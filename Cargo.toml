@@ -1,0 +1,14 @@
+workspace = { members = ["src/input"] }
+
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+renderer = { path = "src/renderer" }
+glam = "=0.8.5"
+enum-map = "2.7.3"
+pollster = "0.3"
