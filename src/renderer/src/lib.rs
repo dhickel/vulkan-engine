@@ -1,4 +1,3 @@
-
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
@@ -7,6 +6,7 @@ pub mod renderer;
 mod texture;
 mod vulkan_init;
 
+use ash::vk;
 use bytemuck;
 use glam::*;
 use image::GenericImageView;
@@ -24,8 +24,6 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
-
-
 
 pub struct Empty {}
 
@@ -64,7 +62,6 @@ pub fn init_window(
 }
 
 pub fn run() {
-
     env_logger::Builder::new()
         .target(env_logger::Target::Stdout)
         .parse_filters(&*env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
@@ -76,10 +73,15 @@ pub fn run() {
     let window = WindowBuilder::new().build(&event_loop).unwrap();
     let window_id = window.id();
     let entry = vulkan_init::init_entry();
-    let instance =
-        vulkan_init::init_instance(&entry, &window, "test".to_string(), true).unwrap();
+    let instance = vulkan_init::init_instance(&entry, &window, "test".to_string(), true).unwrap();
 
-    println!("{:?}",instance.1);
+    let devices = vulkan_init::get_physical_devices(
+        instance.0,
+        vec![vk::QueueFlags::GRAPHICS],
+        None,
+    ).unwrap();
+
+
 
     event_loop
         .run(move |event, control_flow| {
