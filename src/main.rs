@@ -1,8 +1,11 @@
 
-use pollster;
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
 
 fn main() {
-   pollster::block_on(renderer::run());
+
+   renderer::run()
 }
 
 
