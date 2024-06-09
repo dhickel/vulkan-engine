@@ -3,23 +3,24 @@ use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::{ffi, ptr};
-use winit::raw_window_handle::HasDisplayHandle;
-use winit::window::Window;
+use winit::raw_window_handle::{HasDisplayHandle, HasRawDisplayHandle, HasRawWindowHandle};
 
 pub struct VulkanApp {
     entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
+    pub device: GPUDevice,
 }
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
-        if let Some(debug) = &self.debug {
-            unsafe {
+        unsafe {
+            if let Some(debug) = &self.debug {
                 debug
                     .debug_utils
-                    .destroy_debug_utils_messenger(debug.debug_callback, None) // None == custom allocator
+                    .destroy_debug_utils_messenger(debug.debug_callback, None); // None == custom allocator
             }
+            self.instance.destroy_instance(None); // None == allocator callback
         }
     }
 }
@@ -44,10 +45,31 @@ pub fn init_entry() -> ash::Entry {
     entry
 }
 
+pub fn get_debug_layers() -> Vec<*const c_char> {
+    let layer_names: [&CStr; 1] = unsafe {
+        [CStr::from_bytes_with_nul_unchecked(
+            b"VK_LAYER_KHRONOS_validation\0",
+        )]
+    };
+
+    let layers_names_raw: Vec<*const c_char> = layer_names
+        .iter()
+        .map(|raw_name| raw_name.as_ptr())
+        .collect();
+
+    layers_names_raw
+}
+
+pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
+    ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
+        .unwrap()
+        .to_vec()
+}
+
 pub fn init_instance(
     entry: &ash::Entry,
-    window: &Window,
     app_name: String,
+    extensions: &mut Vec<*const c_char>,
     is_validate: bool,
 ) -> Result<(ash::Instance, Option<VkDebug>), String> {
     log::info!("Creating Vulkan Instance");
@@ -60,12 +82,7 @@ pub fn init_instance(
         .application_version(vk::make_api_version(0, 0, 1, 0))
         .engine_name(engine_name.as_c_str())
         .engine_version(vk::make_api_version(0, 0, 1, 0))
-        .api_version(vk::make_api_version(0, 1, 3, 0));
-
-    let mut extension_names =
-        ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
-            .unwrap()
-            .to_vec();
+        .api_version(vk::make_api_version(0, 1, 2, 0));
 
     let create_flags = if cfg!(any(target_os = "macos", target_os = "ios")) {
         vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
@@ -74,20 +91,8 @@ pub fn init_instance(
     };
 
     let layer_name_ptrs = if is_validate {
-        let layer_names: [&CStr; 1] = unsafe {
-            [CStr::from_bytes_with_nul_unchecked(
-                b"VK_LAYER_KHRONOS_validation\0",
-            )]
-        };
-
-        let layers_names_raw: Vec<*const c_char> = layer_names
-            .iter()
-            .map(|raw_name| raw_name.as_ptr())
-            .collect();
-
-        extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
-
-        layers_names_raw
+        extensions.push(ash::ext::debug_utils::NAME.as_ptr());
+        get_debug_layers()
     } else {
         vec![]
     };
@@ -95,7 +100,7 @@ pub fn init_instance(
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .enabled_layer_names(&layer_name_ptrs)
-        .enabled_extension_names(&extension_names)
+        .enabled_extension_names(&extensions)
         .flags(create_flags);
 
     let instance = unsafe {
@@ -149,13 +154,13 @@ unsafe extern "system" fn vulkan_debug_callback(
     let message_id_name = if callback_data.p_message_id_name.is_null() {
         Cow::from("")
     } else {
-        ffi::CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
+        CStr::from_ptr(callback_data.p_message_id_name).to_string_lossy()
     };
 
     let message = if callback_data.p_message.is_null() {
         Cow::from("")
     } else {
-        ffi::CStr::from_ptr(callback_data.p_message).to_string_lossy()
+        CStr::from_ptr(callback_data.p_message).to_string_lossy()
     };
 
     println!(
@@ -165,6 +170,28 @@ unsafe extern "system" fn vulkan_debug_callback(
     vk::FALSE
 }
 
+pub fn get_window_surface(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    window: &winit::window::Window,
+) -> Result<vk::SurfaceKHR, String> {
+    log::info!("Creating surface");
+
+    let surface = unsafe {
+        ash_window::create_surface(
+            &entry,
+            &instance,
+            window.raw_display_handle().expect("Failed to get raw window handle"),
+            window.raw_window_handle().expect("Failed to get raw window handle"),
+            None,
+        )
+        .map_err(|err| format!("failed to create surface: {:?}", err))?
+    };
+
+    log::info!("Surface created");
+    Ok(surface)
+}
+
 pub struct GPUDevice {
     pub name: String,
     pub id: u32,
@@ -172,10 +199,11 @@ pub struct GPUDevice {
 }
 
 pub fn get_physical_devices(
-    instance: ash::Instance,
-    required_flags: Vec<vk::QueueFlags>,
-    min_version: Option<u32>,
+    instance: &ash::Instance,
+    suitability_check: &dyn Fn(&ash::Instance, &vk::PhysicalDevice) -> bool,
 ) -> Result<Vec<GPUDevice>, String> {
+    log::info!("Iterating devices");
+
     let physical_devices = unsafe {
         instance
             .enumerate_physical_devices()
@@ -195,7 +223,7 @@ pub fn get_physical_devices(
 
         log::info!("Found device: {}:{}", device_name, device_id);
 
-        if is_physical_device_suitable(&instance, device, required_flags.as_slice(), min_version) {
+        if suitability_check(&instance, device) {
             let gpu_device = GPUDevice {
                 name: device_name.to_string(),
                 id: device_id,
@@ -207,26 +235,31 @@ pub fn get_physical_devices(
     }
 
     if devices.is_empty() {
+        log::info!("No suitable devices");
         Err("No suitable devices found".to_string())
     } else {
+        log::info!("Found: {} suitable devices", devices.len());
         Ok(devices)
     }
 }
 
-fn is_physical_device_suitable(
+pub fn simple_device_suitability(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
-    required_flags: &[vk::QueueFlags],
-    min_version: Option<u32>,
 ) -> bool {
     let device_properties = unsafe { instance.get_physical_device_properties(*physical_device) };
     let device_features = unsafe { instance.get_physical_device_features(*physical_device) };
     let device_queue_families =
         unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
 
+    let available_extensions: Vec<vk::ExtensionProperties> = unsafe {
+        instance.enumerate_device_extension_properties(*physical_device)
+            .expect("Failed to enumerate device extension properties.")
+    };
+
     if !matches!(
         device_properties.device_type,
-        vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU
+        vk::PhysicalDeviceType::DISCRETE_GPU
     ) {
         return false;
     }
@@ -235,21 +268,45 @@ fn is_physical_device_suitable(
         return false;
     }
 
-    if let Some(min_version) = min_version {
-        if device_properties.api_version < min_version {
-            return false;
-        }
+    if device_properties.api_version < vk::API_VERSION_1_2 {
+        return false;
     }
 
-    let supports_queue_flags = required_flags.iter().all(|&required_flag| {
-        device_queue_families
-            .iter()
-            .any(|queue_family| queue_family.queue_flags.contains(required_flag))
-    });
+    let supports_queue_flags = device_queue_families
+        .iter()
+        .any(|qf| qf.queue_flags.contains(vk::QueueFlags::GRAPHICS));
 
     if !supports_queue_flags {
         return false;
     }
 
     return true;
+}
+
+pub struct QueueFamilyIndices {
+    pub graphics_family: Option<u32>,
+    pub compute_family: Option<u32>,
+    pub transfer_family: Option<u32>,
+    pub present_family: Option<u32>,
+}
+
+pub fn find_queue_families(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    inclusive_types: &[vk::QueueFlags],
+    exclusive_indices: &[u32],
+) -> Result<u32, String> {
+    let queue_families =
+        unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+
+    for (i, queue_family) in queue_families.iter().enumerate() {
+        let valid = inclusive_types
+            .iter()
+            .all(|typ| queue_family.queue_flags.contains(*typ));
+
+        if valid && !exclusive_indices.contains(&(i as u32)) {
+            return Ok(i as u32);
+        }
+    }
+    Err("Failed to find queue meeting constrains".to_string())
 }

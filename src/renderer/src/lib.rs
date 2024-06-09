@@ -7,6 +7,7 @@ mod texture;
 mod vulkan_init;
 
 use ash::vk;
+use ash::vk::PhysicalDeviceFeatures;
 use bytemuck;
 use glam::*;
 use image::GenericImageView;
@@ -61,6 +62,17 @@ pub fn init_window(
         .expect("Fatal: Failed to create window")
 }
 
+pub fn default_feat_ext_check(inst: &ash::Instance, p_device: vk::PhysicalDevice) -> bool {
+    let device_features: PhysicalDeviceFeatures =
+        unsafe { inst.get_physical_device_features(p_device) };
+
+
+    if device_features.depth_clamp == vk::FALSE {
+        return false;
+    }
+    return true;
+}
+
 pub fn run() {
     env_logger::Builder::new()
         .target(env_logger::Target::Stdout)
@@ -73,15 +85,15 @@ pub fn run() {
     let window = WindowBuilder::new().build(&event_loop).unwrap();
     let window_id = window.id();
     let entry = vulkan_init::init_entry();
-    let instance = vulkan_init::init_instance(&entry, &window, "test".to_string(), true).unwrap();
+    let mut extensions = vulkan_init::get_winit_extensions(&window);
+    let (instance, vk_debug) =
+        vulkan_init::init_instance(&entry, "test".to_string(), &mut extensions, true).unwrap();
 
-    let devices = vulkan_init::get_physical_devices(
-        instance.0,
-        vec![vk::QueueFlags::GRAPHICS],
-        None,
-    ).unwrap();
+    let devices =
+        vulkan_init::get_physical_devices(&instance, &vulkan_init::simple_device_suitability)
+            .unwrap();
 
-
+    let surface = vulkan_init::get_window_surface(&entry, &instance, &window).unwrap();
 
     event_loop
         .run(move |event, control_flow| {
