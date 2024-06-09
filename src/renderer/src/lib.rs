@@ -66,7 +66,6 @@ pub fn default_feat_ext_check(inst: &ash::Instance, p_device: vk::PhysicalDevice
     let device_features: PhysicalDeviceFeatures =
         unsafe { inst.get_physical_device_features(p_device) };
 
-
     if device_features.depth_clamp == vk::FALSE {
         return false;
     }
@@ -93,7 +92,20 @@ pub fn run() {
         vulkan_init::get_physical_devices(&instance, &vulkan_init::simple_device_suitability)
             .unwrap();
 
-    let surface = vulkan_init::get_window_surface(&entry, &instance, &window).unwrap();
+    let device = devices.first().unwrap();
+
+    let (surface, surface_instance) =
+        vulkan_init::get_window_surface(&entry, &instance, &window).unwrap();
+
+    let device = vulkan_init::create_logical_device(
+        &instance,
+        &device.device,
+        &surface,
+        &surface_instance,
+        &extensions,
+        &vulkan_init::graphics_only_queue_indices,
+        &vulkan_init::basic_features,
+    );
 
     event_loop
         .run(move |event, control_flow| {
