@@ -1,5 +1,6 @@
 use ash::vk;
 
+use ash::vk::ExtensionProperties;
 use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
@@ -11,12 +12,19 @@ pub struct VulkanApp {
     entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
-    pub device: GPUDevice,
+    pub physical_device: PhyDevice,
+    pub logical_device: LogicalDevice,
+    pub surface: VkSurface,
 }
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+            self.surface
+                .surface_instance
+                .destroy_surface(self.surface.surface, None);
+            self.logical_device.device.destroy_device(None);
+
             if let Some(debug) = &self.debug {
                 debug
                     .debug_utils
@@ -27,15 +35,70 @@ impl Drop for VulkanApp {
     }
 }
 
+impl VulkanApp {
+    fn destroy(&mut self) {
+        unsafe {
+            self.instance.destroy_instance(None); // None == allocator callback
+        }
+    }
+}
+
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
     pub debug_callback: vk::DebugUtilsMessengerEXT,
 }
 
-impl VulkanApp {
-    fn destroy(&mut self) {
-        unsafe {
-            self.instance.destroy_instance(None); // None == allocator callback
+pub struct SwapchainSupport {
+    capabilities: vk::SurfaceCapabilitiesKHR,
+    formats: Vec<vk::SurfaceFormatKHR>,
+    present_modes: Vec<vk::PresentModeKHR>,
+}
+
+pub struct VkSurface {
+    pub surface: vk::SurfaceKHR,
+    pub surface_instance: ash::khr::surface::Instance,
+}
+
+pub struct PhyDevice {
+    pub name: String,
+    pub id: u32,
+    pub p_device: vk::PhysicalDevice,
+}
+
+pub struct LogicalDevice {
+    pub device: ash::Device,
+    pub queues: DeviceQueues,
+}
+
+pub struct QueueIndex {
+    pub index: u32,
+    pub queue_types: Vec<QueueType>,
+}
+
+pub enum QueueType {
+    Present,
+    Graphics,
+    Compute,
+    Transfer,
+    SparseBinding,
+}
+
+pub struct DeviceQueues {
+    pub graphics_queue: vk::Queue,
+    pub present_queue: vk::Queue,
+    pub compute_queue: vk::Queue,
+    pub transfer_queue: vk::Queue,
+    pub sparse_binding_queue: vk::Queue,
+}
+
+impl Default for DeviceQueues {
+    fn default() -> Self {
+        Self {
+            graphics_queue: vk::Queue::null(),
+            present_queue: vk::Queue::null(),
+            compute_queue: vk::Queue::null(),
+            transfer_queue: vk::Queue::null(),
+            sparse_binding_queue: vk::Queue::null(),
         }
     }
 }
@@ -62,6 +125,7 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
     layers_names_raw
 }
 
+// this get hour VK_KHR_surface  extensions
 pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
     ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
         .unwrap()
@@ -112,6 +176,8 @@ pub fn init_instance(
     };
 
     if is_validate {
+        log::info!("Initializing debug layers");
+
         let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
             .message_severity(
                 vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
@@ -176,7 +242,7 @@ pub fn get_window_surface(
     entry: &ash::Entry,
     instance: &ash::Instance,
     window: &winit::window::Window,
-) -> Result<(vk::SurfaceKHR, ash::khr::surface::Instance), String> {
+) -> Result<VkSurface, String> {
     log::info!("Creating surface");
 
     let surface = unsafe {
@@ -190,22 +256,20 @@ pub fn get_window_surface(
         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
     };
 
-    let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+    let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
 
     log::info!("Surface created");
-    Ok((surface, surface_loader))
-}
-
-pub struct GPUDevice {
-    pub name: String,
-    pub id: u32,
-    pub p_device: vk::PhysicalDevice,
+    Ok(VkSurface {
+        surface,
+        surface_instance,
+    })
 }
 
 pub fn get_physical_devices(
     instance: &ash::Instance,
-    suitability_check: &dyn Fn(&ash::Instance, &vk::PhysicalDevice) -> bool,
-) -> Result<Vec<GPUDevice>, String> {
+    surface_info: Option<&VkSurface>,
+    suitability_check: &dyn Fn(&ash::Instance, &vk::PhysicalDevice, Option<&VkSurface>) -> bool,
+) -> Result<Vec<PhyDevice>, String> {
     log::info!("Iterating devices");
 
     let physical_devices = unsafe {
@@ -214,7 +278,7 @@ pub fn get_physical_devices(
             .map_err(|e| format!("Fatal: Failed to enumerate devices: {:?}", e))?
     };
 
-    let mut devices = Vec::<GPUDevice>::with_capacity(3);
+    let mut devices = Vec::<PhyDevice>::with_capacity(3);
 
     for (i, device) in physical_devices.iter().enumerate() {
         let device_properties = unsafe { instance.get_physical_device_properties(*device) };
@@ -227,8 +291,44 @@ pub fn get_physical_devices(
 
         log::info!("Found device: {}:{}", device_name, device_id);
 
-        if suitability_check(&instance, device) {
-            let gpu_device = GPUDevice {
+        if let Some(surface) = surface_info {
+            log::info!("Checking device for swapchain support");
+            let available_ext: Vec<ExtensionProperties> = unsafe {
+                instance
+                    .enumerate_device_extension_properties(*device)
+                    .map_err(|e| {
+                        format!("Failed to enumerate device extension properties: {:?}", e)
+                    })?
+            };
+
+            let available_ext_cstr: Vec<&CStr> = available_ext
+                .iter()
+                .map(|e| e.extension_name_as_c_str().unwrap())
+                .collect();
+
+            if let false = get_basic_device_ext_names()
+                .iter()
+                .all(|ext| available_ext_cstr.contains(ext))
+            {
+                log::info!("Device doesn't support swapchain: Extension");
+                continue;
+            }
+
+            match get_swapchain_support(device, surface) {
+                Ok(sup) if sup.formats.is_empty() || sup.present_modes.is_empty() => {
+                    log::info!("Device doesn't support swapchain: Empty formats or present modes");
+                }
+                Err(err) => {
+                    log::info!("Error checking swapchain support: {:?}", err);
+                }
+                _ => {}
+            }
+
+            log::info!("Device supports swapchain");
+        }
+
+        if suitability_check(&instance, device, surface_info) {
+            let gpu_device = PhyDevice {
                 name: device_name.to_string(),
                 id: device_id,
                 p_device: *device,
@@ -250,17 +350,12 @@ pub fn get_physical_devices(
 pub fn simple_device_suitability(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
+    surface_info: Option<&VkSurface>,
 ) -> bool {
     let device_properties = unsafe { instance.get_physical_device_properties(*physical_device) };
     let device_features = unsafe { instance.get_physical_device_features(*physical_device) };
     let device_queue_families =
         unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
-
-    let available_extensions: Vec<vk::ExtensionProperties> = unsafe {
-        instance
-            .enumerate_device_extension_properties(*physical_device)
-            .expect("Failed to enumerate device extension properties.")
-    };
 
     if !matches!(
         device_properties.device_type,
@@ -286,51 +381,6 @@ pub fn simple_device_suitability(
     }
 
     return true;
-}
-
-pub struct QueueIndex {
-    pub index: u32,
-    pub queue_types: Vec<QueueType>,
-}
-
-pub enum QueueType {
-    Present,
-    Graphics,
-    Compute,
-    Transfer,
-    SparseBinding,
-}
-
-pub struct DeviceQueues {
-    pub graphics_queue: vk::Queue,
-    pub present_queue: vk::Queue,
-    pub compute_queue: vk::Queue,
-    pub transfer_queue: vk::Queue,
-    pub sparse_binding_queue: vk::Queue,
-}
-
-impl Default for DeviceQueues {
-    fn default() -> Self {
-        Self {
-            graphics_queue: vk::Queue::null(),
-            present_queue: vk::Queue::null(),
-            compute_queue: vk::Queue::null(),
-            transfer_queue: vk::Queue::null(),
-            sparse_binding_queue: vk::Queue::null(),
-        }
-    }
-}
-
-pub struct DeviceFeatures<'a> {
-    features2: vk::PhysicalDeviceFeatures2<'a>,
-    vulkan_11_features: Option<vk::PhysicalDeviceVulkan11Features<'a>>,
-    vulkan_12_features: Option<vk::PhysicalDeviceVulkan12Features<'a>>,
-    vulkan_13_features: Option<vk::PhysicalDeviceVulkan13Features<'a>>,
-}
-
-pub struct LogicalDevice {
-    pub device: ash::Device,
-    pub queues: DeviceQueues,
 }
 
 pub fn create_logical_device<'a>(
@@ -401,7 +451,7 @@ pub fn create_logical_device<'a>(
 
     log::info!("Created Logical Device");
     let queue_info = format!(
-        "Queue Info: Present: {:?} | Graphics: {:?} | Compute: {:?} | Transfer: {:?} |  Sparse:: {:?}",
+        "Queue Info: Present: {:?} | Graphics: {:?} | Compute: {:?} | Transfer: {:?} |  Sparse: {:?}",
         queues.present_queue != vk::Queue::null(),
         queues.graphics_queue != vk::Queue::null(),
         queues.compute_queue != vk::Queue::null(),
@@ -416,15 +466,15 @@ pub fn create_logical_device<'a>(
 pub fn graphics_only_queue_indices(
     instance: &ash::Instance,
     p_device: &vk::PhysicalDevice,
-    surface: &vk::SurfaceKHR,
-    surface_loader: &ash::khr::surface::Instance,
+    surface: &VkSurface,
 ) -> Result<Vec<QueueIndex>, String> {
     let qf_properties = unsafe { instance.get_physical_device_queue_family_properties(*p_device) };
 
     let gfx_index = qf_properties.iter().enumerate().find_map(|(index, qf)| {
         let present_support = unsafe {
-            surface_loader // Present support make this a presentation queue
-                .get_physical_device_surface_support(*p_device, index as u32, *surface)
+            surface
+                .surface_instance // Present support make this a presentation queue
+                .get_physical_device_surface_support(*p_device, index as u32, surface.surface)
                 .map_err(|e| format!("Fatal: Failed surface support check: {:?}", e))
                 .ok()?
         };
@@ -572,4 +622,48 @@ pub fn get_general_v13_features<'a>(
     }
 
     vulkan_13_features
+}
+
+pub fn get_swapchain_support(
+    physical_device: &vk::PhysicalDevice,
+    surface_info: &VkSurface,
+) -> Result<SwapchainSupport, String> {
+    unsafe {
+        let capabilities = surface_info
+            .surface_instance
+            .get_physical_device_surface_capabilities(*physical_device, surface_info.surface)
+            .map_err(|e| format!("Fatal: Failed swapchain capabilities check: {:?}", e))?;
+
+        let formats = surface_info
+            .surface_instance
+            .get_physical_device_surface_formats(*physical_device, surface_info.surface)
+            .map_err(|e| format!("Fatal: Failed swapchain formats check: {:?}", e))?;
+
+        let present_modes = surface_info
+            .surface_instance
+            .get_physical_device_surface_present_modes(*physical_device, surface_info.surface)
+            .map_err(|e| format!("Fatal: Failed swapchain present mode check: {:?}", e))?;
+
+        Ok(SwapchainSupport {
+            capabilities,
+            formats,
+            present_modes,
+        })
+    }
+}
+
+pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
+    vec![
+        ash::khr::swapchain::NAME,
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        ash::khr::portability_subset::NAME,
+    ]
+}
+
+pub fn get_basic_device_ext_ptrs() -> Vec<*const c_char> {
+    vec![
+        ash::khr::swapchain::NAME.as_ptr(),
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        ash::khr::portability_subset::NAME.as_ptr(),
+    ]
 }

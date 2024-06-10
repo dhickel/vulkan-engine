@@ -84,31 +84,31 @@ pub fn run() {
     let window = WindowBuilder::new().build(&event_loop).unwrap();
     let window_id = window.id();
     let entry = vulkan_init::init_entry();
-    let mut extensions = vulkan_init::get_winit_extensions(&window);
+    let mut instance_ext = vulkan_init::get_winit_extensions(&window);
     let (instance, vk_debug) =
-        vulkan_init::init_instance(&entry, "test".to_string(), &mut extensions, true).unwrap();
+        vulkan_init::init_instance(&entry, "test".to_string(), &mut instance_ext, true).unwrap();
 
-    let devices =
-        vulkan_init::get_physical_devices(&instance, &vulkan_init::simple_device_suitability)
-            .unwrap();
+    //let device_extensions =
 
-    let device = devices.first().unwrap();
+    let vk_surface = vulkan_init::get_window_surface(&entry, &instance, &window).unwrap();
 
-    let (surface, surface_instance) =
-        vulkan_init::get_window_surface(&entry, &instance, &window).unwrap();
-
-    let queue_indices = vulkan_init::graphics_only_queue_indices(
+    let devices = vulkan_init::get_physical_devices(
         &instance,
-        &device.p_device,
-        &surface,
-        &surface_instance,
+        Some(&vk_surface),
+        &vulkan_init::simple_device_suitability,
     )
     .unwrap();
 
-    let mut core_features = vulkan_init::get_general_core_features(&instance, &device.p_device);
-    let vk11_features = vulkan_init::get_general_v11_features(&instance, &device.p_device);
-    let vk12_features = vulkan_init::get_general_v12_features(&instance, &device.p_device);
-    let vk13_features = vulkan_init::get_general_v13_features(&instance, &device.p_device);
+    let p_device = devices.first().unwrap();
+
+    let queue_indices =
+        vulkan_init::graphics_only_queue_indices(&instance, &p_device.p_device, &vk_surface)
+            .unwrap();
+
+    let mut core_features = vulkan_init::get_general_core_features(&instance, &p_device.p_device);
+    let vk11_features = vulkan_init::get_general_v11_features(&instance, &p_device.p_device);
+    let vk12_features = vulkan_init::get_general_v12_features(&instance, &p_device.p_device);
+    let vk13_features = vulkan_init::get_general_v13_features(&instance, &p_device.p_device);
 
     let mut ext_feats: Vec<Box<dyn ExtendsPhysicalDeviceFeatures2>> = vec![
         Box::new(vk11_features),
@@ -116,14 +116,18 @@ pub fn run() {
         Box::new(vk13_features),
     ];
 
+    let surface_ext = vulkan_init::get_basic_device_ext_ptrs();
     let l_device = vulkan_init::create_logical_device(
         &instance,
-        &device.p_device,
+        &p_device.p_device,
         &queue_indices,
         &mut core_features,
         Some(&mut ext_feats),
-        None
+        Some(&surface_ext),
     );
+
+    let swapchain_support =
+        vulkan_init::get_swapchain_support(&p_device.p_device, &vk_surface).unwrap();
 
     event_loop
         .run(move |event, control_flow| {
