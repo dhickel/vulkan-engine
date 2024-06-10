@@ -53,7 +53,7 @@ pub struct GameLogic {
 pub fn init_window(
     event_loop: &EventLoop<()>,
     title: String,
-    size: (i32, i32),
+    size: (u32, u32),
 ) -> winit::window::Window {
     winit::window::WindowBuilder::new()
         .with_title(title)
@@ -81,12 +81,15 @@ pub fn run() {
     let mut input_manager = InputManager::new();
 
     let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let size = (1920u32, 1080u32);
+    let window = init_window(&event_loop, "Vulkan testing".to_string(), size);
     let window_id = window.id();
     let entry = vulkan_init::init_entry();
     let mut instance_ext = vulkan_init::get_winit_extensions(&window);
     let (instance, vk_debug) =
         vulkan_init::init_instance(&entry, "test".to_string(), &mut instance_ext, true).unwrap();
+
+
 
     //let device_extensions =
 
@@ -124,10 +127,24 @@ pub fn run() {
         &mut core_features,
         Some(&mut ext_feats),
         Some(&surface_ext),
-    );
+    ).unwrap();
 
     let swapchain_support =
         vulkan_init::get_swapchain_support(&p_device.p_device, &vk_surface).unwrap();
+
+
+    let swapchain = vulkan_init::create_swapchain(
+        &instance,
+        &p_device,
+        &l_device,
+        &vk_surface,
+        size,
+        3,
+        None,
+        Some(vk::PresentModeKHR::FIFO),
+        None,
+        true
+    );
 
     event_loop
         .run(move |event, control_flow| {

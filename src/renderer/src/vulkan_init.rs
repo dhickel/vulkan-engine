@@ -1,6 +1,5 @@
 use ash::vk;
 
-use ash::vk::ExtensionProperties;
 use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
@@ -15,15 +14,19 @@ pub struct VulkanApp {
     pub physical_device: PhyDevice,
     pub logical_device: LogicalDevice,
     pub surface: VkSurface,
+    pub swapchain: VkSwapchain,
 }
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+            self.swapchain
+                .swapchain_loader
+                .destroy_swapchain(self.swapchain.swapchain, None);
+            self.logical_device.device.destroy_device(None);
             self.surface
                 .surface_instance
                 .destroy_surface(self.surface.surface, None);
-            self.logical_device.device.destroy_device(None);
 
             if let Some(debug) = &self.debug {
                 debug
@@ -52,6 +55,14 @@ pub struct SwapchainSupport {
     capabilities: vk::SurfaceCapabilitiesKHR,
     formats: Vec<vk::SurfaceFormatKHR>,
     present_modes: Vec<vk::PresentModeKHR>,
+}
+
+pub struct VkSwapchain {
+    swapchain_loader: ash::khr::swapchain::Device,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
+    surface_format: vk::SurfaceFormatKHR,
+    extent: vk::Extent2D,
 }
 
 pub struct VkSurface {
@@ -84,21 +95,64 @@ pub enum QueueType {
 }
 
 pub struct DeviceQueues {
-    pub graphics_queue: vk::Queue,
-    pub present_queue: vk::Queue,
-    pub compute_queue: vk::Queue,
-    pub transfer_queue: vk::Queue,
-    pub sparse_binding_queue: vk::Queue,
+    pub graphics_queue: (u32, vk::Queue),
+    pub present_queue: (u32, vk::Queue),
+    pub compute_queue: (u32, vk::Queue),
+    pub transfer_queue: (u32, vk::Queue),
+    pub sparse_binding_queue: (u32, vk::Queue),
 }
 
 impl Default for DeviceQueues {
     fn default() -> Self {
         Self {
-            graphics_queue: vk::Queue::null(),
-            present_queue: vk::Queue::null(),
-            compute_queue: vk::Queue::null(),
-            transfer_queue: vk::Queue::null(),
-            sparse_binding_queue: vk::Queue::null(),
+            graphics_queue: (u32::MAX, vk::Queue::null()),
+            present_queue: (u32::MAX, vk::Queue::null()),
+            compute_queue: (u32::MAX, vk::Queue::null()),
+            transfer_queue: (u32::MAX, vk::Queue::null()),
+            sparse_binding_queue: (u32::MAX, vk::Queue::null()),
+        }
+    }
+}
+
+impl DeviceQueues {
+    fn get_queue(&self, typ: QueueType) -> vk::Queue {
+        match typ {
+            QueueType::Present => self.present_queue.1,
+            QueueType::Graphics => self.graphics_queue.1,
+            QueueType::Compute => self.compute_queue.1,
+            QueueType::Transfer => self.transfer_queue.1,
+            QueueType::SparseBinding => self.sparse_binding_queue.1,
+        }
+    }
+
+    fn get_queue_index(&self, typ: QueueType) -> u32 {
+        match typ {
+            QueueType::Present => self.present_queue.0,
+            QueueType::Graphics => self.graphics_queue.0,
+            QueueType::Compute => self.compute_queue.0,
+            QueueType::Transfer => self.transfer_queue.0,
+            QueueType::SparseBinding => self.sparse_binding_queue.0,
+        }
+    }
+
+    fn has_queue_type(&self, typ: QueueType) -> bool {
+        match typ {
+            QueueType::Present => {
+                self.present_queue.0 < u32::MAX && self.present_queue.1 != vk::Queue::null()
+            }
+            QueueType::Graphics => {
+                self.graphics_queue.0 < u32::MAX && self.graphics_queue.1 != vk::Queue::null()
+            }
+            QueueType::Compute => {
+                self.compute_queue.0 < u32::MAX && self.compute_queue.1 != vk::Queue::null()
+            }
+            QueueType::Transfer => {
+                self.transfer_queue.0 < u32::MAX && self.transfer_queue.1 != vk::Queue::null()
+            }
+            QueueType::SparseBinding => {
+                self.sparse_binding_queue.0 < u32::MAX
+                    && self.sparse_binding_queue.1 != vk::Queue::null()
+            }
         }
     }
 }
@@ -182,12 +236,12 @@ pub fn init_instance(
             .message_severity(
                 vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
                     | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
             )
             .message_type(
                 vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
                     | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
             )
             .pfn_user_callback(Some(vulkan_debug_callback));
 
@@ -293,7 +347,7 @@ pub fn get_physical_devices(
 
         if let Some(surface) = surface_info {
             log::info!("Checking device for swapchain support");
-            let available_ext: Vec<ExtensionProperties> = unsafe {
+            let available_ext: Vec<vk::ExtensionProperties> = unsafe {
                 instance
                     .enumerate_device_extension_properties(*device)
                     .map_err(|e| {
@@ -368,7 +422,7 @@ pub fn simple_device_suitability(
         return false;
     }
 
-    if device_properties.api_version < vk::API_VERSION_1_2 {
+    if device_properties.api_version < vk::API_VERSION_1_3 {
         return false;
     }
 
@@ -410,21 +464,22 @@ pub fn create_logical_device<'a>(
         .collect();
 
     log::info!("Logical Device: Enabling features");
-    let mut device_features = vk::PhysicalDeviceFeatures2::default().features(*core_features);
+    let mut device_features = vk::PhysicalDeviceFeatures2::default()
+        .features(*core_features);
 
     if let Some(other_features) = other_features {
-        for mut feat in other_features {
-            let _ = device_features.push_next(feat.as_mut());
+        for  feat in other_features {
+            device_features = device_features.push_next(feat.as_mut());
         }
     }
 
     log::info!("Logical Device: Crafting device info");
-    let device_create_info = vk::DeviceCreateInfo::default()
+    let mut device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .push_next(&mut device_features);
 
     if let Some(ext) = required_extensions {
-        let _ = device_create_info.enabled_extension_names(ext);
+        device_create_info = device_create_info.enabled_extension_names(ext);
     }
 
     log::info!("Logical Device: Creating device");
@@ -440,11 +495,11 @@ pub fn create_logical_device<'a>(
         let queue: vk::Queue = unsafe { device.get_device_queue(index.index, 0) };
         for typ in &index.queue_types {
             match typ {
-                QueueType::Present => queues.present_queue = queue,
-                QueueType::Graphics => queues.graphics_queue = queue,
-                QueueType::Compute => queues.compute_queue = queue,
-                QueueType::Transfer => queues.transfer_queue = queue,
-                QueueType::SparseBinding => queues.sparse_binding_queue = queue,
+                QueueType::Present => queues.present_queue = (index.index, queue),
+                QueueType::Graphics => queues.graphics_queue = (index.index, queue),
+                QueueType::Compute => queues.compute_queue = (index.index, queue),
+                QueueType::Transfer => queues.transfer_queue = (index.index, queue),
+                QueueType::SparseBinding => queues.sparse_binding_queue = (index.index, queue),
             }
         }
     }
@@ -452,11 +507,11 @@ pub fn create_logical_device<'a>(
     log::info!("Created Logical Device");
     let queue_info = format!(
         "Queue Info: Present: {:?} | Graphics: {:?} | Compute: {:?} | Transfer: {:?} |  Sparse: {:?}",
-        queues.present_queue != vk::Queue::null(),
-        queues.graphics_queue != vk::Queue::null(),
-        queues.compute_queue != vk::Queue::null(),
-        queues.transfer_queue != vk::Queue::null(),
-        queues.sparse_binding_queue != vk::Queue::null()
+        queues.present_queue.1 != vk::Queue::null(),
+        queues.graphics_queue.1 != vk::Queue::null(),
+        queues.compute_queue.1 != vk::Queue::null(),
+        queues.transfer_queue.1 != vk::Queue::null(),
+        queues.sparse_binding_queue.1 != vk::Queue::null()
     );
 
     log::info!("{}", queue_info);
@@ -652,7 +707,198 @@ pub fn get_swapchain_support(
     }
 }
 
+pub fn create_swapchain(
+    instance: &ash::Instance,
+    physical_device: &PhyDevice,
+    logical_device: &LogicalDevice,
+    surface_info: &VkSurface,
+    requested_extent: (u32, u32),
+    image_count: u32,
+    surface_format: Option<vk::SurfaceFormatKHR>,
+    present_mode: Option<vk::PresentModeKHR>,
+    old_swapchain: Option<vk::SwapchainKHR>,
+    allow_defaults: bool,
+) -> Result<VkSwapchain, String> {
+    log::info!("Creating swapchain");
+    let swapchain_support = get_swapchain_support(&physical_device.p_device, &surface_info)?;
+
+    log::info!("Swapchain: Setting surface format");
+    let surface_format = if let Some(sf) = surface_format {
+        let format =
+            select_sc_surface_format(&swapchain_support.formats, sf.format, sf.color_space);
+
+        if !format.0 && !allow_defaults {
+            return Err("Couldn't find expected surface format".to_string());
+        }
+        format.1
+    } else {
+        get_default_sc_format(&swapchain_support.formats)
+    };
+
+    log::info!("Swapchain: Setting present mode");
+    let present_mode = if let Some(pm) = present_mode {
+        let mode = select_sc_present_mode(&swapchain_support.present_modes, pm);
+
+        if !mode.0 && !allow_defaults {
+            return Err("Couldn't find expected present mode".to_string());
+        }
+        mode.1
+    } else {
+        select_sc_present_mode(&swapchain_support.present_modes, vk::PresentModeKHR::FIFO).1
+    };
+
+    log::info!("Swapchain: Setting extent");
+    let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
+    let image_count = std::cmp::max(swapchain_support.capabilities.max_image_count, image_count);
+
+    log::info!("Swapchain: Setting pre transform");
+    let pre_transform = if swapchain_support
+        .capabilities
+        .supported_transforms
+        .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+    {
+        vk::SurfaceTransformFlagsKHR::IDENTITY
+    } else {
+        swapchain_support.capabilities.current_transform
+    };
+
+    log::info!("Swapchain: creating info");
+    let mut sc_create_info = vk::SwapchainCreateInfoKHR::default()
+        .surface(surface_info.surface)
+        .min_image_count(image_count)
+        .image_color_space(surface_format.color_space)
+        .image_format(surface_format.format)
+        .image_extent(extent)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .pre_transform(pre_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(present_mode)
+        .clipped(true)
+        .image_array_layers(1);
+
+    let present_gfx_indices = [
+        logical_device.queues.get_queue_index(QueueType::Graphics),
+        logical_device.queues.get_queue_index(QueueType::Present),
+    ];
+
+    sc_create_info = if present_gfx_indices[0] != present_gfx_indices[1] {
+        log::info!("Swapchain: Set sharing mode: Concurrent with indies: {:?}", present_gfx_indices);
+        sc_create_info
+            .image_sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(&present_gfx_indices)
+    } else {
+        log::info!("Swapchain: Set sharing mode: Exclusive");
+        sc_create_info.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+    };
+
+
+    if let Some(old_swapchain) = old_swapchain {
+        log::info!("Swapchain: Utilizing old swapchain");
+        sc_create_info = sc_create_info.old_swapchain(old_swapchain);
+    }
+
+
+    log::info!("Swapchain: Initializing loader");
+    let swapchain_loader = ash::khr::swapchain::Device::new(instance, &logical_device.device);
+
+    log::info!("Swapchain: Initializing swapchain");
+    let swapchain = unsafe {
+        swapchain_loader
+            .create_swapchain(&sc_create_info, None)
+            .map_err(|err| format!("Failed to create swapchain: {:?}", err))?
+    };
+
+    log::info!("Swapchain: Initializing images");
+    let swapchain_images = unsafe {
+        swapchain_loader
+            .get_swapchain_images(swapchain)
+            .map_err(|err| format!("Failed to get swapchain images: {:?}", err))?
+    };
+
+    log::info!("Swapchain created");
+    Ok(VkSwapchain {
+        swapchain_loader,
+        swapchain,
+        swapchain_images,
+        surface_format,
+        extent,
+    })
+}
+
+pub fn get_default_sc_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
+    select_sc_surface_format(
+        available_formats,
+        vk::Format::B8G8R8A8_SRGB,
+        vk::ColorSpaceKHR::SRGB_NONLINEAR,
+    )
+    .1
+}
+
+pub fn select_sc_surface_format(
+    available_formats: &[vk::SurfaceFormatKHR],
+    format: vk::Format,
+    color_space: vk::ColorSpaceKHR,
+) -> (bool, vk::SurfaceFormatKHR) {
+    log::info!("Selecting swapchain surface format");
+    for af in available_formats {
+        if af.format == format && af.color_space == color_space {
+            log::info!("Found expected format: {:?} | {:?}", format, color_space);
+            return (true, *af);
+        }
+    }
+
+    let first_format = *available_formats.first().unwrap();
+    log::info!(
+        "No expected format, returning: {:?}|{:?}",
+        first_format.format,
+        first_format.color_space
+    );
+
+    (false, first_format)
+}
+
+pub fn select_sc_present_mode(
+    available_modes: &[vk::PresentModeKHR],
+    present_mode: vk::PresentModeKHR,
+) -> (bool, vk::PresentModeKHR) {
+    log::info!("Selecting swapchain present mode");
+    for pm in available_modes {
+        if *pm == present_mode {
+            log::info!("Found expected present mode: {:?} ", present_mode);
+            return (true, *pm);
+        }
+    }
+
+    log::info!(
+        "No expected present mode, return : {:?} ",
+        vk::PresentModeKHR::FIFO
+    );
+
+    (false, vk::PresentModeKHR::FIFO)
+}
+
+pub fn select_sc_extent(
+    capabilities: &vk::SurfaceCapabilitiesKHR,
+    requested_extent: (u32, u32),
+) -> vk::Extent2D {
+    if capabilities.current_extent.width != u32::MAX {
+        capabilities.current_extent
+    } else {
+        vk::Extent2D {
+            width: requested_extent.0.clamp(
+                capabilities.min_image_extent.width,
+                capabilities.max_image_extent.width,
+            ),
+            height: requested_extent.1.clamp(
+                capabilities.min_image_extent.height,
+                capabilities.max_image_extent.height,
+            ),
+        }
+    }
+}
+
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
+
     vec![
         ash::khr::swapchain::NAME,
         #[cfg(any(target_os = "macos", target_os = "ios"))]
