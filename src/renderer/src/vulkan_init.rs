@@ -1,5 +1,5 @@
 use ash::vk;
-use ash::vk::{ExtendsPhysicalDeviceFeatures2, PhysicalDeviceFeatures, PhysicalDeviceVulkan11Features, PhysicalDeviceVulkan12Features, QueueFlags};
+
 use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
@@ -199,7 +199,7 @@ pub fn get_window_surface(
 pub struct GPUDevice {
     pub name: String,
     pub id: u32,
-    pub device: vk::PhysicalDevice,
+    pub p_device: vk::PhysicalDevice,
 }
 
 pub fn get_physical_devices(
@@ -231,7 +231,7 @@ pub fn get_physical_devices(
             let gpu_device = GPUDevice {
                 name: device_name.to_string(),
                 id: device_id,
-                device: *device,
+                p_device: *device,
             };
             devices.push(gpu_device);
             log::info!("Suitable device: {}:{}", device_name, device_id);
@@ -336,28 +336,16 @@ pub struct LogicalDevice {
 pub fn create_logical_device<'a>(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
-    surface: &vk::SurfaceKHR,
-    surface_loader: &ash::khr::surface::Instance,
-    required_extensions: &[*const c_char],
-    select_queues: &dyn Fn(
-        &[vk::QueueFamilyProperties],
-        &vk::PhysicalDevice,
-        &vk::SurfaceKHR,
-        &ash::khr::surface::Instance,
-    ) -> Result<Vec<QueueIndex>, String>,
-    enable_features: &dyn Fn(&ash::Instance, &vk::PhysicalDevice) -> DeviceFeatures<'a>,
+    queue_indices: &[QueueIndex],
+    core_features: &mut vk::PhysicalDeviceFeatures,
+    other_features: Option<&mut [Box<dyn vk::ExtendsPhysicalDeviceFeatures2>]>,
+    required_extensions: Option<&[*const c_char]>,
 ) -> Result<LogicalDevice, String> {
     log::info!("Creating Logical Device");
     let queue_family_properties =
         unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
 
     log::info!("Logical Device: Selecting queue indices");
-    let queue_indices = select_queues(
-        &queue_family_properties,
-        &physical_device,
-        &surface,
-        &surface_loader,
-    )?;
 
     let queue_priority = vec![1.0f32];
 
@@ -372,34 +360,22 @@ pub fn create_logical_device<'a>(
         .collect();
 
     log::info!("Logical Device: Enabling features");
-    //let mut device_features = enable_features(&instance, &physical_device);
+    let mut device_features = vk::PhysicalDeviceFeatures2::default().features(*core_features);
 
-    let mut vec = Vec::<Box<dyn ExtendsPhysicalDeviceFeatures2>>::new();
-
-    let feat = vk::PhysicalDeviceFeatures::default()
-        .depth_clamp(true);
-
-    let feat2 = PhysicalDeviceVulkan11Features::default()
-        .multiview(true);
-
-    let feat3 = PhysicalDeviceVulkan12Features::default()
-        .timeline_semaphore(true);
-
-    let mut pf = vk::PhysicalDeviceFeatures2::default()
-        .features(feat);
-
-    vec.push(Box::new(feat2));
-    vec.push(Box::new(feat3));
-    for mut f in vec {
-        pf.push_next(f.as_mut());
+    if let Some(other_features) = other_features {
+        for mut feat in other_features {
+            let _ = device_features.push_next(feat.as_mut());
+        }
     }
-
 
     log::info!("Logical Device: Crafting device info");
     let device_create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
-        //.enabled_extension_names(required_extensions)
-        .push_next(&mut  pf);
+        .push_next(&mut device_features);
+
+    if let Some(ext) = required_extensions {
+        let _ = device_create_info.enabled_extension_names(ext);
+    }
 
     log::info!("Logical Device: Creating device");
     let device = unsafe {
@@ -412,7 +388,7 @@ pub fn create_logical_device<'a>(
     let mut queues = DeviceQueues::default();
     for index in queue_indices {
         let queue: vk::Queue = unsafe { device.get_device_queue(index.index, 0) };
-        for typ in index.queue_types {
+        for typ in &index.queue_types {
             match typ {
                 QueueType::Present => queues.present_queue = queue,
                 QueueType::Graphics => queues.graphics_queue = queue,
@@ -438,11 +414,13 @@ pub fn create_logical_device<'a>(
 }
 
 pub fn graphics_only_queue_indices(
-    qf_properties: &[vk::QueueFamilyProperties],
+    instance: &ash::Instance,
     p_device: &vk::PhysicalDevice,
     surface: &vk::SurfaceKHR,
     surface_loader: &ash::khr::surface::Instance,
 ) -> Result<Vec<QueueIndex>, String> {
+    let qf_properties = unsafe { instance.get_physical_device_queue_family_properties(*p_device) };
+
     let gfx_index = qf_properties.iter().enumerate().find_map(|(index, qf)| {
         let present_support = unsafe {
             surface_loader // Present support make this a presentation queue
@@ -471,87 +449,127 @@ pub fn graphics_only_queue_indices(
     Ok(indices)
 }
 
-pub fn basic_features<'a>(
+pub fn get_general_core_features(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
-) -> DeviceFeatures<'a> {
-    // Initialize structs for querying supported features
+) -> vk::PhysicalDeviceFeatures {
+    let mut device_features = vk::PhysicalDeviceFeatures::default();
+    let supported_features = unsafe { instance.get_physical_device_features(*physical_device) };
+
+    if supported_features.geometry_shader == vk::TRUE {
+        device_features.geometry_shader = vk::TRUE;
+    }
+    if supported_features.tessellation_shader == vk::TRUE {
+        device_features.tessellation_shader = vk::TRUE;
+    }
+    if supported_features.sample_rate_shading == vk::TRUE {
+        device_features.sample_rate_shading = vk::TRUE;
+    }
+    if supported_features.fill_mode_non_solid == vk::TRUE {
+        device_features.fill_mode_non_solid = vk::TRUE;
+    }
+    if supported_features.depth_clamp == vk::TRUE {
+        device_features.depth_clamp = vk::TRUE;
+    }
+    if supported_features.independent_blend == vk::TRUE {
+        device_features.independent_blend = vk::TRUE;
+    }
+    if supported_features.dual_src_blend == vk::TRUE {
+        device_features.dual_src_blend = vk::TRUE;
+    }
+    if supported_features.multi_draw_indirect == vk::TRUE {
+        device_features.multi_draw_indirect = vk::TRUE;
+    }
+    if supported_features.draw_indirect_first_instance == vk::TRUE {
+        device_features.draw_indirect_first_instance = vk::TRUE;
+    }
+
+    device_features
+}
+
+pub fn get_general_v11_features<'a>(
+    instance: &ash::Instance,
+    physical_device: &vk::PhysicalDevice,
+) -> vk::PhysicalDeviceVulkan11Features<'a> {
+    let mut vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default();
     let mut query_vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default();
+
+    let mut features2 =
+        vk::PhysicalDeviceFeatures2::default().push_next(&mut query_vulkan_11_features);
+
+    unsafe {
+        instance.get_physical_device_features2(*physical_device, &mut features2);
+    }
+
+    if query_vulkan_11_features.multiview == vk::TRUE {
+        vulkan_11_features.multiview = vk::TRUE;
+    }
+    if query_vulkan_11_features.shader_draw_parameters == vk::TRUE {
+        vulkan_11_features.shader_draw_parameters = vk::TRUE;
+    }
+
+    vulkan_11_features
+}
+
+pub fn get_general_v12_features<'a>(
+    instance: &ash::Instance,
+    physical_device: &vk::PhysicalDevice,
+) -> vk::PhysicalDeviceVulkan12Features<'a> {
+    let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default();
     let mut query_vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default();
+
+    let mut features2 =
+        vk::PhysicalDeviceFeatures2::default().push_next(&mut query_vulkan_12_features);
+
+    unsafe {
+        instance.get_physical_device_features2(*physical_device, &mut features2);
+    }
+
+    if query_vulkan_12_features.timeline_semaphore == vk::TRUE {
+        vulkan_12_features.timeline_semaphore = vk::TRUE;
+    }
+    if query_vulkan_12_features.buffer_device_address == vk::TRUE {
+        vulkan_12_features.buffer_device_address = vk::TRUE;
+    }
+    if query_vulkan_12_features.descriptor_indexing == vk::TRUE {
+        vulkan_12_features.descriptor_indexing = vk::TRUE;
+    }
+    if query_vulkan_12_features.sampler_filter_minmax == vk::TRUE {
+        vulkan_12_features.sampler_filter_minmax = vk::TRUE;
+    }
+    if query_vulkan_12_features.scalar_block_layout == vk::TRUE {
+        vulkan_12_features.scalar_block_layout = vk::TRUE;
+    }
+    if query_vulkan_12_features.imageless_framebuffer == vk::TRUE {
+        vulkan_12_features.imageless_framebuffer = vk::TRUE;
+    }
+    if query_vulkan_12_features.uniform_buffer_standard_layout == vk::TRUE {
+        vulkan_12_features.uniform_buffer_standard_layout = vk::TRUE;
+    }
+
+    vulkan_12_features
+}
+
+pub fn get_general_v13_features<'a>(
+    instance: &ash::Instance,
+    physical_device: &vk::PhysicalDevice,
+) -> vk::PhysicalDeviceVulkan13Features<'a> {
+    let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default();
     let mut query_vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default();
 
-    // Chain the query structs
-    let mut query_device_features = vk::PhysicalDeviceFeatures2::default()
-        .push_next(&mut query_vulkan_11_features)
-        .push_next(&mut query_vulkan_12_features)
-        .push_next(&mut query_vulkan_13_features);
+    let mut features2 =
+        vk::PhysicalDeviceFeatures2::default().push_next(&mut query_vulkan_13_features);
 
-    // Query the supported features
     unsafe {
-        instance.get_physical_device_features2(*physical_device, &mut query_device_features);
+        instance.get_physical_device_features2(*physical_device, &mut features2);
     }
 
-    // Initialize structs for enabling features
-    let mut enable_device_features = vk::PhysicalDeviceFeatures::default();
-    let mut enable_vulkan_11_features = vk::PhysicalDeviceVulkan11Features::default();
-    let mut enable_vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default();
-    let mut enable_vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default();
-
-    // Enable base features if supported
-    if query_device_features.features.geometry_shader == vk::TRUE {
-        enable_device_features.geometry_shader = vk::TRUE;
-    }
-
-    // Enable Vulkan 1.1 features if supported
-    if query_vulkan_11_features.sampler_ycbcr_conversion == vk::TRUE {
-        enable_vulkan_11_features.sampler_ycbcr_conversion = vk::TRUE;
-    }
-
-    // Enable Vulkan 1.2 features if supported
-    if query_vulkan_12_features.timeline_semaphore == vk::TRUE {
-        enable_vulkan_12_features.timeline_semaphore = vk::TRUE;
-    }
-
-    if query_vulkan_12_features.buffer_device_address == vk::TRUE {
-        enable_vulkan_12_features.buffer_device_address = vk::TRUE;
-    }
-
-    // Enable Vulkan 1.3 features if supported
     if query_vulkan_13_features.dynamic_rendering == vk::TRUE {
-        enable_vulkan_13_features.dynamic_rendering = vk::TRUE;
+        vulkan_13_features.dynamic_rendering = vk::TRUE;
     }
-
     if query_vulkan_13_features.synchronization2 == vk::TRUE {
-        enable_vulkan_13_features.synchronization2 = vk::TRUE;
+        vulkan_13_features.synchronization2 = vk::TRUE;
     }
 
-    // Chain the enabling structs
-    let mut enable_features2 = vk::PhysicalDeviceFeatures2::default()
-        .features(enable_device_features)
-        .push_next(unsafe { &mut *(Box::into_raw(Box::new(enable_vulkan_11_features)) as *mut _) })
-        .push_next(unsafe { &mut *(Box::into_raw(Box::new(enable_vulkan_12_features)) as *mut _) })
-        .push_next(unsafe { &mut *(Box::into_raw(Box::new(enable_vulkan_13_features)) as *mut _) });
-
-    DeviceFeatures {
-        features2: enable_features2,
-        vulkan_11_features: if enable_vulkan_11_features.sampler_ycbcr_conversion == vk::TRUE {
-            Some(enable_vulkan_11_features)
-        } else {
-            None
-        },
-        vulkan_12_features: if enable_vulkan_12_features.timeline_semaphore == vk::TRUE
-            || enable_vulkan_12_features.buffer_device_address == vk::TRUE
-        {
-            Some(enable_vulkan_12_features)
-        } else {
-            None
-        },
-        vulkan_13_features: if enable_vulkan_13_features.dynamic_rendering == vk::TRUE
-            || enable_vulkan_13_features.synchronization2 == vk::TRUE
-        {
-            Some(enable_vulkan_13_features)
-        } else {
-            None
-        },
-    }
+    vulkan_13_features
 }

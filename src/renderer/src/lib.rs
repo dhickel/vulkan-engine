@@ -7,7 +7,7 @@ mod texture;
 mod vulkan_init;
 
 use ash::vk;
-use ash::vk::PhysicalDeviceFeatures;
+use ash::vk::{ExtendsPhysicalDeviceFeatures2, PhysicalDeviceFeatures};
 use bytemuck;
 use glam::*;
 use image::GenericImageView;
@@ -97,14 +97,32 @@ pub fn run() {
     let (surface, surface_instance) =
         vulkan_init::get_window_surface(&entry, &instance, &window).unwrap();
 
-    let device = vulkan_init::create_logical_device(
+    let queue_indices = vulkan_init::graphics_only_queue_indices(
         &instance,
-        &device.device,
+        &device.p_device,
         &surface,
         &surface_instance,
-        &extensions,
-        &vulkan_init::graphics_only_queue_indices,
-        &vulkan_init::basic_features,
+    )
+    .unwrap();
+
+    let mut core_features = vulkan_init::get_general_core_features(&instance, &device.p_device);
+    let vk11_features = vulkan_init::get_general_v11_features(&instance, &device.p_device);
+    let vk12_features = vulkan_init::get_general_v12_features(&instance, &device.p_device);
+    let vk13_features = vulkan_init::get_general_v13_features(&instance, &device.p_device);
+
+    let mut ext_feats: Vec<Box<dyn ExtendsPhysicalDeviceFeatures2>> = vec![
+        Box::new(vk11_features),
+        Box::new(vk12_features),
+        Box::new(vk13_features),
+    ];
+
+    let l_device = vulkan_init::create_logical_device(
+        &instance,
+        &device.p_device,
+        &queue_indices,
+        &mut core_features,
+        Some(&mut ext_feats),
+        None
     );
 
     event_loop
