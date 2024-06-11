@@ -236,12 +236,12 @@ pub fn init_instance(
             .message_severity(
                 vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
                     | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
             )
             .message_type(
                 vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
                     | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
             .pfn_user_callback(Some(vulkan_debug_callback));
 
@@ -464,11 +464,10 @@ pub fn create_logical_device<'a>(
         .collect();
 
     log::info!("Logical Device: Enabling features");
-    let mut device_features = vk::PhysicalDeviceFeatures2::default()
-        .features(*core_features);
+    let mut device_features = vk::PhysicalDeviceFeatures2::default().features(*core_features);
 
     if let Some(other_features) = other_features {
-        for  feat in other_features {
+        for feat in other_features {
             device_features = device_features.push_next(feat.as_mut());
         }
     }
@@ -713,7 +712,7 @@ pub fn create_swapchain(
     logical_device: &LogicalDevice,
     surface_info: &VkSurface,
     requested_extent: (u32, u32),
-    image_count: u32,
+    image_count: Option<u32>,
     surface_format: Option<vk::SurfaceFormatKHR>,
     present_mode: Option<vk::PresentModeKHR>,
     old_swapchain: Option<vk::SwapchainKHR>,
@@ -749,7 +748,22 @@ pub fn create_swapchain(
 
     log::info!("Swapchain: Setting extent");
     let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
-    let image_count = std::cmp::max(swapchain_support.capabilities.max_image_count, image_count);
+
+    let image_count = if let Some(explicit_count) = image_count {
+        std::cmp::min(
+            swapchain_support.capabilities.max_image_count,
+            explicit_count,
+        )
+    } else {
+        let count = swapchain_support.capabilities.min_image_count + 1;
+        if swapchain_support.capabilities.max_image_count > 0
+            && count > swapchain_support.capabilities.max_image_count
+        {
+            swapchain_support.capabilities.max_image_count
+        } else {
+            count
+        }
+    };
 
     log::info!("Swapchain: Setting pre transform");
     let pre_transform = if swapchain_support
@@ -782,7 +796,10 @@ pub fn create_swapchain(
     ];
 
     sc_create_info = if present_gfx_indices[0] != present_gfx_indices[1] {
-        log::info!("Swapchain: Set sharing mode: Concurrent with indies: {:?}", present_gfx_indices);
+        log::info!(
+            "Swapchain: Set sharing mode: Concurrent with indies: {:?}",
+            present_gfx_indices
+        );
         sc_create_info
             .image_sharing_mode(vk::SharingMode::CONCURRENT)
             .queue_family_indices(&present_gfx_indices)
@@ -791,12 +808,10 @@ pub fn create_swapchain(
         sc_create_info.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
     };
 
-
     if let Some(old_swapchain) = old_swapchain {
         log::info!("Swapchain: Utilizing old swapchain");
         sc_create_info = sc_create_info.old_swapchain(old_swapchain);
     }
-
 
     log::info!("Swapchain: Initializing loader");
     let swapchain_loader = ash::khr::swapchain::Device::new(instance, &logical_device.device);
@@ -898,7 +913,6 @@ pub fn select_sc_extent(
 }
 
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
-
     vec![
         ash::khr::swapchain::NAME,
         #[cfg(any(target_os = "macos", target_os = "ios"))]
