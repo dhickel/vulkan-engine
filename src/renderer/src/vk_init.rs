@@ -1,29 +1,57 @@
 use ash::vk;
 
+use ash::vk::CommandBuffer;
 use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
-use std::{ffi, ptr};
+use std::{ffi, iter, ptr};
 
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 pub struct VulkanApp {
-    entry: ash::Entry,
+    pub window: winit::window::Window,
+    pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
     pub physical_device: PhyDevice,
     pub logical_device: LogicalDevice,
     pub surface: VkSurface,
     pub swapchain: VkSwapchain,
+    pub present_images: Vec<vk::ImageView>,
+    pub command_pools: Vec<VkCommandPool>,
+    pub presentation: VkPresent,
 }
 
 impl Drop for VulkanApp {
     fn drop(&mut self) {
         unsafe {
+            self.presentation.frame_buffers.iter().for_each(|b| {
+                self.logical_device
+                    .device
+                    .destroy_semaphore(b.swap_semaphore, None);
+                self.logical_device
+                    .device
+                    .destroy_semaphore(b.render_semaphore, None);
+                self.logical_device
+                    .device
+                    .destroy_fence(b.render_fence, None);
+            });
+            self.command_pools.iter().for_each(|pool| {
+                self.logical_device
+                    .device
+                    .destroy_command_pool(pool.pool, None)
+            });
+
+            self.present_images
+                .iter()
+                .for_each(|view| self.logical_device.device.destroy_image_view(*view, None));
+
             self.swapchain
                 .swapchain_loader
                 .destroy_swapchain(self.swapchain.swapchain, None);
+
             self.logical_device.device.destroy_device(None);
+
             self.surface
                 .surface_instance
                 .destroy_surface(self.surface.surface, None);
@@ -52,17 +80,17 @@ pub struct VkDebug {
 }
 
 pub struct SwapchainSupport {
-    capabilities: vk::SurfaceCapabilitiesKHR,
-    formats: Vec<vk::SurfaceFormatKHR>,
-    present_modes: Vec<vk::PresentModeKHR>,
+    pub capabilities: vk::SurfaceCapabilitiesKHR,
+    pub formats: Vec<vk::SurfaceFormatKHR>,
+    pub present_modes: Vec<vk::PresentModeKHR>,
 }
 
 pub struct VkSwapchain {
-    swapchain_loader: ash::khr::swapchain::Device,
-    swapchain: vk::SwapchainKHR,
-    swapchain_images: Vec<vk::Image>,
-    surface_format: vk::SurfaceFormatKHR,
-    extent: vk::Extent2D,
+    pub swapchain_loader: ash::khr::swapchain::Device,
+    pub swapchain: vk::SwapchainKHR,
+    pub swapchain_images: Vec<vk::Image>,
+    pub surface_format: vk::SurfaceFormatKHR,
+    pub extent: vk::Extent2D,
 }
 
 pub struct VkSurface {
@@ -86,12 +114,78 @@ pub struct QueueIndex {
     pub queue_types: Vec<QueueType>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum QueueType {
     Present,
     Graphics,
     Compute,
     Transfer,
     SparseBinding,
+}
+
+impl QueueType {
+    // Define an array of all the enum variants
+    const ALL_QUEUE_TYPES: [QueueType; 5] = [
+        QueueType::Present,
+        QueueType::Graphics,
+        QueueType::Compute,
+        QueueType::Transfer,
+        QueueType::SparseBinding,
+    ];
+
+    // Provide a static method to get an iterator over all variants
+    pub fn iter() -> std::slice::Iter<'static, QueueType> {
+        Self::ALL_QUEUE_TYPES.iter()
+    }
+}
+
+#[derive(Debug)]
+pub struct VkCommandPool {
+    pub queue_index: u32,
+    pub queue: vk::Queue,
+    pub queue_type: Vec<QueueType>,
+    pub pool: vk::CommandPool,
+    pub buffers: Vec<vk::CommandBuffer>,
+}
+
+#[derive(Debug)]
+pub struct VkFrameBuffer {
+    pub swap_semaphore: vk::Semaphore,
+    pub render_semaphore: vk::Semaphore,
+    pub render_fence: vk::Fence,
+}
+
+pub struct VkPresent {
+    frame_buffers: Vec<VkFrameBuffer>,
+    pub curr_frame_count: u32,
+    max_frames_active: u32,
+}
+
+impl VkPresent {
+    pub fn new(frame_buffers: Vec<VkFrameBuffer>, image_indices: &Vec<vk::ImageView>) -> Self {
+        if frame_buffers.len() != image_indices.len() {
+            panic!(
+                "Buffer and indices count mismatch, buffers: {}, image_indices: {}",
+                frame_buffers.len(),
+                image_indices.len()
+            )
+        }
+
+        Self {
+            frame_buffers,
+            curr_frame_count: 0,
+            max_frames_active: image_indices.len() as u32,
+        }
+    }
+
+    pub fn get_next_frame(&self) -> &VkFrameBuffer {
+        let index = self.curr_frame_count % self.max_frames_active;
+        &self.frame_buffers[index as usize]
+    }
+
+    pub fn get_curr_frame_count(&self) -> u32 {
+        self.curr_frame_count
+    }
 }
 
 pub struct DeviceQueues {
@@ -764,6 +858,7 @@ pub fn create_swapchain(
             count
         }
     };
+    log::info!("Swapchain: Requesting image count: {}", image_count);
 
     log::info!("Swapchain: Setting pre transform");
     let pre_transform = if swapchain_support
@@ -776,14 +871,14 @@ pub fn create_swapchain(
         swapchain_support.capabilities.current_transform
     };
 
-    log::info!("Swapchain: creating info");
+    log::info!("Swapchain: Creating info");
     let mut sc_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface_info.surface)
         .min_image_count(image_count)
         .image_color_space(surface_format.color_space)
         .image_format(surface_format.format)
         .image_extent(extent)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
         .pre_transform(pre_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode)
@@ -830,6 +925,7 @@ pub fn create_swapchain(
             .map_err(|err| format!("Failed to get swapchain images: {:?}", err))?
     };
 
+
     log::info!("Swapchain created");
     Ok(VkSwapchain {
         swapchain_loader,
@@ -838,6 +934,50 @@ pub fn create_swapchain(
         surface_format,
         extent,
     })
+}
+
+pub fn create_basic_image_views(
+    logical_device: &LogicalDevice,
+    swapchain: &VkSwapchain,
+) -> Result<Vec<vk::ImageView>, String> {
+    log::info!("Creating image views");
+    let present_images = unsafe {
+        swapchain
+            .swapchain_loader
+            .get_swapchain_images(swapchain.swapchain)
+            .map_err(|err| format!("Error getting swapchain images: {:?}", err))?
+    };
+
+    let image_views: Vec<vk::ImageView> = present_images
+        .iter()
+        .map(|&image| unsafe {
+            let create_view_info = vk::ImageViewCreateInfo::default()
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(swapchain.surface_format.format)
+                .components(vk::ComponentMapping {
+                    r: vk::ComponentSwizzle::R,
+                    g: vk::ComponentSwizzle::G,
+                    b: vk::ComponentSwizzle::B,
+                    a: vk::ComponentSwizzle::A,
+                })
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image(image);
+
+            logical_device
+                .device
+                .create_image_view(&create_view_info, None)
+                .map_err(|err| format!("Error creating image views: {:?}", err))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    log::info!("Image views created");
+    Ok(image_views)
 }
 
 pub fn get_default_sc_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
@@ -910,6 +1050,107 @@ pub fn select_sc_extent(
             ),
         }
     }
+}
+
+pub fn create_command_pools(
+    device: &LogicalDevice,
+    buffer_count: u32,
+) -> Result<Vec<VkCommandPool>, String> {
+    log::info!("Creating command pools");
+
+    let devices_queues = &device.queues;
+    let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<QueueType>, vk::CommandPool)>::new();
+
+    for &t in QueueType::iter() {
+        if devices_queues.has_queue_type(t) {
+            let queue = devices_queues.get_queue(t);
+            let index = devices_queues.get_queue_index(t);
+            let existing = mapped_queues.iter_mut().find(|q| q.1 == queue);
+            if let Some(existing) = existing {
+                existing.2.push(t);
+            } else {
+                let command_pool_info = vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(index)
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+
+                let pool = unsafe {
+                    device
+                        .device
+                        .create_command_pool(&command_pool_info, None)
+                        .map_err(|err| format!("Error creating command pool: {:?}", err))?
+                };
+
+                mapped_queues.push((index, queue, vec![t], pool));
+            }
+        }
+    }
+
+    let pool_vec: Vec<VkCommandPool> = mapped_queues
+        .iter()
+        .map(|e| VkCommandPool {
+            queue_index: e.0,
+            queue: e.1,
+            queue_type: e.2.to_vec(),
+            pool: e.3,
+            buffers: create_command_buffers(device, &e.3, vk::CommandBufferLevel::PRIMARY, 2)
+                .unwrap(),
+        })
+        .collect();
+
+    log::info!("Command pools created");
+    Ok(pool_vec)
+}
+
+pub fn create_command_buffers(
+    device: &LogicalDevice,
+    pool: &vk::CommandPool,
+    level: vk::CommandBufferLevel,
+    count: u32,
+) -> Result<Vec<vk::CommandBuffer>, String> {
+    let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+        .command_buffer_count(count)
+        .command_pool(*pool)
+        .level(level);
+
+    let buffers = unsafe {
+        device
+            .device
+            .allocate_command_buffers(&command_buffer_allocate_info)
+            .map_err(|err| format!("Error creating command buffers: {:?}", err))?
+    };
+
+    Ok(buffers)
+}
+
+pub fn create_frame_buffer(device: &LogicalDevice) -> Result<VkFrameBuffer, String> {
+    let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+
+    let (swap_semaphore, render_semaphore, render_fence) = unsafe {
+        let s_create_info = vk::SemaphoreCreateInfo::default();
+        let s = device
+            .device
+            .create_semaphore(&semaphore_create_info, None)
+            .map_err(|err| format!("Error creating semaphore: {:?}", err))?;
+        let r = device
+            .device
+            .create_semaphore(&semaphore_create_info, None)
+            .map_err(|err| format!("Error creating semaphore: {:?}", err))?;
+
+        let f_create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+        let f = device
+            .device
+            .create_fence(&f_create_info, None)
+            .map_err(|err| format!("Error creating fence: {:?}", err))?;
+
+        (s, r, f)
+    };
+
+    Ok(VkFrameBuffer {
+        swap_semaphore,
+        render_semaphore,
+        render_fence,
+    })
 }
 
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
