@@ -24,8 +24,9 @@ use std::fmt::{Debug, Pointer};
 use std::process::exit;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
+use std::thread::Thread;
 use winit::application::ApplicationHandler;
-use winit::event_loop::ControlFlow::WaitUntil;
+
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
@@ -116,9 +117,9 @@ impl ApplicationHandler for Control {
             WindowEvent::Resized(_) => {}
             WindowEvent::Moved(_) => {}
             WindowEvent::KeyboardInput { event, .. } => {
-                self.input_manager.update();
+              //  self.input_manager.update();
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    self.input_manager.add_keycode(key) // TODO need to take pressed state into account
+                    // self.input_manager.add_keycode(key) // TODO need to take pressed state into account
                 }
             }
             WindowEvent::ModifiersChanged(modd, ..) => {}
@@ -143,14 +144,14 @@ impl ApplicationHandler for Control {
                 }
 
                 let now = SystemTime::now();
-                let frame_ms = now.duration_since(self.last_time).unwrap().as_secs_f32() / 1000f32;
+                let frame_ms = now.duration_since(self.last_time).unwrap().as_millis();
                 self.last_time = now;
                 if let Some(app) = &self.app {
                     app.window
                         .set_title(format!("Frame-time: {}", frame_ms).as_str());
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(
-                        std::time::Instant::now() + self.wait_time,
-                    ));
+                    // event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    //     std::time::Instant::now() + self.wait_time,
+                    // ));
                 }
 
                 self.frame += 1;
@@ -169,9 +170,7 @@ impl ApplicationHandler for Control {
             }
         }
 
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + self.wait_time,
-        ));
+        // event_loop.set_control_flow(ControlFlow::Poll);
     }
 }
 
@@ -183,8 +182,10 @@ pub fn run() {
 
     let input_manager = InputManager::new();
     let mut control = Control::new(input_manager, (1920, 1080), Duration::from_secs(2));
-    let even_loop = EventLoop::new().unwrap();
-    even_loop.run_app(&mut control).unwrap()
+    let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.run_app(&mut control).unwrap();
+
 }
 
 

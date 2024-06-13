@@ -1,35 +1,35 @@
 use ash::vk;
 use ash::vk::{ImageType, PipelineLayoutCreateInfo};
 
-pub fn command_pool_create_info(
+pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
     flags: vk::CommandPoolCreateFlags,
-) -> vk::CommandPoolCreateInfo {
+) -> vk::CommandPoolCreateInfo <'a>{
     vk::CommandPoolCreateInfo::default()
         .queue_family_index(queue_family_index)
         .flags(flags)
 }
 
-pub fn command_buffer_allocate_info(
+pub fn command_buffer_allocate_info<'a>(
     command_pool: vk::CommandPool,
     count: u32,
     level: vk::CommandBufferLevel,
-) -> vk::CommandBufferAllocateInfo {
+) -> vk::CommandBufferAllocateInfo<'a> {
     vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .command_buffer_count(count)
         .level(level)
 }
 
-pub fn fence_create_info(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo {
+pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
     vk::FenceCreateInfo::default().flags(flags)
 }
 
-pub fn semaphore_create_info(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo {
+pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
     vk::SemaphoreCreateInfo::default().flags(flags)
 }
 
-pub fn command_buffer_begin_info(flags: vk::CommandBufferUsageFlags) -> vk::CommandBufferBeginInfo {
+pub fn command_buffer_begin_info<'a>(flags: vk::CommandBufferUsageFlags) -> vk::CommandBufferBeginInfo<'a> {
     vk::CommandBufferBeginInfo::default().flags(flags)
 }
 
@@ -70,11 +70,11 @@ pub fn submit_info_2<'a>(
         .signal_semaphore_infos(signal_semaphore)
 }
 
-pub fn render_pass_begin_info(
+pub fn render_pass_begin_info<'a>(
     render_pass: vk::RenderPass,
     window_extent: vk::Extent2D,
     frame_buffer: vk::Framebuffer,
-) -> vk::RenderPassBeginInfo {
+) -> vk::RenderPassBeginInfo<'a> {
     vk::RenderPassBeginInfo::default()
         .render_pass(render_pass)
         .render_area(
@@ -85,13 +85,13 @@ pub fn render_pass_begin_info(
         .framebuffer(frame_buffer)
 }
 
-pub fn image_create_info(
+pub fn image_create_info<'a>(
     format: vk::Format,
     usage_flags: vk::ImageUsageFlags,
     extent: vk::Extent3D,
     image_type: vk::ImageType,
     sample_flags: vk::SampleCountFlags,
-) -> vk::ImageCreateInfo {
+) -> vk::ImageCreateInfo<'a> {
     vk::ImageCreateInfo::default()
         .image_type(image_type)
         .format(format)
@@ -102,11 +102,11 @@ pub fn image_create_info(
         .usage(usage_flags)
 }
 
-pub fn image_view_create_info(
+pub fn image_view_create_info<'a>(
     format: vk::Format,
     image: vk::Image,
     aspect_flags: vk::ImageAspectFlags,
-) -> vk::ImageViewCreateInfo {
+) -> vk::ImageViewCreateInfo<'a> {
     vk::ImageViewCreateInfo::default()
         .format(format)
         .image(image)
@@ -120,11 +120,11 @@ pub fn image_view_create_info(
         )
 }
 
-pub fn rendering_attachment_info(
+pub fn rendering_attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
     clear: Option<vk::ClearValue>,
-) -> vk::RenderingAttachmentInfo {
+) -> vk::RenderingAttachmentInfo <'a>{
     let info = vk::RenderingAttachmentInfo::default()
         .image_view(view)
         .image_layout(layout)
@@ -141,16 +141,16 @@ pub fn rendering_attachment_info(
     info
 }
 
-pub fn pipeline_shader_stage_create_info(
+pub fn pipeline_shader_stage_create_info<'a>(
     stage : vk::ShaderStageFlags,
     module: vk::ShaderModule
-) -> vk::PipelineShaderStageCreateInfo {
+) -> vk::PipelineShaderStageCreateInfo<'a> {
     vk::PipelineShaderStageCreateInfo::default()
         .stage(stage)
         .module(module)
 }
 
-pub fn pipeline_layout_create_info() -> PipelineLayoutCreateInfo {
+pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
     vk::PipelineLayoutCreateInfo::default()
 }
 
