@@ -6,10 +6,11 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::{ffi, iter, ptr};
 
+
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+
 pub struct VulkanApp {
-    pub window: winit::window::Window,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
@@ -273,8 +274,13 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
     layers_names_raw
 }
 
-// this get hour VK_KHR_surface  extensions
 pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
+    ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
+        .unwrap()
+        .to_vec()
+}
+
+pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
     ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
         .unwrap()
         .to_vec()
@@ -411,6 +417,34 @@ pub fn get_window_surface(
         surface,
         surface_instance,
     })
+}
+
+pub fn get_glfw_surface(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    window: &glfw::PWindow,
+) -> Result<VkSurface, String> {
+    log::info!("Creating surface");
+
+    let surface = unsafe {
+        ash_window::create_surface(
+            &entry,
+            &instance,
+            window.display_handle().unwrap().as_raw(),
+            window.window_handle().unwrap().as_raw(),
+            None,
+        )
+            .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
+    };
+
+    let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
+
+    log::info!("Surface created");
+    Ok(VkSurface {
+        surface,
+        surface_instance,
+    })
+
 }
 
 pub fn get_physical_devices(
@@ -924,7 +958,6 @@ pub fn create_swapchain(
             .get_swapchain_images(swapchain)
             .map_err(|err| format!("Failed to get swapchain images: {:?}", err))?
     };
-
 
     log::info!("Swapchain created");
     Ok(VkSwapchain {

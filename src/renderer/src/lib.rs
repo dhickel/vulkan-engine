@@ -7,54 +7,26 @@ mod texture;
 mod vk_init;
 mod vk_util;
 
-
 use crate::vk_init::{QueueType, VkFrameBuffer, VkPresent, VulkanApp};
 use ash::vk;
 use ash::vk::{
     CommandBuffer, CommandBufferResetFlags, CommandBufferUsageFlags,
     ExtendsPhysicalDeviceFeatures2, PhysicalDeviceFeatures, SubmitInfo2,
 };
-use bytemuck;
 use glam::*;
+use glfw::{Action, ClientApiHint, Context, Key, WindowHint};
 use image::GenericImageView;
 use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
-use std::fmt::{Debug, Pointer};
-use std::process::exit;
+
+
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
-use std::thread::Thread;
-use winit::application::ApplicationHandler;
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-use winit::window::{Window, WindowId};
-use winit::{
-    event::*,
-    event_loop::EventLoop,
-    keyboard::{KeyCode, PhysicalKey},
-};
 
-pub struct Empty {}
-
-impl KeyboardListener for Empty {
-    fn listener_type(&self) -> ListenerType {
-        ListenerType::GameInput
-    }
-
-    fn listener_id(&self) -> u32 {
-        1
-    }
-
-    fn listener_for(&self, key: KeyCode) -> bool {
-        true
-    }
-
-    fn broadcast(&mut self, key: KeyCode, pressed: bool, modifiers: &HashSet<Modifiers>) {
-        println!("Key: {:?} : {:?}", key, pressed)
-    }
-}
+const NANO: f64 = 1000000000.0;
 
 pub struct GameLogic {
     input_manager: InputManager,
@@ -72,125 +44,83 @@ struct Control {
     window_size: (u32, u32),
 }
 
-impl Control {
-    pub fn new(input_manager: InputManager, window_size: (u32, u32), wait_time: Duration) -> Self {
-        Self {
-            app: None,
-            input_manager,
-            wait_time,
-            frame: 0,
-            last_time: SystemTime::now(),
-            request_redraw: true,
-            wait_cancelled: false,
-            close_requested: false,
-            window_size,
-        }
-    }
-}
+pub fn run2() {
 
-impl ApplicationHandler for Control {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_att = Window::default_attributes()
-            .with_title("Winit fucking sucks")
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                self.window_size.0,
-                self.window_size.1,
-            ));
 
-        let window = event_loop.create_window(window_att).unwrap();
-        window.request_redraw();
-        self.app = Some(init_vulkan_app(window, self.window_size).unwrap());
+    let mut glfw = glfw::init(glfw::log_errors).unwrap();
 
-    }
+    glfw.window_hint(WindowHint::ClientApi(ClientApiHint::NoApi));
+    let (mut window, events) = glfw
+        .create_window(
+            1920,
+            1080,
+            "Hello this is window",
+            glfw::WindowMode::Windowed,
+        )
+        .expect("Failed to create GLFW window.");
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        match event {
-            WindowEvent::CloseRequested => {
-                self.close_requested = true;
-            }
-            WindowEvent::ActivationTokenDone { .. } => {}
-            WindowEvent::Resized(_) => {}
-            WindowEvent::Moved(_) => {}
-            WindowEvent::KeyboardInput { event, .. } => {
-              //  self.input_manager.update();
-                if let PhysicalKey::Code(key) = event.physical_key {
-                    // self.input_manager.add_keycode(key) // TODO need to take pressed state into account
-                }
-            }
-            WindowEvent::ModifiersChanged(modd, ..) => {}
-            WindowEvent::CursorMoved { position, .. } => {
-                self.input_manager
-                    .update_mouse_pos(position.x as f32, position.y as f32)
-                //TODO Maybe track as f64?
-            }
-            WindowEvent::CursorEntered { .. } => {}
-            WindowEvent::CursorLeft { .. } => {}
-            WindowEvent::MouseWheel { delta, .. } => {
-                if let MouseScrollDelta::LineDelta(delta, ..) = delta {
-                    self.input_manager.update_scroll_state(delta)
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.input_manager.add_mouse_button(button)
-            }
-            WindowEvent::RedrawRequested => {
-                if let Some(ref mut app) = &mut self.app {
-                    app.render(self.frame);
-                }
+    window.set_key_polling(false);
+    window.set_raw_mouse_motion(true);
 
-                let now = SystemTime::now();
-                let frame_ms = now.duration_since(self.last_time).unwrap().as_millis();
-                self.last_time = now;
-                if let Some(app) = &self.app {
-                    app.window
-                        .set_title(format!("Frame-time: {}", frame_ms).as_str());
-                    // event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    //     std::time::Instant::now() + self.wait_time,
-                    // ));
-                }
 
-                self.frame += 1;
+    let mut app = init_vulkan_app(&window, (1920, 1080)).unwrap();
+    window.make_current();
 
-            }
-            _ => {}
-        }
-    }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.request_redraw && !self.wait_cancelled && !self.close_requested {
-            if let Some(app) = &self.app {
-                self.last_time = time::SystemTime::now();
-                self.frame += 1;
-                app.window.request_redraw();
-            }
+    // window.set_key_callback(|_, key, _, action, _| println!("Input: {:?}", action));
+
+    let logic_ups = 10000.0;
+    let frame_ups = 1000.0;
+
+    let time_u = NANO / logic_ups;
+    let time_r = if frame_ups > 0.0 {
+        NANO / frame_ups
+    } else {
+        0.0
+    };
+    let mut delta_update = 0.0;
+    let mut delta_fps = 0.0;
+
+    let init_time = SystemTime::now();
+    let mut last_time = init_time;
+    let mut frames = 0;
+
+    let mut fps_timer = SystemTime::now();
+    let mut frame = 0;
+    let running = true;
+
+    while !window.should_close() {
+        let now = SystemTime::now();
+        let elapsed = now.duration_since(last_time).unwrap().as_nanos() as f64;
+        delta_update += elapsed / time_u;
+        delta_fps += elapsed / time_r;
+
+        while delta_update >= 1.0 {
+            delta_update -= 1.0;
+            glfw.poll_events();
+            // update logic here
         }
 
-        // event_loop.set_control_flow(ControlFlow::Poll);
+        if delta_fps >= 1.0 {
+            app.render(frame);
+            delta_fps -= 1.0;
+            frames += 1;
+            frame +=1;
+        }
+
+        if now.duration_since(fps_timer).unwrap() > Duration::from_secs(1) {
+            window.set_title(&format!("FPS: {}", frames));
+            fps_timer = SystemTime::now();
+            frames = 0;
+        }
+
+        last_time = now;
     }
 }
-
-pub fn run() {
-    env_logger::Builder::new()
-        .target(env_logger::Target::Stdout)
-        .parse_filters(&*env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
-        .init();
-
-    let input_manager = InputManager::new();
-    let mut control = Control::new(input_manager, (1920, 1080), Duration::from_secs(2));
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut control).unwrap();
-
-}
-
 
 impl VulkanApp {
     pub fn render(&mut self, frame_number: u32) {
+        let start = SystemTime::now();
         let device = &self.logical_device.device;
         let frame_buffer = self.presentation.get_next_frame();
         let fence = &[frame_buffer.render_fence];
@@ -246,7 +176,9 @@ impl VulkanApp {
                 },
             };
 
-            let clear_range = [vk_util::image_subresource_range(vk::ImageAspectFlags::COLOR)];
+            let clear_range = [vk_util::image_subresource_range(
+                vk::ImageAspectFlags::COLOR,
+            )];
             device.cmd_clear_color_image(
                 cmd,
                 image,
@@ -291,20 +223,18 @@ impl VulkanApp {
                 .queue_present(cmd_pool.queue, &present_info)
                 .unwrap();
         }
+        println!("Render Took: {}ms", SystemTime::now().duration_since(start).unwrap().as_millis())
     }
 }
 
-pub fn init_vulkan_app(
-    window: winit::window::Window,
-    size: (u32, u32),
-) -> Result<VulkanApp, String> {
+pub fn init_vulkan_app(window: &glfw::PWindow, size: (u32, u32)) -> Result<VulkanApp, String> {
     let entry = vk_init::init_entry();
 
-    let mut instance_ext = vk_init::get_winit_extensions(&window);
+    let mut instance_ext = vk_init::get_glfw_extensions(&window);
     let (instance, debug) =
-        vk_init::init_instance(&entry, "test".to_string(), &mut instance_ext, true)?;
+        vk_init::init_instance(&entry, "test".to_string(), &mut instance_ext, false)?;
 
-    let surface = vk_init::get_window_surface(&entry, &instance, &window)?;
+    let surface = vk_init::get_glfw_surface(&entry, &instance, &window)?;
 
     let physical_device = vk_init::get_physical_devices(
         &instance,
@@ -338,8 +268,7 @@ pub fn init_vulkan_app(
         Some(&surface_ext),
     )?;
 
-    let swapchain_support =
-        vk_init::get_swapchain_support(&physical_device.p_device, &surface)?;
+    let swapchain_support = vk_init::get_swapchain_support(&physical_device.p_device, &surface)?;
 
     let swapchain = vk_init::create_swapchain(
         &instance,
@@ -347,9 +276,9 @@ pub fn init_vulkan_app(
         &logical_device,
         &surface,
         size,
+        Some(2),
         None,
-        None,
-        Some(vk::PresentModeKHR::FIFO),
+        Some(vk::PresentModeKHR::MAILBOX),
         None,
         true,
     )?;
@@ -358,14 +287,13 @@ pub fn init_vulkan_app(
 
     let command_pools = vk_init::create_command_pools(&logical_device, 2)?;
 
-    let frame_buffers: Vec<VkFrameBuffer> = (0..3)
+    let frame_buffers: Vec<VkFrameBuffer> = (0..2)
         .map(|_| vk_init::create_frame_buffer(&logical_device))
         .collect::<Result<Vec<_>, _>>()?;
 
     let presentation = VkPresent::new(frame_buffers, &present_images);
 
     Ok(VulkanApp {
-        window,
         entry,
         instance,
         debug,

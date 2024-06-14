@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/renderer/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/input/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/glfw/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

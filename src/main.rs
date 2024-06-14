@@ -5,7 +5,7 @@
 
 fn main() {
 
-   renderer::run()
+   renderer::run2()
 }
 
 
