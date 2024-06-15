@@ -6,74 +6,10 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::{ffi, iter, ptr};
 
-
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 
-pub struct VulkanApp {
-    pub entry: ash::Entry,
-    pub instance: ash::Instance,
-    pub debug: Option<VkDebug>,
-    pub physical_device: PhyDevice,
-    pub logical_device: LogicalDevice,
-    pub surface: VkSurface,
-    pub swapchain: VkSwapchain,
-    pub present_images: Vec<vk::ImageView>,
-    pub command_pools: Vec<VkCommandPool>,
-    pub presentation: VkPresent,
-}
 
-impl Drop for VulkanApp {
-    fn drop(&mut self) {
-        unsafe {
-            self.presentation.frame_buffers.iter().for_each(|b| {
-                self.logical_device
-                    .device
-                    .destroy_semaphore(b.swap_semaphore, None);
-                self.logical_device
-                    .device
-                    .destroy_semaphore(b.render_semaphore, None);
-                self.logical_device
-                    .device
-                    .destroy_fence(b.render_fence, None);
-            });
-            self.command_pools.iter().for_each(|pool| {
-                self.logical_device
-                    .device
-                    .destroy_command_pool(pool.pool, None)
-            });
-
-            self.present_images
-                .iter()
-                .for_each(|view| self.logical_device.device.destroy_image_view(*view, None));
-
-            self.swapchain
-                .swapchain_loader
-                .destroy_swapchain(self.swapchain.swapchain, None);
-
-            self.logical_device.device.destroy_device(None);
-
-            self.surface
-                .surface_instance
-                .destroy_surface(self.surface.surface, None);
-
-            if let Some(debug) = &self.debug {
-                debug
-                    .debug_utils
-                    .destroy_debug_utils_messenger(debug.debug_callback, None); // None == custom allocator
-            }
-            self.instance.destroy_instance(None); // None == allocator callback
-        }
-    }
-}
-
-impl VulkanApp {
-    fn destroy(&mut self) {
-        unsafe {
-            self.instance.destroy_instance(None); // None == allocator callback
-        }
-    }
-}
 
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
@@ -149,39 +85,72 @@ pub struct VkCommandPool {
     pub buffers: Vec<vk::CommandBuffer>,
 }
 
-#[derive(Debug)]
-pub struct VkFrameBuffer {
+#[derive(Debug, Copy, Clone)]
+pub struct VkFrameSync {
     pub swap_semaphore: vk::Semaphore,
     pub render_semaphore: vk::Semaphore,
     pub render_fence: vk::Fence,
 }
 
 pub struct VkPresent {
-    frame_buffers: Vec<VkFrameBuffer>,
-    pub curr_frame_count: u32,
+    pub(crate) frame_sync: Vec<VkFrameSync>,
+    pub(crate) command_pool: VkCommandPool,
+    curr_frame_count: u32,
     max_frames_active: u32,
 }
 
 impl VkPresent {
-    pub fn new(frame_buffers: Vec<VkFrameBuffer>, image_indices: &Vec<vk::ImageView>) -> Self {
-        if frame_buffers.len() != image_indices.len() {
+    pub fn new(
+        frame_sync: Vec<VkFrameSync>,
+        image_indices: &Vec<vk::ImageView>,
+        command_pool: VkCommandPool,
+    ) -> Self {
+        if frame_sync.len() != image_indices.len() {
             panic!(
-                "Buffer and indices count mismatch, buffers: {}, image_indices: {}",
-                frame_buffers.len(),
+                "Sync and  image  count mismatch, frame_sync: {}, image_indices: {}",
+                frame_sync.len(),
                 image_indices.len()
             )
         }
 
+        if frame_sync.len() != command_pool.buffers.len() {
+            panic!(
+                "Sync and buffer count mismatch, frame_sync: {}, command_buffers: {}",
+                frame_sync.len(),
+                command_pool.buffers.len()
+            )
+        }
+
         Self {
-            frame_buffers,
+            frame_sync,
+            command_pool,
             curr_frame_count: 0,
             max_frames_active: image_indices.len() as u32,
         }
     }
 
-    pub fn get_next_frame(&self) -> &VkFrameBuffer {
+    pub fn get_command_pool(&self) -> &VkCommandPool {
+        &self.command_pool
+    }
+
+    pub fn get_next_frame(
+        &self,
+    ) -> (
+        VkFrameSync,
+        vk::CommandPool,
+        vk::CommandBuffer,
+        vk::Queue,
+    ) {
         let index = self.curr_frame_count % self.max_frames_active;
-        &self.frame_buffers[index as usize]
+        let frame_sync = self.frame_sync[index as usize];
+        let command_buffer = self.command_pool.buffers[index as usize];
+        let command_queue = self.command_pool.queue;
+        (
+            frame_sync,
+            self.command_pool.pool,
+            command_buffer,
+            command_queue,
+        )
     }
 
     pub fn get_curr_frame_count(&self) -> u32 {
@@ -434,7 +403,7 @@ pub fn get_glfw_surface(
             window.window_handle().unwrap().as_raw(),
             None,
         )
-            .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
+        .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
     };
 
     let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
@@ -444,7 +413,6 @@ pub fn get_glfw_surface(
         surface,
         surface_instance,
     })
-
 }
 
 pub fn get_physical_devices(
@@ -565,7 +533,7 @@ pub fn simple_device_suitability(
     return true;
 }
 
-pub fn create_logical_device<'a>(
+pub fn create_logical_device(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
     queue_indices: &[QueueIndex],
@@ -1155,7 +1123,7 @@ pub fn create_command_buffers(
     Ok(buffers)
 }
 
-pub fn create_frame_buffer(device: &LogicalDevice) -> Result<VkFrameBuffer, String> {
+pub fn create_frame_buffer(device: &LogicalDevice) -> Result<VkFrameSync, String> {
     let semaphore_create_info = vk::SemaphoreCreateInfo::default();
 
     let (swap_semaphore, render_semaphore, render_fence) = unsafe {
@@ -1179,7 +1147,7 @@ pub fn create_frame_buffer(device: &LogicalDevice) -> Result<VkFrameBuffer, Stri
         (s, r, f)
     };
 
-    Ok(VkFrameBuffer {
+    Ok(VkFrameSync {
         swap_semaphore,
         render_semaphore,
         render_fence,
