@@ -5,11 +5,14 @@ use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::{ffi, iter, ptr};
+use vk_mem::Alloc;
 
+use crate::vk_util;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-
-
+pub trait VkDestroyable {
+    fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {}
+}
 
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
@@ -93,23 +96,57 @@ pub struct VkFrameSync {
 }
 
 pub struct VkPresent {
-    pub(crate) frame_sync: Vec<VkFrameSync>,
-    pub(crate) command_pool: VkCommandPool,
+    pub frame_sync: Vec<VkFrameSync>,
+    pub image_alloc: Vec<VkImageAlloc>,
+    pub present_images: Vec<(vk::Image, vk::ImageView)>,
+    pub command_pool: VkCommandPool,
     curr_frame_count: u32,
     max_frames_active: u32,
 }
 
+pub struct VkImageAlloc {
+    image: vk::Image,
+    image_view: vk::ImageView,
+    allocation: vk_mem::Allocation,
+    image_extent: vk::Extent3D,
+    image_format: vk::Format,
+}
+
+impl VkDestroyable for VkImageAlloc {
+    fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        unsafe {
+            device.destroy_image_view(self.image_view, None);
+            allocator.destroy_image(self.image, &mut self.allocation);
+        }
+    }
+}
+
+
+pub struct VkFrame {
+    pub sync: VkFrameSync,
+    pub render_image: vk::Image,
+    pub render_image_view: vk::ImageView,
+    pub present_image: vk::Image,
+    pub present_image_view: vk::ImageView,
+    pub cmd_pool: vk::CommandPool,
+    pub cmd_buffer: vk::CommandBuffer,
+    pub cmd_queue: vk::Queue,
+}
+
+
 impl VkPresent {
     pub fn new(
         frame_sync: Vec<VkFrameSync>,
-        image_indices: &Vec<vk::ImageView>,
+        image_alloc: Vec<VkImageAlloc>,
+        present_images: Vec<(vk::Image, vk::ImageView)>,
         command_pool: VkCommandPool,
     ) -> Self {
-        if frame_sync.len() != image_indices.len() {
+        if frame_sync.len() != image_alloc.len() || image_alloc.len() != present_images.len() {
             panic!(
-                "Sync and  image  count mismatch, frame_sync: {}, image_indices: {}",
+                "Sync and  image  count mismatch, frame_sync: {}, image_alloc: {}, present_images: {}",
                 frame_sync.len(),
-                image_indices.len()
+                image_alloc.len(),
+                present_images.len()
             )
         }
 
@@ -121,11 +158,14 @@ impl VkPresent {
             )
         }
 
+        let len = image_alloc.len();
         Self {
             frame_sync,
             command_pool,
+            image_alloc,
+            present_images,
             curr_frame_count: 0,
-            max_frames_active: image_indices.len() as u32,
+            max_frames_active: len as u32,
         }
     }
 
@@ -133,24 +173,24 @@ impl VkPresent {
         &self.command_pool
     }
 
-    pub fn get_next_frame(
-        &self,
-    ) -> (
-        VkFrameSync,
-        vk::CommandPool,
-        vk::CommandBuffer,
-        vk::Queue,
-    ) {
+    pub fn get_next_frame(&self) -> VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame_sync = self.frame_sync[index as usize];
-        let command_buffer = self.command_pool.buffers[index as usize];
-        let command_queue = self.command_pool.queue;
-        (
-            frame_sync,
-            self.command_pool.pool,
-            command_buffer,
-            command_queue,
-        )
+        let image_data = &self.image_alloc[index as usize];
+        let cmd_buffer = self.command_pool.buffers[index as usize];
+        let cmd_queue = self.command_pool.queue;
+        let (present_image, present_image_view) = self.present_images[index as usize];
+
+        VkFrame {
+            sync: frame_sync,
+            render_image: image_data.image,
+            render_image_view: image_data.image_view,
+            present_image,
+            present_image_view,
+            cmd_pool: self.command_pool.pool,
+            cmd_buffer,
+            cmd_queue,
+        }
     }
 
     pub fn get_curr_frame_count(&self) -> u32 {
@@ -937,10 +977,82 @@ pub fn create_swapchain(
     })
 }
 
-pub fn create_basic_image_views(
+pub fn allocate_basic_images(
+    allocator: &vk_mem::Allocator,
+    device: &LogicalDevice,
+    size: (u32, u32),
+    count: u32,
+) -> Result<Vec<VkImageAlloc>, String> {
+    let image_extent = vk::Extent3D {
+        width: size.0,
+        height: size.1,
+        depth: 1, // Depth should be 1 for 2D images
+    };
+
+    let mut usage_flags = vk::ImageUsageFlags::empty();
+    usage_flags |= vk::ImageUsageFlags::TRANSFER_SRC;
+    usage_flags |= vk::ImageUsageFlags::TRANSFER_DST;
+    usage_flags |= vk::ImageUsageFlags::STORAGE;
+    usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+
+    let sample_flags = vk::SampleCountFlags::TYPE_1;
+    let image_format = vk::Format::R16G16B16A16_SFLOAT;
+    let image_type = vk::ImageType::TYPE_2D;
+
+    // Use your utility function to create image create info
+    let image_create_info = vk_util::image_create_info(
+        image_format,
+        usage_flags,
+        image_extent,
+        image_type,
+        sample_flags,
+    );
+
+    let allocator_create_info = vk_mem::AllocationCreateInfo {
+        usage: vk_mem::MemoryUsage::AutoPreferDevice,
+        required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ..Default::default()
+    };
+
+    // Create images and allocations
+    let images: Vec<(vk::Image, vk_mem::Allocation)> = unsafe {
+        (0..count)
+            .map(|_| {
+                allocator
+                    .create_image(&image_create_info, &allocator_create_info)
+                    .map_err(|e| format!("Error creating image: {:?}", e))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    // Create image views
+    let image_views: Vec<VkImageAlloc> = images
+        .into_iter()
+        .map(|(image, allocation)| {
+            // Use your utility function to create image view create info
+            let view_create_info =
+                vk_util::image_view_create_info(image_format, image, vk::ImageAspectFlags::COLOR);
+
+            let image_view = unsafe { device.device.create_image_view(&view_create_info, None) }
+                .map_err(|e| format!("Error creating image view: {:?}", e))?;
+
+            Ok(VkImageAlloc {
+                image,
+                image_view,
+                allocation,
+                image_extent,
+                image_format,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(image_views)
+}
+
+pub fn create_basic_present_views(
     logical_device: &LogicalDevice,
     swapchain: &VkSwapchain,
-) -> Result<Vec<vk::ImageView>, String> {
+) -> Result<Vec<(vk::Image, vk::ImageView)>, String> {
     log::info!("Creating image views");
     let present_images = unsafe {
         swapchain
@@ -949,7 +1061,7 @@ pub fn create_basic_image_views(
             .map_err(|err| format!("Error getting swapchain images: {:?}", err))?
     };
 
-    let image_views: Vec<vk::ImageView> = present_images
+    let image_views: Vec<(vk::Image, vk::ImageView)> = present_images
         .iter()
         .map(|&image| unsafe {
             let create_view_info = vk::ImageViewCreateInfo::default()
@@ -973,6 +1085,7 @@ pub fn create_basic_image_views(
             logical_device
                 .device
                 .create_image_view(&create_view_info, None)
+                .map(|image_view| (image, image_view))
                 .map_err(|err| format!("Error creating image views: {:?}", err))
         })
         .collect::<Result<Vec<_>, _>>()?;

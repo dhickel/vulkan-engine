@@ -1,12 +1,16 @@
-use std::time::SystemTime;
-use ash::vk;
-use ash::vk::ExtendsPhysicalDeviceFeatures2;
-use crate::vk_init::{LogicalDevice, PhyDevice, VkDebug, VkFrameSync, VkPresent, VkSurface, VkSwapchain};
+use crate::vk_init::{
+    LogicalDevice, PhyDevice, VkDebug, VkDestroyable, VkFrameSync, VkPresent, VkSurface,
+    VkSwapchain,
+};
 use crate::{vk_init, vk_util};
-
+use ash::vk;
+use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2};
+use std::time::SystemTime;
+use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
 pub struct VkRender {
     pub window: glfw::PWindow,
+    pub allocator: Allocator,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
@@ -14,14 +18,24 @@ pub struct VkRender {
     pub logical_device: LogicalDevice,
     pub surface: VkSurface,
     pub swapchain: VkSwapchain,
-    pub present_images: Vec<vk::ImageView>,
+    //   pub present_images: Vec<vk::ImageView>,
     // pub command_pools: Vec<VkCommandPool>,
     pub presentation: VkPresent,
+    pub main_deletion_queue: Vec<Box<dyn VkDestroyable>>,
 }
 
 impl Drop for VkRender {
     fn drop(&mut self) {
         unsafe {
+            self.main_deletion_queue
+                .iter_mut()
+                .for_each(| item| item.destroy(&self.logical_device.device, &self.allocator));
+
+            self.logical_device
+                .device
+                .device_wait_idle()
+                .expect("Render drop failed waiting for device idle");
+
             self.presentation.frame_sync.iter().for_each(|b| {
                 self.logical_device
                     .device
@@ -38,10 +52,6 @@ impl Drop for VkRender {
             self.logical_device
                 .device
                 .destroy_command_pool(self.presentation.command_pool.pool, None);
-
-            self.present_images
-                .iter()
-                .for_each(|view| self.logical_device.device.destroy_image_view(*view, None));
 
             self.swapchain
                 .swapchain_loader
@@ -64,17 +74,23 @@ impl Drop for VkRender {
 }
 impl VkRender {
     fn destroy(&mut self) {
-        unsafe {
-            self.instance.destroy_instance(None); // None == allocator callback
-        }
+        unsafe { std::mem::drop(self) }
     }
 
-    pub fn new(window: glfw::PWindow, size: (u32, u32)) -> Result<Self, String> {
+    pub fn new(
+        window: glfw::PWindow,
+        size: (u32, u32),
+        with_validation: bool,
+    ) -> Result<Self, String> {
         let entry = vk_init::init_entry();
 
         let mut instance_ext = vk_init::get_glfw_extensions(&window);
-        let (instance, debug) =
-            vk_init::init_instance(&entry, "test".to_string(), &mut instance_ext, false)?;
+        let (instance, debug) = vk_init::init_instance(
+            &entry,
+            "test".to_string(),
+            &mut instance_ext,
+            with_validation,
+        )?;
 
         let surface = vk_init::get_glfw_surface(&entry, &instance, &window)?;
 
@@ -83,7 +99,7 @@ impl VkRender {
             Some(&surface),
             &vk_init::simple_device_suitability,
         )?
-            .remove(0);
+        .remove(0);
 
         let queue_indices =
             vk_init::graphics_only_queue_indices(&instance, &physical_device.p_device, &surface)?;
@@ -110,7 +126,8 @@ impl VkRender {
             Some(&surface_ext),
         )?;
 
-        let swapchain_support = vk_init::get_swapchain_support(&physical_device.p_device, &surface)?;
+        let swapchain_support =
+            vk_init::get_swapchain_support(&physical_device.p_device, &surface)?;
 
         let swapchain = vk_init::create_swapchain(
             &instance,
@@ -125,7 +142,7 @@ impl VkRender {
             true,
         )?;
 
-        let present_images = vk_init::create_basic_image_views(&logical_device, &swapchain)?;
+        let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
 
         let mut command_pools = vk_init::create_command_pools(&logical_device, 2)?;
 
@@ -138,10 +155,28 @@ impl VkRender {
         //  it needs to be ironed out how to manage separate pools in relation, maybe just
         //  store them all in the frame buffer?
 
-        let presentation = VkPresent::new(frame_buffers, &present_images, command_pools.remove(0));
+        let allocator_info =
+            AllocatorCreateInfo::new(&instance, &logical_device.device, physical_device.p_device);
+
+        let allocator = unsafe {
+            Allocator::new(allocator_info).map_err(|err| "Failed to initialize allocator")?
+        };
+
+        let image_data = vk_init::allocate_basic_images(&allocator, &logical_device, size, 2)?;
+        let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
+
+        let presentation = VkPresent::new(
+            frame_buffers,
+            image_data,
+            present_images,
+            command_pools.remove(0),
+        );
+
+
 
         Ok(VkRender {
             window,
+            allocator,
             entry,
             instance,
             debug,
@@ -149,19 +184,19 @@ impl VkRender {
             logical_device,
             surface,
             swapchain,
-            present_images,
             presentation,
+            main_deletion_queue: Vec::new(),
         })
     }
-
 }
-
 
 impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
         let start = SystemTime::now();
         let device = &self.logical_device.device;
-        let (frame_sync, cmd_pool, cmd_buffer, cmd_queue) = self.presentation.get_next_frame();
+        let frame_data = self.presentation.get_next_frame();
+        let frame_sync = frame_data.sync;
+        let cmd_buffer = frame_data.cmd_buffer;
         let fence = &[frame_sync.render_fence];
 
         let swapchain = [self.swapchain.swapchain];
@@ -195,7 +230,7 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
-            let image = self.swapchain.swapchain_images[image_index as usize];
+            let image = frame_data.render_image;
             vk_util::transition_image(
                 device,
                 cmd_buffer,
@@ -244,7 +279,7 @@ impl VkRender {
             )];
             let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
             device
-                .queue_submit2(cmd_queue, &submit, frame_sync.render_fence)
+                .queue_submit2(frame_data.cmd_queue, &submit, frame_sync.render_fence)
                 .unwrap();
 
             let r_sem = [frame_sync.render_semaphore];
@@ -256,7 +291,7 @@ impl VkRender {
 
             self.swapchain
                 .swapchain_loader
-                .queue_present(cmd_queue, &present_info)
+                .queue_present(frame_data.cmd_queue, &present_info)
                 .unwrap();
         }
         println!(
@@ -265,4 +300,3 @@ impl VkRender {
         )
     }
 }
-

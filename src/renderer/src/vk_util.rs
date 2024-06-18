@@ -1,10 +1,11 @@
+use crate::vk_init::LogicalDevice;
 use ash::vk;
 use ash::vk::{ImageType, PipelineLayoutCreateInfo};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
     flags: vk::CommandPoolCreateFlags,
-) -> vk::CommandPoolCreateInfo <'a>{
+) -> vk::CommandPoolCreateInfo<'a> {
     vk::CommandPoolCreateInfo::default()
         .queue_family_index(queue_family_index)
         .flags(flags)
@@ -29,7 +30,9 @@ pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::Semapho
     vk::SemaphoreCreateInfo::default().flags(flags)
 }
 
-pub fn command_buffer_begin_info<'a>(flags: vk::CommandBufferUsageFlags) -> vk::CommandBufferBeginInfo<'a> {
+pub fn command_buffer_begin_info<'a>(
+    flags: vk::CommandBufferUsageFlags,
+) -> vk::CommandBufferBeginInfo<'a> {
     vk::CommandBufferBeginInfo::default().flags(flags)
 }
 
@@ -124,7 +127,7 @@ pub fn rendering_attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
     clear: Option<vk::ClearValue>,
-) -> vk::RenderingAttachmentInfo <'a>{
+) -> vk::RenderingAttachmentInfo<'a> {
     let info = vk::RenderingAttachmentInfo::default()
         .image_view(view)
         .image_layout(layout)
@@ -142,8 +145,8 @@ pub fn rendering_attachment_info<'a>(
 }
 
 pub fn pipeline_shader_stage_create_info<'a>(
-    stage : vk::ShaderStageFlags,
-    module: vk::ShaderModule
+    stage: vk::ShaderStageFlags,
+    module: vk::ShaderModule,
 ) -> vk::PipelineShaderStageCreateInfo<'a> {
     vk::PipelineShaderStageCreateInfo::default()
         .stage(stage)
@@ -157,29 +160,67 @@ pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
 pub fn find_memory_type(
     physical_device: vk::PhysicalDevice,
     type_filter: u32,
-    prop_flags: vk::MemoryPropertyFlags
+    prop_flags: vk::MemoryPropertyFlags,
 ) -> u32 {
-   todo!()
+    todo!()
 }
 
 pub fn create_buffer() {
     todo!()
 }
 
-
-pub fn copy_image_to_image(
-    cmd : vk::CommandBuffer,
-    source : vk::Image,
+pub fn blit_copy_image_to_image(
+    device: &LogicalDevice,
+    cmd: vk::CommandBuffer,
+    source: vk::Image,
     src_size: vk::Extent2D,
     dest: vk::Image,
-    dest_size: vk::Extent2D
+    dest_size: vk::Extent2D,
 ) {
-todo!()
+    let src_offsets = [
+        vk::Offset3D::default(),
+        vk::Offset3D::default()
+            .x(src_size.width as i32)
+            .y(src_size.height as i32)
+            .z(0),
+    ];
+
+    let dst_offsets = [
+        vk::Offset3D::default(),
+        vk::Offset3D::default()
+            .x(dest_size.width as i32)
+            .y(dest_size.height as i32)
+            .z(0),
+    ];
+
+    let src_sub_resource = vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_array_layer(0)
+        .layer_count(0)
+        .mip_level(0);
+
+    let dst_sub_resource = vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_array_layer(0)
+        .layer_count(0)
+        .mip_level(0);
+
+    let blit_region = vk::ImageBlit2::default()
+        .src_offsets(src_offsets)
+        .dst_offsets(dst_offsets)
+        .src_subresource(src_sub_resource)
+        .dst_subresource(dst_sub_resource);
+
+    let blit_info = vk::BlitImageInfo2::default()
+        .src_image(source)
+        .src_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+        .dst_image(dest)
+        .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .filter(vk::Filter::LINEAR)
+        .regions(&[blit_region]);
+
+    unsafe { device.device.cmd_blit_image2(cmd, &blit_info) }
 }
-
-
-
-
 
 pub fn transition_image(
     device: &ash::Device,

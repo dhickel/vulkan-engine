@@ -22,7 +22,7 @@ use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{RawWindowHandle};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
 use crate::vk_render::VkRender;
@@ -51,7 +51,7 @@ pub fn run2() {
     window.set_raw_mouse_motion(true);
     window.make_current();
 
-    let mut app = VkRender::new(window, (1920, 1080)).unwrap();
+    let mut app = VkRender::new(window, (1920, 1080), true).unwrap();
 
     // window.set_key_callback(|_, key, _, action, _| println!("Input: {:?}", action));
 
@@ -80,6 +80,7 @@ pub fn run2() {
         let elapsed = now.duration_since(last_time).unwrap().as_nanos() as f64;
         delta_update += elapsed / time_u;
         delta_fps += elapsed / time_r;
+
 
         while delta_update >= 1.0 {
             delta_update -= 1.0;
