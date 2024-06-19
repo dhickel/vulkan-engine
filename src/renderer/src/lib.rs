@@ -7,7 +7,8 @@ mod texture;
 mod vk_init;
 mod vk_util;
 mod vk_render;
-
+mod vk_pipeline;
+mod vk_descriptor;
 
 
 use crate::vk_init::{QueueType, VkFrameSync, VkPresent};
