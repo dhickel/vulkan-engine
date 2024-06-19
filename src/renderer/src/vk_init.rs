@@ -121,7 +121,6 @@ impl VkDestroyable for VkImageAlloc {
     }
 }
 
-
 pub struct VkFrame {
     pub sync: VkFrameSync,
     pub render_image: vk::Image,
@@ -132,7 +131,6 @@ pub struct VkFrame {
     pub cmd_buffer: vk::CommandBuffer,
     pub cmd_queue: vk::Queue,
 }
-
 
 impl VkPresent {
     pub fn new(
@@ -181,7 +179,7 @@ impl VkPresent {
         let cmd_queue = self.command_pool.queue;
         let (present_image, present_image_view) = self.present_images[index as usize];
 
-        self.curr_frame_count +=1;
+        self.curr_frame_count += 1;
 
         VkFrame {
             sync: frame_sync,
@@ -922,7 +920,7 @@ pub fn create_swapchain(
         .image_color_space(surface_format.color_space)
         .image_format(surface_format.format)
         .image_extent(extent)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST )
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
         .pre_transform(pre_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode)
@@ -1028,8 +1026,12 @@ pub fn allocate_basic_images(
     let image_views: Vec<VkImageAlloc> = images
         .into_iter()
         .map(|(image, allocation)| {
-            let view_create_info =
-                vk_util::image_view_create_info(image_format, image, vk::ImageAspectFlags::COLOR);
+            let view_create_info = vk_util::image_view_create_info(
+                image_format,
+                vk::ImageViewType::TYPE_2D,
+                image,
+                vk::ImageAspectFlags::COLOR,
+            );
 
             let image_view = unsafe { device.device.create_image_view(&view_create_info, None) }
                 .map_err(|e| format!("Error creating image view: {:?}", e))?;
@@ -1095,7 +1097,7 @@ pub fn create_basic_present_views(
 pub fn get_default_sc_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
     select_sc_surface_format(
         available_formats,
-        vk::Format::B8G8R8A8_SRGB,
+        vk::Format::R16G16B16A16_SFLOAT,
         vk::ColorSpaceKHR::SRGB_NONLINEAR,
     )
     .1

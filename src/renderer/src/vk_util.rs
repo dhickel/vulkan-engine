@@ -107,12 +107,14 @@ pub fn image_create_info<'a>(
 
 pub fn image_view_create_info<'a>(
     format: vk::Format,
+    view_type : vk::ImageViewType,
     image: vk::Image,
     aspect_flags: vk::ImageAspectFlags,
 ) -> vk::ImageViewCreateInfo<'a> {
     vk::ImageViewCreateInfo::default()
         .format(format)
         .image(image)
+        .view_type(view_type)
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .base_mip_level(0)

@@ -2,8 +2,13 @@
 name = "renderer"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+shaderc = "0.8.3"
+
 
 [dependencies]
 cfg-if = "1"
@@ -14,6 +19,7 @@ vk-mem = "0.4.0"
 winit = { version = "0.30", features = ["rwh_06"] }
 glfw = { version = "0.56.0", default-features = false, features = ["vulkan", "ash", "raw-window-handle-v0-6"] }
 raw-window-handle = { version = "0.6.2", features = ["std"] }
+shaderc = "0.8.3"
 
 env_logger = "0.10"
 log = "0.4"
