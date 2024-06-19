@@ -105,11 +105,11 @@ pub struct VkPresent {
 }
 
 pub struct VkImageAlloc {
-    image: vk::Image,
-    image_view: vk::ImageView,
-    allocation: vk_mem::Allocation,
-    image_extent: vk::Extent3D,
-    image_format: vk::Format,
+    pub image: vk::Image,
+    pub image_view: vk::ImageView,
+    pub allocation: vk_mem::Allocation,
+    pub image_extent: vk::Extent3D,
+    pub image_format: vk::Format,
 }
 
 impl VkDestroyable for VkImageAlloc {
@@ -173,13 +173,15 @@ impl VkPresent {
         &self.command_pool
     }
 
-    pub fn get_next_frame(&self) -> VkFrame {
+    pub fn get_next_frame(&mut self) -> VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame_sync = self.frame_sync[index as usize];
         let image_data = &self.image_alloc[index as usize];
         let cmd_buffer = self.command_pool.buffers[index as usize];
         let cmd_queue = self.command_pool.queue;
         let (present_image, present_image_view) = self.present_images[index as usize];
+
+        self.curr_frame_count +=1;
 
         VkFrame {
             sync: frame_sync,
@@ -920,7 +922,7 @@ pub fn create_swapchain(
         .image_color_space(surface_format.color_space)
         .image_format(surface_format.format)
         .image_extent(extent)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST )
         .pre_transform(pre_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode)
@@ -999,7 +1001,6 @@ pub fn allocate_basic_images(
     let image_format = vk::Format::R16G16B16A16_SFLOAT;
     let image_type = vk::ImageType::TYPE_2D;
 
-    // Use your utility function to create image create info
     let image_create_info = vk_util::image_create_info(
         image_format,
         usage_flags,
@@ -1014,7 +1015,6 @@ pub fn allocate_basic_images(
         ..Default::default()
     };
 
-    // Create images and allocations
     let images: Vec<(vk::Image, vk_mem::Allocation)> = unsafe {
         (0..count)
             .map(|_| {
@@ -1025,11 +1025,9 @@ pub fn allocate_basic_images(
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    // Create image views
     let image_views: Vec<VkImageAlloc> = images
         .into_iter()
         .map(|(image, allocation)| {
-            // Use your utility function to create image view create info
             let view_create_info =
                 vk_util::image_view_create_info(image_format, image, vk::ImageAspectFlags::COLOR);
 

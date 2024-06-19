@@ -27,14 +27,31 @@ pub struct VkRender {
 impl Drop for VkRender {
     fn drop(&mut self) {
         unsafe {
-            self.main_deletion_queue
-                .iter_mut()
-                .for_each(| item| item.destroy(&self.logical_device.device, &self.allocator));
-
             self.logical_device
                 .device
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
+
+            self.presentation.image_alloc.iter_mut().for_each(|item| {
+                self.logical_device
+                    .device
+                    .destroy_image_view(item.image_view, None);
+
+                self.allocator
+                    .destroy_image(item.image, &mut item.allocation);
+            });
+
+
+            self.presentation
+                .present_images
+                .iter()
+                .for_each(|(image, view)| {
+                    self.logical_device.device.destroy_image_view(*view, None)
+                });
+
+            self.main_deletion_queue
+                .iter_mut()
+                .for_each(|item| item.destroy(&self.logical_device.device, &self.allocator));
 
             self.presentation.frame_sync.iter().for_each(|b| {
                 self.logical_device
@@ -59,6 +76,7 @@ impl Drop for VkRender {
 
             self.logical_device.device.destroy_device(None);
 
+
             self.surface
                 .surface_instance
                 .destroy_surface(self.surface.surface, None);
@@ -69,6 +87,8 @@ impl Drop for VkRender {
                     .destroy_debug_utils_messenger(debug.debug_callback, None); // None == custom allocator
             }
             self.instance.destroy_instance(None); // None == allocator callback
+
+
         }
     }
 }
@@ -142,8 +162,6 @@ impl VkRender {
             true,
         )?;
 
-        let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
-
         let mut command_pools = vk_init::create_command_pools(&logical_device, 2)?;
 
         let frame_buffers: Vec<VkFrameSync> = (0..2)
@@ -155,8 +173,11 @@ impl VkRender {
         //  it needs to be ironed out how to manage separate pools in relation, maybe just
         //  store them all in the frame buffer?
 
-        let allocator_info =
+        let mut allocator_info =
             AllocatorCreateInfo::new(&instance, &logical_device.device, physical_device.p_device);
+
+        allocator_info.vulkan_api_version = vk::API_VERSION_1_3;
+
 
         let allocator = unsafe {
             Allocator::new(allocator_info).map_err(|err| "Failed to initialize allocator")?
@@ -171,8 +192,6 @@ impl VkRender {
             present_images,
             command_pools.remove(0),
         );
-
-
 
         Ok(VkRender {
             window,
@@ -219,6 +238,7 @@ impl VkRender {
                 .acquire_next_image2(&acquire)
                 .unwrap();
 
+
             device
                 .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
@@ -230,39 +250,56 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
-            let image = frame_data.render_image;
+            let r_image = frame_data.render_image;
+            let p_image = frame_data.present_image;
+
+            let extent = self.swapchain.extent;
+
             vk_util::transition_image(
                 device,
                 cmd_buffer,
-                image,
+                r_image,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::GENERAL,
             );
 
-            let flash = f32::abs(f32::sin(frame_number as f32 / 50f32));
-            let clear_values = vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, flash, 1.0],
-                },
-            };
+            // Draw to render image
+            self.draw_background(r_image, cmd_buffer, frame_number);
 
-            let clear_range = [vk_util::image_subresource_range(
-                vk::ImageAspectFlags::COLOR,
-            )];
-
-            device.cmd_clear_color_image(
-                cmd_buffer,
-                image,
-                vk::ImageLayout::GENERAL,
-                &clear_values.color,
-                &clear_range,
-            );
-
+            //transition render image for copy from
             vk_util::transition_image(
                 device,
                 cmd_buffer,
-                image,
+                r_image,
                 vk::ImageLayout::GENERAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            );
+
+            // transition present image to copy to
+            vk_util::transition_image(
+                device,
+                cmd_buffer,
+                p_image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            );
+
+            //copy render image onto present image
+            vk_util::blit_copy_image_to_image(
+                &self.logical_device,
+                cmd_buffer,
+                r_image,
+                extent,
+                p_image,
+                extent,
+            );
+
+            // transition swapchain to present
+            vk_util::transition_image(
+                device,
+                cmd_buffer,
+                p_image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,
             );
 
@@ -298,5 +335,28 @@ impl VkRender {
             "Render Took: {}ms",
             SystemTime::now().duration_since(start).unwrap().as_millis()
         )
+    }
+
+    pub fn draw_background(&self, image: vk::Image, cmd_buffer: vk::CommandBuffer, frame_num: u32) {
+        let flash = f32::abs(f32::sin(frame_num as f32 / 50f32));
+        let clear_values = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, flash, 1.0],
+            },
+        };
+
+        let clear_range = [vk_util::image_subresource_range(
+            vk::ImageAspectFlags::COLOR,
+        )];
+
+        unsafe {
+            self.logical_device.device.cmd_clear_color_image(
+                cmd_buffer,
+                image,
+                vk::ImageLayout::GENERAL,
+                &clear_values.color,
+                &clear_range,
+            );
+        }
     }
 }

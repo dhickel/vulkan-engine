@@ -1,6 +1,6 @@
 use crate::vk_init::LogicalDevice;
 use ash::vk;
-use ash::vk::{ImageType, PipelineLayoutCreateInfo};
+use ash::vk::{AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -182,7 +182,7 @@ pub fn blit_copy_image_to_image(
         vk::Offset3D::default()
             .x(src_size.width as i32)
             .y(src_size.height as i32)
-            .z(0),
+            .z(1),
     ];
 
     let dst_offsets = [
@@ -190,26 +190,26 @@ pub fn blit_copy_image_to_image(
         vk::Offset3D::default()
             .x(dest_size.width as i32)
             .y(dest_size.height as i32)
-            .z(0),
+            .z(1),
     ];
 
     let src_sub_resource = vk::ImageSubresourceLayers::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .base_array_layer(0)
-        .layer_count(0)
+        .layer_count(1)
         .mip_level(0);
 
     let dst_sub_resource = vk::ImageSubresourceLayers::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .base_array_layer(0)
-        .layer_count(0)
+        .layer_count(1)
         .mip_level(0);
 
-    let blit_region = vk::ImageBlit2::default()
+    let blit_region = [vk::ImageBlit2::default()
         .src_offsets(src_offsets)
         .dst_offsets(dst_offsets)
         .src_subresource(src_sub_resource)
-        .dst_subresource(dst_sub_resource);
+        .dst_subresource(dst_sub_resource)];
 
     let blit_info = vk::BlitImageInfo2::default()
         .src_image(source)
@@ -217,7 +217,7 @@ pub fn blit_copy_image_to_image(
         .dst_image(dest)
         .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
         .filter(vk::Filter::LINEAR)
-        .regions(&[blit_region]);
+        .regions(&blit_region);
 
     unsafe { device.device.cmd_blit_image2(cmd, &blit_info) }
 }
@@ -226,77 +226,26 @@ pub fn transition_image(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
     image: vk::Image,
-    curr_layout: vk::ImageLayout,
+    old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
 ) {
-    let color_subresource_range = vk::ImageSubresourceRange {
-        aspect_mask: vk::ImageAspectFlags::COLOR,
-        base_mip_level: 0,
-        level_count: 1,
-        base_array_layer: 0,
-        layer_count: 1,
+    let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
     };
 
-    let image_memory_barrier = vk::ImageMemoryBarrier::default()
-        .image(image)
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-        .old_layout(curr_layout)
+    let image_barrier = [vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+        .old_layout(old_layout)
         .new_layout(new_layout)
-        .subresource_range(color_subresource_range);
+        .subresource_range(image_subresource_range(aspect_mask))
+        .image(image)];
 
-    unsafe {
-        device.cmd_pipeline_barrier(
-            cmd_buffer,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[image_memory_barrier],
-        )
-    }
-    // let color_subresource_range = vk::ImageSubresourceRange {
-    //     aspect_mask: vk::ImageAspectFlags::COLOR,
-    //     base_mip_level: 0,
-    //     level_count: 1,
-    //     base_array_layer: 0,
-    //     layer_count: 1,
-    // };
-    //
-    // let (src_stage, dst_stage, src_access, dst_access) = match (curr_layout, new_layout) {
-    //     (vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL) => (
-    //         vk::PipelineStageFlags::TOP_OF_PIPE,
-    //         vk::PipelineStageFlags::TRANSFER,
-    //         vk::AccessFlags::empty(),
-    //         vk::AccessFlags::TRANSFER_WRITE,
-    //     ),
-    //     (vk::ImageLayout::GENERAL, vk::ImageLayout::PRESENT_SRC_KHR) => (
-    //         vk::PipelineStageFlags::TRANSFER,
-    //         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-    //         vk::AccessFlags::TRANSFER_WRITE,
-    //         vk::AccessFlags::empty(),
-    //     ),
-    //     _ => (vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::BOTTOM_OF_PIPE, vk::AccessFlags::empty(), vk::AccessFlags::empty()),
-    // };
-    //
-    // let image_memory_barrier = vk::ImageMemoryBarrier::default()
-    //     .image(image)
-    //     .src_access_mask(src_access)
-    //     .dst_access_mask(dst_access)
-    //     .old_layout(curr_layout)
-    //     .new_layout(new_layout)
-    //     .subresource_range(color_subresource_range);
-    //
-    // unsafe {
-    //     device.cmd_pipeline_barrier(
-    //         cmd_buffer,
-    //         src_stage,
-    //         dst_stage,
-    //         vk::DependencyFlags::empty(),
-    //         &[],
-    //         &[],
-    //         &[image_memory_barrier],
-    //     )
-    // }
+    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barrier);
+
+    unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }

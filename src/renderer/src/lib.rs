@@ -56,7 +56,7 @@ pub fn run2() {
     // window.set_key_callback(|_, key, _, action, _| println!("Input: {:?}", action));
 
     let logic_ups = 10000.0;
-    let frame_ups = 1000.0;
+    let frame_ups = 10000.0;
 
     let time_u = NANO / logic_ups;
     let time_r = if frame_ups > 0.0 {
