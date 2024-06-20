@@ -8,14 +8,23 @@ pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,
 }
 
+impl<'a> Default for DescriptorLayoutBuilder<'a> {
+    fn default() -> Self {
+        Self {
+            bindings: Vec::with_capacity(10),
+        }
+    }
+}
+
 impl<'a> DescriptorLayoutBuilder<'a> {
-    pub fn add_binding(&mut self, binding: u32, typ: vk::DescriptorType) {
+    pub fn add_binding(&mut self, binding: u32, typ: vk::DescriptorType) -> &mut DescriptorLayoutBuilder<'a> {
         let binding = vk::DescriptorSetLayoutBinding::default()
             .binding(binding)
             .descriptor_type(typ)
             .descriptor_count(1);
 
-        self.bindings.push(binding)
+        self.bindings.push(binding);
+        self
     }
 
     pub fn build(
@@ -122,6 +131,16 @@ pub struct DescriptorWriter<'a> {
     image_infos: Vec<vk::DescriptorImageInfo>,
     buffer_infos: Vec<vk::DescriptorBufferInfo>,
     writes: Vec<vk::WriteDescriptorSet<'a>>,
+}
+
+impl <'a>Default for DescriptorWriter<'a> {
+    fn default() -> Self {
+        Self {
+            image_infos: Vec::with_capacity(10),
+            buffer_infos: Vec::with_capacity(10),
+            writes: Vec::with_capacity(10),
+        }
+    }
 }
 
 impl<'a> DescriptorWriter<'a> {

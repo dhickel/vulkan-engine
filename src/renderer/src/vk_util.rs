@@ -1,3 +1,4 @@
+use std::io::{Read, Seek, SeekFrom};
 use crate::vk_init::LogicalDevice;
 use ash::vk;
 use ash::vk::{AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2};
@@ -250,4 +251,38 @@ pub fn transition_image(
     let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barrier);
 
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
+}
+
+pub fn load_shader_module(
+    device: &LogicalDevice,
+    file_path: &str
+) -> Result<vk::ShaderModule, String> {
+    // Open the file with the cursor at the end to determine the file size
+    let mut file = std::fs::File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
+    let file_size = file.seek(SeekFrom::End(0)).map_err(|e| format!("Failed to seek file: {}", e))?;
+
+    // spirv expects the buffer to be on uint32, so make sure to reserve a Vec
+    // big enough for the entire file
+    let mut buffer = vec![0u32; (file_size / 4) as usize];
+
+    // Put file cursor at the beginning
+    file.seek(SeekFrom::Start(0)).map_err(|e| format!("Failed to seek file: {}", e))?;
+
+    // Load the entire file into the buffer
+    file.read_exact(bytemuck::cast_slice_mut(&mut buffer))
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    // Create a new shader module, using the buffer we loaded
+    let create_info = vk::ShaderModuleCreateInfo::default()
+        .code(&buffer);
+
+    // Check that the creation goes well
+    let shader_module = unsafe {
+        device
+            .device
+            .create_shader_module(&create_info, None)
+            .map_err(|e| format!("Failed to create shader module: {:?}", e))?
+    };
+
+    Ok(shader_module)
 }

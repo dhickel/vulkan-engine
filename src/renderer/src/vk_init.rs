@@ -7,6 +7,8 @@ use std::os::raw::c_char;
 use std::{ffi, iter, ptr};
 use vk_mem::Alloc;
 
+use crate::vk_descriptor::DescriptorAllocator;
+use crate::vk_render::VkDescriptors;
 use crate::vk_util;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -95,15 +97,6 @@ pub struct VkFrameSync {
     pub render_fence: vk::Fence,
 }
 
-pub struct VkPresent {
-    pub frame_sync: Vec<VkFrameSync>,
-    pub image_alloc: Vec<VkImageAlloc>,
-    pub present_images: Vec<(vk::Image, vk::ImageView)>,
-    pub command_pool: VkCommandPool,
-    curr_frame_count: u32,
-    max_frames_active: u32,
-}
-
 pub struct VkImageAlloc {
     pub image: vk::Image,
     pub image_view: vk::ImageView,
@@ -130,6 +123,18 @@ pub struct VkFrame {
     pub cmd_pool: vk::CommandPool,
     pub cmd_buffer: vk::CommandBuffer,
     pub cmd_queue: vk::Queue,
+    pub desc_layout: [vk::DescriptorSetLayout; 1],
+    pub desc_set: [vk::DescriptorSet; 1],
+}
+
+pub struct VkPresent {
+    pub frame_sync: Vec<VkFrameSync>,
+    pub image_alloc: Vec<VkImageAlloc>,
+    pub descriptors: VkDescriptors,
+    pub present_images: Vec<(vk::Image, vk::ImageView)>,
+    pub command_pool: VkCommandPool,
+    curr_frame_count: u32,
+    max_frames_active: u32,
 }
 
 impl VkPresent {
@@ -138,6 +143,7 @@ impl VkPresent {
         image_alloc: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
         command_pool: VkCommandPool,
+        descriptors: VkDescriptors,
     ) -> Self {
         if frame_sync.len() != image_alloc.len() || image_alloc.len() != present_images.len() {
             panic!(
@@ -162,6 +168,7 @@ impl VkPresent {
             command_pool,
             image_alloc,
             present_images,
+            descriptors,
             curr_frame_count: 0,
             max_frames_active: len as u32,
         }
@@ -178,6 +185,8 @@ impl VkPresent {
         let cmd_buffer = self.command_pool.buffers[index as usize];
         let cmd_queue = self.command_pool.queue;
         let (present_image, present_image_view) = self.present_images[index as usize];
+        let desc_layout = [self.descriptors.descriptor_layouts[index as usize]];
+        let desc_set = [self.descriptors.descriptor_sets[index as usize]];
 
         self.curr_frame_count += 1;
 
@@ -190,6 +199,8 @@ impl VkPresent {
             cmd_pool: self.command_pool.pool,
             cmd_buffer,
             cmd_queue,
+            desc_layout,
+            desc_set,
         }
     }
 
