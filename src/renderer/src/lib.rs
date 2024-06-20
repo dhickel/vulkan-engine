@@ -90,7 +90,7 @@ impl ApplicationHandler for Control {
         );
 
         let window = event_loop.create_window(window_att).unwrap();
-        self.app = Some(vk_render::VkRender::new(window, self.window_size, true).unwrap());
+        self.app = Some(vk_render::VkRender::new(window, self.window_size, false).unwrap());
         self.app.as_mut().unwrap().window.request_redraw();
     }
 

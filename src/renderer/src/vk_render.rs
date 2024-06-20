@@ -482,10 +482,10 @@ impl VkRender {
                 .queue_present(frame_data.cmd_queue, &present_info)
                 .unwrap();
         }
-        println!(
-            "Render Took: {}ms",
-            SystemTime::now().duration_since(start).unwrap().as_millis()
-        )
+        // println!(
+        //     "Render Took: {}ms",
+        //     SystemTime::now().duration_since(start).unwrap().as_millis()
+        // )
     }
 
     pub fn draw_background(
