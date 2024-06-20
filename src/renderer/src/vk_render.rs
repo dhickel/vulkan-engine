@@ -46,7 +46,7 @@ impl VkPipeline {
 }
 
 pub struct VkRender {
-    pub window: glfw::PWindow,
+    pub window: winit::window::Window,
     pub allocator: Allocator,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
@@ -155,6 +155,13 @@ impl Drop for VkRender {
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
 
+            self.logical_device
+                .device
+                .destroy_pipeline_layout(self.pipeline.pipeline_layout, None);
+            self.logical_device
+                .device
+                .destroy_pipeline(self.pipeline.pipeline, None);
+
             for x in 0..self.presentation.descriptors.descriptor_layouts.len() {
                 self.logical_device.device.destroy_descriptor_set_layout(
                     self.presentation.descriptors.descriptor_layouts[x],
@@ -229,13 +236,13 @@ impl VkRender {
     }
 
     pub fn new(
-        window: glfw::PWindow,
+        window: winit::window::Window,
         size: (u32, u32),
         with_validation: bool,
     ) -> Result<Self, String> {
         let entry = vk_init::init_entry();
 
-        let mut instance_ext = vk_init::get_glfw_extensions(&window);
+        let mut instance_ext = vk_init::get_winit_extensions(&window);
         let (instance, debug) = vk_init::init_instance(
             &entry,
             "test".to_string(),
@@ -243,7 +250,7 @@ impl VkRender {
             with_validation,
         )?;
 
-        let surface = vk_init::get_glfw_surface(&entry, &instance, &window)?;
+        let surface = vk_init::get_window_surface(&entry, &instance, &window)?;
 
         let physical_device = vk_init::get_physical_devices(
             &instance,
@@ -288,7 +295,7 @@ impl VkRender {
             size,
             Some(2),
             None,
-            Some(vk::PresentModeKHR::MAILBOX),
+            Some(vk::PresentModeKHR::IMMEDIATE),
             None,
             true,
         )?;
@@ -402,7 +409,13 @@ impl VkRender {
             );
 
             // Draw to render image
-            self.draw_background(r_image, cmd_buffer, &frame_data.desc_set, self.pipeline.pipeline_layout, self.pipeline.pipeline);
+            self.draw_background(
+                r_image,
+                cmd_buffer,
+                &frame_data.desc_set,
+                self.pipeline.pipeline_layout,
+                self.pipeline.pipeline,
+            );
 
             //transition render image for copy from
             vk_util::transition_image(
@@ -503,7 +516,6 @@ impl VkRender {
         //         &clear_range,
         //     );
         // }
-
 
         unsafe {
             self.logical_device.device.cmd_bind_pipeline(
