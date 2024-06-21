@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::{ffi, iter, ptr};
+use std::sync::{Arc, Mutex};
 use vk_mem::Alloc;
 
 use crate::vk_descriptor::DescriptorAllocator;
@@ -989,7 +990,7 @@ pub fn create_swapchain(
 }
 
 pub fn allocate_basic_images(
-    allocator: &vk_mem::Allocator,
+    allocator: &Arc<Mutex<vk_mem::Allocator>>,
     device: &LogicalDevice,
     size: (u32, u32),
     count: u32,
@@ -1027,7 +1028,7 @@ pub fn allocate_basic_images(
     let images: Vec<(vk::Image, vk_mem::Allocation)> = unsafe {
         (0..count)
             .map(|_| {
-                allocator
+                allocator.lock().unwrap()
                     .create_image(&image_create_info, &allocator_create_info)
                     .map_err(|e| format!("Error creating image: {:?}", e))
             })

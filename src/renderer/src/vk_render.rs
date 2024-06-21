@@ -1,3 +1,4 @@
+use crate::egui_init::EGUIInstance;
 use crate::vk_descriptor::{DescriptorAllocator, DescriptorLayoutBuilder, PoolSizeRatio};
 use crate::vk_init::{
     LogicalDevice, PhyDevice, VkDebug, VkDestroyable, VkFrameSync, VkPresent, VkSurface,
@@ -6,7 +7,9 @@ use crate::vk_init::{
 use crate::{vk_init, vk_util};
 use ash::vk;
 use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2};
+use egui_ash_renderer::DynamicRendering;
 use std::ffi::{CStr, CString};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
@@ -47,7 +50,7 @@ impl VkPipeline {
 
 pub struct VkRender {
     pub window: winit::window::Window,
-    pub allocator: Allocator,
+    pub allocator: Arc<Mutex<Allocator>>,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
@@ -59,7 +62,7 @@ pub struct VkRender {
     // pub command_pools: Vec<VkCommandPool>,
     pub presentation: VkPresent,
     pub pipeline: VkPipeline,
-
+    pub gui: EGUIInstance,
     pub main_deletion_queue: Vec<Box<dyn VkDestroyable>>,
 }
 
@@ -180,6 +183,8 @@ impl Drop for VkRender {
                     .destroy_image_view(item.image_view, None);
 
                 self.allocator
+                    .lock()
+                    .unwrap()
                     .destroy_image(item.image, &mut item.allocation);
             });
 
@@ -190,9 +195,9 @@ impl Drop for VkRender {
                     self.logical_device.device.destroy_image_view(*view, None)
                 });
 
-            self.main_deletion_queue
-                .iter_mut()
-                .for_each(|item| item.destroy(&self.logical_device.device, &self.allocator));
+            self.main_deletion_queue.iter_mut().for_each(|item| {
+                item.destroy(&self.logical_device.device, &self.allocator.lock().unwrap())
+            });
 
             self.presentation.frame_sync.iter().for_each(|b| {
                 self.logical_device
@@ -295,7 +300,7 @@ impl VkRender {
             size,
             Some(2),
             None,
-            Some(vk::PresentModeKHR::IMMEDIATE),
+            Some(vk::PresentModeKHR::MAILBOX),
             None,
             true,
         )?;
@@ -317,7 +322,9 @@ impl VkRender {
         allocator_info.vulkan_api_version = vk::API_VERSION_1_3;
 
         let allocator = unsafe {
-            Allocator::new(allocator_info).map_err(|err| "Failed to initialize allocator")?
+            Arc::new(Mutex::new(
+                Allocator::new(allocator_info).map_err(|err| "Failed to initialize allocator")?,
+            ))
         };
 
         let image_data = vk_init::allocate_basic_images(&allocator, &logical_device, size, 2)?;
@@ -338,6 +345,26 @@ impl VkRender {
 
         let pipeline = init_background_pipeline(&logical_device, &layout);
 
+        let dynamic_render = DynamicRendering {
+            color_attachment_format: vk::Format::R16G16B16A16_SFLOAT,
+            depth_attachment_format: None,
+        };
+
+        let egui_opts = egui_ash_renderer::Options {
+            in_flight_frames: 2,
+            enable_depth_test: false,
+            enable_depth_write: false,
+            srgb_framebuffer: false,
+        };
+
+        let gui = EGUIInstance::new(
+            &window,
+            allocator.clone(),
+            &logical_device,
+            dynamic_render,
+            egui_opts,
+        );
+
         Ok(VkRender {
             window,
             allocator,
@@ -350,6 +377,7 @@ impl VkRender {
             swapchain,
             presentation,
             pipeline,
+            gui,
             main_deletion_queue: Vec::new(),
         })
     }

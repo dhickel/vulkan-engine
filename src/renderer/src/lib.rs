@@ -2,6 +2,7 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
+mod egui_init;
 pub mod renderer;
 mod texture;
 mod vk_descriptor;
@@ -23,14 +24,12 @@ use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 
-use crate::vk_render::VkRender;
 use raw_window_handle::RawWindowHandle;
 use std::process::exit;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
-use winit::application::ApplicationHandler;
-use winit::event::{MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event::{Event, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
@@ -46,127 +45,114 @@ pub fn run() {
         .parse_filters(&*env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
         .init();
 
-    let input_manager = InputManager::new();
-    let mut control = Control::new(input_manager, (1920, 1080), Duration::from_secs(2));
+    let mut input_manager = InputManager::new();
+
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut control).unwrap();
-}
+    let size = (1920u32, 1080u32);
+    let window = winit::window::WindowBuilder::new()
+        .with_inner_size(winit::dpi::PhysicalSize::new(size.0, size.1))
+        .build(&event_loop)
+        .unwrap();
 
-struct Control {
-    app: Option<VkRender>,
-    input_manager: InputManager,
-    wait_time: Duration,
-    frame: u32,
-    last_time: SystemTime,
-    request_redraw: bool,
-    wait_cancelled: bool,
-    close_requested: bool,
-    window_size: (u32, u32),
-    fps_timer: SystemTime,
-}
+    let mut last_time = SystemTime::now();
+    let mut frame: u32 = 0;
+    let mut fps_timer = SystemTime::now();
 
-impl Control {
-    pub fn new(input_manager: InputManager, window_size: (u32, u32), wait_time: Duration) -> Self {
-        Self {
-            app: None,
-            input_manager,
-            wait_time,
-            frame: 0,
-            last_time: SystemTime::now(),
-            request_redraw: true,
-            wait_cancelled: false,
-            close_requested: false,
-            window_size,
-            fps_timer: SystemTime::now(),
-        }
-    }
-}
+    let mut app = vk_render::VkRender::new(window, size, true).unwrap();
 
-impl ApplicationHandler for Control {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window_att = Window::default_attributes().with_title("").with_inner_size(
-            winit::dpi::LogicalSize::new(self.window_size.0, self.window_size.1),
-        );
+    event_loop
+        .run(move |event, control_flow| {
+            input_manager.update();
+            match event {
+                Event::WindowEvent {
+                    ref event,
+                    window_id,
+                } if window_id == window_id => {
+                    let gui_response = app.gui.state.on_window_event(&app.window, event);
 
-        let window = event_loop.create_window(window_att).unwrap();
-        self.app = Some(vk_render::VkRender::new(window, self.window_size, false).unwrap());
-        self.app.as_mut().unwrap().window.request_redraw();
-    }
+                    match event {
+                        WindowEvent::ActivationTokenDone { .. } => {}
+                        WindowEvent::Resized(_) => {}
+                        WindowEvent::Moved(_) => {}
+                        WindowEvent::CloseRequested => control_flow.exit(),
+                        WindowEvent::Destroyed => {}
+                        WindowEvent::DroppedFile(_) => {}
+                        WindowEvent::HoveredFile(_) => {}
+                        WindowEvent::HoveredFileCancelled => {}
+                        WindowEvent::Focused(_) => {}
+                        WindowEvent::KeyboardInput { event, .. } => {
+                            input_manager.update();
+                            if let PhysicalKey::Code(key) = event.physical_key {
+                                input_manager.add_keycode(key) // TODO need to take pressed state into account
+                            }
+                        }
+                        WindowEvent::ModifiersChanged(modd, ..) => {}
+                        WindowEvent::Ime(_) => {}
+                        WindowEvent::CursorMoved { position, .. } => {
+                            input_manager.update_mouse_pos(position.x as f32, position.y as f32)
+                            //TODO Maybe track as f64?
+                        }
+                        WindowEvent::CursorEntered { .. } => {}
+                        WindowEvent::CursorLeft { .. } => {}
+                        WindowEvent::MouseWheel { delta, .. } => {
+                            if let MouseScrollDelta::LineDelta(delta, ..) = delta {
+                                input_manager.update_scroll_state(*delta)
+                            }
+                        }
+                        WindowEvent::MouseInput { state, button, .. } => {
+                            input_manager.add_mouse_button(*button)
+                        }
+                        WindowEvent::TouchpadMagnify { .. } => {}
+                        WindowEvent::SmartMagnify { .. } => {}
+                        WindowEvent::TouchpadRotate { .. } => {}
+                        WindowEvent::TouchpadPressure { .. } => {}
+                        WindowEvent::AxisMotion { .. } => {}
+                        WindowEvent::Touch(_) => {}
+                        WindowEvent::ScaleFactorChanged { .. } => {} // Tutorial resizes here but api changed
+                        WindowEvent::ThemeChanged(_) => {}
+                        WindowEvent::Occluded(_) => {}
+                        WindowEvent::RedrawRequested => {
+                            let now = SystemTime::now();
+                            let frame_ms = now.duration_since(last_time).unwrap().as_millis();
+                            last_time = now;
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::ActivationTokenDone { .. } => {}
-            WindowEvent::Resized(_) => {}
-            WindowEvent::Moved(_) => {}
-            WindowEvent::KeyboardInput { event, .. } => {
-                //  self.input_manager.update();
-                if let PhysicalKey::Code(key) = event.physical_key {
-                    // self.input_manager.add_keycode(key) // TODO need to take pressed state into account
+                            app.render(frame);
+                            app.window.request_redraw();
+                            if now.duration_since(fps_timer).unwrap() > Duration::from_secs(1) {
+                                app.window
+                                    .set_title(format!("Frame-Rate: {}", frame).as_str());
+                                frame = 0;
+                                fps_timer = now;
+
+                                // event_loop.set_control_flow(ControlFlow::WaitUntil(
+                                //     std::time::Instant::now() + self.wait_time,
+                                // ));
+                            }
+                            frame += 1;
+                        }
+                    }
                 }
+                _ => {}
             }
-            WindowEvent::ModifiersChanged(modd, ..) => {}
-            WindowEvent::CursorMoved { position, .. } => {
-                self.input_manager
-                    .update_mouse_pos(position.x as f32, position.y as f32)
-                //TODO Maybe track as f64?
-            }
-            WindowEvent::CursorEntered { .. } => {}
-            WindowEvent::CursorLeft { .. } => {}
-            WindowEvent::MouseWheel { delta, .. } => {
-                if let MouseScrollDelta::LineDelta(delta, ..) = delta {
-                    self.input_manager.update_scroll_state(delta)
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.input_manager.add_mouse_button(button)
-            }
-            WindowEvent::RedrawRequested => {
-                let now = SystemTime::now();
-                let frame_ms = now.duration_since(self.last_time).unwrap().as_millis();
-                self.last_time = now;
-
-                let app = unsafe { self.app.as_mut().unwrap_unchecked() };
-                app.render(self.frame);
-                app.window.request_redraw();
-                if now.duration_since(self.fps_timer).unwrap() > Duration::from_secs(1) {
-                    app.window
-                        .set_title(format!("Frame-time: {}", self.frame).as_str());
-                    self.frame = 0;
-                    self.fps_timer = now;
-
-                    // event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    //     std::time::Instant::now() + self.wait_time,
-                    // ));
-
-                }
-
-                self.frame += 1;
-            }
-            _ => {}
-        }
-    }
-
-    // fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-    //     if self.request_redraw && !self.wait_cancelled && !self.close_requested {
-    //         if let Some(app) = &self.app {
-    //             self.last_time = time::SystemTime::now();
-    //             self.frame += 1;
-    //             app.window.request_redraw();
-    //         }
-    //     }
-    //
-    //     println!("Updated physics");
-    //
-    //     // event_loop.set_control_flow(ControlFlow::Poll);
-    // }
+        })
+        .expect("TODO: panic message");
 }
+
+// fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+//     if self.request_redraw && !self.wait_cancelled && !self.close_requested {
+//         if let Some(app) = &self.app {
+//             self.last_time = time::SystemTime::now();
+//             self.frame += 1;
+//             app.window.request_redraw();
+//         }
+//     }
+//
+//     println!("Updated physics");
+//
+//     // event_loop.set_control_flow(ControlFlow::Poll);
+// }
+//}
 
 // pub fn run2() {
 //     let mut glfw = glfw::init(glfw::log_errors).unwrap();
