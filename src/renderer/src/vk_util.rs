@@ -1,7 +1,9 @@
-use std::io::{Read, Seek, SeekFrom};
-use crate::vk_init::LogicalDevice;
+use crate::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2};
+use ash::vk::{
+    AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2, RenderingInfo,
+};
+use std::io::{Read, Seek, SeekFrom};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -108,7 +110,7 @@ pub fn image_create_info<'a>(
 
 pub fn image_view_create_info<'a>(
     format: vk::Format,
-    view_type : vk::ImageViewType,
+    view_type: vk::ImageViewType,
     image: vk::Image,
     aspect_flags: vk::ImageAspectFlags,
 ) -> vk::ImageViewCreateInfo<'a> {
@@ -147,6 +149,29 @@ pub fn rendering_attachment_info<'a>(
     info
 }
 
+pub fn rendering_info<'a>(
+    extent: vk::Extent2D,
+    color_attachment: &'a [vk::RenderingAttachmentInfo],
+    depth_attachment: &'a [vk::RenderingAttachmentInfo],
+) -> RenderingInfo<'a> {
+    let mut render_info = vk::RenderingInfo::default()
+        .render_area(
+            vk::Rect2D::default()
+                .offset(vk::Offset2D::default().x(0).y(0))
+                .extent(extent),
+        )
+        .layer_count(1);
+
+    if !color_attachment.is_empty() {
+        render_info = render_info.color_attachments(color_attachment);
+    }
+    // if !depth_attachment.is_empty() { // FIXME lifetime issues if optional but cant use a vec like above
+    //     render_info = render_info.depth_attachment(depth_attachment)
+    // }
+
+    render_info
+}
+
 pub fn pipeline_shader_stage_create_info<'a>(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
@@ -173,7 +198,7 @@ pub fn create_buffer() {
 }
 
 pub fn blit_copy_image_to_image(
-    device: &LogicalDevice,
+    device: &ash::Device,
     cmd: vk::CommandBuffer,
     source: vk::Image,
     src_size: vk::Extent2D,
@@ -222,7 +247,7 @@ pub fn blit_copy_image_to_image(
         .filter(vk::Filter::LINEAR)
         .regions(&blit_region);
 
-    unsafe { device.device.cmd_blit_image2(cmd, &blit_info) }
+    unsafe { device.cmd_blit_image2(cmd, &blit_info) }
 }
 
 pub fn transition_image(
@@ -255,26 +280,29 @@ pub fn transition_image(
 
 pub fn load_shader_module(
     device: &LogicalDevice,
-    file_path: &str
+    file_path: &str,
 ) -> Result<vk::ShaderModule, String> {
     // Open the file with the cursor at the end to determine the file size
-    let mut file = std::fs::File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
-    let file_size = file.seek(SeekFrom::End(0)).map_err(|e| format!("Failed to seek file: {}", e))?;
+    let mut file =
+        std::fs::File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
+    let file_size = file
+        .seek(SeekFrom::End(0))
+        .map_err(|e| format!("Failed to seek file: {}", e))?;
 
     // spirv expects the buffer to be on uint32, so make sure to reserve a Vec
     // big enough for the entire file
     let mut buffer = vec![0u32; (file_size / 4) as usize];
 
     // Put file cursor at the beginning
-    file.seek(SeekFrom::Start(0)).map_err(|e| format!("Failed to seek file: {}", e))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("Failed to seek file: {}", e))?;
 
     // Load the entire file into the buffer
     file.read_exact(bytemuck::cast_slice_mut(&mut buffer))
         .map_err(|e| format!("Failed to read file: {}", e))?;
 
     // Create a new shader module, using the buffer we loaded
-    let create_info = vk::ShaderModuleCreateInfo::default()
-        .code(&buffer);
+    let create_info = vk::ShaderModuleCreateInfo::default().code(&buffer);
 
     // Check that the creation goes well
     let shader_module = unsafe {

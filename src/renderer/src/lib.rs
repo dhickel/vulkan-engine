@@ -2,7 +2,6 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
-mod egui_init;
 pub mod renderer;
 mod texture;
 mod vk_descriptor;
@@ -10,8 +9,10 @@ mod vk_init;
 mod vk_pipeline;
 mod vk_render;
 mod vk_util;
+mod vk_types;
 
-use crate::vk_init::{QueueType, VkFrameSync, VkPresent};
+
+use crate::vk_types::*;
 use ash::vk;
 use ash::vk::{
     CommandBuffer, CommandBufferResetFlags, CommandBufferUsageFlags,
@@ -49,6 +50,7 @@ pub fn run() {
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
+
     let size = (1920u32, 1080u32);
     let window = winit::window::WindowBuilder::new()
         .with_inner_size(winit::dpi::PhysicalSize::new(size.0, size.1))
@@ -60,30 +62,35 @@ pub fn run() {
     let mut fps_timer = SystemTime::now();
 
     let mut app = vk_render::VkRender::new(window, size, true).unwrap();
+    let mut opened  = true;
+
 
     event_loop
         .run(move |event, control_flow| {
             input_manager.update();
+            app.imgui.handle_event(&app.window, &event);
             match event {
                 Event::WindowEvent {
                     ref event,
                     window_id,
                 } if window_id == window_id => {
-                    let gui_response = app.gui.state.on_window_event(&app.window, event);
 
                     match event {
                         WindowEvent::ActivationTokenDone { .. } => {}
                         WindowEvent::Resized(_) => {}
                         WindowEvent::Moved(_) => {}
-                        WindowEvent::CloseRequested => control_flow.exit(),
+                        WindowEvent::CloseRequested => {
+                            control_flow.exit();
+                        },
                         WindowEvent::Destroyed => {}
                         WindowEvent::DroppedFile(_) => {}
                         WindowEvent::HoveredFile(_) => {}
                         WindowEvent::HoveredFileCancelled => {}
                         WindowEvent::Focused(_) => {}
-                        WindowEvent::KeyboardInput { event, .. } => {
+                        WindowEvent::KeyboardInput { event: key_event, .. } => {
+
                             input_manager.update();
-                            if let PhysicalKey::Code(key) = event.physical_key {
+                            if let PhysicalKey::Code(key) = key_event.physical_key {
                                 input_manager.add_keycode(key) // TODO need to take pressed state into account
                             }
                         }
@@ -113,6 +120,9 @@ pub fn run() {
                         WindowEvent::ThemeChanged(_) => {}
                         WindowEvent::Occluded(_) => {}
                         WindowEvent::RedrawRequested => {
+                            app.imgui.prepare_frame(&app.window);
+
+
                             let now = SystemTime::now();
                             let frame_ms = now.duration_since(last_time).unwrap().as_millis();
                             last_time = now;
@@ -137,6 +147,8 @@ pub fn run() {
             }
         })
         .expect("TODO: panic message");
+
+
 }
 
 // fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

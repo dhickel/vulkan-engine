@@ -1,8 +1,10 @@
-use crate::vk_init::LogicalDevice;
+
 use ash::prelude::VkResult;
 use ash::vk;
 use ash::vk::DescriptorPool;
 use std::collections::VecDeque;
+use crate::vk_types::*;
+
 
 pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,

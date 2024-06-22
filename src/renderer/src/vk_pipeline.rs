@@ -1,5 +1,5 @@
 use std::io::{Read, Seek, SeekFrom};
-use crate::vk_init::LogicalDevice;
+use crate::vk_types::*;
 use crate::vk_util;
 use ash::vk;
 

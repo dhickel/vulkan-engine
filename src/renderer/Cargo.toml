@@ -18,9 +18,10 @@ vk-mem = "0.4.0"
 
 winit = { version = "0.29.15", features = ["rwh_06"] }
 glfw = { version = "0.56.0", default-features = false, features = ["vulkan", "ash", "raw-window-handle-v0-6"] }
-egui-ash-renderer = { version = "0.3.0", features = ["dynamic-rendering", "vk-mem"] }
-egui = "0.27.2"
-egui-winit = "0.27.2"
+
+imgui-rs-vulkan-renderer = { version = "1.12.0", features = ["vk-mem", "dynamic-rendering"] }
+imgui = "0.12.0"
+imgui-winit-support = "0.12.0"
 
 raw-window-handle = { version = "0.6.2", features = ["std"] }
 shaderc = "0.8.3"
@@ -52,16 +53,14 @@ features = ["png", "jpeg"]
 #raw-window-handle = "0.6.2"
 
 
-#[patch.crates-io.egui-ash-renderer]
-#raw-window-handle = "0.6.2"
-#ash = "0.38.0"
+#[patch.crates-io.imgui-rs-vulkan-render]
 #vk-mem = "0.4.0"
 
 
-[patch.crates-io]
-raw-window-handle = "0.6.2"
-ash = "0.38.0"
-vk-mem = "0.4.0"
+#[patch.crates-io]
+#raw-window-handle = "0.6.2"
+#ash = "0.38.0"
+#vk-mem = "0.4.0"
 
 
 
