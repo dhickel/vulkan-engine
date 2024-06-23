@@ -68,6 +68,7 @@ impl PoolSizeRatio {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct DescriptorAllocator {
     pool: vk::DescriptorPool,
 }

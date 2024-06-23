@@ -2,34 +2,17 @@ use crate::vk_descriptor::{DescriptorAllocator, DescriptorLayoutBuilder, PoolSiz
 use crate::vk_init::*;
 use crate::vk_types::*;
 use crate::{vk_init, vk_util};
-use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, ImageLayout};
+use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, ImageLayout, ShaderStageFlags};
 use ash::{vk, Device};
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use glam::Vec4;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
-pub struct VkDescriptors {
-    pub allocator: DescriptorAllocator,
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
-    pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
-}
 
-impl VkDescriptors {
-    pub fn new(allocator: DescriptorAllocator) -> Self {
-        Self {
-            allocator,
-            descriptor_sets: vec![],
-            descriptor_layouts: vec![],
-        }
-    }
 
-    pub fn add_descriptor(&mut self, set: vk::DescriptorSet, layout: vk::DescriptorSetLayout) {
-        self.descriptor_sets.push(set);
-        self.descriptor_layouts.push(layout);
-    }
-}
 
 pub struct VkRender {
     pub window: winit::window::Window,
@@ -44,9 +27,10 @@ pub struct VkRender {
     //   pub present_images: Vec<vk::ImageView>,
     // pub command_pools: Vec<VkCommandPool>,
     pub presentation: VkPresent,
-    pub pipeline: VkPipeline,
+    // pub pipeline: VkPipeline,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
+    pub scene_data: SceneData,
 
     pub main_deletion_queue: Vec<Box<dyn VkDestroyable>>,
 }
@@ -93,11 +77,17 @@ pub fn init_descriptors(device: &LogicalDevice, image_views: &[vk::ImageView]) -
     descriptors
 }
 
-pub fn init_background_pipeline(
-    device: &LogicalDevice,
-    layout: &[vk::DescriptorSetLayout],
-) -> VkPipeline {
-    let compute_info = vk::PipelineLayoutCreateInfo::default().set_layouts(layout);
+pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> SceneData {
+    let desc_layout = &layout.descriptor_layouts;
+
+    let push_constants = [vk::PushConstantRange::default()
+        .offset(0)
+        .size(std::mem::size_of::<Compute4x4PushConstants>() as u32)
+        .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+
+    let compute_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(desc_layout)
+        .push_constant_ranges(&push_constants);
 
     let compute_layout = unsafe {
         device
@@ -106,36 +96,85 @@ pub fn init_background_pipeline(
             .unwrap()
     };
 
-    let shader_module = vk_util::load_shader_module(
+    let gradient_shader = vk_util::load_shader_module(
         device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gradient.comp.spv",
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gradient_color.comp.spv",
     )
-    .unwrap();
+    .expect("Error loading shader");
+
+    let sky_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/sky.comp.spv",
+    )
+    .expect("Error loading shader");
 
     let name = CString::new("main").unwrap();
     let stage_info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(shader_module)
+        .module(gradient_shader)
         .name(&name);
 
     let pipeline_info = [vk::ComputePipelineCreateInfo::default()
         .layout(compute_layout)
         .stage(stage_info)];
 
-    let compute_pipeline = unsafe {
+    let gradient_data = Compute4x4PushConstants::default()
+        .set_data_1(glam::vec4(1.0, 0.0, 0.0, 1.0))
+        .set_data_2(glam::vec4(0.0, 0.0, 1.0, 1.0));
+
+    let gradient_pipeline = unsafe {
         device
             .device
             .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
             .unwrap()[0]
     };
 
+    let gradient = ComputeEffect {
+        name: "gradient".to_string(),
+        pipeline: gradient_pipeline,
+        layout: compute_layout,
+        descriptors: layout.clone(),
+        data: gradient_data,
+    };
+
+    let stage_info = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(sky_shader)
+        .name(&name);
+
+    let pipeline_info = [vk::ComputePipelineCreateInfo::default()
+        .layout(compute_layout)
+        .stage(stage_info)];
+
+    let sky_pipeline = unsafe {
+        device
+            .device
+            .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+            .unwrap()[0]
+    };
+
+    let sky_data =
+        Compute4x4PushConstants::default().set_data_1(glam::Vec4::new(0.1, 0.2, 0.4, 0.97));
+
+    let sky = ComputeEffect {
+        name: "sky".to_string(),
+        pipeline: sky_pipeline,
+        layout: compute_layout,
+        descriptors: layout.clone(),
+        data: sky_data,
+    };
+
     unsafe {
-        device.device.destroy_shader_module(shader_module, None);
+        device.device.destroy_shader_module(gradient_shader, None);
+        device.device.destroy_shader_module(sky_shader, None);
     }
-    VkPipeline::new(compute_pipeline, compute_layout)
+
+    let mut scene_data = SceneData::default();
+    scene_data.effects.push(gradient);
+    scene_data.effects.push(sky);
+
+    scene_data
 }
-
-
 
 impl Drop for VkRender {
     fn drop(&mut self) {
@@ -154,12 +193,12 @@ impl Drop for VkRender {
                 .device
                 .destroy_fence(self.immediate.fence[0], None);
 
-            self.logical_device
-                .device
-                .destroy_pipeline_layout(self.pipeline.pipeline_layout, None);
-            self.logical_device
-                .device
-                .destroy_pipeline(self.pipeline.pipeline, None);
+            // self.logical_device
+            //     .device
+            //     .destroy_pipeline_layout(self.pipeline.pipeline_layout, None);
+            // self.logical_device
+            //     .device
+            //     .destroy_pipeline(self.pipeline.pipeline, None);
 
             for x in 0..self.presentation.descriptors.descriptor_layouts.len() {
                 self.logical_device.device.destroy_descriptor_set_layout(
@@ -260,7 +299,6 @@ impl VkRender {
         )?
         .remove(0);
 
-
         let queue_indices =
             vk_init::graphics_only_queue_indices(&instance, &physical_device.p_device, &surface)?;
 
@@ -275,7 +313,6 @@ impl VkRender {
             Box::new(vk12_features),
             Box::new(vk13_features),
         ];
-
 
         // FIXME better extension init
         let mut surface_ext = vk_init::get_basic_device_ext_ptrs();
@@ -331,13 +368,18 @@ impl VkRender {
         };
 
         let image_data = vk_init::allocate_basic_images(&allocator, &logical_device, size, 2)?;
-        let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
 
         let render_views: Vec<vk::ImageView> =
             image_data.iter().map(|data| data.image_view).collect();
 
+        let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
+
+
         let descriptors = init_descriptors(&logical_device, &render_views);
         let layout = [descriptors.descriptor_layouts[0]];
+
+        // FIXME, this needs generalized
+        let scene_data = init_scene_data(&logical_device, &descriptors);
 
         let presentation = VkPresent::new(
             frame_buffers,
@@ -347,8 +389,6 @@ impl VkRender {
             descriptors,
         );
 
-        // FIXME, this needs generalized
-        let pipeline = init_background_pipeline(&logical_device, &layout);
 
         //create command pool for immediate rendering, this may need moved to an init
         let im_command_pool = vk_init::create_command_pools(&logical_device, 1)
@@ -366,17 +406,17 @@ impl VkRender {
         // GUI
 
         let mut imgui_context = imgui::Context::create();
+
         let mut platform = WinitPlatform::init(&mut imgui_context);
         platform.attach_window(imgui_context.io_mut(), &window, HiDpiMode::Default);
 
         let imgui_opts = imgui_rs_vulkan_renderer::Options {
             in_flight_frames: 2,
-            enable_depth_test: false,
-            enable_depth_write: false,
+            ..Default::default()
         };
 
         let imgui_dynamic = imgui_rs_vulkan_renderer::DynamicRendering {
-            color_attachment_format: vk::Format::B8G8R8A8_UNORM,
+            color_attachment_format: swapchain.surface_format.format,
             depth_attachment_format: None,
         };
         let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
@@ -391,6 +431,7 @@ impl VkRender {
             Some(imgui_opts),
         )
         .unwrap();
+
 
         let immediate = VkImmediate::new(im_command_pool, im_fence);
 
@@ -407,9 +448,9 @@ impl VkRender {
             surface,
             swapchain,
             presentation,
-            pipeline,
             immediate,
             imgui,
+            scene_data,
             main_deletion_queue: Vec::new(),
         })
     }
@@ -457,10 +498,18 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
+
+
             let r_image = frame_data.render_image;
             let r_image_view = frame_data.render_image_view;
             let p_image = frame_data.present_image;
             let p_image_view = frame_data.present_image_view;
+
+            println!("On frame: {:?}", self.swapchain.swapchain_images[image_index as usize]);
+            println!("present Image: {:?}", p_image);
+            println!("present view: {:?}", p_image_view);
+            println!("render Image: {:?}", r_image);
+            println!("render View: {:?}", r_image_view);
 
             let extent = self.swapchain.extent;
 
@@ -472,13 +521,13 @@ impl VkRender {
                 vk::ImageLayout::GENERAL,
             );
 
-            // Draw to render image
+            //
+
+            let ds = [self.scene_data.get_current_effect().descriptors.descriptor_sets[image_index as usize]];
             self.draw_background(
                 r_image,
                 cmd_buffer,
-                &frame_data.desc_set,
-                self.pipeline.pipeline_layout,
-                self.pipeline.pipeline,
+                &ds,
             );
 
             //transition render image for copy from
@@ -489,6 +538,7 @@ impl VkRender {
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
+
 
             // transition present image to copy to
             vk_util::transition_image(
@@ -518,6 +568,8 @@ impl VkRender {
             );
 
             self.draw_imgui(cmd_buffer, p_image_view);
+
+
 
             // transition swapchain to present
             vk_util::transition_image(
@@ -569,6 +621,7 @@ impl VkRender {
     }
 
     pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
+
         let attachment_info = [vk_util::rendering_attachment_info(
             image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -583,14 +636,54 @@ impl VkRender {
                 .cmd_begin_rendering(cmd_buffer, &render_info);
         }
 
+        let mut selected = self.scene_data.get_current_effect();
+
+        // let frame = self.imgui.context.new_frame();
+        // frame.text(&selected.name);
+
+        // let data_1_arr = &mut selected.data.data_1.to_array();
+        // let mut data_1 = frame
+        //     .input_float4("data1", data_1_arr);
+        //
+        // if data_1.build() {
+        //     selected.data.data_1 = Vec4::from_array(*data_1_arr);
+        // }
+        //
+        //
+        //
+        // let data_2 = frame
+        //     .input_float4("data2", &mut selected.data.data_2.to_array())
+        //     .build();
+        // let data_3 = frame
+        //     .input_float4("data3", &mut selected.data.data_3.to_array())
+        //     .build();
+        // let data_4 = frame
+        //     .input_float4("data4", &mut selected.data.data_4.to_array())
+        //     .build();
+
+        //
+        // frame.slider(
+        //     "Effect Index".to_string(),
+        //     0,
+        //     (self.scene_data.effects.len() - 1) as u32,
+        //     &mut self.scene_data.current,
+        // );
+        //
+        // self.imgui.platform.prepare_render(frame, &self.window);
+
+
         self.imgui.context.new_frame().show_demo_window(&mut self.imgui.opened);
+
         let draw_data = self.imgui.context.render();
 
         self.imgui.renderer.cmd_draw(cmd_buffer, draw_data).unwrap();
 
+
         unsafe {
             self.logical_device.device.cmd_end_rendering(cmd_buffer);
         }
+
+
     }
 
     pub fn immediate_submit<F>(&mut self, function: F)
@@ -642,33 +735,44 @@ impl VkRender {
     }
 
     pub fn draw_background(
-        &self,
+        &mut self,
         image: vk::Image,
         cmd_buffer: vk::CommandBuffer,
         descriptor_set: &[vk::DescriptorSet],
-        pipeline_layout: vk::PipelineLayout,
-        pipeline: vk::Pipeline,
+
     ) {
+        let compute_effect = self.scene_data.get_current_effect();
         unsafe {
             self.logical_device.device.cmd_bind_pipeline(
                 cmd_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                self.pipeline.pipeline,
+                compute_effect.pipeline,
             );
+
             self.logical_device.device.cmd_bind_descriptor_sets(
                 cmd_buffer,
                 vk::PipelineBindPoint::COMPUTE,
-                pipeline_layout,
+                compute_effect.layout,
                 0,
-                descriptor_set,
-                &vec![], // only need if dynamic offsets are used, if none make empty
+                &descriptor_set,
+                &[],
             );
+
+            self.logical_device.device.cmd_push_constants(
+                cmd_buffer,
+                compute_effect.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                compute_effect.data.as_byte_slice(),
+            );
+
             self.logical_device.device.cmd_dispatch(
                 cmd_buffer,
                 (self.swapchain.extent.width as f32 / 16.0).ceil() as u32,
                 (self.swapchain.extent.height as f32 / 16.0).ceil() as u32,
                 1,
             );
+
         }
     }
 }

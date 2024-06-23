@@ -9,7 +9,6 @@ use std::{ffi, iter, ptr};
 use vk_mem::Alloc;
 
 use crate::vk_descriptor::DescriptorAllocator;
-use crate::vk_render::VkDescriptors;
 use crate::vk_types::*;
 use crate::vk_util;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -78,8 +77,6 @@ pub fn init_instance(
     } else {
         vec![]
     };
-
-
 
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
@@ -313,6 +310,7 @@ pub fn simple_device_suitability(
         return false;
     }
 
+
     if device_properties.api_version < vk::API_VERSION_1_3 {
         return false;
     }
@@ -457,6 +455,7 @@ pub fn get_general_core_features(
     if supported_features.tessellation_shader == vk::TRUE {
         device_features.tessellation_shader = vk::TRUE;
     }
+
     if supported_features.sample_rate_shading == vk::TRUE {
         device_features.sample_rate_shading = vk::TRUE;
     }
@@ -472,12 +471,14 @@ pub fn get_general_core_features(
     if supported_features.dual_src_blend == vk::TRUE {
         device_features.dual_src_blend = vk::TRUE;
     }
+
     if supported_features.multi_draw_indirect == vk::TRUE {
         device_features.multi_draw_indirect = vk::TRUE;
     }
     if supported_features.draw_indirect_first_instance == vk::TRUE {
         device_features.draw_indirect_first_instance = vk::TRUE;
     }
+
 
     device_features
 }
@@ -542,6 +543,7 @@ pub fn get_general_v12_features<'a>(
         vulkan_12_features.uniform_buffer_standard_layout = vk::TRUE;
     }
 
+
     vulkan_12_features
 }
 
@@ -562,6 +564,7 @@ pub fn get_general_v13_features<'a>(
     if query_vulkan_13_features.dynamic_rendering == vk::TRUE {
         vulkan_13_features.dynamic_rendering = vk::TRUE;
     }
+
     if query_vulkan_13_features.synchronization2 == vk::TRUE {
         vulkan_13_features.synchronization2 = vk::TRUE;
     }
@@ -588,7 +591,6 @@ pub fn get_swapchain_support(
             .surface_instance
             .get_physical_device_surface_present_modes(*physical_device, surface_info.surface)
             .map_err(|e| format!("Fatal: Failed swapchain present mode check: {:?}", e))?;
-
 
         Ok(SwapchainSupport {
             capabilities,
@@ -755,6 +757,12 @@ pub fn allocate_basic_images(
     let image_format = vk::Format::R16G16B16A16_SFLOAT;
     let image_type = vk::ImageType::TYPE_2D;
 
+    let allocator_create_info = vk_mem::AllocationCreateInfo {
+        usage: vk_mem::MemoryUsage::AutoPreferDevice,
+        required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ..Default::default()
+    };
+
     let image_create_info = vk_util::image_create_info(
         image_format,
         usage_flags,
@@ -763,27 +771,16 @@ pub fn allocate_basic_images(
         sample_flags,
     );
 
-    let allocator_create_info = vk_mem::AllocationCreateInfo {
-        usage: vk_mem::MemoryUsage::AutoPreferDevice,
-        required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ..Default::default()
-    };
-
-    let images: Vec<(vk::Image, vk_mem::Allocation)> = unsafe {
-        (0..count)
-            .map(|_| {
+    let images: Vec<VkImageAlloc> = (0..count)
+        .map(|_| {
+            let (image, allocation) = unsafe {
                 allocator
                     .lock()
                     .unwrap()
                     .create_image(&image_create_info, &allocator_create_info)
-                    .map_err(|e| format!("Error creating image: {:?}", e))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+                    .map_err(|e| format!("Error creating image: {:?}", e))?
+            };
 
-    let image_views: Vec<VkImageAlloc> = images
-        .into_iter()
-        .map(|(image, allocation)| {
             let view_create_info = vk_util::image_view_create_info(
                 image_format,
                 vk::ImageViewType::TYPE_2D,
@@ -791,8 +788,12 @@ pub fn allocate_basic_images(
                 vk::ImageAspectFlags::COLOR,
             );
 
-            let image_view = unsafe { device.device.create_image_view(&view_create_info, None) }
-                .map_err(|e| format!("Error creating image view: {:?}", e))?;
+            let image_view = unsafe {
+                device
+                    .device
+                    .create_image_view(&view_create_info, None)
+                    .map_err(|e| format!("Error creating image view: {:?}", e))?
+            };
 
             Ok(VkImageAlloc {
                 image,
@@ -804,7 +805,7 @@ pub fn allocate_basic_images(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    Ok(image_views)
+    Ok(images)
 }
 
 pub fn create_basic_present_views(

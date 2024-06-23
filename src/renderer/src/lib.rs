@@ -64,18 +64,22 @@ pub fn run() {
     let mut app = vk_render::VkRender::new(window, size, true).unwrap();
     let mut opened  = true;
 
-
     event_loop
         .run(move |event, control_flow| {
             input_manager.update();
             app.imgui.handle_event(&app.window, &event);
             match event {
+                Event::NewEvents(..) => {
+                    app.imgui.context.io_mut().update_delta_time(SystemTime::now().duration_since(last_time).unwrap());
+                }
+
                 Event::WindowEvent {
                     ref event,
                     window_id,
                 } if window_id == window_id => {
 
                     match event {
+
                         WindowEvent::ActivationTokenDone { .. } => {}
                         WindowEvent::Resized(_) => {}
                         WindowEvent::Moved(_) => {}
@@ -120,10 +124,11 @@ pub fn run() {
                         WindowEvent::ThemeChanged(_) => {}
                         WindowEvent::Occluded(_) => {}
                         WindowEvent::RedrawRequested => {
-                            app.imgui.prepare_frame(&app.window);
 
 
                             let now = SystemTime::now();
+                            app.imgui.context.io_mut().update_delta_time(now.duration_since(last_time).unwrap());
+                            app.imgui.platform.prepare_frame(app.imgui.context.io_mut(), &app.window).unwrap();
                             let frame_ms = now.duration_since(last_time).unwrap().as_millis();
                             last_time = now;
 

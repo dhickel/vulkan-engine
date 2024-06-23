@@ -419,7 +419,7 @@ name = "engine"
 version = "0.1.0"
 dependencies = [
  "enum-map",
- "glam",
+ "glam 0.8.5",
  "pollster",
  "renderer",
  "vk-mem",
@@ -548,6 +548,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb24d4e1b92ceed0450bbf803ac894b597c5b8d0e16f175f7ef28c42024d8cbd"
 
 [[package]]
+name = "glam"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "779ae4bf7e8421cf91c0b3b64e7e8b40b862fba4d393f59150042de7c4965a94"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "glfw"
 version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -673,7 +682,7 @@ name = "input"
 version = "0.1.0"
 dependencies = [
  "enum-map",
- "glam",
+ "glam 0.8.5",
  "winit",
 ]
 
@@ -1164,7 +1173,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "env_logger",
- "glam",
+ "glam 0.28.0",
  "glfw",
  "image",
  "imgui",

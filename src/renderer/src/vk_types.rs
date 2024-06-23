@@ -1,5 +1,10 @@
-use crate::vk_render::VkDescriptors;
+use crate::vk_descriptor::DescriptorAllocator;
 use ash::vk;
+use bytemuck::{Pod, Zeroable};
+use glam::Vec4;
+use std::ffi::{CStr, CString};
+use winit::event::ElementState::{Pressed, Released};
+use winit::event::Event::WindowEvent;
 
 pub trait VkDestroyable {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {}
@@ -306,7 +311,7 @@ impl VkImgui {
             context,
             platform,
             renderer,
-            opened: true
+            opened: true,
         }
     }
 
@@ -321,7 +326,104 @@ impl VkImgui {
         window: &winit::window::Window,
         event: &winit::event::Event<T>,
     ) {
+
+
         self.platform
             .handle_event(self.context.io_mut(), window, event);
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Compute4x4PushConstants {
+    pub data_1: glam::Vec4,
+    pub data_2: glam::Vec4,
+    pub data_3: glam::Vec4,
+    pub data_4: glam::Vec4,
+}
+
+impl Default for Compute4x4PushConstants {
+    fn default() -> Self {
+        Self {
+            data_1: Default::default(),
+            data_2: Default::default(),
+            data_3: Default::default(),
+            data_4: Default::default(),
+        }
+    }
+}
+
+impl Compute4x4PushConstants {
+    pub fn set_data_1(mut self, data: glam::Vec4) -> Self {
+        self.data_1 = data;
+        self
+    }
+    pub fn set_data_2(mut self, data: glam::Vec4) -> Self {
+        self.data_2 = data;
+        self
+    }
+    pub fn set_data_3(mut self, data: glam::Vec4) -> Self {
+        self.data_3 = data;
+        self
+    }
+    pub fn set_data_4(mut self, data: glam::Vec4) -> Self {
+        self.data_4 = data;
+        self
+    }
+}
+
+impl Compute4x4PushConstants {
+    pub fn as_byte_slice(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+}
+
+pub struct ComputeEffect {
+    pub name: String,
+    pub pipeline: vk::Pipeline,
+    pub layout: vk::PipelineLayout,
+    pub descriptors: VkDescriptors,
+    pub data: Compute4x4PushConstants,
+}
+
+pub struct SceneData {
+    pub effects: Vec<ComputeEffect>,
+    pub current: u32,
+}
+
+impl SceneData {
+    pub fn get_current_effect(&mut self) -> &mut ComputeEffect {
+        self.effects.get_mut(self.current as usize).unwrap()
+    }
+}
+
+impl Default for SceneData {
+    fn default() -> Self {
+        Self {
+            effects: vec![],
+            current: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct VkDescriptors {
+    pub allocator: DescriptorAllocator,
+    pub descriptor_sets: Vec<vk::DescriptorSet>,
+    pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
+}
+
+impl VkDescriptors {
+    pub fn new(allocator: DescriptorAllocator) -> Self {
+        Self {
+            allocator,
+            descriptor_sets: vec![],
+            descriptor_layouts: vec![],
+        }
+    }
+
+    pub fn add_descriptor(&mut self, set: vk::DescriptorSet, layout: vk::DescriptorSetLayout) {
+        self.descriptor_sets.push(set);
+        self.descriptor_layouts.push(layout);
     }
 }
