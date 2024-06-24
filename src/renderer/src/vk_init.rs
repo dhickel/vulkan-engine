@@ -754,7 +754,7 @@ pub fn allocate_basic_images(
     usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
 
     let sample_flags = vk::SampleCountFlags::TYPE_1;
-    let image_format = vk::Format::R16G16B16A16_SFLOAT;
+    let image_format = vk::Format::B8G8R8A8_UNORM;
     let image_type = vk::ImageType::TYPE_2D;
 
     let allocator_create_info = vk_mem::AllocationCreateInfo {

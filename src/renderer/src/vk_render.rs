@@ -1,18 +1,15 @@
 use crate::vk_descriptor::{DescriptorAllocator, DescriptorLayoutBuilder, PoolSizeRatio};
 use crate::vk_init::*;
 use crate::vk_types::*;
-use crate::{vk_init, vk_util};
+use crate::{vk_init, vk_pipeline, vk_util};
 use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, ImageLayout, ShaderStageFlags};
 use ash::{vk, Device};
+use glam::Vec4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use glam::Vec4;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
-
-
-
 
 pub struct VkRender {
     pub window: winit::window::Window,
@@ -27,7 +24,7 @@ pub struct VkRender {
     //   pub present_images: Vec<vk::ImageView>,
     // pub command_pools: Vec<VkCommandPool>,
     pub presentation: VkPresent,
-    // pub pipeline: VkPipeline,
+    pub pipeline: VkPipeline,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
     pub scene_data: SceneData,
@@ -75,6 +72,57 @@ pub fn init_descriptors(device: &LogicalDevice, image_views: &[vk::ImageView]) -
         descriptors.add_descriptor(render_desc, render_layout[0])
     }
     descriptors
+}
+
+pub fn init_triangle_pipeline(
+    device: &LogicalDevice,
+    format: vk::Format,
+) -> Result<VkPipeline, String> {
+    let vert_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
+    )
+    .expect("Error loading shader");
+
+    let frag_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.frag.spv",
+    )
+    .expect("Error loading shader");
+
+    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+
+    let pipeline_layout = unsafe {
+        device
+            .device
+            .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
+            .map_err(|err| "Error creating pipeline")?
+    };
+
+    println!("Here");
+    let entry = CString::new("main").unwrap();
+
+    let pipeline = vk_pipeline::PipelineBuilder::default()
+        .set_pipeline_layout(pipeline_layout)
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .disable_depth_test()
+        .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
+        .set_depth_format(vk::Format::UNDEFINED)
+        .build_pipeline(&device)
+        .unwrap();
+
+    println!("Note here");
+    unsafe {
+        device.device.destroy_shader_module(vert_shader, None);
+        device.device.destroy_shader_module(frag_shader, None);
+    }
+
+    Ok(VkPipeline::new(pipeline, pipeline_layout))
 }
 
 pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> SceneData {
@@ -374,7 +422,6 @@ impl VkRender {
 
         let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
 
-
         let descriptors = init_descriptors(&logical_device, &render_views);
         let layout = [descriptors.descriptor_layouts[0]];
 
@@ -388,7 +435,6 @@ impl VkRender {
             command_pools.remove(0),
             descriptors,
         );
-
 
         //create command pool for immediate rendering, this may need moved to an init
         let im_command_pool = vk_init::create_command_pools(&logical_device, 1)
@@ -432,10 +478,12 @@ impl VkRender {
         )
         .unwrap();
 
-
         let immediate = VkImmediate::new(im_command_pool, im_fence);
 
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
+
+        let pipeline =
+            init_triangle_pipeline(&logical_device, swapchain.surface_format.format).unwrap();
 
         Ok(VkRender {
             window,
@@ -448,6 +496,7 @@ impl VkRender {
             surface,
             swapchain,
             presentation,
+            pipeline,
             immediate,
             imgui,
             scene_data,
@@ -498,14 +547,15 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
-
-
             let r_image = frame_data.render_image;
             let r_image_view = frame_data.render_image_view;
             let p_image = frame_data.present_image;
             let p_image_view = frame_data.present_image_view;
 
-            println!("On frame: {:?}", self.swapchain.swapchain_images[image_index as usize]);
+            println!(
+                "On frame: {:?}",
+                self.swapchain.swapchain_images[image_index as usize]
+            );
             println!("present Image: {:?}", p_image);
             println!("present view: {:?}", p_image_view);
             println!("render Image: {:?}", r_image);
@@ -523,12 +573,12 @@ impl VkRender {
 
             //
 
-            let ds = [self.scene_data.get_current_effect().descriptors.descriptor_sets[image_index as usize]];
-            self.draw_background(
-                r_image,
-                cmd_buffer,
-                &ds,
-            );
+            let ds = [self
+                .scene_data
+                .get_current_effect()
+                .descriptors
+                .descriptor_sets[image_index as usize]];
+            self.draw_background(r_image, cmd_buffer, &ds);
 
             //transition render image for copy from
             vk_util::transition_image(
@@ -536,11 +586,20 @@ impl VkRender {
                 cmd_buffer,
                 r_image,
                 vk::ImageLayout::GENERAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+
+            self.draw_geometry(cmd_buffer, r_image_view, self.pipeline.pipeline);
+
+            // transition present image to copy to
+            vk_util::transition_image(
+                &self.logical_device.device,
+                cmd_buffer,
+                r_image,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
 
-
-            // transition present image to copy to
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
@@ -548,6 +607,7 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
+
 
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
@@ -568,8 +628,6 @@ impl VkRender {
             );
 
             self.draw_imgui(cmd_buffer, p_image_view);
-
-
 
             // transition swapchain to present
             vk_util::transition_image(
@@ -621,7 +679,6 @@ impl VkRender {
     }
 
     pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
-
         let attachment_info = [vk_util::rendering_attachment_info(
             image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -671,19 +728,75 @@ impl VkRender {
         //
         // self.imgui.platform.prepare_render(frame, &self.window);
 
-
-        self.imgui.context.new_frame().show_demo_window(&mut self.imgui.opened);
+        self.imgui
+            .context
+            .new_frame()
+            .show_demo_window(&mut self.imgui.opened);
 
         let draw_data = self.imgui.context.render();
 
         self.imgui.renderer.cmd_draw(cmd_buffer, draw_data).unwrap();
 
-
         unsafe {
             self.logical_device.device.cmd_end_rendering(cmd_buffer);
         }
+    }
 
+    pub fn draw_geometry(
+        &self,
+        cmd_buffer: vk::CommandBuffer,
+        image_view: vk::ImageView,
+        pipeline: vk::Pipeline,
+    ) {
+        let color_attachment = [vk_util::rendering_attachment_info(
+            image_view,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            None,
+        )];
 
+        let extent = self.swapchain.extent;
+
+        let rendering_info = vk_util::rendering_info(extent, &color_attachment, &[]);
+
+        unsafe {
+            self.logical_device
+                .device
+                .cmd_begin_rendering(cmd_buffer, &rendering_info);
+
+            self.logical_device.device.cmd_bind_pipeline(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline,
+            );
+        }
+
+        let viewport = [vk::Viewport::default()
+            .x(0.0)
+            .y(0.0)
+            .width(extent.width as f32)
+            .height(extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(0.0)];
+
+        unsafe {
+            self.logical_device
+                .device
+                .cmd_set_viewport(cmd_buffer, 0, &viewport);
+        }
+
+        let scissor = [vk::Rect2D::default()
+            .offset(vk::Offset2D::default().y(0).y(0))
+            .extent(extent)];
+
+        unsafe {
+            self.logical_device
+                .device
+                .cmd_set_scissor(cmd_buffer, 0, &scissor);
+
+            self.logical_device.device.cmd_draw(cmd_buffer, 3, 1, 0, 0);
+
+            self.logical_device.device.cmd_end_rendering(cmd_buffer);
+        }
     }
 
     pub fn immediate_submit<F>(&mut self, function: F)
@@ -739,7 +852,6 @@ impl VkRender {
         image: vk::Image,
         cmd_buffer: vk::CommandBuffer,
         descriptor_set: &[vk::DescriptorSet],
-
     ) {
         let compute_effect = self.scene_data.get_current_effect();
         unsafe {
@@ -772,7 +884,6 @@ impl VkRender {
                 (self.swapchain.extent.height as f32 / 16.0).ceil() as u32,
                 1,
             );
-
         }
     }
 }

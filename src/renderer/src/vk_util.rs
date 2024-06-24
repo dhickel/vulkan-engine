@@ -1,3 +1,4 @@
+use std::ffi::CStr;
 use crate::vk_types::*;
 use ash::vk;
 use ash::vk::{
@@ -172,12 +173,14 @@ pub fn rendering_info<'a>(
     render_info
 }
 
-pub fn pipeline_shader_stage_create_info<'a>(
+pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
-) -> vk::PipelineShaderStageCreateInfo<'a> {
+    entry: &CStr
+) -> vk::PipelineShaderStageCreateInfo {
     vk::PipelineShaderStageCreateInfo::default()
         .stage(stage)
+        .name(entry)
         .module(module)
 }
 
