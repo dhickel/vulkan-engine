@@ -4,15 +4,10 @@
 
 pub mod renderer;
 mod texture;
-mod vk_descriptor;
-mod vk_init;
-mod vk_pipeline;
-mod vk_render;
-mod vk_util;
-mod vk_types;
+mod vulkan;
+mod data;
 
 
-use crate::vk_types::*;
 use ash::vk;
 use ash::vk::{
     CommandBuffer, CommandBufferResetFlags, CommandBufferUsageFlags,
@@ -33,6 +28,8 @@ use winit::event::{Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
+use crate::vulkan::vk_render;
+
 
 const NANO: f64 = 1000000000.0;
 

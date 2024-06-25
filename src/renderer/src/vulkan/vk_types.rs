@@ -1,8 +1,12 @@
-use crate::vk_descriptor::DescriptorAllocator;
+use crate::vulkan::vk_descriptor::DescriptorAllocator;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 use std::ffi::{CStr, CString};
+use std::rc::Rc;
+use std::sync::Mutex;
+use std::{mem, slice};
+use vk_mem::Alloc;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
 
@@ -265,7 +269,7 @@ impl DeviceQueues {
         }
     }
 }
-
+#[derive(Clone, Copy)]
 pub struct VkPipeline {
     pub pipeline: vk::Pipeline,
     pub pipeline_layout: vk::PipelineLayout,
@@ -326,8 +330,6 @@ impl VkImgui {
         window: &winit::window::Window,
         event: &winit::event::Event<T>,
     ) {
-
-
         self.platform
             .handle_event(self.context.io_mut(), window, event);
     }
@@ -425,5 +427,117 @@ impl VkDescriptors {
     pub fn add_descriptor(&mut self, set: vk::DescriptorSet, layout: vk::DescriptorSetLayout) {
         self.descriptor_sets.push(set);
         self.descriptor_layouts.push(layout);
+    }
+}
+
+pub struct VkBuffer {
+    pub buffer: vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+    pub alloc_info: vk_mem::AllocationInfo,
+}
+
+impl VkBuffer {
+    pub fn new(
+        buffer: vk::Buffer,
+        allocation: vk_mem::Allocation,
+        alloc_info: vk_mem::AllocationInfo,
+    ) -> Self {
+        Self {
+            buffer,
+            allocation,
+            alloc_info,
+        }
+    }
+}
+
+pub struct VkGpuMeshBuffers {
+    pub index_buffer: VkBuffer,
+    pub vertex_buffer: VkBuffer,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+}
+
+impl VkGpuMeshBuffers {
+    pub fn new(
+        index_buffer: VkBuffer,
+        vertex_buffer: VkBuffer,
+        vertex_buffer_addr: vk::DeviceAddress,
+    ) -> Self {
+        Self {
+            index_buffer,
+            vertex_buffer,
+            vertex_buffer_addr,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkGpuPushConsts {
+    pub world_matrix: glam::Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+}
+
+impl VkGpuPushConsts {
+    pub fn new(world_matrix: glam::Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            world_matrix,
+            vertex_buffer_addr,
+        }
+    }
+
+    pub fn as_byte_slice(&self) -> &[u8] {
+        unsafe {
+            let ptr = self as *const VkGpuPushConsts as *const u8;
+            slice::from_raw_parts(ptr, mem::size_of::<VkGpuPushConsts>())
+        }
+    }
+}
+
+// macro_rules! enum_byte_variant_count {
+//     ($enum:ty) => {{
+//         let mut count = 0;
+//         while <$enum as std::convert::TryFrom<u8>>::try_from(count).is_ok() {
+//             count += 1;
+//         }
+//         println!("Count is:{}", count);
+//         count as usize
+//     }};
+// }
+
+#[repr(u8)]
+pub enum VkPipelineType {
+    BACKGROUND = 0,
+    MESH = 1,
+    TRIANGLE = 2,
+}
+
+impl VkPipelineType {
+    pub(crate) const SIZE: usize = 3;
+}
+
+//#[derive(Clone, Copy)]
+pub struct VkPipelineCache {
+    pipelines: [Option<VkPipeline>; VkPipelineType::SIZE],
+}
+
+impl Default for VkPipelineCache {
+    fn default() -> Self {
+        Self {
+            pipelines: [None; VkPipelineType::SIZE],
+        }
+    }
+}
+
+impl VkPipelineCache {
+    pub fn add_pipeline(&mut self, typ: VkPipelineType, pipeline: VkPipeline) {
+        self.pipelines[typ as usize] = Some(pipeline);
+    }
+
+    pub fn get_pipeline(&self, typ: VkPipelineType) -> Option<VkPipeline> {
+        self.pipelines[typ as usize]
+    }
+
+    pub fn get_unchecked(&self, typ: VkPipelineType) -> VkPipeline {
+        unsafe { self.pipelines[typ as usize].unwrap_unchecked() }
     }
 }

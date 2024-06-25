@@ -12,6 +12,8 @@ fn main() {
     let out_dir = shader_dir;
     // Create a shader compiler
     let compiler = Compiler::new().unwrap();
+    let mut options = shaderc::CompileOptions::new().unwrap();
+    options.add_macro_definition("GL_EXT_buffer_reference", Some("1"));
 
     // Iterate over the shader files in the shader directory
     for entry in fs::read_dir(shader_dir).unwrap() {
@@ -33,7 +35,7 @@ fn main() {
                 },
                 path.file_name().unwrap().to_str().unwrap(),
                 "main",
-                None,
+                Some(&options),
             ).expect("Failed");
 
             // Write the compiled SPIR-V to the output directory

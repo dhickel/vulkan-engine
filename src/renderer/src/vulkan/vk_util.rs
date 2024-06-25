@@ -1,10 +1,14 @@
 use std::ffi::CStr;
-use crate::vk_types::*;
+
+use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
     AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2, RenderingInfo,
 };
 use std::io::{Read, Seek, SeekFrom};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use vk_mem::{Alloc, Allocator};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -176,7 +180,7 @@ pub fn rendering_info<'a>(
 pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
-    entry: &CStr
+    entry: &CStr,
 ) -> vk::PipelineShaderStageCreateInfo {
     vk::PipelineShaderStageCreateInfo::default()
         .stage(stage)
@@ -193,10 +197,6 @@ pub fn find_memory_type(
     type_filter: u32,
     prop_flags: vk::MemoryPropertyFlags,
 ) -> u32 {
-    todo!()
-}
-
-pub fn create_buffer() {
     todo!()
 }
 
@@ -316,4 +316,45 @@ pub fn load_shader_module(
     };
 
     Ok(shader_module)
+}
+
+pub fn allocate_buffer(
+    allocator: &Arc<Mutex<Allocator>>,
+    size: usize,
+    usage_flags: vk::BufferUsageFlags,
+    memory_usage: vk_mem::MemoryUsage,
+) -> Result<VkBuffer, String> {
+    let buffer_info = vk::BufferCreateInfo::default()
+        .size(size as vk::DeviceSize)
+        .usage(usage_flags);
+
+    let mut alloc_create_info = vk_mem::AllocationCreateInfo::default();
+    alloc_create_info.usage = memory_usage;
+    alloc_create_info.flags = vk_mem::AllocationCreateFlags::MAPPED
+        | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE;
+
+    let (buffer, allocation) = unsafe {
+        allocator
+            .lock()
+            .unwrap()
+            .create_buffer(&buffer_info, &alloc_create_info)
+            .map_err(|err| format!("Failed to allocate buffer, reason: {:?}", err))?
+    };
+
+    let alloc_info = allocator.lock().unwrap().get_allocation_info(&allocation);
+
+    Ok(VkBuffer {
+        buffer,
+        allocation,
+        alloc_info,
+    })
+}
+
+pub fn destroy_buffer(allocator: &Arc<Mutex<vk_mem::Allocator>>, mut buffer: VkBuffer) {
+    unsafe {
+        allocator
+            .lock()
+            .unwrap()
+            .destroy_buffer(buffer.buffer, &mut buffer.allocation)
+    }
 }

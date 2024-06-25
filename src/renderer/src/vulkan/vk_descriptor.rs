@@ -3,7 +3,7 @@ use ash::prelude::VkResult;
 use ash::vk;
 use ash::vk::DescriptorPool;
 use std::collections::VecDeque;
-use crate::vk_types::*;
+use crate::vulkan::vk_types::*;
 
 
 pub struct DescriptorLayoutBuilder<'a> {

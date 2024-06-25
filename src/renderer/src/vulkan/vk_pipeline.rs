@@ -1,8 +1,10 @@
-use crate::vk_types::*;
-use crate::vk_util;
+
 use ash::vk;
 use std::ffi::CStr;
 use std::io::{Read, Seek, SeekFrom};
+use crate::vulkan::vk_types::*;
+use crate::vulkan::vk_util;
+
 
 pub struct PipelineBuilder<'a> {
     pub shader_stages: Vec<vk::PipelineShaderStageCreateInfo<'a>>,
@@ -63,6 +65,8 @@ impl<'a> PipelineBuilder<'a> {
         let mut render_info = self
             .render_info
             .color_attachment_formats(&self.color_attachment_format);
+
+        println!("Pipeline used: {:?}", self.pipeline_layout);
 
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)
@@ -241,7 +245,9 @@ impl<'a> PipelineBuilder<'a> {
     }
 
     pub fn set_pipeline_layout(mut self, layout: vk::PipelineLayout) -> Self {
+        println!("Pipeline in: {:?}", layout);
         self.pipeline_layout = layout;
+        println!("Pipeline set: {:?}", self.pipeline_layout);
         self
     }
 }

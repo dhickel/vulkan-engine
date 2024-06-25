@@ -1,15 +1,22 @@
-use crate::vk_descriptor::{DescriptorAllocator, DescriptorLayoutBuilder, PoolSizeRatio};
-use crate::vk_init::*;
-use crate::vk_types::*;
-use crate::{vk_init, vk_pipeline, vk_util};
-use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, ImageLayout, ShaderStageFlags};
+use crate::data::primitives::Vertex;
+use crate::vulkan;
+use ash::vk::{
+    AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, ImageLayout, PipelineCache,
+    ShaderStageFlags,
+};
 use ash::{vk, Device};
 use glam::Vec4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::ffi::{CStr, CString};
+use std::mem::align_of;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
+
+use crate::vulkan::vk_descriptor::*;
+use crate::vulkan::vk_types::*;
+use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 
 pub struct VkRender {
     pub window: winit::window::Window,
@@ -24,10 +31,11 @@ pub struct VkRender {
     //   pub present_images: Vec<vk::ImageView>,
     // pub command_pools: Vec<VkCommandPool>,
     pub presentation: VkPresent,
-    pub pipeline: VkPipeline,
+    pub pipeline_cache: VkPipelineCache,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
     pub scene_data: SceneData,
+    pub mesh: Option<VkGpuMeshBuffers>,
 
     pub main_deletion_queue: Vec<Box<dyn VkDestroyable>>,
 }
@@ -123,6 +131,59 @@ pub fn init_triangle_pipeline(
     }
 
     Ok(VkPipeline::new(pipeline, pipeline_layout))
+}
+
+pub fn init_mesh_pipeline(device: &LogicalDevice, format: vk::Format) -> VkPipeline {
+    let vert_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
+    )
+    .expect("Error loading shader");
+
+    let frag_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.frag.spv",
+    )
+    .expect("Error loading shader");
+
+    let buffer_range = [vk::PushConstantRange::default()
+        .offset(0)
+        .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+
+    let pipeline_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&buffer_range);
+
+    let pipeline_layout = unsafe {
+        device
+            .device
+            .create_pipeline_layout(&pipeline_info, None)
+            .unwrap()
+    };
+
+    println!("Created layout: {:?}", pipeline_layout);
+
+    let entry = CString::new("main").unwrap();
+
+    let pipeline = vk_pipeline::PipelineBuilder::default()
+        .set_pipeline_layout(pipeline_layout)
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .disable_depth_test()
+        .set_color_attachment_format(format)
+        .set_depth_format(vk::Format::UNDEFINED)
+        .build_pipeline(device)
+        .unwrap();
+
+    unsafe {
+        device.device.destroy_shader_module(vert_shader, None);
+        device.device.destroy_shader_module(frag_shader, None);
+    }
+
+    VkPipeline::new(pipeline, pipeline_layout)
 }
 
 pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> SceneData {
@@ -408,6 +469,7 @@ impl VkRender {
             AllocatorCreateInfo::new(&instance, &logical_device.device, physical_device.p_device);
 
         allocator_info.vulkan_api_version = vk::API_VERSION_1_3;
+        allocator_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
 
         let allocator = unsafe {
             Arc::new(Mutex::new(
@@ -482,8 +544,15 @@ impl VkRender {
 
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
 
-        let pipeline =
+        let mut pipeline_cache = VkPipelineCache::default();
+
+        let triangle_pipeline =
             init_triangle_pipeline(&logical_device, swapchain.surface_format.format).unwrap();
+
+        let mesh_pipeline = init_mesh_pipeline(&logical_device, swapchain.surface_format.format);
+
+        pipeline_cache.add_pipeline(VkPipelineType::MESH, mesh_pipeline);
+            pipeline_cache.add_pipeline(VkPipelineType::TRIANGLE, triangle_pipeline);
 
         Ok(VkRender {
             window,
@@ -496,11 +565,12 @@ impl VkRender {
             surface,
             swapchain,
             presentation,
-            pipeline,
+            pipeline_cache,
             immediate,
             imgui,
             scene_data,
             main_deletion_queue: Vec::new(),
+            mesh: None,
         })
     }
 }
@@ -589,7 +659,18 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
-            self.draw_geometry(cmd_buffer, r_image_view, self.pipeline.pipeline);
+            if self.mesh.is_none() {
+                let mesh = self.init_default_data();
+                self.mesh = Some(mesh);
+            }
+
+            let mesh = if let Some(mesh) = &self.mesh {
+                mesh
+            } else {
+                panic!()
+            };
+
+            self.draw_geometry(cmd_buffer, r_image_view, mesh);
 
             // transition present image to copy to
             vk_util::transition_image(
@@ -607,7 +688,6 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
-
 
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
@@ -627,7 +707,7 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
-            self.draw_imgui(cmd_buffer, p_image_view);
+              self.draw_imgui(cmd_buffer, p_image_view);
 
             // transition swapchain to present
             vk_util::transition_image(
@@ -746,7 +826,7 @@ impl VkRender {
         &self,
         cmd_buffer: vk::CommandBuffer,
         image_view: vk::ImageView,
-        pipeline: vk::Pipeline,
+        mesh_buffers: &VkGpuMeshBuffers,
     ) {
         let color_attachment = [vk_util::rendering_attachment_info(
             image_view,
@@ -766,7 +846,9 @@ impl VkRender {
             self.logical_device.device.cmd_bind_pipeline(
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline,
+                self.pipeline_cache
+                    .get_unchecked(VkPipelineType::TRIANGLE)
+                    .pipeline,
             );
         }
 
@@ -793,21 +875,54 @@ impl VkRender {
                 .device
                 .cmd_set_scissor(cmd_buffer, 0, &scissor);
 
-            self.logical_device.device.cmd_draw(cmd_buffer, 3, 1, 0, 0);
+
+            //
+            self.logical_device.device.cmd_bind_pipeline(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_cache
+                    .get_unchecked(VkPipelineType::TRIANGLE)
+                    .pipeline,
+            );
+
+            let push_constants =
+                VkGpuPushConsts::new(glam::Mat4::IDENTITY, mesh_buffers.vertex_buffer_addr);
+
+            self.logical_device.device.cmd_push_constants(
+                cmd_buffer,
+                self.pipeline_cache
+                    .get_unchecked(VkPipelineType::MESH)
+                    .pipeline_layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                &push_constants.as_byte_slice(),
+            );
+
+            self.logical_device.device.cmd_bind_index_buffer(
+                cmd_buffer,
+                mesh_buffers.index_buffer.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+
+            self.logical_device
+                .device
+                .cmd_draw_indexed(cmd_buffer, 6, 1, 0, 0, 0);
 
             self.logical_device.device.cmd_end_rendering(cmd_buffer);
         }
     }
 
-    pub fn immediate_submit<F>(&mut self, function: F)
+    pub fn immediate_submit<F>(&self, function: F)
     where
         F: FnOnce(vk::CommandBuffer),
     {
         unsafe {
             let cmd_buffer = self.immediate.command_pool.buffers[0];
             let queue = self.immediate.command_pool.queue;
-            let graphics_queue = self
-                .logical_device
+
+            // Reset the fence correctly
+            self.logical_device
                 .device
                 .reset_fences(&self.immediate.fence)
                 .unwrap();
@@ -835,15 +950,47 @@ impl VkRender {
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
             let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
+            // Check the fence status before submission
+            let fence_status_before = self
+                .logical_device
+                .device
+                .get_fence_status(self.immediate.fence[0]);
+            match fence_status_before {
+                Ok(status) => println!("Fence status before submit: {:?}", status),
+                Err(e) => println!("Error getting fence status before submit: {:?}", e),
+            }
+
+            // Submit the command buffer and signal the fence correctly
             self.logical_device
                 .device
                 .queue_submit2(queue, &submit_info, self.immediate.fence[0])
                 .unwrap();
 
+            // Check the fence status after submission
+            let fence_status_after = self
+                .logical_device
+                .device
+                .get_fence_status(self.immediate.fence[0]);
+            match fence_status_after {
+                Ok(status) => println!("Fence status after submit: {:?}", status),
+                Err(e) => println!("Error getting fence status after submit: {:?}", e),
+            }
+
+            // Wait for the fence to be signaled
             self.logical_device
                 .device
                 .wait_for_fences(&self.immediate.fence, true, u64::MAX)
                 .unwrap();
+
+            // Check the fence status after waiting
+            let fence_status_final = self
+                .logical_device
+                .device
+                .get_fence_status(self.immediate.fence[0]);
+            match fence_status_final {
+                Ok(status) => println!("Fence status after waiting: {:?}", status),
+                Err(e) => println!("Error getting fence status after waiting: {:?}", e),
+            }
         }
     }
 
@@ -885,5 +1032,133 @@ impl VkRender {
                 1,
             );
         }
+    }
+
+    pub fn upload_mesh(&mut self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
+        let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
+        let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
+
+        let index_buffer = vk_util::allocate_buffer(
+            &self.allocator,
+            i_buffer_size,
+            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            vk_mem::MemoryUsage::AutoPreferDevice,
+        )
+        .expect("Failed to allocate index buffer");
+
+        let vertex_buffer = vk_util::allocate_buffer(
+            &self.allocator,
+            v_buffer_size,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            vk_mem::MemoryUsage::AutoPreferDevice,
+        )
+        .expect("Failed to allocate vertex buffer");
+
+        let v_buffer_addr_info =
+            vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer.buffer);
+
+        let v_buffer_addr = unsafe {
+            self.logical_device
+                .device
+                .get_buffer_device_address(&v_buffer_addr_info)
+        };
+
+        let new_surface = VkGpuMeshBuffers::new(index_buffer, vertex_buffer, v_buffer_addr);
+
+        /*
+        With the buffers allocated, we need to write the data into them. For that, we will be using a
+        staging buffer. This is a very common pattern with Vulkan. As GPU_ONLY memory can't be written
+        on the CPU, we first write the memory on a temporal staging buffer that is CPU writable,
+        and then execute a copy command to copy this buffer into the GPU buffers. It's not necessary
+        for meshes to use GPU_ONLY vertex buffers, but it's highly recommended unless
+        it's something like a CPU-side particle system or other dynamic effects.
+         */
+
+        let staging_buffer = vk_util::allocate_buffer(
+            &self.allocator,
+            v_buffer_size + i_buffer_size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk_mem::MemoryUsage::AutoPreferHost,
+        )
+        .expect("Failed to allocate staging buffer");
+
+        let staging_data = staging_buffer.alloc_info.mapped_data as *mut u8;
+
+        unsafe {
+            // Copy vertex data to the staging buffer
+            std::ptr::copy_nonoverlapping(
+                vertices.as_ptr() as *const u8,
+                staging_data,
+                v_buffer_size,
+            );
+
+            // Copy index data to the staging buffer
+            std::ptr::copy_nonoverlapping(
+                indices.as_ptr() as *const u8,
+                staging_data.add(v_buffer_size),
+                i_buffer_size,
+            );
+        }
+
+        self.immediate_submit(|cmd| {
+            let vertex_copy = [vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(0)
+                .size(v_buffer_size as vk::DeviceSize)];
+
+            let index_copy = [vk::BufferCopy::default()
+                .dst_offset(0)
+                .src_offset(v_buffer_size as vk::DeviceSize)
+                .size(i_buffer_size as vk::DeviceSize)];
+
+            unsafe {
+                self.logical_device.device.cmd_copy_buffer(
+                    cmd,
+                    staging_buffer.buffer,
+                    new_surface.vertex_buffer.buffer,
+                    &vertex_copy,
+                );
+            }
+
+            unsafe {
+                self.logical_device.device.cmd_copy_buffer(
+                    cmd,
+                    staging_buffer.buffer,
+                    new_surface.index_buffer.buffer,
+                    &index_copy,
+                );
+            }
+        });
+
+        vk_util::destroy_buffer(&self.allocator, staging_buffer);
+
+        new_surface
+    }
+
+    pub fn init_default_data(&mut self) -> VkGpuMeshBuffers {
+        let mut verts = [Vertex::default(); 4];
+
+        verts[0].position = glam::vec3(0.5, -0.5, 0.0);
+        verts[1].position = glam::vec3(0.5, 0.5, 0.0);
+        verts[2].position = glam::vec3(-0.5, -0.5, 0.0);
+        verts[3].position = glam::vec3(-0.5, 0.5, 0.0);
+
+        verts[0].color = glam::vec4(0.0, 0.0, 0.0, 1.0);
+        verts[1].color = glam::vec4(0.5, 0.5, 0.5, 1.0);
+        verts[2].color = glam::vec4(1.0, 0.0, 0.0, 1.0);
+        verts[3].color = glam::vec4(0.0, 1.0, 0.0, 1.0);
+
+        let mut indices: [u32; 6] = [0; 6];
+
+        indices[0] = 0;
+        indices[1] = 1;
+        indices[2] = 2;
+        indices[3] = 2;
+        indices[4] = 1;
+        indices[5] = 3;
+
+        self.upload_mesh(&indices, &verts)
     }
 }

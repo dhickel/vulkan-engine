@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::{ffi, iter, ptr};
 use vk_mem::Alloc;
 
-use crate::vk_descriptor::DescriptorAllocator;
-use crate::vk_types::*;
-use crate::vk_util;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use crate::vulkan::vk_types::*;
+use crate::vulkan::vk_util;
+
 
 pub fn init_entry() -> ash::Entry {
     log::info!("Creating entry");
@@ -984,6 +984,7 @@ pub fn create_command_buffers(
         .command_buffer_count(count)
         .command_pool(*pool)
         .level(level);
+    
 
     let buffers = unsafe {
         device
