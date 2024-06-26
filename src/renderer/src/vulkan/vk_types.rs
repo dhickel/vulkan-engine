@@ -450,6 +450,7 @@ impl VkBuffer {
     }
 }
 
+
 pub struct VkGpuMeshBuffers {
     pub index_buffer: VkBuffer,
     pub vertex_buffer: VkBuffer,

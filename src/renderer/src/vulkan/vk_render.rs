@@ -13,6 +13,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
+use crate::data::gltf_util;
+use crate::data::gltf_util::{load_meshes, MeshAsset};
 
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
@@ -36,7 +38,7 @@ pub struct VkRender {
     pub imgui: VkImgui,
     pub scene_data: SceneData,
     pub mesh: Option<VkGpuMeshBuffers>,
-
+    pub meshes: Option<Vec<Rc<MeshAsset>>>,
     pub main_deletion_queue: Vec<Box<dyn VkDestroyable>>,
 }
 
@@ -571,6 +573,7 @@ impl VkRender {
             scene_data,
             main_deletion_queue: Vec::new(),
             mesh: None,
+            meshes: None
         })
     }
 }
@@ -660,14 +663,19 @@ impl VkRender {
             );
 
             if self.mesh.is_none() {
-                let mesh = self.init_default_data();
-                self.mesh = Some(mesh);
+            self.init_default_data();
             }
 
             let mesh = if let Some(mesh) = &self.mesh {
                 mesh
             } else {
                 panic!()
+            };
+            
+            let meshes = if let Some(meshes) = &self.meshes {
+                &meshes;
+            } else {
+                panic!();
             };
 
             self.draw_geometry(cmd_buffer, r_image_view, mesh);
@@ -1137,7 +1145,7 @@ impl VkRender {
         new_surface
     }
 
-    pub fn init_default_data(&mut self) -> VkGpuMeshBuffers {
+    pub fn init_default_data(&mut self){
         let mut verts = [Vertex::default(); 4];
 
         verts[0].position = glam::vec3(0.5, -0.5, 0.0);
@@ -1159,6 +1167,9 @@ impl VkRender {
         indices[4] = 1;
         indices[5] = 3;
 
-        self.upload_mesh(&indices, &verts)
+       self.mesh = Some(self.upload_mesh(&indices, &verts));
+        self.meshes = Some(gltf_util::load_meshes(
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/basicmesh.glb", 
+            |indices, vertices| self.upload_mesh(indices, vertices)).unwrap())
     }
 }
