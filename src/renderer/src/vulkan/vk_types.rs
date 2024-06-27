@@ -13,6 +13,18 @@ use winit::event::Event::WindowEvent;
 pub trait VkDestroyable {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {}
 }
+#[derive(Debug)]
+pub enum VkError {
+    Present(String),
+}
+
+// impl std::fmt::Display for VkError {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         match self {
+//             VkError::Present(msg) => write!(f, "Present error: {}", msg),
+//         }
+//     }
+// }
 
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
@@ -49,43 +61,71 @@ pub struct LogicalDevice {
     pub queues: DeviceQueues,
 }
 
+#[derive(Debug)]
 pub struct QueueIndex {
     pub index: u32,
     pub queue_types: Vec<QueueType>,
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum QueueType {
-    Present,
-    Graphics,
-    Compute,
-    Transfer,
-    SparseBinding,
+    Present = 0,
+    Graphics = 1,
+    Compute = 2,
+    Transfer = 3,
 }
 
 impl QueueType {
     // Define an array of all the enum variants
-    const ALL_QUEUE_TYPES: [QueueType; 5] = [
+    const ALL_QUEUE_TYPES: [QueueType; 4] = [
         QueueType::Present,
         QueueType::Graphics,
         QueueType::Compute,
         QueueType::Transfer,
-        QueueType::SparseBinding,
     ];
 
-    // Provide a static method to get an iterator over all variants
     pub fn iter() -> std::slice::Iter<'static, QueueType> {
         Self::ALL_QUEUE_TYPES.iter()
     }
 }
 
+// TODO this with need refactored when it comes to to request separate compute/graphics pools
+
 #[derive(Debug)]
+pub struct VkCommandPoolMap {
+    pools: [VkCommandPool; 4],
+}
+
+impl VkCommandPoolMap {
+    pub fn new(pools: [VkCommandPool; 4]) -> Self {
+        Self { pools }
+    }
+
+    pub fn get(&self, typ: QueueType) -> &VkCommandPool {
+        &self.pools[typ as usize]
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct VkCommandPool {
     pub queue_index: u32,
     pub queue: vk::Queue,
     pub queue_type: Vec<QueueType>,
     pub pool: vk::CommandPool,
     pub buffers: Vec<vk::CommandBuffer>,
+}
+
+impl Default for VkCommandPool {
+    fn default() -> Self {
+        Self {
+            queue_index: 0,
+            queue: Default::default(),
+            queue_type: vec![],
+            pool: Default::default(),
+            buffers: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -112,102 +152,102 @@ impl VkDestroyable for VkImageAlloc {
     }
 }
 
-pub struct VkFrame {
+// TODO we are going to want more control over the descriptor sets
+pub struct VkFrameData {
     pub sync: VkFrameSync,
-    pub draw_image: vk::Image,
-    pub draw_image_view: vk::ImageView,
-    pub depth_image: vk::Image,
-    pub depth_image_view: vk::ImageView,
+    pub draw: VkImageAlloc,
+    pub depth: VkImageAlloc,
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
-    pub cmd_pool: vk::CommandPool,
-    pub cmd_buffer: vk::CommandBuffer,
-    pub cmd_queue: vk::Queue,
-    pub desc_layout: [vk::DescriptorSetLayout; 1],
-    pub desc_set: [vk::DescriptorSet; 1],
+    pub cmd_pool: VkCommandPoolMap,
+    pub descriptors: VkDescriptors,
+}
+
+impl VkFrameData {
+    pub fn get_frame(&self) -> VkFrame {
+        VkFrame {
+            sync: self.sync,
+            draw_image: self.draw.image,
+            draw_view: self.draw.image_view,
+            depth_image: self.depth.image,
+            depth_view: self.depth.image_view,
+            present_image: self.present_image,
+            present_view: self.present_image_view,
+            cmd_pool: &self.cmd_pool,
+            descriptors: &self.descriptors,
+        }
+    }
+}
+
+pub struct VkFrame<'a> {
+    pub sync: VkFrameSync,
+    pub draw_image: vk::Image,
+    pub draw_view: vk::ImageView,
+    pub depth_image: vk::Image,
+    pub depth_view: vk::ImageView,
+    pub present_image: vk::Image,
+    pub present_view: vk::ImageView,
+    pub cmd_pool: &'a VkCommandPoolMap,
+    pub descriptors: &'a VkDescriptors,
 }
 
 pub struct VkPresent {
-    pub frame_sync: Vec<VkFrameSync>,
-    pub draw_images: Vec<VkImageAlloc>,
-    pub depth_images: Vec<VkImageAlloc>,
-    pub descriptors: VkDescriptors,
-    pub present_images: Vec<(vk::Image, vk::ImageView)>,
-    pub command_pool: VkCommandPool,
+    pub frame_data: Vec<VkFrameData>,
     curr_frame_count: u32,
     max_frames_active: u32,
 }
 
+// TODO allow for multiple buffers and related sync structures
 impl VkPresent {
     pub fn new(
         frame_sync: Vec<VkFrameSync>,
-        draw_images: Vec<VkImageAlloc>,
-        depth_images: Vec<VkImageAlloc>,
+        mut draw_images: Vec<VkImageAlloc>,
+        mut depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
-        command_pool: VkCommandPool,
+        mut command_pool: Vec<VkCommandPoolMap>,
         descriptors: VkDescriptors,
-    ) -> Self {
-        if frame_sync.len() != draw_images.len() || draw_images.len() != present_images.len() {
-            panic!(
-                "Sync and  image  count mismatch, frame_sync: {}, image_alloc: {}, present_images: {}",
-                frame_sync.len(),
-                draw_images.len(),
-                present_images.len()
-            )
-        }
+    ) -> Result<Self, VkError> {
+        let lengths = [
+            frame_sync.len(),
+            draw_images.len(),
+            depth_images.len(),
+            present_images.len(),
+            command_pool.len(),
+        ];
 
-        if frame_sync.len() != command_pool.buffers.len() {
-            panic!(
-                "Sync and buffer count mismatch, frame_sync: {}, command_buffers: {}",
-                frame_sync.len(),
-                command_pool.buffers.len()
-            )
-        }
+        let length_match = lengths.iter().all(|len| len == &lengths[0]);
+        if !length_match {
+            return Err(VkError::Present(
+                "Source of frame data have non-matching lengths".to_string(),
+            ));
+        };
 
-        let len = draw_images.len();
-        Self {
-            frame_sync,
-            command_pool,
-            draw_images,
-            depth_images,
-            present_images,
-            descriptors,
+        let data_len = frame_sync.len();
+        let mut frame_data = Vec::<VkFrameData>::with_capacity(data_len);
+        for i in 0..data_len {
+            let frame = VkFrameData {
+                sync: frame_sync[i],
+                draw: draw_images.remove(0),   //FIXME
+                depth: depth_images.remove(0), // FIXME
+                present_image: present_images[i].0,
+                present_image_view: present_images[i].1,
+                cmd_pool: command_pool.remove(0), //FIME
+                descriptors: descriptors.clone(),
+            };
+            frame_data.push(frame);
+        }
+        Ok(Self {
+            frame_data,
             curr_frame_count: 0,
-            max_frames_active: len as u32,
-        }
+            max_frames_active: data_len as u32,
+        })
     }
 
-    pub fn get_command_pool(&self) -> &VkCommandPool {
-        &self.command_pool
-    }
-
-    pub fn get_next_frame(&mut self) -> VkFrame {
+    pub fn get_next_frame(&mut self) ->  &VkFrameData {
         let index = self.curr_frame_count % self.max_frames_active;
-        let frame_sync = self.frame_sync[index as usize];
-        let draw_data = &self.draw_images[index as usize];
-        let depth_data = &self.depth_images[index as usize];
-        let cmd_buffer = self.command_pool.buffers[index as usize];
-        let cmd_queue = self.command_pool.queue;
-        let (present_image, present_image_view) = self.present_images[index as usize];
-        let desc_layout = [self.descriptors.descriptor_layouts[index as usize]];
-        let desc_set = [self.descriptors.descriptor_sets[index as usize]];
-
+        let frame = &self.frame_data[index as usize]; // FIXME
         self.curr_frame_count += 1;
-
-        VkFrame {
-            sync: frame_sync,
-            draw_image: draw_data.image,
-            draw_image_view: draw_data.image_view,
-            depth_image: depth_data.image,
-            depth_image_view: depth_data.image_view,
-            present_image,
-            present_image_view,
-            cmd_pool: self.command_pool.pool,
-            cmd_buffer,
-            cmd_queue,
-            desc_layout,
-            desc_set,
-        }
+        frame
     }
 
     pub fn get_curr_frame_count(&self) -> u32 {
@@ -215,12 +255,12 @@ impl VkPresent {
     }
 }
 
+#[derive(Debug)]
 pub struct DeviceQueues {
     pub graphics_queue: (u32, vk::Queue),
     pub present_queue: (u32, vk::Queue),
     pub compute_queue: (u32, vk::Queue),
     pub transfer_queue: (u32, vk::Queue),
-    pub sparse_binding_queue: (u32, vk::Queue),
 }
 
 impl Default for DeviceQueues {
@@ -230,7 +270,6 @@ impl Default for DeviceQueues {
             present_queue: (u32::MAX, vk::Queue::null()),
             compute_queue: (u32::MAX, vk::Queue::null()),
             transfer_queue: (u32::MAX, vk::Queue::null()),
-            sparse_binding_queue: (u32::MAX, vk::Queue::null()),
         }
     }
 }
@@ -242,7 +281,6 @@ impl DeviceQueues {
             QueueType::Graphics => self.graphics_queue.1,
             QueueType::Compute => self.compute_queue.1,
             QueueType::Transfer => self.transfer_queue.1,
-            QueueType::SparseBinding => self.sparse_binding_queue.1,
         }
     }
 
@@ -252,7 +290,19 @@ impl DeviceQueues {
             QueueType::Graphics => self.graphics_queue.0,
             QueueType::Compute => self.compute_queue.0,
             QueueType::Transfer => self.transfer_queue.0,
-            QueueType::SparseBinding => self.sparse_binding_queue.0,
+        }
+    }
+    pub fn get_queue_by_index(&self, index: u32) -> Option<(u32, vk::Queue)> {
+        if self.present_queue.0 == index {
+            Some(self.present_queue)
+        } else if self.graphics_queue.0 == index {
+            Some(self.graphics_queue)
+        } else if self.compute_queue.0 == index {
+            Some(self.compute_queue)
+        } else if self.transfer_queue.0 == index {
+            Some(self.transfer_queue)
+        } else {
+            None
         }
     }
 
@@ -269,10 +319,6 @@ impl DeviceQueues {
             }
             QueueType::Transfer => {
                 self.transfer_queue.0 < u32::MAX && self.transfer_queue.1 != vk::Queue::null()
-            }
-            QueueType::SparseBinding => {
-                self.sparse_binding_queue.0 < u32::MAX
-                    && self.sparse_binding_queue.1 != vk::Queue::null()
             }
         }
     }
@@ -402,8 +448,8 @@ pub struct SceneData {
 }
 
 impl SceneData {
-    pub fn get_current_effect(&mut self) -> &mut ComputeEffect {
-        self.effects.get_mut(self.current as usize).unwrap()
+    pub fn get_current_effect(&self) -> &ComputeEffect {
+        self.effects.get(self.current as usize).unwrap()
     }
 }
 
@@ -416,6 +462,7 @@ impl Default for SceneData {
     }
 }
 
+// TODO make this have a lookup method using an enum?
 #[derive(Clone)]
 pub struct VkDescriptors {
     pub allocator: DescriptorAllocator,

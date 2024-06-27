@@ -127,7 +127,7 @@ pub fn init_mesh_pipeline(
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
-        .disable_blending()
+        .enable_blending_additive()
         .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
         .set_color_attachment_format(draw_format)
         .set_depth_format(depth_format)
@@ -242,98 +242,99 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> SceneD
 }
 
 impl Drop for VkRender {
-    fn drop(&mut self) {
-        unsafe {
-            self.logical_device
-                .device
-                .device_wait_idle()
-                .expect("Render drop failed waiting for device idle");
-
-            self.imgui.renderer.destroy();
-
-            self.logical_device
-                .device
-                .destroy_command_pool(self.immediate.command_pool.pool, None);
-            self.logical_device
-                .device
-                .destroy_fence(self.immediate.fence[0], None);
-
-            // self.logical_device
-            //     .device
-            //     .destroy_pipeline_layout(self.pipeline.pipeline_layout, None);
-            // self.logical_device
-            //     .device
-            //     .destroy_pipeline(self.pipeline.pipeline, None);
-
-            for x in 0..self.presentation.descriptors.descriptor_layouts.len() {
-                self.logical_device.device.destroy_descriptor_set_layout(
-                    self.presentation.descriptors.descriptor_layouts[x],
-                    None,
-                );
-            }
-
-            self.presentation
-                .descriptors
-                .allocator
-                .destroy(&self.logical_device);
-
-            self.presentation.draw_images.iter_mut().for_each(|item| {
-                self.logical_device
-                    .device
-                    .destroy_image_view(item.image_view, None);
-
-                self.allocator
-                    .lock()
-                    .unwrap()
-                    .destroy_image(item.image, &mut item.allocation);
-            });
-
-            self.presentation
-                .present_images
-                .iter()
-                .for_each(|(image, view)| {
-                    self.logical_device.device.destroy_image_view(*view, None)
-                });
-
-            self.main_deletion_queue.iter_mut().for_each(|item| {
-                item.destroy(&self.logical_device.device, &self.allocator.lock().unwrap())
-            });
-
-            self.presentation.frame_sync.iter().for_each(|b| {
-                self.logical_device
-                    .device
-                    .destroy_semaphore(b.swap_semaphore, None);
-                self.logical_device
-                    .device
-                    .destroy_semaphore(b.render_semaphore, None);
-                self.logical_device
-                    .device
-                    .destroy_fence(b.render_fence, None);
-            });
-
-            // todo need to do some work on destruction
-            self.logical_device
-                .device
-                .destroy_command_pool(self.presentation.command_pool.pool, None);
-
-            self.swapchain
-                .swapchain_loader
-                .destroy_swapchain(self.swapchain.swapchain, None);
-
-            self.logical_device.device.destroy_device(None);
-
-            self.surface
-                .surface_instance
-                .destroy_surface(self.surface.surface, None);
-
-            if let Some(debug) = &self.debug {
-                debug
-                    .debug_utils
-                    .destroy_debug_utils_messenger(debug.debug_callback, None); // None == custom allocator
-            }
-            self.instance.destroy_instance(None); // None == allocator callback
-        }
-    }
+    fn drop(&mut self) {}
+    
+       // unsafe {
+        //     self.logical_device
+        //         .device
+        //         .device_wait_idle()
+        //         .expect("Render drop failed waiting for device idle");
+        // 
+        //     self.imgui.renderer.destroy();
+        // 
+        //     self.logical_device
+        //         .device
+        //         .destroy_command_pool(self.immediate.command_pool.pool, None);
+        //     self.logical_device
+        //         .device
+        //         .destroy_fence(self.immediate.fence[0], None);
+        // 
+        //     // self.logical_device
+        //     //     .device
+        //     //     .destroy_pipeline_layout(self.pipeline.pipeline_layout, None);
+        //     // self.logical_device
+        //     //     .device
+        //     //     .destroy_pipeline(self.pipeline.pipeline, None);
+        // 
+        //     for x in 0..self.presentation.descriptors.descriptor_layouts.len() {
+        //         self.logical_device.device.destroy_descriptor_set_layout(
+        //             self.presentation.descriptors.descriptor_layouts[x],
+        //             None,
+        //         );
+        //     }
+        // 
+        //     self.presentation
+        //         .descriptors
+        //         .allocator
+        //         .destroy(&self.logical_device);
+        // 
+        //     self.presentation.draw_images.iter_mut().for_each(|item| {
+        //         self.logical_device
+        //             .device
+        //             .destroy_image_view(item.image_view, None);
+        // 
+        //         self.allocator
+        //             .lock()
+        //             .unwrap()
+        //             .destroy_image(item.image, &mut item.allocation);
+        //     });
+        // 
+        //     self.presentation
+        //         .present_images
+        //         .iter()
+        //         .for_each(|(image, view)| {
+        //             self.logical_device.device.destroy_image_view(*view, None)
+        //         });
+        // 
+        //     self.main_deletion_queue.iter_mut().for_each(|item| {
+        //         item.destroy(&self.logical_device.device, &self.allocator.lock().unwrap())
+        //     });
+        // 
+        //     self.presentation.frame_sync.iter().for_each(|b| {
+        //         self.logical_device
+        //             .device
+        //             .destroy_semaphore(b.swap_semaphore, None);
+        //         self.logical_device
+        //             .device
+        //             .destroy_semaphore(b.render_semaphore, None);
+        //         self.logical_device
+        //             .device
+        //             .destroy_fence(b.render_fence, None);
+        //     });
+        // 
+        //     // todo need to do some work on destruction
+        //     self.logical_device
+        //         .device
+        //         .destroy_command_pool(self.presentation.command_pool.pool, None);
+        // 
+        //     self.swapchain
+        //         .swapchain_loader
+        //         .destroy_swapchain(self.swapchain.swapchain, None);
+        // 
+        //     self.logical_device.device.destroy_device(None);
+        // 
+        //     self.surface
+        //         .surface_instance
+        //         .destroy_surface(self.surface.surface, None);
+        // 
+        //     if let Some(debug) = &self.debug {
+        //         debug
+        //             .debug_utils
+        //             .destroy_debug_utils_messenger(debug.debug_callback, None); // None == custom allocator
+        //     }
+        //     self.instance.destroy_instance(None); // None == allocator callback
+        // }
+  //  }
 }
 impl VkRender {
     fn destroy(&mut self) {
@@ -365,7 +366,7 @@ impl VkRender {
         .remove(0);
 
         let queue_indices =
-            vk_init::graphics_only_queue_indices(&instance, &physical_device.p_device, &surface)?;
+            vk_init::queue_indices_with_preferences(&instance, &physical_device.p_device, &surface, true, true)?;
 
         let mut core_features =
             vk_init::get_general_core_features(&instance, &physical_device.p_device);
@@ -405,12 +406,12 @@ impl VkRender {
             size,
             Some(2),
             None,
-            Some(vk::PresentModeKHR::MAILBOX),
+            Some(vk::PresentModeKHR::IMMEDIATE),
             None,
             true,
         )?;
 
-        let mut command_pools = vk_init::create_command_pools(&logical_device, 2)?;
+        let  command_pools = vk_init::create_command_pools(&logical_device, 2, 1)?;
 
         let frame_buffers: Vec<VkFrameSync> = (0..2)
             .map(|_| vk_init::create_frame_buffer(&logical_device))
@@ -455,14 +456,32 @@ impl VkRender {
             draw_images,
             depth_images,
             present_images,
-            command_pools.remove(0),
+            command_pools,
             descriptors,
-        );
+        ).unwrap();
 
-        //create command pool for immediate rendering, this may need moved to an init
-        let im_command_pool = vk_init::create_command_pools(&logical_device, 1)
-            .unwrap()
-            .remove(0);
+        //create command pool for immediate usage 
+        // TODO this selection needs cleaned up, or we need to properly include all the of
+        // flags a queue support not just the ones we are using it for
+        let im_index = queue_indices
+            .iter()
+            .find(|q| {
+            q.queue_types.contains(&QueueType::Graphics)
+            })
+            .unwrap();
+
+        let im_queue = logical_device
+            .queues
+            .get_queue_by_index(im_index.index)
+            .unwrap();
+
+        let im_command_pool = vk_init::create_immediate_command_pool(
+            &logical_device.device,
+            im_queue,
+            im_index.queue_types.clone(),
+        )
+        .unwrap();
+
         let im_fence_create_info =
             vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         let im_fence = unsafe {
@@ -491,10 +510,8 @@ impl VkRender {
         let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
             allocator.clone(),
             logical_device.device.clone(),
-            presentation.command_pool.queue,
-            presentation.command_pool.pool,
-            // im_command_pool.queue,
-            // im_command_pool.pool,
+            im_command_pool.queue,
+            im_command_pool.pool,
             imgui_dynamic,
             &mut imgui_context,
             Some(imgui_opts),
@@ -507,11 +524,7 @@ impl VkRender {
 
         let mut pipeline_cache = VkPipelineCache::default();
 
-        let mesh_pipeline = init_mesh_pipeline(
-            &logical_device,
-            draw_format,
-            depth_format
-        );
+        let mesh_pipeline = init_mesh_pipeline(&logical_device, draw_format, depth_format);
 
         pipeline_cache.add_pipeline(VkPipelineType::MESH, mesh_pipeline);
 
@@ -542,7 +555,9 @@ impl VkRender {
         let start = SystemTime::now();
         let frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
-        let cmd_buffer = frame_data.cmd_buffer;
+        let cmd_pool = frame_data.cmd_pool.get(QueueType::Graphics);
+        let queue = cmd_pool.queue;
+        let cmd_buffer = cmd_pool.buffers[0];
         let fence = &[frame_sync.render_fence];
 
         let swapchain = [self.swapchain.swapchain];
@@ -579,10 +594,10 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
-            let draw_image = frame_data.draw_image;
-            let draw_view = frame_data.draw_image_view;
-            let depth_image = frame_data.depth_image;
-            let depth_view = frame_data.depth_image_view;
+            let draw_image = frame_data.draw.image;
+            let draw_view = frame_data.draw.image_view;
+            let depth_image = frame_data.depth.image;
+            let depth_view = frame_data.depth.image_view;
             let present_image = frame_data.present_image;
             let present_view = frame_data.present_image_view;
 
@@ -612,7 +627,7 @@ impl VkRender {
                 .get_current_effect()
                 .descriptors
                 .descriptor_sets[image_index as usize]];
-            self.draw_background(draw_image, cmd_buffer, &ds);
+            &self.draw_background(draw_image, cmd_buffer, &ds);
 
             //transition render image for copy from
             vk_util::transition_image(
@@ -708,7 +723,7 @@ impl VkRender {
             &self
                 .logical_device
                 .device
-                .queue_submit2(frame_data.cmd_queue, &submit, frame_sync.render_fence)
+                .queue_submit2(queue, &submit, frame_sync.render_fence)
                 .unwrap();
 
             let r_sem = [frame_sync.render_semaphore];
@@ -720,7 +735,7 @@ impl VkRender {
 
             self.swapchain
                 .swapchain_loader
-                .queue_present(frame_data.cmd_queue, &present_info)
+                .queue_present(queue, &present_info)
                 .unwrap();
         }
         // println!(
@@ -849,7 +864,7 @@ impl VkRender {
                 .cmd_set_scissor(cmd_buffer, 0, &scissor);
 
             let view = glam::Mat4::from_translation(vec3(0.0, 0.0, -5.0));
-            let mut projection = glam::Mat4::perspective_rh_gl(
+            let mut projection = glam::Mat4::perspective_rh(
                 70.0_f32.to_radians(),
                 extent.width as f32 / extent.height as f32,
                 0.1,
@@ -865,7 +880,9 @@ impl VkRender {
 
             self.logical_device.device.cmd_push_constants(
                 cmd_buffer,
-                self.pipeline_cache.get_unchecked(VkPipelineType::MESH).pipeline_layout,
+                self.pipeline_cache
+                    .get_unchecked(VkPipelineType::MESH)
+                    .pipeline_layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 &push_constants.as_byte_slice(),
@@ -975,7 +992,7 @@ impl VkRender {
     }
 
     pub fn draw_background(
-        &mut self,
+        &self,
         image: vk::Image,
         cmd_buffer: vk::CommandBuffer,
         descriptor_set: &[vk::DescriptorSet],
