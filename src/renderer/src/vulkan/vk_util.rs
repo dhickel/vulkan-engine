@@ -177,6 +177,22 @@ pub fn rendering_info<'a>(
     render_info
 }
 
+pub fn depth_attachment_info<'a>(
+    view: vk::ImageView,
+    layout: vk::ImageLayout,
+) -> vk::RenderingAttachmentInfo<'a> {
+    let mut render_info = vk::RenderingAttachmentInfo::default()
+        .image_view(view)
+        .image_layout(layout)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::STORE);
+
+    unsafe {
+        render_info.clear_value.depth_stencil.depth = 0.0;
+    }
+    render_info
+}
+
 pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,

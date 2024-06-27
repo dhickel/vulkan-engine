@@ -61,7 +61,7 @@ where
     let mut unnamed_idx = 0;
     
     for mesh in gltf.meshes() {
-        let surfaces = Vec::<GeoSurface>::new();
+        let mut surfaces = Vec::<GeoSurface>::new();
 
         indices.clear();
         vertices.clear();
@@ -71,6 +71,7 @@ where
                 start_index: indices.len() as u32,
                 count: prim.indices().unwrap().count() as u32,
             };
+            surfaces.push(new_surface);
 
             let init_vtx = vertices.len();
 

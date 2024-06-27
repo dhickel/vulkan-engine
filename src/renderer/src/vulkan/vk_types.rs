@@ -114,8 +114,10 @@ impl VkDestroyable for VkImageAlloc {
 
 pub struct VkFrame {
     pub sync: VkFrameSync,
-    pub render_image: vk::Image,
-    pub render_image_view: vk::ImageView,
+    pub draw_image: vk::Image,
+    pub draw_image_view: vk::ImageView,
+    pub depth_image: vk::Image,
+    pub depth_image_view: vk::ImageView,
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
     pub cmd_pool: vk::CommandPool,
@@ -127,7 +129,8 @@ pub struct VkFrame {
 
 pub struct VkPresent {
     pub frame_sync: Vec<VkFrameSync>,
-    pub image_alloc: Vec<VkImageAlloc>,
+    pub draw_images: Vec<VkImageAlloc>,
+    pub depth_images: Vec<VkImageAlloc>,
     pub descriptors: VkDescriptors,
     pub present_images: Vec<(vk::Image, vk::ImageView)>,
     pub command_pool: VkCommandPool,
@@ -138,16 +141,17 @@ pub struct VkPresent {
 impl VkPresent {
     pub fn new(
         frame_sync: Vec<VkFrameSync>,
-        image_alloc: Vec<VkImageAlloc>,
+        draw_images: Vec<VkImageAlloc>,
+        depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
         command_pool: VkCommandPool,
         descriptors: VkDescriptors,
     ) -> Self {
-        if frame_sync.len() != image_alloc.len() || image_alloc.len() != present_images.len() {
+        if frame_sync.len() != draw_images.len() || draw_images.len() != present_images.len() {
             panic!(
                 "Sync and  image  count mismatch, frame_sync: {}, image_alloc: {}, present_images: {}",
                 frame_sync.len(),
-                image_alloc.len(),
+                draw_images.len(),
                 present_images.len()
             )
         }
@@ -160,11 +164,12 @@ impl VkPresent {
             )
         }
 
-        let len = image_alloc.len();
+        let len = draw_images.len();
         Self {
             frame_sync,
             command_pool,
-            image_alloc,
+            draw_images,
+            depth_images,
             present_images,
             descriptors,
             curr_frame_count: 0,
@@ -179,7 +184,8 @@ impl VkPresent {
     pub fn get_next_frame(&mut self) -> VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame_sync = self.frame_sync[index as usize];
-        let image_data = &self.image_alloc[index as usize];
+        let draw_data = &self.draw_images[index as usize];
+        let depth_data = &self.depth_images[index as usize];
         let cmd_buffer = self.command_pool.buffers[index as usize];
         let cmd_queue = self.command_pool.queue;
         let (present_image, present_image_view) = self.present_images[index as usize];
@@ -190,8 +196,10 @@ impl VkPresent {
 
         VkFrame {
             sync: frame_sync,
-            render_image: image_data.image,
-            render_image_view: image_data.image_view,
+            draw_image: draw_data.image,
+            draw_image_view: draw_data.image_view,
+            depth_image: depth_data.image,
+            depth_image_view: depth_data.image_view,
             present_image,
             present_image_view,
             cmd_pool: self.command_pool.pool,
@@ -449,7 +457,6 @@ impl VkBuffer {
         }
     }
 }
-
 
 pub struct VkGpuMeshBuffers {
     pub index_buffer: VkBuffer,

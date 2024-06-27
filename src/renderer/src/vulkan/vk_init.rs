@@ -735,7 +735,7 @@ pub fn create_swapchain(
     })
 }
 
-pub fn allocate_basic_images(
+pub fn allocate_draw_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
     device: &LogicalDevice,
     size: (u32, u32),
@@ -749,7 +749,7 @@ pub fn allocate_basic_images(
 
     let mut usage_flags = vk::ImageUsageFlags::empty();
     usage_flags |= vk::ImageUsageFlags::TRANSFER_SRC;
-    usage_flags |= vk::ImageUsageFlags::TRANSFER_DST;
+    usage_flags |= vk::ImageUsageFlags::TRANSFER_DST;// Might not be needed?
     usage_flags |= vk::ImageUsageFlags::STORAGE;
     usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
 
@@ -786,6 +786,76 @@ pub fn allocate_basic_images(
                 vk::ImageViewType::TYPE_2D,
                 image,
                 vk::ImageAspectFlags::COLOR,
+            );
+
+            let image_view = unsafe {
+                device
+                    .device
+                    .create_image_view(&view_create_info, None)
+                    .map_err(|e| format!("Error creating image view: {:?}", e))?
+            };
+
+            Ok(VkImageAlloc {
+                image,
+                image_view,
+                allocation,
+                image_extent,
+                image_format,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(images)
+}
+
+pub fn allocate_depth_images(
+    allocator: &Arc<Mutex<vk_mem::Allocator>>,
+    device: &LogicalDevice,
+    size: (u32, u32),
+    count: u32,
+) -> Result<Vec<VkImageAlloc>, String> {
+    let image_extent = vk::Extent3D {
+        width: size.0,
+        height: size.1,
+        depth: 1, // Depth should be 1 for 2D images
+    };
+
+    let mut usage_flags = vk::ImageUsageFlags::empty();
+    usage_flags |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+
+    let sample_flags = vk::SampleCountFlags::TYPE_1;
+    let image_format = vk::Format::D32_SFLOAT;
+    let image_type = vk::ImageType::TYPE_2D;
+
+    let allocator_create_info = vk_mem::AllocationCreateInfo {
+        usage: vk_mem::MemoryUsage::AutoPreferDevice,
+        required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ..Default::default()
+    };
+
+    let image_create_info = vk_util::image_create_info(
+        image_format,
+        usage_flags,
+        image_extent,
+        image_type,
+        sample_flags,
+    );
+
+    let images: Vec<VkImageAlloc> = (0..count)
+        .map(|_| {
+            let (image, allocation) = unsafe {
+                allocator
+                    .lock()
+                    .unwrap()
+                    .create_image(&image_create_info, &allocator_create_info)
+                    .map_err(|e| format!("Error creating image: {:?}", e))?
+            };
+
+            let view_create_info = vk_util::image_view_create_info(
+                image_format,
+                vk::ImageViewType::TYPE_2D,
+                image,
+                vk::ImageAspectFlags::DEPTH,
             );
 
             let image_view = unsafe {

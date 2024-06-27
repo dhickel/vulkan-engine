@@ -1,3 +1,5 @@
+use crate::data::gltf_util;
+use crate::data::gltf_util::MeshAsset;
 use crate::data::primitives::Vertex;
 use crate::vulkan;
 use ash::vk::{
@@ -5,7 +7,8 @@ use ash::vk::{
     ShaderStageFlags,
 };
 use ash::{vk, Device};
-use glam::Vec4;
+use glam::{vec3, Vec4};
+use gltf::accessor::Dimensions::Mat4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
@@ -13,8 +16,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
-use crate::data::gltf_util;
-use crate::data::gltf_util::{load_meshes, MeshAsset};
 
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
@@ -84,58 +85,11 @@ pub fn init_descriptors(device: &LogicalDevice, image_views: &[vk::ImageView]) -
     descriptors
 }
 
-pub fn init_triangle_pipeline(
+pub fn init_mesh_pipeline(
     device: &LogicalDevice,
-    format: vk::Format,
-) -> Result<VkPipeline, String> {
-    let vert_shader = vk_util::load_shader_module(
-        device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
-    )
-    .expect("Error loading shader");
-
-    let frag_shader = vk_util::load_shader_module(
-        device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.frag.spv",
-    )
-    .expect("Error loading shader");
-
-    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
-
-    let pipeline_layout = unsafe {
-        device
-            .device
-            .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None)
-            .map_err(|err| "Error creating pipeline")?
-    };
-
-    println!("Here");
-    let entry = CString::new("main").unwrap();
-
-    let pipeline = vk_pipeline::PipelineBuilder::default()
-        .set_pipeline_layout(pipeline_layout)
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .disable_depth_test()
-        .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
-        .set_depth_format(vk::Format::UNDEFINED)
-        .build_pipeline(&device)
-        .unwrap();
-
-    println!("Note here");
-    unsafe {
-        device.device.destroy_shader_module(vert_shader, None);
-        device.device.destroy_shader_module(frag_shader, None);
-    }
-
-    Ok(VkPipeline::new(pipeline, pipeline_layout))
-}
-
-pub fn init_mesh_pipeline(device: &LogicalDevice, format: vk::Format) -> VkPipeline {
+    draw_format: vk::Format,
+    depth_format: vk::Format,
+) -> VkPipeline {
     let vert_shader = vk_util::load_shader_module(
         device,
         "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
@@ -174,9 +128,9 @@ pub fn init_mesh_pipeline(device: &LogicalDevice, format: vk::Format) -> VkPipel
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
-        .disable_depth_test()
-        .set_color_attachment_format(format)
-        .set_depth_format(vk::Format::UNDEFINED)
+        .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
+        .set_color_attachment_format(draw_format)
+        .set_depth_format(depth_format)
         .build_pipeline(device)
         .unwrap();
 
@@ -323,7 +277,7 @@ impl Drop for VkRender {
                 .allocator
                 .destroy(&self.logical_device);
 
-            self.presentation.image_alloc.iter_mut().for_each(|item| {
+            self.presentation.draw_images.iter_mut().for_each(|item| {
                 self.logical_device
                     .device
                     .destroy_image_view(item.image_view, None);
@@ -479,22 +433,27 @@ impl VkRender {
             ))
         };
 
-        let image_data = vk_init::allocate_basic_images(&allocator, &logical_device, size, 2)?;
+        let draw_images = vk_init::allocate_draw_images(&allocator, &logical_device, size, 2)?;
+        let draw_format = draw_images[0].image_format;
 
-        let render_views: Vec<vk::ImageView> =
-            image_data.iter().map(|data| data.image_view).collect();
+        let draw_views: Vec<vk::ImageView> =
+            draw_images.iter().map(|data| data.image_view).collect();
 
         let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
 
-        let descriptors = init_descriptors(&logical_device, &render_views);
+        let descriptors = init_descriptors(&logical_device, &draw_views);
         let layout = [descriptors.descriptor_layouts[0]];
+
+        let depth_images = vk_init::allocate_depth_images(&allocator, &logical_device, size, 2)?;
+        let depth_format = depth_images[0].image_format;
 
         // FIXME, this needs generalized
         let scene_data = init_scene_data(&logical_device, &descriptors);
 
         let presentation = VkPresent::new(
             frame_buffers,
-            image_data,
+            draw_images,
+            depth_images,
             present_images,
             command_pools.remove(0),
             descriptors,
@@ -548,13 +507,13 @@ impl VkRender {
 
         let mut pipeline_cache = VkPipelineCache::default();
 
-        let triangle_pipeline =
-            init_triangle_pipeline(&logical_device, swapchain.surface_format.format).unwrap();
-
-        let mesh_pipeline = init_mesh_pipeline(&logical_device, swapchain.surface_format.format);
+        let mesh_pipeline = init_mesh_pipeline(
+            &logical_device,
+            draw_format,
+            depth_format
+        );
 
         pipeline_cache.add_pipeline(VkPipelineType::MESH, mesh_pipeline);
-            pipeline_cache.add_pipeline(VkPipelineType::TRIANGLE, triangle_pipeline);
 
         Ok(VkRender {
             window,
@@ -573,7 +532,7 @@ impl VkRender {
             scene_data,
             main_deletion_queue: Vec::new(),
             mesh: None,
-            meshes: None
+            meshes: None,
         })
     }
 }
@@ -620,26 +579,28 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
-            let r_image = frame_data.render_image;
-            let r_image_view = frame_data.render_image_view;
-            let p_image = frame_data.present_image;
-            let p_image_view = frame_data.present_image_view;
+            let draw_image = frame_data.draw_image;
+            let draw_view = frame_data.draw_image_view;
+            let depth_image = frame_data.depth_image;
+            let depth_view = frame_data.depth_image_view;
+            let present_image = frame_data.present_image;
+            let present_view = frame_data.present_image_view;
 
             println!(
                 "On frame: {:?}",
                 self.swapchain.swapchain_images[image_index as usize]
             );
-            println!("present Image: {:?}", p_image);
-            println!("present view: {:?}", p_image_view);
-            println!("render Image: {:?}", r_image);
-            println!("render View: {:?}", r_image_view);
+            println!("present Image: {:?}", present_image);
+            println!("present view: {:?}", present_view);
+            println!("render Image: {:?}", draw_image);
+            println!("render View: {:?}", draw_view);
 
             let extent = self.swapchain.extent;
 
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                r_image,
+                draw_image,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::GENERAL,
             );
@@ -651,40 +612,42 @@ impl VkRender {
                 .get_current_effect()
                 .descriptors
                 .descriptor_sets[image_index as usize]];
-            self.draw_background(r_image, cmd_buffer, &ds);
+            self.draw_background(draw_image, cmd_buffer, &ds);
 
             //transition render image for copy from
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                r_image,
+                draw_image,
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
-            if self.mesh.is_none() {
-            self.init_default_data();
+            if self.meshes.is_none() {
+                self.init_default_data();
             }
 
-            let mesh = if let Some(mesh) = &self.mesh {
-                mesh
+            let meshes = if let Some(meshes) = &self.meshes {
+                meshes
             } else {
                 panic!()
             };
-            
-            let meshes = if let Some(meshes) = &self.meshes {
-                &meshes;
-            } else {
-                panic!();
-            };
 
-            self.draw_geometry(cmd_buffer, r_image_view, mesh);
+            vk_util::transition_image(
+                &self.logical_device.device,
+                cmd_buffer,
+                depth_image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            );
+
+            self.draw_geometry(cmd_buffer, draw_view, depth_view, meshes);
 
             // transition present image to copy to
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                r_image,
+                draw_image,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
@@ -692,7 +655,7 @@ impl VkRender {
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                p_image,
+                present_image,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
@@ -701,27 +664,27 @@ impl VkRender {
             vk_util::blit_copy_image_to_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                r_image,
+                draw_image,
                 extent,
-                p_image,
+                present_image,
                 extent,
             );
 
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                p_image,
+                present_image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
-              self.draw_imgui(cmd_buffer, p_image_view);
+            self.draw_imgui(cmd_buffer, present_view);
 
             // transition swapchain to present
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
-                p_image,
+                present_image,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,
             );
@@ -833,18 +796,24 @@ impl VkRender {
     pub fn draw_geometry(
         &self,
         cmd_buffer: vk::CommandBuffer,
-        image_view: vk::ImageView,
-        mesh_buffers: &VkGpuMeshBuffers,
+        draw_view: vk::ImageView,
+        depth_view: vk::ImageView,
+        model_buffers: &[Rc<MeshAsset>],
     ) {
         let color_attachment = [vk_util::rendering_attachment_info(
-            image_view,
+            draw_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
 
+        let depth_attachment = [vk_util::depth_attachment_info(
+            depth_view,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        )];
+
         let extent = self.swapchain.extent;
 
-        let rendering_info = vk_util::rendering_info(extent, &color_attachment, &[]);
+        let rendering_info = vk_util::rendering_info(extent, &color_attachment, &depth_attachment);
 
         unsafe {
             self.logical_device
@@ -855,52 +824,48 @@ impl VkRender {
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_cache
-                    .get_unchecked(VkPipelineType::TRIANGLE)
+                    .get_unchecked(VkPipelineType::MESH)
                     .pipeline,
             );
-        }
 
-        let viewport = [vk::Viewport::default()
-            .x(0.0)
-            .y(0.0)
-            .width(extent.width as f32)
-            .height(extent.height as f32)
-            .min_depth(0.0)
-            .max_depth(0.0)];
+            let viewport = [vk::Viewport::default()
+                .x(0.0)
+                .y(0.0)
+                .width(extent.width as f32)
+                .height(extent.height as f32)
+                .min_depth(0.0)
+                .max_depth(0.0)];
 
-        unsafe {
             self.logical_device
                 .device
                 .cmd_set_viewport(cmd_buffer, 0, &viewport);
-        }
 
-        let scissor = [vk::Rect2D::default()
-            .offset(vk::Offset2D::default().y(0).y(0))
-            .extent(extent)];
+            let scissor = [vk::Rect2D::default()
+                .offset(vk::Offset2D::default().y(0).y(0))
+                .extent(extent)];
 
-        unsafe {
             self.logical_device
                 .device
                 .cmd_set_scissor(cmd_buffer, 0, &scissor);
 
-
-            //
-            self.logical_device.device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_cache
-                    .get_unchecked(VkPipelineType::TRIANGLE)
-                    .pipeline,
+            let view = glam::Mat4::from_translation(vec3(0.0, 0.0, -5.0));
+            let mut projection = glam::Mat4::perspective_rh_gl(
+                70.0_f32.to_radians(),
+                extent.width as f32 / extent.height as f32,
+                0.1,
+                10_000.0,
             );
 
-            let push_constants =
-                VkGpuPushConsts::new(glam::Mat4::IDENTITY, mesh_buffers.vertex_buffer_addr);
+            projection.y_axis.y *= -1.0;
+
+            let mut push_constants = VkGpuPushConsts::new(
+                projection * view,
+                model_buffers[2].mesh_buffers.vertex_buffer_addr,
+            );
 
             self.logical_device.device.cmd_push_constants(
                 cmd_buffer,
-                self.pipeline_cache
-                    .get_unchecked(VkPipelineType::MESH)
-                    .pipeline_layout,
+                self.pipeline_cache.get_unchecked(VkPipelineType::MESH).pipeline_layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 &push_constants.as_byte_slice(),
@@ -908,14 +873,21 @@ impl VkRender {
 
             self.logical_device.device.cmd_bind_index_buffer(
                 cmd_buffer,
-                mesh_buffers.index_buffer.buffer,
+                model_buffers[2].mesh_buffers.index_buffer.buffer,
                 0,
                 vk::IndexType::UINT32,
             );
 
-            self.logical_device
-                .device
-                .cmd_draw_indexed(cmd_buffer, 6, 1, 0, 0, 0);
+            println!("Surfaces{:?}", model_buffers[2].surfaces);
+
+            self.logical_device.device.cmd_draw_indexed(
+                cmd_buffer,
+                model_buffers[2].surfaces[0].count,
+                1,
+                model_buffers[2].surfaces[0].start_index,
+                0,
+                0,
+            );
 
             self.logical_device.device.cmd_end_rendering(cmd_buffer);
         }
@@ -1145,31 +1117,14 @@ impl VkRender {
         new_surface
     }
 
-    pub fn init_default_data(&mut self){
-        let mut verts = [Vertex::default(); 4];
-
-        verts[0].position = glam::vec3(0.5, -0.5, 0.0);
-        verts[1].position = glam::vec3(0.5, 0.5, 0.0);
-        verts[2].position = glam::vec3(-0.5, -0.5, 0.0);
-        verts[3].position = glam::vec3(-0.5, 0.5, 0.0);
-
-        verts[0].color = glam::vec4(0.0, 0.0, 0.0, 1.0);
-        verts[1].color = glam::vec4(0.5, 0.5, 0.5, 1.0);
-        verts[2].color = glam::vec4(1.0, 0.0, 0.0, 1.0);
-        verts[3].color = glam::vec4(0.0, 1.0, 0.0, 1.0);
-
-        let mut indices: [u32; 6] = [0; 6];
-
-        indices[0] = 0;
-        indices[1] = 1;
-        indices[2] = 2;
-        indices[3] = 2;
-        indices[4] = 1;
-        indices[5] = 3;
-
-       self.mesh = Some(self.upload_mesh(&indices, &verts));
-        self.meshes = Some(gltf_util::load_meshes(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/basicmesh.glb", 
-            |indices, vertices| self.upload_mesh(indices, vertices)).unwrap())
+    pub fn init_default_data(&mut self) {
+        self.mesh = None;
+        self.meshes = Some(
+            gltf_util::load_meshes(
+                "/home/mindspice/code/rust/engine/src/renderer/src/assets/basicmesh.glb",
+                |indices, vertices| self.upload_mesh(indices, vertices),
+            )
+            .unwrap(),
+        );
     }
 }
