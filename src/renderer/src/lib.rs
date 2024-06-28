@@ -2,16 +2,15 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
+mod data;
 pub mod renderer;
 mod texture;
 mod vulkan;
-mod data;
-
 
 use ash::vk;
 use ash::vk::{
     CommandBuffer, CommandBufferResetFlags, CommandBufferUsageFlags,
-    ExtendsPhysicalDeviceFeatures2, PhysicalDeviceFeatures, SubmitInfo2,
+    ExtendsPhysicalDeviceFeatures2, Extent2D, PhysicalDeviceFeatures, SubmitInfo2,
 };
 use glam::*;
 use glfw::{Action, ClientApiHint, Context, Key, WindowHint};
@@ -20,7 +19,10 @@ use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 
+use crate::vulkan::vk_render;
+use crate::vulkan::vk_types::VkWindowState;
 use raw_window_handle::RawWindowHandle;
+use std::cmp::max;
 use std::process::exit;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
@@ -28,8 +30,6 @@ use winit::event::{Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
-use crate::vulkan::vk_render;
-
 
 const NANO: f64 = 1000000000.0;
 
@@ -48,48 +48,64 @@ pub fn run() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let size = (1920u32, 1080u32);
+    let size = Extent2D::default().width(1920).height(1080);
+
     let window = winit::window::WindowBuilder::new()
         .with_inner_size(winit::dpi::PhysicalSize::new(size.0, size.1))
         .build(&event_loop)
         .unwrap();
 
+    let max_extent = if let Some(mon) = event_loop
+        .available_monitors()
+        .into_iter()
+        .max_by_key(|mon| mon.size())
+    {
+        Extent2D::default()
+            .height(mon.size().height)
+            .width(mon.size().width)
+    } else {
+        panic!("Failed to detect monitor")
+    };
+
+    let window_state = VkWindowState::new(window, size, max_extent);
+
     let mut last_time = SystemTime::now();
     let mut frame: u32 = 0;
     let mut fps_timer = SystemTime::now();
 
-    let mut app = vk_render::VkRender::new(window, size, true).unwrap();
-    let mut opened  = true;
+    let mut app = vk_render::VkRender::new(window_state, true).unwrap();
+    let mut opened = true;
 
     event_loop
         .run(move |event, control_flow| {
             input_manager.update();
-            app.imgui.handle_event(&app.window, &event);
+            app.imgui.handle_event(&app.window_state.window, &event);
             match event {
                 Event::NewEvents(..) => {
-                    app.imgui.context.io_mut().update_delta_time(SystemTime::now().duration_since(last_time).unwrap());
+                    app.imgui
+                        .context
+                        .io_mut()
+                        .update_delta_time(SystemTime::now().duration_since(last_time).unwrap());
                 }
 
                 Event::WindowEvent {
                     ref event,
                     window_id,
                 } if window_id == window_id => {
-
                     match event {
-
                         WindowEvent::ActivationTokenDone { .. } => {}
-                        WindowEvent::Resized(_) => {}
                         WindowEvent::Moved(_) => {}
                         WindowEvent::CloseRequested => {
                             control_flow.exit();
-                        },
+                        }
                         WindowEvent::Destroyed => {}
                         WindowEvent::DroppedFile(_) => {}
                         WindowEvent::HoveredFile(_) => {}
                         WindowEvent::HoveredFileCancelled => {}
                         WindowEvent::Focused(_) => {}
-                        WindowEvent::KeyboardInput { event: key_event, .. } => {
-
+                        WindowEvent::KeyboardInput {
+                            event: key_event, ..
+                        } => {
                             input_manager.update();
                             if let PhysicalKey::Code(key) = key_event.physical_key {
                                 input_manager.add_keycode(key) // TODO need to take pressed state into account
@@ -120,28 +136,47 @@ pub fn run() {
                         WindowEvent::ScaleFactorChanged { .. } => {} // Tutorial resizes here but api changed
                         WindowEvent::ThemeChanged(_) => {}
                         WindowEvent::Occluded(_) => {}
+                        WindowEvent::Resized(new_size) => {
+                            println!("Resize requested");
+                            app.resize_requested = true;
+                            let new_extent = Extent2D::default()
+                                .height(new_size.height)
+                                .width(new_size.width);
+
+                            app.rebuild_swapchain(new_extent)
+                        }
                         WindowEvent::RedrawRequested => {
+                            if !app.resize_requested {
+                                let now = SystemTime::now();
+                                app.imgui
+                                    .context
+                                    .io_mut()
+                                    .update_delta_time(now.duration_since(last_time).unwrap());
+                                app.imgui
+                                    .platform
+                                    .prepare_frame(
+                                        app.imgui.context.io_mut(),
+                                        &app.window_state.window,
+                                    )
+                                    .unwrap();
+                                let frame_ms = now.duration_since(last_time).unwrap().as_millis();
+                                last_time = now;
 
+                                app.render(frame);
+                                app.window_state.window.request_redraw();
+                                if now.duration_since(fps_timer).unwrap() > Duration::from_secs(1) {
+                                    app.window_state
+                                        .window
+                                        .set_title(format!("Frame-Rate: {}", frame).as_str());
+                                    frame = 0;
+                                    fps_timer = now;
 
-                            let now = SystemTime::now();
-                            app.imgui.context.io_mut().update_delta_time(now.duration_since(last_time).unwrap());
-                            app.imgui.platform.prepare_frame(app.imgui.context.io_mut(), &app.window).unwrap();
-                            let frame_ms = now.duration_since(last_time).unwrap().as_millis();
-                            last_time = now;
-
-                            app.render(frame);
-                            app.window.request_redraw();
-                            if now.duration_since(fps_timer).unwrap() > Duration::from_secs(1) {
-                                app.window
-                                    .set_title(format!("Frame-Rate: {}", frame).as_str());
-                                frame = 0;
-                                fps_timer = now;
-
-                                // event_loop.set_control_flow(ControlFlow::WaitUntil(
-                                //     std::time::Instant::now() + self.wait_time,
-                                // ));
+                                    // event_loop.set_control_flow(ControlFlow::WaitUntil(
+                                    //     std::time::Instant::now() + self.wait_time,
+                                    // ));
+                                }
+                                frame += 1;
                             }
-                            frame += 1;
                         }
                     }
                 }
@@ -149,8 +184,6 @@ pub fn run() {
             }
         })
         .expect("TODO: panic message");
-
-
 }
 
 // fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

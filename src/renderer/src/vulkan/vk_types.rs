@@ -1,17 +1,18 @@
 use crate::vulkan::vk_descriptor::DescriptorAllocator;
-use ash::vk;
+use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 use std::ffi::{CStr, CString};
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::{mem, slice};
-use vk_mem::Alloc;
+
+use vk_mem::{Alloc, Allocator};
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
 
 pub trait VkDestroyable {
-    fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {}
+    fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator);
 }
 #[derive(Debug)]
 pub enum VkError {
@@ -25,6 +26,30 @@ pub enum VkError {
 //         }
 //     }
 // }
+
+pub struct VkWindowState {
+    pub window: winit::window::Window,
+    pub resize_requested: bool,
+    pub max_extent: vk::Extent2D,
+    pub curr_extent: vk::Extent2D,
+    pub render_scale: f32,
+}
+
+impl VkWindowState {
+    pub fn new(
+        window: winit::window::Window,
+        curr_extent: vk::Extent2D,
+        max_extent: vk::Extent2D,
+    ) -> Self {
+        Self {
+            window,
+            curr_extent,
+            max_extent,
+            resize_requested: false,
+            render_scale: 1.0,
+        }
+    }
+}
 
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
@@ -92,9 +117,17 @@ impl QueueType {
 
 // TODO this with need refactored when it comes to to request separate compute/graphics pools
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VkCommandPoolMap {
     pools: [VkCommandPool; 4],
+}
+
+impl VkDestroyable for VkCommandPoolMap {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.pools
+            .iter_mut()
+            .for_each(|mut pool| pool.destroy(device, allocator));
+    }
 }
 
 impl VkCommandPoolMap {
@@ -107,13 +140,25 @@ impl VkCommandPoolMap {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VkCommandPool {
     pub queue_index: u32,
     pub queue: vk::Queue,
     pub queue_type: Vec<QueueType>,
     pub pool: vk::CommandPool,
     pub buffers: Vec<vk::CommandBuffer>,
+}
+
+impl Clone for VkCommandPool {
+    fn clone(&self) -> Self {
+        VkCommandPool {
+            queue_index: self.queue_index,
+            queue: self.queue,
+            queue_type: self.queue_type.clone(),
+            pool: self.pool,
+            buffers: self.buffers.clone(),
+        }
+    }
 }
 
 impl Default for VkCommandPool {
@@ -128,11 +173,29 @@ impl Default for VkCommandPool {
     }
 }
 
+impl VkDestroyable for VkCommandPool {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        unsafe {
+            device.destroy_command_pool(self.pool, None);
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct VkFrameSync {
     pub swap_semaphore: vk::Semaphore,
     pub render_semaphore: vk::Semaphore,
     pub render_fence: vk::Fence,
+}
+
+impl VkDestroyable for VkFrameSync {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        unsafe {
+            device.destroy_semaphore(self.swap_semaphore, None);
+            device.destroy_semaphore(self.render_semaphore, None);
+            device.destroy_fence(self.render_fence, None);
+        }
+    }
 }
 
 pub struct VkImageAlloc {
@@ -153,48 +216,56 @@ impl VkDestroyable for VkImageAlloc {
 }
 
 // TODO we are going to want more control over the descriptor sets
-pub struct VkFrameData {
+pub struct VKFrame {
     pub sync: VkFrameSync,
     pub draw: VkImageAlloc,
     pub depth: VkImageAlloc,
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
     pub cmd_pool: VkCommandPoolMap,
-    pub descriptors: VkDescriptors,
 }
 
-impl VkFrameData {
-    pub fn get_frame(&self) -> VkFrame {
-        VkFrame {
-            sync: self.sync,
-            draw_image: self.draw.image,
-            draw_view: self.draw.image_view,
-            depth_image: self.depth.image,
-            depth_view: self.depth.image_view,
-            present_image: self.present_image,
-            present_view: self.present_image_view,
-            cmd_pool: &self.cmd_pool,
-            descriptors: &self.descriptors,
+impl VkDestroyable for VKFrame {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        unsafe {
+            self.sync.destroy(device, allocator);
+            self.draw.destroy(device, allocator);
+            self.depth.destroy(device, allocator);
+            // device.destroy_image_view(self.present_image_view, None);
+            // device.destroy_image(self.present_image, None);
+            self.cmd_pool.destroy(device, allocator)
         }
     }
 }
 
-pub struct VkFrame<'a> {
-    pub sync: VkFrameSync,
-    pub draw_image: vk::Image,
-    pub draw_view: vk::ImageView,
-    pub depth_image: vk::Image,
-    pub depth_view: vk::ImageView,
-    pub present_image: vk::Image,
-    pub present_view: vk::ImageView,
-    pub cmd_pool: &'a VkCommandPoolMap,
-    pub descriptors: &'a VkDescriptors,
+impl VKFrame {
+    pub fn destroy_for_rebuild(
+        &mut self,
+        device: &Device,
+        allocator: &Allocator,
+    ) -> (VkFrameSync, VkCommandPoolMap) {
+        unsafe {
+            self.draw.destroy(device, allocator);
+            self.depth.destroy(device, allocator);
+            // device.destroy_image_view(self.present_image_view, None);
+            // device.destroy_image(self.present_image, None);
+        }
+        (self.sync, self.cmd_pool.clone())
+    }
 }
 
 pub struct VkPresent {
-    pub frame_data: Vec<VkFrameData>,
+    pub frame_data: Vec<VKFrame>,
     curr_frame_count: u32,
     max_frames_active: u32,
+}
+
+impl VkDestroyable for VkPresent {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.frame_data
+            .iter_mut()
+            .for_each(|frame| frame.destroy(device, allocator));
+    }
 }
 
 // TODO allow for multiple buffers and related sync structures
@@ -205,7 +276,6 @@ impl VkPresent {
         mut depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
         mut command_pool: Vec<VkCommandPoolMap>,
-        descriptors: VkDescriptors,
     ) -> Result<Self, VkError> {
         let lengths = [
             frame_sync.len(),
@@ -223,16 +293,15 @@ impl VkPresent {
         };
 
         let data_len = frame_sync.len();
-        let mut frame_data = Vec::<VkFrameData>::with_capacity(data_len);
+        let mut frame_data = Vec::<VKFrame>::with_capacity(data_len);
         for i in 0..data_len {
-            let frame = VkFrameData {
+            let frame = VKFrame {
                 sync: frame_sync[i],
                 draw: draw_images.remove(0),   //FIXME
                 depth: depth_images.remove(0), // FIXME
                 present_image: present_images[i].0,
                 present_image_view: present_images[i].1,
                 cmd_pool: command_pool.remove(0), //FIME
-                descriptors: descriptors.clone(),
             };
             frame_data.push(frame);
         }
@@ -243,7 +312,7 @@ impl VkPresent {
         })
     }
 
-    pub fn get_next_frame(&mut self) ->  &VkFrameData {
+    pub fn get_next_frame(&mut self) -> &VKFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame = &self.frame_data[index as usize]; // FIXME
         self.curr_frame_count += 1;
@@ -252,6 +321,20 @@ impl VkPresent {
 
     pub fn get_curr_frame_count(&self) -> u32 {
         self.curr_frame_count
+    }
+
+    pub fn destroy_for_rebuild(
+        &mut self,
+        device: &Device,
+        allocator: &Allocator,
+    ) -> (Vec<VkFrameSync>, Vec<VkCommandPoolMap>) {
+        let (frame_sync, cmd_pools): (Vec<_>, Vec<_>) = self
+            .frame_data
+            .iter_mut()
+            .map(|frame| frame.destroy_for_rebuild(device, allocator))
+            .unzip();
+
+        (frame_sync, cmd_pools)
     }
 }
 

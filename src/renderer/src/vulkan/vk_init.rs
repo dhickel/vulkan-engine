@@ -1,6 +1,6 @@
 use ash::vk;
 
-use ash::vk::CommandBuffer;
+use ash::vk::{CommandBuffer, Extent2D};
 use std::borrow::Cow;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
@@ -169,7 +169,8 @@ pub fn get_window_surface(
         )
         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
     };
-
+    
+    
     let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
 
     log::info!("Surface created");
@@ -664,7 +665,7 @@ pub fn get_swapchain_support(
             .surface_instance
             .get_physical_device_surface_capabilities(*physical_device, surface_info.surface)
             .map_err(|e| format!("Fatal: Failed swapchain capabilities check: {:?}", e))?;
-
+        
         let formats = surface_info
             .surface_instance
             .get_physical_device_surface_formats(*physical_device, surface_info.surface)
@@ -688,7 +689,7 @@ pub fn create_swapchain(
     physical_device: &PhyDevice,
     logical_device: &LogicalDevice,
     surface_info: &VkSurface,
-    requested_extent: (u32, u32),
+    requested_extent: Extent2D,
     image_count: Option<u32>,
     surface_format: Option<vk::SurfaceFormatKHR>,
     present_mode: Option<vk::PresentModeKHR>,
@@ -725,6 +726,7 @@ pub fn create_swapchain(
 
     log::info!("Swapchain: Setting extent");
     let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
+    
 
     let image_count = if let Some(explicit_count) = image_count {
         std::cmp::min(
@@ -821,12 +823,12 @@ pub fn create_swapchain(
 pub fn allocate_draw_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
     device: &LogicalDevice,
-    size: (u32, u32),
+    size: Extent2D,
     count: u32,
 ) -> Result<Vec<VkImageAlloc>, String> {
     let image_extent = vk::Extent3D {
-        width: size.0,
-        height: size.1,
+        width: size.width,
+        height: size.height,
         depth: 1, // Depth should be 1 for 2D images
     };
 
@@ -894,12 +896,12 @@ pub fn allocate_draw_images(
 pub fn allocate_depth_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
     device: &LogicalDevice,
-    size: (u32, u32),
+    size: Extent2D,
     count: u32,
 ) -> Result<Vec<VkImageAlloc>, String> {
     let image_extent = vk::Extent3D {
-        width: size.0,
-        height: size.1,
+        width: size.width,
+        height: size.height,
         depth: 1, // Depth should be 1 for 2D images
     };
 
@@ -1060,17 +1062,17 @@ pub fn select_sc_present_mode(
 
 pub fn select_sc_extent(
     capabilities: &vk::SurfaceCapabilitiesKHR,
-    requested_extent: (u32, u32),
+    requested_extent: Extent2D,
 ) -> vk::Extent2D {
     if capabilities.current_extent.width != u32::MAX {
         capabilities.current_extent
     } else {
         vk::Extent2D {
-            width: requested_extent.0.clamp(
+            width: requested_extent.width.clamp(
                 capabilities.min_image_extent.width,
                 capabilities.max_image_extent.width,
             ),
-            height: requested_extent.1.clamp(
+            height: requested_extent.height.clamp(
                 capabilities.min_image_extent.height,
                 capabilities.max_image_extent.height,
             ),
@@ -1134,7 +1136,6 @@ pub fn create_command_pools(
     buffer_count: u32,
 ) -> Result<Vec<VkCommandPoolMap>, String> {
     log::info!("Creating command pools");
-
     
     println!("Queues: {:?}", device.queues);
     let devices_queues = &device.queues;
@@ -1263,7 +1264,7 @@ pub fn create_command_buffers(
     Ok(buffers)
 }
 
-pub fn create_frame_buffer(device: &LogicalDevice) -> Result<VkFrameSync, String> {
+pub fn create_frame_sync(device: &LogicalDevice) -> Result<VkFrameSync, String> {
     let semaphore_create_info = vk::SemaphoreCreateInfo::default();
 
     let (swap_semaphore, render_semaphore, render_fence) = unsafe {
@@ -1293,6 +1294,8 @@ pub fn create_frame_buffer(device: &LogicalDevice) -> Result<VkFrameSync, String
         render_fence,
     })
 }
+
+
 
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
     vec![
