@@ -3,7 +3,10 @@ use crate::data::gltf_util::MeshAsset;
 use crate::data::primitives::Vertex;
 use crate::vulkan;
 use ash::prelude::VkResult;
-use ash::vk::{AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, Extent2D, ImageLayout, PipelineCache, ShaderStageFlags};
+use ash::vk::{
+    AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, Extent2D, ImageLayout, PipelineCache,
+    ShaderStageFlags,
+};
 use ash::{vk, Device};
 use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
@@ -368,7 +371,7 @@ impl VkRender {
             None,
             true,
         )?;
-        
+
         if swapchain.extent != window_state.curr_extent {
             window_state.curr_extent = swapchain.extent;
         }
@@ -395,10 +398,11 @@ impl VkRender {
                 Allocator::new(allocator_info).map_err(|err| "Failed to initialize allocator")?,
             ))
         };
-        
+
         // Set images to max extent, so they can be reused on window resizing
 
-        let draw_images = vk_init::allocate_draw_images(&allocator, &logical_device, window_state.max_extent, 2)?;
+        let draw_images =
+            vk_init::allocate_draw_images(&allocator, &logical_device, window_state.max_extent, 2)?;
         let draw_format = draw_images[0].image_format;
 
         let draw_views: Vec<vk::ImageView> =
@@ -409,7 +413,12 @@ impl VkRender {
         let descriptors = init_descriptors(&logical_device, &draw_views);
         let layout = [descriptors.descriptor_layouts[0]];
 
-        let depth_images = vk_init::allocate_depth_images(&allocator, &logical_device, window_state.max_extent, 2)?;
+        let depth_images = vk_init::allocate_depth_images(
+            &allocator,
+            &logical_device,
+            window_state.max_extent,
+            2,
+        )?;
         let depth_format = depth_images[0].image_format;
 
         // FIXME, this needs generalized
@@ -458,7 +467,11 @@ impl VkRender {
         let mut imgui_context = imgui::Context::create();
 
         let mut platform = WinitPlatform::init(&mut imgui_context);
-        platform.attach_window(imgui_context.io_mut(), &window_state.window, HiDpiMode::Default);
+        platform.attach_window(
+            imgui_context.io_mut(),
+            &window_state.window,
+            HiDpiMode::Default,
+        );
 
         let imgui_opts = imgui_rs_vulkan_renderer::Options {
             in_flight_frames: 2,
@@ -530,41 +543,13 @@ impl VkRender {
             true,
         )
         .unwrap();
-
-        let (frame_sync, command_pools) = self
-            .presentation
-            .destroy_for_rebuild(&self.logical_device.device, &self.allocator.lock().unwrap());
-
-        let draw_images =
-            vk_init::allocate_draw_images(&self.allocator, &self.logical_device, new_size, 2)
-                .unwrap();
-        let draw_format = draw_images[0].image_format;
-
-        let draw_views: Vec<vk::ImageView> =
-            draw_images.iter().map(|data| data.image_view).collect();
-
-        let present_images =
-            vk_init::create_basic_present_views(&self.logical_device, &swapchain).unwrap();
-
-        let descriptors = init_descriptors(&self.logical_device, &draw_views);
-        let layout = [descriptors.descriptor_layouts[0]];
-
-        let depth_images =
-            vk_init::allocate_depth_images(&self.allocator, &self.logical_device, new_size, 2)
-                .unwrap();
-        let depth_format = depth_images[0].image_format;
-
-        let presentation = VkPresent::new(
-            frame_sync,
-            draw_images,
-            depth_images,
-            present_images,
-            command_pools,
-        )
-        .unwrap();
-
+        
+ 
+        // FIXME, I think we will need to destory the old images view when we reassign
+        let present_images = vk_init::create_basic_present_views(&self.logical_device, &swapchain).unwrap();
         self.swapchain = swapchain;
-        self.presentation = presentation;
+        self.presentation.replace_present_images(present_images);
+        //self.presentation = presentation;
         self.resize_requested = false;
         println!("Resize Completed")
     }
@@ -636,7 +621,7 @@ impl VkRender {
             println!("render Image: {:?}", draw_image);
             println!("render View: {:?}", draw_view);
 
-            let extent = self.swapchain.extent;
+            let extent = self.window_state.curr_extent;
 
             vk_util::transition_image(
                 &self.logical_device.device,
@@ -783,7 +768,8 @@ impl VkRender {
             None,
         )];
 
-        let render_info = vk_util::rendering_info(self.swapchain.extent, &attachment_info, &[]);
+        let render_info =
+            vk_util::rendering_info(self.window_state.curr_extent, &attachment_info, &[]);
 
         unsafe {
             self.logical_device
@@ -858,7 +844,7 @@ impl VkRender {
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
         )];
 
-        let extent = self.swapchain.extent;
+        let extent = self.window_state.curr_extent;
 
         let rendering_info = vk_util::rendering_info(extent, &color_attachment, &depth_attachment);
 
@@ -1056,8 +1042,8 @@ impl VkRender {
 
             self.logical_device.device.cmd_dispatch(
                 cmd_buffer,
-                (self.swapchain.extent.width as f32 / 16.0).ceil() as u32,
-                (self.swapchain.extent.height as f32 / 16.0).ceil() as u32,
+                (self.window_state.curr_extent.width as f32 / 16.0).ceil() as u32,
+                (self.window_state.curr_extent.height as f32 / 16.0).ceil() as u32,
                 1,
             );
         }

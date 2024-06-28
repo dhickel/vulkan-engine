@@ -51,7 +51,7 @@ pub fn run() {
     let size = Extent2D::default().width(1920).height(1080);
 
     let window = winit::window::WindowBuilder::new()
-        .with_inner_size(winit::dpi::PhysicalSize::new(size.0, size.1))
+        .with_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height))
         .build(&event_loop)
         .unwrap();
 

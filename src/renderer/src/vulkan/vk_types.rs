@@ -322,6 +322,17 @@ impl VkPresent {
     pub fn get_curr_frame_count(&self) -> u32 {
         self.curr_frame_count
     }
+    
+    pub fn replace_present_images(&mut self, images: Vec<(vk::Image, vk::ImageView)>) {
+        if images.len() != self.frame_data.len() {
+            panic!("Replacement present images, more than existing")
+        }
+        for x in 0..images.len() {
+            self.frame_data[x].present_image = images[x].0;
+            self.frame_data[x].present_image_view = images[x].1;
+        }
+        self.curr_frame_count = 0;
+    }
 
     pub fn destroy_for_rebuild(
         &mut self,
