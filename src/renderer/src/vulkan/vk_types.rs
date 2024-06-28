@@ -1,4 +1,4 @@
-use crate::vulkan::vk_descriptor::DescriptorAllocator;
+use crate::vulkan::vk_descriptor::{DescriptorAllocator, VkDynamicDescriptorAllocator};
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
@@ -48,6 +48,15 @@ impl VkWindowState {
             resize_requested: false,
             render_scale: 1.0,
         }
+    }
+    
+    // FIXME doesn't work
+    pub fn update_window_scale(&mut self, new_scalar : Option<f32>) {
+        if let Some(scalar) = new_scalar {
+            self.render_scale = scalar
+        }
+        self.curr_extent.height = (self.curr_extent.height as f32 * self.render_scale) as u32;
+        self.curr_extent.width = (self.curr_extent.width as f32 * self.render_scale) as u32;
     }
 }
 
@@ -223,6 +232,7 @@ pub struct VKFrame {
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
     pub cmd_pool: VkCommandPoolMap,
+    pub descriptors: VkDynamicDescriptorAllocator
 }
 
 impl VkDestroyable for VKFrame {
@@ -276,6 +286,7 @@ impl VkPresent {
         mut depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
         mut command_pool: Vec<VkCommandPoolMap>,
+        mut descriptor_allocators: Vec<VkDynamicDescriptorAllocator>
     ) -> Result<Self, VkError> {
         let lengths = [
             frame_sync.len(),
@@ -283,6 +294,7 @@ impl VkPresent {
             depth_images.len(),
             present_images.len(),
             command_pool.len(),
+            descriptor_allocators.len()
         ];
 
         let length_match = lengths.iter().all(|len| len == &lengths[0]);
@@ -293,15 +305,18 @@ impl VkPresent {
         };
 
         let data_len = frame_sync.len();
+        // Not the most efficient since items are removed from the head, but keeps resource
+        // alignment simple, and there's only 2-3 elements anyway.
         let mut frame_data = Vec::<VKFrame>::with_capacity(data_len);
         for i in 0..data_len {
             let frame = VKFrame {
                 sync: frame_sync[i],
-                draw: draw_images.remove(0),   //FIXME
-                depth: depth_images.remove(0), // FIXME
+                draw: draw_images.remove(0),  
+                depth: depth_images.remove(0), 
                 present_image: present_images[i].0,
                 present_image_view: present_images[i].1,
-                cmd_pool: command_pool.remove(0), //FIME
+                cmd_pool: command_pool.remove(0), 
+                descriptors: descriptor_allocators.remove(0)
             };
             frame_data.push(frame);
         }
@@ -536,18 +551,18 @@ pub struct ComputeEffect {
     pub data: Compute4x4PushConstants,
 }
 
-pub struct SceneData {
+pub struct ComputeData {
     pub effects: Vec<ComputeEffect>,
     pub current: u32,
 }
 
-impl SceneData {
+impl ComputeData {
     pub fn get_current_effect(&self) -> &ComputeEffect {
         self.effects.get(self.current as usize).unwrap()
     }
 }
 
-impl Default for SceneData {
+impl Default for ComputeData {
     fn default() -> Self {
         Self {
             effects: vec![],
@@ -690,3 +705,5 @@ impl VkPipelineCache {
         unsafe { self.pipelines[typ as usize].unwrap_unchecked() }
     }
 }
+
+

@@ -1,10 +1,9 @@
-
-use ash::prelude::VkResult;
-use ash::vk;
-use ash::vk::DescriptorPool;
-use std::collections::VecDeque;
 use crate::vulkan::vk_types::*;
-
+use ash::prelude::VkResult;
+use ash::vk::DescriptorPool;
+use ash::{vk, Device};
+use std::collections::VecDeque;
+use vk_mem::Allocator;
 
 pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,
@@ -19,7 +18,11 @@ impl<'a> Default for DescriptorLayoutBuilder<'a> {
 }
 
 impl<'a> DescriptorLayoutBuilder<'a> {
-    pub fn add_binding(&mut self, binding: u32, typ: vk::DescriptorType) -> &mut DescriptorLayoutBuilder<'a> {
+    pub fn add_binding(
+        &mut self,
+        binding: u32,
+        typ: vk::DescriptorType,
+    ) -> &mut DescriptorLayoutBuilder<'a> {
         let binding = vk::DescriptorSetLayoutBinding::default()
             .binding(binding)
             .descriptor_type(typ)
@@ -136,7 +139,7 @@ pub struct DescriptorWriter<'a> {
     writes: Vec<vk::WriteDescriptorSet<'a>>,
 }
 
-impl <'a>Default for DescriptorWriter<'a> {
+impl<'a> Default for DescriptorWriter<'a> {
     fn default() -> Self {
         Self {
             image_infos: Vec::with_capacity(10),
@@ -212,14 +215,14 @@ impl<'a> DescriptorWriter<'a> {
     }
 }
 
-pub struct DynamicDescriptorAllocator {
+pub struct VkDynamicDescriptorAllocator {
     ratios: Vec<PoolSizeRatio>,
     full_pools: Vec<vk::DescriptorPool>,
     ready_pools: Vec<vk::DescriptorPool>,
     sets_per_pool: u32,
 }
 
-impl Default for DynamicDescriptorAllocator {
+impl Default for VkDynamicDescriptorAllocator {
     fn default() -> Self {
         Self {
             ratios: Vec::with_capacity(10),
@@ -230,22 +233,20 @@ impl Default for DynamicDescriptorAllocator {
     }
 }
 
-impl DynamicDescriptorAllocator {
-    pub fn init(
-        &mut self,
+impl VkDynamicDescriptorAllocator {
+    pub fn new(
         device: &LogicalDevice,
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
-    ) -> Result<(), String> {
-        self.ratios.clear();
-        pool_ratios.iter().for_each(|r| self.ratios.push(*r));
+    ) -> Result<VkDynamicDescriptorAllocator, String> {
+        let mut pool = VkDynamicDescriptorAllocator::default();
+        pool_ratios.iter().for_each(|r| pool.ratios.push(*r));
 
         let new_pool = Self::create_pool(device, max_sets, pool_ratios)?;
-
-        self.sets_per_pool = (max_sets as f32 * 1.5) as u32;
-
-        self.ready_pools.push(new_pool);
-        Ok(())
+        
+        pool.sets_per_pool = (max_sets as f32 * 1.5) as u32;
+        pool.ready_pools.push(new_pool);
+        Ok(pool)
     }
 
     pub fn clear_pools(&mut self, device: &LogicalDevice) -> Result<(), String> {
@@ -272,25 +273,7 @@ impl DynamicDescriptorAllocator {
         Ok(())
     }
 
-    pub fn destroy_pools(&mut self, device: &LogicalDevice) -> Result<(), String> {
-        unsafe {
-            for &pool in &self.ready_pools {
-                device.device.destroy_descriptor_pool(pool, None);
-            }
-        }
-
-        unsafe {
-            for &pool in &self.full_pools {
-                device.device.destroy_descriptor_pool(pool, None);
-            }
-        }
-
-        self.ready_pools.clear();
-        self.full_pools.clear();
-        Ok(())
-    }
-
-    pub fn get_pool(&mut self, device: &LogicalDevice) -> Result<vk::DescriptorPool, String> {
+    fn get_pool(&mut self, device: &LogicalDevice) -> Result<vk::DescriptorPool, String> {
         if self.ready_pools.len() != 0 {
             Ok(self.ready_pools.remove(self.ready_pools.len() - 1))
         } else {
@@ -307,7 +290,7 @@ impl DynamicDescriptorAllocator {
         }
     }
 
-    pub fn create_pool(
+    fn create_pool(
         device: &LogicalDevice,
         set_count: u32,
         pool_ratios: &[PoolSizeRatio],
@@ -363,5 +346,24 @@ impl DynamicDescriptorAllocator {
             }
             Err(e) => Err(format!("Allocation error {:?}", e)),
         }
+    }
+}
+
+impl VkDestroyable for VkDynamicDescriptorAllocator {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        unsafe {
+            for pool in &self.ready_pools {
+                device.destroy_descriptor_pool(*pool, None);
+            }
+        }
+
+        unsafe {
+            for pool in &self.full_pools {
+                device.destroy_descriptor_pool(*pool, None);
+            }
+        }
+
+        self.ready_pools.clear();
+        self.full_pools.clear();
     }
 }

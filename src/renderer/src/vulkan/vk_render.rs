@@ -1,6 +1,6 @@
 use crate::data::gltf_util;
 use crate::data::gltf_util::MeshAsset;
-use crate::data::primitives::Vertex;
+use crate::data::gpu_data::{GPUScene, Vertex};
 use crate::vulkan;
 use ash::prelude::VkResult;
 use ash::vk::{
@@ -38,7 +38,8 @@ pub struct VkRender {
     pub pipeline_cache: VkPipelineCache,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
-    pub scene_data: SceneData,
+    pub compute_data: ComputeData,
+    pub scene_data: GPUScene,
     pub mesh: Option<VkGpuMeshBuffers>,
     pub meshes: Option<Vec<Rc<MeshAsset>>>,
     pub resize_requested: bool,
@@ -144,7 +145,7 @@ pub fn init_mesh_pipeline(
     VkPipeline::new(pipeline, pipeline_layout)
 }
 
-pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> SceneData {
+pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> ComputeData {
     let desc_layout = &layout.descriptor_layouts;
 
     let push_constants = [vk::PushConstantRange::default()
@@ -236,7 +237,7 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> SceneD
         device.device.destroy_shader_module(sky_shader, None);
     }
 
-    let mut scene_data = SceneData::default();
+    let mut scene_data = ComputeData::default();
     scene_data.effects.push(gradient);
     scene_data.effects.push(sky);
 
@@ -422,7 +423,19 @@ impl VkRender {
         let depth_format = depth_images[0].image_format;
 
         // FIXME, this needs generalized
-        let scene_data = init_scene_data(&logical_device, &descriptors);
+        let compute_data = init_scene_data(&logical_device, &descriptors);
+
+        let pool_ratios = [
+            PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
+        ];
+
+        let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..2)
+            .map(|_| VkDynamicDescriptorAllocator::new(&logical_device, 1000, &pool_ratios))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
 
         let presentation = VkPresent::new(
             frame_buffers,
@@ -430,16 +443,22 @@ impl VkRender {
             depth_images,
             present_images,
             command_pools,
+            descriptor_allocators,
         )
         .unwrap();
 
         //create command pool for immediate usage
         // TODO this selection needs cleaned up, or we need to properly include all the of
-        // flags a queue support not just the ones we are using it for
+        //  flags a queue support not just the ones we are using it for, right now selecting graphics
+        //  which also supports transfer, but we are also using this as a queue for gui rendering
+        //  maybe give the gui its own graphics queue as well, since immediate is mainly for transfer
+        //  and should be using its own transfer queue, as we dont need them in the per frame?
         let im_index = queue_indices
             .iter()
             .find(|q| q.queue_types.contains(&QueueType::Graphics))
             .unwrap();
+
+        print!("Queue Types Immediate: {:?}", im_index.queue_types);
 
         let im_queue = logical_device
             .queues
@@ -503,6 +522,15 @@ impl VkRender {
 
         pipeline_cache.add_pipeline(VkPipelineType::MESH, mesh_pipeline);
 
+        let gpu_descriptor = DescriptorLayoutBuilder::default()
+            .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+            .build(
+                &logical_device,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                vk::DescriptorSetLayoutCreateFlags::empty(),
+            );
+        let scene_data = GPUScene::new(gpu_descriptor.unwrap());
+
         Ok(VkRender {
             window_state,
             allocator,
@@ -517,10 +545,11 @@ impl VkRender {
             pipeline_cache,
             immediate,
             imgui,
-            scene_data,
+            compute_data,
             main_deletion_queue: Vec::new(),
             mesh: None,
             meshes: None,
+            scene_data,
             resize_requested: false,
         })
     }
@@ -528,6 +557,7 @@ impl VkRender {
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
         println!("Resize Rebuild SwapChain");
         self.window_state.curr_extent = new_size;
+
         unsafe { self.logical_device.device.device_wait_idle().unwrap() }
 
         let swapchain = vk_init::create_swapchain(
@@ -543,10 +573,10 @@ impl VkRender {
             true,
         )
         .unwrap();
-        
- 
+
         // FIXME, I think we will need to destory the old images view when we reassign
-        let present_images = vk_init::create_basic_present_views(&self.logical_device, &swapchain).unwrap();
+        let present_images =
+            vk_init::create_basic_present_views(&self.logical_device, &swapchain).unwrap();
         self.swapchain = swapchain;
         self.presentation.replace_present_images(present_images);
         //self.presentation = presentation;
@@ -634,7 +664,7 @@ impl VkRender {
             //
 
             let ds = [self
-                .scene_data
+                .compute_data
                 .get_current_effect()
                 .descriptors
                 .descriptor_sets[image_index as usize]];
@@ -777,7 +807,7 @@ impl VkRender {
                 .cmd_begin_rendering(cmd_buffer, &render_info);
         }
 
-        let mut selected = self.scene_data.get_current_effect();
+        let mut selected = self.compute_data.get_current_effect();
 
         // let frame = self.imgui.context.new_frame();
         // frame.text(&selected.name);
@@ -1015,7 +1045,7 @@ impl VkRender {
         cmd_buffer: vk::CommandBuffer,
         descriptor_set: &[vk::DescriptorSet],
     ) {
-        let compute_effect = self.scene_data.get_current_effect();
+        let compute_effect = self.compute_data.get_current_effect();
         unsafe {
             self.logical_device.device.cmd_bind_pipeline(
                 cmd_buffer,

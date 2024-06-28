@@ -9,7 +9,7 @@ use gltf::mesh::util::{ReadColors, ReadIndices, ReadNormals, ReadPositions, Read
 use gltf::{Gltf, Semantic};
 use std::rc::Rc;
 
-use crate::data::primitives::Vertex;
+use crate::data::gpu_data::Vertex;
 use log::log;
 
 #[derive(Debug)]
