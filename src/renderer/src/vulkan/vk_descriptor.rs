@@ -262,11 +262,10 @@ impl VkDynamicDescriptorAllocator {
         Ok(pool)
     }
 
-    pub fn clear_pools(&mut self, device: &LogicalDevice) -> Result<(), String> {
+    pub fn clear_pools(&mut self, device: &ash::Device) -> Result<(), String> {
         unsafe {
             for &pool in &self.ready_pools {
                 device
-                    .device
                     .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
                     .map_err(|err| format!("Failed to reset descriptor pool: {:?}", err))?;
             }
@@ -275,7 +274,6 @@ impl VkDynamicDescriptorAllocator {
         unsafe {
             for &pool in &self.full_pools {
                 device
-                    .device
                     .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
                     .map_err(|err| format!("Failed to reset descriptor pool: {:?}", err))?;
                 self.ready_pools.push(pool);

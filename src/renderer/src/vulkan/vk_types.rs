@@ -271,7 +271,9 @@ impl VkFrame {
     pub fn process_deletions(&mut self, device: &ash::Device, allocator: &Allocator) {
         self.deletions
             .iter_mut()
-            .for_each(|d| d.delete(device, allocator));
+            .for_each(|d| {
+                d.delete(device, allocator)
+            });
         self.deletions.clear();
     }
 }
@@ -355,7 +357,7 @@ impl VkPresent {
         let index = (self.curr_frame_count - 1) % self.max_frames_active;
         unsafe { self.frame_data.get_unchecked_mut(index as usize) }
     }
-    
+
     pub fn get_curr_frame(&self) -> &VkFrame {
         let index = (self.curr_frame_count - 1) % self.max_frames_active;
         unsafe { self.frame_data.get_unchecked(index as usize) }

@@ -622,7 +622,7 @@ impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
         let start = SystemTime::now();
 
-        let frame_data = self.presentation.get_next_frame();
+        let mut frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
         let cmd_pool = frame_data.cmd_pool.get(QueueType::Graphics);
         let draw_image = frame_data.draw.image;
@@ -644,6 +644,8 @@ impl VkRender {
                 .wait_for_fences(fence, true, u32::MAX as u64)
                 .unwrap();
             self.logical_device.device.reset_fences(fence).unwrap();
+
+         self.presentation.get_curr_frame_mut().process_deletions(&self.logical_device.device, &self.allocator.lock().unwrap());
 
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
@@ -925,7 +927,8 @@ impl VkRender {
                 .presentation
                 .get_curr_frame_mut()
                 .descriptors
-                .allocate(&self.logical_device, &def_desc).unwrap()];
+                .allocate(&self.logical_device, &def_desc)
+                .unwrap()];
 
             let mut writer = DescriptorWriter::default();
             writer.write_image(
@@ -935,9 +938,8 @@ impl VkRender {
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
-            
+
             writer.update_set(&self.logical_device, image_set[0]);
-            
 
             self.logical_device.device.cmd_bind_descriptor_sets(
                 cmd_buffer,
@@ -949,7 +951,7 @@ impl VkRender {
                 &image_set,
                 &[],
             );
-            
+
             let viewport = [vk::Viewport::default()
                 .x(0.0)
                 .y(0.0)
@@ -1043,16 +1045,16 @@ impl VkRender {
                 .unwrap();
 
             let mut writer = DescriptorWriter::default();
-            
-                writer.write_buffer(
-                    0,
-                    gpu_scene_buffer.buffer,
-                    std::mem::size_of::<GPUSceneData>(),
-                    0,
-                    vk::DescriptorType::UNIFORM_BUFFER,
-                );
-            
-                writer.update_set(&self.logical_device, global_descriptor);
+
+            writer.write_buffer(
+                0,
+                gpu_scene_buffer.buffer,
+                std::mem::size_of::<GPUSceneData>(),
+                0,
+                vk::DescriptorType::UNIFORM_BUFFER,
+            );
+
+            writer.update_set(&self.logical_device, global_descriptor);
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
 
