@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::ffi::CStr;
 
 use crate::vulkan::vk_types::*;
@@ -111,6 +112,58 @@ pub fn image_create_info<'a>(
         .array_layers(1)
         .samples(sample_flags)
         .usage(usage_flags)
+}
+
+pub fn create_image(
+    device: &ash::Device,
+    allocator: &Allocator,
+    size: vk::Extent3D,
+    format: vk::Format,
+    usage_flags: vk::ImageUsageFlags,
+    mip_mapped: bool,
+) -> VkImageAlloc {
+    let mut image_info = image_create_info(
+        format,
+        usage_flags,
+        size,
+        ImageType::TYPE_2D,
+        vk::SampleCountFlags::TYPE_1,
+    );
+
+    let mips = if mip_mapped {
+        let max_dimension = max(size.width, size.height) as f64;
+        let mips = (max_dimension.log2().floor() as u32) + 1;
+        image_info = image_info.mip_levels(mips);
+        mips
+    } else {
+        1
+    };
+
+    let mut alloc_info = vk_mem::AllocationCreateInfo::default();
+    alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
+    alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+    let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
+
+    let aspect_flag = if format == vk::Format::D32_SFLOAT {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
+    };
+
+    let mut view_info =
+        image_view_create_info(format, vk::ImageViewType::TYPE_2D, image, aspect_flag);
+    view_info.subresource_range.level_count = mips;
+
+    let image_view = unsafe { device.create_image_view(&view_info, None).unwrap() };
+
+    VkImageAlloc {
+        image,
+        image_view,
+        allocation,
+        image_extent: size,
+        image_format: format,
+    }
 }
 
 pub fn image_view_create_info<'a>(
@@ -335,7 +388,7 @@ pub fn load_shader_module(
 }
 
 pub fn allocate_buffer(
-    allocator: &Arc<Mutex<Allocator>>,
+    allocator: &Allocator,
     size: usize,
     usage_flags: vk::BufferUsageFlags,
     memory_usage: vk_mem::MemoryUsage,
@@ -351,13 +404,11 @@ pub fn allocate_buffer(
 
     let (buffer, allocation) = unsafe {
         allocator
-            .lock()
-            .unwrap()
             .create_buffer(&buffer_info, &alloc_create_info)
             .map_err(|err| format!("Failed to allocate buffer, reason: {:?}", err))?
     };
 
-    let alloc_info = allocator.lock().unwrap().get_allocation_info(&allocation);
+    let alloc_info = allocator.get_allocation_info(&allocation);
 
     Ok(VkBuffer {
         buffer,
@@ -366,11 +417,8 @@ pub fn allocate_buffer(
     })
 }
 
-pub fn destroy_buffer(allocator: &Arc<Mutex<vk_mem::Allocator>>, mut buffer: VkBuffer) {
+pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
     unsafe {
-        allocator
-            .lock()
-            .unwrap()
-            .destroy_buffer(buffer.buffer, &mut buffer.allocation)
+        allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation)
     }
 }

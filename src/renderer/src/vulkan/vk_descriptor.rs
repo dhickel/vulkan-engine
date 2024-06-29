@@ -157,13 +157,13 @@ impl<'a> Default for DescriptorWriter<'a> {
 
 impl<'a> DescriptorWriter<'a> {
     pub fn write_image(
-        &'a mut self,
+        &mut self,
         binding: u32,
         image_view: vk::ImageView,
         sampler: vk::Sampler,
         layout: vk::ImageLayout,
         typ: vk::DescriptorType,
-    ) {
+    )  {
         let info = vk::DescriptorImageInfo::default()
             .sampler(sampler)
             .image_view(image_view)
@@ -181,13 +181,13 @@ impl<'a> DescriptorWriter<'a> {
     }
 
     pub fn write_buffer(
-        mut self,
+        &mut self,
         binding: u32,
         buffer: vk::Buffer,
         size: usize,
         offset: usize,
         typ: vk::DescriptorType,
-    ) -> Self {
+    )  {
         let info = vk::DescriptorBufferInfo::default()
             .buffer(buffer)
             .offset(offset as vk::DeviceSize)
@@ -202,7 +202,6 @@ impl<'a> DescriptorWriter<'a> {
             .descriptor_type(typ);
 
         self.writes.push((VkDescWriterType::Buffer, descriptor_set));
-        self
     }
 
     pub fn clear(&mut self) {
@@ -211,7 +210,7 @@ impl<'a> DescriptorWriter<'a> {
         self.writes.clear();
     }
     
-    pub fn update_set(mut self, device: &LogicalDevice, set: vk::DescriptorSet) -> Self {
+    pub fn update_set(mut self, device: &LogicalDevice, set: vk::DescriptorSet) {
         let mut buffer_infos = self.buffer_infos.iter();
         let mut image_infos = self.image_infos.iter();
 
@@ -226,7 +225,6 @@ impl<'a> DescriptorWriter<'a> {
                     .update_descriptor_sets(&[write.dst_set(set)], &[])
             }
         }
-        self
     }
 }
 

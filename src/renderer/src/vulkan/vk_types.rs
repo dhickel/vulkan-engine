@@ -351,9 +351,14 @@ impl VkPresent {
         self.curr_frame_count
     }
 
-    pub fn get_curr_frame(&mut self) -> &mut VkFrame {
+    pub fn get_curr_frame_mut(&mut self) -> &mut VkFrame {
         let index = (self.curr_frame_count - 1) % self.max_frames_active;
         unsafe { self.frame_data.get_unchecked_mut(index as usize) }
+    }
+    
+    pub fn get_curr_frame(&self) -> &VkFrame {
+        let index = (self.curr_frame_count - 1) % self.max_frames_active;
+        unsafe { self.frame_data.get_unchecked(index as usize) }
     }
 
     pub fn add_deletion_to_curr_frame(&mut self, deletion: VkDeletable) {
@@ -596,7 +601,7 @@ impl Default for ComputeData {
 
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
-pub struct VkDescriptors {
+pub struct  VkDescriptors {
     pub allocator: DescriptorAllocator,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
