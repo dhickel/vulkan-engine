@@ -49,9 +49,9 @@ impl VkWindowState {
             render_scale: 1.0,
         }
     }
-    
+
     // FIXME doesn't work
-    pub fn update_window_scale(&mut self, new_scalar : Option<f32>) {
+    pub fn update_window_scale(&mut self, new_scalar: Option<f32>) {
         if let Some(scalar) = new_scalar {
             self.render_scale = scalar
         }
@@ -225,17 +225,18 @@ impl VkDestroyable for VkImageAlloc {
 }
 
 // TODO we are going to want more control over the descriptor sets
-pub struct VKFrame {
+pub struct VkFrame {
     pub sync: VkFrameSync,
     pub draw: VkImageAlloc,
     pub depth: VkImageAlloc,
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
     pub cmd_pool: VkCommandPoolMap,
-    pub descriptors: VkDynamicDescriptorAllocator
+    pub descriptors: VkDynamicDescriptorAllocator,
+    deletions: Vec<VkDeletable>,
 }
 
-impl VkDestroyable for VKFrame {
+impl VkDestroyable for VkFrame {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
             self.sync.destroy(device, allocator);
@@ -248,7 +249,7 @@ impl VkDestroyable for VKFrame {
     }
 }
 
-impl VKFrame {
+impl VkFrame {
     pub fn destroy_for_rebuild(
         &mut self,
         device: &Device,
@@ -262,10 +263,21 @@ impl VKFrame {
         }
         (self.sync, self.cmd_pool.clone())
     }
+
+    pub fn add_deletion(&mut self, deletion: VkDeletable) {
+        self.deletions.push(deletion);
+    }
+
+    pub fn process_deletions(&mut self, device: &ash::Device, allocator: &Allocator) {
+        self.deletions
+            .iter_mut()
+            .for_each(|d| d.delete(device, allocator));
+        self.deletions.clear();
+    }
 }
 
 pub struct VkPresent {
-    pub frame_data: Vec<VKFrame>,
+    pub frame_data: Vec<VkFrame>,
     curr_frame_count: u32,
     max_frames_active: u32,
 }
@@ -286,7 +298,7 @@ impl VkPresent {
         mut depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
         mut command_pool: Vec<VkCommandPoolMap>,
-        mut descriptor_allocators: Vec<VkDynamicDescriptorAllocator>
+        mut descriptor_allocators: Vec<VkDynamicDescriptorAllocator>,
     ) -> Result<Self, VkError> {
         let lengths = [
             frame_sync.len(),
@@ -294,7 +306,7 @@ impl VkPresent {
             depth_images.len(),
             present_images.len(),
             command_pool.len(),
-            descriptor_allocators.len()
+            descriptor_allocators.len(),
         ];
 
         let length_match = lengths.iter().all(|len| len == &lengths[0]);
@@ -307,16 +319,17 @@ impl VkPresent {
         let data_len = frame_sync.len();
         // Not the most efficient since items are removed from the head, but keeps resource
         // alignment simple, and there's only 2-3 elements anyway.
-        let mut frame_data = Vec::<VKFrame>::with_capacity(data_len);
+        let mut frame_data = Vec::<VkFrame>::with_capacity(data_len);
         for i in 0..data_len {
-            let frame = VKFrame {
+            let frame = VkFrame {
                 sync: frame_sync[i],
-                draw: draw_images.remove(0),  
-                depth: depth_images.remove(0), 
+                draw: draw_images.remove(0),
+                depth: depth_images.remove(0),
                 present_image: present_images[i].0,
                 present_image_view: present_images[i].1,
-                cmd_pool: command_pool.remove(0), 
-                descriptors: descriptor_allocators.remove(0)
+                cmd_pool: command_pool.remove(0),
+                descriptors: descriptor_allocators.remove(0),
+                deletions: Vec::with_capacity(100),
             };
             frame_data.push(frame);
         }
@@ -327,7 +340,7 @@ impl VkPresent {
         })
     }
 
-    pub fn get_next_frame(&mut self) -> &VKFrame {
+    pub fn get_next_frame(&mut self) -> &VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame = &self.frame_data[index as usize]; // FIXME
         self.curr_frame_count += 1;
@@ -337,7 +350,17 @@ impl VkPresent {
     pub fn get_curr_frame_count(&self) -> u32 {
         self.curr_frame_count
     }
-    
+
+    pub fn get_curr_frame(&mut self) -> &mut VkFrame {
+        let index = (self.curr_frame_count - 1) % self.max_frames_active;
+        unsafe { self.frame_data.get_unchecked_mut(index as usize) }
+    }
+
+    pub fn add_deletion_to_curr_frame(&mut self, deletion: VkDeletable) {
+        let index = (self.curr_frame_count - 1) % self.max_frames_active;
+        self.frame_data[index as usize].add_deletion(deletion);
+    }
+
     pub fn replace_present_images(&mut self, images: Vec<(vk::Image, vk::ImageView)>) {
         if images.len() != self.frame_data.len() {
             panic!("Replacement present images, more than existing")
@@ -706,4 +729,16 @@ impl VkPipelineCache {
     }
 }
 
+pub enum VkDeletable {
+    AllocatedBuffer(VkBuffer),
+}
 
+impl VkDeletable {
+    pub fn delete(&mut self, device: &ash::Device, allocator: &Allocator) {
+        match self {
+            VkDeletable::AllocatedBuffer(ref mut buffer) => unsafe {
+                allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation);
+            },
+        }
+    }
+}

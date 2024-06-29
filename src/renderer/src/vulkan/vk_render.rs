@@ -1,6 +1,6 @@
 use crate::data::gltf_util;
 use crate::data::gltf_util::MeshAsset;
-use crate::data::gpu_data::{GPUScene, Vertex};
+use crate::data::gpu_data::{GPUScene, GPUSceneData, Vertex};
 use crate::vulkan;
 use ash::prelude::VkResult;
 use ash::vk::{
@@ -588,9 +588,17 @@ impl VkRender {
 impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
         let start = SystemTime::now();
+
         let frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
         let cmd_pool = frame_data.cmd_pool.get(QueueType::Graphics);
+        let draw_image = frame_data.draw.image;
+        let draw_view = frame_data.draw.image_view;
+        let depth_image = frame_data.depth.image;
+        let depth_view = frame_data.depth.image_view;
+        let present_image = frame_data.present_image;
+        let present_view = frame_data.present_image_view;
+
         let queue = cmd_pool.queue;
         let cmd_buffer = cmd_pool.buffers[0];
         let fence = &[frame_sync.render_fence];
@@ -635,13 +643,6 @@ impl VkRender {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
-            let draw_image = frame_data.draw.image;
-            let draw_view = frame_data.draw.image_view;
-            let depth_image = frame_data.depth.image;
-            let depth_view = frame_data.depth.image_view;
-            let present_image = frame_data.present_image;
-            let present_view = frame_data.present_image_view;
-
             println!(
                 "On frame: {:?}",
                 self.swapchain.swapchain_images[image_index as usize]
@@ -683,12 +684,6 @@ impl VkRender {
                 self.init_default_data();
             }
 
-            let meshes = if let Some(meshes) = &self.meshes {
-                meshes
-            } else {
-                panic!()
-            };
-
             vk_util::transition_image(
                 &self.logical_device.device,
                 cmd_buffer,
@@ -697,7 +692,7 @@ impl VkRender {
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
 
-            self.draw_geometry(cmd_buffer, draw_view, depth_view, meshes);
+            self.draw_geometry(cmd_buffer, draw_view, depth_view);
 
             // transition present image to copy to
             vk_util::transition_image(
@@ -857,12 +852,16 @@ impl VkRender {
     }
 
     pub fn draw_geometry(
-        &self,
+        &mut self,
         cmd_buffer: vk::CommandBuffer,
         draw_view: vk::ImageView,
         depth_view: vk::ImageView,
-        model_buffers: &[Rc<MeshAsset>],
     ) {
+        let model_buffers = if let Some(meshes) = &self.meshes {
+            meshes
+        } else {
+            panic!()
+        };
         let color_attachment = [vk_util::rendering_attachment_info(
             draw_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -943,8 +942,6 @@ impl VkRender {
                 vk::IndexType::UINT32,
             );
 
-            println!("Surfaces{:?}", model_buffers[2].surfaces);
-
             self.logical_device.device.cmd_draw_indexed(
                 cmd_buffer,
                 model_buffers[2].surfaces[0].count,
@@ -953,6 +950,47 @@ impl VkRender {
                 0,
                 0,
             );
+
+            let mut gpu_scene_buffer = vk_util::allocate_buffer(
+                &self.allocator,
+                std::mem::size_of::<GPUSceneData>(),
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk_mem::MemoryUsage::AutoPreferDevice,
+            )
+            .unwrap();
+
+            let curr_frame = self.presentation.get_curr_frame();
+
+            let scene_uniform_data = GPUSceneData::default();
+
+            unsafe {
+                unsafe {
+                    let allocator = self.allocator.lock().unwrap();
+                    let data_ptr = allocator
+                        .map_memory(&mut gpu_scene_buffer.allocation)
+                        .unwrap() as *mut GPUSceneData;
+                    data_ptr.write(scene_uniform_data);
+
+                    allocator.unmap_memory(&mut gpu_scene_buffer.allocation);
+                }
+            }
+
+            let global_descriptor = curr_frame
+                .descriptors
+                .allocate(&self.logical_device, &self.scene_data.descriptor)
+                .unwrap();
+
+            let writer = DescriptorWriter::default()
+                .write_buffer(
+                    0,
+                    gpu_scene_buffer.buffer,
+                    std::mem::size_of::<GPUSceneData>(),
+                    0,
+                    vk::DescriptorType::UNIFORM_BUFFER,
+                )
+                .update_set(&self.logical_device, global_descriptor);
+
+            curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
 
             self.logical_device.device.cmd_end_rendering(cmd_buffer);
         }
@@ -995,47 +1033,17 @@ impl VkRender {
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
             let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
-            // Check the fence status before submission
-            let fence_status_before = self
-                .logical_device
-                .device
-                .get_fence_status(self.immediate.fence[0]);
-            match fence_status_before {
-                Ok(status) => println!("Fence status before submit: {:?}", status),
-                Err(e) => println!("Error getting fence status before submit: {:?}", e),
-            }
-
             // Submit the command buffer and signal the fence correctly
             self.logical_device
                 .device
                 .queue_submit2(queue, &submit_info, self.immediate.fence[0])
                 .unwrap();
 
-            // Check the fence status after submission
-            let fence_status_after = self
-                .logical_device
-                .device
-                .get_fence_status(self.immediate.fence[0]);
-            match fence_status_after {
-                Ok(status) => println!("Fence status after submit: {:?}", status),
-                Err(e) => println!("Error getting fence status after submit: {:?}", e),
-            }
-
             // Wait for the fence to be signaled
             self.logical_device
                 .device
                 .wait_for_fences(&self.immediate.fence, true, u64::MAX)
                 .unwrap();
-
-            // Check the fence status after waiting
-            let fence_status_final = self
-                .logical_device
-                .device
-                .get_fence_status(self.immediate.fence[0]);
-            match fence_status_final {
-                Ok(status) => println!("Fence status after waiting: {:?}", status),
-                Err(e) => println!("Error getting fence status after waiting: {:?}", e),
-            }
         }
     }
 
@@ -1125,7 +1133,7 @@ impl VkRender {
             &self.allocator,
             v_buffer_size + i_buffer_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferHost,
+            vk_mem::MemoryUsage::AutoPreferDevice,
         )
         .expect("Failed to allocate staging buffer");
 

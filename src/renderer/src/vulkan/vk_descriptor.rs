@@ -3,6 +3,7 @@ use ash::prelude::VkResult;
 use ash::vk::DescriptorPool;
 use ash::{vk, Device};
 use std::collections::VecDeque;
+use std::vec;
 use vk_mem::Allocator;
 
 pub struct DescriptorLayoutBuilder<'a> {
@@ -133,10 +134,15 @@ impl DescriptorAllocator {
     }
 }
 
+pub enum VkDescWriterType {
+    Image,
+    Buffer,
+}
+
 pub struct DescriptorWriter<'a> {
-    image_infos: Vec<vk::DescriptorImageInfo>,
-    buffer_infos: Vec<vk::DescriptorBufferInfo>,
-    writes: Vec<vk::WriteDescriptorSet<'a>>,
+    image_infos: Vec<[vk::DescriptorImageInfo; 1]>,
+    buffer_infos: Vec<[vk::DescriptorBufferInfo; 1]>,
+    writes: Vec<(VkDescWriterType, vk::WriteDescriptorSet<'a>)>,
 }
 
 impl<'a> Default for DescriptorWriter<'a> {
@@ -163,43 +169,40 @@ impl<'a> DescriptorWriter<'a> {
             .image_view(image_view)
             .image_layout(layout);
 
-        self.image_infos.push(info);
-        let info = std::slice::from_ref(self.image_infos.last().unwrap());
+        self.image_infos.push([info]);
 
         let descriptor_set = vk::WriteDescriptorSet::default()
             .dst_binding(binding)
             .dst_set(vk::DescriptorSet::null())
             .descriptor_count(1)
-            .descriptor_type(typ)
-            .image_info(info);
+            .descriptor_type(typ);
 
-        self.writes.push(descriptor_set);
+        self.writes.push((VkDescWriterType::Image, descriptor_set));
     }
 
     pub fn write_buffer(
-        &'a mut self,
+        mut self,
         binding: u32,
         buffer: vk::Buffer,
         size: usize,
         offset: usize,
         typ: vk::DescriptorType,
-    ) {
+    ) -> Self {
         let info = vk::DescriptorBufferInfo::default()
             .buffer(buffer)
             .offset(offset as vk::DeviceSize)
             .range(size as vk::DeviceSize);
 
-        self.buffer_infos.push(info);
-        let info = std::slice::from_ref(self.buffer_infos.last().unwrap());
+        self.buffer_infos.push([info]);
 
         let descriptor_set = vk::WriteDescriptorSet::default()
             .dst_binding(binding)
             .dst_set(vk::DescriptorSet::null())
             .descriptor_count(1)
-            .descriptor_type(typ)
-            .buffer_info(info);
+            .descriptor_type(typ);
 
-        self.writes.push(descriptor_set);
+        self.writes.push((VkDescWriterType::Buffer, descriptor_set));
+        self
     }
 
     pub fn clear(&mut self) {
@@ -207,11 +210,23 @@ impl<'a> DescriptorWriter<'a> {
         self.buffer_infos.clear();
         self.writes.clear();
     }
+    
+    pub fn update_set(mut self, device: &LogicalDevice, set: vk::DescriptorSet) -> Self {
+        let mut buffer_infos = self.buffer_infos.iter();
+        let mut image_infos = self.image_infos.iter();
 
-    pub fn update_set(&mut self, device: LogicalDevice, set: vk::DescriptorSet) {
-        self.writes.iter_mut().for_each(|w| *w = w.dst_set(set));
-
-        unsafe { device.device.update_descriptor_sets(&self.writes, &[]) }
+        for (typ, write_desc) in &self.writes {
+            let mut write = match typ {
+                VkDescWriterType::Image => write_desc.image_info(image_infos.next().unwrap()),
+                VkDescWriterType::Buffer => write_desc.buffer_info(buffer_infos.next().unwrap()),
+            };
+            unsafe {
+                device
+                    .device
+                    .update_descriptor_sets(&[write.dst_set(set)], &[])
+            }
+        }
+        self
     }
 }
 
@@ -243,7 +258,7 @@ impl VkDynamicDescriptorAllocator {
         pool_ratios.iter().for_each(|r| pool.ratios.push(*r));
 
         let new_pool = Self::create_pool(device, max_sets, pool_ratios)?;
-        
+
         pool.sets_per_pool = (max_sets as f32 * 1.5) as u32;
         pool.ready_pools.push(new_pool);
         Ok(pool)

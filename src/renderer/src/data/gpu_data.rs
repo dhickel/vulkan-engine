@@ -24,14 +24,14 @@ impl Default for Vertex {
 
 pub struct GPUScene {
     pub data: GPUSceneData,
-    pub descriptor: vk::DescriptorSetLayout,
+    pub descriptor: [vk::DescriptorSetLayout; 1],
 }
 
 impl GPUScene {
     pub fn new(descriptor: vk::DescriptorSetLayout) -> Self {
         Self {
             data: Default::default(),
-            descriptor,
+            descriptor: [descriptor],
         }
     }
 }
