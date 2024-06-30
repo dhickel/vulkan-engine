@@ -645,9 +645,15 @@ impl VkRender {
                 .unwrap();
             self.logical_device.device.reset_fences(fence).unwrap();
 
-            self.presentation
-                .get_curr_frame_mut()
+            let curr_frame = self.presentation.get_curr_frame_mut();
+
+            curr_frame
                 .process_deletions(&self.logical_device.device, &self.allocator.lock().unwrap());
+
+            curr_frame
+                .descriptors
+                .clear_pools(&self.logical_device.device)
+                .unwrap();
 
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
@@ -935,7 +941,7 @@ impl VkRender {
             let mut writer = DescriptorWriter::default();
             writer.write_image(
                 0,
-                def_text.error_image.image_view,
+                def_text.white_image.image_view,
                 def_text.nearest_sampler,
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -1057,6 +1063,8 @@ impl VkRender {
             );
 
             writer.update_set(&self.logical_device, global_descriptor);
+            
+      
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
 
@@ -1357,7 +1365,7 @@ impl VkRender {
         let mut error_val = vec![0_u32; 16 * 16]; // 16x16 checkerboard texture
         for y in 0..16 {
             for x in 0..16 {
-                error_val[y * 16 + x] =  if (x % 2) ^ (y % 2) != 0 {
+                error_val[y * 16 + x] = if (x % 2) ^ (y % 2) != 0 {
                     magenta_val
                 } else {
                     black_val
@@ -1365,7 +1373,8 @@ impl VkRender {
             }
         }
 
-        let err_bytes: Vec<u8> = error_val.iter()
+        let err_bytes: Vec<u8> = error_val
+            .iter()
             .flat_map(|&pixel| pixel.to_le_bytes())
             .collect();
 

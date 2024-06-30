@@ -2,6 +2,7 @@ use crate::vulkan::vk_types::*;
 use ash::prelude::VkResult;
 use ash::vk::DescriptorPool;
 use ash::{vk, Device};
+use std::backtrace::Backtrace;
 use std::collections::VecDeque;
 use std::vec;
 use vk_mem::Allocator;
@@ -163,7 +164,7 @@ impl<'a> DescriptorWriter<'a> {
         sampler: vk::Sampler,
         layout: vk::ImageLayout,
         typ: vk::DescriptorType,
-    )  {
+    ) {
         let info = vk::DescriptorImageInfo::default()
             .sampler(sampler)
             .image_view(image_view)
@@ -187,7 +188,7 @@ impl<'a> DescriptorWriter<'a> {
         size: usize,
         offset: usize,
         typ: vk::DescriptorType,
-    )  {
+    ) {
         let info = vk::DescriptorBufferInfo::default()
             .buffer(buffer)
             .offset(offset as vk::DeviceSize)
@@ -209,7 +210,7 @@ impl<'a> DescriptorWriter<'a> {
         self.buffer_infos.clear();
         self.writes.clear();
     }
-    
+
     pub fn update_set(mut self, device: &LogicalDevice, set: vk::DescriptorSet) {
         let mut buffer_infos = self.buffer_infos.iter();
         let mut image_infos = self.image_infos.iter();
@@ -333,6 +334,7 @@ impl VkDynamicDescriptorAllocator {
         device: &LogicalDevice,
         layout: &[vk::DescriptorSetLayout],
     ) -> Result<vk::DescriptorSet, String> {
+        
         let mut pool_to_use = self.get_pool(device)?;
 
         let mut alloc_info = vk::DescriptorSetAllocateInfo::default()
@@ -341,7 +343,7 @@ impl VkDynamicDescriptorAllocator {
 
         let alloc_result = unsafe { device.device.allocate_descriptor_sets(&alloc_info) };
 
-        match alloc_result {
+      let rtn =   match alloc_result {
             Ok(result) => Ok(result[0]),
             Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
                 self.full_pools.push(pool_to_use);
@@ -356,7 +358,10 @@ impl VkDynamicDescriptorAllocator {
                 }
             }
             Err(e) => Err(format!("Allocation error {:?}", e)),
-        }
+        };
+        
+        self.ready_pools.push(pool_to_use);
+        rtn
     }
 }
 
