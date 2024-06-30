@@ -157,7 +157,7 @@ pub fn init_mesh_pipeline(
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
-        .enable_blending_additive()
+        .disable_blending()
         .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
         .set_color_attachment_format(draw_format)
         .set_depth_format(depth_format)
@@ -645,7 +645,9 @@ impl VkRender {
                 .unwrap();
             self.logical_device.device.reset_fences(fence).unwrap();
 
-         self.presentation.get_curr_frame_mut().process_deletions(&self.logical_device.device, &self.allocator.lock().unwrap());
+            self.presentation
+                .get_curr_frame_mut()
+                .process_deletions(&self.logical_device.device, &self.allocator.lock().unwrap());
 
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
@@ -1352,18 +1354,20 @@ impl VkRender {
         let black_val = data_util::pack_unorm4x8([0.0, 0.0, 0.0, 0.0]);
         let magenta_val = data_util::pack_unorm4x8([1.0, 0.0, 1.0, 1.0]);
 
-        let mut error_val = vec![0u8; 16 * 16 * 4]; // 16x16 checkerboard texture
+        let mut error_val = vec![0_u32; 16 * 16]; // 16x16 checkerboard texture
         for y in 0..16 {
             for x in 0..16 {
-                let color = if (x % 2) ^ (y % 2) == 1 {
+                error_val[y * 16 + x] =  if (x % 2) ^ (y % 2) != 0 {
                     magenta_val
                 } else {
                     black_val
                 };
-                error_val[(y * 16 + x) * 4..(y * 16 + x) * 4 + 4]
-                    .copy_from_slice(&color.to_ne_bytes());
             }
         }
+
+        let err_bytes: Vec<u8> = error_val.iter()
+            .flat_map(|&pixel| pixel.to_le_bytes())
+            .collect();
 
         let white_image = self.upload_image(
             &white_val.to_ne_bytes(),
@@ -1390,7 +1394,7 @@ impl VkRender {
         );
 
         let error_image = self.upload_image(
-            &error_val,
+            &err_bytes,
             data_util::EXTENT3D_ONE,
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageUsageFlags::SAMPLED,
