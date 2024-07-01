@@ -1,3 +1,4 @@
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -14,6 +15,18 @@ fn main() {
     let compiler = Compiler::new().unwrap();
     let mut options = shaderc::CompileOptions::new().unwrap();
     options.add_macro_definition("GL_EXT_buffer_reference", Some("1"));
+    options.add_macro_definition("GL_GOOGLE_include_directive", Some("1"));
+    options.set_include_callback(|name, _include_type, _source_file, _depth| {
+        let path = Path::new(shader_dir).join(name);
+        if path.exists() {
+            Ok(shaderc::ResolvedInclude {
+                resolved_name: path.to_str().unwrap().to_string(),
+                content: fs::read_to_string(path).unwrap(),
+            })
+        } else {
+            Err(format!("Failed to find include file: {}", name))
+        }
+    });
 
     // Iterate over the shader files in the shader directory
     for entry in fs::read_dir(shader_dir).unwrap() {
@@ -36,7 +49,10 @@ fn main() {
                 path.file_name().unwrap().to_str().unwrap(),
                 "main",
                 Some(&options),
-            ).expect("Failed");
+            ).unwrap_or_else(|e| {
+                eprintln!("Shader compilation failed: {}", e);
+                panic!("Shader compilation failed");
+            });
 
             // Write the compiled SPIR-V to the output directory
             let output_path = Path::new(&out_dir).join(format!(

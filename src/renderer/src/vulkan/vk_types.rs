@@ -149,6 +149,37 @@ impl VkCommandPoolMap {
     }
 }
 
+#[repr(C)]
+#[derive(Ord, Eq, PartialEq, PartialOrd)]
+pub enum VkDescType {
+    DrawImage = 0,
+    GpuScene = 1,
+}
+pub struct VkDescLayoutMap {
+    layouts: [vk::DescriptorSetLayout; 2],
+}
+
+impl VkDescLayoutMap {
+    pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
+       layouts.sort();
+
+        let sorted_layouts: [vk::DescriptorSetLayout; 2] = layouts
+            .into_iter()
+            .map(|(_, layout)| layout)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Number of descriptor layouts did not match number of enum keys");
+
+        Self {
+            layouts: sorted_layouts,
+        }
+    }
+
+    pub fn get(&self, typ: VkDescType) -> vk::DescriptorSetLayout {
+        self.layouts[typ as usize]
+    }
+}
+
 #[derive(Debug)]
 pub struct VkCommandPool {
     pub queue_index: u32,
@@ -207,6 +238,8 @@ impl VkDestroyable for VkFrameSync {
     }
 }
 
+
+
 pub struct VkImageAlloc {
     pub image: vk::Image,
     pub image_view: vk::ImageView,
@@ -214,6 +247,7 @@ pub struct VkImageAlloc {
     pub image_extent: vk::Extent3D,
     pub image_format: vk::Format,
 }
+
 
 impl VkDestroyable for VkImageAlloc {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
@@ -271,9 +305,7 @@ impl VkFrame {
     pub fn process_deletions(&mut self, device: &ash::Device, allocator: &Allocator) {
         self.deletions
             .iter_mut()
-            .for_each(|d| {
-                d.delete(device, allocator)
-            });
+            .for_each(|d| d.delete(device, allocator));
         self.deletions.clear();
     }
 }
@@ -465,14 +497,14 @@ impl DeviceQueues {
 #[derive(Clone, Copy)]
 pub struct VkPipeline {
     pub pipeline: vk::Pipeline,
-    pub pipeline_layout: vk::PipelineLayout,
+    pub layout: vk::PipelineLayout,
 }
 
 impl VkPipeline {
     pub fn new(pipeline: vk::Pipeline, pipeline_layout: vk::PipelineLayout) -> Self {
         Self {
             pipeline,
-            pipeline_layout,
+            layout: pipeline_layout,
         }
     }
 }
@@ -603,7 +635,7 @@ impl Default for ComputeData {
 
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
-pub struct  VkDescriptors {
+pub struct VkDescriptors {
     pub allocator: DescriptorAllocator,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
@@ -623,6 +655,7 @@ impl VkDescriptors {
         self.descriptor_layouts.push(layout);
     }
 }
+
 
 pub struct VkBuffer {
     pub buffer: vk::Buffer,

@@ -1,4 +1,6 @@
 use ash::vk;
+use glam::Vec4;
+
 
 pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
     width: 1,
@@ -6,10 +8,19 @@ pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
     depth: 1,
 };
 
-pub fn pack_unorm4x8(color: [f32; 4]) -> u32 {
-    let r = (color[0] * 255.0).round() as u32;
-    let g = (color[1] * 255.0).round() as u32;
-    let b = (color[2] * 255.0).round() as u32;
-    let a = (color[3] * 255.0).round() as u32;
-    (r << 24) | (g << 16) | (b << 8) | a
+
+
+pub trait PackUnorm {
+    fn pack_unorm_4x8(&self) -> u32;
+}
+
+impl PackUnorm for Vec4 {
+    fn pack_unorm_4x8(&self) -> u32 {
+        let x = (self.x.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let y = (self.y.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let z = (self.z.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let w = (self.w.clamp(0.0, 1.0) * 255.0).round() as u32;
+
+        (x << 0) | (y << 8) | (z << 16) | (w << 24)
+    }
 }

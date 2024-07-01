@@ -3,7 +3,6 @@
 #![allow(unused_variables)]
 
 mod data;
-pub mod renderer;
 mod texture;
 mod vulkan;
 

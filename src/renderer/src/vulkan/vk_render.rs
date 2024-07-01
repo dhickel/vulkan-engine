@@ -1,13 +1,17 @@
 use crate::data::gltf_util::MeshAsset;
-use crate::data::gpu_data::{GPUScene, GPUSceneData, Vertex};
+use crate::data::gpu_data::{
+    GLTFMetallicRoughness, GLTFMetallicRoughnessConstants, GLTFMetallicRoughnessResources,
+    GPUScene, GPUSceneData, MaterialInstance, MaterialPass, Vertex,
+};
 use crate::data::{data_util, gltf_util};
 use crate::vulkan;
 use ash::prelude::VkResult;
 use ash::vk::{
-    AllocationCallbacks, ExtendsPhysicalDeviceFeatures2, Extent2D, ImageLayout, PipelineCache,
-    ShaderStageFlags,
+    AllocationCallbacks, DescriptorSetLayoutCreateFlags, ExtendsPhysicalDeviceFeatures2, Extent2D,
+    ImageLayout, PipelineCache, ShaderStageFlags,
 };
 use ash::{vk, Device};
+use data_util::PackUnorm;
 use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
@@ -32,7 +36,12 @@ pub struct DefaultTextures {
     image_descriptor: vk::DescriptorSetLayout,
 }
 
-pub struct VkRender {
+pub struct GltfStuffs<'a> {
+    pub default_data: MaterialInstance,
+    pub metal_roughness: GLTFMetallicRoughness<'a>,
+}
+
+pub struct VkRender<'a> {
     pub window_state: VkWindowState,
     pub allocator: Arc<Mutex<Allocator>>,
     pub entry: ash::Entry,
@@ -53,8 +62,36 @@ pub struct VkRender {
     pub mesh: Option<VkGpuMeshBuffers>,
     pub meshes: Option<Vec<Rc<MeshAsset>>>,
     pub default_textures: Option<DefaultTextures>,
+    pub descriptors: VkDescLayoutMap,
+    pub global_desc_allocator: VkDynamicDescriptorAllocator,
+    pub gltf_stuffs: Option<GltfStuffs<'a>>,
     pub resize_requested: bool,
-    pub main_deletion_queue: Vec<Box<dyn VkDestroyable>>,
+    pub main_deletion_queue: Vec<VkDeletable>,
+}
+
+pub fn init_desc_map(device: &LogicalDevice) -> VkDescLayoutMap {
+    let draw_image_layout = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
+        .build(
+            device,
+            vk::ShaderStageFlags::COMPUTE,
+            DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
+
+    let gpu_scene_desc = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .build(
+            device,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
+
+    VkDescLayoutMap::new(vec![
+        (VkDescType::DrawImage, draw_image_layout),
+        (VkDescType::GpuScene, gpu_scene_desc),
+    ])
 }
 
 pub fn init_image_descriptor(device: &LogicalDevice) -> vk::DescriptorSetLayout {
@@ -271,7 +308,7 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> Comput
     scene_data
 }
 
-impl Drop for VkRender {
+impl<'a> Drop for VkRender<'a> {
     fn drop(&mut self) {
         unsafe {
             self.logical_device
@@ -298,8 +335,8 @@ impl Drop for VkRender {
             self.presentation
                 .destroy(&self.logical_device.device, &self.allocator.lock().unwrap());
 
-            self.main_deletion_queue.iter_mut().for_each(|item| {
-                item.destroy(&self.logical_device.device, &self.allocator.lock().unwrap())
+            self.main_deletion_queue.iter_mut().for_each(|mut del| {
+                del.delete(&self.logical_device.device, &self.allocator.lock().unwrap())
             });
 
             // todo need to do some work on destruction
@@ -324,7 +361,7 @@ impl Drop for VkRender {
     }
 }
 
-impl VkRender {
+impl<'a> VkRender<'a> {
     fn destroy(&mut self) {
         unsafe { std::mem::drop(self) }
     }
@@ -561,6 +598,21 @@ impl VkRender {
             );
         let scene_data = GPUScene::new(gpu_descriptor.unwrap());
 
+        let desc_map = init_desc_map(&logical_device);
+
+        let pool_ratios = [
+            PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
+        ];
+
+        let global_alloc = VkDynamicDescriptorAllocator::new(
+            &logical_device,
+            10,
+            &pool_ratios,
+        ).unwrap();
+
         let mut render = VkRender {
             window_state,
             allocator,
@@ -581,9 +633,13 @@ impl VkRender {
             meshes: None,
             default_textures: None,
             scene_data,
+            descriptors: desc_map,
+            gltf_stuffs: None,
             resize_requested: false,
+            global_desc_allocator: global_alloc
         };
         render.init_default_data(image_desc);
+      //  render.init_gltf_data();
         Ok(render)
     }
 
@@ -618,7 +674,7 @@ impl VkRender {
     }
 }
 
-impl VkRender {
+impl<'a> VkRender<'a> {
     pub fn render(&mut self, frame_number: u32) {
         let start = SystemTime::now();
 
@@ -941,7 +997,7 @@ impl VkRender {
             let mut writer = DescriptorWriter::default();
             writer.write_image(
                 0,
-                def_text.white_image.image_view,
+                def_text.error_image.image_view,
                 def_text.nearest_sampler,
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -954,7 +1010,7 @@ impl VkRender {
                 vk::PipelineBindPoint::GRAPHICS,
                 self.pipeline_cache
                     .get_unchecked(VkPipelineType::MESH)
-                    .pipeline_layout,
+                    .layout,
                 0,
                 &image_set,
                 &[],
@@ -1003,7 +1059,7 @@ impl VkRender {
                 cmd_buffer,
                 self.pipeline_cache
                     .get_unchecked(VkPipelineType::MESH)
-                    .pipeline_layout,
+                    .layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 &push_constants.as_byte_slice(),
@@ -1063,8 +1119,6 @@ impl VkRender {
             );
 
             writer.update_set(&self.logical_device, global_descriptor);
-            
-      
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
 
@@ -1276,12 +1330,13 @@ impl VkRender {
         usage_flags: vk::ImageUsageFlags,
         mip_mapped: bool,
     ) -> VkImageAlloc {
-        let data_size = data.len();
+        //let data_size = data.len();
+        let data_size = size.width * size.height * size.depth * 4;
         let allocator = self.allocator.lock().unwrap();
 
         let mut upload_buffer = vk_util::allocate_buffer(
             &allocator,
-            data_size,
+            data_size as usize,
             vk::BufferUsageFlags::TRANSFER_SRC,
             vk_mem::MemoryUsage::AutoPreferDevice,
         )
@@ -1289,7 +1344,7 @@ impl VkRender {
 
         unsafe {
             let data_ptr = allocator.map_memory(&mut upload_buffer.allocation).unwrap();
-            std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data_size);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data_size as usize);
             allocator.unmap_memory(&mut upload_buffer.allocation);
         }
 
@@ -1357,15 +1412,15 @@ impl VkRender {
             .unwrap(),
         );
 
-        let white_val = data_util::pack_unorm4x8([1.0, 1.0, 1.0, 1.0]);
-        let grey_val = data_util::pack_unorm4x8([0.66, 0.66, 0.66, 1.0]);
-        let black_val = data_util::pack_unorm4x8([0.0, 0.0, 0.0, 0.0]);
-        let magenta_val = data_util::pack_unorm4x8([1.0, 0.0, 1.0, 1.0]);
+        let white_val = glam::vec4(1.0, 1.0, 1.0, 1.0).pack_unorm_4x8();
+        let grey_val = glam::vec4(0.66, 0.66, 0.66, 1.0).pack_unorm_4x8();
+        let black_val = glam::vec4(0.0, 0.0, 0.0, 0.0).pack_unorm_4x8();
+        let magenta_val = glam::vec4(1.0, 0.0, 1.0, 1.0).pack_unorm_4x8();
 
         let mut error_val = vec![0_u32; 16 * 16]; // 16x16 checkerboard texture
         for y in 0..16 {
             for x in 0..16 {
-                error_val[y * 16 + x] = if (x % 2) ^ (y % 2) != 0 {
+                error_val[y * 16 + x] = if ((x % 2) ^ (y % 2)) != 0 {
                     magenta_val
                 } else {
                     black_val
@@ -1373,7 +1428,7 @@ impl VkRender {
             }
         }
 
-        let err_bytes: Vec<u8> = error_val
+        let mut err_bytes: Vec<u8> = error_val
             .iter()
             .flat_map(|&pixel| pixel.to_le_bytes())
             .collect();
@@ -1404,7 +1459,11 @@ impl VkRender {
 
         let error_image = self.upload_image(
             &err_bytes,
-            data_util::EXTENT3D_ONE,
+            vk::Extent3D {
+                width: 16,
+                height: 16,
+                depth: 16,
+            },
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageUsageFlags::SAMPLED,
             false,
@@ -1440,5 +1499,91 @@ impl VkRender {
             nearest_sampler,
             image_descriptor,
         })
+    }
+
+    pub fn init_gltf_data(&mut self) {
+        let (opaque, transparent) =
+            GLTFMetallicRoughness::build_pipelines(&self.logical_device, &self.descriptors);
+
+        let mut roughness = GLTFMetallicRoughness {
+            opaque_pipeline: opaque,
+            transparent_pipeline: transparent,
+            descriptor_layout: [self.descriptors.get(VkDescType::DrawImage)],
+            writer: Default::default(),
+        };
+
+        let default = if let Some(def) = &self.default_textures {
+            def
+        } else {
+            panic!("Default not inited")
+        };
+
+        let mut material_constants = vk_util::allocate_buffer(
+            &self.allocator.lock().unwrap(),
+            std::mem::size_of::<GLTFMetallicRoughnessConstants>(),
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk_mem::MemoryUsage::Auto,
+        )
+        .unwrap();
+
+
+
+        let scene_uniform_data = unsafe {
+            let scene_uniform_data = self
+                .allocator
+                .lock()
+                .unwrap()
+                .map_memory(&mut material_constants.allocation)
+                .unwrap()
+                .cast::<GLTFMetallicRoughnessConstants>();
+
+            (*scene_uniform_data).color_factors = Vec4::new(1.0, 1.0, 1.0, 1.0);
+            (*scene_uniform_data).metal_rough_factors = Vec4::new(1.0, 0.5, 0.0, 0.0);
+            scene_uniform_data
+        };
+
+        let white_val = glam::vec4(1.0, 1.0, 1.0, 1.0).pack_unorm_4x8();
+
+        let white_image_1 = self.upload_image(
+            &white_val.to_ne_bytes(),
+            data_util::EXTENT3D_ONE,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::SAMPLED,
+            false,
+        );
+
+        let white_image_2 = self.upload_image(
+            &white_val.to_ne_bytes(),
+            data_util::EXTENT3D_ONE,
+            vk::Format::R8G8B8A8_UNORM,
+            vk::ImageUsageFlags::SAMPLED,
+            false,
+        );
+
+
+
+        let material_resources = GLTFMetallicRoughnessResources {
+            color_image: white_image_1,
+            color_sampler: default.linear_sampler,
+            metal_rough_image: white_image_2,
+            metal_rough_sampler: default.linear_sampler,
+            data_buffer: material_constants.buffer,
+            data_buffer_offset: 0,
+        };
+
+        let def_data = roughness.write_material(
+            &self.logical_device,
+            MaterialPass::MainColor,
+            &material_resources,
+            &mut self.global_desc_allocator,
+        );
+
+        let gltf_data = GltfStuffs {
+            default_data: def_data,
+            metal_roughness: roughness,
+        };
+        self.gltf_stuffs = Some(gltf_data);
+
+        // self.main_deletion_queue.push(VkDeletable::AllocatedBuffer(material_constants));
     }
 }

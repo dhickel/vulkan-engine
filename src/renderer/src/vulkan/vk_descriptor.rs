@@ -211,7 +211,7 @@ impl<'a> DescriptorWriter<'a> {
         self.writes.clear();
     }
 
-    pub fn update_set(mut self, device: &LogicalDevice, set: vk::DescriptorSet) {
+    pub fn update_set(&mut self, device: &LogicalDevice, set: vk::DescriptorSet) {
         let mut buffer_infos = self.buffer_infos.iter();
         let mut image_infos = self.image_infos.iter();
 
