@@ -19,7 +19,8 @@ use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::thread::sleep;
+use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
 use crate::vulkan::vk_descriptor::*;
@@ -478,6 +479,7 @@ impl<'a> VkRender<'a> {
         let descriptors = init_descriptors(&logical_device, &draw_views);
         let layout = [descriptors.descriptor_layouts[0]];
 
+     
         let depth_images = vk_init::allocate_depth_images(
             &allocator,
             &logical_device,
@@ -495,7 +497,7 @@ impl<'a> VkRender<'a> {
             PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
-
+   
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..2)
             .map(|_| VkDynamicDescriptorAllocator::new(&logical_device, 1000, &pool_ratios))
             .collect::<Result<Vec<_>, _>>()
@@ -612,7 +614,6 @@ impl<'a> VkRender<'a> {
             10,
             &pool_ratios,
         ).unwrap();
-
         let mut render = VkRender {
             window_state,
             allocator,
@@ -835,7 +836,7 @@ impl<'a> VkRender<'a> {
                 vk::ImageLayout::PRESENT_SRC_KHR,
             );
 
-            &self
+            self
                 .logical_device
                 .device
                 .end_command_buffer(cmd_buffer)
@@ -851,7 +852,7 @@ impl<'a> VkRender<'a> {
                 frame_sync.render_semaphore,
             )];
             let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
-            &self
+            self
                 .logical_device
                 .device
                 .queue_submit2(queue, &submit, frame_sync.render_fence)
@@ -872,7 +873,6 @@ impl<'a> VkRender<'a> {
 
             if let Err(_) = present_result {
                 self.resize_requested = true;
-                return;
             }
         }
         // println!(
@@ -1462,7 +1462,7 @@ impl<'a> VkRender<'a> {
             vk::Extent3D {
                 width: 16,
                 height: 16,
-                depth: 16,
+                depth: 1,
             },
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageUsageFlags::SAMPLED,
