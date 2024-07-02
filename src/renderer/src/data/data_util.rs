@@ -24,3 +24,4 @@ impl PackUnorm for Vec4 {
         (x << 0) | (y << 8) | (z << 16) | (w << 24)
     }
 }
+

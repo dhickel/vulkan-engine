@@ -417,8 +417,27 @@ pub fn allocate_buffer(
     })
 }
 
-pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
+pub fn allocate_and_write_buffer<T>(
+    allocator: &Allocator,
+    data: T,
+    usage: vk::BufferUsageFlags,
+) -> Result<VkBuffer, String> {
+    let buffer_size = std::mem::size_of::<T>();
+    let mut buffer = allocate_buffer(allocator, buffer_size, usage, vk_mem::MemoryUsage::Auto)?;
+    
     unsafe {
-        allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation)
+        let data_ptr = allocator
+            .map_memory(&mut buffer.allocation)
+            .map_err(|err| format!("Failed to map memory: {:?}", err))?
+            as *mut T;
+
+        data_ptr.write(data);
+        allocator.unmap_memory(&mut buffer.allocation);
     }
+
+    Ok(buffer)
+}
+
+pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
+    unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
 }

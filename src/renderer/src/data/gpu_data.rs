@@ -1,3 +1,4 @@
+use crate::data::gltf_util::MeshAsset;
 use crate::vulkan::vk_descriptor::{
     DescriptorLayoutBuilder, DescriptorWriter, VkDescWriterType, VkDynamicDescriptorAllocator,
 };
@@ -9,8 +10,12 @@ use crate::vulkan::vk_types::{
 };
 use crate::vulkan::vk_util;
 use ash::vk;
+use ash::vk::DescriptorSet;
+use glam::Mat4;
+use std::cell::RefCell;
 use std::cmp::PartialEq;
 use std::ffi::{CStr, CString};
+use std::rc::{Rc, Weak};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -48,6 +53,7 @@ impl GPUScene {
     }
 }
 
+#[derive(Default, Copy, Clone)]
 pub struct GPUSceneData {
     pub view: glam::Mat4,
     pub projection: glam::Mat4,
@@ -57,35 +63,29 @@ pub struct GPUSceneData {
     pub sunlight_color: glam::Vec4,
 }
 
-impl Default for GPUSceneData {
-    fn default() -> Self {
-        Self {
-            view: Default::default(),
-            projection: Default::default(),
-            view_projection: Default::default(),
-            ambient_color: Default::default(),
-            sunlight_direction: Default::default(),
-            sunlight_color: Default::default(),
-        }
-    }
-}
-
-pub trait Renderable {
-    //fn draw(top_matrix: &glam::Mat4, context: &DrawContext);
-}
-
 #[repr(C)]
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug, Copy, Clone)]
 pub enum MaterialPass {
     MainColor,
     Transparent,
     Other,
+    NULL,
+}
+#[derive(Debug, Copy, Clone)]
+pub struct MaterialInstance {
+    pub pipeline: VkPipeline,
+    pub descriptor: vk::DescriptorSet,
+    pub pass_type: MaterialPass,
 }
 
-pub struct MaterialInstance {
-    pipeline: VkPipeline,
-    descriptor: vk::DescriptorSet,
-    pass_type: MaterialPass,
+impl MaterialInstance {
+    pub fn null() -> Self {
+        Self {
+            pipeline: VkPipeline::new(vk::Pipeline::null(), vk::PipelineLayout::null()),
+            descriptor: vk::DescriptorSet::null(),
+            pass_type: MaterialPass::NULL,
+        }
+    }
 }
 
 pub struct RenderObject {
@@ -125,7 +125,7 @@ impl GLTFMetallicRoughness<'_> {
     pub fn build_pipelines(
         device: &LogicalDevice,
         descriptors: &VkDescLayoutMap,
-    ) -> (VkPipeline, VkPipeline) {
+    ) -> (VkPipeline, VkPipeline, vk::DescriptorSetLayout) {
         let vert_shader = vk_util::load_shader_module(
             &device,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv",
@@ -168,9 +168,11 @@ impl GLTFMetallicRoughness<'_> {
         };
 
         let entry = CString::new("main").unwrap();
+        
         let mut pipeline_builder = PipelineBuilder::default()
             .set_shaders(vert_shader, &entry, frag_shader, &entry)
             .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
             .set_polygon_mode(vk::PolygonMode::FILL)
             .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
             .set_multisample_none()
@@ -194,6 +196,7 @@ impl GLTFMetallicRoughness<'_> {
         (
             VkPipeline::new(opaque_pipeline, layout),
             VkPipeline::new(transparent_pipeline, layout),
+            material_layout
         )
     }
 
@@ -247,5 +250,106 @@ impl GLTFMetallicRoughness<'_> {
 
         self.writer.update_set(device, mat_data.descriptor);
         mat_data
+    }
+}
+
+pub trait Renderable {
+    fn draw(&self, top_matrix: &glam::Mat4, context: &mut DrawContext);
+    fn refresh_transform(&mut self, transform: &glam::Mat4);
+    fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>>;
+}
+
+
+pub struct Node {
+    pub parent: Option<Weak<Node>>,
+    pub children: Vec<Rc<RefCell<dyn Renderable>>>,
+    pub world_transform: glam::Mat4,
+    pub local_transform: glam::Mat4,
+}
+
+
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            children: vec![],
+            world_transform: Default::default(),
+            local_transform: Default::default(),
+        }
+    }
+}
+
+impl Renderable for Node {
+    fn draw(&self, top_matrix: &glam::Mat4, ctx: &mut DrawContext) {
+        for child in &self.children {
+            child.borrow().draw(top_matrix, ctx);
+        }
+    }
+
+    fn refresh_transform(&mut self, parent_matrix: &glam::Mat4) {
+        self.world_transform = parent_matrix.mul_mat4(&self.local_transform);
+
+        for child in self.children.iter_mut() {
+            child.borrow_mut().refresh_transform(&self.world_transform);
+        }
+    }
+
+    fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>> {
+        &self.children
+    }
+}
+
+pub struct DrawContext {
+    pub opaque_surfaces: Vec<RenderObject>,
+}
+
+impl Default for DrawContext {
+     fn default() -> Self {
+        DrawContext {
+            opaque_surfaces: Vec::new(),
+        }
+    }
+}
+
+
+pub struct MeshNode {
+    pub node: Node,
+    pub mesh: Rc<MeshAsset>,
+}
+
+impl MeshNode {
+    pub fn new(mesh: Rc<MeshAsset>) -> Self {
+        Self {
+            node: Default::default(),
+            mesh,
+        }
+    }
+}
+
+impl Renderable for MeshNode {
+    fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext) {
+        let node_matrix = top_matrix.mul_mat4(&self.node.world_transform);
+
+        for surface in &self.mesh.surfaces {
+            let ro = RenderObject {
+                index_count: surface.count,
+                first_index: surface.start_index,
+                index_buffer: self.mesh.mesh_buffers.index_buffer.buffer,
+                material: surface.material.data,
+                transform: node_matrix,
+                vertex_buffer_addr: self.mesh.mesh_buffers.vertex_buffer_addr,
+            };
+
+            context.opaque_surfaces.push(ro);
+        }
+        self.node.draw(top_matrix, context);
+    }
+
+    fn refresh_transform(&mut self, transform: &Mat4) {
+        todo!()
+    }
+
+    fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>> {
+        todo!()
     }
 }

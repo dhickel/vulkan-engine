@@ -1137,7 +1137,6 @@ pub fn create_command_pools(
 ) -> Result<Vec<VkCommandPoolMap>, String> {
     log::info!("Creating command pools");
     
-    println!("Queues: {:?}", device.queues);
     let devices_queues = &device.queues;
     let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<QueueType>, vk::CommandPool)>::new();
 

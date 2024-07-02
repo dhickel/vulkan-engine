@@ -66,7 +66,6 @@ impl<'a> PipelineBuilder<'a> {
             .render_info
             .color_attachment_formats(&self.color_attachment_format);
 
-        println!("Pipeline used: {:?}", self.pipeline_layout);
 
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)

@@ -9,22 +9,40 @@ use gltf::mesh::util::{ReadColors, ReadIndices, ReadNormals, ReadPositions, Read
 use gltf::{Gltf, Semantic};
 use std::rc::Rc;
 
-use crate::data::gpu_data::Vertex;
+use crate::data::gpu_data::{MaterialInstance, Vertex};
 use log::log;
 
 #[derive(Debug)]
 pub struct GeoSurface {
     pub start_index: u32,
     pub count: u32,
+    pub material: Rc<GLTFMaterial>,
 }
 
+#[derive(Debug)]
+pub struct GLTFMaterial {
+    pub data: MaterialInstance,
+}
 
+impl GLTFMaterial {
+    pub fn null() -> Self {
+        Self {
+            data: MaterialInstance::null(),
+        }
+    }
 
-impl GeoSurface {
-    pub fn new(start_index: u32, count: u32) -> Self {
-        Self { start_index, count }
+    pub fn new(data: MaterialInstance) -> Self {
+        Self { data }
     }
 }
+
+impl GeoSurface {
+    pub fn new(start_index: u32, count: u32, material : Rc<GLTFMaterial>) -> Self {
+        Self { start_index, count, material }
+    }
+}
+
+#[derive(Debug)]
 pub struct MeshAsset {
     pub name: String,
     pub surfaces: Vec<GeoSurface>,
@@ -41,7 +59,7 @@ impl MeshAsset {
     // }
 }
 
-pub fn load_meshes<F>(path: &str, mut upload_fn: F) -> Result<Vec<Rc<MeshAsset>>, String>
+pub fn load_meshes<F>(path: &str, mut upload_fn: F) -> Result<Vec<MeshAsset>, String>
 where
     F: FnMut(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
 {
@@ -54,12 +72,12 @@ where
 
     let buffer_data = load_buffers(&gltf, &path).unwrap();
 
-    let mut meshes = Vec::<Rc<MeshAsset>>::new();
+    let mut meshes = Vec::<MeshAsset>::new();
 
     let mut indices = Vec::<u32>::new();
     let mut vertices = Vec::<Vertex>::new();
     let mut unnamed_idx = 0;
-    
+
     for mesh in gltf.meshes() {
         let mut surfaces = Vec::<GeoSurface>::new();
 
@@ -70,6 +88,7 @@ where
             let new_surface = GeoSurface {
                 start_index: indices.len() as u32,
                 count: prim.indices().unwrap().count() as u32,
+                material: Rc::new(GLTFMaterial::null()),
             };
             surfaces.push(new_surface);
 
@@ -155,7 +174,7 @@ where
             }
         }
 
-        let override_colors = true;
+        let override_colors = false;
         if override_colors {
             vertices
                 .iter_mut()
@@ -171,35 +190,35 @@ where
             },
             |n| n.to_string(),
         );
-        
+
         let new_mesh = MeshAsset {
             name,
             surfaces,
             mesh_buffers,
         };
 
-        meshes.push(Rc::new(new_mesh));
+        meshes.push(new_mesh);
     }
     Ok(meshes)
 }
 
 fn load_buffers(gltf: &gltf::Gltf, gltf_path: &Path) -> Result<Vec<Vec<u8>>, std::io::Error> {
-    gltf.buffers().map(|buffer| {
-        match buffer.source() {
+    gltf.buffers()
+        .map(|buffer| match buffer.source() {
             gltf::buffer::Source::Uri(uri) => {
                 let buffer_path = gltf_path.parent().unwrap().join(uri);
                 let mut file = File::open(buffer_path)?;
                 let mut buffer_data = Vec::new();
                 file.read_to_end(&mut buffer_data)?;
                 Ok(buffer_data)
-            },
-            gltf::buffer::Source::Bin => {
-                gltf.blob.as_ref()
-                    .map(|blob| blob.to_vec())
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Binary buffer not found"))
             }
-        }
-    }).collect()
+            gltf::buffer::Source::Bin => {
+                gltf.blob.as_ref().map(|blob| blob.to_vec()).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "Binary buffer not found")
+                })
+            }
+        })
+        .collect()
 }
 
 // fn load_buffers(

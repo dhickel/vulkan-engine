@@ -150,7 +150,7 @@ impl VkCommandPoolMap {
 }
 
 #[repr(C)]
-#[derive(Ord, Eq, PartialEq, PartialOrd)]
+#[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy)]
 pub enum VkDescType {
     DrawImage = 0,
     GpuScene = 1,
@@ -161,14 +161,16 @@ pub struct VkDescLayoutMap {
 
 impl VkDescLayoutMap {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
-       layouts.sort();
-
+         layouts.sort();
+        
         let sorted_layouts: [vk::DescriptorSetLayout; 2] = layouts
             .into_iter()
             .map(|(_, layout)| layout)
             .collect::<Vec<_>>()
             .try_into()
             .expect("Number of descriptor layouts did not match number of enum keys");
+
+
 
         Self {
             layouts: sorted_layouts,
@@ -494,7 +496,7 @@ impl DeviceQueues {
         }
     }
 }
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct VkPipeline {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
@@ -656,7 +658,7 @@ impl VkDescriptors {
     }
 }
 
-
+#[derive(Debug)]
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
     pub allocation: vk_mem::Allocation,
@@ -676,7 +678,7 @@ impl VkBuffer {
         }
     }
 }
-
+#[derive(Debug)]
 pub struct VkGpuMeshBuffers {
     pub index_buffer: VkBuffer,
     pub vertex_buffer: VkBuffer,
