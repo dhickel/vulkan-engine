@@ -70,7 +70,7 @@ pub fn run() {
     };
 
     let camera = camera::Camera::default();
-    let fps_controller = FPSController::new(1, camera, 0.1, 0.005);
+    let fps_controller = FPSController::new(1, camera, 0.01, 0.01);
 
     let window_state = VkWindowState::new(window, size, max_extent, fps_controller);
     input_manager.register_key_listener(window_state.controller.clone());
@@ -81,7 +81,7 @@ pub fn run() {
     let mut fps_timer = SystemTime::now();
 
     let mut app = vk_render::VkRender::new(window_state, true).unwrap();
-    let mut opened = true;
+    
     event_loop
         .run(move |event, control_flow| {
             app.imgui.handle_event(&app.window_state.window, &event);

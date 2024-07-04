@@ -100,7 +100,7 @@ pub trait MouseBListener {
 pub trait MousePosListener {
     fn listener_type(&self) -> ListenerType;
     fn listener_id(&self) -> u32;
-    fn broadcast(&mut self, pos: Vec2, modifiers: &HashSet<winit::event::Modifiers>);
+    fn broadcast(&mut self, delta: (f64, f64), modifiers: &HashSet<winit::event::Modifiers>);
 }
 
 pub trait MouseScrollListener {
@@ -128,7 +128,7 @@ pub enum ListenFilter {
 
 #[derive(Default)]
 pub struct InputManager {
-    curr_m_pos: Vec2,
+    mouse_delta: (f64, f64),
     scroll_state: f32,
     m_button_states: HashSet<MouseButton>,
     key_states: Vec<(KeyCode, bool)>,
@@ -149,9 +149,8 @@ impl InputManager {
         self.key_state_listener.push(listener)
     }
 
-    pub fn update_mouse_pos(&mut self, delta :(f64, f64)) {
-        self.curr_m_pos.x = delta.0 as f32;
-        self.curr_m_pos.y = delta.1 as f32;
+    pub fn update_mouse_pos(&mut self, delta: (f64, f64)) {
+        self.mouse_delta = delta;
     }
 
     pub fn update_scroll_state(&mut self, delta: f32) {
@@ -173,11 +172,12 @@ impl InputManager {
         self.broadcast_m_scroll();
         self.broadcast_m_buttons();
         self.broadcast_key_states();
-        
+
         self.scroll_state = 0.0;
         self.key_states.clear();
         self.modifiers.clear();
         self.m_button_states.clear();
+        self.mouse_delta = (0_f64, 0_f64)
     }
 
     fn broadcast_m_pos(&mut self) {
@@ -185,19 +185,19 @@ impl InputManager {
             match self.listen_filter {
                 None => listener
                     .borrow_mut()
-                    .broadcast(self.curr_m_pos, &self.modifiers),
+                    .broadcast(self.mouse_delta, &self.modifiers),
                 Some(TypeFilter(typ)) => {
                     if listener.borrow().listener_type() == typ {
                         listener
                             .borrow_mut()
-                            .broadcast(self.curr_m_pos, &self.modifiers);
+                            .broadcast(self.mouse_delta, &self.modifiers);
                     }
                 }
                 Some(ListenFilter::IdFilter(id)) => {
                     if listener.borrow().listener_id() == id {
                         listener
                             .borrow_mut()
-                            .broadcast(self.curr_m_pos, &self.modifiers);
+                            .broadcast(self.mouse_delta, &self.modifiers);
                     }
                 }
             }
@@ -266,7 +266,9 @@ impl InputManager {
 
             for key in &self.key_states {
                 if listener.borrow().listener_for(key.0) {
-                    listener.borrow_mut().broadcast(key.0, key.1, &self.modifiers)
+                    listener
+                        .borrow_mut()
+                        .broadcast(key.0, key.1, &self.modifiers)
                 }
             }
         }

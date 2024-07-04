@@ -1,6 +1,7 @@
 use input::{KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 use glam::vec3;
+use gltf::accessor::Dimensions::Mat4;
 use winit::event::Modifiers;
 use winit::keyboard::KeyCode;
 
@@ -29,16 +30,13 @@ impl Default for Camera {
 }
 
 impl Camera {
-    pub fn update_rotation(&mut self, delta_x: f32, delta_y: f32) {
-        // Apply sensitivity to deltas
+    pub fn update_rotation(&mut self, delta_x: f64, delta_y: f64) {
+        
+        self.yaw += delta_x as f32;
+        self.pitch += delta_y as f32;
 
-
-        // Update yaw and pitch
-        self.yaw += delta_x;
-        self.pitch += delta_y;
-
-        // Clamp the pitch to avoid gimbal lock
-        self.pitch = self.pitch.clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
+        // Clamp the pitch to avoid flipping
+        self.pitch = self.pitch.clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
 
         // Create quaternions for the yaw and pitch
         let yaw_quat = glam::Quat::from_rotation_y(self.yaw);
@@ -46,6 +44,7 @@ impl Camera {
 
         // Update orientation
         self.orientation = yaw_quat * pitch_quat;
+
 
         // Update the view matrix
         self.update_view_matrix();
@@ -70,9 +69,9 @@ impl Camera {
 pub struct FPSController {
     id: u32,
     prev_m_pos: glam::Vec2,
-    curr_m_pos: glam::Vec2,
+    m_delta: (f64, f64),
     view_vec: glam::Vec2,
-    m_sensitivity: f32,
+    m_sensitivity: f64,
     in_window: bool,
     camera: Camera,
     input_actions: [bool; 4],
@@ -89,11 +88,11 @@ pub enum InputAction {
 }
 
 impl FPSController {
-    pub fn new(id: u32, camera: Camera, m_sensitivity: f32, move_speed: f32) -> Self {
+    pub fn new(id: u32, camera: Camera, m_sensitivity: f64, move_speed: f32) -> Self {
         Self {
             id: id,
             prev_m_pos: Default::default(),
-            curr_m_pos: Default::default(),
+            m_delta: Default::default(),
             view_vec: Default::default(),
             move_vec: Default::default(),
             in_window: true,
@@ -109,23 +108,9 @@ impl FPSController {
     }
 
     pub fn update(&mut self, delta: u128) {
-        // Mouse
-       // if self.prev_m_pos.x > 0.0 && self.prev_m_pos.y > 0.0 && self.in_window {
-        //     let dx = self.curr_m_pos.x - self.prev_m_pos.x;
-        //     let dy = self.curr_m_pos.y - self.prev_m_pos.y;
-        //     let rotate_x = dx != 0.0;
-        //     let rotate_y = dy != 0.0;
-        //
-        //     if rotate_x {
-        //         self.view_vec.y = dx;
-        //     }
-        //     if rotate_y {
-        //         self.view_vec.x = dy;
-        //     }
-        // }
-        //
-        // let rot_x = (self.view_vec.x * self.m_sensitivity).to_radians();
-        // let rot_y = (self.view_vec.y * self.m_sensitivity).to_radians();
+
+        let rot_x = self.m_delta.0 * self.m_sensitivity;
+        let rot_y = self.m_delta.1 * self.m_sensitivity;
 
         // Movement
         let amount = (delta as f64 * self.move_speed as f64) as f32;
@@ -144,7 +129,7 @@ impl FPSController {
             self.move_vec.x += amount;
         }
 
-        self.camera.update_rotation(self.curr_m_pos.x, self.curr_m_pos.y);
+        self.camera.update_rotation(-rot_x, -rot_y);
 
         if self.move_vec.length() > 0.0 {
             self.move_vec = self.move_vec.normalize() * amount;
@@ -165,12 +150,10 @@ impl MousePosListener for FPSController {
         self.id
     }
 
-    fn broadcast(&mut self, pos: glam::Vec2, modifiers: &HashSet<Modifiers>) {
-        self.prev_m_pos = self.curr_m_pos;
-        self.curr_m_pos = pos;
+    fn broadcast(&mut self, delta: (f64, f64), modifiers: &HashSet<Modifiers>) {
+        self.m_delta = delta;
         
-        // println!("Prev Pos: {:?}", self.curr_m_pos);
-        // println!("curr Pos: {:?}", pos);
+  
     }
 }
 

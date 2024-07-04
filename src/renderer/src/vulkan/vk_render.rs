@@ -438,7 +438,7 @@ impl<'a> VkRender<'a> {
             window_state.curr_extent,
             Some(2),
             None,
-            Some(vk::PresentModeKHR::IMMEDIATE),
+            Some(vk::PresentModeKHR::MAILBOX),
             None,
             true,
         )?;
@@ -661,7 +661,7 @@ impl<'a> VkRender<'a> {
             new_size,
             Some(2),
             None,
-            Some(vk::PresentModeKHR::IMMEDIATE),
+            Some(vk::PresentModeKHR::MAILBOX),
             Some(self.swapchain.swapchain),
             true,
         )
@@ -1648,7 +1648,8 @@ impl<'a> VkRender<'a> {
 
 
             // Set up the view matrix
-            self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
+            // self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
+            self.scene_data.data.view =  self.window_state.controller.borrow().get_camera().get_view_matrix();
 
             // Set up the projection matrix
             let fovy = 70.0_f32.to_radians();
