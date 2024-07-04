@@ -18,17 +18,23 @@ use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 
+use crate::data::camera;
+use crate::data::camera::FPSController;
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
-use raw_window_handle::RawWindowHandle;
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use std::cell::RefCell;
 use std::cmp::max;
 use std::process::exit;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
-use winit::event::{Event, MouseScrollDelta, WindowEvent};
+use winit::dpi::Position;
+use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::NamedKey::Camera;
 use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 const NANO: f64 = 1000000000.0;
 
@@ -39,10 +45,10 @@ pub struct GameLogic {
 pub fn run() {
     env_logger::Builder::new()
         .target(env_logger::Target::Stdout)
-        .parse_filters(&*env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+        .parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
         .init();
 
-    let mut input_manager = InputManager::new();
+    let mut input_manager = InputManager::default();
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -54,10 +60,7 @@ pub fn run() {
         .build(&event_loop)
         .unwrap();
 
-    let max_extent = if let Some(mon) = event_loop
-        .available_monitors()
-        .into_iter()
-        .max_by_key(|mon| mon.size())
+    let max_extent = if let Some(mon) = event_loop.available_monitors().max_by_key(|mon| mon.size())
     {
         Extent2D::default()
             .height(mon.size().height)
@@ -66,7 +69,12 @@ pub fn run() {
         panic!("Failed to detect monitor")
     };
 
-    let window_state = VkWindowState::new(window, size, max_extent);
+    let camera = camera::Camera::default();
+    let fps_controller = FPSController::new(1, camera, 0.1, 0.005);
+
+    let window_state = VkWindowState::new(window, size, max_extent, fps_controller);
+    input_manager.register_key_listener(window_state.controller.clone());
+    input_manager.register_m_pos_listener(window_state.controller.clone());
 
     let mut last_time = SystemTime::now();
     let mut frame: u32 = 0;
@@ -74,18 +82,32 @@ pub fn run() {
 
     let mut app = vk_render::VkRender::new(window_state, true).unwrap();
     let mut opened = true;
-
     event_loop
         .run(move |event, control_flow| {
-            input_manager.update();
             app.imgui.handle_event(&app.window_state.window, &event);
+            let delta = SystemTime::now().duration_since(last_time).unwrap();
+
             match event {
                 Event::NewEvents(..) => {
-                    app.imgui
-                        .context
-                        .io_mut()
-                        .update_delta_time(SystemTime::now().duration_since(last_time).unwrap());
+                    app.imgui.context.io_mut().update_delta_time(delta);
                 }
+                Event::DeviceEvent { device_id, event } => match event {
+                    DeviceEvent::MouseMotion { delta } => {
+                        input_manager.update_mouse_pos(delta);
+                    },
+                    DeviceEvent::MouseWheel { delta: MouseScrollDelta::LineDelta(delta, ..) } => {
+                        input_manager.update_scroll_state(delta)
+                    }
+                    DeviceEvent::Button { button, state} => {
+                        //input_manager.add_mouse_button(*button)
+                    }
+                    DeviceEvent::Key(key_event) => {
+                        if let PhysicalKey::Code(key) = key_event.physical_key {
+                            input_manager.add_keycode(key, key_event.state.is_pressed())
+                        }
+                    }
+                    _ => {}
+                },
 
                 Event::WindowEvent {
                     ref event,
@@ -101,30 +123,33 @@ pub fn run() {
                         WindowEvent::DroppedFile(_) => {}
                         WindowEvent::HoveredFile(_) => {}
                         WindowEvent::HoveredFileCancelled => {}
-                        WindowEvent::Focused(_) => {}
+                        WindowEvent::Focused(focused) => {}
                         WindowEvent::KeyboardInput {
                             event: key_event, ..
                         } => {
-                            input_manager.update();
-                            if let PhysicalKey::Code(key) = key_event.physical_key {
-                                input_manager.add_keycode(key) // TODO need to take pressed state into account
-                            }
                         }
                         WindowEvent::ModifiersChanged(modd, ..) => {}
                         WindowEvent::Ime(_) => {}
-                        WindowEvent::CursorMoved { position, .. } => {
-                            input_manager.update_mouse_pos(position.x as f32, position.y as f32)
-                            //TODO Maybe track as f64?
+                        WindowEvent::CursorMoved { position, .. } => {}
+                        WindowEvent::CursorEntered { .. } => {
+                            app.window_state
+                                .window
+                                .set_cursor_grab(CursorGrabMode::Confined)
+                                .unwrap();
+                            app.window_state.window.set_cursor_visible(false);
                         }
-                        WindowEvent::CursorEntered { .. } => {}
-                        WindowEvent::CursorLeft { .. } => {}
+                        WindowEvent::CursorLeft { .. } => {
+                            app.window_state
+                                .window
+                                .set_cursor_grab(CursorGrabMode::None)
+                                .unwrap();
+                            app.window_state.window.set_cursor_visible(true);
+                        }
                         WindowEvent::MouseWheel { delta, .. } => {
-                            if let MouseScrollDelta::LineDelta(delta, ..) = delta {
-                                input_manager.update_scroll_state(*delta)
-                            }
+                          
                         }
                         WindowEvent::MouseInput { state, button, .. } => {
-                            input_manager.add_mouse_button(*button)
+                           
                         }
                         WindowEvent::TouchpadMagnify { .. } => {}
                         WindowEvent::SmartMagnify { .. } => {}
@@ -145,12 +170,17 @@ pub fn run() {
                             app.rebuild_swapchain(new_extent)
                         }
                         WindowEvent::RedrawRequested => {
+                            input_manager.update();
+                            app.window_state
+                                .controller
+                                .borrow_mut()
+                                .update(delta.as_millis());
+
+                          
+
                             if !app.resize_requested {
                                 let now = SystemTime::now();
-                                app.imgui
-                                    .context
-                                    .io_mut()
-                                    .update_delta_time(now.duration_since(last_time).unwrap());
+                                app.imgui.context.io_mut().update_delta_time(delta);
                                 app.imgui
                                     .platform
                                     .prepare_frame(
@@ -158,7 +188,7 @@ pub fn run() {
                                         &app.window_state.window,
                                     )
                                     .unwrap();
-                                let frame_ms = now.duration_since(last_time).unwrap().as_millis();
+                                let frame_ms = delta.as_millis();
                                 last_time = now;
 
                                 app.render(frame);

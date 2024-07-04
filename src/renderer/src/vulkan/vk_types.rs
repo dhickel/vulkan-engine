@@ -2,12 +2,15 @@ use crate::vulkan::vk_descriptor::{DescriptorAllocator, VkDynamicDescriptorAlloc
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
+use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::{mem, slice};
 
+use crate::data::camera::FPSController;
 use vk_mem::{Alloc, Allocator};
+use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
 
@@ -33,6 +36,7 @@ pub struct VkWindowState {
     pub max_extent: vk::Extent2D,
     pub curr_extent: vk::Extent2D,
     pub render_scale: f32,
+    pub controller: Rc<RefCell<FPSController>>,
 }
 
 impl VkWindowState {
@@ -40,11 +44,13 @@ impl VkWindowState {
         window: winit::window::Window,
         curr_extent: vk::Extent2D,
         max_extent: vk::Extent2D,
+        controller: FPSController,
     ) -> Self {
         Self {
             window,
             curr_extent,
             max_extent,
+            controller: Rc::new(RefCell::new(controller)),
             resize_requested: false,
             render_scale: 1.0,
         }
@@ -57,6 +63,15 @@ impl VkWindowState {
         }
         self.curr_extent.height = (self.curr_extent.height as f32 * self.render_scale) as u32;
         self.curr_extent.width = (self.curr_extent.width as f32 * self.render_scale) as u32;
+    }
+
+    pub fn center_cursor(&self) {
+        self.window
+            .set_cursor_position(LogicalPosition {
+                x: self.curr_extent.width / 2,
+                y: self.curr_extent.height / 2,
+            })
+            .expect("Errored centering cursor");
     }
 }
 
@@ -161,16 +176,14 @@ pub struct VkDescLayoutMap {
 
 impl VkDescLayoutMap {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
-         layouts.sort();
-        
+        layouts.sort();
+
         let sorted_layouts: [vk::DescriptorSetLayout; 2] = layouts
             .into_iter()
             .map(|(_, layout)| layout)
             .collect::<Vec<_>>()
             .try_into()
             .expect("Number of descriptor layouts did not match number of enum keys");
-
-
 
         Self {
             layouts: sorted_layouts,
@@ -240,8 +253,6 @@ impl VkDestroyable for VkFrameSync {
     }
 }
 
-
-
 pub struct VkImageAlloc {
     pub image: vk::Image,
     pub image_view: vk::ImageView,
@@ -249,7 +260,6 @@ pub struct VkImageAlloc {
     pub image_extent: vk::Extent3D,
     pub image_format: vk::Format,
 }
-
 
 impl VkDestroyable for VkImageAlloc {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {

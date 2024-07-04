@@ -661,7 +661,7 @@ impl<'a> VkRender<'a> {
             new_size,
             Some(2),
             None,
-            Some(vk::PresentModeKHR::MAILBOX),
+            Some(vk::PresentModeKHR::IMMEDIATE),
             Some(self.swapchain.swapchain),
             true,
         )
@@ -1037,7 +1037,7 @@ impl<'a> VkRender<'a> {
             self.logical_device
                 .device
                 .cmd_set_scissor(cmd_buffer, 0, &scissor);
-            
+
             let curr_frame = self.presentation.get_curr_frame_mut();
 
 
@@ -1048,7 +1048,7 @@ impl<'a> VkRender<'a> {
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
             .unwrap();
-          
+
 
             let desc = [self.descriptors.get(VkDescType::GpuScene)];
 
@@ -1628,16 +1628,16 @@ impl<'a> VkRender<'a> {
     }
 
     pub fn update_scene(&mut self) {
-   
-        
+
+
         if let Some(ref mut gltf_data) = self.gltf_stuffs {
             gltf_data.draw_context.opaque_surfaces.clear();
-            
+
             let loaded_nodes = &mut gltf_data.loaded_nodes;
             let model = loaded_nodes.get_mut("Cube").unwrap();
-            
+
             for x in  -3..3 {
-           
+
                 let scale = glam::Mat4::from_scale(glam::Vec3::splat(0.2));
                 let translation = glam::Mat4::from_translation(glam::vec3(x as f32, 1.0, 0.0));
                 let trans_scale = translation * scale;
@@ -1645,10 +1645,10 @@ impl<'a> VkRender<'a> {
                     .borrow_mut()
                     .draw(&trans_scale, &mut gltf_data.draw_context);
             }
-           
-            
+
+
             // Set up the view matrix
-            self.scene_data.data.view = glam::Mat4::from_translation(vec3(0.0, 0.0, -5.0));
+            self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
 
             // Set up the projection matrix
             let fovy = 70.0_f32.to_radians();

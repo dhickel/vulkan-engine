@@ -1007,7 +1007,7 @@ name = "input"
 version = "0.1.0"
 dependencies = [
  "enum-map",
- "glam 0.8.5",
+ "glam 0.28.0",
  "winit",
 ]
 

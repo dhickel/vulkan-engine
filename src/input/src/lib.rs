@@ -4,7 +4,6 @@
 
 use std::cell::RefCell;
 
-
 use crate::ListenFilter::TypeFilter;
 use glam::Vec2;
 use std::cmp::PartialEq;
@@ -23,6 +22,7 @@ pub enum ListenerType {
     GameInput,
 }
 
+#[derive(Default)]
 pub struct InputMap<K, V>
 where
     K: enum_map::Enum + enum_map::EnumArray<V>,
@@ -63,12 +63,6 @@ where
     K: enum_map::Enum + enum_map::EnumArray<V>,
     V: enum_map::Enum + PartialOrd + Default,
 {
-    pub fn new() -> Self {
-        InputMap {
-            map: enum_map::EnumMap::default(),
-        }
-    }
-
     pub fn add_binding(&mut self, key: K, value: V) {
         self.map[key] = value;
     }
@@ -119,7 +113,12 @@ pub trait KeyboardListener {
     fn listener_type(&self) -> ListenerType;
     fn listener_id(&self) -> u32;
     fn listener_for(&self, key: KeyCode) -> bool;
-    fn broadcast(&mut self, key: KeyCode, pressed: bool, modifiers: &HashSet<winit::event::Modifiers>);
+    fn broadcast(
+        &mut self,
+        key: KeyCode,
+        pressed: bool,
+        modifiers: &HashSet<winit::event::Modifiers>,
+    );
 }
 
 pub enum ListenFilter {
@@ -127,11 +126,12 @@ pub enum ListenFilter {
     IdFilter(u32),
 }
 
+#[derive(Default)]
 pub struct InputManager {
     curr_m_pos: Vec2,
     scroll_state: f32,
     m_button_states: HashSet<MouseButton>,
-    key_states: HashSet<KeyCode>,
+    key_states: Vec<(KeyCode, bool)>,
     modifiers: HashSet<winit::event::Modifiers>,
     m_pos_listeners: Vec<Rc<RefCell<dyn MousePosListener>>>,
     m_scroll_listeners: Vec<Rc<RefCell<dyn MouseScrollListener>>>,
@@ -141,21 +141,6 @@ pub struct InputManager {
 }
 
 impl InputManager {
-    pub fn new() -> Self {
-        InputManager {
-            curr_m_pos: Vec2::zero(),
-            scroll_state: 0.0,
-            m_button_states: HashSet::new(),
-            key_states: HashSet::new(),
-            modifiers: HashSet::new(),
-            m_pos_listeners: Vec::new(),
-            m_scroll_listeners: Vec::new(),
-            m_button_listeners: Vec::new(),
-            key_state_listener: Vec::new(),
-            listen_filter: None,
-        }
-    }
-
     pub fn register_m_pos_listener(&mut self, listener: Rc<RefCell<dyn MousePosListener>>) {
         self.m_pos_listeners.push(listener)
     }
@@ -164,9 +149,9 @@ impl InputManager {
         self.key_state_listener.push(listener)
     }
 
-    pub fn update_mouse_pos(&mut self, x: f32, y: f32) {
-        self.curr_m_pos.set_x(x);
-        self.curr_m_pos.set_y(y);
+    pub fn update_mouse_pos(&mut self, delta :(f64, f64)) {
+        self.curr_m_pos.x = delta.0 as f32;
+        self.curr_m_pos.y = delta.1 as f32;
     }
 
     pub fn update_scroll_state(&mut self, delta: f32) {
@@ -178,41 +163,48 @@ impl InputManager {
         self.m_button_states.insert(button);
     }
 
-    pub fn add_keycode(&mut self, key: KeyCode) {
+    pub fn add_keycode(&mut self, key: KeyCode, pressed: bool) {
         // let k_code = KeyCode::from_winit(key);
-        self.key_states.insert(key);
+        self.key_states.push((key, pressed));
     }
 
     pub fn update(&mut self) {
-        let m_buttons = self.m_button_states.drain().collect();
-        let key_states = self.key_states.drain().collect();
-        let mods = HashSet::<Modifiers>::with_capacity(0);
-
-        self.broadcast_m_pos(&mods);
-        self.broadcast_m_scroll(&mods);
-        self.broadcast_m_buttons(&m_buttons, &mods);
-        self.broadcast_key_states(&key_states, &mods);
+        self.broadcast_m_pos();
+        self.broadcast_m_scroll();
+        self.broadcast_m_buttons();
+        self.broadcast_key_states();
+        
+        self.scroll_state = 0.0;
+        self.key_states.clear();
+        self.modifiers.clear();
+        self.m_button_states.clear();
     }
 
-    fn broadcast_m_pos(&mut self, mods: &HashSet<Modifiers>) {
+    fn broadcast_m_pos(&mut self) {
         for listener in self.m_pos_listeners.iter_mut() {
             match self.listen_filter {
-                None => listener.borrow_mut().broadcast(self.curr_m_pos, mods),
+                None => listener
+                    .borrow_mut()
+                    .broadcast(self.curr_m_pos, &self.modifiers),
                 Some(TypeFilter(typ)) => {
                     if listener.borrow().listener_type() == typ {
-                        listener.borrow_mut().broadcast(self.curr_m_pos, mods);
+                        listener
+                            .borrow_mut()
+                            .broadcast(self.curr_m_pos, &self.modifiers);
                     }
                 }
                 Some(ListenFilter::IdFilter(id)) => {
                     if listener.borrow().listener_id() == id {
-                        listener.borrow_mut().broadcast(self.curr_m_pos, mods);
+                        listener
+                            .borrow_mut()
+                            .broadcast(self.curr_m_pos, &self.modifiers);
                     }
                 }
             }
         }
     }
 
-    fn broadcast_m_scroll(&mut self, mods: &HashSet<Modifiers>) {
+    fn broadcast_m_scroll(&mut self) {
         for listener in self.m_scroll_listeners.iter_mut() {
             match self.listen_filter {
                 None => listener.borrow_mut().broadcast(self.scroll_state),
@@ -230,7 +222,7 @@ impl InputManager {
         }
     }
 
-    fn broadcast_m_buttons(&mut self, buttons: &Vec<MouseButton>, mods: &HashSet<Modifiers>) {
+    fn broadcast_m_buttons(&mut self) {
         for listener in self.m_button_listeners.iter_mut() {
             match self.listen_filter {
                 None => {}
@@ -245,14 +237,18 @@ impl InputManager {
                     }
                 }
             }
-            buttons
+            self.m_button_states
                 .iter()
                 .filter(|btn| listener.borrow().listener_for(**btn))
-                .for_each(|btn| listener.borrow_mut().broadcasts(*btn, true, mods))
+                .for_each(|btn| {
+                    listener
+                        .borrow_mut()
+                        .broadcasts(*btn, true, &self.modifiers)
+                })
         }
     }
 
-    fn broadcast_key_states(&mut self, keys: &Vec<KeyCode>, mods: &HashSet<Modifiers>) {
+    fn broadcast_key_states(&mut self) {
         for listener in self.key_state_listener.iter_mut() {
             match self.listen_filter {
                 None => {}
@@ -267,13 +263,12 @@ impl InputManager {
                     }
                 }
             }
-           
-            for key in keys {
-                if listener.borrow().listener_for(*key) {
-                    listener.borrow_mut().broadcast(*key, true, &self.modifiers)
+
+            for key in &self.key_states {
+                if listener.borrow().listener_for(key.0) {
+                    listener.borrow_mut().broadcast(key.0, key.1, &self.modifiers)
                 }
             }
         }
     }
 }
-
