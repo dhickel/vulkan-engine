@@ -19,7 +19,7 @@ pub struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self{
-            position: glam::vec3(0.0, 0.0, -5.0),
+            position: glam::vec3(0.0, 0.0, 5.0),
             view_matrix: Default::default(),
             orientation: Default::default(),
             delta_rotation: Default::default(),

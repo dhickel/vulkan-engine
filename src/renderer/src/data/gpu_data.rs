@@ -39,6 +39,114 @@ impl Default for Vertex {
     }
 }
 
+
+pub struct TextureData {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub format: vk::Format,
+    pub mips_levels: u32,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub enum AlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub enum PbrTexture {
+    MetallicRough(PbrMetallicRoughness),
+    SpecularGloss(PbrSpecularGlossiness),
+    Transmission(PbrTransmission),
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct PbrMetallicRoughness {
+    pub base_color_factor: glam::Vec4,
+    pub base_color_tex_id: u16,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub metallic_roughness_tex_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct PbrSpecularGlossiness {
+    pub diffuse_factor: glam::Vec4,
+    pub diffuse_tex_idx: u16,
+    pub specular_factor: glam::Vec3,
+    pub glossiness_factor: f32,
+    pub specular_glossiness_tex_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct PbrTransmission {
+    pub transmission_factor: f32,
+    pub transmission_tex_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct SpecularMap {
+    pub specular_factor: f32,
+    pub specular_tex_id: u16,
+    pub specular_color_factor: glam::Vec3,
+    pub specular_color_tex_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct EmissiveMap {
+    pub emissive_factor: glam::Vec3,
+    pub emissive_tex_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct NormalMap {
+    pub scale: f32,
+    pub texture_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct OcclusionMap {
+    pub strength: f32,
+    pub texture_id: u16,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct VolumeMap {
+    pub thickness_factor: f32,
+    pub thickness_tex_id: u32,
+    pub attenuation_distance: f32,
+    pub attenuation_color: glam::Vec3,
+}
+
+#[derive( Copy, Clone, PartialEq)]
+pub struct Material {
+    pub base_color_factor: glam::Vec4,
+    pub base_color_tex_id: u16,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub metallic_roughness_tex_id: u16,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: f32,
+    pub unlit: bool,
+    pub pbr_texture: PbrTexture,
+    pub normal_map: Option<NormalMap>,
+    pub occlusion_map: Option<OcclusionMap>,
+}
+
+impl Material {
+    pub fn has_normal(&self) -> bool {
+        self.normal_map.is_some()
+    }
+
+    pub fn has_occulsion(&self) -> bool {
+        self.occlusion_map.is_some()
+    }
+
+   
+}
+
 pub struct GPUScene {
     pub data: GPUSceneData,
     pub descriptor: [vk::DescriptorSetLayout; 1],
@@ -168,7 +276,7 @@ impl GLTFMetallicRoughness<'_> {
         };
 
         let entry = CString::new("main").unwrap();
-        
+
         let mut pipeline_builder = PipelineBuilder::default()
             .set_shaders(vert_shader, &entry, frag_shader, &entry)
             .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -196,7 +304,7 @@ impl GLTFMetallicRoughness<'_> {
         (
             VkPipeline::new(opaque_pipeline, layout),
             VkPipeline::new(transparent_pipeline, layout),
-            material_layout
+            material_layout,
         )
     }
 
@@ -259,14 +367,12 @@ pub trait Renderable {
     fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>>;
 }
 
-
 pub struct Node {
     pub parent: Option<Weak<Node>>,
     pub children: Vec<Rc<RefCell<dyn Renderable>>>,
     pub world_transform: glam::Mat4,
     pub local_transform: glam::Mat4,
 }
-
 
 impl Default for Node {
     fn default() -> Self {
@@ -304,13 +410,12 @@ pub struct DrawContext {
 }
 
 impl Default for DrawContext {
-     fn default() -> Self {
+    fn default() -> Self {
         DrawContext {
             opaque_surfaces: Vec::new(),
         }
     }
 }
-
 
 pub struct MeshNode {
     pub node: Node,

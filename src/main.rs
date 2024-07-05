@@ -5,7 +5,7 @@
 
 fn main() {
 
-   renderer::run()
+   renderer::gltf("/home/mindspice/code/rust/engine/src/renderer/src/assets/structure.glb".to_string())
 }
 
 

@@ -18,7 +18,7 @@ use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 
-use crate::data::camera;
+use crate::data::{camera, gltf_util};
 use crate::data::camera::FPSController;
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
@@ -40,6 +40,11 @@ const NANO: f64 = 1000000000.0;
 
 pub struct GameLogic {
     input_manager: InputManager,
+}
+
+
+pub fn gltf(str : String) {
+    gltf_util::parse_gltf_to_raw(str.as_str()).unwrap();
 }
 
 pub fn run() {

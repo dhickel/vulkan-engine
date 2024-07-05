@@ -250,25 +250,24 @@ impl InputManager {
 
     fn broadcast_key_states(&mut self) {
         for listener in self.key_state_listener.iter_mut() {
+            let mut listener = listener.borrow_mut();
             match self.listen_filter {
                 None => {}
                 Some(TypeFilter(typ)) => {
-                    if listener.borrow().listener_type() != typ {
+                    if listener.listener_type() != typ {
                         continue;
                     }
                 }
                 Some(ListenFilter::IdFilter(id)) => {
-                    if listener.borrow().listener_id() != id {
+                    if listener.listener_id() != id {
                         continue;
                     }
                 }
             }
 
             for key in &self.key_states {
-                if listener.borrow().listener_for(key.0) {
-                    listener
-                        .borrow_mut()
-                        .broadcast(key.0, key.1, &self.modifiers)
+                if listener.listener_for(key.0) {
+                    listener.broadcast(key.0, key.1, &self.modifiers)
                 }
             }
         }
