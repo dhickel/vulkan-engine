@@ -1,4 +1,7 @@
-use crate::vulkan::vk_types::VkGpuMeshBuffers;
+use std::any::Any;
+use std::collections::HashMap;
+use std::default::Default;
+
 use std::fmt::format;
 use std::fs;
 use std::fs::File;
@@ -7,13 +10,20 @@ use std::marker::PhantomData;
 use std::path::Path;
 
 use ash::vk;
-use glfw::Glfw;
+use gltf::image::Format;
+use gltf::material::AlphaMode;
 use gltf::mesh::util::{ReadColors, ReadIndices, ReadNormals, ReadPositions, ReadTexCoords};
 use gltf::texture::{MagFilter, MinFilter};
 use gltf::{Gltf, Material, Semantic};
+use imgui::sys::ImDrawFlags_None;
 use std::rc::Rc;
 
-use crate::data::gpu_data::{MaterialInstance, MeshNode, Vertex};
+use crate::data::data_util::{MeshCache, TextureCache};
+use crate::data::gpu_data;
+use crate::data::gpu_data::{
+    EmissiveMap, MeshMeta, NodeMeta, NormalMap, OcclusionMap, SurfaceMeta, TextureMeta, Transform,
+    Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer,
+};
 use log::log;
 
 #[derive(Debug)]
@@ -23,21 +33,13 @@ pub struct GeoSurface {
     pub material: Rc<GLTFMaterial>,
 }
 
-
-
 #[derive(Debug)]
 pub struct GLTFMaterial {
-    pub data: MaterialInstance,
+    pub data: VkGpuTextureBuffer,
 }
 
 impl GLTFMaterial {
-    pub fn null() -> Self {
-        Self {
-            data: MaterialInstance::null(),
-        }
-    }
-
-    pub fn new(data: MaterialInstance) -> Self {
+    pub fn new(data: VkGpuTextureBuffer) -> Self {
         Self { data }
     }
 }
@@ -59,226 +61,12 @@ pub struct MeshAsset {
     pub mesh_buffers: VkGpuMeshBuffers,
 }
 
-impl MeshAsset {
-    // pub fn new() -> self {
-    //     Self {
-    //         name: "".to_string(),
-    //         surfaces: vec![],
-    //         mesh_buffers: VkGpuMeshBuffers {},
-    //     }
-    // }
-}
-
-pub fn load_meshes<F>(path: &str, mut upload_fn: F) -> Result<Vec<MeshAsset>, String>
-where
-    F: FnMut(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
-{
-    log::info!("Loading Mesh: {:?}", path);
-
-    let path = std::path::Path::new(path);
-    let file = File::open(path).unwrap();
-    let reader = BufReader::new(file);
-    let gltf = Gltf::from_reader(reader).unwrap();
-
-    let buffer_data = load_buffers(&gltf, &path).unwrap();
-
-    let mut meshes = Vec::<MeshAsset>::new();
-
-    let mut indices = Vec::<u32>::new();
-    let mut vertices = Vec::<Vertex>::new();
-    let mut unnamed_idx = 0;
-
-    for mesh in gltf.meshes() {
-        let mut surfaces = Vec::<GeoSurface>::new();
-
-        indices.clear();
-        vertices.clear();
-
-        for prim in mesh.primitives() {
-            let new_surface = GeoSurface {
-                start_index: indices.len() as u32,
-                count: prim.indices().unwrap().count() as u32,
-                material: Rc::new(GLTFMaterial::null()),
-            };
-            surfaces.push(new_surface);
-
-            let init_vtx = vertices.len();
-            let reader = prim.reader(|buffer| Some(buffer_data[buffer.index()].as_slice()));
-
-            match reader.read_indices().unwrap() {
-                ReadIndices::U8(val) => {
-                    indices.extend(val.map(|idx| idx as u32 + init_vtx as u32));
-                }
-                ReadIndices::U16(val) => {
-                    indices.extend(val.map(|idx| idx as u32 + init_vtx as u32));
-                }
-                ReadIndices::U32(val) => {
-                    indices.extend(val.map(|idx| idx + init_vtx as u32));
-                }
-            }
-
-            // load vertex positions
-            match reader.read_positions().unwrap() {
-                ReadPositions::Standard(pos_iter) => {
-                    for pos in pos_iter {
-                        let vert = Vertex {
-                            position: glam::Vec3::from_array(pos),
-                            normal: glam::vec3(1.0, 0.0, 0.0),
-                            color: glam::Vec4::ONE,
-                            uv_x: 0.0,
-                            uv_y: 0.0,
-                        };
-                        vertices.push(vert);
-                    }
-                }
-                ReadPositions::Sparse(pos) => {
-                    panic!("Sparse")
-                }
-            };
-
-            if let Some(norms) = reader.read_normals() {
-                match norms {
-                    ReadNormals::Standard(norm_iter) => {
-                        for (idx, norm) in norm_iter.enumerate() {
-                            vertices[init_vtx + idx].normal = glam::Vec3::from_array(norm);
-                        }
-                    }
-                    ReadNormals::Sparse(_) => {
-                        panic!("Sparse")
-                    }
-                }
-            }
-
-            if let Some(uvs) = reader.read_tex_coords(0) {
-                match uvs {
-                    ReadTexCoords::U8(_) => {
-                        panic!("u8 uvs")
-                    }
-                    ReadTexCoords::U16(_) => {
-                        panic!("u16 uvs")
-                    }
-                    ReadTexCoords::F32(cord_iter) => {
-                        for (idx, cord) in cord_iter.enumerate() {
-                            vertices[init_vtx + idx].uv_x = cord[0];
-                            vertices[init_vtx + idx].uv_y = cord[1];
-                        }
-                    }
-                }
-            }
-
-            if let Some(colors) = reader.read_colors(0) {
-                match colors {
-                    ReadColors::RgbF32(color_iter) => {
-                        for (idx, color) in color_iter.enumerate() {
-                            vertices[init_vtx + idx].color =
-                                glam::Vec3::from_array(color).extend(1.0);
-                        }
-                    }
-                    ReadColors::RgbaF32(color_iter) => {
-                        for (idx, color) in color_iter.enumerate() {
-                            vertices[init_vtx + idx].color = glam::Vec4::from_array(color)
-                        }
-                    }
-                    _ => panic!("Non float colors"),
-                }
-            }
-        }
-
-        let override_colors = false;
-        if override_colors {
-            vertices
-                .iter_mut()
-                .for_each(|vtx| vtx.color = vtx.normal.extend(1.0));
-        }
-
-        let mesh_buffers = upload_fn(&indices, &vertices);
-
-        let name = mesh.name().map_or_else(
-            || {
-                unnamed_idx += 1;
-                format!("unnamed_{}", unnamed_idx - 1)
-            },
-            |n| n.to_string(),
-        );
-
-        let new_mesh = MeshAsset {
-            name,
-            surfaces,
-            mesh_buffers,
-        };
-
-        meshes.push(new_mesh);
-    }
-    Ok(meshes)
-}
-
-fn load_buffers(gltf: &gltf::Gltf, gltf_path: &Path) -> Result<Vec<Vec<u8>>, std::io::Error> {
-    gltf.buffers()
-        .map(|buffer| match buffer.source() {
-            gltf::buffer::Source::Uri(uri) => {
-                let buffer_path = gltf_path.parent().unwrap().join(uri);
-                let mut file = File::open(buffer_path)?;
-                let mut buffer_data = Vec::new();
-                file.read_to_end(&mut buffer_data)?;
-                Ok(buffer_data)
-            }
-            gltf::buffer::Source::Bin => {
-                gltf.blob.as_ref().map(|blob| blob.to_vec()).ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::NotFound, "Binary buffer not found")
-                })
-            }
-        })
-        .collect()
-}
-
-fn map_mag_filter(filter: gltf::texture::MagFilter) -> vk::Filter {
-    match filter {
-        MagFilter::Nearest => vk::Filter::NEAREST,
-        MagFilter::Linear => vk::Filter::LINEAR,
-    }
-}
-
-fn map_min_filter(filter: gltf::texture::MinFilter) -> vk::Filter {
-    match filter {
-        MinFilter::Nearest | MinFilter::NearestMipmapNearest | MinFilter::NearestMipmapLinear => {
-            vk::Filter::NEAREST
-        }
-        MinFilter::Linear | MinFilter::LinearMipmapNearest | MinFilter::LinearMipmapLinear => {
-            vk::Filter::LINEAR
-        }
-    }
-}
-
-pub struct RawSurface {
-    start_index: u32,
-    count: u32,
-    material_index: Option<usize>,
-}
-
-pub struct RawMeshData {
-    pub name: String,
-    pub indices: Vec<u32>,
-    pub vertices: Vec<Vertex>,
-    pub surfaces: Vec<RawSurface>,
-}
-
-pub struct RawNodeData {
-    pub name: String,
-    pub mesh_index: Option<usize>,
-    pub position: glam::Vec3,
-    pub rotation: glam::Quat,
-    pub scale: glam::Vec3,
-    pub children: Vec<usize>,
-}
-
-pub struct RawSceneData<'a> {
-    pub meshes: Vec<RawMeshData>,
-    pub materials: Vec<gltf::Material<'a>>,
-    pub nodes: Vec<RawNodeData>,
-    pub root_indices: Vec<usize>,
-}
-
-pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
+// TODO Break out into more functions lol :/
+pub fn parse_gltf_to_raw(
+    path: &str,
+    texture_cache: &mut TextureCache,
+    mesh_cache: &mut MeshCache,
+) -> Result<String, String> {
     log::info!("Loading Mesh: {:?}", path);
 
     // let path = std::path::Path::new(path);
@@ -291,10 +79,9 @@ pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
     let (gltf_data, buffer_data, images) =
         gltf::import(path).map_err(|err| format!("Error loading GLTF file: {:?}", err))?;
 
-    
     println!("Image Count: {}", images.len());
-    let mut parsed_meshes = Vec::<RawMeshData>::new();
-    let materials: Vec<gltf::Material> = gltf_data.materials().collect();
+    let mut parsed_meshes = Vec::<MeshMeta>::new();
+    let parsed_materials: Vec<gltf::Material> = gltf_data.materials().collect();
 
     let mut unnamed_mesh_index = 0;
     let mut unnamed_mat_index = 0;
@@ -309,7 +96,7 @@ pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
 
         let mut tmp_indices = Vec::<u32>::new();
         let mut tmp_vertices = Vec::<Vertex>::new();
-        let mut surfaces = Vec::<RawSurface>::new();
+        let mut surfaces = Vec::<SurfaceMeta>::new();
 
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buffer| Some(buffer_data[buffer.index()].0.as_slice()));
@@ -474,14 +261,14 @@ pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
                 }
             }
 
-            surfaces.push(RawSurface {
+            surfaces.push(SurfaceMeta {
                 start_index: start_index as u32,
                 count: count as u32,
-                material_index: primitive.material().index(),
+                material_index: primitive.material().index().map(|idx| idx as u32),
             })
         }
 
-        parsed_meshes.push(RawMeshData {
+        parsed_meshes.push(MeshMeta {
             name,
             indices: tmp_indices,
             vertices: tmp_vertices,
@@ -489,9 +276,189 @@ pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
         })
     }
 
+    // LOAD AND STORE TEXTURES/MATERIALS
+    let mut mapped_materials = HashMap::<u32, u32>::with_capacity(parsed_materials.len());
+
+    for material in parsed_materials {
+        let name = material.name().or(Some("Unnamed")).unwrap().to_string();
+
+        let (base_color_tex_id, base_color_factor) =
+            if let Some(tex) = material.pbr_metallic_roughness().base_color_texture() {
+                (
+                    Some(tex.texture().source().index()),
+                    Some(glam::Vec4::from_array(
+                        material.pbr_metallic_roughness().base_color_factor(),
+                    )),
+                )
+            } else {
+                (None, None) // TODO add better default
+            };
+
+        let (metallic_roughness_tex_id, metallic_factor, roughness_factor) = if let Some(tex) =
+            material
+                .pbr_metallic_roughness()
+                .metallic_roughness_texture()
+        {
+            (
+                Some(tex.texture().source().index()),
+                Some(material.pbr_metallic_roughness().metallic_factor()),
+                Some(material.pbr_metallic_roughness().roughness_factor()),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        let (normal_id, normal_scale) = if let Some(tex) = material.normal_texture() {
+            (Some(tex.texture().source().index()), Some(tex.scale()))
+        } else {
+            (None, None)
+        };
+
+        let (occlusion_id, occlusion_strength) = if let Some(tex) = material.occlusion_texture() {
+            (Some(tex.texture().source().index()), Some(tex.strength()))
+        } else {
+            (None, None)
+        };
+
+        let (emissive_id, emissive_factor) = if let Some(tex) = material.emissive_texture() {
+            (
+                Some(tex.texture().source().index()),
+                Some(material.emissive_factor()),
+            )
+        } else {
+            (None, None)
+        };
+
+        let alpha_mode = match material.alpha_mode() {
+            AlphaMode::Opaque => gpu_data::AlphaMode::Opaque,
+            AlphaMode::Mask => gpu_data::AlphaMode::Mask,
+            AlphaMode::Blend => gpu_data::AlphaMode::Blend,
+        };
+
+        let alpha_cutoff = material.alpha_cutoff().unwrap_or_else(|| 1.0);
+
+        let (base_color_tex_id, base_color_factor) = if let Some(bc_id) = base_color_tex_id {
+            let bc_factor = base_color_factor.unwrap();
+            let data = images.get(bc_id).ok_or_else(|| {
+                format!(
+                    "Could not locate texture index {} for material: {:?}",
+                    bc_id, name
+                )
+            })?;
+
+            let texture_data = gpu_data::TextureMeta::from_gltf_texture(data);
+            let texture_id = texture_cache.add_texture(texture_data);
+            (texture_id, bc_factor)
+        } else {
+            panic!("No pbr data") // TODO store a default to use in cache
+        };
+
+        let (metallic_roughness_tex_id, metallic_factor, roughness_factor) =
+            if let Some(mr_id) = metallic_roughness_tex_id {
+                let met_factor = metallic_factor.unwrap();
+                let rough_factor = roughness_factor.unwrap();
+                let data = images.get(mr_id).ok_or_else(|| {
+                    format!(
+                        "Could not locate texture index {} for material: {:?}",
+                        mr_id, name
+                    )
+                })?;
+
+                let texture_data = gpu_data::TextureMeta::from_gltf_texture(data);
+                let texture_id = texture_cache.add_texture(texture_data);
+                (texture_id, met_factor, rough_factor)
+            } else {
+                panic!("No pbr data") // TODO store a default to use in cache
+            };
+
+        let normal_map = if let Some(norm_id) = normal_id {
+            let scale = normal_scale.unwrap();
+            let data = images.get(norm_id).ok_or_else(|| {
+                format!(
+                    "Could not locate texture index {} for material: {:?}",
+                    norm_id, name
+                )
+            })?;
+
+            let texture_data = gpu_data::TextureMeta::from_gltf_texture(data);
+            let texture_id = texture_cache.add_texture(texture_data);
+            Some(NormalMap { texture_id, scale })
+        } else {
+            None
+        };
+
+        let occlusion_map = if let Some(occ_id) = occlusion_id {
+            let strength = occlusion_strength.unwrap();
+            let data = images.get(occ_id).ok_or_else(|| {
+                format!(
+                    "Could not locate texture index {} for material: {:?}",
+                    occ_id, name
+                )
+            })?;
+
+            let texture_data = gpu_data::TextureMeta::from_gltf_texture(data);
+            let texture_id = texture_cache.add_texture(texture_data);
+            Some(OcclusionMap {
+                texture_id,
+                strength,
+            })
+        } else {
+            None
+        };
+
+        let emissive_map = if let Some(e_id) = emissive_id {
+            let factor = glam::Vec3::from_array(emissive_factor.unwrap());
+            let data = images.get(e_id).ok_or_else(|| {
+                format!(
+                    "Could not locate texture index {} for material: {:?}",
+                    e_id, name
+                )
+            })?;
+
+            let texture_data = gpu_data::TextureMeta::from_gltf_texture(data);
+            let texture_id = texture_cache.add_texture(texture_data);
+            Some(EmissiveMap { texture_id, factor })
+        } else {
+            None
+        };
+
+        let mat_data = gpu_data::MaterialMeta {
+            base_color_factor,
+            base_color_tex_id,
+            metallic_factor,
+            roughness_factor,
+            metallic_roughness_tex_id,
+            alpha_mode,
+            alpha_cutoff,
+            normal_map,
+            occlusion_map,
+            emissive_map,
+        };
+
+        let mat_id = texture_cache.add_material(mat_data);
+        mapped_materials.insert(material.index().unwrap() as u32, mat_id);
+    }
+
+    // MAP EXISTING GLTF MESH MATERIAL INDEX TO CACHE INDEX
+
+    let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(parsed_meshes.len());
+
+    for (idx, mut mesh) in parsed_meshes.drain(..).enumerate() {
+        for surface in &mut mesh.surfaces {
+            if let Some(mat_index) = surface.material_index {
+                if let Some(cache_index) = mapped_materials.get(&mat_index) {
+                    surface.material_index = Some(*cache_index);
+                }
+            }
+        }
+
+        let mesh_index = mesh_cache.add_mesh(mesh);
+        mapped_meshes.insert(idx as u32, mesh_index);
+    }
+
     // NODES, INDICES & TRANSFORMS
     let mut root_indices: Vec<Option<usize>> = gltf_data.nodes().map(|n| Some(n.index())).collect();
-    let mut nodes = Vec::<RawNodeData>::with_capacity(gltf_data.nodes().count());
+    let mut parsed_nodes = Vec::<NodeMeta>::with_capacity(gltf_data.nodes().count());
 
     let mut unnamed_node_idx = 0;
     for node in gltf_data.nodes() {
@@ -505,9 +472,12 @@ pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
         let mesh_index = node.mesh().map(|m| m.index());
 
         let (translation, rotation, scale) = node.transform().decomposed();
-        let position = glam::Vec3::from_array(translation);
-        let rotation = glam::Quat::from_array(rotation);
-        let scale = glam::Vec3::from_array(scale);
+
+        let transform = Transform {
+            position: glam::Vec3::from_array(translation),
+            rotation: glam::Quat::from_array(rotation),
+            scale: glam::Vec3::from_array(scale),
+        };
 
         let children: Vec<usize> = node
             .children()
@@ -518,67 +488,34 @@ pub fn parse_gltf_to_raw(path: &str) -> Result<String, String> {
             })
             .collect();
 
-        let node_data = RawNodeData {
+        let mapped_mesh_index = mesh_index
+            .and_then(|index| mapped_meshes.get(&(index as u32)))
+            .copied();
+
+        let node_data = NodeMeta {
             name,
-            mesh_index,
-            position,
-            rotation,
-            scale,
-            children,
+            mesh_index: mapped_mesh_index,
+            local_transform: transform,
+            children: children.into_iter().map(|idx| idx as u32).collect(),
         };
 
-        nodes.push(node_data);
+        parsed_nodes.push(node_data);
     }
 
-    let scene_data = RawSceneData {
-        meshes: parsed_meshes,
-        materials,
-        nodes,
-        root_indices: root_indices
-            .into_iter()
-            .flatten()
-            .collect(),
-    };
-    Err("Fucky".to_string())
-
+    Err("psasd".to_string())
 }
 
-fn extract_scene_data(scene: gltf::Scene) {}
-
-// fn load_buffers(
-//     gltf: &gltf::Gltf,
-//     path: &Path
-// ) -> Result<Vec<Vec<u8>>, Gltf::GltfError> {
-//     const VALID_MIME_TYPES: &[&str] = &["application/octet-stream", "application/gltf-buffer"];
-//     let mut buffer_data = Vec::new();
-//     for buffer in gltf.buffers() {
-//         match buffer.source() {
-//             gltf::buffer::Source::Uri(uri) => {
-//                 let uri = percent_encoding::percent_decode_str(uri)
-//                     .decode_utf8()
-//                     .unwrap();
-//                 let uri = uri.as_ref();
-//                 let buffer_bytes = match DataUri::parse(uri) {
-//                     Ok(data_uri) if VALID_MIME_TYPES.contains(&data_uri.mime_type) => {
-//                         datauri.decode()?
-//                     }
-//                     Ok() => return Err(GltfError::BufferFormatUnsupported),
-//                     Err(()) => {
-//                         // TODO: Remove this and add dep
-//                         let buffer_path = load_context.path().parent().unwrap().join(uri);
-//                         load_context.read_asset_bytes(buffer_path).await?
-//                     }
-//                 };
-//                 buffer_data.push(buffer_bytes);
-//             }
-//             gltf::buffer::Source::Bin => {
-//                 if let Some(blob) = gltf.blob.as_deref() {
-//                     buffer_data.push(blob.into());
-//                 } else {
-//                     return Err(Gltf::GltfError::MissingBlob);
-//                 }
-//             }
-//         }
-//     }
-//     Ok(buffer_data)
-// }
+pub(crate) fn gltf_format_to_vk_format(format: Format) -> vk::Format {
+    match format {
+        Format::R8 => vk::Format::R8_UNORM,
+        Format::R8G8 => vk::Format::R8G8_UNORM,
+        Format::R8G8B8 => vk::Format::R8G8B8_UNORM,
+        Format::R8G8B8A8 => vk::Format::R8G8B8A8_UNORM,
+        Format::R16 => vk::Format::R16_UNORM,
+        Format::R16G16 => vk::Format::R16G16_UNORM,
+        Format::R16G16B16 => vk::Format::R16G16B16_UNORM,
+        Format::R16G16B16A16 => vk::Format::R16G16B16A16_UNORM,
+        Format::R32G32B32FLOAT => vk::Format::R32G32B32_SFLOAT,
+        Format::R32G32B32A32FLOAT => vk::Format::R32G32B32A32_SFLOAT,
+    }
+}

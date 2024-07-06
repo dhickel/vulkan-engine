@@ -253,6 +253,7 @@ impl VkDestroyable for VkFrameSync {
     }
 }
 
+#[derive(Debug)]
 pub struct VkImageAlloc {
     pub image: vk::Image,
     pub image_view: vk::ImageView,
@@ -688,26 +689,7 @@ impl VkBuffer {
         }
     }
 }
-#[derive(Debug)]
-pub struct VkGpuMeshBuffers {
-    pub index_buffer: VkBuffer,
-    pub vertex_buffer: VkBuffer,
-    pub vertex_buffer_addr: vk::DeviceAddress,
-}
 
-impl VkGpuMeshBuffers {
-    pub fn new(
-        index_buffer: VkBuffer,
-        vertex_buffer: VkBuffer,
-        vertex_buffer_addr: vk::DeviceAddress,
-    ) -> Self {
-        Self {
-            index_buffer,
-            vertex_buffer,
-            vertex_buffer_addr,
-        }
-    }
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]

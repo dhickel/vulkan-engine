@@ -244,9 +244,7 @@ impl<'a> PipelineBuilder<'a> {
     }
 
     pub fn set_pipeline_layout(mut self, layout: vk::PipelineLayout) -> Self {
-        println!("Pipeline in: {:?}", layout);
         self.pipeline_layout = layout;
-        println!("Pipeline set: {:?}", self.pipeline_layout);
         self
     }
 }

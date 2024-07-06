@@ -1,7 +1,7 @@
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
 use crate::data::gpu_data::{
-    DrawContext, GLTFMetallicRoughness, GLTFMetallicRoughnessConstants,
-    GLTFMetallicRoughnessResources, GPUScene, GPUSceneData, MaterialInstance, MaterialPass,
+    DrawContext, VkGpuMetRoughPipeline, GLTFMetallicRoughnessConstants,
+    GLTFMetallicRoughnessResources, GPUScene, GPUSceneData, VkGpuTextureBuffer, MaterialPass,
     MeshNode, Node, Renderable, Vertex,
 };
 use crate::data::{data_util, gltf_util};
@@ -42,7 +42,7 @@ pub struct DefaultTextures {
 
 pub struct GltfStuffs<'a> {
     pub default_data: Rc<GLTFMaterial>,
-    pub metal_roughness: GLTFMetallicRoughness<'a>,
+    pub metal_roughness: VkGpuMetRoughPipeline<'a>,
     pub loaded_nodes: HashMap<String, Rc<RefCell<MeshNode>>>,
     pub draw_context: DrawContext,
 }
@@ -1516,9 +1516,9 @@ impl<'a> VkRender<'a> {
         );
 
         let (opaque, transparent, layout) =
-            GLTFMetallicRoughness::build_pipelines(&self.logical_device, &self.descriptors);
+            VkGpuMetRoughPipeline::build_pipelines(&self.logical_device, &self.descriptors);
 
-        let mut roughness = GLTFMetallicRoughness {
+        let mut roughness = VkGpuMetRoughPipeline {
             opaque_pipeline: opaque,
             transparent_pipeline: transparent,
             descriptor_layout: [layout],

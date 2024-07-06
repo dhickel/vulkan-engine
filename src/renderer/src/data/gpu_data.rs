@@ -4,27 +4,29 @@ use crate::vulkan::vk_descriptor::{
 };
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
-use crate::vulkan::vk_types::{
-    LogicalDevice, VkDescLayoutMap, VkDescType, VkDescriptors, VkGpuPushConsts, VkImageAlloc,
-    VkPipeline,
-};
+use crate::vulkan::vk_types::{LogicalDevice, VkDescLayoutMap, VkDescType, VkDescriptors, VkGpuPushConsts, VkImageAlloc, VkPipeline, VkBuffer};
 use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
-use glam::Mat4;
 use std::cell::RefCell;
 use std::cmp::PartialEq;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
+use glam::{Mat4, Quat, Vec3, Vec4};
+use crate::data::gltf_util;
+
+/////////////////////////////
+//  MESH & TEXTURE DATA //
+/////////////////////////////
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vertex {
-    pub position: glam::Vec3,
+    pub position: Vec3,
     pub uv_x: f32,
-    pub normal: glam::Vec3,
+    pub normal: Vec3,
     pub uv_y: f32,
-    pub color: glam::Vec4,
+    pub color: Vec4,
 }
 
 impl Default for Vertex {
@@ -39,8 +41,108 @@ impl Default for Vertex {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum AlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
 
-pub struct TextureData {
+#[derive(Copy, Clone, PartialEq)]
+pub enum PbrTexture {
+    MetallicRough(PbrMetallicRoughness),
+    SpecularGloss(PbrSpecularGlossiness),
+    Transmission(PbrTransmission),
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct PbrMetallicRoughness {
+    pub base_color_factor: Vec4,
+    pub base_color_tex_id: u32,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub metallic_roughness_tex_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct PbrSpecularGlossiness {
+    pub diffuse_factor: Vec4,
+    pub diffuse_tex_idx: u32,
+    pub specular_factor: Vec3,
+    pub glossiness_factor: f32,
+    pub specular_glossiness_tex_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct PbrTransmission {
+    pub transmission_factor: f32,
+    pub transmission_tex_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct SpecularMap {
+    pub specular_factor: f32,
+    pub specular_tex_id: u32,
+    pub specular_color_factor: Vec3,
+    pub specular_color_tex_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct EmissiveMap {
+    pub factor: Vec3,
+    pub texture_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct NormalMap {
+    pub scale: f32,
+    pub texture_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct OcclusionMap {
+    pub strength: f32,
+    pub texture_id: u32,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct VolumeMap {
+    pub thickness_factor: f32,
+    pub thickness_tex_id: u32,
+    pub attenuation_distance: f32,
+    pub attenuation_color: Vec3,
+}
+
+
+// MESH & TEXTURE METADATA
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct MaterialMeta {
+    pub base_color_factor: Vec4,
+    pub base_color_tex_id: u32,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+    pub metallic_roughness_tex_id: u32,
+    pub alpha_mode: AlphaMode,
+    pub alpha_cutoff: f32,
+    pub normal_map: Option<NormalMap>,
+    pub occlusion_map: Option<OcclusionMap>,
+    pub emissive_map: Option<EmissiveMap>
+}
+
+impl MaterialMeta {
+    pub fn has_normal(&self) -> bool {
+        self.normal_map.is_some()
+    }
+
+    pub fn has_occlusion(&self) -> bool {
+        self.occlusion_map.is_some()
+    }
+}
+
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct TextureMeta {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
@@ -48,176 +150,61 @@ pub struct TextureData {
     pub mips_levels: u32,
 }
 
-#[derive( Copy, Clone, PartialEq)]
-pub enum AlphaMode {
-    Opaque,
-    Mask,
-    Blend,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub enum PbrTexture {
-    MetallicRough(PbrMetallicRoughness),
-    SpecularGloss(PbrSpecularGlossiness),
-    Transmission(PbrTransmission),
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct PbrMetallicRoughness {
-    pub base_color_factor: glam::Vec4,
-    pub base_color_tex_id: u16,
-    pub metallic_factor: f32,
-    pub roughness_factor: f32,
-    pub metallic_roughness_tex_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct PbrSpecularGlossiness {
-    pub diffuse_factor: glam::Vec4,
-    pub diffuse_tex_idx: u16,
-    pub specular_factor: glam::Vec3,
-    pub glossiness_factor: f32,
-    pub specular_glossiness_tex_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct PbrTransmission {
-    pub transmission_factor: f32,
-    pub transmission_tex_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct SpecularMap {
-    pub specular_factor: f32,
-    pub specular_tex_id: u16,
-    pub specular_color_factor: glam::Vec3,
-    pub specular_color_tex_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct EmissiveMap {
-    pub emissive_factor: glam::Vec3,
-    pub emissive_tex_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct NormalMap {
-    pub scale: f32,
-    pub texture_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct OcclusionMap {
-    pub strength: f32,
-    pub texture_id: u16,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct VolumeMap {
-    pub thickness_factor: f32,
-    pub thickness_tex_id: u32,
-    pub attenuation_distance: f32,
-    pub attenuation_color: glam::Vec3,
-}
-
-#[derive( Copy, Clone, PartialEq)]
-pub struct Material {
-    pub base_color_factor: glam::Vec4,
-    pub base_color_tex_id: u16,
-    pub metallic_factor: f32,
-    pub roughness_factor: f32,
-    pub metallic_roughness_tex_id: u16,
-    pub alpha_mode: AlphaMode,
-    pub alpha_cutoff: f32,
-    pub unlit: bool,
-    pub pbr_texture: PbrTexture,
-    pub normal_map: Option<NormalMap>,
-    pub occlusion_map: Option<OcclusionMap>,
-}
-
-impl Material {
-    pub fn has_normal(&self) -> bool {
-        self.normal_map.is_some()
-    }
-
-    pub fn has_occulsion(&self) -> bool {
-        self.occlusion_map.is_some()
-    }
-
-   
-}
-
-pub struct GPUScene {
-    pub data: GPUSceneData,
-    pub descriptor: [vk::DescriptorSetLayout; 1],
-}
-
-impl GPUScene {
-    pub fn new(descriptor: vk::DescriptorSetLayout) -> Self {
+impl TextureMeta {
+    pub fn from_gltf_texture(data : &gltf::image::Data) -> Self {
         Self {
-            data: Default::default(),
-            descriptor: [descriptor],
+            bytes: data.pixels.clone(),
+            width: data.width,
+            height: data.height,
+            format: gltf_util::gltf_format_to_vk_format(data.format),
+            mips_levels: 1,
         }
     }
 }
 
-#[derive(Default, Copy, Clone)]
-pub struct GPUSceneData {
-    pub view: glam::Mat4,
-    pub projection: glam::Mat4,
-    pub view_projection: glam::Mat4,
-    pub ambient_color: glam::Vec4,
-    pub sunlight_direction: glam::Vec4,
-    pub sunlight_color: glam::Vec4,
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SurfaceMeta {
+    pub start_index: u32,
+    pub count: u32,
+    pub material_index: Option<u32>,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub struct MeshMeta {
+    pub name: String,
+    pub indices: Vec<u32>,
+    pub vertices: Vec<Vertex>,
+    pub surfaces: Vec<SurfaceMeta>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct NodeMeta {
+    pub name: String,
+    pub mesh_index: Option<u32>,
+    pub local_transform: Transform,
+    pub children: Vec<u32>,
+}
+
+
+
+
+/////////////////
+// SHADER DATA //
+/////////////////
 #[repr(C)]
-#[derive(PartialEq, Debug, Copy, Clone)]
-pub enum MaterialPass {
-    MainColor,
-    Transparent,
-    Other,
-    NULL,
-}
-#[derive(Debug, Copy, Clone)]
-pub struct MaterialInstance {
-    pub pipeline: VkPipeline,
-    pub descriptor: vk::DescriptorSet,
-    pub pass_type: MaterialPass,
+pub struct GLTFMetallicRoughnessConstants {
+    pub color_factors: Vec4,
+    pub metal_rough_factors: Vec4,
+    //padding
+    pub extra: [Vec4; 14],
 }
 
-impl MaterialInstance {
-    pub fn null() -> Self {
-        Self {
-            pipeline: VkPipeline::new(vk::Pipeline::null(), vk::PipelineLayout::null()),
-            descriptor: vk::DescriptorSet::null(),
-            pass_type: MaterialPass::NULL,
-        }
-    }
-}
-
-pub struct RenderObject {
-    pub index_count: u32,
-    pub first_index: u32,
-    pub index_buffer: vk::Buffer,
-    pub material: MaterialInstance,
-    pub transform: glam::Mat4,
-    pub vertex_buffer_addr: vk::DeviceAddress,
-}
 
 pub struct GLTFMetallicRoughness<'a> {
     pub opaque_pipeline: VkPipeline,
     pub transparent_pipeline: VkPipeline,
     pub descriptor_layout: [vk::DescriptorSetLayout; 1],
     pub writer: DescriptorWriter<'a>,
-}
-
-#[repr(C)]
-pub struct GLTFMetallicRoughnessConstants {
-    pub color_factors: glam::Vec4,
-    pub metal_rough_factors: glam::Vec4,
-    //padding
-    pub extra: [glam::Vec4; 14],
 }
 
 pub struct GLTFMetallicRoughnessResources {
@@ -229,7 +216,7 @@ pub struct GLTFMetallicRoughnessResources {
     pub data_buffer_offset: u32,
 }
 
-impl GLTFMetallicRoughness<'_> {
+impl VkGpuMetRoughPipeline<'_> {
     pub fn build_pipelines(
         device: &LogicalDevice,
         descriptors: &VkDescLayoutMap,
@@ -318,8 +305,8 @@ impl GLTFMetallicRoughness<'_> {
         pass: MaterialPass,
         resources: &GLTFMetallicRoughnessResources,
         descriptor_allocator: &mut VkDynamicDescriptorAllocator,
-    ) -> MaterialInstance {
-        let mat_data = MaterialInstance {
+    ) -> VkGpuTextureBuffer {
+        let mat_data = VkGpuTextureBuffer {
             pipeline: if pass == MaterialPass::Transparent {
                 self.transparent_pipeline
             } else {
@@ -361,17 +348,96 @@ impl GLTFMetallicRoughness<'_> {
     }
 }
 
+
+
+
+///////////////////////////
+// VULKAN ALLOCATION DATA//
+///////////////////////////
+
+#[derive(Debug)]
+pub struct VkGpuMeshBuffers {
+    pub index_buffer: VkBuffer,
+    pub vertex_buffer: VkBuffer,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+}
+
+#[derive(Debug)]
+pub struct VkGpuTextureBuffer {
+    pub image_alloc: VkImageAlloc,
+    pub data_buffer: vk::Buffer,
+    pub data_buffer_offset: u32,
+}
+
+#[derive(Debug)]
+pub struct VkGpuMetRoughBuffer {
+    pub color_image: VkImageAlloc,
+    pub metal_rough_image: VkImageAlloc,
+    pub data_buffer: vk::Buffer,
+    pub data_buffer_offset: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VkMetRoughUniforms {
+    pub color_factors: Vec4, 
+    pub metal_rough_factors: Vec4, 
+    pub extra: [Vec4; 14], 
+}
+
+
+//////////////////////
+// VULKAN PIPELINES //
+//////////////////////
+
+pub struct VkGpuMetRoughPipeline<'a> {
+    pub opaque_pipeline: VkPipeline,
+    pub transparent_pipeline: VkPipeline,
+    pub descriptor_layout: [vk::DescriptorSetLayout; 1],
+    pub writer: DescriptorWriter<'a>,
+}
+
+/////////////////////////////
+// SCENE GRAPH & RENDERING //
+/////////////////////////////
+
+pub struct RenderObject {
+    pub index_count: u32,
+    pub first_index: u32,
+    pub index_buffer: vk::Buffer,
+    pub material: VkGpuTextureBuffer,
+    pub transform: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+}
+
 pub trait Renderable {
-    fn draw(&self, top_matrix: &glam::Mat4, context: &mut DrawContext);
-    fn refresh_transform(&mut self, transform: &glam::Mat4);
-    fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>>;
+    fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext);
+    fn refresh_transform(&mut self, transform: &Mat4);
+    fn get_children(&self) -> &Vec<Rc<RefCell<Node>>>;
+}
+#[derive(Debug, Copy, Clone, Default, PartialEq)]
+pub struct Transform {
+    pub position: Vec3,
+    pub scale: Vec3,
+    pub rotation: Quat,
+}
+
+impl Transform {
+    pub fn compose(&self) -> Mat4 {
+        let scale_matrix = Mat4::from_scale(self.scale);
+        let rotation_matrix = Mat4::from_quat(self.rotation);
+        let translation_matrix = Mat4::from_translation(self.position);
+        translation_matrix * rotation_matrix * scale_matrix
+    }
 }
 
 pub struct Node {
-    pub parent: Option<Weak<Node>>,
-    pub children: Vec<Rc<RefCell<dyn Renderable>>>,
-    pub world_transform: glam::Mat4,
-    pub local_transform: glam::Mat4,
+    pub parent: Option<Weak<RefCell<Node>>>,
+    pub children: Vec<Rc<RefCell<Node>>>,
+    pub meshes: Vec<MeshAsset>,
+    pub world_transform: Mat4,
+    pub local_transform: Transform,
+    pub dirty: bool,
 }
 
 impl Default for Node {
@@ -379,28 +445,30 @@ impl Default for Node {
         Self {
             parent: None,
             children: vec![],
+            meshes: vec![],
             world_transform: Default::default(),
             local_transform: Default::default(),
+            dirty: false,
         }
     }
 }
 
 impl Renderable for Node {
-    fn draw(&self, top_matrix: &glam::Mat4, ctx: &mut DrawContext) {
+    fn draw(&self, top_matrix: &Mat4, ctx: &mut DrawContext) {
         for child in &self.children {
             child.borrow().draw(top_matrix, ctx);
         }
     }
 
-    fn refresh_transform(&mut self, parent_matrix: &glam::Mat4) {
-        self.world_transform = parent_matrix.mul_mat4(&self.local_transform);
-
-        for child in self.children.iter_mut() {
-            child.borrow_mut().refresh_transform(&self.world_transform);
-        }
+    fn refresh_transform(&mut self, parent_matrix: &Mat4) {
+        // self.world_transform = parent_matrix.mul_mat4(&self.local_transform);
+        // 
+        // for child in self.children.iter_mut() {
+        //     child.borrow_mut().refresh_transform(&self.world_transform);
+        // }
     }
 
-    fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>> {
+    fn get_children(&self) -> &Vec<Rc<RefCell<Node>>> {
         &self.children
     }
 }
@@ -417,44 +485,35 @@ impl Default for DrawContext {
     }
 }
 
-pub struct MeshNode {
-    pub node: Node,
-    pub mesh: Rc<MeshAsset>,
+pub struct GPUScene {
+    pub data: GPUSceneData,
+    pub descriptor: [vk::DescriptorSetLayout; 1],
 }
 
-impl MeshNode {
-    pub fn new(mesh: Rc<MeshAsset>) -> Self {
+impl GPUScene {
+    pub fn new(descriptor: vk::DescriptorSetLayout) -> Self {
         Self {
-            node: Default::default(),
-            mesh,
+            data: Default::default(),
+            descriptor: [descriptor],
         }
     }
 }
 
-impl Renderable for MeshNode {
-    fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext) {
-        let node_matrix = top_matrix.mul_mat4(&self.node.world_transform);
+#[derive(Default, Copy, Clone)]
+pub struct GPUSceneData {
+    pub view: Mat4,
+    pub projection: Mat4,
+    pub view_projection: Mat4,
+    pub ambient_color: Vec4,
+    pub sunlight_direction: Vec4,
+    pub sunlight_color: Vec4,
+}
 
-        for surface in &self.mesh.surfaces {
-            let ro = RenderObject {
-                index_count: surface.count,
-                first_index: surface.start_index,
-                index_buffer: self.mesh.mesh_buffers.index_buffer.buffer,
-                material: surface.material.data,
-                transform: node_matrix,
-                vertex_buffer_addr: self.mesh.mesh_buffers.vertex_buffer_addr,
-            };
-
-            context.opaque_surfaces.push(ro);
-        }
-        self.node.draw(top_matrix, context);
-    }
-
-    fn refresh_transform(&mut self, transform: &Mat4) {
-        todo!()
-    }
-
-    fn get_children(&self) -> &Vec<Rc<RefCell<dyn Renderable>>> {
-        todo!()
-    }
+#[repr(C)]
+#[derive(PartialEq, Debug, Copy, Clone)]
+pub enum MaterialPass {
+    MainColor,
+    Transparent,
+    Other,
+    NULL,
 }
