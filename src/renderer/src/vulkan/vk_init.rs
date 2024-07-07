@@ -40,11 +40,11 @@ pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char
         .to_vec()
 }
 
-pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
-    ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
-        .unwrap()
-        .to_vec()
-}
+// pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
+//     ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
+//         .unwrap()
+//         .to_vec()
+// }
 
 pub fn init_instance(
     entry: &ash::Entry,
@@ -180,32 +180,32 @@ pub fn get_window_surface(
     })
 }
 
-pub fn get_glfw_surface(
-    entry: &ash::Entry,
-    instance: &ash::Instance,
-    window: &glfw::PWindow,
-) -> Result<VkSurface, String> {
-    log::info!("Creating surface");
-
-    let surface = unsafe {
-        ash_window::create_surface(
-            &entry,
-            &instance,
-            window.display_handle().unwrap().as_raw(),
-            window.window_handle().unwrap().as_raw(),
-            None,
-        )
-        .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
-    };
-
-    let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
-
-    log::info!("Surface created");
-    Ok(VkSurface {
-        surface,
-        surface_instance,
-    })
-}
+// pub fn get_glfw_surface(
+//     entry: &ash::Entry,
+//     instance: &ash::Instance,
+//     window: &glfw::PWindow,
+// ) -> Result<VkSurface, String> {
+//     log::info!("Creating surface");
+// 
+//     let surface = unsafe {
+//         ash_window::create_surface(
+//             &entry,
+//             &instance,
+//             window.display_handle().unwrap().as_raw(),
+//             window.window_handle().unwrap().as_raw(),
+//             None,
+//         )
+//         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
+//     };
+// 
+//     let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
+// 
+//     log::info!("Surface created");
+//     Ok(VkSurface {
+//         surface,
+//         surface_instance,
+//     })
+// }
 
 pub fn get_physical_devices(
     instance: &ash::Instance,

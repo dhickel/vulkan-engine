@@ -19,13 +19,14 @@ use gltf::{Gltf, Material, Semantic};
 use imgui::sys::ImDrawFlags_None;
 use std::rc::{Rc, Weak};
 
+
 use crate::data::data_util::{MeshCache, TextureCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     EmissiveMap, MeshMeta, NodeMeta, NormalMap, OcclusionMap, SurfaceMeta, TextureMeta, Transform,
     Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer,
 };
-use log::log;
+use log::{info, log};
 
 #[derive(Debug)]
 pub struct GeoSurface {
@@ -67,7 +68,7 @@ pub fn parse_gltf_to_raw(
     path: &str,
     texture_cache: &mut TextureCache,
     mesh_cache: &mut MeshCache,
-) -> Result<String, String> {
+) -> Result<Rc<RefCell<gpu_data::Node>>, String> {
     log::info!("Loading Mesh: {:?}", path);
 
     // let path = std::path::Path::new(path);
@@ -80,7 +81,7 @@ pub fn parse_gltf_to_raw(
     let (gltf_data, buffer_data, images) =
         gltf::import(path).map_err(|err| format!("Error loading GLTF file: {:?}", err))?;
 
-    println!("Image Count: {}", images.len());
+ 
     let mut parsed_meshes = Vec::<MeshMeta>::new();
     let parsed_materials: Vec<gltf::Material> = gltf_data.materials().collect();
 
@@ -99,6 +100,7 @@ pub fn parse_gltf_to_raw(
         let mut tmp_vertices = Vec::<Vertex>::new();
         let mut surfaces = Vec::<SurfaceMeta>::new();
 
+        
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buffer| Some(buffer_data[buffer.index()].0.as_slice()));
             let start_index = tmp_vertices.len();
@@ -282,7 +284,7 @@ pub fn parse_gltf_to_raw(
 
     for material in parsed_materials {
         let name = material.name().or(Some("Unnamed")).unwrap().to_string();
-
+        
         let (base_color_tex_id, base_color_factor) =
             if let Some(tex) = material.pbr_metallic_roughness().base_color_texture() {
                 (
@@ -351,7 +353,8 @@ pub fn parse_gltf_to_raw(
             let texture_id = texture_cache.add_texture(texture_data);
             (texture_id, bc_factor)
         } else {
-            panic!("No pbr data") // TODO store a default to use in cache
+            log::info!("Used Default Base Color For Material: {:?}", name);
+            (0, glam::vec4(1.0,1.0,1.0,1.0))
         };
 
         let (metallic_roughness_tex_id, metallic_factor, roughness_factor) =
@@ -369,7 +372,9 @@ pub fn parse_gltf_to_raw(
                 let texture_id = texture_cache.add_texture(texture_data);
                 (texture_id, met_factor, rough_factor)
             } else {
-                panic!("No pbr data") // TODO store a default to use in cache
+                log::info!("Used Default Metallic Roughness For Material: {:?}", name);
+
+                (1, 0.0, 1.0)
             };
 
         let normal_map = if let Some(norm_id) = normal_id {
@@ -540,8 +545,7 @@ pub fn parse_gltf_to_raw(
         .collect();
 
     root_node.borrow_mut().children = root_children;
-
-    Err("psasd".to_string())
+    Ok(root_node)
 }
 
 fn recur_children(

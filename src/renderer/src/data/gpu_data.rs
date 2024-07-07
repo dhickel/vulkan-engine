@@ -318,7 +318,7 @@ impl VkGpuMetRoughPipeline<'_> {
         //         .unwrap(),
         //     pass_type: pass,
         // };
-        // 
+        //
         // self.writer.clear();
         // self.writer.write_buffer(
         //     0,
@@ -327,7 +327,7 @@ impl VkGpuMetRoughPipeline<'_> {
         //     resources.data_buffer_offset as usize,
         //     vk::DescriptorType::UNIFORM_BUFFER,
         // );
-        // 
+        //
         // self.writer.write_image(
         //     1,
         //     resources.color_image.image_view,
@@ -335,7 +335,7 @@ impl VkGpuMetRoughPipeline<'_> {
         //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         //     vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         // );
-        // 
+        //
         // self.writer.write_image(
         //     2,
         //     resources.metal_rough_image.image_view,
@@ -343,7 +343,7 @@ impl VkGpuMetRoughPipeline<'_> {
         //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         //     vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         // );
-        // 
+        //
         // self.writer.update_set(device, mat_data.descriptor);
         // mat_data
     }
@@ -432,6 +432,7 @@ impl Transform {
     }
 }
 
+#[derive(Debug, Default)]
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
@@ -441,18 +442,6 @@ pub struct Node {
     pub dirty: bool,
 }
 
-impl Default for Node {
-    fn default() -> Self {
-        Self {
-            parent: None,
-            children: vec![],
-            meshes: None,
-            world_transform: Default::default(),
-            local_transform: Default::default(),
-            dirty: false,
-        }
-    }
-}
 
 impl Renderable for Node {
     fn draw(&self, top_matrix: &Mat4, ctx: &mut DrawContext) {

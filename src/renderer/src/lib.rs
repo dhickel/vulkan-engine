@@ -12,7 +12,6 @@ use ash::vk::{
     ExtendsPhysicalDeviceFeatures2, Extent2D, PhysicalDeviceFeatures, SubmitInfo2,
 };
 use glam::*;
-use glfw::{Action, ClientApiHint, Context, Key, WindowHint};
 use image::GenericImageView;
 use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
@@ -35,6 +34,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::NamedKey::Camera;
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
+use crate::data::data_util::{MeshCache, TextureCache};
+
 
 const NANO: f64 = 1000000000.0;
 
@@ -44,7 +45,9 @@ pub struct GameLogic {
 
 
 pub fn gltf(str : String) {
-    gltf_util::parse_gltf_to_raw(str.as_str()).unwrap();
+    let mut texture_cache = TextureCache::default();
+    let mut mesh_cache = MeshCache::default();
+    gltf_util::parse_gltf_to_raw(str.as_str(), &mut texture_cache, &mut mesh_cache).unwrap();
 }
 
 pub fn run() {

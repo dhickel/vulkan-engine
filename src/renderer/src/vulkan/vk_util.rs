@@ -1,12 +1,14 @@
 use std::cmp::max;
 use std::ffi::CStr;
 
+use crate::data::gpu_data::VkGpuMeshBuffers;
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
     AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2, RenderingInfo,
 };
 use std::io::{Read, Seek, SeekFrom};
+use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use vk_mem::{Alloc, Allocator};
@@ -424,7 +426,7 @@ pub fn allocate_and_write_buffer<T>(
 ) -> Result<VkBuffer, String> {
     let buffer_size = std::mem::size_of::<T>();
     let mut buffer = allocate_buffer(allocator, buffer_size, usage, vk_mem::MemoryUsage::Auto)?;
-    
+
     unsafe {
         let data_ptr = allocator
             .map_memory(&mut buffer.allocation)
@@ -440,4 +442,20 @@ pub fn allocate_and_write_buffer<T>(
 
 pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
     unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
+}
+
+pub fn destroy_mesh_buffers(allocator: &Allocator, mut buffer: VkGpuMeshBuffers) {
+    unsafe {
+        allocator.destroy_buffer(
+            buffer.index_buffer.buffer,
+            &mut buffer.index_buffer.allocation,
+        );
+        allocator.destroy_buffer(
+            buffer.vertex_buffer.buffer,
+            &mut buffer.vertex_buffer.allocation,
+        )
+    }
+}
+pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
+    unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
 }
