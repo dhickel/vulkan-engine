@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::default::Default;
 
@@ -16,7 +17,7 @@ use gltf::mesh::util::{ReadColors, ReadIndices, ReadNormals, ReadPositions, Read
 use gltf::texture::{MagFilter, MinFilter};
 use gltf::{Gltf, Material, Semantic};
 use imgui::sys::ImDrawFlags_None;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::data::data_util::{MeshCache, TextureCache};
 use crate::data::gpu_data;
@@ -439,7 +440,7 @@ pub fn parse_gltf_to_raw(
         mapped_materials.insert(material.index().unwrap() as u32, mat_id);
     }
 
-    // MAP EXISTING GLTF MESH MATERIAL INDEX TO CACHE INDEX
+    // MAP EXISTING GLTF MESH & MATERIAL INDEX TO CACHE INDICES
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(parsed_meshes.len());
 
@@ -502,7 +503,79 @@ pub fn parse_gltf_to_raw(
         parsed_nodes.push(node_data);
     }
 
+    // flatten root indices to remove Nones, and compose final tree
+
+    let root_node = gpu_data::Node {
+        parent: None,
+        children: vec![],
+        meshes: None,
+        world_transform: Default::default(),
+        local_transform: Transform::default(),
+        dirty: true,
+    };
+
+    let root_node = Rc::new(RefCell::new(root_node));
+
+    let root_children = root_indices
+        .iter()
+        .flatten()
+        .map(|&node_index| {
+            let parent_node = &parsed_nodes[node_index];
+
+            let root_child = Rc::new(RefCell::new(gpu_data::Node {
+                parent: Some(Rc::downgrade(&root_node)),
+                children: vec![],
+                meshes: parent_node.mesh_index,
+                world_transform: Default::default(),
+                local_transform: parent_node.local_transform,
+                dirty: true,
+            }));
+
+            // Recursively set the children
+            let child_nodes = recur_children(&root_child, &parent_node.children, &parsed_nodes);
+            root_child.borrow_mut().children = child_nodes;
+
+            root_child
+        })
+        .collect();
+
+    root_node.borrow_mut().children = root_children;
+
     Err("psasd".to_string())
+}
+
+fn recur_children(
+    parent: &Rc<RefCell<gpu_data::Node>>,
+    children: &[u32],
+    parsed_nodes: &[NodeMeta],
+) -> Vec<Rc<RefCell<gpu_data::Node>>> {
+
+    // Terminate on leaf nodes with no children
+    if children.is_empty() {
+        return vec![]
+    }
+    
+    children
+        .iter()
+        .map(|&child_index| {
+            let child_meta = &parsed_nodes[child_index as usize];
+
+            let child_node = Rc::new(RefCell::new(gpu_data::Node {
+                parent: Some(Rc::downgrade(parent)),
+                children: vec![],
+                meshes: child_meta.mesh_index,
+                world_transform: Default::default(),
+                local_transform: child_meta.local_transform,
+                dirty: true,
+            }));
+
+            // Recursively construct child nodes
+            let child_children = recur_children(&child_node, &child_meta.children, parsed_nodes);
+            child_node.borrow_mut().children = child_children;
+
+            child_node
+        })
+        .collect()
 }
 
 pub(crate) fn gltf_format_to_vk_format(format: Format) -> vk::Format {

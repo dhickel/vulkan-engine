@@ -15,9 +15,9 @@ use std::rc::{Rc, Weak};
 use glam::{Mat4, Quat, Vec3, Vec4};
 use crate::data::gltf_util;
 
-/////////////////////////////
+//////////////////////////
 //  MESH & TEXTURE DATA //
-/////////////////////////////
+//////////////////////////
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -306,54 +306,55 @@ impl VkGpuMetRoughPipeline<'_> {
         resources: &GLTFMetallicRoughnessResources,
         descriptor_allocator: &mut VkDynamicDescriptorAllocator,
     ) -> VkGpuTextureBuffer {
-        let mat_data = VkGpuTextureBuffer {
-            pipeline: if pass == MaterialPass::Transparent {
-                self.transparent_pipeline
-            } else {
-                self.opaque_pipeline
-            },
-            descriptor: descriptor_allocator
-                .allocate(device, &self.descriptor_layout)
-                .unwrap(),
-            pass_type: pass,
-        };
-
-        self.writer.clear();
-        self.writer.write_buffer(
-            0,
-            resources.data_buffer,
-            std::mem::size_of::<GLTFMetallicRoughnessConstants>(),
-            resources.data_buffer_offset as usize,
-            vk::DescriptorType::UNIFORM_BUFFER,
-        );
-
-        self.writer.write_image(
-            1,
-            resources.color_image.image_view,
-            resources.color_sampler,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        );
-
-        self.writer.write_image(
-            2,
-            resources.metal_rough_image.image_view,
-            resources.metal_rough_sampler,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        );
-
-        self.writer.update_set(device, mat_data.descriptor);
-        mat_data
+        todo!();
+        // let mat_data = VkGpuTextureBuffer {
+        //     pipeline: if pass == MaterialPass::Transparent {
+        //         self.transparent_pipeline
+        //     } else {
+        //         self.opaque_pipeline
+        //     },
+        //     descriptor: descriptor_allocator
+        //         .allocate(device, &self.descriptor_layout)
+        //         .unwrap(),
+        //     pass_type: pass,
+        // };
+        // 
+        // self.writer.clear();
+        // self.writer.write_buffer(
+        //     0,
+        //     resources.data_buffer,
+        //     std::mem::size_of::<GLTFMetallicRoughnessConstants>(),
+        //     resources.data_buffer_offset as usize,
+        //     vk::DescriptorType::UNIFORM_BUFFER,
+        // );
+        // 
+        // self.writer.write_image(
+        //     1,
+        //     resources.color_image.image_view,
+        //     resources.color_sampler,
+        //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        //     vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        // );
+        // 
+        // self.writer.write_image(
+        //     2,
+        //     resources.metal_rough_image.image_view,
+        //     resources.metal_rough_sampler,
+        //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        //     vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        // );
+        // 
+        // self.writer.update_set(device, mat_data.descriptor);
+        // mat_data
     }
 }
 
 
 
 
-///////////////////////////
-// VULKAN ALLOCATION DATA//
-///////////////////////////
+////////////////////////////
+// VULKAN ALLOCATION DATA //
+////////////////////////////
 
 #[derive(Debug)]
 pub struct VkGpuMeshBuffers {
@@ -434,7 +435,7 @@ impl Transform {
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
-    pub meshes: Vec<MeshAsset>,
+    pub meshes: Option<u32>,
     pub world_transform: Mat4,
     pub local_transform: Transform,
     pub dirty: bool,
@@ -445,7 +446,7 @@ impl Default for Node {
         Self {
             parent: None,
             children: vec![],
-            meshes: vec![],
+            meshes: None,
             world_transform: Default::default(),
             local_transform: Default::default(),
             dirty: false,
@@ -508,6 +509,7 @@ pub struct GPUSceneData {
     pub sunlight_direction: Vec4,
     pub sunlight_color: Vec4,
 }
+
 
 #[repr(C)]
 #[derive(PartialEq, Debug, Copy, Clone)]
