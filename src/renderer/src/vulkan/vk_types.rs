@@ -243,6 +243,7 @@ impl VkDestroyable for VkImageAlloc {
 
 // TODO we are going to want more control over the descriptor sets
 pub struct VkFrame {
+    pub index: u32,
     pub sync: VkFrameSync,
     pub draw: VkImageAlloc,
     pub depth: VkImageAlloc,
@@ -339,6 +340,7 @@ impl VkPresent {
         let mut frame_data = Vec::<VkFrame>::with_capacity(data_len);
         for i in 0..data_len {
             let frame = VkFrame {
+                index: i as u32,
                 sync: frame_sync[i],
                 draw: draw_images.remove(0),
                 depth: depth_images.remove(0),

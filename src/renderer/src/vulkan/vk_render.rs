@@ -1,10 +1,13 @@
+use crate::data::data_cache::{
+    CoreShaderType, MeshCache, ShaderCache, TextureCache, VkDescLayoutCache, VkDescType,
+    VkPipelineCache, VkPipelineType,
+};
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
 use crate::data::gpu_data::{
-    DrawContext, MetRoughShaderConsts, GLTFMetallicRoughnessResources, GPUScene,
-    GPUSceneData, MaterialPass, Node, Renderable, Vertex, VkGpuMeshBuffers, VkGpuMetRoughPipeline,
-    VkGpuTextureBuffer,
+    DrawContext, GPUScene, GPUSceneData, MaterialPass, MetRoughShaderConsts, Node, Vertex,
+    VkGpuMeshBuffers, VkGpuTextureBuffer,
 };
-use crate::data::{data_util, gltf_util, gpu_data};
+use crate::data::{data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
 use ash::vk::{
@@ -25,106 +28,86 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
-use crate::data::data_cache::{CoreShaderType, ShaderCache, VkDescLayoutCache};
 
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 
-pub struct DefaultTextures {
-    white_image: VkImageAlloc,
-    black_image: VkImageAlloc,
-    grey_image: VkImageAlloc,
-    error_image: VkImageAlloc,
-    linear_sampler: vk::Sampler,
-    nearest_sampler: vk::Sampler,
-    image_descriptor: vk::DescriptorSetLayout,
+pub struct DataCache {
+    shader_cache: ShaderCache,
+    desc_layout_cache: VkDescLayoutCache,
+    pipeline_cache: VkPipelineCache,
+    mesh_cache: MeshCache,
+    texture_cache: TextureCache,
 }
 
-pub struct GltfStuffs<'a> {
-    pub default_data: Rc<GLTFMaterial>,
-    pub metal_roughness: VkGpuMetRoughPipeline<'a>,
-    pub scene_graph: Rc<RefCell<gpu_data::Node>>,
+pub struct RenderContext {
     pub draw_context: DrawContext,
+    pub scene_tree: Rc<RefCell<gpu_data::Node>>,
 }
 
-pub struct VkRender<'a> {
+impl Default for RenderContext {
+    fn default() -> Self {
+        Self {
+            draw_context: Default::default(),
+            scene_tree: Rc::new(RefCell::new(Default::default())),
+        }
+    }
+}
+
+pub struct VkRender {
     pub window_state: VkWindowState,
     pub allocator: Arc<Mutex<Allocator>>,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
     pub physical_device: PhyDevice,
-    pub logical_device: LogicalDevice,
+    pub device: ash::Device,
+    pub device_queues: DeviceQueues,
     pub surface: VkSurface,
     pub swapchain: VkSwapchain,
-    //   pub present_images: Vec<vk::ImageView>,
-    // pub command_pools: Vec<VkCommandPool>,
     pub presentation: VkPresent,
-    pub pipeline_cache: VkPipelineCache,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
-    pub compute_data: ComputeData,
-    pub scene_data: GPUScene,
-    // pub mesh: Option<VkGpuMeshBuffers>,
-    pub meshes: Option<Vec<MeshAsset>>,
-    pub default_textures: Option<DefaultTextures>,
-    pub descriptors: VkDescLayoutMap,
+    // pub compute_data: ComputeData,
+    pub scene_data: GPUSceneData,
+    pub render_context: RenderContext,
+    pub data_cache: DataCache,
     pub global_desc_allocator: VkDynamicDescriptorAllocator,
-    pub gltf_stuffs: Option<GltfStuffs<'a>>,
-    pub resize_requested: bool,
     pub main_deletion_queue: Vec<VkDeletable>,
+    pub resize_requested: bool,
 }
 
-
-pub fn init_caches(device: &ash::Device) {
+pub fn init_caches(device: &ash::Device) -> DataCache {
     let shader_paths = vec![
-        (CoreShaderType::MetRoughFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.frag.spv".to_string()),
-        (CoreShaderType::MetRoughVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string()),
+        (
+            CoreShaderType::MetRoughFrag,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.frag.spv".to_string(),
+        ),
+        (
+            CoreShaderType::MetRoughVert,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string(),
+        ),
     ];
+
     let shader_cache = ShaderCache::new(device, shader_paths).unwrap();
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
-    let pipeline_cache = vk_pipeline::init_pipeline_cache(device, &desc_layout_cache, &shader_cache);
-    
+
+    let pipeline_cache =
+        vk_pipeline::init_pipeline_cache(device, &desc_layout_cache, &shader_cache);
+    let texture_cache = TextureCache::new(device);
+    let mesh_cache = MeshCache::default();
+
+    DataCache {
+        shader_cache,
+        desc_layout_cache,
+        pipeline_cache,
+        mesh_cache,
+        texture_cache,
+    }
 }
 
-pub fn init_desc_map(device: &LogicalDevice) -> VkDescLayoutMap {
-    let draw_image_layout = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
-        .build(
-            device,
-            vk::ShaderStageFlags::COMPUTE,
-            DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .unwrap();
-
-    let gpu_scene_desc = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
-        .build(
-            device,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .unwrap();
-
-    VkDescLayoutMap::new(vec![
-        (VkDescType::DrawImageDrawImage, draw_image_layout),
-        (VkDescType::GpuScene, gpu_scene_desc),
-    ])
-}
-
-pub fn init_image_descriptor(device: &LogicalDevice) -> vk::DescriptorSetLayout {
-    DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .build(
-            device,
-            vk::ShaderStageFlags::FRAGMENT,
-            vk::DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .unwrap()
-}
-
-pub fn init_descriptors(device: &LogicalDevice, image_views: &[vk::ImageView]) -> VkDescriptors {
+pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
     let sizes = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 1.0)];
 
     let alloc = DescriptorAllocator::new(&device, 10, &sizes).unwrap();
@@ -156,11 +139,7 @@ pub fn init_descriptors(device: &LogicalDevice, image_views: &[vk::ImageView]) -
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&image_info)];
 
-        unsafe {
-            device
-                .device
-                .update_descriptor_sets(&image_write_desc, &vec![])
-        }
+        unsafe { device.update_descriptor_sets(&image_write_desc, &vec![]) }
         descriptors.add_descriptor(render_desc, render_layout[0])
     }
 
@@ -168,7 +147,7 @@ pub fn init_descriptors(device: &LogicalDevice, image_views: &[vk::ImageView]) -
 }
 
 pub fn init_mesh_pipeline(
-    device: &LogicalDevice,
+    device: &ash::Device,
     draw_format: vk::Format,
     depth_format: vk::Format,
     image_desc: vk::DescriptorSetLayout,
@@ -195,12 +174,7 @@ pub fn init_mesh_pipeline(
         .push_constant_ranges(&buffer_range)
         .set_layouts(&binding);
 
-    let pipeline_layout = unsafe {
-        device
-            .device
-            .create_pipeline_layout(&pipeline_info, None)
-            .unwrap()
-    };
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_info, None).unwrap() };
 
     println!("Created layout: {:?}", pipeline_layout);
 
@@ -221,14 +195,14 @@ pub fn init_mesh_pipeline(
         .unwrap();
 
     unsafe {
-        device.device.destroy_shader_module(vert_shader, None);
-        device.device.destroy_shader_module(frag_shader, None);
+        device.destroy_shader_module(vert_shader, None);
+        device.destroy_shader_module(frag_shader, None);
     }
 
     VkPipeline::new(pipeline, pipeline_layout)
 }
 
-pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> ComputeData {
+pub fn init_scene_data(device: &ash::Device, layout: &VkDescriptors) -> ComputeData {
     let desc_layout = &layout.descriptor_layouts;
 
     let push_constants = [vk::PushConstantRange::default()
@@ -240,12 +214,7 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> Comput
         .set_layouts(desc_layout)
         .push_constant_ranges(&push_constants);
 
-    let compute_layout = unsafe {
-        device
-            .device
-            .create_pipeline_layout(&compute_info, None)
-            .unwrap()
-    };
+    let compute_layout = unsafe { device.create_pipeline_layout(&compute_info, None).unwrap() };
 
     let gradient_shader = vk_util::load_shader_module(
         device,
@@ -275,7 +244,6 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> Comput
 
     let gradient_pipeline = unsafe {
         device
-            .device
             .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
             .unwrap()[0]
     };
@@ -299,7 +267,6 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> Comput
 
     let sky_pipeline = unsafe {
         device
-            .device
             .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
             .unwrap()[0]
     };
@@ -316,8 +283,8 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> Comput
     };
 
     unsafe {
-        device.device.destroy_shader_module(gradient_shader, None);
-        device.device.destroy_shader_module(sky_shader, None);
+        device.destroy_shader_module(gradient_shader, None);
+        device.destroy_shader_module(sky_shader, None);
     }
 
     let mut scene_data = ComputeData::default();
@@ -327,22 +294,19 @@ pub fn init_scene_data(device: &LogicalDevice, layout: &VkDescriptors) -> Comput
     scene_data
 }
 
-impl<'a> Drop for VkRender<'a> {
+impl Drop for VkRender {
     fn drop(&mut self) {
         unsafe {
-            self.logical_device
-                .device
+            self.device
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
 
             self.imgui.renderer.destroy();
 
-            self.logical_device
-                .device
+            self.device
                 .destroy_command_pool(self.immediate.command_pool.pool, None);
-            self.logical_device
-                .device
-                .destroy_fence(self.immediate.fence[0], None);
+
+            self.device.destroy_fence(self.immediate.fence[0], None);
 
             // self.logical_device
             //     .device
@@ -352,11 +316,11 @@ impl<'a> Drop for VkRender<'a> {
             //     .destroy_pipeline(self.pipeline.pipeline, None);
 
             self.presentation
-                .destroy(&self.logical_device.device, &self.allocator.lock().unwrap());
+                .destroy(&self.device, &self.allocator.lock().unwrap());
 
-            self.main_deletion_queue.iter_mut().for_each(|mut del| {
-                del.delete(&self.logical_device.device, &self.allocator.lock().unwrap())
-            });
+            self.main_deletion_queue
+                .iter_mut()
+                .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
 
             // todo need to do some work on destruction
 
@@ -364,7 +328,7 @@ impl<'a> Drop for VkRender<'a> {
                 .swapchain_loader
                 .destroy_swapchain(self.swapchain.swapchain, None);
 
-            self.logical_device.device.destroy_device(None);
+            self.device.destroy_device(None);
 
             self.surface
                 .surface_instance
@@ -380,7 +344,7 @@ impl<'a> Drop for VkRender<'a> {
     }
 }
 
-impl<'a> VkRender<'a> {
+impl VkRender {
     fn destroy(&mut self) {
         unsafe { std::mem::drop(self) }
     }
@@ -431,7 +395,7 @@ impl<'a> VkRender<'a> {
         //     unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_KHR_swapchain_mutable_format\0") };
         // surface_ext.push(ext.as_ptr());
 
-        let logical_device = vk_init::create_logical_device(
+        let (device, device_queues) = vk_init::create_logical_device(
             &instance,
             &physical_device.p_device,
             &queue_indices,
@@ -446,7 +410,8 @@ impl<'a> VkRender<'a> {
         let swapchain = vk_init::create_swapchain(
             &instance,
             &physical_device,
-            &logical_device,
+            &device,
+            &device_queues,
             &surface,
             window_state.curr_extent,
             Some(2),
@@ -460,10 +425,10 @@ impl<'a> VkRender<'a> {
             window_state.curr_extent = swapchain.extent;
         }
 
-        let command_pools = vk_init::create_command_pools(&logical_device, 2, 1)?;
+        let command_pools = vk_init::create_command_pools(&device, &device_queues, 2, 1)?;
 
         let frame_buffers: Vec<VkFrameSync> = (0..2)
-            .map(|_| vk_init::create_frame_sync(&logical_device))
+            .map(|_| vk_init::create_frame_sync(&device))
             .collect::<Result<Vec<_>, _>>()?;
 
         // TODO will have to separate compute pools when we get to that stage
@@ -472,7 +437,7 @@ impl<'a> VkRender<'a> {
         //  store them all in the frame buffer?
 
         let mut allocator_info =
-            AllocatorCreateInfo::new(&instance, &logical_device.device, physical_device.p_device);
+            AllocatorCreateInfo::new(&instance, &device, physical_device.p_device);
 
         allocator_info.vulkan_api_version = vk::API_VERSION_1_3;
         allocator_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
@@ -486,27 +451,23 @@ impl<'a> VkRender<'a> {
         // Set images to max extent, so they can be reused on window resizing
 
         let draw_images =
-            vk_init::allocate_draw_images(&allocator, &logical_device, window_state.max_extent, 2)?;
+            vk_init::allocate_draw_images(&allocator, &device, window_state.max_extent, 2)?;
         let draw_format = draw_images[0].image_format;
 
         let draw_views: Vec<vk::ImageView> =
             draw_images.iter().map(|data| data.image_view).collect();
 
-        let present_images = vk_init::create_basic_present_views(&logical_device, &swapchain)?;
+        let present_images = vk_init::create_basic_present_views(&device, &swapchain)?;
 
-        let descriptors = init_descriptors(&logical_device, &draw_views);
+        let descriptors = init_descriptors(&device, &draw_views);
         let layout = [descriptors.descriptor_layouts[0]];
 
-        let depth_images = vk_init::allocate_depth_images(
-            &allocator,
-            &logical_device,
-            window_state.max_extent,
-            2,
-        )?;
+        let depth_images =
+            vk_init::allocate_depth_images(&allocator, &device, window_state.max_extent, 2)?;
         let depth_format = depth_images[0].image_format;
 
         // FIXME, this needs generalized
-        let compute_data = init_scene_data(&logical_device, &descriptors);
+        let compute_data = init_scene_data(&device, &descriptors);
 
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
@@ -516,7 +477,7 @@ impl<'a> VkRender<'a> {
         ];
 
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..2)
-            .map(|_| VkDynamicDescriptorAllocator::new(&logical_device, 1000, &pool_ratios))
+            .map(|_| VkDynamicDescriptorAllocator::new(&device, 1000, &pool_ratios))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
@@ -543,26 +504,15 @@ impl<'a> VkRender<'a> {
 
         print!("Queue Types Immediate: {:?}", im_index.queue_types);
 
-        let im_queue = logical_device
-            .queues
-            .get_queue_by_index(im_index.index)
-            .unwrap();
+        let im_queue = device_queues.get_queue_by_index(im_index.index).unwrap();
 
-        let im_command_pool = vk_init::create_immediate_command_pool(
-            &logical_device.device,
-            im_queue,
-            im_index.queue_types.clone(),
-        )
-        .unwrap();
+        let im_command_pool =
+            vk_init::create_immediate_command_pool(&device, im_queue, im_index.queue_types.clone())
+                .unwrap();
 
         let im_fence_create_info =
             vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let im_fence = unsafe {
-            logical_device
-                .device
-                .create_fence(&im_fence_create_info, None)
-        }
-        .unwrap();
+        let im_fence = unsafe { device.create_fence(&im_fence_create_info, None) }.unwrap();
 
         // GUI
 
@@ -586,7 +536,7 @@ impl<'a> VkRender<'a> {
         };
         let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
             allocator.clone(),
-            logical_device.device.clone(),
+            device.clone(),
             im_command_pool.queue,
             im_command_pool.pool,
             imgui_dynamic,
@@ -596,28 +546,15 @@ impl<'a> VkRender<'a> {
         .unwrap();
 
         let immediate = VkImmediate::new(im_command_pool, im_fence);
-
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
 
-        let mut pipeline_cache = PipelineCache::default();
-
-        let image_desc = init_image_descriptor(&logical_device);
-
-        let mesh_pipeline =
-            init_mesh_pipeline(&logical_device, draw_format, depth_format, image_desc);
-
-        pipeline_cache.add_pipeline(VkPipeline::MESH, mesh_pipeline);
-
-        let gpu_descriptor = DescriptorLayoutBuilder::default()
-            .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
-            .build(
-                &logical_device,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                vk::DescriptorSetLayoutCreateFlags::empty(),
-            );
-        let scene_data = GPUScene::new(gpu_descriptor.unwrap());
-
-        let desc_map = init_desc_map(&logical_device);
+        // let gpu_descriptor = DescriptorLayoutBuilder::default()
+        //     .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        //     .build(
+        //         &logical_device,
+        //         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+        //         vk::DescriptorSetLayoutCreateFlags::empty(),
+        //     );
 
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
@@ -626,8 +563,10 @@ impl<'a> VkRender<'a> {
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
-        let global_alloc =
-            VkDynamicDescriptorAllocator::new(&logical_device, 10, &pool_ratios).unwrap();
+        let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
+
+        let data_cache = init_caches(&device);
+        let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
         let mut render = VkRender {
             window_state,
@@ -636,40 +575,51 @@ impl<'a> VkRender<'a> {
             instance,
             debug,
             physical_device,
-            logical_device,
+            device,
+            device_queues,
             surface,
             swapchain,
             presentation,
-            pipeline_cache,
             immediate,
             imgui,
-            compute_data,
             main_deletion_queue: Vec::new(),
-          //  mesh: None,
-            meshes: None,
-            default_textures: None,
-            scene_data,
-            descriptors: desc_map,
-            gltf_stuffs: None,
+            scene_data: GPUSceneData::default(),
+            render_context: RenderContext::default(),
+            data_cache,
             resize_requested: false,
             global_desc_allocator: global_alloc,
         };
-        render.init_gltf_data();
-        render.init_default_data(image_desc);
+
+        let texture_cache = &mut render.data_cache.texture_cache;
+        let mesh_cache = &mut render.data_cache.mesh_cache;
+
+        let loaded_scene = gltf_util::parse_gltf_to_raw(
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/structure_mat.glb",
+            texture_cache,
+            mesh_cache,
+        )
+        .unwrap();
+
+        render.render_context.scene_tree = loaded_scene;
 
         Ok(render)
+    }
+    
+    pub fn load_caches(&self) {
+        self.data_cache.mesh_cache.allocate_all(|i,v|self.upload_mesh(i,v));
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
         println!("Resize Rebuild SwapChain");
         self.window_state.curr_extent = new_size;
 
-        unsafe { self.logical_device.device.device_wait_idle().unwrap() }
+        unsafe { self.device.device_wait_idle().unwrap() }
 
         let swapchain = vk_init::create_swapchain(
             &self.instance,
             &self.physical_device,
-            &self.logical_device,
+            &self.device,
+            &self.device_queues,
             &self.surface,
             new_size,
             Some(2),
@@ -681,18 +631,18 @@ impl<'a> VkRender<'a> {
         .unwrap();
 
         // FIXME, I think we will need to destory the old images view when we reassign
-        let present_images =
-            vk_init::create_basic_present_views(&self.logical_device, &swapchain).unwrap();
+        let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
+
         self.swapchain = swapchain;
         self.presentation.replace_present_images(present_images);
+
         //self.presentation = presentation;
         self.resize_requested = false;
         println!("Resize Completed")
     }
 }
 
-
-impl<'a> VkRender<'a> {
+impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
         let start = SystemTime::now();
 
@@ -714,21 +664,17 @@ impl<'a> VkRender<'a> {
         let swapchain = [self.swapchain.swapchain];
 
         unsafe {
-            self.logical_device
-                .device
+            self.device
                 .wait_for_fences(fence, true, u32::MAX as u64)
                 .unwrap();
-            self.logical_device.device.reset_fences(fence).unwrap();
+
+            self.device.reset_fences(fence).unwrap();
 
             let curr_frame = self.presentation.get_curr_frame_mut();
 
-            curr_frame
-                .process_deletions(&self.logical_device.device, &self.allocator.lock().unwrap());
+            curr_frame.process_deletions(&self.device, &self.allocator.lock().unwrap());
 
-            curr_frame
-                .descriptors
-                .clear_pools(&self.logical_device.device)
-                .unwrap();
+            curr_frame.descriptors.clear_pools(&self.device).unwrap();
 
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
@@ -748,16 +694,14 @@ impl<'a> VkRender<'a> {
                 }
             };
 
-            self.logical_device
-                .device
+            self.device
                 .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-            self.logical_device
-                .device
+            self.device
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
@@ -773,7 +717,7 @@ impl<'a> VkRender<'a> {
             let extent = self.window_state.curr_extent;
 
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 draw_image,
                 vk::ImageLayout::UNDEFINED,
@@ -782,16 +726,16 @@ impl<'a> VkRender<'a> {
 
             //
 
-            let ds = [self
-                .compute_data
-                .get_current_effect()
-                .descriptors
-                .descriptor_sets[image_index as usize]];
-            &self.draw_background(draw_image, cmd_buffer, &ds);
+            // let ds = [self
+            //     .compute_data
+            //     .get_current_effect()
+            //     .descriptors
+            //     .descriptor_sets[image_index as usize]];
+            // &self.draw_background(draw_image, cmd_buffer, &ds);
 
             //transition render image for copy from
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 draw_image,
                 vk::ImageLayout::GENERAL,
@@ -799,18 +743,18 @@ impl<'a> VkRender<'a> {
             );
 
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 depth_image,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
 
-            self.draw_geometry(cmd_buffer, draw_view, depth_view);
+            self.draw_geometry();
 
             // transition present image to copy to
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 draw_image,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -818,7 +762,7 @@ impl<'a> VkRender<'a> {
             );
 
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 present_image,
                 vk::ImageLayout::UNDEFINED,
@@ -827,7 +771,7 @@ impl<'a> VkRender<'a> {
 
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 draw_image,
                 extent,
@@ -836,7 +780,7 @@ impl<'a> VkRender<'a> {
             );
 
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 present_image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -847,30 +791,28 @@ impl<'a> VkRender<'a> {
 
             // transition swapchain to present
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd_buffer,
                 present_image,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,
             );
 
-            self.logical_device
-                .device
-                .end_command_buffer(cmd_buffer)
-                .unwrap();
+            self.device.end_command_buffer(cmd_buffer).unwrap();
 
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
             let wait_info = [vk_util::semaphore_submit_info(
                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT_KHR,
                 frame_sync.swap_semaphore,
             )];
+
             let signal_info = [vk_util::semaphore_submit_info(
                 vk::PipelineStageFlags2::ALL_GRAPHICS,
                 frame_sync.render_semaphore,
             )];
+
             let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
-            self.logical_device
-                .device
+            self.device
                 .queue_submit2(queue, &submit, frame_sync.render_fence)
                 .unwrap();
 
@@ -908,12 +850,10 @@ impl<'a> VkRender<'a> {
             vk_util::rendering_info(self.window_state.curr_extent, &attachment_info, &[]);
 
         unsafe {
-            self.logical_device
-                .device
-                .cmd_begin_rendering(cmd_buffer, &render_info);
+            self.device.cmd_begin_rendering(cmd_buffer, &render_info);
         }
 
-        let mut selected = self.compute_data.get_current_effect();
+        //  let mut selected = self.compute_data.get_current_effect();
 
         // let frame = self.imgui.context.new_frame();
         // frame.text(&selected.name);
@@ -958,24 +898,28 @@ impl<'a> VkRender<'a> {
         self.imgui.renderer.cmd_draw(cmd_buffer, draw_data).unwrap();
 
         unsafe {
-            self.logical_device.device.cmd_end_rendering(cmd_buffer);
+            self.device.cmd_end_rendering(cmd_buffer);
         }
     }
 
     pub fn draw_geometry(
         &mut self,
-        cmd_buffer: vk::CommandBuffer,
-        draw_view: vk::ImageView,
-        depth_view: vk::ImageView,
+        // cmd_buffer: vk::CommandBuffer,
+        // draw_view: vk::ImageView,
+        // depth_view: vk::ImageView,
     ) {
+        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let cmd_pool = curr_frame.cmd_pool.get(QueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffers[0];
+
         let color_attachment = [vk_util::rendering_attachment_info(
-            draw_view,
+            curr_frame.draw.image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
 
         let depth_attachment = [vk_util::depth_attachment_info(
-            depth_view,
+            curr_frame.depth.image_view,
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
         )];
 
@@ -984,53 +928,7 @@ impl<'a> VkRender<'a> {
         let rendering_info = vk_util::rendering_info(extent, &color_attachment, &depth_attachment);
 
         unsafe {
-            self.logical_device
-                .device
-                .cmd_begin_rendering(cmd_buffer, &rendering_info);
-
-            self.logical_device.device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_cache
-                    .get_unchecked(VkPipelineType::MESH)
-                    .pipeline,
-            );
-
-            let def_text = if let Some(tex) = &self.default_textures {
-                tex
-            } else {
-                panic!("No image desc")
-            };
-
-            let def_desc = [def_text.image_descriptor];
-            let image_set = [self
-                .presentation
-                .get_curr_frame_mut()
-                .descriptors
-                .allocate(&self.logical_device, &def_desc)
-                .unwrap()];
-
-            let mut writer = DescriptorWriter::default();
-            writer.write_image(
-                0,
-                def_text.error_image.image_view,
-                def_text.nearest_sampler,
-                vk::ImageLayout::READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            );
-
-            writer.update_set(&self.logical_device, image_set[0]);
-
-            self.logical_device.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline_cache
-                    .get_unchecked(VkPipelineType::MESH)
-                    .layout,
-                0,
-                &image_set,
-                &[],
-            );
+            self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
             let viewport = [vk::Viewport::default()
                 .x(0.0)
@@ -1040,37 +938,23 @@ impl<'a> VkRender<'a> {
                 .min_depth(0.0)
                 .max_depth(0.0)];
 
-            self.logical_device
-                .device
-                .cmd_set_viewport(cmd_buffer, 0, &viewport);
+            self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
 
             let scissor = [vk::Rect2D::default()
                 .offset(vk::Offset2D::default().y(0).y(0))
                 .extent(extent)];
 
-            self.logical_device
-                .device
-                .cmd_set_scissor(cmd_buffer, 0, &scissor);
-
-            let curr_frame = self.presentation.get_curr_frame_mut();
+            self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
 
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
                 &allocator,
-                self.scene_data.data,
+                self.scene_data,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
             .unwrap();
 
-            let desc = [self.descriptors.get(VkDescType::GpuScene)];
-
-            let mut global_descriptor = curr_frame
-                .descriptors
-                .allocate(&self.logical_device, &desc)
-                .unwrap();
-
             let mut writer = DescriptorWriter::default();
-
             writer.write_buffer(
                 0,
                 gpu_scene_buffer.buffer,
@@ -1079,44 +963,47 @@ impl<'a> VkRender<'a> {
                 vk::DescriptorType::UNIFORM_BUFFER,
             );
 
-            writer.update_set(&self.logical_device, global_descriptor);
+            let desc_layout = [self.data_cache.desc_layout_cache.get(VkDescType::GpuScene)];
+            let desc_set = curr_frame
+                .descriptors
+                .allocate(&self.device, &desc_layout)
+                .unwrap();
 
-            let global_descriptor = [global_descriptor];
+            writer.update_set(&self.device, desc_set);
 
-            let gltf = if let Some(data) = &self.gltf_stuffs {
-                data
-            } else {
-                panic!("No GLTF Data")
-            };
+            for obj in &self.render_context.draw_context.opaque_surfaces {
+                let material = &(*obj.material);
 
-            for obj in &gltf.draw_context.opaque_surfaces {
-                self.logical_device.device.cmd_bind_pipeline(
+                let mat_pipeline = self
+                    .data_cache
+                    .pipeline_cache
+                    .get_pipeline(curr_frame.index, material.pipeline);
+
+                self.device.cmd_bind_pipeline(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    obj.material.pipeline.pipeline,
+                    mat_pipeline.pipeline,
                 );
 
-                self.logical_device.device.cmd_bind_descriptor_sets(
+                self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    obj.material.pipeline.layout,
+                    mat_pipeline.layout,
                     0,
-                    &global_descriptor,
+                    &material.descriptors,
                     &[],
                 );
 
-                let mat_desc = [obj.material.descriptor];
+                // self.device.cmd_bind_descriptor_sets(
+                //     cmd_buffer,
+                //     vk::PipelineBindPoint::GRAPHICS,
+                //     obj.material.pipeline.layout,
+                //     1,
+                //     &mat_desc,
+                //     &[],
+                // );
 
-                self.logical_device.device.cmd_bind_descriptor_sets(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    obj.material.pipeline.layout,
-                    1,
-                    &mat_desc,
-                    &[],
-                );
-
-                self.logical_device.device.cmd_bind_index_buffer(
+                self.device.cmd_bind_index_buffer(
                     cmd_buffer,
                     obj.index_buffer,
                     0,
@@ -1125,28 +1012,22 @@ impl<'a> VkRender<'a> {
 
                 let push_consts = VkGpuPushConsts::new(obj.transform, obj.vertex_buffer_addr);
 
-                self.logical_device.device.cmd_push_constants(
+                self.device.cmd_push_constants(
                     cmd_buffer,
-                    obj.material.pipeline.layout,
+                    mat_pipeline.layout,
                     vk::ShaderStageFlags::VERTEX,
                     0,
                     push_consts.as_byte_slice(),
                 );
 
-                self.logical_device.device.cmd_draw_indexed(
-                    cmd_buffer,
-                    obj.index_count,
-                    1,
-                    obj.first_index,
-                    0,
-                    0,
-                );
+                self.device
+                    .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             }
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
 
-            self.logical_device.device.cmd_end_rendering(cmd_buffer);
-       }
+            self.device.cmd_end_rendering(cmd_buffer);
+        }
     }
 
     // TODO decide if this is only used for transfers
@@ -1159,89 +1040,79 @@ impl<'a> VkRender<'a> {
             let queue = self.immediate.command_pool.queue;
 
             // Reset the fence correctly
-            self.logical_device
-                .device
-                .reset_fences(&self.immediate.fence)
-                .unwrap();
+            self.device.reset_fences(&self.immediate.fence).unwrap();
 
-            self.logical_device
-                .device
+            self.device
                 .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
 
             let begin_info =
                 vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-            self.logical_device
-                .device
+            self.device
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
             function(cmd_buffer);
 
-            self.logical_device
-                .device
-                .end_command_buffer(cmd_buffer)
-                .unwrap();
+            self.device.end_command_buffer(cmd_buffer).unwrap();
 
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
             let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
             // Submit the command buffer and signal the fence correctly
-            self.logical_device
-                .device
+            self.device
                 .queue_submit2(queue, &submit_info, self.immediate.fence[0])
                 .unwrap();
 
             // Wait for the fence to be signaled
-            self.logical_device
-                .device
+            self.device
                 .wait_for_fences(&self.immediate.fence, true, u64::MAX)
                 .unwrap();
         }
     }
 
-    pub fn draw_background(
-        &self,
-        image: vk::Image,
-        cmd_buffer: vk::CommandBuffer,
-        descriptor_set: &[vk::DescriptorSet],
-    ) {
-        let compute_effect = self.compute_data.get_current_effect();
-        unsafe {
-            self.logical_device.device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                compute_effect.pipeline,
-            );
+    // pub fn draw_background(
+    //     &self,
+    //     image: vk::Image,
+    //     cmd_buffer: vk::CommandBuffer,
+    //     descriptor_set: &[vk::DescriptorSet],
+    // ) {
+    //     let compute_effect = self.compute_data.get_current_effect();
+    //     unsafe {
+    //         self.device.cmd_bind_pipeline(
+    //             cmd_buffer,
+    //             vk::PipelineBindPoint::COMPUTE,
+    //             compute_effect.pipeline,
+    //         );
+    //
+    //         self.device.cmd_bind_descriptor_sets(
+    //             cmd_buffer,
+    //             vk::PipelineBindPoint::COMPUTE,
+    //             compute_effect.layout,
+    //             0,
+    //             &descriptor_set,
+    //             &[],
+    //         );
+    //
+    //         self.device.cmd_push_constants(
+    //             cmd_buffer,
+    //             compute_effect.layout,
+    //             vk::ShaderStageFlags::COMPUTE,
+    //             0,
+    //             compute_effect.data.as_byte_slice(),
+    //         );
+    //
+    //         self.device.cmd_dispatch(
+    //             cmd_buffer,
+    //             (self.window_state.curr_extent.width as f32 / 16.0).ceil() as u32,
+    //             (self.window_state.curr_extent.height as f32 / 16.0).ceil() as u32,
+    //             1,
+    //         );
+    //     }
+    // }
 
-            self.logical_device.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                compute_effect.layout,
-                0,
-                &descriptor_set,
-                &[],
-            );
-
-            self.logical_device.device.cmd_push_constants(
-                cmd_buffer,
-                compute_effect.layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                compute_effect.data.as_byte_slice(),
-            );
-
-            self.logical_device.device.cmd_dispatch(
-                cmd_buffer,
-                (self.window_state.curr_extent.width as f32 / 16.0).ceil() as u32,
-                (self.window_state.curr_extent.height as f32 / 16.0).ceil() as u32,
-                1,
-            );
-        }
-    }
-
-    pub fn upload_mesh(&mut self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
+    pub fn upload_mesh(&self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
         let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
         let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
         let allocator = self.allocator.lock().unwrap();
@@ -1267,13 +1138,14 @@ impl<'a> VkRender<'a> {
         let v_buffer_addr_info =
             vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer.buffer);
 
-        let v_buffer_addr = unsafe {
-            self.logical_device
-                .device
-                .get_buffer_device_address(&v_buffer_addr_info)
-        };
+        let vertex_buffer_addr =
+            unsafe { self.device.get_buffer_device_address(&v_buffer_addr_info) };
 
-        let new_surface = VkGpuMeshBuffers::new(index_buffer, vertex_buffer, v_buffer_addr);
+        let new_surface = VkGpuMeshBuffers {
+            index_buffer,
+            vertex_buffer,
+            vertex_buffer_addr,
+        };
 
         /*
         With the buffers allocated, we need to write the data into them. For that, we will be using a
@@ -1322,7 +1194,7 @@ impl<'a> VkRender<'a> {
                 .size(i_buffer_size as vk::DeviceSize)];
 
             unsafe {
-                self.logical_device.device.cmd_copy_buffer(
+                self.device.cmd_copy_buffer(
                     cmd,
                     staging_buffer.buffer,
                     new_surface.vertex_buffer.buffer,
@@ -1331,7 +1203,7 @@ impl<'a> VkRender<'a> {
             }
 
             unsafe {
-                self.logical_device.device.cmd_copy_buffer(
+                self.device.cmd_copy_buffer(
                     cmd,
                     staging_buffer.buffer,
                     new_surface.index_buffer.buffer,
@@ -1372,7 +1244,7 @@ impl<'a> VkRender<'a> {
         }
 
         let new_image = vk_util::create_image(
-            &self.logical_device.device,
+            &self.device,
             &allocator,
             size,
             format,
@@ -1383,7 +1255,7 @@ impl<'a> VkRender<'a> {
         self.immediate_submit(|cmd| {
             // let curr_frame = self.presentation.get_curr_frame();
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd,
                 new_image.image,
                 vk::ImageLayout::UNDEFINED,
@@ -1404,7 +1276,7 @@ impl<'a> VkRender<'a> {
                 .image_extent(size)];
 
             unsafe {
-                self.logical_device.device.cmd_copy_buffer_to_image(
+                self.device.cmd_copy_buffer_to_image(
                     cmd,
                     upload_buffer.buffer,
                     new_image.image,
@@ -1414,7 +1286,7 @@ impl<'a> VkRender<'a> {
             }
 
             vk_util::transition_image(
-                &self.logical_device.device,
+                &self.device,
                 cmd,
                 new_image.image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -1427,264 +1299,42 @@ impl<'a> VkRender<'a> {
         new_image
     }
 
-    pub fn init_default_data(&mut self, image_descriptor: vk::DescriptorSetLayout) {
-        let white_val = glam::vec4(1.0, 1.0, 1.0, 1.0).pack_unorm_4x8();
-        let grey_val = glam::vec4(0.66, 0.66, 0.66, 1.0).pack_unorm_4x8();
-        let black_val = glam::vec4(0.0, 0.0, 0.0, 0.0).pack_unorm_4x8();
-        let magenta_val = glam::vec4(1.0, 0.0, 1.0, 1.0).pack_unorm_4x8();
-
-        let mut error_val = vec![0_u32; 16 * 16]; // 16x16 checkerboard texture
-        for y in 0..16 {
-            for x in 0..16 {
-                error_val[y * 16 + x] = if ((x % 2) ^ (y % 2)) != 0 {
-                    magenta_val
-                } else {
-                    black_val
-                };
-            }
-        }
-
-        let mut err_bytes: Vec<u8> = error_val
-            .iter()
-            .flat_map(|&pixel| pixel.to_le_bytes())
-            .collect();
-
-        let white_image = self.upload_image(
-            &white_val.to_ne_bytes(),
-            data_util::EXTENT3D_ONE,
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED,
-            false,
-        );
-
-        let grey_image = self.upload_image(
-            &grey_val.to_ne_bytes(),
-            data_util::EXTENT3D_ONE,
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED,
-            false,
-        );
-
-        let black_image = self.upload_image(
-            &black_val.to_ne_bytes(),
-            data_util::EXTENT3D_ONE,
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED,
-            false,
-        );
-
-        let error_image = self.upload_image(
-            &err_bytes,
-            vk::Extent3D {
-                width: 16,
-                height: 16,
-                depth: 1,
-            },
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED,
-            false,
-        );
-
-        let mut sampler = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST);
-
-        let nearest_sampler = unsafe {
-            self.logical_device
-                .device
-                .create_sampler(&sampler, None)
-                .unwrap()
-        };
-
-        sampler.mag_filter = vk::Filter::LINEAR;
-        sampler.min_filter = vk::Filter::LINEAR;
-
-        let linear_sampler = unsafe {
-            self.logical_device
-                .device
-                .create_sampler(&sampler, None)
-                .unwrap()
-        };
-
-        self.default_textures = Some(DefaultTextures {
-            white_image,
-            black_image,
-            grey_image,
-            error_image,
-            linear_sampler,
-            nearest_sampler,
-            image_descriptor,
-        })
-    }
-
-    pub fn init_gltf_data(&mut self) {
-        println!("Inited GLTF data");
-        self.meshes = Some(
-            gltf_util::load_meshes(
-                "/home/mindspice/code/rust/engine/src/renderer/src/assets/basicmesh.glb",
-                |indices, vertices| self.upload_mesh(indices, vertices),
-            )
-            .unwrap(),
-        );
-
-        let (opaque, transparent, layout) =
-            VkGpuMetRoughPipeline::build_pipelines(&self.logical_device, &self.descriptors);
-
-        let mut roughness = VkGpuMetRoughPipeline {
-            opaque_pipeline: opaque,
-            transparent_pipeline: transparent,
-            descriptor_layout: [layout],
-            writer: Default::default(),
-        };
-
-        let mut material_constants = vk_util::allocate_buffer(
-            &self.allocator.lock().unwrap(),
-            std::mem::size_of::<MetRoughShaderConsts>(),
-            vk::BufferUsageFlags::UNIFORM_BUFFER,
-            vk_mem::MemoryUsage::Auto,
-        )
-        .unwrap();
-
-        let scene_uniform_data = unsafe {
-            // Lock the allocator and map memory for the buffer
-            let allocator = self.allocator.lock().unwrap();
-            let data_ptr = allocator
-                .map_memory(&mut material_constants.allocation)
-                .unwrap()
-                .cast::<MetRoughShaderConsts>();
-
-            // Update the mapped memory
-            (*data_ptr).color_factors = Vec4::new(1.0, 1.0, 1.0, 1.0);
-            (*data_ptr).metal_rough_factors = Vec4::new(1.0, 0.5, 0.0, 0.0);
-
-            // Optionally unmap the memory if required by the allocator (depends on the allocator implementation)
-            // allocator.unmap_memory(&mut material_constants.allocation);
-
-            data_ptr
-        };
-
-        let white_val = glam::vec4(1.0, 1.0, 1.0, 1.0).pack_unorm_4x8();
-
-        let white_image_1 = self.upload_image(
-            &white_val.to_ne_bytes(),
-            data_util::EXTENT3D_ONE,
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED,
-            false,
-        );
-
-        let white_image_2 = self.upload_image(
-            &white_val.to_ne_bytes(),
-            data_util::EXTENT3D_ONE,
-            vk::Format::R8G8B8A8_UNORM,
-            vk::ImageUsageFlags::SAMPLED,
-            false,
-        );
-
-        let mut sampler = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR);
-
-        let linear_sampler = unsafe {
-            self.logical_device
-                .device
-                .create_sampler(&sampler, None)
-                .unwrap()
-        };
-
-        let material_resources = GLTFMetallicRoughnessResources {
-            color_image: white_image_1,
-            color_sampler: linear_sampler,
-            metal_rough_image: white_image_2,
-            metal_rough_sampler: linear_sampler,
-            data_buffer: material_constants.buffer,
-            data_buffer_offset: 0,
-        };
-
-        let def_data = roughness.write_material(
-            &self.logical_device,
-            MaterialPass::MainColor,
-            &material_resources,
-            &mut self.global_desc_allocator,
-        );
-        let def_data = Rc::new(GLTFMaterial::new(def_data));
-
-        let mut loaded_nodes = HashMap::<String, Rc<RefCell<MeshNode>>>::with_capacity(3);
-
-        if let Some(ref mut meshes) = self.meshes {
-            for _ in 0..meshes.len() {
-                let mut mesh = meshes.remove(0);
-                for mut surface in mesh.surfaces.iter_mut() {
-                    surface.material = def_data.clone();
-                }
-
-                let mut new_node = MeshNode::new(Rc::new(mesh));
-                new_node.node.local_transform = glam::Mat4::IDENTITY;
-                new_node.node.world_transform = glam::Mat4::IDENTITY;
-
-                loaded_nodes.insert(new_node.mesh.name.clone(), Rc::new(RefCell::new(new_node)));
-            }
-        }
-
-        println!("Loaded Nodes: {:?}", loaded_nodes.keys());
-
-        let gltf_data = GltfStuffs {
-            default_data: def_data,
-            metal_roughness: roughness,
-            loaded_nodes,
-            draw_context: Default::default(),
-        };
-        self.gltf_stuffs = Some(gltf_data);
-
-        // self.main_deletion_queue.push(VkDeletable::AllocatedBuffer(material_constants));
-    }
-
     pub fn update_scene(&mut self) {
+        self.render_context.draw_context.opaque_surfaces.clear();
 
-        if let Some(ref mut gltf_data) = self.gltf_stuffs {
-            gltf_data.draw_context.opaque_surfaces.clear();
+        // Set up the view matrix
+        // self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
+        self.scene_data.view = self
+            .window_state
+            .controller
+            .borrow()
+            .get_camera()
+            .get_view_matrix();
 
-            let loaded_nodes = &mut gltf_data.loaded_nodes;
-            let model = loaded_nodes.get_mut("Cube").unwrap();
+        // Set up the projection matrix
+        let fovy = 70.0_f32.to_radians();
+        let aspect_ratio = self.window_state.curr_extent.width as f32
+            / self.window_state.curr_extent.height as f32;
+        let near = 0.1;
+        let far = 10000.0;
 
-            for x in -3..3 {
-                let scale = glam::Mat4::from_scale(glam::Vec3::splat(0.2));
-                let translation = glam::Mat4::from_translation(glam::vec3(x as f32, 1.0, 0.0));
-                let trans_scale = translation * scale;
-                model
-                    .borrow_mut()
-                    .draw(&trans_scale, &mut gltf_data.draw_context);
-            }
+        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
+        proj.y_axis.y *= -1.0; // Flip the Y-axis
 
-            // Set up the view matrix
-            // self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
-            self.scene_data.data.view = self
-                .window_state
-                .controller
-                .borrow()
-                .get_camera()
-                .get_view_matrix();
+        // Combine view and projection matrices
+        self.scene_data.view_projection = proj * self.scene_data.view;
+        self.scene_data.projection = proj;
 
-            // Set up the projection matrix
-            let fovy = 70.0_f32.to_radians();
-            let aspect_ratio = self.window_state.curr_extent.width as f32
-                / self.window_state.curr_extent.height as f32;
-            let near = 0.1;
-            let far = 10000.0;
+        // Set default lighting parameters
+        self.scene_data.ambient_color = Vec4::splat(0.1);
+        self.scene_data.sunlight_color = Vec4::splat(1.0);
+        self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
 
-            let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
-            proj.y_axis.y *= -1.0; // Flip the Y-axis
-
-            // Combine view and projection matrices
-            self.scene_data.data.view_projection = proj * self.scene_data.data.view;
-            self.scene_data.data.projection = proj;
-
-            // Set default lighting parameters
-            self.scene_data.data.ambient_color = Vec4::splat(0.1);
-            self.scene_data.data.sunlight_color = Vec4::splat(1.0);
-            self.scene_data.data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
-        } else {
-            panic!("No gtlf stuff")
-        }
+        self.render_context.scene_tree.borrow_mut().draw(
+            &glam::Mat4::IDENTITY,
+            &mut self.render_context.draw_context,
+            &self.data_cache.mesh_cache,
+            &self.data_cache.texture_cache,
+        )
     }
 }

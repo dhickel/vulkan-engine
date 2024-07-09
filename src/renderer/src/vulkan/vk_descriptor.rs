@@ -81,7 +81,7 @@ pub struct DescriptorAllocator {
 
 impl DescriptorAllocator {
     pub fn new(
-        device: &LogicalDevice,
+        device: &ash::Device,
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
     ) -> Result<Self, String> {
@@ -99,7 +99,7 @@ impl DescriptorAllocator {
             .max_sets(max_sets)
             .pool_sizes(&pool_sizes);
 
-        let pool = unsafe { device.device.create_descriptor_pool(&pool_info, None) }
+        let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
             .map_err(|err| format!("Failed to create pool {:?}", err))?;
 
         Ok(Self { pool })
@@ -122,14 +122,14 @@ impl DescriptorAllocator {
 
     pub fn allocate(
         &self,
-        device: &LogicalDevice,
+        device: &ash::Device,
         layouts: &[vk::DescriptorSetLayout],
     ) -> Result<vk::DescriptorSet, String> {
         let info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(self.pool)
             .set_layouts(layouts);
 
-        let descriptor_set = unsafe { device.device.allocate_descriptor_sets(&info) }
+        let descriptor_set = unsafe { device.allocate_descriptor_sets(&info) }
             .map_err(|err| format!("Error allocating descriptor set: {:?}", err))?;
 
         Ok(descriptor_set[0])

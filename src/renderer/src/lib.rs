@@ -21,7 +21,7 @@ use crate::data::{camera, gltf_util};
 use crate::data::camera::FPSController;
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use raw_window_handle::{RawWindowHandle};
 use std::cell::RefCell;
 use std::cmp::max;
 use std::process::exit;
@@ -34,7 +34,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::NamedKey::Camera;
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
-use crate::data::data_util::{MeshCache, TextureCache};
+use crate::data::data_cache::{MeshCache, TextureCache};
 
 
 const NANO: f64 = 1000000000.0;
@@ -45,9 +45,9 @@ pub struct GameLogic {
 
 
 pub fn gltf(str : String) {
-    let mut texture_cache = TextureCache::default();
-    let mut mesh_cache = MeshCache::default();
-    gltf_util::parse_gltf_to_raw(str.as_str(), &mut texture_cache, &mut mesh_cache).unwrap();
+    // let mut texture_cache = TextureCache::default();
+    // let mut mesh_cache = MeshCache::default();
+    // gltf_util::parse_gltf_to_raw(str.as_str(), &mut texture_cache, &mut mesh_cache).unwrap();
 }
 
 pub fn run() {

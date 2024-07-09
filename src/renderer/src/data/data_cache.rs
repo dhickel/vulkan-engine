@@ -52,7 +52,7 @@ pub struct TextureCache {
 }
 
 impl TextureCache {
-    pub fn new(nearest_sampler: vk::Sampler, linear_sampler: vk::Sampler) -> Self {
+    pub fn new(device: &ash::Device) -> Self {
         let def_color = CachedTexture::UnLoaded(TextureMeta {
             bytes: vec![255, 255, 255, 255],
             width: 1,
@@ -90,6 +90,17 @@ impl TextureCache {
 
         let mut cached_materials = Vec::with_capacity(100);
         cached_materials.push(def_mat);
+
+        let mut sampler = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST);
+
+        let nearest_sampler = unsafe { device.create_sampler(&sampler, None).unwrap() };
+
+        sampler.mag_filter = vk::Filter::LINEAR;
+        sampler.min_filter = vk::Filter::LINEAR;
+
+        let linear_sampler = unsafe { device.create_sampler(&sampler, None).unwrap() };
 
         Self {
             cached_textures,
@@ -147,6 +158,15 @@ impl TextureCache {
         }
     }
 
+    pub fn get_loaded_material_unchecked_ptr(&self, id: u32) -> *const VkLoadedMaterial {
+        unsafe {
+            match self.cached_materials.get_unchecked(id as usize) {
+                CacheMaterial::Loaded(loaded) => loaded,
+                _ => std::hint::unreachable_unchecked(),
+            }
+        }
+    }
+
     pub fn get_texture(&self, id: u32) -> Option<&CachedTexture> {
         self.cached_textures.get(id as usize)
     }
@@ -174,7 +194,7 @@ impl TextureCache {
 
     pub fn allocate_texture<F>(&mut self, mut upload_fn: F, tex_id: u32)
     where
-        F: FnMut(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
+        F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
     {
         let tex_id = tex_id as usize;
         let texture = std::mem::replace(
@@ -397,14 +417,20 @@ impl TextureCache {
         desc_allocators: &mut [VkDynamicDescriptorAllocator],
         desc_layout_cache: &VkDescLayoutCache,
     ) where
-        F: FnMut(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
+        F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
     {
         for x in 0..self.cached_textures.len() {
-            self.allocate_texture(&mut upload_fn, x as u32);
+            self.allocate_texture(&upload_fn, x as u32);
         }
 
         for x in 0..self.cached_materials.len() {
-            self.allocate_material(device, allocator, desc_allocators, desc_layout_cache,  x as u32,);
+            self.allocate_material(
+                device,
+                allocator,
+                desc_allocators,
+                desc_layout_cache,
+                x as u32,
+            );
         }
     }
 
@@ -490,7 +516,7 @@ impl MeshCache {
 
     pub fn allocate_mesh<F>(&mut self, mut upload_fn: F, mesh_id: usize)
     where
-        F: FnMut(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
+        F: Fn(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
     {
         let mesh = std::mem::replace(
             &mut self.cached_meshes[mesh_id],
@@ -536,12 +562,12 @@ impl MeshCache {
         }
     }
 
-    pub fn allocate_all<F>(&mut self, mut upload_fn: F)
+    pub fn allocate_all<F>(&mut self,  upload_fn: F)
     where
-        F: FnMut(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
+        F: Fn(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
     {
         for x in 0..self.cached_meshes.len() {
-            self.allocate_mesh(&mut upload_fn, x);
+            self.allocate_mesh(& upload_fn, x);
         }
     }
 
@@ -649,10 +675,12 @@ impl VkPipelineCache {
         })
     }
 
-    pub fn get_pipeline(&self, index: usize, typ: VkPipelineType) -> Option<&VkPipeline> {
-        self.pipelines
-            .get(index)
-            .and_then(|pipe| pipe.get(typ as usize))
+    pub fn get_pipeline(&self, index: u32, typ: VkPipelineType) -> &VkPipeline {
+        unsafe {
+            self.pipelines
+                .get_unchecked(index as usize)
+                .get_unchecked(typ as usize)
+        }
     }
 
     pub fn get_unchecked(&self, index: usize, typ: VkPipelineType) -> &VkPipeline {
@@ -676,14 +704,14 @@ pub enum VkDescType {
     PbrMetRough,
 }
 pub struct VkDescLayoutCache {
-    layouts: [vk::DescriptorSetLayout; 2],
+    layouts: [vk::DescriptorSetLayout; 3],
 }
 
 impl VkDescLayoutCache {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
         layouts.sort();
 
-        let sorted_layouts: [vk::DescriptorSetLayout; 2] = layouts
+        let sorted_layouts: [vk::DescriptorSetLayout; 3] = layouts
             .into_iter()
             .map(|(_, layout)| layout)
             .collect::<Vec<_>>()

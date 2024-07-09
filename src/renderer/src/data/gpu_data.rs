@@ -1,4 +1,6 @@
-use crate::data::data_util::{CoreShaderType, ShaderCache, TextureCache};
+use crate::data::data_cache::{
+    CoreShaderType, MeshCache, ShaderCache, TextureCache, VkLoadedMaterial,
+};
 use crate::data::gltf_util;
 use crate::data::gltf_util::MeshAsset;
 use crate::vulkan::vk_descriptor::{
@@ -7,19 +9,17 @@ use crate::vulkan::vk_descriptor::{
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
 use crate::vulkan::vk_types::{
-    LogicalDevice, VkBuffer, VkDescLayoutMap, VkDescType, VkDescriptors, VkGpuPushConsts,
-    VkImageAlloc, VkPipeline,
+    LogicalDevice, VkBuffer, VkDescriptors, VkGpuPushConsts, VkImageAlloc, VkPipeline,
 };
 use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
-use crate::data::data_cache::{CoreShaderType, ShaderCache, TextureCache};
 
 //////////////////////////
 //  MESH & TEXTURE DATA //
@@ -31,7 +31,7 @@ pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
     pub color: Vec4,
-    pub uv: Vec2
+    pub uv: Vec2,
 }
 
 impl Default for Vertex {
@@ -40,7 +40,7 @@ impl Default for Vertex {
             position: Default::default(),
             normal: Default::default(),
             color: Default::default(),
-            uv: Default::default()
+            uv: Default::default(),
         }
     }
 }
@@ -261,123 +261,123 @@ pub struct VkMetRoughUniforms {
 // VULKAN PIPELINES //
 //////////////////////
 
-pub struct VkGpuMetRoughPipeline<'a> {
-    pub opaque_pipeline: VkPipeline,
-    pub transparent_pipeline: VkPipeline,
-    pub descriptor_layout: [vk::DescriptorSetLayout; 1],
-    pub writer: DescriptorWriter<'a>,
-}
-
-impl VkGpuMetRoughPipeline<'_> {
-    pub fn build_pipelines(
-        device: &ash::Device,
-        descriptors: &VkDescLayoutMap,
-        shader_cache: &ShaderCache,
-    ) -> (VkPipeline, VkPipeline, vk::DescriptorSetLayout) {
-        let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
-
-        let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
-        
-        let matrix_range = [vk::PushConstantRange::default()
-            .offset(0)
-            .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
-            .stage_flags(vk::ShaderStageFlags::VERTEX)];
-
-        let material_layout = 
-
-        let layouts = [descriptors.get(VkDescType::GpuScene), material_layout];
-
-        let mesh_layout_info = vk_util::pipeline_layout_create_info()
-            .set_layouts(&layouts)
-            .push_constant_ranges(&matrix_range);
-
-        let layout = unsafe {
-            device
-                .create_pipeline_layout(&mesh_layout_info, None)
-                .unwrap()
-        };
-
-        let entry = CString::new("main").unwrap();
-
-        let mut pipeline_builder = PipelineBuilder::default()
-            .set_shaders(vert_shader, &entry, frag_shader, &entry)
-            .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-            .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
-            .set_polygon_mode(vk::PolygonMode::FILL)
-            .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-            .set_multisample_none()
-            .disable_blending()
-            .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
-            .set_pipeline_layout(layout);
-
-        let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
-
-        let mut pipeline_builder = pipeline_builder
-            .enable_blending_additive()
-            .enable_depth_test(false, vk::CompareOp::GREATER_OR_EQUAL);
-
-        let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
-
-        (
-            VkPipeline::new(opaque_pipeline, layout),
-            VkPipeline::new(transparent_pipeline, layout),
-            material_layout,
-        )
-    }
-
-    pub fn clear_resources(&mut self, device: &ash::Device) {
-        todo!()
-    }
-
-    pub fn write_material(
-        &mut self,
-        device: &ash::Device,
-        material_id: u32,
-        texture_cache: &TextureCache,
-        descriptor_allocator: &mut VkDynamicDescriptorAllocator,
-    )  {
-
-        let material = texture_cache.get_loaded_material_unchecked(material_id);
-        let color_tex = texture_cache.get_loaded_texture_unchecked(material.meta.base_color_tex_id);
-        let metallic_tex =
-            texture_cache.get_loaded_texture_unchecked(material.meta.metallic_roughness_tex_id);
-        
-        let pipeline = match material.meta.alpha_mode {
-            AlphaMode::Opaque => self.opaque_pipeline
-            AlphaMode::Mask | AlphaMode::Blend => self.transparent_pipeline
-        };
-        
-        let descriptor = descriptor_allocator
-            .allocate(device, &self.descriptor_layout)
-            .unwrap();
-        
-        self.writer.write_buffer(
-            0,
-            material.uniform_buffer.buffer,
-            std::mem::size_of::<MetRoughShaderConsts>(),
-            material.buffer_offset as usize,
-            vk::DescriptorType::UNIFORM_BUFFER,
-        );
-
-        self.writer.write_image(
-            1,
-            color_tex.alloc.image_view,
-            texture_cache.get_sampler(color_tex.meta.sampler),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        );
-
-        self.writer.write_image(
-            2,
-            metallic_tex.alloc.image_view,
-            texture_cache.get_sampler(metallic_tex.meta.sampler),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        );
-
-        self.writer.update_set(device, descriptor);
-    }
-}
+// pub struct VkGpuMetRoughPipeline<'a> {
+//     pub opaque_pipeline: VkPipeline,
+//     pub transparent_pipeline: VkPipeline,
+//     pub descriptor_layout: [vk::DescriptorSetLayout; 1],
+//     pub writer: DescriptorWriter<'a>,
+// }
+//
+// impl VkGpuMetRoughPipeline<'_> {
+//     pub fn build_pipelines(
+//         device: &ash::Device,
+//         descriptors: &VkDescLayoutMap,
+//         shader_cache: &ShaderCache,
+//     ) -> (VkPipeline, VkPipeline, vk::DescriptorSetLayout) {
+//         let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
+//
+//         let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
+//
+//         let matrix_range = [vk::PushConstantRange::default()
+//             .offset(0)
+//             .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
+//             .stage_flags(vk::ShaderStageFlags::VERTEX)];
+//
+//         let material_layout =
+//
+//         let layouts = [descriptors.get(VkDescType::GpuScene), material_layout];
+//
+//         let mesh_layout_info = vk_util::pipeline_layout_create_info()
+//             .set_layouts(&layouts)
+//             .push_constant_ranges(&matrix_range);
+//
+//         let layout = unsafe {
+//             device
+//                 .create_pipeline_layout(&mesh_layout_info, None)
+//                 .unwrap()
+//         };
+//
+//         let entry = CString::new("main").unwrap();
+//
+//         let mut pipeline_builder = PipelineBuilder::default()
+//             .set_shaders(vert_shader, &entry, frag_shader, &entry)
+//             .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+//             .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
+//             .set_polygon_mode(vk::PolygonMode::FILL)
+//             .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+//             .set_multisample_none()
+//             .disable_blending()
+//             .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
+//             .set_pipeline_layout(layout);
+//
+//         let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+//
+//         let mut pipeline_builder = pipeline_builder
+//             .enable_blending_additive()
+//             .enable_depth_test(false, vk::CompareOp::GREATER_OR_EQUAL);
+//
+//         let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+//
+//         (
+//             VkPipeline::new(opaque_pipeline, layout),
+//             VkPipeline::new(transparent_pipeline, layout),
+//             material_layout,
+//         )
+//     }
+//
+//     pub fn clear_resources(&mut self, device: &ash::Device) {
+//         todo!()
+//     }
+//
+//     pub fn write_material(
+//         &mut self,
+//         device: &ash::Device,
+//         material_id: u32,
+//         texture_cache: &TextureCache,
+//         descriptor_allocator: &mut VkDynamicDescriptorAllocator,
+//     )  {
+//
+//         let material = texture_cache.get_loaded_material_unchecked(material_id);
+//         let color_tex = texture_cache.get_loaded_texture_unchecked(material.meta.base_color_tex_id);
+//         let metallic_tex =
+//             texture_cache.get_loaded_texture_unchecked(material.meta.metallic_roughness_tex_id);
+//
+//         let pipeline = match material.meta.alpha_mode {
+//             AlphaMode::Opaque => self.opaque_pipeline
+//             AlphaMode::Mask | AlphaMode::Blend => self.transparent_pipeline
+//         };
+//
+//         let descriptor = descriptor_allocator
+//             .allocate(device, &self.descriptor_layout)
+//             .unwrap();
+//
+//         self.writer.write_buffer(
+//             0,
+//             material.uniform_buffer.buffer,
+//             std::mem::size_of::<MetRoughShaderConsts>(),
+//             material.buffer_offset as usize,
+//             vk::DescriptorType::UNIFORM_BUFFER,
+//         );
+//
+//         self.writer.write_image(
+//             1,
+//             color_tex.alloc.image_view,
+//             texture_cache.get_sampler(color_tex.meta.sampler),
+//             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+//             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+//         );
+//
+//         self.writer.write_image(
+//             2,
+//             metallic_tex.alloc.image_view,
+//             texture_cache.get_sampler(metallic_tex.meta.sampler),
+//             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+//             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+//         );
+//
+//         self.writer.update_set(device, descriptor);
+//     }
+// }
 
 /////////////////////////////
 // SCENE GRAPH & RENDERING //
@@ -387,16 +387,16 @@ pub struct RenderObject {
     pub index_count: u32,
     pub first_index: u32,
     pub index_buffer: vk::Buffer,
-    pub material: VkGpuTextureBuffer,
+    pub material: *const VkLoadedMaterial,
     pub transform: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
 }
 
-pub trait Renderable {
-    fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext);
-    fn refresh_transform(&mut self, transform: &Mat4);
-    fn get_children(&self) -> &Vec<Rc<RefCell<Node>>>;
-}
+// pub trait Renderable {
+//     fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext);
+//     fn refresh_transform(&mut self);
+//     fn get_children(&self) -> &Vec<Rc<RefCell<Node>>>;
+// }
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct Transform {
     pub position: Vec3,
@@ -423,20 +423,65 @@ pub struct Node {
     pub dirty: bool,
 }
 
-impl Renderable for Node {
-    fn draw(&self, top_matrix: &Mat4, ctx: &mut DrawContext) {
+impl Node {
+    pub(crate) fn draw(
+        &mut self,
+        top_matrix: &Mat4,
+        ctx: &mut DrawContext,
+        mesh_cache: &MeshCache,
+        tex_cache: &TextureCache,
+    ) {
+        let node_matrix = top_matrix.mul_mat4(&self.world_transform);
+        
+        if self.dirty {
+            self.refresh_transform(None);
+        }
+
+        if let Some(id) = self.meshes {
+            let mesh = mesh_cache.get_loaded_mesh_unchecked(id);
+
+            for surface in &mesh.meta.surfaces {
+                if let Some(id) = surface.material_index {
+                    let material = tex_cache.get_loaded_material_unchecked_ptr(id);
+                    let ro = RenderObject {
+                        index_count: surface.count,
+                        first_index: surface.start_index,
+                        index_buffer: mesh.buffer.index_buffer.buffer,
+                        material,
+                        transform: node_matrix,
+                        vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
+                    };
+                    ctx.opaque_surfaces.push(ro); // TODO transparency
+                }
+            }
+        }
+        
+        
         for child in &self.children {
-            child.borrow().draw(top_matrix, ctx);
+            child.borrow_mut().draw(top_matrix, ctx, mesh_cache, tex_cache);
         }
     }
 
-    fn refresh_transform(&mut self, parent_matrix: &Mat4) {
-        // self.world_transform = parent_matrix.mul_mat4(&self.local_transform);
-        //
-        // for child in self.children.iter_mut() {
-        //     child.borrow_mut().refresh_transform(&self.world_transform);
-        // }
+    pub fn refresh_transform(&mut self, parent_transform: Option<&Mat4>) {
+        // Compute new world transform based on parent's world transform if available
+        
+        let new_world_transform = if let Some(parent_transform) = parent_transform {
+            parent_transform.mul_mat4(&self.local_transform.compose())
+        } else {
+            self.local_transform.compose()
+        };
+
+        // Update the node's world transform
+        self.world_transform = new_world_transform;
+        self.dirty = false;
+
+        // Pass the new world transform to the children
+        for child in &self.children {
+            let mut child = child.borrow_mut();
+            child.refresh_transform(Some(&self.world_transform));
+        }
     }
+    
 
     fn get_children(&self) -> &Vec<Rc<RefCell<Node>>> {
         &self.children

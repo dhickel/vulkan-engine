@@ -169,8 +169,7 @@ pub fn get_window_surface(
         )
         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
     };
-    
-    
+
     let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
 
     log::info!("Surface created");
@@ -186,7 +185,7 @@ pub fn get_window_surface(
 //     window: &glfw::PWindow,
 // ) -> Result<VkSurface, String> {
 //     log::info!("Creating surface");
-// 
+//
 //     let surface = unsafe {
 //         ash_window::create_surface(
 //             &entry,
@@ -197,9 +196,9 @@ pub fn get_window_surface(
 //         )
 //         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
 //     };
-// 
+//
 //     let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
-// 
+//
 //     log::info!("Surface created");
 //     Ok(VkSurface {
 //         surface,
@@ -332,7 +331,7 @@ pub fn create_logical_device(
     core_features: &mut vk::PhysicalDeviceFeatures,
     other_features: Option<&mut [Box<dyn vk::ExtendsPhysicalDeviceFeatures2>]>,
     required_extensions: Option<&[*const c_char]>,
-) -> Result<LogicalDevice, String> {
+) -> Result<(ash::Device, DeviceQueues), String> {
     log::info!("Creating Logical Device");
     let queue_family_properties =
         unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
@@ -400,7 +399,7 @@ pub fn create_logical_device(
     );
 
     log::info!("{}", queue_info);
-    Ok(LogicalDevice { device, queues })
+    Ok((device, queues))
 }
 
 pub fn graphics_only_queue_indices(
@@ -472,19 +471,23 @@ pub fn queue_indices_with_preferences(
     for (index, qf) in qf_properties.iter().enumerate() {
         let index = index as u32;
 
-        if prefer_unique_compute && compute_index.is_none() &&
-            qf.queue_flags.contains(vk::QueueFlags::COMPUTE) &&
-            !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) &&
-            Some(index) != graphics_present_index {
+        if prefer_unique_compute
+            && compute_index.is_none()
+            && qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            && !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            && Some(index) != graphics_present_index
+        {
             compute_index = Some(index);
         }
 
-        if prefer_unique_transfer && transfer_index.is_none() &&
-            qf.queue_flags.contains(vk::QueueFlags::TRANSFER) &&
-            !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) &&
-            !qf.queue_flags.contains(vk::QueueFlags::COMPUTE) &&
-            Some(index) != graphics_present_index &&
-            Some(index) != compute_index {
+        if prefer_unique_transfer
+            && transfer_index.is_none()
+            && qf.queue_flags.contains(vk::QueueFlags::TRANSFER)
+            && !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            && !qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            && Some(index) != graphics_present_index
+            && Some(index) != compute_index
+        {
             transfer_index = Some(index);
         }
     }
@@ -665,7 +668,7 @@ pub fn get_swapchain_support(
             .surface_instance
             .get_physical_device_surface_capabilities(*physical_device, surface_info.surface)
             .map_err(|e| format!("Fatal: Failed swapchain capabilities check: {:?}", e))?;
-        
+
         let formats = surface_info
             .surface_instance
             .get_physical_device_surface_formats(*physical_device, surface_info.surface)
@@ -687,7 +690,8 @@ pub fn get_swapchain_support(
 pub fn create_swapchain(
     instance: &ash::Instance,
     physical_device: &PhyDevice,
-    logical_device: &LogicalDevice,
+    device: &ash::Device,
+    device_queues: &DeviceQueues,
     surface_info: &VkSurface,
     requested_extent: Extent2D,
     image_count: Option<u32>,
@@ -726,7 +730,6 @@ pub fn create_swapchain(
 
     log::info!("Swapchain: Setting extent");
     let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
-    
 
     let image_count = if let Some(explicit_count) = image_count {
         std::cmp::min(
@@ -771,8 +774,8 @@ pub fn create_swapchain(
         .image_array_layers(1);
 
     let present_gfx_indices = [
-        logical_device.queues.get_queue_index(QueueType::Graphics),
-        logical_device.queues.get_queue_index(QueueType::Present),
+        device_queues.get_queue_index(QueueType::Graphics),
+        device_queues.get_queue_index(QueueType::Present),
     ];
 
     sc_create_info = if present_gfx_indices[0] != present_gfx_indices[1] {
@@ -794,7 +797,7 @@ pub fn create_swapchain(
     }
 
     log::info!("Swapchain: Initializing loader");
-    let swapchain_loader = ash::khr::swapchain::Device::new(instance, &logical_device.device);
+    let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
 
     log::info!("Swapchain: Initializing swapchain");
     let swapchain = unsafe {
@@ -822,7 +825,7 @@ pub fn create_swapchain(
 
 pub fn allocate_draw_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
-    device: &LogicalDevice,
+    device: &ash::Device,
     size: Extent2D,
     count: u32,
 ) -> Result<Vec<VkImageAlloc>, String> {
@@ -875,7 +878,6 @@ pub fn allocate_draw_images(
 
             let image_view = unsafe {
                 device
-                    .device
                     .create_image_view(&view_create_info, None)
                     .map_err(|e| format!("Error creating image view: {:?}", e))?
             };
@@ -895,7 +897,7 @@ pub fn allocate_draw_images(
 
 pub fn allocate_depth_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
-    device: &LogicalDevice,
+    device: &ash::Device,
     size: Extent2D,
     count: u32,
 ) -> Result<Vec<VkImageAlloc>, String> {
@@ -945,7 +947,6 @@ pub fn allocate_depth_images(
 
             let image_view = unsafe {
                 device
-                    .device
                     .create_image_view(&view_create_info, None)
                     .map_err(|e| format!("Error creating image view: {:?}", e))?
             };
@@ -964,7 +965,7 @@ pub fn allocate_depth_images(
 }
 
 pub fn create_basic_present_views(
-    logical_device: &LogicalDevice,
+    logical_device: &ash::Device,
     swapchain: &VkSwapchain,
 ) -> Result<Vec<(vk::Image, vk::ImageView)>, String> {
     log::info!("Creating image views");
@@ -997,7 +998,6 @@ pub fn create_basic_present_views(
                 .image(image);
 
             logical_device
-                .device
                 .create_image_view(&create_view_info, None)
                 .map(|image_view| (image, image_view))
                 .map_err(|err| format!("Error creating image views: {:?}", err))
@@ -1131,19 +1131,19 @@ pub fn select_sc_extent(
 // }
 
 pub fn create_command_pools(
-    device: &LogicalDevice,
+    device: &ash::Device,
+    device_queues: &DeviceQueues,
     pool_count: u32,
     buffer_count: u32,
 ) -> Result<Vec<VkCommandPoolMap>, String> {
     log::info!("Creating command pools");
     
-    let devices_queues = &device.queues;
     let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<QueueType>, vk::CommandPool)>::new();
 
     for &t in QueueType::iter() {
-        if devices_queues.has_queue_type(t) {
-            let queue = devices_queues.get_queue(t);
-            let index = devices_queues.get_queue_index(t);
+        if device_queues.has_queue_type(t) {
+            let queue = device_queues.get_queue(t);
+            let index = device_queues.get_queue_index(t);
             let existing = mapped_queues.iter_mut().find(|q| q.1 == queue);
             if let Some(existing) = existing {
                 existing.2.push(t);
@@ -1154,7 +1154,6 @@ pub fn create_command_pools(
 
                 let pool = unsafe {
                     device
-                        .device
                         .create_command_pool(&command_pool_info, None)
                         .map_err(|err| format!("Error creating command pool: {:?}", err))?
                 };
@@ -1243,7 +1242,7 @@ pub fn create_immediate_command_pool(
 }
 
 pub fn create_command_buffers(
-    device: &LogicalDevice,
+    device: &ash::Device,
     pool: &vk::CommandPool,
     level: vk::CommandBufferLevel,
     count: u32,
@@ -1255,7 +1254,6 @@ pub fn create_command_buffers(
 
     let buffers = unsafe {
         device
-            .device
             .allocate_command_buffers(&command_buffer_allocate_info)
             .map_err(|err| format!("Error creating command buffers: {:?}", err))?
     };
@@ -1263,24 +1261,21 @@ pub fn create_command_buffers(
     Ok(buffers)
 }
 
-pub fn create_frame_sync(device: &LogicalDevice) -> Result<VkFrameSync, String> {
+pub fn create_frame_sync(device: &ash::Device) -> Result<VkFrameSync, String> {
     let semaphore_create_info = vk::SemaphoreCreateInfo::default();
 
     let (swap_semaphore, render_semaphore, render_fence) = unsafe {
         let s_create_info = vk::SemaphoreCreateInfo::default();
         let s = device
-            .device
             .create_semaphore(&semaphore_create_info, None)
             .map_err(|err| format!("Error creating semaphore: {:?}", err))?;
         let r = device
-            .device
             .create_semaphore(&semaphore_create_info, None)
             .map_err(|err| format!("Error creating semaphore: {:?}", err))?;
 
         let f_create_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
         let f = device
-            .device
             .create_fence(&f_create_info, None)
             .map_err(|err| format!("Error creating fence: {:?}", err))?;
 
@@ -1293,8 +1288,6 @@ pub fn create_frame_sync(device: &LogicalDevice) -> Result<VkFrameSync, String> 
         render_fence,
     })
 }
-
-
 
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
     vec![
