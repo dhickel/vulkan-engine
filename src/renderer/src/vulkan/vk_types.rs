@@ -164,36 +164,6 @@ impl VkCommandPoolMap {
     }
 }
 
-#[repr(C)]
-#[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy)]
-pub enum VkDescType {
-    DrawImage = 0,
-    GpuScene = 1,
-}
-pub struct VkDescLayoutMap {
-    layouts: [vk::DescriptorSetLayout; 2],
-}
-
-impl VkDescLayoutMap {
-    pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
-        layouts.sort();
-
-        let sorted_layouts: [vk::DescriptorSetLayout; 2] = layouts
-            .into_iter()
-            .map(|(_, layout)| layout)
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("Number of descriptor layouts did not match number of enum keys");
-
-        Self {
-            layouts: sorted_layouts,
-        }
-    }
-
-    pub fn get(&self, typ: VkDescType) -> vk::DescriptorSetLayout {
-        self.layouts[typ as usize]
-    }
-}
 
 #[derive(Debug)]
 pub struct VkCommandPool {
@@ -725,43 +695,7 @@ impl VkGpuPushConsts {
 //     }};
 // }
 
-#[repr(u8)]
-pub enum VkPipelineType {
-    BACKGROUND = 0,
-    MESH = 1,
-    TRIANGLE = 2,
-}
 
-impl VkPipelineType {
-    pub(crate) const SIZE: usize = 3;
-}
-
-//#[derive(Clone, Copy)]
-pub struct VkPipelineCache {
-    pipelines: [Option<VkPipeline>; VkPipelineType::SIZE],
-}
-
-impl Default for VkPipelineCache {
-    fn default() -> Self {
-        Self {
-            pipelines: [None; VkPipelineType::SIZE],
-        }
-    }
-}
-
-impl VkPipelineCache {
-    pub fn add_pipeline(&mut self, typ: VkPipelineType, pipeline: VkPipeline) {
-        self.pipelines[typ as usize] = Some(pipeline);
-    }
-
-    pub fn get_pipeline(&self, typ: VkPipelineType) -> Option<VkPipeline> {
-        self.pipelines[typ as usize]
-    }
-
-    pub fn get_unchecked(&self, typ: VkPipelineType) -> VkPipeline {
-        unsafe { self.pipelines[typ as usize].unwrap_unchecked() }
-    }
-}
 
 pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),

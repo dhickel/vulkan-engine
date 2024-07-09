@@ -18,15 +18,18 @@ use gltf::texture::{MagFilter, MinFilter};
 use gltf::{Gltf, Material, Semantic};
 use imgui::sys::ImDrawFlags_None;
 use std::rc::{Rc, Weak};
+use glam::Vec2;
 
 
-use crate::data::data_util::{MeshCache, TextureCache};
+use crate::data::data_cache::{MeshCache, TextureCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     EmissiveMap, MeshMeta, NodeMeta, NormalMap, OcclusionMap, SurfaceMeta, TextureMeta, Transform,
     Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer,
 };
 use log::{info, log};
+
+
 
 #[derive(Debug)]
 pub struct GeoSurface {
@@ -135,8 +138,7 @@ pub fn parse_gltf_to_raw(
                             position: glam::Vec3::from_array(pos),
                             normal: glam::vec3(1.0, 0.0, 0.0),
                             color: glam::Vec4::ONE,
-                            uv_x: 0.0,
-                            uv_y: 0.0,
+                            uv: Vec2::ZERO
                         };
                         tmp_vertices.push(vert);
                     }
@@ -147,8 +149,7 @@ pub fn parse_gltf_to_raw(
                             position: glam::Vec3::from_array(pos),
                             normal: glam::vec3(1.0, 0.0, 0.0),
                             color: glam::Vec4::ONE,
-                            uv_x: 0.0,
-                            uv_y: 0.0,
+                            uv: Vec2::ZERO
                         };
                         tmp_vertices.push(vert);
                     }
@@ -176,20 +177,20 @@ pub fn parse_gltf_to_raw(
                 match uvs {
                     ReadTexCoords::U8(cord_iter) => {
                         for (idx, cord) in cord_iter.enumerate() {
-                            tmp_vertices[start_index + idx].uv_x = cord[0] as f32;
-                            tmp_vertices[start_index + idx].uv_y = cord[1] as f32;
+                            tmp_vertices[start_index + idx].uv.x = cord[0] as f32;
+                            tmp_vertices[start_index + idx].uv.y = cord[1] as f32;
                         }
                     }
                     ReadTexCoords::U16(cord_iter) => {
                         for (idx, cord) in cord_iter.enumerate() {
-                            tmp_vertices[start_index + idx].uv_x = cord[0] as f32;
-                            tmp_vertices[start_index + idx].uv_y = cord[1] as f32;
+                            tmp_vertices[start_index + idx].uv.x = cord[0] as f32;
+                            tmp_vertices[start_index + idx].uv.y = cord[1] as f32;
                         }
                     }
                     ReadTexCoords::F32(cord_iter) => {
                         for (idx, cord) in cord_iter.enumerate() {
-                            tmp_vertices[start_index + idx].uv_x = cord[0];
-                            tmp_vertices[start_index + idx].uv_y = cord[1];
+                            tmp_vertices[start_index + idx].uv.x = cord[0];
+                            tmp_vertices[start_index + idx].uv.y = cord[1];
                         }
                     }
                 }

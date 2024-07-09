@@ -1,10 +1,11 @@
-
-use ash::vk;
-use std::ffi::CStr;
-use std::io::{Read, Seek, SeekFrom};
+use crate::data::data_cache::{
+    CoreShaderType, ShaderCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+};
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
-
+use ash::vk;
+use std::ffi::{CStr, CString};
+use std::io::{Read, Seek, SeekFrom};
 
 pub struct PipelineBuilder<'a> {
     pub shader_stages: Vec<vk::PipelineShaderStageCreateInfo<'a>>,
@@ -47,7 +48,7 @@ impl<'a> PipelineBuilder<'a> {
         self.color_attachment_format = [vk::Format::UNDEFINED];
     }
 
-    pub fn build_pipeline(&mut self, device: &LogicalDevice) -> Result<vk::Pipeline, String> {
+    pub fn build_pipeline(&mut self, device: &ash::Device) -> Result<vk::Pipeline, String> {
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
@@ -66,7 +67,6 @@ impl<'a> PipelineBuilder<'a> {
             .render_info
             .color_attachment_formats(&self.color_attachment_format);
 
-
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)
             .vertex_input_state(&vertex_input_info)
@@ -82,7 +82,6 @@ impl<'a> PipelineBuilder<'a> {
 
         unsafe {
             Ok(device
-                .device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
                 .map_err(|err| format!("Error creating pipeline: {:?}", err))?[0])
         }
@@ -123,7 +122,7 @@ impl<'a> PipelineBuilder<'a> {
     }
 
     pub fn set_polygon_mode(mut self, mode: vk::PolygonMode) -> Self {
-        self.rasterizer  = self.rasterizer.polygon_mode(mode).line_width(1f32);
+        self.rasterizer = self.rasterizer.polygon_mode(mode).line_width(1f32);
         self
     }
 
@@ -198,7 +197,6 @@ impl<'a> PipelineBuilder<'a> {
     pub fn set_color_attachment_format(mut self, format: vk::Format) -> Self {
         self.color_attachment_format = [format];
 
-
         // self.render_info = vk::PipelineRenderingCreateInfo::default()
         //     .color_attachment_formats(&self.color_attachment_format);
         //
@@ -247,4 +245,82 @@ impl<'a> PipelineBuilder<'a> {
         self.pipeline_layout = layout;
         self
     }
+}
+
+pub fn init_pipeline_cache(
+    device: &ash::Device,
+    desc_layout_cache: &VkDescLayoutCache,
+    shader_cache: &ShaderCache,
+) -> VkPipelineCache {
+    let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
+    let (pbr_opaque2, pbr_alpha2) =
+        init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
+
+    VkPipelineCache::new(vec![
+        vec![
+            (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
+            (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
+        ],
+        vec![
+            (VkPipelineType::PbrMetRoughOpaque, pbr_opaque2),
+            (VkPipelineType::PbrMetRoughAlpha, pbr_alpha2),
+        ],
+    ])
+    .unwrap()
+}
+
+fn init_met_rough_pipelines(
+    device: &ash::Device,
+    desc_layout_cache: &VkDescLayoutCache,
+    shader_cache: &ShaderCache,
+) -> (VkPipeline, VkPipeline) {
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
+
+    let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
+
+    let matrix_range = [vk::PushConstantRange::default()
+        .offset(0)
+        .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+
+    let layouts = [
+        desc_layout_cache.get(VkDescType::GpuScene),
+        desc_layout_cache.get(VkDescType::PbrMetRough),
+    ];
+
+    let mesh_layout_info = vk_util::pipeline_layout_create_info()
+        .set_layouts(&layouts)
+        .push_constant_ranges(&matrix_range);
+
+    let layout = unsafe {
+        device
+            .create_pipeline_layout(&mesh_layout_info, None)
+            .unwrap()
+    };
+
+    let entry = CString::new("main").unwrap();
+
+    let mut pipeline_builder = PipelineBuilder::default()
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
+        .set_pipeline_layout(layout);
+
+    let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+
+    let mut pipeline_builder = pipeline_builder
+        .enable_blending_additive()
+        .enable_depth_test(false, vk::CompareOp::GREATER_OR_EQUAL);
+
+    let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+
+    (
+        VkPipeline::new(opaque_pipeline, layout),
+        VkPipeline::new(transparent_pipeline, layout),
+    )
 }

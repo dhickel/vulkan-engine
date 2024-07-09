@@ -1,6 +1,6 @@
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
 use crate::data::gpu_data::{
-    DrawContext, GLTFMetallicRoughnessConstants, GLTFMetallicRoughnessResources, GPUScene,
+    DrawContext, MetRoughShaderConsts, GLTFMetallicRoughnessResources, GPUScene,
     GPUSceneData, MaterialPass, Node, Renderable, Vertex, VkGpuMeshBuffers, VkGpuMetRoughPipeline,
     VkGpuTextureBuffer,
 };
@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
+use crate::data::data_cache::{CoreShaderType, ShaderCache, VkDescLayoutCache};
 
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
@@ -75,6 +76,18 @@ pub struct VkRender<'a> {
     pub main_deletion_queue: Vec<VkDeletable>,
 }
 
+
+pub fn init_caches(device: &ash::Device) {
+    let shader_paths = vec![
+        (CoreShaderType::MetRoughFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.frag.spv".to_string()),
+        (CoreShaderType::MetRoughVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string()),
+    ];
+    let shader_cache = ShaderCache::new(device, shader_paths).unwrap();
+    let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
+    let pipeline_cache = vk_pipeline::init_pipeline_cache(device, &desc_layout_cache, &shader_cache);
+    
+}
+
 pub fn init_desc_map(device: &LogicalDevice) -> VkDescLayoutMap {
     let draw_image_layout = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
@@ -95,7 +108,7 @@ pub fn init_desc_map(device: &LogicalDevice) -> VkDescLayoutMap {
         .unwrap();
 
     VkDescLayoutMap::new(vec![
-        (VkDescType::DrawImage, draw_image_layout),
+        (VkDescType::DrawImageDrawImage, draw_image_layout),
         (VkDescType::GpuScene, gpu_scene_desc),
     ])
 }
@@ -586,14 +599,14 @@ impl<'a> VkRender<'a> {
 
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
 
-        let mut pipeline_cache = VkPipelineCache::default();
+        let mut pipeline_cache = PipelineCache::default();
 
         let image_desc = init_image_descriptor(&logical_device);
 
         let mesh_pipeline =
             init_mesh_pipeline(&logical_device, draw_format, depth_format, image_desc);
 
-        pipeline_cache.add_pipeline(VkPipelineType::MESH, mesh_pipeline);
+        pipeline_cache.add_pipeline(VkPipeline::MESH, mesh_pipeline);
 
         let gpu_descriptor = DescriptorLayoutBuilder::default()
             .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
@@ -677,6 +690,7 @@ impl<'a> VkRender<'a> {
         println!("Resize Completed")
     }
 }
+
 
 impl<'a> VkRender<'a> {
     pub fn render(&mut self, frame_number: u32) {
@@ -959,21 +973,21 @@ impl<'a> VkRender<'a> {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
-        
+
         let depth_attachment = [vk_util::depth_attachment_info(
             depth_view,
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
         )];
-        
+
         let extent = self.window_state.curr_extent;
-        
+
         let rendering_info = vk_util::rendering_info(extent, &color_attachment, &depth_attachment);
-        
+
         unsafe {
             self.logical_device
                 .device
                 .cmd_begin_rendering(cmd_buffer, &rendering_info);
-        
+
             self.logical_device.device.cmd_bind_pipeline(
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -981,13 +995,13 @@ impl<'a> VkRender<'a> {
                     .get_unchecked(VkPipelineType::MESH)
                     .pipeline,
             );
-        
+
             let def_text = if let Some(tex) = &self.default_textures {
                 tex
             } else {
                 panic!("No image desc")
             };
-        
+
             let def_desc = [def_text.image_descriptor];
             let image_set = [self
                 .presentation
@@ -995,7 +1009,7 @@ impl<'a> VkRender<'a> {
                 .descriptors
                 .allocate(&self.logical_device, &def_desc)
                 .unwrap()];
-        
+
             let mut writer = DescriptorWriter::default();
             writer.write_image(
                 0,
@@ -1004,9 +1018,9 @@ impl<'a> VkRender<'a> {
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
-        
+
             writer.update_set(&self.logical_device, image_set[0]);
-        
+
             self.logical_device.device.cmd_bind_descriptor_sets(
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1017,7 +1031,7 @@ impl<'a> VkRender<'a> {
                 &image_set,
                 &[],
             );
-        
+
             let viewport = [vk::Viewport::default()
                 .x(0.0)
                 .y(0.0)
@@ -1025,21 +1039,21 @@ impl<'a> VkRender<'a> {
                 .height(extent.height as f32)
                 .min_depth(0.0)
                 .max_depth(0.0)];
-        
+
             self.logical_device
                 .device
                 .cmd_set_viewport(cmd_buffer, 0, &viewport);
-        
+
             let scissor = [vk::Rect2D::default()
                 .offset(vk::Offset2D::default().y(0).y(0))
                 .extent(extent)];
-        
+
             self.logical_device
                 .device
                 .cmd_set_scissor(cmd_buffer, 0, &scissor);
-        
+
             let curr_frame = self.presentation.get_curr_frame_mut();
-        
+
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
                 &allocator,
@@ -1047,16 +1061,16 @@ impl<'a> VkRender<'a> {
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
             .unwrap();
-        
+
             let desc = [self.descriptors.get(VkDescType::GpuScene)];
-        
+
             let mut global_descriptor = curr_frame
                 .descriptors
                 .allocate(&self.logical_device, &desc)
                 .unwrap();
-        
+
             let mut writer = DescriptorWriter::default();
-        
+
             writer.write_buffer(
                 0,
                 gpu_scene_buffer.buffer,
@@ -1064,24 +1078,24 @@ impl<'a> VkRender<'a> {
                 0,
                 vk::DescriptorType::UNIFORM_BUFFER,
             );
-        
+
             writer.update_set(&self.logical_device, global_descriptor);
-        
+
             let global_descriptor = [global_descriptor];
-        
+
             let gltf = if let Some(data) = &self.gltf_stuffs {
                 data
             } else {
                 panic!("No GLTF Data")
             };
-        
+
             for obj in &gltf.draw_context.opaque_surfaces {
                 self.logical_device.device.cmd_bind_pipeline(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     obj.material.pipeline.pipeline,
                 );
-        
+
                 self.logical_device.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -1090,9 +1104,9 @@ impl<'a> VkRender<'a> {
                     &global_descriptor,
                     &[],
                 );
-        
+
                 let mat_desc = [obj.material.descriptor];
-        
+
                 self.logical_device.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -1101,16 +1115,16 @@ impl<'a> VkRender<'a> {
                     &mat_desc,
                     &[],
                 );
-        
+
                 self.logical_device.device.cmd_bind_index_buffer(
                     cmd_buffer,
                     obj.index_buffer,
                     0,
                     vk::IndexType::UINT32,
                 );
-        
+
                 let push_consts = VkGpuPushConsts::new(obj.transform, obj.vertex_buffer_addr);
-        
+
                 self.logical_device.device.cmd_push_constants(
                     cmd_buffer,
                     obj.material.pipeline.layout,
@@ -1118,7 +1132,7 @@ impl<'a> VkRender<'a> {
                     0,
                     push_consts.as_byte_slice(),
                 );
-        
+
                 self.logical_device.device.cmd_draw_indexed(
                     cmd_buffer,
                     obj.index_count,
@@ -1128,9 +1142,9 @@ impl<'a> VkRender<'a> {
                     0,
                 );
             }
-        
+
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
-        
+
             self.logical_device.device.cmd_end_rendering(cmd_buffer);
        }
     }
@@ -1231,7 +1245,7 @@ impl<'a> VkRender<'a> {
         let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
         let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
         let allocator = self.allocator.lock().unwrap();
-      
+
         let index_buffer = vk_util::allocate_buffer(
             &allocator,
             i_buffer_size,
@@ -1239,7 +1253,7 @@ impl<'a> VkRender<'a> {
             vk_mem::MemoryUsage::AutoPreferDevice,
         )
         .expect("Failed to allocate index buffer");
-        
+
         let vertex_buffer = vk_util::allocate_buffer(
             &allocator,
             v_buffer_size,
@@ -1249,18 +1263,18 @@ impl<'a> VkRender<'a> {
             vk_mem::MemoryUsage::AutoPreferDevice,
         )
         .expect("Failed to allocate vertex buffer");
-        
+
         let v_buffer_addr_info =
             vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer.buffer);
-        
+
         let v_buffer_addr = unsafe {
             self.logical_device
                 .device
                 .get_buffer_device_address(&v_buffer_addr_info)
         };
-        
+
         let new_surface = VkGpuMeshBuffers::new(index_buffer, vertex_buffer, v_buffer_addr);
-        
+
         /*
         With the buffers allocated, we need to write the data into them. For that, we will be using a
         staging buffer. This is a very common pattern with Vulkan. As GPU_ONLY memory can't be written
@@ -1269,7 +1283,7 @@ impl<'a> VkRender<'a> {
         for meshes to use GPU_ONLY vertex buffers, but it's highly recommended unless
         it's something like a CPU-side particle system or other dynamic effects.
          */
-        
+
         let staging_buffer = vk_util::allocate_buffer(
             &allocator,
             v_buffer_size + i_buffer_size,
@@ -1277,9 +1291,9 @@ impl<'a> VkRender<'a> {
             vk_mem::MemoryUsage::AutoPreferDevice,
         )
         .expect("Failed to allocate staging buffer");
-        
+
         let staging_data = staging_buffer.alloc_info.mapped_data as *mut u8;
-        
+
         unsafe {
             // Copy vertex data to the staging buffer
             std::ptr::copy_nonoverlapping(
@@ -1287,7 +1301,7 @@ impl<'a> VkRender<'a> {
                 staging_data,
                 v_buffer_size,
             );
-        
+
             // Copy index data to the staging buffer
             std::ptr::copy_nonoverlapping(
                 indices.as_ptr() as *const u8,
@@ -1295,18 +1309,18 @@ impl<'a> VkRender<'a> {
                 i_buffer_size,
             );
         }
-        
+
         self.immediate_submit(|cmd| {
             let vertex_copy = [vk::BufferCopy::default()
                 .src_offset(0)
                 .dst_offset(0)
                 .size(v_buffer_size as vk::DeviceSize)];
-        
+
             let index_copy = [vk::BufferCopy::default()
                 .dst_offset(0)
                 .src_offset(v_buffer_size as vk::DeviceSize)
                 .size(i_buffer_size as vk::DeviceSize)];
-        
+
             unsafe {
                 self.logical_device.device.cmd_copy_buffer(
                     cmd,
@@ -1315,7 +1329,7 @@ impl<'a> VkRender<'a> {
                     &vertex_copy,
                 );
             }
-        
+
             unsafe {
                 self.logical_device.device.cmd_copy_buffer(
                     cmd,
@@ -1325,9 +1339,9 @@ impl<'a> VkRender<'a> {
                 );
             }
         });
-        
+
         vk_util::destroy_buffer(&allocator, staging_buffer);
-        
+
         new_surface
     }
 
@@ -1408,6 +1422,7 @@ impl<'a> VkRender<'a> {
             );
         });
 
+        // FIXME we can reuse the same buffer for this,
         vk_util::destroy_buffer(&allocator, upload_buffer);
         new_image
     }
@@ -1511,45 +1526,45 @@ impl<'a> VkRender<'a> {
             )
             .unwrap(),
         );
-        
+
         let (opaque, transparent, layout) =
             VkGpuMetRoughPipeline::build_pipelines(&self.logical_device, &self.descriptors);
-        
+
         let mut roughness = VkGpuMetRoughPipeline {
             opaque_pipeline: opaque,
             transparent_pipeline: transparent,
             descriptor_layout: [layout],
             writer: Default::default(),
         };
-        
+
         let mut material_constants = vk_util::allocate_buffer(
             &self.allocator.lock().unwrap(),
-            std::mem::size_of::<GLTFMetallicRoughnessConstants>(),
+            std::mem::size_of::<MetRoughShaderConsts>(),
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
         )
         .unwrap();
-        
+
         let scene_uniform_data = unsafe {
             // Lock the allocator and map memory for the buffer
             let allocator = self.allocator.lock().unwrap();
             let data_ptr = allocator
                 .map_memory(&mut material_constants.allocation)
                 .unwrap()
-                .cast::<GLTFMetallicRoughnessConstants>();
-        
+                .cast::<MetRoughShaderConsts>();
+
             // Update the mapped memory
             (*data_ptr).color_factors = Vec4::new(1.0, 1.0, 1.0, 1.0);
             (*data_ptr).metal_rough_factors = Vec4::new(1.0, 0.5, 0.0, 0.0);
-        
+
             // Optionally unmap the memory if required by the allocator (depends on the allocator implementation)
             // allocator.unmap_memory(&mut material_constants.allocation);
-        
+
             data_ptr
         };
-        
+
         let white_val = glam::vec4(1.0, 1.0, 1.0, 1.0).pack_unorm_4x8();
-        
+
         let white_image_1 = self.upload_image(
             &white_val.to_ne_bytes(),
             data_util::EXTENT3D_ONE,
@@ -1557,7 +1572,7 @@ impl<'a> VkRender<'a> {
             vk::ImageUsageFlags::SAMPLED,
             false,
         );
-        
+
         let white_image_2 = self.upload_image(
             &white_val.to_ne_bytes(),
             data_util::EXTENT3D_ONE,
@@ -1565,18 +1580,18 @@ impl<'a> VkRender<'a> {
             vk::ImageUsageFlags::SAMPLED,
             false,
         );
-        
+
         let mut sampler = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR);
-        
+
         let linear_sampler = unsafe {
             self.logical_device
                 .device
                 .create_sampler(&sampler, None)
                 .unwrap()
         };
-        
+
         let material_resources = GLTFMetallicRoughnessResources {
             color_image: white_image_1,
             color_sampler: linear_sampler,
@@ -1585,7 +1600,7 @@ impl<'a> VkRender<'a> {
             data_buffer: material_constants.buffer,
             data_buffer_offset: 0,
         };
-        
+
         let def_data = roughness.write_material(
             &self.logical_device,
             MaterialPass::MainColor,
@@ -1593,26 +1608,26 @@ impl<'a> VkRender<'a> {
             &mut self.global_desc_allocator,
         );
         let def_data = Rc::new(GLTFMaterial::new(def_data));
-        
+
         let mut loaded_nodes = HashMap::<String, Rc<RefCell<MeshNode>>>::with_capacity(3);
-        
+
         if let Some(ref mut meshes) = self.meshes {
             for _ in 0..meshes.len() {
                 let mut mesh = meshes.remove(0);
                 for mut surface in mesh.surfaces.iter_mut() {
                     surface.material = def_data.clone();
                 }
-        
+
                 let mut new_node = MeshNode::new(Rc::new(mesh));
                 new_node.node.local_transform = glam::Mat4::IDENTITY;
                 new_node.node.world_transform = glam::Mat4::IDENTITY;
-        
+
                 loaded_nodes.insert(new_node.mesh.name.clone(), Rc::new(RefCell::new(new_node)));
             }
         }
-        
+
         println!("Loaded Nodes: {:?}", loaded_nodes.keys());
-        
+
         let gltf_data = GltfStuffs {
             default_data: def_data,
             metal_roughness: roughness,
@@ -1620,18 +1635,18 @@ impl<'a> VkRender<'a> {
             draw_context: Default::default(),
         };
         self.gltf_stuffs = Some(gltf_data);
-        
+
         // self.main_deletion_queue.push(VkDeletable::AllocatedBuffer(material_constants));
     }
 
     pub fn update_scene(&mut self) {
-     
+
         if let Some(ref mut gltf_data) = self.gltf_stuffs {
             gltf_data.draw_context.opaque_surfaces.clear();
-        
+
             let loaded_nodes = &mut gltf_data.loaded_nodes;
             let model = loaded_nodes.get_mut("Cube").unwrap();
-        
+
             for x in -3..3 {
                 let scale = glam::Mat4::from_scale(glam::Vec3::splat(0.2));
                 let translation = glam::Mat4::from_translation(glam::vec3(x as f32, 1.0, 0.0));
@@ -1640,7 +1655,7 @@ impl<'a> VkRender<'a> {
                     .borrow_mut()
                     .draw(&trans_scale, &mut gltf_data.draw_context);
             }
-        
+
             // Set up the view matrix
             // self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
             self.scene_data.data.view = self
@@ -1649,21 +1664,21 @@ impl<'a> VkRender<'a> {
                 .borrow()
                 .get_camera()
                 .get_view_matrix();
-        
+
             // Set up the projection matrix
             let fovy = 70.0_f32.to_radians();
             let aspect_ratio = self.window_state.curr_extent.width as f32
                 / self.window_state.curr_extent.height as f32;
             let near = 0.1;
             let far = 10000.0;
-        
+
             let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
             proj.y_axis.y *= -1.0; // Flip the Y-axis
-        
+
             // Combine view and projection matrices
             self.scene_data.data.view_projection = proj * self.scene_data.data.view;
             self.scene_data.data.projection = proj;
-        
+
             // Set default lighting parameters
             self.scene_data.data.ambient_color = Vec4::splat(0.1);
             self.scene_data.data.sunlight_color = Vec4::splat(1.0);

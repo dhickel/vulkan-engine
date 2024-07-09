@@ -1,6 +1,8 @@
+use crate::data::data_cache;
+use crate::data::data_cache::VkDescType;
 use crate::vulkan::vk_types::*;
 use ash::prelude::VkResult;
-use ash::vk::DescriptorPool;
+use ash::vk::{DescriptorPool, DescriptorSetLayoutCreateFlags};
 use ash::{vk, Device};
 use std::backtrace::Backtrace;
 use std::collections::VecDeque;
@@ -36,7 +38,7 @@ impl<'a> DescriptorLayoutBuilder<'a> {
 
     pub fn build(
         &mut self,
-        device: &LogicalDevice,
+        device: &ash::Device,
         stage_flags: vk::ShaderStageFlags,
         layout_flags: vk::DescriptorSetLayoutCreateFlags,
     ) -> Result<vk::DescriptorSetLayout, String> {
@@ -50,7 +52,6 @@ impl<'a> DescriptorLayoutBuilder<'a> {
 
         unsafe {
             device
-                .device
                 .create_descriptor_set_layout(&info, None)
                 .map_err(|err| format!("Error creating descriptor set layout: {:?}", err))
         }
@@ -211,7 +212,7 @@ impl<'a> DescriptorWriter<'a> {
         self.writes.clear();
     }
 
-    pub fn update_set(&mut self, device: &LogicalDevice, set: vk::DescriptorSet) {
+    pub fn update_set(&mut self, device: &ash::Device, set: vk::DescriptorSet) {
         let mut buffer_infos = self.buffer_infos.iter();
         let mut image_infos = self.image_infos.iter();
 
@@ -220,11 +221,7 @@ impl<'a> DescriptorWriter<'a> {
                 VkDescWriterType::Image => write_desc.image_info(image_infos.next().unwrap()),
                 VkDescWriterType::Buffer => write_desc.buffer_info(buffer_infos.next().unwrap()),
             };
-            unsafe {
-                device
-                    .device
-                    .update_descriptor_sets(&[write.dst_set(set)], &[])
-            }
+            unsafe { device.update_descriptor_sets(&[write.dst_set(set)], &[]) }
         }
     }
 }
@@ -249,7 +246,7 @@ impl Default for VkDynamicDescriptorAllocator {
 
 impl VkDynamicDescriptorAllocator {
     pub fn new(
-        device: &LogicalDevice,
+        device: &ash::Device,
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
     ) -> Result<VkDynamicDescriptorAllocator, String> {
@@ -285,7 +282,7 @@ impl VkDynamicDescriptorAllocator {
         Ok(())
     }
 
-    fn get_pool(&mut self, device: &LogicalDevice) -> Result<vk::DescriptorPool, String> {
+    fn get_pool(&mut self, device: &ash::Device) -> Result<vk::DescriptorPool, String> {
         if self.ready_pools.len() != 0 {
             Ok(self.ready_pools.remove(self.ready_pools.len() - 1))
         } else {
@@ -303,7 +300,7 @@ impl VkDynamicDescriptorAllocator {
     }
 
     fn create_pool(
-        device: &LogicalDevice,
+        device: &ash::Device,
         set_count: u32,
         pool_ratios: &[PoolSizeRatio],
     ) -> Result<DescriptorPool, String> {
@@ -323,7 +320,6 @@ impl VkDynamicDescriptorAllocator {
 
         unsafe {
             device
-                .device
                 .create_descriptor_pool(&pool_info, None)
                 .map_err(|err| format!("Error creating descriptor pool: {:?}", err))
         }
@@ -331,19 +327,18 @@ impl VkDynamicDescriptorAllocator {
 
     pub fn allocate(
         &mut self,
-        device: &LogicalDevice,
+        device: &ash::Device,
         layout: &[vk::DescriptorSetLayout],
     ) -> Result<vk::DescriptorSet, String> {
-        
         let mut pool_to_use = self.get_pool(device)?;
 
         let mut alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool_to_use)
             .set_layouts(layout);
 
-        let alloc_result = unsafe { device.device.allocate_descriptor_sets(&alloc_info) };
+        let alloc_result = unsafe { device.allocate_descriptor_sets(&alloc_info) };
 
-      let rtn =   match alloc_result {
+        let rtn = match alloc_result {
             Ok(result) => Ok(result[0]),
             Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
                 self.full_pools.push(pool_to_use);
@@ -352,14 +347,13 @@ impl VkDynamicDescriptorAllocator {
 
                 unsafe {
                     Ok(device
-                        .device
                         .allocate_descriptor_sets(&alloc_info)
                         .map_err(|err| format!("Failed allocation retry: {:?}", err))?[0])
                 }
             }
             Err(e) => Err(format!("Allocation error {:?}", e)),
         };
-        
+
         self.ready_pools.push(pool_to_use);
         rtn
     }
@@ -382,4 +376,41 @@ impl VkDestroyable for VkDynamicDescriptorAllocator {
         self.ready_pools.clear();
         self.full_pools.clear();
     }
+}
+
+pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCache {
+    let draw_image_layout = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
+        .build(
+            device,
+            vk::ShaderStageFlags::COMPUTE,
+            DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
+
+    let gpu_scene_desc = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .build(
+            device,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
+
+    let pbr_met_rough = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .build(
+            &device,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
+
+    data_cache::VkDescLayoutCache::new(vec![
+        (VkDescType::DrawImage, draw_image_layout),
+        (VkDescType::GpuScene, gpu_scene_desc),
+        (VkDescType::PbrMetRough, pbr_met_rough),
+    ])
 }

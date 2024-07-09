@@ -353,7 +353,7 @@ pub fn transition_image(
 }
 
 pub fn load_shader_module(
-    device: &LogicalDevice,
+    device: &ash::Device,
     file_path: &str,
 ) -> Result<vk::ShaderModule, String> {
     // Open the file with the cursor at the end to determine the file size
@@ -381,7 +381,6 @@ pub fn load_shader_module(
     // Check that the creation goes well
     let shader_module = unsafe {
         device
-            .device
             .create_shader_module(&create_info, None)
             .map_err(|e| format!("Failed to create shader module: {:?}", e))?
     };
@@ -436,7 +435,6 @@ pub fn allocate_and_write_buffer<T>(
         data_ptr.write(data);
         allocator.unmap_memory(&mut buffer.allocation);
     }
-
     Ok(buffer)
 }
 
