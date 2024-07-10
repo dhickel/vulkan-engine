@@ -15,11 +15,13 @@ use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+use glam::{vec4, Mat4, Quat, Vec2, Vec3, Vec4};
 use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
+use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
+use imgui::sys::igSetClipboardText;
 
 //////////////////////////
 //  MESH & TEXTURE DATA //
@@ -29,9 +31,10 @@ use std::rc::{Rc, Weak};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vertex {
     pub position: Vec3,
+    pub uv_x : f32,
     pub normal: Vec3,
+    pub uv_y: f32,
     pub color: Vec4,
-    pub uv: Vec2,
 }
 
 impl Default for Vertex {
@@ -40,7 +43,8 @@ impl Default for Vertex {
             position: Default::default(),
             normal: Default::default(),
             color: Default::default(),
-            uv: Default::default(),
+            uv_x: 0.0,
+            uv_y: 0.0,
         }
     }
 }
@@ -405,15 +409,24 @@ pub struct Transform {
 }
 
 impl Transform {
+    
     pub fn compose(&self) -> Mat4 {
-        let scale_matrix = Mat4::from_scale(self.scale);
-        let rotation_matrix = Mat4::from_quat(self.rotation);
-        let translation_matrix = Mat4::from_translation(self.position);
-        translation_matrix * rotation_matrix * scale_matrix
+      glam::Mat4::from_scale_rotation_translation(-self.scale, self.rotation, self.position)
+        
+    }
+
+    pub fn new_vulkan_adjusted(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Self {
+
+        Transform {
+            position: glam::Vec3::from_array(translation),
+            scale: glam::Vec3::from_array(scale),
+            rotation: glam::Quat::from_array(rotation),
+        }
+       
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
@@ -421,6 +434,23 @@ pub struct Node {
     pub world_transform: Mat4,
     pub local_transform: Transform,
     pub dirty: bool,
+}
+
+impl Default for Node {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            children: vec![],
+            meshes: None,
+            world_transform: Mat4::IDENTITY,
+            local_transform: Transform {
+                position: glam::vec3(0.0, 0.0, 0.0),
+                scale: glam::vec3(1.0, 1.0, 1.0),
+                rotation: glam::Quat::IDENTITY,
+            },
+            dirty: false,
+        }
+    }
 }
 
 impl Node {
@@ -431,10 +461,8 @@ impl Node {
         mesh_cache: &MeshCache,
         tex_cache: &TextureCache,
     ) {
-        let node_matrix = top_matrix.mul_mat4(&self.world_transform);
-        
         if self.dirty {
-            self.refresh_transform(None);
+            self.refresh_transform(top_matrix);
         }
 
         if let Some(id) = self.meshes {
@@ -448,40 +476,37 @@ impl Node {
                         first_index: surface.start_index,
                         index_buffer: mesh.buffer.index_buffer.buffer,
                         material,
-                        transform: node_matrix,
+                        transform: self.world_transform,
                         vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
                     };
                     ctx.opaque_surfaces.push(ro); // TODO transparency
                 }
             }
         }
-        
-        
+
         for child in &self.children {
-            child.borrow_mut().draw(top_matrix, ctx, mesh_cache, tex_cache);
+            child
+                .borrow_mut()
+                .draw(top_matrix, ctx, mesh_cache, tex_cache);
         }
     }
 
-    pub fn refresh_transform(&mut self, parent_transform: Option<&Mat4>) {
+    pub fn refresh_transform(&mut self, parent_transform: &Mat4) {
         // Compute new world transform based on parent's world transform if available
-        
-        let new_world_transform = if let Some(parent_transform) = parent_transform {
-            parent_transform.mul_mat4(&self.local_transform.compose())
-        } else {
-            self.local_transform.compose()
-        };
+
+        self.world_transform = parent_transform.mul_mat4(&self.local_transform.compose());
 
         // Update the node's world transform
-        self.world_transform = new_world_transform;
         self.dirty = false;
+
+        println!("set transform to: {:?}", self.world_transform);
 
         // Pass the new world transform to the children
         for child in &self.children {
             let mut child = child.borrow_mut();
-            child.refresh_transform(Some(&self.world_transform));
+            child.refresh_transform(&self.world_transform);
         }
     }
-    
 
     fn get_children(&self) -> &Vec<Rc<RefCell<Node>>> {
         &self.children
@@ -516,7 +541,8 @@ impl GPUScene {
     }
 }
 
-#[derive(Default, Copy, Clone)]
+#[repr(C)]
+#[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct GPUSceneData {
     pub view: Mat4,
     pub projection: Mat4,
@@ -524,6 +550,12 @@ pub struct GPUSceneData {
     pub ambient_color: Vec4,
     pub sunlight_direction: Vec4,
     pub sunlight_color: Vec4,
+}
+
+impl GPUSceneData {
+    pub fn as_byte_slice(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
 }
 
 #[repr(C)]

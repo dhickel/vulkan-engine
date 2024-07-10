@@ -8,6 +8,8 @@ use std::backtrace::Backtrace;
 use std::collections::VecDeque;
 use std::vec;
 use vk_mem::Allocator;
+use crate::vulkan::vk_descriptor;
+
 
 pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,
@@ -407,10 +409,20 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
         .unwrap();
+    
+    let mesh_desc = vk_descriptor::DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .build(
+            device,
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
 
     data_cache::VkDescLayoutCache::new(vec![
         (VkDescType::DrawImage, draw_image_layout),
         (VkDescType::GpuScene, gpu_scene_desc),
         (VkDescType::PbrMetRough, pbr_met_rough),
+        (VkDescType::Mesh, mesh_desc)
     ])
 }

@@ -145,6 +145,7 @@ pub fn create_image(
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
+    println!("Creating image with format: {:?}", image_info);    
     let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
 
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
@@ -418,21 +419,21 @@ pub fn allocate_buffer(
     })
 }
 
-pub fn allocate_and_write_buffer<T>(
+pub fn allocate_and_write_buffer(
     allocator: &Allocator,
-    data: T,
+    data: &[u8],
     usage: vk::BufferUsageFlags,
 ) -> Result<VkBuffer, String> {
-    let buffer_size = std::mem::size_of::<T>();
+    let buffer_size = data.len();
     let mut buffer = allocate_buffer(allocator, buffer_size, usage, vk_mem::MemoryUsage::Auto)?;
 
     unsafe {
         let data_ptr = allocator
             .map_memory(&mut buffer.allocation)
             .map_err(|err| format!("Failed to map memory: {:?}", err))?
-            as *mut T;
+            as *mut u8;
 
-        data_ptr.write(data);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data.len());
         allocator.unmap_memory(&mut buffer.allocation);
     }
     Ok(buffer)

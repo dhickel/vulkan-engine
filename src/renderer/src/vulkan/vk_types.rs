@@ -292,6 +292,7 @@ impl VkFrame {
             .for_each(|d| d.delete(device, allocator));
         self.deletions.clear();
     }
+    
 }
 
 pub struct VkPresent {
@@ -358,7 +359,8 @@ impl VkPresent {
             max_frames_active: data_len as u32,
         })
     }
-
+    
+    
     pub fn get_next_frame(&mut self) -> &VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame = &self.frame_data[index as usize]; // FIXME

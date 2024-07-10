@@ -2,7 +2,7 @@ use crate::data::data_cache::{
     CoreShaderType, ShaderCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
 };
 use crate::vulkan::vk_types::*;
-use crate::vulkan::vk_util;
+use crate::vulkan::{vk_descriptor, vk_util};
 use ash::vk;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom};
@@ -255,16 +255,22 @@ pub fn init_pipeline_cache(
     let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
     let (pbr_opaque2, pbr_alpha2) =
         init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
+    
+    let mesh = init_mesh_pipeline(device, desc_layout_cache);
+    let mesh2 = init_mesh_pipeline(device, desc_layout_cache);
 
     VkPipelineCache::new(vec![
         vec![
             (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
             (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
+            (VkPipelineType::Mesh, mesh),
         ],
         vec![
             (VkPipelineType::PbrMetRoughOpaque, pbr_opaque2),
             (VkPipelineType::PbrMetRoughAlpha, pbr_alpha2),
+            (VkPipelineType::Mesh, mesh2),
         ],
+        
     ])
     .unwrap()
 }
@@ -324,3 +330,65 @@ fn init_met_rough_pipelines(
         VkPipeline::new(transparent_pipeline, layout),
     )
 }
+
+pub fn init_mesh_pipeline(
+    device: &ash::Device,
+    desc_cache: &VkDescLayoutCache
+) -> VkPipeline {
+    
+    let image_desc = desc_cache.get(VkDescType::Mesh);
+    
+    let vert_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
+    )
+        .expect("Error loading shader");
+
+    let frag_shader = vk_util::load_shader_module(
+        device,
+        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/tex_image.frag.spv",
+    )
+        .expect("Error loading shader");
+
+    let buffer_range = [vk::PushConstantRange::default()
+        .offset(0)
+        .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
+        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+
+    let binding = [image_desc];
+    let pipeline_info = vk::PipelineLayoutCreateInfo::default()
+        .push_constant_ranges(&buffer_range)
+        .set_layouts(&binding);
+
+    let pipeline_layout = unsafe {
+        device
+            .create_pipeline_layout(&pipeline_info, None)
+            .unwrap()
+    };
+
+    println!("Created layout: {:?}", pipeline_layout);
+
+    let entry = CString::new("main").unwrap();
+
+    let pipeline = PipelineBuilder::default()
+        .set_pipeline_layout(pipeline_layout)
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
+        .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
+        .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
+        .build_pipeline(device)
+        .unwrap();
+
+    unsafe {
+        device.destroy_shader_module(vert_shader, None);
+        device.destroy_shader_module(frag_shader, None);
+    }
+
+    VkPipeline::new(pipeline, pipeline_layout)
+}
+

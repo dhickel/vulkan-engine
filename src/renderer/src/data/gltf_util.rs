@@ -72,7 +72,7 @@ pub fn parse_gltf_to_raw(
     texture_cache: &mut TextureCache,
     mesh_cache: &mut MeshCache,
 ) -> Result<Rc<RefCell<gpu_data::Node>>, String> {
-    log::info!("Loading Mesh: {:?}", path);
+    log::info!("\nLoading Mesh: {:?}", path);
 
     // let path = std::path::Path::new(path);
     //    let file = File::open(path).unwrap();
@@ -138,7 +138,8 @@ pub fn parse_gltf_to_raw(
                             position: glam::Vec3::from_array(pos),
                             normal: glam::vec3(1.0, 0.0, 0.0),
                             color: glam::Vec4::ONE,
-                            uv: Vec2::ZERO
+                            uv_x: 0.0,
+                            uv_y: 0.0
                         };
                         tmp_vertices.push(vert);
                     }
@@ -149,7 +150,8 @@ pub fn parse_gltf_to_raw(
                             position: glam::Vec3::from_array(pos),
                             normal: glam::vec3(1.0, 0.0, 0.0),
                             color: glam::Vec4::ONE,
-                            uv: Vec2::ZERO
+                            uv_x: 0.0,
+                            uv_y: 0.0
                         };
                         tmp_vertices.push(vert);
                     }
@@ -177,20 +179,20 @@ pub fn parse_gltf_to_raw(
                 match uvs {
                     ReadTexCoords::U8(cord_iter) => {
                         for (idx, cord) in cord_iter.enumerate() {
-                            tmp_vertices[start_index + idx].uv.x = cord[0] as f32;
-                            tmp_vertices[start_index + idx].uv.y = cord[1] as f32;
+                            tmp_vertices[start_index + idx].uv_x = cord[0] as f32 / 255.0;
+                            tmp_vertices[start_index + idx].uv_y = cord[1] as f32 / 255.0;
                         }
                     }
                     ReadTexCoords::U16(cord_iter) => {
                         for (idx, cord) in cord_iter.enumerate() {
-                            tmp_vertices[start_index + idx].uv.x = cord[0] as f32;
-                            tmp_vertices[start_index + idx].uv.y = cord[1] as f32;
+                            tmp_vertices[start_index + idx].uv_x = cord[0] as f32 / 65535.0;
+                            tmp_vertices[start_index + idx].uv_y = cord[1] as f32 / 65535.0;
                         }
                     }
                     ReadTexCoords::F32(cord_iter) => {
                         for (idx, cord) in cord_iter.enumerate() {
-                            tmp_vertices[start_index + idx].uv.x = cord[0];
-                            tmp_vertices[start_index + idx].uv.y = cord[1];
+                            tmp_vertices[start_index + idx].uv_x = cord[0];
+                            tmp_vertices[start_index + idx].uv_y = cord[1];
                         }
                     }
                 }
@@ -355,7 +357,7 @@ pub fn parse_gltf_to_raw(
             (texture_id, bc_factor)
         } else {
             log::info!("Used Default Base Color For Material: {:?}", name);
-            (0, glam::vec4(1.0,1.0,1.0,1.0))
+            (TextureCache::DEFAULT_COLOR_TEX, glam::vec4(1.0,1.0,1.0,1.0))
         };
 
         let (metallic_roughness_tex_id, metallic_factor, roughness_factor) =
@@ -375,7 +377,7 @@ pub fn parse_gltf_to_raw(
             } else {
                 log::info!("Used Default Metallic Roughness For Material: {:?}", name);
 
-                (1, 0.0, 1.0)
+                (TextureCache::DEFAULT_ROUGH_TEX, 0.0, 1.0)
             };
 
         let normal_map = if let Some(norm_id) = normal_id {
@@ -480,12 +482,8 @@ pub fn parse_gltf_to_raw(
 
         let (translation, rotation, scale) = node.transform().decomposed();
 
-        let transform = Transform {
-            position: glam::Vec3::from_array(translation),
-            rotation: glam::Quat::from_array(rotation),
-            scale: glam::Vec3::from_array(scale),
-        };
-
+        let transform = Transform::new_vulkan_adjusted(translation, rotation, scale);
+        
         let children: Vec<usize> = node
             .children()
             .map(|c| {
@@ -511,14 +509,7 @@ pub fn parse_gltf_to_raw(
 
     // flatten root indices to remove Nones, and compose final tree
 
-    let root_node = gpu_data::Node {
-        parent: None,
-        children: vec![],
-        meshes: None,
-        world_transform: Default::default(),
-        local_transform: Transform::default(),
-        dirty: true,
-    };
+    let root_node = gpu_data::Node::default();
 
     let root_node = Rc::new(RefCell::new(root_node));
 

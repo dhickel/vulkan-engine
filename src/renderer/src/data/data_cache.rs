@@ -1,3 +1,4 @@
+use crate::data::data_util::PackUnorm;
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     AlphaMode, MaterialMeta, MeshMeta, MetRoughShaderConsts, Sampler, SurfaceMeta, TextureMeta,
@@ -9,8 +10,13 @@ use crate::vulkan::vk_descriptor::{
 use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
 use ash::vk;
+use ash::vk::Format;
 use glam::{vec4, Vec4};
+use image::ImageBuffer;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use vk_mem::Allocator;
 
 ///////////////////
 // TEXTURE CACHE //
@@ -52,6 +58,11 @@ pub struct TextureCache {
 }
 
 impl TextureCache {
+    pub const DEFAULT_COLOR_TEX: u32 = 0;
+    pub const DEFAULT_ROUGH_TEX: u32 = 1;
+    pub const DEFAULT_MAT_ROUGH_MAT: u32 = 0;
+    pub const DEFAULT_ERROR_MAT: u32 = 1;
+
     pub fn new(device: &ash::Device) -> Self {
         let def_color = CachedTexture::UnLoaded(TextureMeta {
             bytes: vec![255, 255, 255, 255],
@@ -84,12 +95,52 @@ impl TextureCache {
             emissive_map: None,
         });
 
+        let black_val = glam::vec4(0.0, 0.0, 0.0, 0.0).pack_unorm_4x8();
+        let magenta_val = glam::vec4(1.0, 0.0, 1.0, 1.0).pack_unorm_4x8();
+        let mut error_val = vec![0_u32; 16 * 16]; // 16x16 checkerboard texture
+        for y in 0..16 {
+            for x in 0..16 {
+                error_val[y * 16 + x] = if ((x % 2) ^ (y % 2)) != 0 {
+                    magenta_val
+                } else {
+                    black_val
+                };
+            }
+        }
+
+        let def_error = CachedTexture::UnLoaded(TextureMeta {
+            bytes: error_val
+                .iter()
+                .flat_map(|&pixel| pixel.to_le_bytes())
+                .collect(),
+            width: 16,
+            height: 16,
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels: 1,
+            sampler: Sampler::Linear,
+        });
+
+        let err_mat = CacheMaterial::Unloaded(MaterialMeta {
+            base_color_factor: Vec4::new(1.0, 1.0, 1.0, 1.0),
+            base_color_tex_id: 2,
+            metallic_factor: 0.0,
+            roughness_factor: 1.0,
+            metallic_roughness_tex_id: 1,
+            alpha_mode: gpu_data::AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            normal_map: None,
+            occlusion_map: None,
+            emissive_map: None,
+        });
+
         let mut cached_textures = Vec::with_capacity(100);
         cached_textures.push(def_color);
         cached_textures.push(def_rough);
+        cached_textures.push(def_error);
 
         let mut cached_materials = Vec::with_capacity(100);
         cached_materials.push(def_mat);
+        cached_materials.push(err_mat);
 
         let mut sampler = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)
@@ -117,8 +168,26 @@ impl TextureCache {
         }
     }
 
-    pub fn add_texture(&mut self, data: TextureMeta) -> u32 {
+    pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
         let index = self.cached_textures.len();
+
+        if data.format != vk::Format::R8G8B8A8_UNORM {
+            let converted =
+                ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, data.bytes);
+
+            if let Some(image) = converted {
+                let new_bytes = image::DynamicImage::ImageRgb8(image).to_rgba8();
+                data.format = vk::Format::R8G8B8A8_UNORM;
+                data.bytes = new_bytes.to_vec();
+            } else {
+                log::info!(
+                    "Error converting material of type: {:?} to RGBA. Using error texture.",
+                    data.format
+                );
+                return Self::DEFAULT_ERROR_MAT;
+            }
+        }
+
         self.cached_textures.push(CachedTexture::UnLoaded(data));
         index as u32
     }
@@ -172,11 +241,14 @@ impl TextureCache {
     }
 
     pub fn get_texture_unchecked(&self, id: u32) -> &CachedTexture {
+ 
         unsafe { self.cached_textures.get_unchecked(id as usize) }
     }
 
     pub fn get_loaded_texture_unchecked(&self, id: u32) -> &VkLoadedTexture {
         unsafe {
+            println!("id: {}", id);
+            println!("len: {}", self.cached_textures.len());
             match self.cached_textures.get_unchecked(id as usize) {
                 CachedTexture::Loaded(loaded) => loaded,
                 _ => std::hint::unreachable_unchecked(),
@@ -216,6 +288,7 @@ impl TextureCache {
                 depth: 1,
             };
 
+            println!("Uploading bytes: {}", meta.bytes.len());
             let alloc = upload_fn(
                 &meta.bytes,
                 size,
@@ -238,8 +311,11 @@ impl TextureCache {
     pub fn allocate_material(
         &mut self,
         device: &ash::Device,
-        allocator: &vk_mem::Allocator,
-        desc_allocators: &mut [VkDynamicDescriptorAllocator],
+        allocator: Arc<Mutex<vk_mem::Allocator>>,
+        desc_allocators: &mut (
+            &mut VkDynamicDescriptorAllocator,
+            &mut VkDynamicDescriptorAllocator,
+        ),
         desc_layout_cache: &VkDescLayoutCache,
         mat_id: u32,
     ) {
@@ -270,7 +346,7 @@ impl TextureCache {
             let const_bytes = bytemuck::bytes_of(&shader_consts);
 
             let uniform_buffer = vk_util::allocate_and_write_buffer(
-                allocator,
+                &allocator.lock().unwrap(),
                 const_bytes,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
@@ -301,7 +377,10 @@ impl TextureCache {
         uniform_buffer: VkBuffer,
         buffer_offset: u32,
         device: &ash::Device,
-        desc_allocators: &mut [VkDynamicDescriptorAllocator],
+        desc_allocators: &mut (
+            &mut VkDynamicDescriptorAllocator,
+            &mut VkDynamicDescriptorAllocator,
+        ),
         desc_layout_cache: &VkDescLayoutCache,
     ) -> VkLoadedMaterial {
         let color_tex = self.get_loaded_texture_unchecked(meta.base_color_tex_id);
@@ -339,16 +418,21 @@ impl TextureCache {
 
         let layout = [desc_layout_cache.get(VkDescType::PbrMetRough)];
 
-        let descriptors: [vk::DescriptorSet; 2] = desc_allocators
-            .iter_mut()
-            .map(|desc_alloc| {
-                let descriptor = desc_alloc.allocate(device, &layout).unwrap();
-                writer.update_set(device, descriptor);
-                descriptor
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+        let descriptors: [vk::DescriptorSet; 2] = [
+            {
+                let descriptor = &desc_allocators.0.allocate(device, &layout).unwrap();
+                writer.update_set(device, *descriptor);
+                *descriptor
+            },
+            {
+                let descriptor = &desc_allocators.1.allocate(device, &layout).unwrap();
+                writer.update_set(device, *descriptor);
+                *descriptor
+            },
+        ];
+        
+        println!("Allocated descripots: {:?}", descriptors);
+        
 
         VkLoadedMaterial {
             meta,
@@ -411,22 +495,28 @@ impl TextureCache {
 
     pub fn allocate_all<F>(
         &mut self,
-        mut upload_fn: F,
+        upload_fn: F,
         device: &ash::Device,
-        allocator: &vk_mem::Allocator,
-        desc_allocators: &mut [VkDynamicDescriptorAllocator],
+        allocator: Arc<Mutex<Allocator>>,
+
+        desc_allocators: &mut (
+            &mut VkDynamicDescriptorAllocator,
+            &mut VkDynamicDescriptorAllocator,
+        ),
         desc_layout_cache: &VkDescLayoutCache,
     ) where
         F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
     {
         for x in 0..self.cached_textures.len() {
+            println!("Uploading texture: {:?}", x);
             self.allocate_texture(&upload_fn, x as u32);
         }
 
+        println!("Writing materials");
         for x in 0..self.cached_materials.len() {
             self.allocate_material(
                 device,
-                allocator,
+                allocator.clone(),
                 desc_allocators,
                 desc_layout_cache,
                 x as u32,
@@ -562,12 +652,12 @@ impl MeshCache {
         }
     }
 
-    pub fn allocate_all<F>(&mut self,  upload_fn: F)
+    pub fn allocate_all<F>(&mut self, upload_fn: F)
     where
         F: Fn(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
     {
         for x in 0..self.cached_meshes.len() {
-            self.allocate_mesh(& upload_fn, x);
+            self.allocate_mesh(&upload_fn, x);
         }
     }
 
@@ -645,11 +735,12 @@ impl ShaderCache {
 pub enum VkPipelineType {
     PbrMetRoughOpaque,
     PbrMetRoughAlpha,
+    Mesh
 }
 
 //#[derive(Clone, Copy)]
 pub struct VkPipelineCache {
-    pipelines: Vec<[VkPipeline; 2]>,
+    pipelines: Vec<[VkPipeline; 3]>,
 }
 
 impl VkPipelineCache {
@@ -659,7 +750,7 @@ impl VkPipelineCache {
         });
 
         // Convert sorted vectors to fixed-size arrays
-        let sorted_pipelines: Vec<[VkPipeline; 2]> = pipelines
+        let sorted_pipelines: Vec<[VkPipeline; 3]> = pipelines
             .into_iter()
             .map(|p| {
                 p.into_iter()
@@ -702,16 +793,17 @@ pub enum VkDescType {
     DrawImage,
     GpuScene,
     PbrMetRough,
+    Mesh,
 }
 pub struct VkDescLayoutCache {
-    layouts: [vk::DescriptorSetLayout; 3],
+    layouts: [vk::DescriptorSetLayout; 4],
 }
 
 impl VkDescLayoutCache {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
         layouts.sort();
 
-        let sorted_layouts: [vk::DescriptorSetLayout; 3] = layouts
+        let sorted_layouts: [vk::DescriptorSetLayout; 4] = layouts
             .into_iter()
             .map(|(_, layout)| layout)
             .collect::<Vec<_>>()

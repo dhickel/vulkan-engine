@@ -69,7 +69,7 @@ pub struct VkRender {
     pub presentation: VkPresent,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
-    // pub compute_data: ComputeData,
+    pub compute_data: ComputeData,
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
     pub data_cache: DataCache,
@@ -581,6 +581,7 @@ impl VkRender {
             swapchain,
             presentation,
             immediate,
+            compute_data,
             imgui,
             main_deletion_queue: Vec::new(),
             scene_data: GPUSceneData::default(),
@@ -594,19 +595,44 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/structure_mat.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
             texture_cache,
             mesh_cache,
         )
         .unwrap();
 
         render.render_context.scene_tree = loaded_scene;
-
+        render.load_caches();
         Ok(render)
     }
-    
+
     pub fn load_caches(&self) {
-        self.data_cache.mesh_cache.allocate_all(|i,v|self.upload_mesh(i,v));
+        println!("loading caches");
+        let mesh_cache_ref = &self.data_cache.mesh_cache;
+        let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
+        let tex_cache_ref = &self.data_cache.texture_cache;
+        let tex_cache_ptr = tex_cache_ref as *const TextureCache as *mut TextureCache;
+        let frame_data_ref = &self.presentation.frame_data;
+        let frame_data_ptr =  frame_data_ref as *const Vec<VkFrame> as *mut Vec<VkFrame>;
+
+        let mesh_upload_fn =
+            |indices: &[u32], vertices: &[Vertex]| self.upload_mesh(indices, vertices);
+
+        let texture_upload_fn =
+            |data: &[u8],
+             extent: vk::Extent3D,
+             format: vk::Format,
+             usage_flags: vk::ImageUsageFlags,
+             mips: bool| { self.upload_image(data, extent, format, usage_flags, mips) };
+
+
+        unsafe {
+            let mut  desc_allocs : (&mut VkDynamicDescriptorAllocator, &mut VkDynamicDescriptorAllocator) = (&mut (*frame_data_ptr).get_mut(0).unwrap().descriptors, &mut (*frame_data_ptr).get_mut(1).unwrap().descriptors);
+            (*mesh_cache_ptr).allocate_all(mesh_upload_fn);
+            println!("mesh loaded");
+            (*tex_cache_ptr).allocate_all(texture_upload_fn, &self.device, self.allocator.clone(), &mut desc_allocs, &self.data_cache.desc_layout_cache);
+            println!("Tex loaded")
+        }
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
@@ -664,17 +690,20 @@ impl VkRender {
         let swapchain = [self.swapchain.swapchain];
 
         unsafe {
+            println!("Enter render");
             self.device
                 .wait_for_fences(fence, true, u32::MAX as u64)
                 .unwrap();
 
             self.device.reset_fences(fence).unwrap();
 
+            println!("Gor fence");
+
             let curr_frame = self.presentation.get_curr_frame_mut();
 
             curr_frame.process_deletions(&self.device, &self.allocator.lock().unwrap());
 
-            curr_frame.descriptors.clear_pools(&self.device).unwrap();
+            //curr_frame.descriptors.clear_pools(&self.device).unwrap();
 
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
@@ -724,14 +753,16 @@ impl VkRender {
                 vk::ImageLayout::GENERAL,
             );
 
+            println!("Compute was here");
+
             //
 
-            // let ds = [self
-            //     .compute_data
-            //     .get_current_effect()
-            //     .descriptors
-            //     .descriptor_sets[image_index as usize]];
-            // &self.draw_background(draw_image, cmd_buffer, &ds);
+            let ds = [self
+                .compute_data
+                .get_current_effect()
+                .descriptors
+                .descriptor_sets[image_index as usize]];
+            &self.draw_background(draw_image, cmd_buffer, &ds);
 
             //transition render image for copy from
             vk_util::transition_image(
@@ -750,6 +781,7 @@ impl VkRender {
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
 
+            println!("geo");
             self.draw_geometry();
 
             // transition present image to copy to
@@ -928,8 +960,10 @@ impl VkRender {
         let rendering_info = vk_util::rendering_info(extent, &color_attachment, &depth_attachment);
 
         unsafe {
+    
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
+         
             let viewport = [vk::Viewport::default()
                 .x(0.0)
                 .y(0.0)
@@ -949,7 +983,7 @@ impl VkRender {
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
                 &allocator,
-                self.scene_data,
+                self.scene_data.as_byte_slice(),
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
             .unwrap();
@@ -969,10 +1003,13 @@ impl VkRender {
                 .allocate(&self.device, &desc_layout)
                 .unwrap();
 
+
             writer.update_set(&self.device, desc_set);
+            let desc_set = [desc_set];
 
             for obj in &self.render_context.draw_context.opaque_surfaces {
                 let material = &(*obj.material);
+                let mat_desc = [material.descriptors[curr_frame.index as usize]];
 
                 let mat_pipeline = self
                     .data_cache
@@ -985,12 +1022,23 @@ impl VkRender {
                     mat_pipeline.pipeline,
                 );
 
+
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     mat_pipeline.layout,
                     0,
-                    &material.descriptors,
+                    &desc_set,
+                    &[],
+                );
+
+
+                self.device.cmd_bind_descriptor_sets(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    mat_pipeline.layout,
+                    1,
+                   &mat_desc,
                     &[],
                 );
 
@@ -1072,45 +1120,45 @@ impl VkRender {
         }
     }
 
-    // pub fn draw_background(
-    //     &self,
-    //     image: vk::Image,
-    //     cmd_buffer: vk::CommandBuffer,
-    //     descriptor_set: &[vk::DescriptorSet],
-    // ) {
-    //     let compute_effect = self.compute_data.get_current_effect();
-    //     unsafe {
-    //         self.device.cmd_bind_pipeline(
-    //             cmd_buffer,
-    //             vk::PipelineBindPoint::COMPUTE,
-    //             compute_effect.pipeline,
-    //         );
-    //
-    //         self.device.cmd_bind_descriptor_sets(
-    //             cmd_buffer,
-    //             vk::PipelineBindPoint::COMPUTE,
-    //             compute_effect.layout,
-    //             0,
-    //             &descriptor_set,
-    //             &[],
-    //         );
-    //
-    //         self.device.cmd_push_constants(
-    //             cmd_buffer,
-    //             compute_effect.layout,
-    //             vk::ShaderStageFlags::COMPUTE,
-    //             0,
-    //             compute_effect.data.as_byte_slice(),
-    //         );
-    //
-    //         self.device.cmd_dispatch(
-    //             cmd_buffer,
-    //             (self.window_state.curr_extent.width as f32 / 16.0).ceil() as u32,
-    //             (self.window_state.curr_extent.height as f32 / 16.0).ceil() as u32,
-    //             1,
-    //         );
-    //     }
-    // }
+    pub fn draw_background(
+        &self,
+        image: vk::Image,
+        cmd_buffer: vk::CommandBuffer,
+        descriptor_set: &[vk::DescriptorSet],
+    ) {
+        let compute_effect = self.compute_data.get_current_effect();
+        unsafe {
+            self.device.cmd_bind_pipeline(
+                cmd_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                compute_effect.pipeline,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                compute_effect.layout,
+                0,
+                &descriptor_set,
+                &[],
+            );
+
+            self.device.cmd_push_constants(
+                cmd_buffer,
+                compute_effect.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                compute_effect.data.as_byte_slice(),
+            );
+
+            self.device.cmd_dispatch(
+                cmd_buffer,
+                (self.window_state.curr_extent.width as f32 / 16.0).ceil() as u32,
+                (self.window_state.curr_extent.height as f32 / 16.0).ceil() as u32,
+                1,
+            );
+        }
+    }
 
     pub fn upload_mesh(&self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
         let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
@@ -1225,24 +1273,28 @@ impl VkRender {
         usage_flags: vk::ImageUsageFlags,
         mip_mapped: bool,
     ) -> VkImageAlloc {
+
+
         //let data_size = data.len();
         let data_size = size.width * size.height * size.depth * 4;
         let allocator = self.allocator.lock().unwrap();
+        println!("Here1");
+        // let mut upload_buffer = vk_util::allocate_buffer(
+        //     &allocator,
+        //     data_size as usize,
+        //     vk::BufferUsageFlags::TRANSFER_SRC,
+        //     vk_mem::MemoryUsage::Auto,
+        // )
+        // .unwrap();
+        //
+        // println!("Here2");
+        // unsafe {
+        //     let data_ptr = allocator.map_memory(&mut upload_buffer.allocation).unwrap();
+        //     std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data_size as usize);
+        //     allocator.unmap_memory(&mut upload_buffer.allocation);
+        // }
 
-        let mut upload_buffer = vk_util::allocate_buffer(
-            &allocator,
-            data_size as usize,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-        )
-        .unwrap();
-
-        unsafe {
-            let data_ptr = allocator.map_memory(&mut upload_buffer.allocation).unwrap();
-            std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data_size as usize);
-            allocator.unmap_memory(&mut upload_buffer.allocation);
-        }
-
+        let mut upload_buffer = vk_util::allocate_and_write_buffer(&allocator, data, vk::BufferUsageFlags::TRANSFER_SRC).unwrap();
         let new_image = vk_util::create_image(
             &self.device,
             &allocator,
@@ -1252,8 +1304,10 @@ impl VkRender {
             mip_mapped,
         );
 
+        println!("Here3");
         self.immediate_submit(|cmd| {
             // let curr_frame = self.presentation.get_curr_frame();
+
             vk_util::transition_image(
                 &self.device,
                 cmd,
@@ -1310,6 +1364,8 @@ impl VkRender {
             .borrow()
             .get_camera()
             .get_view_matrix();
+        
+        
 
         // Set up the projection matrix
         let fovy = 70.0_f32.to_radians();
@@ -1322,13 +1378,18 @@ impl VkRender {
         proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         // Combine view and projection matrices
-        self.scene_data.view_projection = proj * self.scene_data.view;
         self.scene_data.projection = proj;
+        self.scene_data.view_projection = proj * self.scene_data.view;
+
 
         // Set default lighting parameters
         self.scene_data.ambient_color = Vec4::splat(0.1);
         self.scene_data.sunlight_color = Vec4::splat(1.0);
         self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
+
+        let scale = glam::Mat4::from_scale(glam::Vec3::splat(0.4));
+        let translation = glam::Mat4::from_translation(glam::vec3(0  as f32, 1.0, 0.0));
+        let trans_scale = translation * scale;
 
         self.render_context.scene_tree.borrow_mut().draw(
             &glam::Mat4::IDENTITY,
