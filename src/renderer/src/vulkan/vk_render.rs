@@ -3,7 +3,10 @@ use crate::data::data_cache::{
     VkPipelineCache, VkPipelineType,
 };
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
-use crate::data::gpu_data::{DrawContext, GPUScene, GPUSceneData, MaterialPass, MetRoughShaderConsts, Node, RenderObject, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
+use crate::data::gpu_data::{
+    DrawContext, GPUScene, GPUSceneData, MaterialPass, MetRoughShaderConsts, Node, RenderObject,
+    Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer,
+};
 use crate::data::{data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
@@ -141,62 +144,6 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
     }
 
     descriptors
-}
-
-pub fn init_mesh_pipeline(
-    device: &ash::Device,
-    draw_format: vk::Format,
-    depth_format: vk::Format,
-    image_desc: vk::DescriptorSetLayout,
-) -> VkPipeline {
-    let vert_shader = vk_util::load_shader_module(
-        device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
-    )
-    .expect("Error loading shader");
-
-    let frag_shader = vk_util::load_shader_module(
-        device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/tex_image.frag.spv",
-    )
-    .expect("Error loading shader");
-
-    let buffer_range = [vk::PushConstantRange::default()
-        .offset(0)
-        .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
-        .stage_flags(vk::ShaderStageFlags::VERTEX)];
-
-    let binding = [image_desc];
-    let pipeline_info = vk::PipelineLayoutCreateInfo::default()
-        .push_constant_ranges(&buffer_range)
-        .set_layouts(&binding);
-
-    let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_info, None).unwrap() };
-
-    println!("Created layout: {:?}", pipeline_layout);
-
-    let entry = CString::new("main").unwrap();
-
-    let pipeline = vk_pipeline::PipelineBuilder::default()
-        .set_pipeline_layout(pipeline_layout)
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
-        .set_color_attachment_format(draw_format)
-        .set_depth_format(depth_format)
-        .build_pipeline(device)
-        .unwrap();
-
-    unsafe {
-        device.destroy_shader_module(vert_shader, None);
-        device.destroy_shader_module(frag_shader, None);
-    }
-
-    VkPipeline::new(pipeline, pipeline_layout)
 }
 
 pub fn init_scene_data(device: &ash::Device, layout: &VkDescriptors) -> ComputeData {
@@ -592,7 +539,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/Avocado.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/BoomBox.glb",
             texture_cache,
             mesh_cache,
         )
@@ -604,13 +551,12 @@ impl VkRender {
     }
 
     pub fn load_caches(&self) {
-        println!("loading caches");
         let mesh_cache_ref = &self.data_cache.mesh_cache;
         let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
         let tex_cache_ref = &self.data_cache.texture_cache;
         let tex_cache_ptr = tex_cache_ref as *const TextureCache as *mut TextureCache;
         let frame_data_ref = &self.presentation.frame_data;
-        let frame_data_ptr =  frame_data_ref as *const Vec<VkFrame> as *mut Vec<VkFrame>;
+        let frame_data_ptr = frame_data_ref as *const Vec<VkFrame> as *mut Vec<VkFrame>;
 
         let mesh_upload_fn =
             |indices: &[u32], vertices: &[Vertex]| self.upload_mesh(indices, vertices);
@@ -622,13 +568,14 @@ impl VkRender {
              usage_flags: vk::ImageUsageFlags,
              mips: bool| { self.upload_image(data, extent, format, usage_flags, mips) };
 
-
         unsafe {
-            let mut  desc_allocs : (&mut VkDynamicDescriptorAllocator, &mut VkDynamicDescriptorAllocator) = (&mut (*frame_data_ptr).get_mut(0).unwrap().descriptors, &mut (*frame_data_ptr).get_mut(1).unwrap().descriptors);
             (*mesh_cache_ptr).allocate_all(mesh_upload_fn);
-            println!("mesh loaded");
-            (*tex_cache_ptr).allocate_all(texture_upload_fn, &self.device, self.allocator.clone(), &mut desc_allocs, &self.data_cache.desc_layout_cache);
-            println!("Tex loaded")
+            (*tex_cache_ptr).allocate_all(
+                texture_upload_fn,
+                &self.device,
+                self.allocator.clone(),
+                &self.data_cache.desc_layout_cache,
+            );
         }
     }
 
@@ -699,8 +646,7 @@ impl VkRender {
             let curr_frame = self.presentation.get_curr_frame_mut();
 
             curr_frame.process_deletions(&self.device, &self.allocator.lock().unwrap());
-
-            //curr_frame.descriptors.clear_pools(&self.device).unwrap();
+            curr_frame.descriptors.clear_pools(&self.device).unwrap();
 
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
@@ -742,32 +688,14 @@ impl VkRender {
 
             let extent = self.window_state.curr_extent;
 
+
+            // Transition Depth/Draw Images for use
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
                 draw_image,
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::GENERAL,
-            );
-
-            println!("Compute was here");
-
-            //
-
-            let ds = [self
-                .compute_data
-                .get_current_effect()
-                .descriptors
-                .descriptor_sets[image_index as usize]];
-            &self.draw_background(draw_image, cmd_buffer, &ds);
-
-            //transition render image for copy from
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                draw_image,
-                vk::ImageLayout::GENERAL,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
             vk_util::transition_image(
@@ -778,10 +706,31 @@ impl VkRender {
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
 
-            println!("geo");
+
+            // draw background // TODO this doesnt need its own structure?
+            let ds = [self
+                .compute_data
+                .get_current_effect()
+                .descriptors
+                .descriptor_sets[image_index as usize]];
+
+            self.draw_background(draw_image, cmd_buffer, &ds);
+
+            //image from general for background draw, and read for color draw
+            vk_util::transition_image(
+                &self.device,
+                cmd_buffer,
+                draw_image,
+                vk::ImageLayout::GENERAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+
+
+
             self.draw_geometry();
 
-            // transition present image to copy to
+            // Transition draw image and present image for copy compatability
+
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -798,6 +747,7 @@ impl VkRender {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
 
+
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
                 &self.device,
@@ -808,6 +758,9 @@ impl VkRender {
                 extent,
             );
 
+
+
+            //re transition present to draw gui on
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -816,9 +769,10 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
+            // draw gpu upon present image
             self.draw_imgui(cmd_buffer, present_view);
 
-            // transition swapchain to present
+            // transition draw again for presentation
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -829,7 +783,11 @@ impl VkRender {
 
             self.device.end_command_buffer(cmd_buffer).unwrap();
 
+
+
+            // Wait for semaphores and submit
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
+
             let wait_info = [vk_util::semaphore_submit_info(
                 vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT_KHR,
                 frame_sync.swap_semaphore,
@@ -841,6 +799,7 @@ impl VkRender {
             )];
 
             let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
+
             self.device
                 .queue_submit2(queue, &submit, frame_sync.render_fence)
                 .unwrap();
@@ -869,14 +828,14 @@ impl VkRender {
     }
 
     pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
-        let attachment_info = [vk_util::rendering_attachment_info(
+        let attachment_info = [vk_util::attachment_info(
             image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
 
         let render_info =
-            vk_util::rendering_info(self.window_state.curr_extent, &attachment_info, &[]);
+            vk_util::rendering_info(self.window_state.curr_extent, &attachment_info, None);
 
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &render_info);
@@ -931,51 +890,44 @@ impl VkRender {
         }
     }
 
-    pub fn draw_geometry(
-        &mut self,
-        // cmd_buffer: vk::CommandBuffer,
-        // draw_view: vk::ImageView,
-        // depth_view: vk::ImageView,
-    ) {
+    pub fn draw_geometry(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pool.get(QueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
 
-        let color_attachment = [vk_util::rendering_attachment_info(
+        let color_attachment = [vk_util::attachment_info(
             curr_frame.draw.image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
 
-        let depth_attachment = [vk_util::depth_attachment_info(
+        let depth_attachment = vk_util::depth_attachment_info(
             curr_frame.depth.image_view,
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-        )];
+        );
 
         let extent = self.window_state.curr_extent;
 
-        let rendering_info = vk_util::rendering_info(extent, &color_attachment, &depth_attachment);
+        let rendering_info = vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
 
         unsafe {
-    
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
-         
             let viewport = [vk::Viewport::default()
                 .x(0.0)
                 .y(0.0)
                 .width(extent.width as f32)
                 .height(extent.height as f32)
                 .min_depth(0.0)
-                .max_depth(0.0)];
+                .max_depth(1.0)];
 
-            self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
 
             let scissor = [vk::Rect2D::default()
                 .offset(vk::Offset2D::default().y(0).y(0))
                 .extent(extent)];
 
-            self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
+
 
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
@@ -995,24 +947,29 @@ impl VkRender {
             );
 
             let desc_layout = [self.data_cache.desc_layout_cache.get(VkDescType::GpuScene)];
+
+            // This is allocated on the per-frame descriptor pool, which is reset after each draw
+            // and handles dynamic data
             let desc_set = curr_frame
                 .descriptors
                 .allocate(&self.device, &desc_layout)
                 .unwrap();
 
-
             writer.update_set(&self.device, desc_set);
-            let desc_set = [desc_set];
-            // 
+            let global_desc = [desc_set];
+            //
             // for obj in &self.render_context.draw_context.opaque_surfaces {
-            // 
+            //
             // }
-            
 
-            
             let draw_fn = |obj: &RenderObject| {
                 let material = &(*obj.material);
-                let mat_desc = [material.descriptors[curr_frame.index as usize]];
+
+
+                // This is a static descriptor set for the material the is allocated once
+                // internally to the cache, only reallocated if a change to the material
+                // occurs (Currently doesn't happen)
+                let mat_desc = [material.descriptors[frame_index as usize]];
 
                 let mat_pipeline = self
                     .data_cache
@@ -1025,16 +982,17 @@ impl VkRender {
                     mat_pipeline.pipeline,
                 );
 
+                self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
+                self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
 
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     mat_pipeline.layout,
                     0,
-                    &desc_set,
+                    &global_desc,
                     &[],
                 );
-
 
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
@@ -1075,11 +1033,23 @@ impl VkRender {
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
 
-            self.render_context.draw_context.opaque_surfaces.iter().for_each(draw_fn);
-            self.render_context.draw_context.transparent_surfaces.iter().for_each(draw_fn);
+
+            self.render_context
+                .draw_context
+                .opaque_surfaces
+                .iter()
+                .for_each(draw_fn);
+
+
+            self.render_context
+                .draw_context
+                .transparent_surfaces
+                .iter()
+                .for_each(draw_fn);
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
-
+            self.render_context.draw_context.opaque_surfaces.clear();
+            self.render_context.draw_context.transparent_surfaces.clear();
             self.device.cmd_end_rendering(cmd_buffer);
         }
     }
@@ -1279,28 +1249,15 @@ impl VkRender {
         usage_flags: vk::ImageUsageFlags,
         mip_mapped: bool,
     ) -> VkImageAlloc {
-
-
         //let data_size = data.len();
-        let data_size = size.width * size.height * size.depth * 4;
         let allocator = self.allocator.lock().unwrap();
-        println!("Here1");
-        // let mut upload_buffer = vk_util::allocate_buffer(
-        //     &allocator,
-        //     data_size as usize,
-        //     vk::BufferUsageFlags::TRANSFER_SRC,
-        //     vk_mem::MemoryUsage::Auto,
-        // )
-        // .unwrap();
-        //
-        // println!("Here2");
-        // unsafe {
-        //     let data_ptr = allocator.map_memory(&mut upload_buffer.allocation).unwrap();
-        //     std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data_size as usize);
-        //     allocator.unmap_memory(&mut upload_buffer.allocation);
-        // }
 
-        let mut upload_buffer = vk_util::allocate_and_write_buffer(&allocator, data, vk::BufferUsageFlags::TRANSFER_SRC).unwrap();
+        let upload_buffer = vk_util::allocate_and_write_buffer(
+            &allocator,
+            data,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+        )
+        .unwrap();
         let new_image = vk_util::create_image(
             &self.device,
             &allocator,
@@ -1310,7 +1267,6 @@ impl VkRender {
             mip_mapped,
         );
 
-        println!("Here3");
         self.immediate_submit(|cmd| {
             // let curr_frame = self.presentation.get_curr_frame();
 
@@ -1360,10 +1316,7 @@ impl VkRender {
     }
 
     pub fn update_scene(&mut self) {
-        self.render_context.draw_context.opaque_surfaces.clear();
-
-        // Set up the view matrix
-        // self.scene_data.data.view = self.window_state.controller.borrow().get_camera().get_view_matrix();
+        
         self.scene_data.view = self
             .window_state
             .controller
@@ -1371,9 +1324,6 @@ impl VkRender {
             .get_camera()
             .get_view_matrix();
         
-        
-
-        // Set up the projection matrix
         let fovy = 70.0_f32.to_radians();
         let aspect_ratio = self.window_state.curr_extent.width as f32
             / self.window_state.curr_extent.height as f32;
@@ -1383,22 +1333,17 @@ impl VkRender {
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
         proj.y_axis.y *= -1.0; // Flip the Y-axis
 
-        // Combine view and projection matrices
         self.scene_data.projection = proj;
         self.scene_data.view_projection = proj * self.scene_data.view;
 
-
-        // Set default lighting parameters
         self.scene_data.ambient_color = Vec4::splat(0.1);
         self.scene_data.sunlight_color = Vec4::splat(1.0);
         self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
 
-        let scale = glam::Mat4::from_scale(glam::Vec3::splat(5.0));
-        let translation = glam::Mat4::from_translation(glam::vec3(0  as f32, 1.0, 0.0));
-        let trans_scale = translation * scale;
+
 
         self.render_context.scene_tree.borrow_mut().draw(
-            &trans_scale,
+            &glam::Mat4::IDENTITY,
             &mut self.render_context.draw_context,
             &self.data_cache.mesh_cache,
             &self.data_cache.texture_cache,

@@ -5,7 +5,7 @@ use crate::data::gpu_data::{
     Vertex, VkGpuMeshBuffers,
 };
 use crate::vulkan::vk_descriptor::{
-    DescriptorAllocator, DescriptorWriter, VkDynamicDescriptorAllocator,
+    DescriptorAllocator, DescriptorWriter, PoolSizeRatio, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
@@ -53,6 +53,7 @@ pub struct VkLoadedTexture {
 pub struct TextureCache {
     cached_textures: Vec<CachedTexture>,
     cached_materials: Vec<CacheMaterial>,
+    image_descriptors: [VkDynamicDescriptorAllocator; 2],
     pub linear_sampler: vk::Sampler,
     pub nearest_sampler: vk::Sampler,
 }
@@ -153,11 +154,24 @@ impl TextureCache {
 
         let linear_sampler = unsafe { device.create_sampler(&sampler, None).unwrap() };
 
+        let pool_ratios = [
+            PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
+            //  PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
+        ];
+
+        let image_descriptors = [
+            VkDynamicDescriptorAllocator::new(device, 10_000, &pool_ratios).unwrap(),
+            VkDynamicDescriptorAllocator::new(device, 10_000, &pool_ratios).unwrap(),
+        ];
+
         Self {
             cached_textures,
             cached_materials,
             linear_sampler,
             nearest_sampler,
+            image_descriptors,
         }
     }
 
@@ -241,7 +255,6 @@ impl TextureCache {
     }
 
     pub fn get_texture_unchecked(&self, id: u32) -> &CachedTexture {
- 
         unsafe { self.cached_textures.get_unchecked(id as usize) }
     }
 
@@ -262,6 +275,10 @@ impl TextureCache {
         } else {
             false
         }
+    }
+
+    pub fn get_descriptor_allocator(&self, index: u32) -> &VkDynamicDescriptorAllocator {
+        unsafe { self.image_descriptors.get_unchecked(index as usize) }
     }
 
     pub fn allocate_texture<F>(&mut self, mut upload_fn: F, tex_id: u32)
@@ -312,10 +329,6 @@ impl TextureCache {
         &mut self,
         device: &ash::Device,
         allocator: Arc<Mutex<vk_mem::Allocator>>,
-        desc_allocators: &mut (
-            &mut VkDynamicDescriptorAllocator,
-            &mut VkDynamicDescriptorAllocator,
-        ),
         desc_layout_cache: &VkDescLayoutCache,
         mat_id: u32,
     ) {
@@ -352,14 +365,8 @@ impl TextureCache {
             )
             .unwrap();
 
-            let loaded_material = self.write_material(
-                meta,
-                uniform_buffer,
-                0,
-                device,
-                desc_allocators,
-                desc_layout_cache,
-            );
+            let loaded_material =
+                self.write_material(meta, uniform_buffer, 0, device, desc_layout_cache);
 
             self.cached_materials[mat_id] = CacheMaterial::Loaded(loaded_material);
         } else {
@@ -372,15 +379,11 @@ impl TextureCache {
     }
 
     fn write_material(
-        &self,
+        &mut self,
         meta: MaterialMeta,
         uniform_buffer: VkBuffer,
         buffer_offset: u32,
         device: &ash::Device,
-        desc_allocators: &mut (
-            &mut VkDynamicDescriptorAllocator,
-            &mut VkDynamicDescriptorAllocator,
-        ),
         desc_layout_cache: &VkDescLayoutCache,
     ) -> VkLoadedMaterial {
         let color_tex = self.get_loaded_texture_unchecked(meta.base_color_tex_id);
@@ -416,23 +419,23 @@ impl TextureCache {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
 
+        // TODO maybe store the size rations with the layouts?
         let layout = [desc_layout_cache.get(VkDescType::PbrMetRough)];
 
         let descriptors: [vk::DescriptorSet; 2] = [
             {
-                let descriptor = &desc_allocators.0.allocate(device, &layout).unwrap();
+                let descriptor = &self.image_descriptors[0].allocate(device, &layout).unwrap();
                 writer.update_set(device, *descriptor);
                 *descriptor
             },
             {
-                let descriptor = &desc_allocators.1.allocate(device, &layout).unwrap();
+                let descriptor = &self.image_descriptors[1].allocate(device, &layout).unwrap();
                 writer.update_set(device, *descriptor);
                 *descriptor
             },
         ];
-        
+
         println!("Allocated descripots: {:?}", descriptors);
-        
 
         VkLoadedMaterial {
             meta,
@@ -498,11 +501,6 @@ impl TextureCache {
         upload_fn: F,
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
-
-        desc_allocators: &mut (
-            &mut VkDynamicDescriptorAllocator,
-            &mut VkDynamicDescriptorAllocator,
-        ),
         desc_layout_cache: &VkDescLayoutCache,
     ) where
         F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
@@ -514,13 +512,7 @@ impl TextureCache {
 
         println!("Writing materials");
         for x in 0..self.cached_materials.len() {
-            self.allocate_material(
-                device,
-                allocator.clone(),
-                desc_allocators,
-                desc_layout_cache,
-                x as u32,
-            );
+            self.allocate_material(device, allocator.clone(), desc_layout_cache, x as u32);
         }
     }
 
@@ -735,7 +727,7 @@ impl ShaderCache {
 pub enum VkPipelineType {
     PbrMetRoughOpaque,
     PbrMetRoughAlpha,
-    Mesh
+    Mesh,
 }
 
 //#[derive(Clone, Copy)]

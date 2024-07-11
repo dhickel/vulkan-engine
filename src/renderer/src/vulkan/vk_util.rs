@@ -5,7 +5,8 @@ use crate::data::gpu_data::VkGpuMeshBuffers;
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
-    AccessFlags2, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2, RenderingInfo,
+    AccessFlags2, ClearValue, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2,
+    RenderingInfo,
 };
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -145,7 +146,7 @@ pub fn create_image(
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-    println!("Creating image with format: {:?}", image_info);    
+    println!("Creating image with format: {:?}", image_info);
     let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
 
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
@@ -189,12 +190,12 @@ pub fn image_view_create_info<'a>(
         )
 }
 
-pub fn rendering_attachment_info<'a>(
+pub fn attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
     clear: Option<vk::ClearValue>,
 ) -> vk::RenderingAttachmentInfo<'a> {
-    let info = vk::RenderingAttachmentInfo::default()
+    let mut info = vk::RenderingAttachmentInfo::default()
         .image_view(view)
         .image_layout(layout)
         .load_op(if clear.is_some() {
@@ -205,7 +206,7 @@ pub fn rendering_attachment_info<'a>(
         .store_op(vk::AttachmentStoreOp::STORE);
 
     if let Some(clear) = clear {
-        let info = info.clear_value(clear);
+        info = info.clear_value(clear);
     };
     info
 }
@@ -213,7 +214,7 @@ pub fn rendering_attachment_info<'a>(
 pub fn rendering_info<'a>(
     extent: vk::Extent2D,
     color_attachment: &'a [vk::RenderingAttachmentInfo],
-    depth_attachment: &'a [vk::RenderingAttachmentInfo],
+    depth_attachment: Option<&'a vk::RenderingAttachmentInfo>,
 ) -> RenderingInfo<'a> {
     let mut render_info = vk::RenderingInfo::default()
         .render_area(
@@ -226,10 +227,10 @@ pub fn rendering_info<'a>(
     if !color_attachment.is_empty() {
         render_info = render_info.color_attachments(color_attachment);
     }
-    // if !depth_attachment.is_empty() { // FIXME lifetime issues if optional but cant use a vec like above
-    //     render_info = render_info.depth_attachment(depth_attachment)
-    // }
 
+    if let Some(depth) = depth_attachment {
+        render_info = render_info.depth_attachment(depth);
+    }
     render_info
 }
 
@@ -241,7 +242,8 @@ pub fn depth_attachment_info<'a>(
         .image_view(view)
         .image_layout(layout)
         .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE);
+        .store_op(vk::AttachmentStoreOp::STORE)
+        .clear_value(ClearValue::default());
 
     unsafe {
         render_info.clear_value.depth_stencil.depth = 0.0;

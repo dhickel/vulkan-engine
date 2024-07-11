@@ -228,6 +228,7 @@ impl<'a> DescriptorWriter<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct VkDynamicDescriptorAllocator {
     ratios: Vec<PoolSizeRatio>,
     full_pools: Vec<vk::DescriptorPool>,

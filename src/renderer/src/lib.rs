@@ -76,6 +76,7 @@ pub fn run() {
     } else {
         panic!("Failed to detect monitor")
     };
+    
 
     let camera = camera::Camera::default();
     let fps_controller = FPSController::new(1, camera, 0.01, 0.01);

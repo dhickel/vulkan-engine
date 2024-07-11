@@ -135,7 +135,6 @@ impl FPSController {
             self.move_vec = self.move_vec.normalize() * amount;
         }
         
-  
         self.camera.update_position(self.move_vec);
 
     }
@@ -152,8 +151,6 @@ impl MousePosListener for FPSController {
 
     fn broadcast(&mut self, delta: (f64, f64), modifiers: &HashSet<Modifiers>) {
         self.m_delta = delta;
-        
-  
     }
 }
 

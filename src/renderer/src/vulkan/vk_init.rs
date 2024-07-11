@@ -832,7 +832,7 @@ pub fn allocate_draw_images(
     let image_extent = vk::Extent3D {
         width: size.width,
         height: size.height,
-        depth: 1, // Depth should be 1 for 2D images
+        depth: 1, 
     };
 
     let mut usage_flags = vk::ImageUsageFlags::empty();

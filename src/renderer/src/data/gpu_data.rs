@@ -417,7 +417,7 @@ impl Transform {
         Transform {
             position: glam::Vec3::from_array(translation),
             scale: glam::Vec3::from_array(scale),
-            rotation: glam::Quat::from_array(rotation),
+            rotation: glam::quat(rotation[3], rotation[0], rotation[1],rotation[2]),
         }
     }
 }

@@ -110,7 +110,7 @@ pub fn parse_gltf_to_raw(
             let count = primitive.indices().unwrap().count();
 
             let material = primitive.material();
-
+         
             // INDICES
             match reader
                 .read_indices()
@@ -128,6 +128,7 @@ pub fn parse_gltf_to_raw(
             }
 
             // VERTICES
+            
             match reader
                 .read_positions()
                 .ok_or_else(|| "No Vertices found".to_string())?
