@@ -310,6 +310,7 @@ fn init_met_rough_pipelines(
         .set_shaders(vert_shader, &entry, frag_shader, &entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
+        .set_depth_format(vk::Format::B8G8R8A8_UNORM)
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()

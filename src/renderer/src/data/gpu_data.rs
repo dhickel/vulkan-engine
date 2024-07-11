@@ -1,5 +1,5 @@
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, ShaderCache, TextureCache, VkLoadedMaterial,
+    CoreShaderType, MeshCache, ShaderCache, TextureCache, VkLoadedMaterial, VkPipelineType,
 };
 use crate::data::gltf_util;
 use crate::data::gltf_util::MeshAsset;
@@ -16,12 +16,12 @@ use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
 use glam::{vec4, Mat4, Quat, Vec2, Vec3, Vec4};
+use imgui::sys::igSetClipboardText;
 use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
-use imgui::sys::igSetClipboardText;
 
 //////////////////////////
 //  MESH & TEXTURE DATA //
@@ -31,7 +31,7 @@ use imgui::sys::igSetClipboardText;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vertex {
     pub position: Vec3,
-    pub uv_x : f32,
+    pub uv_x: f32,
     pub normal: Vec3,
     pub uv_y: f32,
     pub color: Vec4,
@@ -409,20 +409,16 @@ pub struct Transform {
 }
 
 impl Transform {
-    
     pub fn compose(&self) -> Mat4 {
-      glam::Mat4::from_scale_rotation_translation(-self.scale, self.rotation, self.position)
-        
+        glam::Mat4::from_scale_rotation_translation(-self.scale, self.rotation, self.position)
     }
 
     pub fn new_vulkan_adjusted(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Self {
-
         Transform {
             position: glam::Vec3::from_array(translation),
             scale: glam::Vec3::from_array(scale),
             rotation: glam::Quat::from_array(rotation),
         }
-       
     }
 }
 
@@ -470,16 +466,26 @@ impl Node {
 
             for surface in &mesh.meta.surfaces {
                 if let Some(id) = surface.material_index {
-                    let material = tex_cache.get_loaded_material_unchecked_ptr(id);
+                    let material = tex_cache.get_loaded_material_unchecked(id);
+                    let material_ptr = material as *const VkLoadedMaterial;
                     let ro = RenderObject {
                         index_count: surface.count,
                         first_index: surface.start_index,
                         index_buffer: mesh.buffer.index_buffer.buffer,
-                        material,
+                        material: material_ptr,
                         transform: self.world_transform,
                         vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
                     };
-                    ctx.opaque_surfaces.push(ro); // TODO transparency
+
+                    match material.pipeline {
+                        VkPipelineType::PbrMetRoughOpaque => {
+                            ctx.opaque_surfaces.push(ro)
+                        }
+                        VkPipelineType::PbrMetRoughAlpha => {
+                            ctx.transparent_surfaces.push(ro)
+                        }
+                        VkPipelineType::Mesh => {panic!("Wrong pipeline")}
+                    }
                 }
             }
         }

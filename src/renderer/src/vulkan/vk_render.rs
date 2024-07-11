@@ -3,10 +3,7 @@ use crate::data::data_cache::{
     VkPipelineCache, VkPipelineType,
 };
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
-use crate::data::gpu_data::{
-    DrawContext, GPUScene, GPUSceneData, MaterialPass, MetRoughShaderConsts, Node, Vertex,
-    VkGpuMeshBuffers, VkGpuTextureBuffer,
-};
+use crate::data::gpu_data::{DrawContext, GPUScene, GPUSceneData, MaterialPass, MetRoughShaderConsts, Node, RenderObject, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
 use crate::data::{data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
@@ -595,7 +592,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/Avocado.glb",
             texture_cache,
             mesh_cache,
         )
@@ -1006,8 +1003,14 @@ impl VkRender {
 
             writer.update_set(&self.device, desc_set);
             let desc_set = [desc_set];
+            // 
+            // for obj in &self.render_context.draw_context.opaque_surfaces {
+            // 
+            // }
+            
 
-            for obj in &self.render_context.draw_context.opaque_surfaces {
+            
+            let draw_fn = |obj: &RenderObject| {
                 let material = &(*obj.material);
                 let mat_desc = [material.descriptors[curr_frame.index as usize]];
 
@@ -1038,7 +1041,7 @@ impl VkRender {
                     vk::PipelineBindPoint::GRAPHICS,
                     mat_pipeline.layout,
                     1,
-                   &mat_desc,
+                    &mat_desc,
                     &[],
                 );
 
@@ -1070,7 +1073,10 @@ impl VkRender {
 
                 self.device
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
-            }
+            };
+
+            self.render_context.draw_context.opaque_surfaces.iter().for_each(draw_fn);
+            self.render_context.draw_context.transparent_surfaces.iter().for_each(draw_fn);
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
 
@@ -1387,12 +1393,12 @@ impl VkRender {
         self.scene_data.sunlight_color = Vec4::splat(1.0);
         self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
 
-        let scale = glam::Mat4::from_scale(glam::Vec3::splat(0.4));
+        let scale = glam::Mat4::from_scale(glam::Vec3::splat(5.0));
         let translation = glam::Mat4::from_translation(glam::vec3(0  as f32, 1.0, 0.0));
         let trans_scale = translation * scale;
 
         self.render_context.scene_tree.borrow_mut().draw(
-            &glam::Mat4::IDENTITY,
+            &trans_scale,
             &mut self.render_context.draw_context,
             &self.data_cache.mesh_cache,
             &self.data_cache.texture_cache,
