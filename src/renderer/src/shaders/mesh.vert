@@ -10,7 +10,6 @@ layout (location = 1) out vec3 outColor;
 layout (location = 2) out vec2 outUV;
 
 struct Vertex {
-
 	vec3 position;
 	float uv_x;
 	vec3 normal;
@@ -42,4 +41,3 @@ void main()
 	outUV.x = v.uv_x;
 	outUV.y = v.uv_y;
 }
-
