@@ -615,6 +615,8 @@ pub fn get_general_v12_features<'a>(
     if query_vulkan_12_features.buffer_device_address == vk::TRUE {
         vulkan_12_features.buffer_device_address = vk::TRUE;
     }
+    
+    
     if query_vulkan_12_features.descriptor_indexing == vk::TRUE {
         vulkan_12_features.descriptor_indexing = vk::TRUE;
     }
@@ -832,12 +834,12 @@ pub fn allocate_draw_images(
     let image_extent = vk::Extent3D {
         width: size.width,
         height: size.height,
-        depth: 1, 
+        depth: 1,
     };
 
     let mut usage_flags = vk::ImageUsageFlags::empty();
     usage_flags |= vk::ImageUsageFlags::TRANSFER_SRC;
-    usage_flags |= vk::ImageUsageFlags::TRANSFER_DST; // Might not be needed?
+    usage_flags |= vk::ImageUsageFlags::TRANSFER_DST; 
     usage_flags |= vk::ImageUsageFlags::STORAGE;
     usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
 
@@ -904,7 +906,7 @@ pub fn allocate_depth_images(
     let image_extent = vk::Extent3D {
         width: size.width,
         height: size.height,
-        depth: 1, // Depth should be 1 for 2D images
+        depth: 1, 
     };
 
     let mut usage_flags = vk::ImageUsageFlags::empty();

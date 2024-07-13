@@ -539,7 +539,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/BoomBox.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/structure.glb",
             texture_cache,
             mesh_cache,
         )
@@ -634,14 +634,12 @@ impl VkRender {
         let swapchain = [self.swapchain.swapchain];
 
         unsafe {
-            println!("Enter render");
             self.device
                 .wait_for_fences(fence, true, u32::MAX as u64)
                 .unwrap();
 
             self.device.reset_fences(fence).unwrap();
 
-            println!("Gor fence");
 
             let curr_frame = self.presentation.get_curr_frame_mut();
 
@@ -926,7 +924,10 @@ impl VkRender {
             let scissor = [vk::Rect2D::default()
                 .offset(vk::Offset2D::default().y(0).y(0))
                 .extent(extent)];
-
+            
+            
+            self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
+            self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
 
 
             let allocator = self.allocator.lock().unwrap();
@@ -936,6 +937,7 @@ impl VkRender {
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
             .unwrap();
+            
 
             let mut writer = DescriptorWriter::default();
             writer.write_buffer(
@@ -982,8 +984,7 @@ impl VkRender {
                     mat_pipeline.pipeline,
                 );
 
-                self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
-                self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
+               
 
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
@@ -1139,6 +1140,7 @@ impl VkRender {
     pub fn upload_mesh(&self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
         let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
         let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
+        
         let allocator = self.allocator.lock().unwrap();
 
         let index_buffer = vk_util::allocate_buffer(
@@ -1184,7 +1186,7 @@ impl VkRender {
             &allocator,
             v_buffer_size + i_buffer_size,
             vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferDevice,
+            vk_mem::MemoryUsage::AutoPreferHost,
         )
         .expect("Failed to allocate staging buffer");
 
@@ -1316,25 +1318,31 @@ impl VkRender {
     }
 
     pub fn update_scene(&mut self) {
-        
-        self.scene_data.view = self
+
+        let view = self
             .window_state
             .controller
             .borrow()
             .get_camera()
             .get_view_matrix();
-        
-        let fovy = 70.0_f32.to_radians();
+
+        let fovy = 70f32.to_radians();
         let aspect_ratio = self.window_state.curr_extent.width as f32
             / self.window_state.curr_extent.height as f32;
+      
         let near = 0.1;
-        let far = 10000.0;
+        let far = 10_000.0;
 
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
         proj.y_axis.y *= -1.0; // Flip the Y-axis
 
+        
+        
+        self.scene_data.view = view;
         self.scene_data.projection = proj;
-        self.scene_data.view_projection = proj * self.scene_data.view;
+        self.scene_data.view_projection = proj * view;
+
+       
 
         self.scene_data.ambient_color = Vec4::splat(0.1);
         self.scene_data.sunlight_color = Vec4::splat(1.0);

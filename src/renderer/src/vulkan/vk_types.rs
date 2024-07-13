@@ -666,25 +666,26 @@ impl VkBuffer {
 
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub struct VkGpuPushConsts {
-    pub world_matrix: glam::Mat4,
+    pub world_matrix: [[f32; 4]; 4],
     pub vertex_buffer_addr: vk::DeviceAddress,
 }
 
 impl VkGpuPushConsts {
     pub fn new(world_matrix: glam::Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
         Self {
-            world_matrix,
+            world_matrix: world_matrix.to_cols_array_2d(),
             vertex_buffer_addr,
         }
     }
 
     pub fn as_byte_slice(&self) -> &[u8] {
-        unsafe {
-            let ptr = self as *const VkGpuPushConsts as *const u8;
-            slice::from_raw_parts(ptr, mem::size_of::<VkGpuPushConsts>())
-        }
+        bytemuck::bytes_of(self)
+        // unsafe {
+        //     let ptr = self as *const VkGpuPushConsts as *const u8;
+        //     slice::from_raw_parts(ptr, mem::size_of::<VkGpuPushConsts>())
+        // }
     }
 }
 

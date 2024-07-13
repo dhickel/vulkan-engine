@@ -195,6 +195,7 @@ pub struct NodeMeta {
     pub name: String,
     pub mesh_index: Option<u32>,
     pub local_transform: Transform,
+    pub og_matrix: Mat4,
     pub children: Vec<u32>,
 }
 
@@ -409,15 +410,15 @@ pub struct Transform {
 }
 
 impl Transform {
-    pub fn compose(&self) -> Mat4 {
-        glam::Mat4::from_scale_rotation_translation(-self.scale, self.rotation, self.position)
+    pub fn compose(&mut self) -> Mat4 {
+        glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
 
     pub fn new_vulkan_adjusted(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Self {
         Transform {
             position: glam::Vec3::from_array(translation),
             scale: glam::Vec3::from_array(scale),
-            rotation: glam::quat(rotation[3], rotation[0], rotation[1],rotation[2]),
+            rotation: glam::Quat::from_array(rotation),
         }
     }
 }
@@ -444,7 +445,7 @@ impl Default for Node {
                 scale: glam::vec3(1.0, 1.0, 1.0),
                 rotation: glam::Quat::IDENTITY,
             },
-            dirty: false,
+            dirty: true,
         }
     }
 }
@@ -457,13 +458,14 @@ impl Node {
         mesh_cache: &MeshCache,
         tex_cache: &TextureCache,
     ) {
-        if self.dirty {
-            self.refresh_transform(top_matrix);
-        }
+        // if self.dirty {
+        //     self.refresh_transform(top_matrix);
+        // }
 
         if let Some(id) = self.meshes {
             let mesh = mesh_cache.get_loaded_mesh_unchecked(id);
-
+            let node_transform = top_matrix.mul_mat4(&self.world_transform);
+            
             for surface in &mesh.meta.surfaces {
                 if let Some(id) = surface.material_index {
                     let material = tex_cache.get_loaded_material_unchecked(id);
@@ -473,18 +475,16 @@ impl Node {
                         first_index: surface.start_index,
                         index_buffer: mesh.buffer.index_buffer.buffer,
                         material: material_ptr,
-                        transform: self.world_transform,
+                        transform: node_transform,
                         vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
                     };
 
                     match material.pipeline {
-                        VkPipelineType::PbrMetRoughOpaque => {
-                            ctx.opaque_surfaces.push(ro)
+                        VkPipelineType::PbrMetRoughOpaque => ctx.opaque_surfaces.push(ro),
+                        VkPipelineType::PbrMetRoughAlpha => ctx.transparent_surfaces.push(ro),
+                        VkPipelineType::Mesh => {
+                            panic!("Wrong pipeline")
                         }
-                        VkPipelineType::PbrMetRoughAlpha => {
-                            ctx.transparent_surfaces.push(ro)
-                        }
-                        VkPipelineType::Mesh => {panic!("Wrong pipeline")}
                     }
                 }
             }
@@ -493,7 +493,7 @@ impl Node {
         for child in &self.children {
             child
                 .borrow_mut()
-                .draw(top_matrix, ctx, mesh_cache, tex_cache);
+                .draw(&self.world_transform, ctx, mesh_cache, tex_cache);
         }
     }
 

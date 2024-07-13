@@ -1,28 +1,22 @@
+use glam::{vec3, Mat4, Quat, Vec3, Vec4};
 use input::{KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
-use glam::vec3;
-use gltf::accessor::Dimensions::Mat4;
+
 use winit::event::Modifiers;
 use winit::keyboard::KeyCode;
 
-
 pub struct Camera {
-    position: glam::Vec3,
-    view_matrix: glam::Mat4,
-    orientation: glam::Quat,
-    delta_rotation: glam::Quat,
+    position: Vec3,
+    orientation: Quat,
     pitch: f32,
     yaw: f32,
 }
 
-
 impl Default for Camera {
     fn default() -> Self {
-        Self{
-            position: glam::vec3(0.0, 0.0, 5.0),
-            view_matrix: Default::default(),
+        Self {
+            position: glam::vec3(0.0, 0.0, 1.0),
             orientation: Default::default(),
-            delta_rotation: Default::default(),
             pitch: 0.0,
             yaw: 0.0,
         }
@@ -30,39 +24,41 @@ impl Default for Camera {
 }
 
 impl Camera {
-    pub fn update_rotation(&mut self, delta_x: f64, delta_y: f64) {
-        
-        self.yaw += delta_x as f32;
-        self.pitch += delta_y as f32;
+    pub fn new(position: Vec3) -> Self {
+        Self {
+            position,
+            ..Default::default()
+        }
+    }
 
-        // Clamp the pitch to avoid flipping
-        self.pitch = self.pitch.clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+    pub fn get_view_matrix(&self) -> Mat4 {
+        let translation = Mat4::from_translation(self.position);
+        let rotation = Mat4::from_quat(self.orientation);
+        (translation * rotation).inverse()
+    }
 
-        // Create quaternions for the yaw and pitch
-        let yaw_quat = glam::Quat::from_rotation_y(self.yaw);
-        let pitch_quat = glam::Quat::from_rotation_x(self.pitch);
+    pub fn update_rotation(&mut self, delta_x: f32, delta_y: f32) {
+        self.yaw += delta_x;
+        self.pitch += delta_y;
 
-        // Update orientation
+        self.pitch = self.pitch.clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
+
+        let yaw_quat = Quat::from_rotation_y(self.yaw);
+        let pitch_quat = Quat::from_rotation_x(self.pitch);
+
         self.orientation = yaw_quat * pitch_quat;
-
-
-        // Update the view matrix
-        self.update_view_matrix();
     }
 
-    pub fn update_position(&mut self, m_vec: glam::Vec3) {
-        let transformed_vec = self.orientation * m_vec;
-        self.position += transformed_vec;
-        self.update_view_matrix();
-    }
+    pub fn update_position(&mut self, direction: Vec3, amount: f32) {
+        let camera_rotation = Mat4::from_quat(self.orientation);
+        let velocity = Vec3::new(direction.x, 0.0, direction.z) * amount; // Assuming no vertical movement
+        let transformed_velocity = camera_rotation * Vec4::new(velocity.x, velocity.y, velocity.z, 0.0);
 
-    pub fn get_view_matrix(&self) -> glam::Mat4 {
-        self.view_matrix
-    }
-
-    fn update_view_matrix(&mut self) {
-        let rotation_matrix = glam::Mat4::from_quat(self.orientation.conjugate());
-        self.view_matrix = rotation_matrix * glam::Mat4::from_translation(-self.position);
+        self.position += Vec3::new(transformed_velocity.x, transformed_velocity.y, transformed_velocity.z);
+        println!("Updating position: {:?}", self.position)
     }
 }
 
@@ -108,35 +104,35 @@ impl FPSController {
     }
 
     pub fn update(&mut self, delta: u128) {
-
         let rot_x = self.m_delta.0 * self.m_sensitivity;
         let rot_y = self.m_delta.1 * self.m_sensitivity;
 
-        // Movement
-        let amount = (delta as f64 * self.move_speed as f64) as f32;
-        self.move_vec = glam::Vec3::ZERO;
+        // Update rotation
+        self.camera.update_rotation(-rot_x as f32, -rot_y as f32);
 
-        if self.input_actions[0] {
-            self.move_vec.z -= amount;
+        // Calculate movement direction and amount
+        let amount = (delta as f64 * self.move_speed as f64 / 1000.0) as f32; // Assuming delta is in milliseconds
+        self.move_vec = Vec3::ZERO;
+
+        if self.input_actions[InputAction::MoveUp as usize] {
+            self.move_vec.z -= 1.0;
         }
-        if self.input_actions[1] {
-            self.move_vec.z += amount;
+        if self.input_actions[InputAction::MoveDown as usize] {
+            self.move_vec.z += 1.0;
         }
-        if self.input_actions[2] {
-            self.move_vec.x -= amount;
+        if self.input_actions[InputAction::MoveLeft as usize] {
+            self.move_vec.x -= 1.0;
         }
-        if self.input_actions[3] {
-            self.move_vec.x += amount;
+        if self.input_actions[InputAction::MoveRight as usize] {
+            self.move_vec.x += 1.0;
         }
 
-        self.camera.update_rotation(-rot_x, -rot_y);
-
-        if self.move_vec.length() > 0.0 {
-            self.move_vec = self.move_vec.normalize() * amount;
+        if self.move_vec.length_squared() > 0.0 {
+            self.move_vec = self.move_vec.normalize();
         }
-        
-        self.camera.update_position(self.move_vec);
 
+        // Update position
+        self.camera.update_position(self.move_vec, amount);
     }
 }
 

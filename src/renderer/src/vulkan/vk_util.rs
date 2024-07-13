@@ -4,10 +4,7 @@ use std::ffi::CStr;
 use crate::data::gpu_data::VkGpuMeshBuffers;
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{
-    AccessFlags2, ClearValue, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2,
-    RenderingInfo,
-};
+use ash::vk::{AccessFlags2, ClearValue, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2, RenderingInfo};
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::align_of;
 use std::rc::Rc;
@@ -206,7 +203,7 @@ pub fn attachment_info<'a>(
         .store_op(vk::AttachmentStoreOp::STORE);
 
     if let Some(clear) = clear {
-        info = info.clear_value(clear);
+         info = info.clear_value(clear);
     };
     info
 }
@@ -245,9 +242,7 @@ pub fn depth_attachment_info<'a>(
         .store_op(vk::AttachmentStoreOp::STORE)
         .clear_value(ClearValue::default());
 
-    unsafe {
-        render_info.clear_value.depth_stencil.depth = 0.0;
-    }
+    unsafe { render_info.clear_value.depth_stencil.depth = 0.0; }
     render_info
 }
 
@@ -432,8 +427,7 @@ pub fn allocate_and_write_buffer(
     unsafe {
         let data_ptr = allocator
             .map_memory(&mut buffer.allocation)
-            .map_err(|err| format!("Failed to map memory: {:?}", err))?
-            as *mut u8;
+            .map_err(|err| format!("Failed to map memory: {:?}", err))?;
 
         std::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr, data.len());
         allocator.unmap_memory(&mut buffer.allocation);

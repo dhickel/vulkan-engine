@@ -110,7 +110,7 @@ pub fn parse_gltf_to_raw(
             let count = primitive.indices().unwrap().count();
 
             let material = primitive.material();
-         
+
             // INDICES
             match reader
                 .read_indices()
@@ -128,7 +128,7 @@ pub fn parse_gltf_to_raw(
             }
 
             // VERTICES
-            
+
             match reader
                 .read_positions()
                 .ok_or_else(|| "No Vertices found".to_string())?
@@ -146,16 +146,17 @@ pub fn parse_gltf_to_raw(
                     }
                 }
                 ReadPositions::Sparse(pos_iter) => {
-                    for pos in pos_iter {
-                        let vert = Vertex {
-                            position: glam::Vec3::from_array(pos),
-                            normal: glam::vec3(1.0, 0.0, 0.0),
-                            color: glam::Vec4::ONE,
-                            uv_x: 0.0,
-                            uv_y: 0.0
-                        };
-                        tmp_vertices.push(vert);
-                    }
+                    panic!("Sparse not implemented");
+                    // for pos in pos_iter {
+                    //     let vert = Vertex {
+                    //         position: glam::Vec3::from_array(pos),
+                    //         normal: glam::vec3(1.0, 0.0, 0.0),
+                    //         color: glam::Vec4::ONE,
+                    //         uv_x: 0.0,
+                    //         uv_y: 0.0
+                    //     };
+                    //     tmp_vertices.push(vert);
+                    // }
                 }
             };
 
@@ -168,9 +169,10 @@ pub fn parse_gltf_to_raw(
                         }
                     }
                     ReadNormals::Sparse(norm_iter) => {
-                        for (idx, norm) in norm_iter.enumerate() {
-                            tmp_vertices[start_index + idx].normal = glam::Vec3::from_array(norm);
-                        }
+                        panic!("Sparse not implemented");
+                        // for (idx, norm) in norm_iter.enumerate() {
+                        //     tmp_vertices[start_index + idx].normal = glam::Vec3::from_array(norm);
+                        // }
                     }
                 }
             }
@@ -287,7 +289,11 @@ pub fn parse_gltf_to_raw(
     let mut mapped_materials = HashMap::<u32, u32>::with_capacity(parsed_materials.len());
 
     for material in parsed_materials {
-        let name = material.name().or(Some("Unnamed")).unwrap().to_string();
+        let name = material.name().or({
+            unnamed_mat_index += 1;
+            Some(format!("unnamed_material_{}", unnamed_mat_index -1).as_str())
+        }
+        ).unwrap().to_string();
         
         let (base_color_tex_id, base_color_factor) =
             if let Some(tex) = material.pbr_metallic_roughness().base_color_texture() {
@@ -449,7 +455,7 @@ pub fn parse_gltf_to_raw(
         mapped_materials.insert(material.index().unwrap() as u32, mat_id);
     }
 
-    // MAP EXISTING GLTF MESH & MATERIAL INDEX TO CACHE INDICES
+    // MAP EXISTING GLTF MESH & MATERIAL INDICES TO CACHE INDICES, MAP MATERIALS TO SURFACES
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(parsed_meshes.len());
 
@@ -458,7 +464,7 @@ pub fn parse_gltf_to_raw(
             if let Some(mat_index) = surface.material_index {
                 if let Some(cache_index) = mapped_materials.get(&mat_index) {
                     surface.material_index = Some(*cache_index);
-                }
+                } 
             }
         }
 
@@ -484,6 +490,17 @@ pub fn parse_gltf_to_raw(
         let (translation, rotation, scale) = node.transform().decomposed();
 
         let transform = Transform::new_vulkan_adjusted(translation, rotation, scale);
+
+        let og_matrix = {
+            let tl = glam::Vec3::new(translation[0], translation[1], translation[2]);
+            let rot = glam::Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+            let sc = glam::Vec3::new(scale[0], scale[1], scale[2]);
+
+            let tm = glam::Mat4::from_translation(tl);
+            let rm = glam::Mat4::from_quat(rot);
+            let sm = glam::Mat4::from_scale(sc);
+            tm * rm * sm
+        };
         
         let children: Vec<usize> = node
             .children()
@@ -500,6 +517,7 @@ pub fn parse_gltf_to_raw(
 
         let node_data = NodeMeta {
             name,
+            og_matrix,
             mesh_index: mapped_mesh_index,
             local_transform: transform,
             children: children.into_iter().map(|idx| idx as u32).collect(),
@@ -561,7 +579,7 @@ fn recur_children(
                 parent: Some(Rc::downgrade(parent)),
                 children: vec![],
                 meshes: child_meta.mesh_index,
-                world_transform: Default::default(),
+                world_transform: child_meta.og_matrix,
                 local_transform: child_meta.local_transform,
                 dirty: true,
             }));

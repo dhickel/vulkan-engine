@@ -76,10 +76,10 @@ pub fn run() {
     } else {
         panic!("Failed to detect monitor")
     };
-    
+
 
     let camera = camera::Camera::default();
-    let fps_controller = FPSController::new(1, camera, 0.01, 0.01);
+    let fps_controller = FPSController::new(1, camera, 0.01, 2.0);
 
     let window_state = VkWindowState::new(window, size, max_extent, fps_controller);
     input_manager.register_key_listener(window_state.controller.clone());

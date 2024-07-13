@@ -67,6 +67,9 @@ impl<'a> PipelineBuilder<'a> {
             .render_info
             .color_attachment_formats(&self.color_attachment_format);
 
+        println!("Render Info: {:?}", render_info);
+
+
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)
             .vertex_input_state(&vertex_input_info)
@@ -80,7 +83,7 @@ impl<'a> PipelineBuilder<'a> {
             .dynamic_state(&dynamic_info)
             .push_next(&mut render_info)];
 
-        
+
 
         unsafe {
             Ok(device
@@ -236,8 +239,8 @@ impl<'a> PipelineBuilder<'a> {
             .depth_compare_op(compare_op)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false)
-            // .front(vk::StencilOpState::default())
-            // .back(vk::StencilOpState::default()) // maybe skip these
+            .front(vk::StencilOpState::default())
+            .back(vk::StencilOpState::default()) // maybe skip these
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
         self
@@ -257,7 +260,7 @@ pub fn init_pipeline_cache(
     let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
     let (pbr_opaque2, pbr_alpha2) =
         init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
-    
+
     let mesh = init_mesh_pipeline(device, desc_layout_cache);
     let mesh2 = init_mesh_pipeline(device, desc_layout_cache);
 
@@ -272,7 +275,7 @@ pub fn init_pipeline_cache(
             (VkPipelineType::PbrMetRoughAlpha, pbr_alpha2),
             (VkPipelineType::Mesh, mesh2),
         ],
-        
+
     ])
     .unwrap()
 }
@@ -314,7 +317,7 @@ fn init_met_rough_pipelines(
         .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
         .set_depth_format(vk::Format::D32_SFLOAT)
         .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_cull_mode(vk::CullModeFlags::BACK, vk::FrontFace::COUNTER_CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
         .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
@@ -338,9 +341,9 @@ pub fn init_mesh_pipeline(
     device: &ash::Device,
     desc_cache: &VkDescLayoutCache
 ) -> VkPipeline {
-    
+
     let image_desc = desc_cache.get(VkDescType::Mesh);
-    
+
     let vert_shader = vk_util::load_shader_module(
         device,
         "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
