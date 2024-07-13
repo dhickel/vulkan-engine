@@ -78,7 +78,7 @@ pub struct VkRender {
     pub resize_requested: bool,
 }
 
-pub fn init_caches(device: &ash::Device) -> DataCache {
+pub fn init_caches(device: &ash::Device, color_format: vk::Format, depth_format: vk::Format) -> DataCache {
     let shader_paths = vec![
         (
             CoreShaderType::MetRoughFrag,
@@ -94,7 +94,7 @@ pub fn init_caches(device: &ash::Device) -> DataCache {
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
 
     let pipeline_cache =
-        vk_pipeline::init_pipeline_cache(device, &desc_layout_cache, &shader_cache);
+        vk_pipeline::init_pipeline_cache(device, &desc_layout_cache, &shader_cache, color_format, depth_format);
     let texture_cache = TextureCache::new(device);
     let mesh_cache = MeshCache::default();
 
@@ -509,7 +509,7 @@ impl VkRender {
 
         let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
 
-        let data_cache = init_caches(&device);
+        let data_cache = init_caches(&device, draw_format, depth_format);
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
         let mut render = VkRender {
@@ -539,7 +539,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/structure.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/ocube.glb",
             texture_cache,
             mesh_cache,
         )
@@ -726,6 +726,7 @@ impl VkRender {
 
 
             self.draw_geometry();
+            
 
             // Transition draw image and present image for copy compatability
 
@@ -914,9 +915,9 @@ impl VkRender {
 
             let viewport = [vk::Viewport::default()
                 .x(0.0)
-                .y(0.0)
+                .y(extent.height as f32)
                 .width(extent.width as f32)
-                .height(extent.height as f32)
+                .height(-(extent.height as f32))
                 .min_depth(0.0)
                 .max_depth(1.0)];
 
@@ -968,6 +969,8 @@ impl VkRender {
                 let material = &(*obj.material);
 
 
+                self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
+                self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
                 // This is a static descriptor set for the material the is allocated once
                 // internally to the cache, only reallocated if a change to the material
                 // occurs (Currently doesn't happen)
@@ -1326,7 +1329,7 @@ impl VkRender {
             .get_camera()
             .get_view_matrix();
 
-        let fovy = 70f32.to_radians();
+        let fovy = 70_f32.to_radians();
         let aspect_ratio = self.window_state.curr_extent.width as f32
             / self.window_state.curr_extent.height as f32;
       
@@ -1334,7 +1337,7 @@ impl VkRender {
         let far = 10_000.0;
 
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
-        proj.y_axis.y *= -1.0; // Flip the Y-axis
+       // proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         
         

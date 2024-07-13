@@ -117,13 +117,13 @@ pub fn parse_gltf_to_raw(
                 .ok_or_else(|| "No Indices found".to_string())?
             {
                 ReadIndices::U8(val) => {
-                    tmp_indices.extend(val.map(|idx| idx as u32 + start_index as u32));
+                    tmp_indices.extend(val.map(|idx|  start_index as u32 + idx as u32));
                 }
                 ReadIndices::U16(val) => {
-                    tmp_indices.extend(val.map(|idx| idx as u32 + start_index as u32));
+                    tmp_indices.extend(val.map(|idx|  start_index as u32 + idx as u32));
                 }
                 ReadIndices::U32(val) => {
-                    tmp_indices.extend(val.map(|idx| idx + start_index as u32));
+                    tmp_indices.extend(val.map(|idx|  start_index as u32 + idx as u32));
                 }
             }
 
@@ -277,6 +277,7 @@ pub fn parse_gltf_to_raw(
             })
         }
 
+        
         parsed_meshes.push(MeshMeta {
             name,
             indices: tmp_indices,
@@ -473,7 +474,7 @@ pub fn parse_gltf_to_raw(
     }
 
     // NODES, INDICES & TRANSFORMS
-    let mut root_indices: Vec<Option<usize>> = gltf_data.nodes().map(|n| Some(n.index())).collect();
+    let mut top_node_indices: Vec<Option<usize>> = gltf_data.nodes().map(|n| Some(n.index())).collect();
     let mut parsed_nodes = Vec::<NodeMeta>::with_capacity(gltf_data.nodes().count());
 
     let mut unnamed_node_idx = 0;
@@ -506,7 +507,7 @@ pub fn parse_gltf_to_raw(
             .children()
             .map(|c| {
                 let index = c.index();
-                root_indices[index] = None;
+                top_node_indices[index] = None;
                 index
             })
             .collect();
@@ -532,7 +533,7 @@ pub fn parse_gltf_to_raw(
 
     let root_node = Rc::new(RefCell::new(root_node));
 
-    let root_children = root_indices
+    let root_children = top_node_indices
         .iter()
         .flatten()
         .map(|&node_index| {
@@ -542,7 +543,7 @@ pub fn parse_gltf_to_raw(
                 parent: Some(Rc::downgrade(&root_node)),
                 children: vec![],
                 meshes: parent_node.mesh_index,
-                world_transform: Default::default(),
+                world_transform: parent_node.og_matrix,
                 local_transform: parent_node.local_transform,
                 dirty: true,
             }));

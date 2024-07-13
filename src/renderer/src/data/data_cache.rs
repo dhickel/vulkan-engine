@@ -157,7 +157,7 @@ impl TextureCache {
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
-            //  PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+              //PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
@@ -185,6 +185,7 @@ impl TextureCache {
     pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
         let index = self.cached_textures.len();
 
+        // TODO roughness textures can actually just be R8 UNORM to save space and bandwidth
         if data.format != vk::Format::R8G8B8A8_UNORM {
             let converted =
                 ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, data.bytes);
@@ -435,7 +436,7 @@ impl TextureCache {
             },
         ];
 
-        println!("Allocated descripots: {:?}", descriptors);
+       
 
         VkLoadedMaterial {
             meta,
@@ -506,11 +507,9 @@ impl TextureCache {
         F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
     {
         for x in 0..self.cached_textures.len() {
-            println!("Uploading texture: {:?}", x);
             self.allocate_texture(&upload_fn, x as u32);
         }
-
-        println!("Writing materials");
+        
         for x in 0..self.cached_materials.len() {
             self.allocate_material(device, allocator.clone(), desc_layout_cache, x as u32);
         }

@@ -235,15 +235,19 @@ pub fn depth_attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
 ) -> vk::RenderingAttachmentInfo<'a> {
-    let mut render_info = vk::RenderingAttachmentInfo::default()
+    let clear_value = vk::ClearValue {
+        depth_stencil: vk::ClearDepthStencilValue {
+            depth: 0.0,
+            stencil: 0,
+        },
+    };
+
+    vk::RenderingAttachmentInfo::default()
         .image_view(view)
         .image_layout(layout)
         .load_op(vk::AttachmentLoadOp::CLEAR)
         .store_op(vk::AttachmentStoreOp::STORE)
-        .clear_value(ClearValue::default());
-
-    unsafe { render_info.clear_value.depth_stencil.depth = 0.0; }
-    render_info
+        .clear_value(clear_value)
 }
 
 pub fn pipeline_shader_stage_create_info(

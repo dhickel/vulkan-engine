@@ -765,7 +765,7 @@ pub fn create_swapchain(
     let mut sc_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface_info.surface)
         .min_image_count(image_count)
-        .image_color_space(surface_format.color_space)
+        .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
         .image_format(surface_format.format)
         .image_extent(extent)
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
@@ -839,7 +839,7 @@ pub fn allocate_draw_images(
 
     let mut usage_flags = vk::ImageUsageFlags::empty();
     usage_flags |= vk::ImageUsageFlags::TRANSFER_SRC;
-    usage_flags |= vk::ImageUsageFlags::TRANSFER_DST; 
+   // usage_flags |= vk::ImageUsageFlags::TRANSFER_DST; 
     usage_flags |= vk::ImageUsageFlags::STORAGE;
     usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
 
@@ -1082,55 +1082,6 @@ pub fn select_sc_extent(
     }
 }
 
-// pub fn create_command_pools(
-//     device: &LogicalDevice,
-//     pool_count: u32,
-//     buffer_count: u32,
-// ) -> Result<Vec<VkCommandPool>, String> {
-//     log::info!("Creating command pools");
-//
-//     let devices_queues = &device.queues;
-//     let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<QueueType>, vk::CommandPool)>::new();
-//
-//     for &t in QueueType::iter() {
-//         if devices_queues.has_queue_type(t) {
-//             let queue = devices_queues.get_queue(t);
-//             let index = devices_queues.get_queue_index(t);
-//             let existing = mapped_queues.iter_mut().find(|q| q.1 == queue);
-//             if let Some(existing) = existing {
-//                 existing.2.push(t);
-//             } else {
-//                 let command_pool_info = vk::CommandPoolCreateInfo::default()
-//                     .queue_family_index(index)
-//                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-//
-//                 let pool = unsafe {
-//                     device
-//                         .device
-//                         .create_command_pool(&command_pool_info, None)
-//                         .map_err(|err| format!("Error creating command pool: {:?}", err))?
-//                 };
-//
-//                 mapped_queues.push((index, queue, vec![t], pool));
-//             }
-//         }
-//     }
-//
-//     let pool_vec: Vec<VkCommandPool> = mapped_queues
-//         .iter()
-//         .map(|e| VkCommandPool {
-//             queue_index: e.0,
-//             queue: e.1,
-//             queue_type: e.2.to_vec(),
-//             pool: e.3,
-//             buffers: create_command_buffers(device, &e.3, vk::CommandBufferLevel::PRIMARY, 2)
-//                 .unwrap(),
-//         })
-//         .collect();
-//
-//     log::info!("Command pools created");
-//     Ok(pool_vec)
-// }
 
 pub fn create_command_pools(
     device: &ash::Device,

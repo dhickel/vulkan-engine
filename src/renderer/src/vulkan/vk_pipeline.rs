@@ -67,9 +67,6 @@ impl<'a> PipelineBuilder<'a> {
             .render_info
             .color_attachment_formats(&self.color_attachment_format);
 
-        println!("Render Info: {:?}", render_info);
-
-
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)
             .vertex_input_state(&vertex_input_info)
@@ -82,8 +79,6 @@ impl<'a> PipelineBuilder<'a> {
             .layout(self.pipeline_layout)
             .dynamic_state(&dynamic_info)
             .push_next(&mut render_info)];
-
-
 
         unsafe {
             Ok(device
@@ -136,7 +131,8 @@ impl<'a> PipelineBuilder<'a> {
         cull_mode: vk::CullModeFlags,
         front_face: vk::FrontFace,
     ) -> Self {
-        self.rasterizer = self.rasterizer.cull_mode(cull_mode).front_face(front_face);
+        self.rasterizer = self.rasterizer.cull_mode(cull_mode);
+        self.rasterizer = self.rasterizer.front_face(front_face);
         self
     }
 
@@ -224,8 +220,8 @@ impl<'a> PipelineBuilder<'a> {
             .depth_compare_op(vk::CompareOp::NEVER)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false)
-            .front(vk::StencilOpState::default())
-            .back(vk::StencilOpState::default()) // maybe skip these
+            // .front(vk::StencilOpState::default())
+            // .back(vk::StencilOpState::default()) // maybe skip these
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
         self
@@ -239,8 +235,8 @@ impl<'a> PipelineBuilder<'a> {
             .depth_compare_op(compare_op)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false)
-            .front(vk::StencilOpState::default())
-            .back(vk::StencilOpState::default()) // maybe skip these
+            // .front(vk::StencilOpState::default())
+            // .back(vk::StencilOpState::default()) // maybe skip these
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
         self
@@ -256,10 +252,23 @@ pub fn init_pipeline_cache(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &ShaderCache,
+    color_format: vk::Format,
+    depth_format: vk::Format,
 ) -> VkPipelineCache {
-    let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
-    let (pbr_opaque2, pbr_alpha2) =
-        init_met_rough_pipelines(device, desc_layout_cache, shader_cache);
+    let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(
+        device,
+        desc_layout_cache,
+        shader_cache,
+        color_format,
+        depth_format,
+    );
+    let (pbr_opaque2, pbr_alpha2) = init_met_rough_pipelines(
+        device,
+        desc_layout_cache,
+        shader_cache,
+        color_format,
+        depth_format,
+    );
 
     let mesh = init_mesh_pipeline(device, desc_layout_cache);
     let mesh2 = init_mesh_pipeline(device, desc_layout_cache);
@@ -275,7 +284,6 @@ pub fn init_pipeline_cache(
             (VkPipelineType::PbrMetRoughAlpha, pbr_alpha2),
             (VkPipelineType::Mesh, mesh2),
         ],
-
     ])
     .unwrap()
 }
@@ -284,6 +292,8 @@ fn init_met_rough_pipelines(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &ShaderCache,
+    color_format: vk::Format,
+    depth_format: vk::Format,
 ) -> (VkPipeline, VkPipeline) {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
 
@@ -314,10 +324,10 @@ fn init_met_rough_pipelines(
     let mut pipeline_builder = PipelineBuilder::default()
         .set_shaders(vert_shader, &entry, frag_shader, &entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
-        .set_depth_format(vk::Format::D32_SFLOAT)
+        .set_color_attachment_format(color_format)
+        .set_depth_format(depth_format)
         .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::BACK, vk::FrontFace::COUNTER_CLOCKWISE)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::COUNTER_CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
         .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
@@ -337,24 +347,20 @@ fn init_met_rough_pipelines(
     )
 }
 
-pub fn init_mesh_pipeline(
-    device: &ash::Device,
-    desc_cache: &VkDescLayoutCache
-) -> VkPipeline {
-
+pub fn init_mesh_pipeline(device: &ash::Device, desc_cache: &VkDescLayoutCache) -> VkPipeline {
     let image_desc = desc_cache.get(VkDescType::Mesh);
 
     let vert_shader = vk_util::load_shader_module(
         device,
         "/home/mindspice/code/rust/engine/src/renderer/src/shaders/colored_triangle.vert.spv",
     )
-        .expect("Error loading shader");
+    .expect("Error loading shader");
 
     let frag_shader = vk_util::load_shader_module(
         device,
         "/home/mindspice/code/rust/engine/src/renderer/src/shaders/tex_image.frag.spv",
     )
-        .expect("Error loading shader");
+    .expect("Error loading shader");
 
     let buffer_range = [vk::PushConstantRange::default()
         .offset(0)
@@ -366,11 +372,7 @@ pub fn init_mesh_pipeline(
         .push_constant_ranges(&buffer_range)
         .set_layouts(&binding);
 
-    let pipeline_layout = unsafe {
-        device
-            .create_pipeline_layout(&pipeline_info, None)
-            .unwrap()
-    };
+    let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_info, None).unwrap() };
 
     println!("Created layout: {:?}", pipeline_layout);
 
@@ -381,7 +383,7 @@ pub fn init_mesh_pipeline(
         .set_shaders(vert_shader, &entry, frag_shader, &entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::COUNTER_CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
         .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
@@ -397,4 +399,3 @@ pub fn init_mesh_pipeline(
 
     VkPipeline::new(pipeline, pipeline_layout)
 }
-

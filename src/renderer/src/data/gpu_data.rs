@@ -262,128 +262,6 @@ pub struct VkMetRoughUniforms {
     pub extra: [Vec4; 14],
 }
 
-//////////////////////
-// VULKAN PIPELINES //
-//////////////////////
-
-// pub struct VkGpuMetRoughPipeline<'a> {
-//     pub opaque_pipeline: VkPipeline,
-//     pub transparent_pipeline: VkPipeline,
-//     pub descriptor_layout: [vk::DescriptorSetLayout; 1],
-//     pub writer: DescriptorWriter<'a>,
-// }
-//
-// impl VkGpuMetRoughPipeline<'_> {
-//     pub fn build_pipelines(
-//         device: &ash::Device,
-//         descriptors: &VkDescLayoutMap,
-//         shader_cache: &ShaderCache,
-//     ) -> (VkPipeline, VkPipeline, vk::DescriptorSetLayout) {
-//         let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
-//
-//         let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
-//
-//         let matrix_range = [vk::PushConstantRange::default()
-//             .offset(0)
-//             .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
-//             .stage_flags(vk::ShaderStageFlags::VERTEX)];
-//
-//         let material_layout =
-//
-//         let layouts = [descriptors.get(VkDescType::GpuScene), material_layout];
-//
-//         let mesh_layout_info = vk_util::pipeline_layout_create_info()
-//             .set_layouts(&layouts)
-//             .push_constant_ranges(&matrix_range);
-//
-//         let layout = unsafe {
-//             device
-//                 .create_pipeline_layout(&mesh_layout_info, None)
-//                 .unwrap()
-//         };
-//
-//         let entry = CString::new("main").unwrap();
-//
-//         let mut pipeline_builder = PipelineBuilder::default()
-//             .set_shaders(vert_shader, &entry, frag_shader, &entry)
-//             .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-//             .set_color_attachment_format(vk::Format::B8G8R8A8_UNORM)
-//             .set_polygon_mode(vk::PolygonMode::FILL)
-//             .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-//             .set_multisample_none()
-//             .disable_blending()
-//             .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
-//             .set_pipeline_layout(layout);
-//
-//         let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
-//
-//         let mut pipeline_builder = pipeline_builder
-//             .enable_blending_additive()
-//             .enable_depth_test(false, vk::CompareOp::GREATER_OR_EQUAL);
-//
-//         let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
-//
-//         (
-//             VkPipeline::new(opaque_pipeline, layout),
-//             VkPipeline::new(transparent_pipeline, layout),
-//             material_layout,
-//         )
-//     }
-//
-//     pub fn clear_resources(&mut self, device: &ash::Device) {
-//         todo!()
-//     }
-//
-//     pub fn write_material(
-//         &mut self,
-//         device: &ash::Device,
-//         material_id: u32,
-//         texture_cache: &TextureCache,
-//         descriptor_allocator: &mut VkDynamicDescriptorAllocator,
-//     )  {
-//
-//         let material = texture_cache.get_loaded_material_unchecked(material_id);
-//         let color_tex = texture_cache.get_loaded_texture_unchecked(material.meta.base_color_tex_id);
-//         let metallic_tex =
-//             texture_cache.get_loaded_texture_unchecked(material.meta.metallic_roughness_tex_id);
-//
-//         let pipeline = match material.meta.alpha_mode {
-//             AlphaMode::Opaque => self.opaque_pipeline
-//             AlphaMode::Mask | AlphaMode::Blend => self.transparent_pipeline
-//         };
-//
-//         let descriptor = descriptor_allocator
-//             .allocate(device, &self.descriptor_layout)
-//             .unwrap();
-//
-//         self.writer.write_buffer(
-//             0,
-//             material.uniform_buffer.buffer,
-//             std::mem::size_of::<MetRoughShaderConsts>(),
-//             material.buffer_offset as usize,
-//             vk::DescriptorType::UNIFORM_BUFFER,
-//         );
-//
-//         self.writer.write_image(
-//             1,
-//             color_tex.alloc.image_view,
-//             texture_cache.get_sampler(color_tex.meta.sampler),
-//             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-//             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-//         );
-//
-//         self.writer.write_image(
-//             2,
-//             metallic_tex.alloc.image_view,
-//             texture_cache.get_sampler(metallic_tex.meta.sampler),
-//             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-//             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-//         );
-//
-//         self.writer.update_set(device, descriptor);
-//     }
-// }
-
 /////////////////////////////
 // SCENE GRAPH & RENDERING //
 /////////////////////////////
@@ -458,9 +336,9 @@ impl Node {
         mesh_cache: &MeshCache,
         tex_cache: &TextureCache,
     ) {
-        // if self.dirty {
-        //     self.refresh_transform(top_matrix);
-        // }
+        if self.dirty {
+            self.refresh_transform(&self.world_transform.clone());
+        }
 
         if let Some(id) = self.meshes {
             let mesh = mesh_cache.get_loaded_mesh_unchecked(id);
@@ -493,21 +371,16 @@ impl Node {
         for child in &self.children {
             child
                 .borrow_mut()
-                .draw(&self.world_transform, ctx, mesh_cache, tex_cache);
+                .draw(top_matrix, ctx, mesh_cache, tex_cache);
         }
     }
 
     pub fn refresh_transform(&mut self, parent_transform: &Mat4) {
-        // Compute new world transform based on parent's world transform if available
-
         self.world_transform = parent_transform.mul_mat4(&self.local_transform.compose());
-
-        // Update the node's world transform
         self.dirty = false;
 
         println!("set transform to: {:?}", self.world_transform);
 
-        // Pass the new world transform to the children
         for child in &self.children {
             let mut child = child.borrow_mut();
             child.refresh_transform(&self.world_transform);
