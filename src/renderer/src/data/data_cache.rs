@@ -157,7 +157,7 @@ impl TextureCache {
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
-              //PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+            //PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
@@ -436,8 +436,6 @@ impl TextureCache {
             },
         ];
 
-       
-
         VkLoadedMaterial {
             meta,
             descriptors,
@@ -509,7 +507,7 @@ impl TextureCache {
         for x in 0..self.cached_textures.len() {
             self.allocate_texture(&upload_fn, x as u32);
         }
-        
+
         for x in 0..self.cached_materials.len() {
             self.allocate_material(device, allocator.clone(), desc_layout_cache, x as u32);
         }
@@ -726,51 +724,33 @@ impl ShaderCache {
 pub enum VkPipelineType {
     PbrMetRoughOpaque,
     PbrMetRoughAlpha,
-    Mesh,
+    // Mesh,
 }
 
 //#[derive(Clone, Copy)]
 pub struct VkPipelineCache {
-    pipelines: Vec<[VkPipeline; 3]>,
+    pipelines: [VkPipeline; 2],
 }
 
 impl VkPipelineCache {
-    pub fn new(mut pipelines: Vec<Vec<(VkPipelineType, VkPipeline)>>) -> Result<Self, String> {
-        pipelines.iter_mut().for_each(|p| {
-            p.sort_by_key(|(typ, _)| *typ);
-        });
+    pub fn new(mut pipelines: Vec<(VkPipelineType, VkPipeline)>) -> Result<Self, String> {
+        pipelines.sort_by_key(|(typ, _)| *typ);
 
         // Convert sorted vectors to fixed-size arrays
-        let sorted_pipelines: Vec<[VkPipeline; 3]> = pipelines
+        let sorted_pipelines: [VkPipeline; 2] = pipelines
             .into_iter()
-            .map(|p| {
-                p.into_iter()
-                    .map(|(_, pipeline)| pipeline)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .map_err(|_| "Number of pipelines did not match number of enum keys")
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(_, pipeline)| pipeline)
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|_| "Number of pipelines did not match number of enum keys".to_string())?;
 
         Ok(Self {
             pipelines: sorted_pipelines,
         })
     }
 
-    pub fn get_pipeline(&self, index: u32, typ: VkPipelineType) -> &VkPipeline {
-        unsafe {
-            self.pipelines
-                .get_unchecked(index as usize)
-                .get_unchecked(typ as usize)
-        }
-    }
-
-    pub fn get_unchecked(&self, index: usize, typ: VkPipelineType) -> &VkPipeline {
-        unsafe {
-            self.pipelines
-                .get_unchecked(index)
-                .get_unchecked(typ as usize)
-        }
+    pub fn get_pipeline(&self, typ: VkPipelineType) -> &VkPipeline {
+        unsafe { self.pipelines.get_unchecked(typ as usize) }
     }
 }
 

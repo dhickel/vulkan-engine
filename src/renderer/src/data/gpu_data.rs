@@ -360,9 +360,9 @@ impl Node {
                     match material.pipeline {
                         VkPipelineType::PbrMetRoughOpaque => ctx.opaque_surfaces.push(ro),
                         VkPipelineType::PbrMetRoughAlpha => ctx.transparent_surfaces.push(ro),
-                        VkPipelineType::Mesh => {
-                            panic!("Wrong pipeline")
-                        }
+                        // VkPipelineType::Mesh => {
+                        //     panic!("Wrong pipeline")
+                        // }
                     }
                 }
             }

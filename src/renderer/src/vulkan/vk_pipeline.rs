@@ -262,28 +262,10 @@ pub fn init_pipeline_cache(
         color_format,
         depth_format,
     );
-    let (pbr_opaque2, pbr_alpha2) = init_met_rough_pipelines(
-        device,
-        desc_layout_cache,
-        shader_cache,
-        color_format,
-        depth_format,
-    );
-
-    let mesh = init_mesh_pipeline(device, desc_layout_cache);
-    let mesh2 = init_mesh_pipeline(device, desc_layout_cache);
-
+    
     VkPipelineCache::new(vec![
-        vec![
             (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
             (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
-            (VkPipelineType::Mesh, mesh),
-        ],
-        vec![
-            (VkPipelineType::PbrMetRoughOpaque, pbr_opaque2),
-            (VkPipelineType::PbrMetRoughAlpha, pbr_alpha2),
-            (VkPipelineType::Mesh, mesh2),
-        ],
     ])
     .unwrap()
 }
@@ -327,7 +309,7 @@ fn init_met_rough_pipelines(
         .set_color_attachment_format(color_format)
         .set_depth_format(depth_format)
         .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::COUNTER_CLOCKWISE)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
         .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
