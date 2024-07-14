@@ -145,7 +145,7 @@ pub fn run() {
                                 .window
                                 .set_cursor_grab(CursorGrabMode::Confined)
                                 .unwrap();
-                            app.window_state.window.set_cursor_visible(false);
+                            // app.window_state.window.set_cursor_visible(false);
                         }
                         WindowEvent::CursorLeft { .. } => {
                             app.window_state

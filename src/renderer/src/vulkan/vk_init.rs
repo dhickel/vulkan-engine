@@ -839,7 +839,7 @@ pub fn allocate_draw_images(
 
     let mut usage_flags = vk::ImageUsageFlags::empty();
     usage_flags |= vk::ImageUsageFlags::TRANSFER_SRC;
-   // usage_flags |= vk::ImageUsageFlags::TRANSFER_DST; 
+   // usage_flags |= vk::ImageUsageFlags::TRANSFER_DST;
     usage_flags |= vk::ImageUsageFlags::STORAGE;
     usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
 

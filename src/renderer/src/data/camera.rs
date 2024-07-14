@@ -54,8 +54,8 @@ impl Camera {
 
     pub fn update_position(&mut self, direction: Vec3, amount: f32) {
         let camera_rotation = Mat4::from_quat(self.orientation);
-        let velocity = Vec3::new(direction.x, 0.0, direction.z) * amount; // Assuming no vertical movement
-        let transformed_velocity = camera_rotation * Vec4::new(velocity.x, velocity.y, velocity.z, 0.0);
+        let velocity = Vec4::new(direction.x, 0.0, direction.z, 0.0) * amount; // Assuming no vertical movement
+        let transformed_velocity = camera_rotation * velocity;
 
         self.position += Vec3::new(transformed_velocity.x, transformed_velocity.y, transformed_velocity.z);
         println!("Updating position: {:?}", self.position)

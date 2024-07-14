@@ -539,7 +539,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/game_cubes.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
             texture_cache,
             mesh_cache,
         )
@@ -726,7 +726,7 @@ impl VkRender {
 
 
             self.draw_geometry();
-            
+
 
             // Transition draw image and present image for copy compatability
 
@@ -1333,8 +1333,11 @@ impl VkRender {
         let aspect_ratio = self.window_state.curr_extent.width as f32
             / self.window_state.curr_extent.height as f32;
       
-        let near = 0.1;
-        let far = 10_000.0;
+        
+        
+        // reversed depth
+        let far = 0.1;
+        let near = 10_000.0;
 
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
        // proj.y_axis.y *= -1.0; // Flip the Y-axis
