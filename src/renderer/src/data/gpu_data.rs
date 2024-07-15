@@ -9,7 +9,7 @@ use crate::vulkan::vk_descriptor::{
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
 use crate::vulkan::vk_types::{
-    LogicalDevice, VkBuffer, VkDescriptors, VkGpuPushConsts, VkImageAlloc, VkPipeline,
+    LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline,
 };
 use crate::vulkan::vk_util;
 use ash::vk;
@@ -31,10 +31,11 @@ use std::rc::{Rc, Weak};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vertex {
     pub position: Vec3,
-    pub uv_x: f32,
+    pub uv_x: f32, // pad with uv_x in between to optimize
     pub normal: Vec3,
     pub uv_y: f32,
     pub color: Vec4,
+    pub tangent: Vec4
 }
 
 impl Default for Vertex {
@@ -43,8 +44,10 @@ impl Default for Vertex {
             position: Default::default(),
             normal: Default::default(),
             color: Default::default(),
+            tangent: Default::default(),
             uv_x: 0.0,
             uv_y: 0.0,
+            
         }
     }
 }
@@ -145,6 +148,10 @@ impl MaterialMeta {
     pub fn has_occlusion(&self) -> bool {
         self.occlusion_map.is_some()
     }
+
+    pub fn is_ext(&self) -> bool {
+        self.normal_map.is_some() || self.occlusion_map.is_some() || self.emissive_map.is_some()
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sampler {
@@ -204,29 +211,67 @@ pub struct NodeMeta {
 /////////////////
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub struct MetRoughShaderConsts {
+pub struct MetRoughUniform {
     pub color_factors: Vec4,
     pub metal_rough_factors: Vec4,
     //padding
     pub extra: [Vec4; 14],
 }
 
-//
-// pub struct GLTFMetallicRoughness<'a> {
-//     pub opaque_pipeline: VkPipeline,
-//     pub transparent_pipeline: VkPipeline,
-//     pub descriptor_layout: [vk::DescriptorSetLayout; 1],
-//     pub writer: DescriptorWriter<'a>,
-// }
-//
-// pub struct GLTFMetallicRoughnessResources {
-//     pub color_image: VkImageAlloc,
-//     pub color_sampler: vk::Sampler,
-//     pub metal_rough_image: VkImageAlloc,
-//     pub metal_rough_sampler: vk::Sampler,
-//     pub data_buffer: vk::Buffer,
-//     pub data_buffer_offset: u32,
-// }
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct MetRoughExtUniform {
+    pub color_factors: Vec4,
+    pub metal_rough_factors: Vec4,
+    pub normal_scale: Vec4,
+    pub occlusion_strength: Vec4,
+    pub emissive_factor: Vec4,
+    //padding
+    pub extra: [Vec4; 11],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct VkGpuPushConsts {
+    pub world_matrix: [[f32; 4]; 4],
+    pub vertex_buffer_addr: vk::DeviceAddress,
+}
+
+impl VkGpuPushConsts {
+    pub fn new(world_matrix: glam::Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            world_matrix: world_matrix.to_cols_array_2d(),
+            vertex_buffer_addr,
+        }
+    }
+
+    pub fn as_byte_slice(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+        // unsafe {
+        //     let ptr = self as *const VkGpuPushConsts as *const u8;
+        //     slice::from_raw_parts(ptr, mem::size_of::<VkGpuPushConsts>())
+        // }
+    }
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone, Pod, Zeroable)]
+pub struct GPUSceneData {
+    pub view: Mat4,
+    pub projection: Mat4,
+    pub view_projection: Mat4,
+    pub ambient_color: Vec4,
+    pub sunlight_direction: Vec4,
+    pub sunlight_color: Vec4,
+}
+
+impl GPUSceneData {
+    pub fn as_byte_slice(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+}
+
+
 
 ////////////////////////////
 // VULKAN ALLOCATION DATA //
@@ -360,6 +405,7 @@ impl Node {
                     match material.pipeline {
                         VkPipelineType::PbrMetRoughOpaque => ctx.opaque_surfaces.push(ro),
                         VkPipelineType::PbrMetRoughAlpha => ctx.transparent_surfaces.push(ro),
+                        _ => {panic!("Not implemented")}
                         // VkPipelineType::Mesh => {
                         //     panic!("Wrong pipeline")
                         // }
@@ -404,36 +450,7 @@ impl Default for DrawContext {
     }
 }
 
-pub struct GPUScene {
-    pub data: GPUSceneData,
-    pub descriptor: [vk::DescriptorSetLayout; 1],
-}
 
-impl GPUScene {
-    pub fn new(descriptor: vk::DescriptorSetLayout) -> Self {
-        Self {
-            data: Default::default(),
-            descriptor: [descriptor],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Default, Copy, Clone, Pod, Zeroable)]
-pub struct GPUSceneData {
-    pub view: Mat4,
-    pub projection: Mat4,
-    pub view_projection: Mat4,
-    pub ambient_color: Vec4,
-    pub sunlight_direction: Vec4,
-    pub sunlight_color: Vec4,
-}
-
-impl GPUSceneData {
-    pub fn as_byte_slice(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-    }
-}
 
 #[repr(C)]
 #[derive(PartialEq, Debug, Copy, Clone)]

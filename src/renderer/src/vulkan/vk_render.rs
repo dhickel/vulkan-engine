@@ -3,10 +3,7 @@ use crate::data::data_cache::{
     VkPipelineType, VkShaderCache,
 };
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
-use crate::data::gpu_data::{
-    DrawContext, GPUScene, GPUSceneData, MaterialPass, MetRoughShaderConsts, Node, RenderObject,
-    Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer,
-};
+use crate::data::gpu_data::{DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, Vertex, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer};
 use crate::data::{data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
@@ -20,7 +17,7 @@ use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use std::cell::{Ref, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::rc::Rc;
@@ -48,7 +45,7 @@ impl VkDestroyable for DataCache {
         self.texture_cache.destroy(device, allocator);
         self.desc_layout_cache.destroy(device, allocator);
         self.pipeline_cache.destroy(device, allocator);
-  
+
     }
 }
 
@@ -78,6 +75,7 @@ pub struct VkRender {
     pub surface: VkSurface,
     pub swapchain: VkSwapchain,
     pub presentation: VkPresent,
+    pub supported_image_formats: HashSet<vk::Format>,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
     pub compute_data: ComputeData,
@@ -93,6 +91,7 @@ pub fn init_caches(
     device: &ash::Device,
     color_format: vk::Format,
     depth_format: vk::Format,
+    supported_formats: HashSet<vk::Format>
 ) -> DataCache {
     let shader_paths = vec![
         (
@@ -115,7 +114,7 @@ pub fn init_caches(
         color_format,
         depth_format,
     );
-    let texture_cache = TextureCache::new(device);
+    let texture_cache = TextureCache::new(device, supported_formats);
     let mesh_cache = MeshCache::default();
 
     DataCache {
@@ -264,7 +263,7 @@ impl Drop for VkRender {
             self.device
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
-            
+
 
             self.imgui.renderer.destroy();
 
@@ -275,17 +274,17 @@ impl Drop for VkRender {
 
 
             self.data_cache.destroy(&self.device, &self.allocator.lock().unwrap());
-            
+
             self.compute_data.destroy(&self.device, &self.allocator.lock().unwrap());
-            
+
             self.global_desc_allocator.destroy(&self.device, &self.allocator.lock().unwrap());
-            
-   
+
+
             self.main_deletion_queue
                 .iter_mut()
                 .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
-            
-    
+
+
             self.swapchain
                 .swapchain_loader
                 .destroy_swapchain(self.swapchain.swapchain, None);
@@ -526,9 +525,12 @@ impl VkRender {
         ];
 
         let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
+        
+        let supported_image_formats = vk_init::get_supported_image_formats(&instance, physical_device.p_device);
 
-        let data_cache = init_caches(&device, draw_format, depth_format);
+        let data_cache = init_caches(&device, draw_format, depth_format,supported_image_formats.clone());
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
+        
 
         let mut render = VkRender {
             window_state,
@@ -541,6 +543,7 @@ impl VkRender {
             device_queues,
             surface,
             swapchain,
+            supported_image_formats,
             presentation,
             immediate,
             compute_data,
@@ -557,7 +560,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/bowling.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
             texture_cache,
             mesh_cache,
         )

@@ -410,20 +410,27 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
         .unwrap();
-    
-    let mesh_desc = vk_descriptor::DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+
+
+    let pbr_met_rough_ext = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(5, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .build(
-            device,
-            vk::ShaderStageFlags::FRAGMENT,
+            &device,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
         .unwrap();
+
 
     data_cache::VkDescLayoutCache::new(vec![
         (VkDescType::DrawImage, draw_image_layout),
         (VkDescType::GpuScene, gpu_scene_desc),
         (VkDescType::PbrMetRough, pbr_met_rough),
-        (VkDescType::Mesh, mesh_desc)
+        (VkDescType::PbrMetRoughExt, pbr_met_rough_ext)
     ])
 }

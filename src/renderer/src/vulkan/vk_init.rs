@@ -6,6 +6,8 @@ use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 use std::{ffi, iter, ptr};
+use std::collections::HashSet;
+use log::info;
 use vk_mem::Alloc;
 
 use crate::vulkan::vk_types::*;
@@ -1238,6 +1240,33 @@ pub fn create_frame_sync(device: &ash::Device) -> Result<VkFrameSync, String> {
         render_semaphore,
         render_fence,
     })
+}
+
+pub fn get_supported_image_formats(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> HashSet<vk::Format> {
+    let candidate_formats = [
+        vk::Format::R8G8B8A8_UNORM,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::Format::R8G8_UNORM,
+        vk::Format::R8_UNORM,
+        vk::Format::R8G8B8_UNORM,
+        vk::Format::B8G8R8A8_UNORM,
+        vk::Format::B8G8R8A8_SRGB,
+        vk::Format::R16G16B16A16_SFLOAT,
+        vk::Format::R32G32B32A32_SFLOAT,
+        // Add any other formats you're interested in here
+    ];
+
+    let supported : HashSet<vk::Format> = candidate_formats
+        .iter()
+        .filter(|&&format| {
+            let props = unsafe { instance.get_physical_device_format_properties(physical_device, format) };
+            props.optimal_tiling_features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE)
+        })
+        .copied()
+        .collect();
+    
+    info!("Supported Texture Formats: {:?}", supported);
+    supported
 }
 
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {

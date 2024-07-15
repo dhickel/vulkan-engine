@@ -1,7 +1,7 @@
 use crate::data::data_util::PackUnorm;
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
-    AlphaMode, MaterialMeta, MeshMeta, MetRoughShaderConsts, Sampler, SurfaceMeta, TextureMeta,
+    AlphaMode, MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta,
     Vertex, VkGpuMeshBuffers,
 };
 use crate::vulkan::vk_descriptor::{
@@ -13,7 +13,7 @@ use ash::{Device, vk};
 use ash::vk::Format;
 use glam::{vec4, Vec4};
 use image::ImageBuffer;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
@@ -54,6 +54,7 @@ pub struct TextureCache {
     cached_textures: Vec<CachedTexture>,
     cached_materials: Vec<CacheMaterial>,
     image_descriptors: [VkDynamicDescriptorAllocator; 2],
+    supported_formats: HashSet<vk::Format>,
     pub linear_sampler: vk::Sampler,
     pub nearest_sampler: vk::Sampler,
 }
@@ -61,10 +62,14 @@ pub struct TextureCache {
 impl TextureCache {
     pub const DEFAULT_COLOR_TEX: u32 = 0;
     pub const DEFAULT_ROUGH_TEX: u32 = 1;
+    pub const DEFAULT_ERROR_TEX: u32 = 2;
+    pub const DEFAULT_NORMAL_TEX: u32 = 3;
+    pub const DEFAULT_OCCLUSION_TEX: u32 = 4;
+    pub const DEFAULT_EMISSIVE_TEX: u32 = 5;
     pub const DEFAULT_MAT_ROUGH_MAT: u32 = 0;
     pub const DEFAULT_ERROR_MAT: u32 = 1;
 
-    pub fn new(device: &ash::Device) -> Self {
+    pub fn new(device: &ash::Device, supported_formats: HashSet<vk::Format>) -> Self {
         let def_color = CachedTexture::UnLoaded(TextureMeta {
             bytes: vec![255, 255, 255, 255],
             width: 1,
@@ -82,6 +87,37 @@ impl TextureCache {
             mips_levels: 1,
             sampler: Sampler::Linear,
         });
+        
+        let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
+        
+        let def_occlusion = CachedTexture::UnLoaded(TextureMeta {
+            bytes: if r8_support {vec![255]} else {vec![255,255,255,255]},
+            width: 1,
+            height: 1,
+            format: if r8_support {vk::Format::R8_UNORM} else {vk::Format::R8G8B8A8_UNORM},
+            mips_levels: 1,
+            sampler: Sampler::Linear,
+        });
+
+        let def_normal = CachedTexture::UnLoaded(TextureMeta {
+            bytes: vec![128,128,128,255],
+            width: 1,
+            height: 1,
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels: 1,
+            sampler: Sampler::Nearest,
+        });
+
+        let def_emissive = CachedTexture::UnLoaded(TextureMeta {
+            bytes: vec![0,0,0,0],
+            width: 1,
+            height: 1,
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels: 1,
+            sampler: Sampler::Linear,
+        });
+        
+        
 
         let def_mat = CacheMaterial::Unloaded(MaterialMeta {
             base_color_factor: Vec4::new(1.0, 1.0, 1.0, 1.0),
@@ -138,6 +174,9 @@ impl TextureCache {
         cached_textures.push(def_color);
         cached_textures.push(def_rough);
         cached_textures.push(def_error);
+        cached_textures.push(def_normal);
+        cached_textures.push(def_occlusion);
+        cached_textures.push(def_emissive);
 
         let mut cached_materials = Vec::with_capacity(100);
         cached_materials.push(def_mat);
@@ -154,11 +193,11 @@ impl TextureCache {
 
         let linear_sampler = unsafe { device.create_sampler(&sampler, None).unwrap() };
 
+
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
-            //PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
-            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
+            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 7.0),
         ];
 
         let image_descriptors = [
@@ -169,6 +208,7 @@ impl TextureCache {
         Self {
             cached_textures,
             cached_materials,
+            supported_formats,
             linear_sampler,
             nearest_sampler,
             image_descriptors,
@@ -186,7 +226,7 @@ impl TextureCache {
         let index = self.cached_textures.len();
 
         // TODO roughness textures can actually just be R8 UNORM to save space and bandwidth
-        if data.format != vk::Format::R8G8B8A8_UNORM {
+        if !self.supported_formats.contains(&data.format) {
             let converted =
                 ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, data.bytes);
 
@@ -350,7 +390,7 @@ impl TextureCache {
         );
 
         if let CacheMaterial::Unloaded(meta) = material {
-            let shader_consts = MetRoughShaderConsts {
+            let shader_consts = MetRoughUniform {
                 color_factors: meta.base_color_factor,
                 metal_rough_factors: vec4(meta.metallic_factor, meta.roughness_factor, 0.0, 0.0),
                 extra: [Vec4::ZERO; 14],
@@ -398,7 +438,7 @@ impl TextureCache {
         writer.write_buffer(
             0,
             uniform_buffer.buffer,
-            std::mem::size_of::<MetRoughShaderConsts>(),
+            std::mem::size_of::<MetRoughUniform>(),
             buffer_offset as usize,
             vk::DescriptorType::UNIFORM_BUFFER,
         );
@@ -702,10 +742,12 @@ impl VkDestroyable for MeshCache {
 pub enum CoreShaderType {
     MetRoughVert,
     MetRoughFrag,
+    MetRoughVertExt,
+    MetRoughFragExt,
 }
 
 pub struct VkShaderCache {
-    pub core_shader_cache: [vk::ShaderModule; 2],
+    pub core_shader_cache: [vk::ShaderModule; 4],
     pub user_shader_cache: Vec<vk::ShaderModule>,
 }
 
@@ -723,7 +765,7 @@ impl VkShaderCache {
 
         compiled_shaders.sort_by_key(|(typ, path)| *typ);
 
-        let sorted_shaders: [vk::ShaderModule; 2] = compiled_shaders
+        let sorted_shaders: [vk::ShaderModule; 4] = compiled_shaders
             .into_iter()
             .map(|(_, shader)| shader)
             .collect::<Vec<_>>()
@@ -767,12 +809,14 @@ impl VkDestroyable for VkShaderCache {
 pub enum VkPipelineType {
     PbrMetRoughOpaque,
     PbrMetRoughAlpha,
+    PbrMetRoughOpaqueExt,
+    PbrMetRoughAlphaExt,
     // Mesh,
 }
 
 //#[derive(Clone, Copy)]
 pub struct VkPipelineCache {
-    pipelines: [VkPipeline; 2],
+    pipelines: [VkPipeline; 4],
 }
 
 impl VkPipelineCache {
@@ -780,7 +824,7 @@ impl VkPipelineCache {
         pipelines.sort_by_key(|(typ, _)| *typ);
 
         // Convert sorted vectors to fixed-size arrays
-        let sorted_pipelines: [VkPipeline; 2] = pipelines
+        let sorted_pipelines: [VkPipeline; 4] = pipelines
             .into_iter()
             .map(|(_, pipeline)| pipeline)
             .collect::<Vec<_>>()
@@ -813,7 +857,7 @@ pub enum VkDescType {
     DrawImage,
     GpuScene,
     PbrMetRough,
-    Mesh,
+    PbrMetRoughExt,
 }
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; 4],
@@ -834,12 +878,11 @@ impl VkDescLayoutCache {
             layouts: sorted_layouts,
         }
     }
-
+    
     pub fn get(&self, typ: VkDescType) -> vk::DescriptorSetLayout {
         self.layouts[typ as usize]
     }
 }
-
 
 impl VkDestroyable for VkDescLayoutCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {

@@ -1,5 +1,5 @@
 use crate::data::gpu_data;
-use crate::data::gpu_data::{MaterialMeta, MeshMeta, MetRoughShaderConsts, Sampler, SurfaceMeta, TextureMeta, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
+use crate::data::gpu_data::{MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
 use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
 use ash::vk;
