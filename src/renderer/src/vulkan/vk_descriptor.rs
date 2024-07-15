@@ -118,8 +118,8 @@ impl DescriptorAllocator {
         Ok(())
     }
 
-    pub fn destroy(&self, device: &LogicalDevice) {
-        unsafe { device.device.destroy_descriptor_pool(self.pool, None) }
+    pub fn destroy(&self, device: &ash::Device) {
+        unsafe { device.destroy_descriptor_pool(self.pool, None) }
     }
 
     pub fn allocate(

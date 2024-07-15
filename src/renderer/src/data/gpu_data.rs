@@ -1,5 +1,5 @@
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, ShaderCache, TextureCache, VkLoadedMaterial, VkPipelineType,
+    CoreShaderType, MeshCache, VkShaderCache, TextureCache, VkLoadedMaterial, VkPipelineType,
 };
 use crate::data::gltf_util;
 use crate::data::gltf_util::MeshAsset;
@@ -378,8 +378,6 @@ impl Node {
     pub fn refresh_transform(&mut self, parent_transform: &Mat4) {
         self.world_transform = parent_transform.mul_mat4(&self.local_transform.compose());
         self.dirty = false;
-
-        println!("set transform to: {:?}", self.world_transform);
 
         for child in &self.children {
             let mut child = child.borrow_mut();

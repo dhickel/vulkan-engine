@@ -1,5 +1,5 @@
 use crate::data::data_cache::{
-    CoreShaderType, ShaderCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+    CoreShaderType, VkShaderCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
 };
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_util};
@@ -251,7 +251,7 @@ impl<'a> PipelineBuilder<'a> {
 pub fn init_pipeline_cache(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
-    shader_cache: &ShaderCache,
+    shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
 ) -> VkPipelineCache {
@@ -273,7 +273,7 @@ pub fn init_pipeline_cache(
 fn init_met_rough_pipelines(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
-    shader_cache: &ShaderCache,
+    shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
 ) -> (VkPipeline, VkPipeline) {
@@ -312,14 +312,14 @@ fn init_met_rough_pipelines(
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::GREATER_OR_EQUAL)
+        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
     let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
 
     let mut pipeline_builder = pipeline_builder
         .enable_blending_additive()
-        .enable_depth_test(false, vk::CompareOp::GREATER_OR_EQUAL);
+        .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
 
     let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
 
@@ -355,9 +355,7 @@ pub fn init_mesh_pipeline(device: &ash::Device, desc_cache: &VkDescLayoutCache) 
         .set_layouts(&binding);
 
     let pipeline_layout = unsafe { device.create_pipeline_layout(&pipeline_info, None).unwrap() };
-
-    println!("Created layout: {:?}", pipeline_layout);
-
+    
     let entry = CString::new("main").unwrap();
 
     let pipeline = PipelineBuilder::default()

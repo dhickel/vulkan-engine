@@ -143,7 +143,6 @@ pub fn create_image(
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-    println!("Creating image with format: {:?}", image_info);
     let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
 
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
@@ -237,7 +236,7 @@ pub fn depth_attachment_info<'a>(
 ) -> vk::RenderingAttachmentInfo<'a> {
     let clear_value = vk::ClearValue {
         depth_stencil: vk::ClearDepthStencilValue {
-            depth: 0.0,
+            depth: 1.0,
             stencil: 0,
         },
     };

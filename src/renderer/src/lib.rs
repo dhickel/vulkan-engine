@@ -28,6 +28,7 @@ use std::process::exit;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
+use log::{info, log};
 use winit::dpi::Position;
 use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, DeviceEvents, EventLoop};
@@ -170,7 +171,8 @@ pub fn run() {
                         WindowEvent::ThemeChanged(_) => {}
                         WindowEvent::Occluded(_) => {}
                         WindowEvent::Resized(new_size) => {
-                            println!("Resize requested");
+                            info!("Resize requested");
+                            
                             app.resize_requested = true;
                             let new_extent = Extent2D::default()
                                 .height(new_size.height)

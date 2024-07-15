@@ -525,9 +525,7 @@ pub fn queue_indices_with_preferences(
             queue_types: vec![QueueType::Transfer],
         });
     }
-
-    println!("Selected Indices: {:?}", indices);
-
+    
     Ok(indices)
 }
 

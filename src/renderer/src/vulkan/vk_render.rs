@@ -1,6 +1,6 @@
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, ShaderCache, TextureCache, VkDescLayoutCache, VkDescType,
-    VkPipelineCache, VkPipelineType,
+    CoreShaderType, MeshCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache,
+    VkPipelineType, VkShaderCache,
 };
 use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
 use crate::data::gpu_data::{
@@ -34,11 +34,22 @@ use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 
 pub struct DataCache {
-    shader_cache: ShaderCache,
+    shader_cache: VkShaderCache,
     desc_layout_cache: VkDescLayoutCache,
     pipeline_cache: VkPipelineCache,
     mesh_cache: MeshCache,
     texture_cache: TextureCache,
+}
+
+impl VkDestroyable for DataCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.shader_cache.destroy(device, allocator);
+        self.mesh_cache.destroy(device, allocator);
+        self.texture_cache.destroy(device, allocator);
+        self.desc_layout_cache.destroy(device, allocator);
+        self.pipeline_cache.destroy(device, allocator);
+  
+    }
 }
 
 pub struct RenderContext {
@@ -78,7 +89,11 @@ pub struct VkRender {
     pub resize_requested: bool,
 }
 
-pub fn init_caches(device: &ash::Device, color_format: vk::Format, depth_format: vk::Format) -> DataCache {
+pub fn init_caches(
+    device: &ash::Device,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+) -> DataCache {
     let shader_paths = vec![
         (
             CoreShaderType::MetRoughFrag,
@@ -90,11 +105,16 @@ pub fn init_caches(device: &ash::Device, color_format: vk::Format, depth_format:
         ),
     ];
 
-    let shader_cache = ShaderCache::new(device, shader_paths).unwrap();
+    let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
 
-    let pipeline_cache =
-        vk_pipeline::init_pipeline_cache(device, &desc_layout_cache, &shader_cache, color_format, depth_format);
+    let pipeline_cache = vk_pipeline::init_pipeline_cache(
+        device,
+        &desc_layout_cache,
+        &shader_cache,
+        color_format,
+        depth_format,
+    );
     let texture_cache = TextureCache::new(device);
     let mesh_cache = MeshCache::default();
 
@@ -244,30 +264,28 @@ impl Drop for VkRender {
             self.device
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
+            
 
             self.imgui.renderer.destroy();
 
-            self.device
-                .destroy_command_pool(self.immediate.command_pool.pool, None);
-
-            self.device.destroy_fence(self.immediate.fence[0], None);
-
-            // self.logical_device
-            //     .device
-            //     .destroy_pipeline_layout(self.pipeline.pipeline_layout, None);
-            // self.logical_device
-            //     .device
-            //     .destroy_pipeline(self.pipeline.pipeline, None);
+            self.immediate.destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.presentation
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
+
+            self.data_cache.destroy(&self.device, &self.allocator.lock().unwrap());
+            
+            self.compute_data.destroy(&self.device, &self.allocator.lock().unwrap());
+            
+            self.global_desc_allocator.destroy(&self.device, &self.allocator.lock().unwrap());
+            
+   
             self.main_deletion_queue
                 .iter_mut()
                 .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
-
-            // todo need to do some work on destruction
-
+            
+    
             self.swapchain
                 .swapchain_loader
                 .destroy_swapchain(self.swapchain.swapchain, None);
@@ -539,7 +557,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/bowling.glb",
             texture_cache,
             mesh_cache,
         )
@@ -580,7 +598,6 @@ impl VkRender {
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
-        println!("Resize Rebuild SwapChain");
         self.window_state.curr_extent = new_size;
 
         unsafe { self.device.device_wait_idle().unwrap() }
@@ -608,7 +625,6 @@ impl VkRender {
 
         //self.presentation = presentation;
         self.resize_requested = false;
-        println!("Resize Completed")
     }
 }
 
@@ -639,7 +655,6 @@ impl VkRender {
                 .unwrap();
 
             self.device.reset_fences(fence).unwrap();
-
 
             let curr_frame = self.presentation.get_curr_frame_mut();
 
@@ -686,7 +701,6 @@ impl VkRender {
 
             let extent = self.window_state.curr_extent;
 
-
             // Transition Depth/Draw Images for use
             vk_util::transition_image(
                 &self.device,
@@ -703,7 +717,6 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
-
 
             // draw background // TODO this doesnt need its own structure?
             let ds = [self
@@ -723,10 +736,7 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
-
-
             self.draw_geometry();
-
 
             // Transition draw image and present image for copy compatability
 
@@ -746,7 +756,6 @@ impl VkRender {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
 
-
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
                 &self.device,
@@ -756,8 +765,6 @@ impl VkRender {
                 present_image,
                 extent,
             );
-
-
 
             //re transition present to draw gui on
             vk_util::transition_image(
@@ -781,8 +788,6 @@ impl VkRender {
             );
 
             self.device.end_command_buffer(cmd_buffer).unwrap();
-
-
 
             // Wait for semaphores and submit
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
@@ -908,7 +913,8 @@ impl VkRender {
 
         let extent = self.window_state.curr_extent;
 
-        let rendering_info = vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
+        let rendering_info =
+            vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
 
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
@@ -921,15 +927,12 @@ impl VkRender {
                 .min_depth(0.0)
                 .max_depth(1.0)];
 
-
             let scissor = [vk::Rect2D::default()
                 .offset(vk::Offset2D::default().y(0).y(0))
                 .extent(extent)];
-            
-            
+
             self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
             self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
-
 
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
@@ -938,7 +941,6 @@ impl VkRender {
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
             .unwrap();
-            
 
             let mut writer = DescriptorWriter::default();
             writer.write_buffer(
@@ -968,7 +970,6 @@ impl VkRender {
             let draw_fn = |obj: &RenderObject| {
                 let material = &(*obj.material);
 
-
                 self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
                 self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
                 // This is a static descriptor set for the material the is allocated once
@@ -986,8 +987,6 @@ impl VkRender {
                     vk::PipelineBindPoint::GRAPHICS,
                     mat_pipeline.pipeline,
                 );
-
-               
 
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
@@ -1037,13 +1036,11 @@ impl VkRender {
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
 
-
             self.render_context
                 .draw_context
                 .opaque_surfaces
                 .iter()
                 .for_each(draw_fn);
-
 
             self.render_context
                 .draw_context
@@ -1053,7 +1050,10 @@ impl VkRender {
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
             self.render_context.draw_context.opaque_surfaces.clear();
-            self.render_context.draw_context.transparent_surfaces.clear();
+            self.render_context
+                .draw_context
+                .transparent_surfaces
+                .clear();
             self.device.cmd_end_rendering(cmd_buffer);
         }
     }
@@ -1143,7 +1143,7 @@ impl VkRender {
     pub fn upload_mesh(&self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
         let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
         let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
-        
+
         let allocator = self.allocator.lock().unwrap();
 
         let index_buffer = vk_util::allocate_buffer(
@@ -1321,7 +1321,6 @@ impl VkRender {
     }
 
     pub fn update_scene(&mut self) {
-
         let view = self
             .window_state
             .controller
@@ -1332,29 +1331,21 @@ impl VkRender {
         let fovy = 70_f32.to_radians();
         let aspect_ratio = self.window_state.curr_extent.width as f32
             / self.window_state.curr_extent.height as f32;
-      
-        
-        
+
         // reversed depth
         let far = 0.1;
         let near = 10_000.0;
 
-        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, near, far);
-       // proj.y_axis.y *= -1.0; // Flip the Y-axis
+        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+        // proj.y_axis.y *= -1.0; // Flip the Y-axis
 
-        
-        
         self.scene_data.view = view;
         self.scene_data.projection = proj;
         self.scene_data.view_projection = proj * view;
 
-       
-
         self.scene_data.ambient_color = Vec4::splat(0.1);
         self.scene_data.sunlight_color = Vec4::splat(1.0);
         self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
-
-
 
         self.render_context.scene_tree.borrow_mut().draw(
             &glam::Mat4::IDENTITY,

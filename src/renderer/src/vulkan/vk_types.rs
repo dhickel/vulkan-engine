@@ -496,6 +496,15 @@ impl VkPipeline {
     }
 }
 
+impl VkDestroyable for VkPipeline {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        unsafe {
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_pipeline(self.pipeline, None);
+        }
+    }
+}
+
 pub struct VkImmediate {
     pub command_pool: VkCommandPool,
     pub fence: [vk::Fence; 1],
@@ -507,6 +516,13 @@ impl VkImmediate {
             command_pool,
             fence: [fence],
         }
+    }
+}
+
+impl VkDestroyable for VkImmediate {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.command_pool.destroy(device, allocator);
+        unsafe {device.destroy_fence(self.fence[0], None);}
     }
 }
 
@@ -600,6 +616,16 @@ pub struct ComputeEffect {
     pub data: Compute4x4PushConstants,
 }
 
+impl VkDestroyable for ComputeEffect {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.descriptors.destroy(device, allocator);
+        unsafe {
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_pipeline(self.pipeline, None);
+        }
+    }
+}
+
 pub struct ComputeData {
     pub effects: Vec<ComputeEffect>,
     pub current: u32,
@@ -608,6 +634,14 @@ pub struct ComputeData {
 impl ComputeData {
     pub fn get_current_effect(&self) -> &ComputeEffect {
         self.effects.get(self.current as usize).unwrap()
+    }
+}
+
+impl VkDestroyable for ComputeData {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.effects
+            .iter_mut()
+            .for_each(|e| e.destroy(device, allocator));
     }
 }
 
@@ -626,6 +660,18 @@ pub struct VkDescriptors {
     pub allocator: DescriptorAllocator,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
+}
+
+
+impl VkDestroyable for VkDescriptors {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.allocator.destroy(device);
+        unsafe {
+            self.descriptor_layouts
+                .iter()
+                .for_each(|set| device.destroy_descriptor_set_layout(*set, None));
+        }
+    }
 }
 
 impl VkDescriptors {
@@ -661,6 +707,12 @@ impl VkBuffer {
             allocation,
             alloc_info,
         }
+    }
+}
+
+impl VkDestroyable for VkBuffer {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+       unsafe { allocator.destroy_buffer(self.buffer, &mut self.allocation); }
     }
 }
 

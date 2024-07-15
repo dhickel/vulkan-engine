@@ -58,7 +58,6 @@ impl Camera {
         let transformed_velocity = camera_rotation * velocity;
 
         self.position += Vec3::new(transformed_velocity.x, transformed_velocity.y, transformed_velocity.z);
-        println!("Updating position: {:?}", self.position)
     }
 }
 

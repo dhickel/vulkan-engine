@@ -7,9 +7,9 @@ use crate::data::gpu_data::{
 use crate::vulkan::vk_descriptor::{
     DescriptorAllocator, DescriptorWriter, PoolSizeRatio, VkDynamicDescriptorAllocator,
 };
-use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
+use crate::vulkan::vk_types::{VkBuffer, VkDestroyable, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
-use ash::vk;
+use ash::{Device, vk};
 use ash::vk::Format;
 use glam::{vec4, Vec4};
 use image::ImageBuffer;
@@ -220,6 +220,8 @@ impl TextureCache {
     }
 
     pub fn add_material(&mut self, data: MaterialMeta) -> u32 {
+        println!("Added Material: {:#?}", data);
+
         let index = self.cached_materials.len();
         self.cached_materials.push(CacheMaterial::Unloaded(data));
         index as u32
@@ -261,8 +263,6 @@ impl TextureCache {
 
     pub fn get_loaded_texture_unchecked(&self, id: u32) -> &VkLoadedTexture {
         unsafe {
-            println!("id: {}", id);
-            println!("len: {}", self.cached_textures.len());
             match self.cached_textures.get_unchecked(id as usize) {
                 CachedTexture::Loaded(loaded) => loaded,
                 _ => std::hint::unreachable_unchecked(),
@@ -306,7 +306,6 @@ impl TextureCache {
                 depth: 1,
             };
 
-            println!("Uploading bytes: {}", meta.bytes.len());
             let alloc = upload_fn(
                 &meta.bytes,
                 size,
@@ -526,6 +525,32 @@ impl TextureCache {
     // pub fn get_loaded_texture_unchecked(&self, id : u32) -> &
 }
 
+
+impl VkDestroyable for TextureCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        for tex in self.cached_textures.drain(..) {
+            if let CachedTexture::Loaded(mut loaded) = tex {
+                loaded.alloc.destroy(device, allocator)
+            }
+        }
+
+        for mat in self.cached_materials.drain(..) {
+            if let CacheMaterial::Loaded(mut loaded) = mat {
+                loaded.uniform_buffer.destroy(device, allocator);
+            }
+        }
+
+        self.image_descriptors
+            .iter_mut()
+            .for_each(|desc| desc.destroy(device, allocator));
+
+        unsafe {
+            device.destroy_sampler(self.linear_sampler, None);
+            device.destroy_sampler(self.nearest_sampler, None);
+        }
+    }
+}
+
 ////////////////
 // MESH CACHE //
 ////////////////
@@ -657,6 +682,17 @@ impl MeshCache {
     }
 }
 
+impl VkDestroyable for MeshCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        for mesh in self.cached_meshes.drain(..) {
+            if let CachedMesh::Loaded(mut loaded) = mesh {
+                loaded.buffer.index_buffer.destroy(device, allocator);
+                loaded.buffer.vertex_buffer.destroy(device, allocator);
+            }
+        }
+    }
+}
+
 //////////////////
 // SHADER CACHE //
 //////////////////
@@ -668,12 +704,12 @@ pub enum CoreShaderType {
     MetRoughFrag,
 }
 
-pub struct ShaderCache {
+pub struct VkShaderCache {
     pub core_shader_cache: [vk::ShaderModule; 2],
     pub user_shader_cache: Vec<vk::ShaderModule>,
 }
 
-impl ShaderCache {
+impl VkShaderCache {
     pub fn new(
         device: &ash::Device,
         shader_paths: Vec<(CoreShaderType, String)>,
@@ -705,6 +741,12 @@ impl ShaderCache {
     }
 
     pub fn destory_all(&mut self, device: &ash::Device) {
+      
+    }
+}
+
+impl VkDestroyable for VkShaderCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.core_shader_cache
             .iter()
             .for_each(|shader| unsafe { device.destroy_shader_module(*shader, None) });
@@ -714,6 +756,7 @@ impl ShaderCache {
             .for_each(|shader| unsafe { device.destroy_shader_module(*shader, None) });
     }
 }
+
 
 ///////////////////////
 // VK PIPELINE CACHE //
@@ -754,6 +797,12 @@ impl VkPipelineCache {
     }
 }
 
+impl VkDestroyable for VkPipelineCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.pipelines.iter_mut().for_each(|pipe| pipe.destroy(device, allocator));
+    }
+}
+
 /////////////////////////////
 // Descriptor Layout Cache //
 /////////////////////////////
@@ -788,5 +837,16 @@ impl VkDescLayoutCache {
 
     pub fn get(&self, typ: VkDescType) -> vk::DescriptorSetLayout {
         self.layouts[typ as usize]
+    }
+}
+
+
+impl VkDestroyable for VkDescLayoutCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.layouts.iter().for_each(|layout| {
+            unsafe {
+                device.destroy_descriptor_set_layout(*layout, None);
+            }
+        })
     }
 }
