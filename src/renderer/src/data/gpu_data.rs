@@ -2,7 +2,6 @@ use crate::data::data_cache::{
     CoreShaderType, MeshCache, VkShaderCache, TextureCache, VkLoadedMaterial, VkPipelineType,
 };
 use crate::data::gltf_util;
-use crate::data::gltf_util::MeshAsset;
 use crate::vulkan::vk_descriptor::{
     DescriptorLayoutBuilder, DescriptorWriter, VkDescWriterType, VkDynamicDescriptorAllocator,
 };
@@ -27,6 +26,7 @@ use std::rc::{Rc, Weak};
 //  MESH & TEXTURE DATA //
 //////////////////////////
 
+// Used In shaders as well
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vertex {
@@ -209,6 +209,9 @@ pub struct NodeMeta {
 /////////////////
 // SHADER DATA //
 /////////////////
+
+// VERTEX - See top of file
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct MetRoughUniform {

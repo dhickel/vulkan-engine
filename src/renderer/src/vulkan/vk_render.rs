@@ -2,7 +2,7 @@ use crate::data::data_cache::{
     CoreShaderType, MeshCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache,
     VkPipelineType, VkShaderCache,
 };
-use crate::data::gltf_util::{GLTFMaterial, MeshAsset};
+
 use crate::data::gpu_data::{DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, Vertex, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer};
 use crate::data::{data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
@@ -101,6 +101,14 @@ pub fn init_caches(
         (
             CoreShaderType::MetRoughVert,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string(),
+        ),
+        (
+            CoreShaderType::MetRoughFragExt,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.frag.spv".to_string(), // FIXME
+        ),
+        (
+            CoreShaderType::MetRoughVertExt,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string(), // FIXME
         ),
     ];
 

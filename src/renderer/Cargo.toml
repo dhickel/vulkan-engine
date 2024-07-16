@@ -19,6 +19,9 @@ ash-window = { version = "0.13.0" }
 
 vk-mem = "0.4.0"
 gltf = { version = "1.4.1" }
+mikktspace = { version = "0.3.0", default-features = false, features = ["glam"] }
+
+
 image = "0.25.1"
 backtrace = "0.3"
 

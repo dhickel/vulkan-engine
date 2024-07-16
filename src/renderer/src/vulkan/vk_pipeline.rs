@@ -1,13 +1,12 @@
 use crate::data::data_cache::{
-    CoreShaderType, VkShaderCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+    CoreShaderType, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
 };
+use crate::data::gpu_data::VkGpuPushConsts;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_util};
 use ash::vk;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom};
-use crate::data::gpu_data::VkGpuPushConsts;
-
 
 pub struct PipelineBuilder<'a> {
     pub shader_stages: Vec<vk::PipelineShaderStageCreateInfo<'a>>,
@@ -264,10 +263,20 @@ pub fn init_pipeline_cache(
         color_format,
         depth_format,
     );
-    
+
+    let (pbr_opaque_ext, pbr_alpha_ext) = init_met_rough_ext_pipelines(
+        device,
+        desc_layout_cache,
+        shader_cache,
+        color_format,
+        depth_format,
+    );
+
     VkPipelineCache::new(vec![
-            (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
-            (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
+        (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
+        (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
+        (VkPipelineType::PbrMetRoughOpaqueExt, pbr_opaque_ext),
+        (VkPipelineType::PbrMetRoughAlphaExt, pbr_alpha_ext),
     ])
     .unwrap()
 }
@@ -389,8 +398,3 @@ fn init_met_rough_ext_pipelines(
         VkPipeline::new(transparent_pipeline, layout),
     )
 }
-
-
-
-
-
