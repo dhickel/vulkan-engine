@@ -8,6 +8,9 @@
 layout (location = 0) out vec3 outNormal;
 layout (location = 1) out vec3 outColor;
 layout (location = 2) out vec2 outUV;
+layout (location = 3) out vec3 outTangent;
+layout (location = 4) out vec3 outBitangent;
+layout (location = 5) out vec3 outWorldPos;
 
 struct Vertex {
 	vec3 position;
@@ -16,9 +19,9 @@ struct Vertex {
 	float uv_y;
 	vec4 color;
 	vec4 tangent;
-}; 
+};
 
-layout(buffer_reference, std430) readonly buffer VertexBuffer{ 
+layout(buffer_reference, std430) readonly buffer VertexBuffer{
 	Vertex vertices[];
 };
 
@@ -29,16 +32,19 @@ layout( push_constant ) uniform constants
 	VertexBuffer vertexBuffer;
 } PushConstants;
 
-void main() 
+void main()
 {
 	Vertex v = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
-	
-	vec4 position = vec4(v.position, 1.0f);
 
-	gl_Position =  sceneData.viewproj * PushConstants.render_matrix *position;	
+	vec4 worldPos = PushConstants.render_matrix * vec4(v.position, 1.0f);
+	gl_Position = sceneData.viewproj * worldPos;
+	outWorldPos = worldPos.xyz;
 
-	outNormal = (PushConstants.render_matrix * vec4(v.normal, 0.f)).xyz;
-	outColor = v.color.xyz * materialData.colorFactors.xyz;	
-	outUV.x = v.uv_x;
-	outUV.y = v.uv_y;
+	mat3 normalMatrix = transpose(inverse(mat3(PushConstants.render_matrix)));
+	outNormal = normalize(normalMatrix * v.normal);
+	outTangent = normalize(normalMatrix * v.tangent.xyz);
+	outBitangent = cross(outNormal, outTangent) * v.tangent.w;
+
+	outColor = v.color.xyz * materialData.colorFactors.xyz;
+	outUV = vec2(v.uv_x, v.uv_y);
 }

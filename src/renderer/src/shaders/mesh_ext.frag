@@ -1,11 +1,14 @@
 #version 450
 
 #extension GL_GOOGLE_include_directive : require
-#include "input_structures.glsl"
+#include "input_structures_ext.glsl"
 
 layout (location = 0) in vec3 inNormal;
 layout (location = 1) in vec3 inColor;
 layout (location = 2) in vec2 inUV;
+layout (location = 3) in vec3 inTangent;
+layout (location = 4) in vec3 inBitangent;
+layout (location = 5) in vec3 inWorldPos;
 
 layout (location = 0) out vec4 outFragColor;
 
@@ -33,28 +36,62 @@ vec3 calcIrradiance(vec3 nor) {
     const float c4 = 0.886227;
     const float c5 = 0.247708;
     return (
-        c1 * c.l22 * (nor.x * nor.x - nor.y * nor.y) +
-        c3 * c.l20 * nor.z * nor.z +
-        c4 * c.l00 -
-        c5 * c.l20 +
-        2.0 * c1 * c.l2m2 * nor.x * nor.y +
-        2.0 * c1 * c.l21  * nor.x * nor.z +
-        2.0 * c1 * c.l2m1 * nor.y * nor.z +
-        2.0 * c2 * c.l11  * nor.x +
-        2.0 * c2 * c.l1m1 * nor.y +
-        2.0 * c2 * c.l10  * nor.z
+    c1 * c.l22 * (nor.x * nor.x - nor.y * nor.y) +
+    c3 * c.l20 * nor.z * nor.z +
+    c4 * c.l00 -
+    c5 * c.l20 +
+    2.0 * c1 * c.l2m2 * nor.x * nor.y +
+    2.0 * c1 * c.l21  * nor.x * nor.z +
+    2.0 * c1 * c.l2m1 * nor.y * nor.z +
+    2.0 * c2 * c.l11  * nor.x +
+    2.0 * c2 * c.l1m1 * nor.y +
+    2.0 * c2 * c.l10  * nor.z
     );
 }
 
-void main() 
+vec3 getNormalFromMap()
 {
-	float lightValue = max(dot(inNormal, vec3(0.3f,1.f,0.3f)), 0.1f);
+    vec3 tangentNormal = texture(normalTex, inUV).xyz * 2.0 - 1.0;
+    tangentNormal.xy *= materialData.normal_scale.x;
 
-	vec3 irradiance = calcIrradiance(inNormal); 
-
-
-	vec3 color = inColor * texture(colorTex,inUV).xyz;
-
-	outFragColor = vec4(color * lightValue + color * irradiance.x * vec3(0.2f) ,1.0f);
+    mat3 TBN = mat3(normalize(inTangent), normalize(inBitangent), normalize(inNormal));
+    return normalize(TBN * tangentNormal);
 }
 
+void main()
+{
+    // Sample textures
+    vec4 albedo = texture(colorTex, inUV) * vec4(inColor, 1.0);
+    vec2 metallicRoughness = texture(metalRoughTex, inUV).bg;
+    float metallic = metallicRoughness.x * materialData.metal_rough_factors.x;
+    float roughness = metallicRoughness.y * materialData.metal_rough_factors.y;
+
+    // Normal mapping
+    vec3 N = getNormalFromMap();
+
+    // Occlusion
+    float occlusion = mix(1.0, texture(occlusionTex, inUV).r, materialData.occlusion_strength.x);
+
+    // Emissive
+    vec3 emissive = texture(emissiveTex, inUV).rgb * materialData.emissive_factor.rgb;
+
+    // Basic lighting
+    vec3 L = normalize(sceneData.sunlightDirection.xyz);
+    float NdotL = max(dot(N, L), 0.0);
+    vec3 diffuse = albedo.rgb * NdotL * sceneData.sunlightColor.rgb;
+
+    // Ambient lighting using SH
+    vec3 irradiance = calcIrradiance(N);
+    vec3 ambient = albedo.rgb * irradiance * occlusion;
+
+    // Combine lighting
+    vec3 finalColor = ambient + diffuse + emissive;
+
+    // Apply a very basic tone mapping (you might want to use a more sophisticated method)
+    finalColor = finalColor / (finalColor + vec3(1.0));
+
+    // Gamma correction
+    finalColor = pow(finalColor, vec3(1.0/2.2));
+
+    outFragColor = vec4(finalColor, albedo.a);
+}
