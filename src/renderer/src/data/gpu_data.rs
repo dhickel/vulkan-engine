@@ -1,5 +1,5 @@
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, VkShaderCache, TextureCache, VkLoadedMaterial, VkPipelineType,
+    CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkPipelineType, VkShaderCache,
 };
 use crate::data::gltf_util;
 use crate::vulkan::vk_descriptor::{
@@ -7,9 +7,7 @@ use crate::vulkan::vk_descriptor::{
 };
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
-use crate::vulkan::vk_types::{
-    LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline,
-};
+use crate::vulkan::vk_types::{LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
@@ -18,6 +16,7 @@ use glam::{vec4, Mat4, Quat, Vec2, Vec3, Vec4};
 use imgui::sys::igSetClipboardText;
 use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
+use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
@@ -35,7 +34,7 @@ pub struct Vertex {
     pub normal: Vec3,
     pub uv_y: f32,
     pub color: Vec4,
-    pub tangent: Vec4
+    pub tangent: Vec4,
 }
 
 impl Default for Vertex {
@@ -47,7 +46,6 @@ impl Default for Vertex {
             tangent: Default::default(),
             uv_x: 0.0,
             uv_y: 0.0,
-            
         }
     }
 }
@@ -223,7 +221,7 @@ pub struct MetRoughUniform {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub struct MetRoughExtUniform {
+pub struct MetRoughUniformExt {
     pub color_factors: Vec4,
     pub metal_rough_factors: Vec4,
     pub normal_scale: Vec4,
@@ -274,8 +272,6 @@ impl GPUSceneData {
     }
 }
 
-
-
 ////////////////////////////
 // VULKAN ALLOCATION DATA //
 ////////////////////////////
@@ -314,6 +310,7 @@ pub struct VkMetRoughUniforms {
 // SCENE GRAPH & RENDERING //
 /////////////////////////////
 
+#[derive(Debug, Copy, Clone)]
 pub struct RenderObject {
     pub index_count: u32,
     pub first_index: u32,
@@ -391,7 +388,7 @@ impl Node {
         if let Some(id) = self.meshes {
             let mesh = mesh_cache.get_loaded_mesh_unchecked(id);
             let node_transform = top_matrix.mul_mat4(&self.world_transform);
-            
+
             for surface in &mesh.meta.surfaces {
                 if let Some(id) = surface.material_index {
                     let material = tex_cache.get_loaded_material_unchecked(id);
@@ -405,13 +402,13 @@ impl Node {
                         vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
                     };
 
-                    match material.pipeline {
-                        VkPipelineType::PbrMetRoughOpaque => ctx.opaque_surfaces.push(ro),
-                        VkPipelineType::PbrMetRoughAlpha => ctx.transparent_surfaces.push(ro),
-                        _ => {panic!("Not implemented")}
-                        // VkPipelineType::Mesh => {
-                        //     panic!("Wrong pipeline")
-                        // }
+                    // FIXME, should use something more performant than a hash set since all types are known
+                    ctx.active_pipelines.insert(material.pipeline);
+
+                    unsafe {
+                        ctx.render_objects
+                            .get_unchecked_mut(material.pipeline as usize)
+                            .push(ro);
                     }
                 }
             }
@@ -440,20 +437,37 @@ impl Node {
 }
 
 pub struct DrawContext {
-    pub opaque_surfaces: Vec<RenderObject>,
-    pub transparent_surfaces: Vec<RenderObject>,
+    pub active_pipelines: HashSet<VkPipelineType>,
+    pub render_objects: [Vec<RenderObject>; 4],
+}
+
+impl DrawContext {
+    pub fn new(vector_capacity: usize) -> Self {
+        DrawContext {
+            active_pipelines: HashSet::with_capacity(4),
+            render_objects: Self::create_render_object_array(vector_capacity),
+        }
+    }
+
+    fn create_render_object_array(capacity: usize) -> [Vec<RenderObject>; 4] {
+        let vec_iter = std::iter::repeat_with(|| Vec::with_capacity(capacity));
+        vec_iter.take(4).collect::<Vec<_>>().try_into().unwrap()
+    }
+
+    pub fn clear(&mut self) {
+        self.active_pipelines
+            .iter()
+            .for_each(|pl| self.render_objects[*pl as usize].clear());
+
+        self.active_pipelines.clear();
+    }
 }
 
 impl Default for DrawContext {
     fn default() -> Self {
-        DrawContext {
-            opaque_surfaces: Vec::new(),
-            transparent_surfaces: Vec::new(),
-        }
+        Self::new(400)
     }
 }
-
-
 
 #[repr(C)]
 #[derive(PartialEq, Debug, Copy, Clone)]

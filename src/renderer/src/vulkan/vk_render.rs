@@ -3,7 +3,10 @@ use crate::data::data_cache::{
     VkPipelineType, VkShaderCache,
 };
 
-use crate::data::gpu_data::{DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, Vertex, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer};
+use crate::data::gpu_data::{
+    DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, Vertex,
+    VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer,
+};
 use crate::data::{data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
@@ -45,7 +48,6 @@ impl VkDestroyable for DataCache {
         self.texture_cache.destroy(device, allocator);
         self.desc_layout_cache.destroy(device, allocator);
         self.pipeline_cache.destroy(device, allocator);
-
     }
 }
 
@@ -91,7 +93,7 @@ pub fn init_caches(
     device: &ash::Device,
     color_format: vk::Format,
     depth_format: vk::Format,
-    supported_formats: HashSet<vk::Format>
+    supported_formats: HashSet<vk::Format>,
 ) -> DataCache {
     let shader_paths = vec![
         (
@@ -104,11 +106,13 @@ pub fn init_caches(
         ),
         (
             CoreShaderType::MetRoughFragExt,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.frag.spv".to_string(), // FIXME
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh_ext.frag.spv"
+                .to_string(),
         ),
         (
             CoreShaderType::MetRoughVertExt,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string(), // FIXME
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh_ext.vert.spv"
+                .to_string(),
         ),
     ];
 
@@ -272,26 +276,26 @@ impl Drop for VkRender {
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
 
-
             self.imgui.renderer.destroy();
 
-            self.immediate.destroy(&self.device, &self.allocator.lock().unwrap());
+            self.immediate
+                .destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.presentation
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
+            self.data_cache
+                .destroy(&self.device, &self.allocator.lock().unwrap());
 
-            self.data_cache.destroy(&self.device, &self.allocator.lock().unwrap());
+            self.compute_data
+                .destroy(&self.device, &self.allocator.lock().unwrap());
 
-            self.compute_data.destroy(&self.device, &self.allocator.lock().unwrap());
-
-            self.global_desc_allocator.destroy(&self.device, &self.allocator.lock().unwrap());
-
+            self.global_desc_allocator
+                .destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.main_deletion_queue
                 .iter_mut()
                 .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
-
 
             self.swapchain
                 .swapchain_loader
@@ -533,12 +537,17 @@ impl VkRender {
         ];
 
         let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
-        
-        let supported_image_formats = vk_init::get_supported_image_formats(&instance, physical_device.p_device);
 
-        let data_cache = init_caches(&device, draw_format, depth_format,supported_image_formats.clone());
+        let supported_image_formats =
+            vk_init::get_supported_image_formats(&instance, physical_device.p_device);
+
+        let data_cache = init_caches(
+            &device,
+            draw_format,
+            depth_format,
+            supported_image_formats.clone(),
+        );
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
-        
 
         let mut render = VkRender {
             window_state,
@@ -568,7 +577,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/bowling.glb",
             texture_cache,
             mesh_cache,
         )
@@ -978,7 +987,7 @@ impl VkRender {
             //
             // }
 
-            let draw_fn = |obj: &RenderObject| {
+            let draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
 
                 self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
@@ -988,21 +997,10 @@ impl VkRender {
                 // occurs (Currently doesn't happen)
                 let mat_desc = [material.descriptors[frame_index as usize]];
 
-                let mat_pipeline = self
-                    .data_cache
-                    .pipeline_cache
-                    .get_pipeline(material.pipeline);
-
-                self.device.cmd_bind_pipeline(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    mat_pipeline.pipeline,
-                );
-
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    mat_pipeline.layout,
+                    pipeline.layout,
                     0,
                     &global_desc,
                     &[],
@@ -1011,21 +1009,12 @@ impl VkRender {
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    mat_pipeline.layout,
+                    pipeline.layout,
                     1,
                     &mat_desc,
                     &[],
                 );
-
-                // self.device.cmd_bind_descriptor_sets(
-                //     cmd_buffer,
-                //     vk::PipelineBindPoint::GRAPHICS,
-                //     obj.material.pipeline.layout,
-                //     1,
-                //     &mat_desc,
-                //     &[],
-                // );
-
+                
                 self.device.cmd_bind_index_buffer(
                     cmd_buffer,
                     obj.index_buffer,
@@ -1037,7 +1026,7 @@ impl VkRender {
 
                 self.device.cmd_push_constants(
                     cmd_buffer,
-                    mat_pipeline.layout,
+                    pipeline.layout,
                     vk::ShaderStageFlags::VERTEX,
                     0,
                     push_consts.as_byte_slice(),
@@ -1047,24 +1036,28 @@ impl VkRender {
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
 
-            self.render_context
-                .draw_context
-                .opaque_surfaces
-                .iter()
-                .for_each(draw_fn);
+            for pipeline in &self.render_context.draw_context.active_pipelines {
+                let mat_pipeline = self.data_cache.pipeline_cache.get_pipeline(*pipeline);
 
-            self.render_context
-                .draw_context
-                .transparent_surfaces
-                .iter()
-                .for_each(draw_fn);
+                self.device.cmd_bind_pipeline(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    mat_pipeline.pipeline,
+                );
+
+                for ro in self
+                    .render_context
+                    .draw_context
+                    .render_objects
+                    .get_unchecked(*pipeline as usize)
+                {
+                    draw_fn(ro, mat_pipeline)
+                }
+            }
 
             curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
-            self.render_context.draw_context.opaque_surfaces.clear();
-            self.render_context
-                .draw_context
-                .transparent_surfaces
-                .clear();
+            self.render_context.draw_context.clear();
+
             self.device.cmd_end_rendering(cmd_buffer);
         }
     }

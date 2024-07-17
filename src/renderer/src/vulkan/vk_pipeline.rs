@@ -347,9 +347,9 @@ fn init_met_rough_ext_pipelines(
     color_format: vk::Format,
     depth_format: vk::Format,
 ) -> (VkPipeline, VkPipeline) {
-    let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVertExt);
 
-    let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
+    let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFragExt);
 
     let matrix_range = [vk::PushConstantRange::default()
         .offset(0)
@@ -358,7 +358,7 @@ fn init_met_rough_ext_pipelines(
 
     let layouts = [
         desc_layout_cache.get(VkDescType::GpuScene),
-        desc_layout_cache.get(VkDescType::PbrMetRough),
+        desc_layout_cache.get(VkDescType::PbrMetRoughExt),
     ];
 
     let mesh_layout_info = vk_util::pipeline_layout_create_info()
