@@ -14,6 +14,7 @@ use ash::{vk, Device};
 use glam::{vec3, vec4, Vec3, Vec4};
 use image::ImageBuffer;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hasher};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
@@ -160,26 +161,17 @@ impl TextureCache {
             emissive_map: None,
         });
 
-        let black_val = glam::vec4(0.0, 0.0, 0.0, 0.0).pack_unorm_4x8();
-        let magenta_val = glam::vec4(1.0, 0.0, 1.0, 1.0).pack_unorm_4x8();
-        let mut error_val = vec![0_u32; 16 * 16]; // 16x16 checkerboard texture
-        for y in 0..16 {
-            for x in 0..16 {
-                error_val[y * 16 + x] = if ((x % 2) ^ (y % 2)) != 0 {
-                    magenta_val
-                } else {
-                    black_val
-                };
-            }
-        }
-
+       let error_tex : [u8; 16] = [
+            255, 20, 147, 255,   // Pixel 1: R, G, B, A
+            255, 20, 147, 255,   // Pixel 2: R, G, B, A
+            255, 20, 147, 255,   // Pixel 3: R, G, B, A
+            255, 20, 147, 255    // Pixel 4: R, G, B, A
+        ];
+    
         let def_error = CachedTexture::UnLoaded(TextureMeta {
-            bytes: error_val
-                .iter()
-                .flat_map(|&pixel| pixel.to_le_bytes())
-                .collect(),
-            width: 16,
-            height: 16,
+            bytes: error_tex.to_vec(),
+            width: 2,
+            height: 2,
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             sampler: Sampler::Linear,
@@ -255,7 +247,7 @@ impl TextureCache {
 
     pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
         let index = self.cached_textures.len();
-
+       
         // TODO roughness textures can actually just be R8 UNORM to save space and bandwidth
         if !self.supported_formats.contains(&data.format) {
             let converted =
@@ -279,6 +271,7 @@ impl TextureCache {
     }
 
     pub fn add_textures(&mut self, data: Vec<(u32, TextureMeta)>) -> HashMap<u32, u32> {
+     
         let mut index = self.cached_textures.len() as u32;
         let mut index_pairs = HashMap::<u32, u32>::with_capacity(data.len());
 
@@ -291,7 +284,6 @@ impl TextureCache {
     }
 
     pub fn add_material(&mut self, mut data: MaterialMeta) -> u32 {
-        println!("{:#?}", data);
         if data.is_ext() {
             if data.normal_map.is_none() {
                 data.normal_map = Some(Self::DEFAULT_NORMAL_MAP);
@@ -433,7 +425,7 @@ impl TextureCache {
 
         if let CacheMaterial::Unloaded(meta) = material {
             let loaded_material: VkLoadedMaterial;
-            if meta.is_ext() {
+            if 1 ==2 && meta.is_ext() { // FIXME ext pipeline is disable
                 let shader_consts = MetRoughUniformExt {
                     color_factors: meta.base_color_factor,
                     metal_rough_factors: vec4(

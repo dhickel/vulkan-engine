@@ -383,7 +383,6 @@ impl Node {
 
         for mesh_id in &self.meshes {
             let mesh = mesh_cache.get_loaded_mesh_unchecked(*mesh_id);
-            let node_transform = top_matrix.mul_mat4(&self.world_transform);
 
             if let Some(id) = mesh.meta.material_index {
                 let material = tex_cache.get_loaded_material_unchecked(id);
@@ -393,7 +392,7 @@ impl Node {
                     first_index: 0,
                     index_buffer: mesh.buffer.index_buffer.buffer,
                     material: material_ptr,
-                    transform: node_transform,
+                    transform: self.world_transform,
                     vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
                 };
 

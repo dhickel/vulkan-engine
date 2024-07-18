@@ -8,23 +8,7 @@ use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
 use log::__private_api::loc;
-use russimp_sys::{
-    aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray,
-    aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile,
-    aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps,
-    aiPostProcessSteps_aiProcess_CalcTangentSpace, aiPostProcessSteps_aiProcess_FixInfacingNormals,
-    aiPostProcessSteps_aiProcess_GenSmoothNormals,
-    aiPostProcessSteps_aiProcess_JoinIdenticalVertices,
-    aiPostProcessSteps_aiProcess_LimitBoneWeights,
-    aiPostProcessSteps_aiProcess_PreTransformVertices, aiPostProcessSteps_aiProcess_Triangulate,
-    aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger, aiString, aiTexture,
-    aiTextureType, aiTextureType_aiTextureType_AMBIENT,
-    aiTextureType_aiTextureType_AMBIENT_OCCLUSION, aiTextureType_aiTextureType_BASE_COLOR,
-    aiTextureType_aiTextureType_DIFFUSE, aiTextureType_aiTextureType_EMISSIVE,
-    aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP,
-    aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS,
-    aiTextureType_aiTextureType_SPECULAR, ai_real, AI_DEFAULT_MATERIAL_NAME,
-};
+use russimp_sys::{aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray, aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile, aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps, aiPostProcessSteps_aiProcess_CalcTangentSpace, aiPostProcessSteps_aiProcess_FixInfacingNormals, aiPostProcessSteps_aiProcess_FlipUVs, aiPostProcessSteps_aiProcess_GenSmoothNormals, aiPostProcessSteps_aiProcess_JoinIdenticalVertices, aiPostProcessSteps_aiProcess_LimitBoneWeights, aiPostProcessSteps_aiProcess_PreTransformVertices, aiPostProcessSteps_aiProcess_Triangulate, aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger, aiString, aiTexture, aiTextureType, aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION, aiTextureType_aiTextureType_BASE_COLOR, aiTextureType_aiTextureType_DIFFUSE, aiTextureType_aiTextureType_EMISSIVE, aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP, aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS, aiTextureType_aiTextureType_SPECULAR, ai_real, AI_DEFAULT_MATERIAL_NAME, aiShadingMode_aiShadingMode_PBR_BRDF, aiTextureType_aiTextureType_UNKNOWN};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_uint, CStr, CString};
@@ -44,9 +28,11 @@ pub fn load_model_to_assimp(
     let mut flags = aiPostProcessSteps_aiProcess_GenSmoothNormals
         | aiPostProcessSteps_aiProcess_JoinIdenticalVertices
         | aiPostProcessSteps_aiProcess_Triangulate
+        | aiPostProcessSteps_aiProcess_FlipUVs
+     //   | aiPostProcessSteps_aiProcess_PreTransformVertices
         | aiPostProcessSteps_aiProcess_FixInfacingNormals
-        | aiPostProcessSteps_aiProcess_CalcTangentSpace
-        | aiPostProcessSteps_aiProcess_LimitBoneWeights;
+        | aiPostProcessSteps_aiProcess_CalcTangentSpace;
+      //  | aiPostProcessSteps_aiProcess_LimitBoneWeights;
 
     if has_animation {
         flags = flags | aiPostProcessSteps_aiProcess_PreTransformVertices;
@@ -114,7 +100,6 @@ pub fn process_materials(
 ) -> Result<Vec<MaterialMeta>, String> {
     let mat_count = ai_scene.mNumMaterials as usize;
     let mut materials = Vec::<MaterialMeta>::with_capacity(mat_count);
-    let mut existing = HashMap::<u64, u32>::with_capacity(mat_count);
 
     unsafe {
         for i in 0..mat_count {
@@ -129,7 +114,7 @@ pub fn process_materials(
             let base_color = if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
-                aiTextureType_aiTextureType_BASE_COLOR,
+                aiTextureType_aiTextureType_DIFFUSE,
                 base_path,
                 tex_cache,
             ) {
@@ -138,7 +123,7 @@ pub fn process_materials(
             } else if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
-                aiTextureType_aiTextureType_DIFFUSE,
+                aiTextureType_aiTextureType_BASE_COLOR,
                 base_path,
                 tex_cache,
             ) {
@@ -151,7 +136,7 @@ pub fn process_materials(
             let metalness = if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
-                aiTextureType_aiTextureType_METALNESS,
+                aiTextureType_aiTextureType_UNKNOWN,
                 base_path,
                 tex_cache,
             ) {
@@ -218,16 +203,8 @@ pub fn process_materials(
             };
 
             let (base_color_tex_id, base_color_factor) = if let Some(base_color) = base_color {
-                let mut hasher = DefaultHasher::new();
-                hasher.write(&base_color.0.bytes);
-                let hash = hasher.finish();
-                if let std::collections::hash_map::Entry::Vacant(e) = existing.entry(hash) {
-                    let texture_id = tex_cache.add_texture(base_color.0);
-                    e.insert(texture_id);
-                    (texture_id, base_color.1)
-                } else {
-                    (*existing.get(&hash).unwrap(), base_color.1)
-                }
+                let texture_id = tex_cache.add_texture(base_color.0);
+                (texture_id, base_color.1)
             } else {
                 (
                     TextureCache::DEFAULT_COLOR_TEX,
@@ -237,16 +214,8 @@ pub fn process_materials(
 
             let (metallic_roughness_tex_id, metallic_factor, roughness_factor) =
                 if let Some(metallic) = metalness {
-                    let mut hasher = DefaultHasher::new();
-                    hasher.write(&metallic.0.bytes);
-                    let hash = hasher.finish();
-                    if let std::collections::hash_map::Entry::Vacant(e) = existing.entry(hash) {
-                        let texture_id = tex_cache.add_texture(metallic.0);
-                        e.insert(texture_id);
-                        (texture_id, metallic.1, metallic.2)
-                    } else {
-                        (*existing.get(&hash).unwrap(), metallic.1, metallic.2)
-                    }
+                    let texture_id = tex_cache.add_texture(metallic.0);
+                    (texture_id, metallic.1, metallic.2)
                 } else {
                     (
                         TextureCache::DEFAULT_ROUGH_TEX,
@@ -256,64 +225,32 @@ pub fn process_materials(
                 };
 
             let normal_map = if let Some(normal) = normal {
-                let mut hasher = DefaultHasher::new();
-                hasher.write(&normal.0.bytes);
-                let hash = hasher.finish();
-                if let std::collections::hash_map::Entry::Vacant(e) = existing.entry(hash) {
-                    let texture_id = tex_cache.add_texture(normal.0);
-                    e.insert(texture_id);
-                    Some(NormalMap {
-                        scale: normal.1,
-                        texture_id,
-                    })
-                } else {
-                    Some(NormalMap {
-                        scale: normal.1,
-                        texture_id: *existing.get(&hash).unwrap(),
-                    })
-                }
+                let texture_id = tex_cache.add_texture(normal.0);
+
+                Some(NormalMap {
+                    scale: normal.1,
+                    texture_id,
+                })
             } else {
                 None
             };
 
             let occlusion_map = if let Some(occlusion) = occlusion {
-                let mut hasher = DefaultHasher::new();
-                hasher.write(&occlusion.0.bytes);
-                let hash = hasher.finish();
-                if let std::collections::hash_map::Entry::Vacant(e) = existing.entry(hash) {
-                    let texture_id = tex_cache.add_texture(occlusion.0);
-                    e.insert(texture_id);
-                    Some(OcclusionMap {
-                        strength: occlusion.1,
-                        texture_id,
-                    })
-                } else {
-                    Some(OcclusionMap {
-                        strength: occlusion.1,
-                        texture_id: *existing.get(&hash).unwrap(),
-                    })
-                }
+                let texture_id = tex_cache.add_texture(occlusion.0);
+                Some(OcclusionMap {
+                    strength: occlusion.1,
+                    texture_id,
+                })
             } else {
                 None
             };
 
             let emissive_map = if let Some(emissive) = emissive {
-                let mut hasher = DefaultHasher::new();
-                hasher.write(&emissive.0.bytes);
-                let hash = hasher.finish();
-                if let std::collections::hash_map::Entry::Vacant(e) = existing.entry(hash) {
-                    let texture_id = tex_cache.add_texture(emissive.0);
-                    e.insert(texture_id);
-                    Some(EmissiveMap {
-                        factor: emissive.1,
-                        texture_id,
-                    })
-                } else {
-                    Some(EmissiveMap {
-                        factor: emissive.1,
-                        texture_id: *existing.get(&hash).unwrap(),
-                    })
-                }
+                let texture_id = tex_cache.add_texture(emissive.0);
+                Some(EmissiveMap {
+                    factor: emissive.1,
+                    texture_id,
+                })
             } else {
                 None
             };
@@ -480,7 +417,7 @@ unsafe fn get_texture_meta(
                     let mut format = to_vk_format(&img);
 
                     let bytes = if tex_cache.is_supported_format(format) {
-                        bytes
+                        img.as_bytes().to_vec()
                     } else {
                         format = vk::Format::R8G8B8A8_UNORM;
                         img.to_rgba8().into_raw()
@@ -557,7 +494,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
 
                 let (uv_x, uv_y) = if !ai_mesh.mTextureCoords[0].is_null() {
                     let uv = ai_mesh.mTextureCoords[0].add(i).read();
-                    (uv.x,  1.0 - uv.y)
+                    (uv.x, uv.y)
                 } else {
                     (0.0, 0.0)
                 };
@@ -616,11 +553,23 @@ fn process_node(
     unsafe {
         let ai_matrix = (*ai_node).mTransformation;
 
-        let local_transform =Mat4::from_cols_array(&[
-            ai_matrix.a1, ai_matrix.b1, ai_matrix.c1, ai_matrix.d1,
-            ai_matrix.a2, ai_matrix.b2, ai_matrix.c2, ai_matrix.d2,
-            ai_matrix.a3, ai_matrix.b3, ai_matrix.c3, ai_matrix.d3,
-            ai_matrix.a4, ai_matrix.b4, ai_matrix.c4, ai_matrix.d4,
+        let local_transform = Mat4::from_cols_array(&[
+            ai_matrix.a1,
+            ai_matrix.b1,
+            ai_matrix.c1,
+            ai_matrix.d1,
+            ai_matrix.a2,
+            ai_matrix.b2,
+            ai_matrix.c2,
+            ai_matrix.d2,
+            ai_matrix.a3,
+            ai_matrix.b3,
+            ai_matrix.c3,
+            ai_matrix.d3,
+            ai_matrix.a4,
+            ai_matrix.b4,
+            ai_matrix.c4,
+            ai_matrix.d4,
         ]);
 
         let name = {

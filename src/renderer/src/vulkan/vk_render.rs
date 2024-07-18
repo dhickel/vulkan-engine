@@ -584,7 +584,7 @@ impl VkRender {
         // .unwrap();
 
         let loaded_scene = assimp_util::load_model_to_assimp(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/Lantern.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
             texture_cache,
             mesh_cache,
             false
