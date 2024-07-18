@@ -382,7 +382,7 @@ impl Node {
         tex_cache: &TextureCache,
     ) {
         if self.dirty {
-            self.refresh_transform(&self.world_transform.clone());
+            self.refresh_transform(&top_matrix);
         }
 
         if let Some(id) = self.meshes {

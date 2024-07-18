@@ -577,7 +577,7 @@ impl VkRender {
         let mesh_cache = &mut render.data_cache.mesh_cache;
 
         let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/bowling.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
             texture_cache,
             mesh_cache,
         )
