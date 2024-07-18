@@ -11,7 +11,7 @@ use crate::vulkan::vk_types::{VkBuffer, VkDestroyable, VkImageAlloc, VkPipeline}
 use crate::vulkan::vk_util;
 use ash::vk::Format;
 use ash::{vk, Device};
-use glam::{vec4, Vec3, Vec4};
+use glam::{vec3, vec4, Vec3, Vec4};
 use image::ImageBuffer;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -67,19 +67,27 @@ impl TextureCache {
     pub const DEFAULT_OCCLUSION_TEX: u32 = 4;
     pub const DEFAULT_EMISSIVE_TEX: u32 = 5;
 
+    pub const DEFAULT_BASE_COLOR_FACTOR: Vec4 = vec4(1.0, 1.0, 1.0, 1.0);
+    pub const DEFAULT_METALLIC_FACTOR: f32 = 0.0;
+    pub const DEFAULT_ROUGHNESS_FACTOR: f32 = 1.0;
+    pub const DEFAULT_NORMAL_SCALE: f32 = 1.0;
+    pub const DEFAULT_OCCLUSION_STRENGTH: f32 = 1.0;
+    pub const DEFAULT_EMISSIVE_FACTOR: Vec3 = Vec3::ZERO;
+
     pub const DEFAULT_MAT_ROUGH_MAT: u32 = 0;
     pub const DEFAULT_ERROR_MAT: u32 = 1;
 
     pub const DEFAULT_NORMAL_MAP: NormalMap = NormalMap {
-        scale: 1.0,
+        scale: Self::DEFAULT_NORMAL_SCALE,
         texture_id: Self::DEFAULT_NORMAL_TEX,
     };
     pub const DEFAULT_OCCLUSION_MAP: OcclusionMap = OcclusionMap {
-        strength: 1.0,
+        strength: Self::DEFAULT_OCCLUSION_STRENGTH,
         texture_id: Self::DEFAULT_OCCLUSION_TEX,
     };
+
     pub const DEFAULT_EMISSIVE_MAP: EmissiveMap = EmissiveMap {
-        factor: Vec3::ZERO,
+        factor: Self::DEFAULT_EMISSIVE_FACTOR,
         texture_id: Self::DEFAULT_EMISSIVE_TEX,
     };
 
@@ -234,6 +242,10 @@ impl TextureCache {
         }
     }
 
+    pub fn is_supported_format(&self, format: vk::Format) -> bool {
+        self.supported_formats.contains(&format)
+    }
+
     pub fn get_sampler(&self, sampler: Sampler) -> vk::Sampler {
         match sampler {
             Sampler::Linear => self.linear_sampler,
@@ -279,6 +291,7 @@ impl TextureCache {
     }
 
     pub fn add_material(&mut self, mut data: MaterialMeta) -> u32 {
+        println!("{:#?}", data);
         if data.is_ext() {
             if data.normal_map.is_none() {
                 data.normal_map = Some(Self::DEFAULT_NORMAL_MAP);
@@ -824,7 +837,7 @@ impl MeshCache {
                 name: "".to_string(),
                 indices: vec![],
                 vertices: vec![],
-                surfaces: vec![],
+                material_index: None,
             }),
         );
 
@@ -849,7 +862,7 @@ impl MeshCache {
                 name: "".to_string(),
                 indices: vec![],
                 vertices: vec![],
-                surfaces: vec![],
+                material_index: None,
             }),
         );
 

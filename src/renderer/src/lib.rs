@@ -46,9 +46,9 @@ pub struct GameLogic {
 
 
 pub fn gltf(str : String) {
-    // let mut texture_cache = TextureCache::default();
-    // let mut mesh_cache = MeshCache::default();
-    // gltf_util::parse_gltf_to_raw(str.as_str(), &mut texture_cache, &mut mesh_cache).unwrap();
+    // let mut texture_cache = TextureCache::new();
+    // // let mut mesh_cache = MeshCache::default();
+    // // gltf_util::parse_gltf_to_raw(str.as_str(), &mut texture_cache, &mut mesh_cache).unwrap();
 }
 
 pub fn run() {

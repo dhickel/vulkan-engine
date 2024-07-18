@@ -7,7 +7,7 @@ use crate::data::gpu_data::{
     DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, Vertex,
     VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer,
 };
-use crate::data::{data_cache, data_util, gltf_util, gpu_data};
+use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
 use ash::vk::{
@@ -575,14 +575,20 @@ impl VkRender {
 
         let texture_cache = &mut render.data_cache.texture_cache;
         let mesh_cache = &mut render.data_cache.mesh_cache;
+        //
+        // let loaded_scene = gltf_util::parse_gltf_to_raw(
+        //     "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+        //     texture_cache,
+        //     mesh_cache,
+        // )
+        // .unwrap();
 
-        let loaded_scene = gltf_util::parse_gltf_to_raw(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/bowling.glb",
+        let loaded_scene = assimp_util::load_model_to_assimp(
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/Lantern.glb",
             texture_cache,
             mesh_cache,
-        )
-        .unwrap();
-
+            false
+        )?;
         render.render_context.scene_tree = loaded_scene;
         render.load_caches();
         Ok(render)
@@ -1014,7 +1020,7 @@ impl VkRender {
                     &mat_desc,
                     &[],
                 );
-                
+
                 self.device.cmd_bind_index_buffer(
                     cmd_buffer,
                     obj.index_buffer,

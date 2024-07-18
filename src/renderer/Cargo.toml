@@ -16,10 +16,13 @@ cfg-if = "1"
 
 ash = { version = "0.38.0", features = ["linked"] }
 ash-window = { version = "0.13.0" }
-
 vk-mem = "0.4.0"
+raw-window-handle = { version = "0.6.2", features = ["std"] }
+shaderc = "0.8.3"
+
 gltf = { version = "1.4.1" }
 mikktspace = { version = "0.3.0", default-features = false, features = ["glam"] }
+russimp-sys = { version = "2.0.2"}
 
 
 image = "0.25.1"
@@ -32,8 +35,7 @@ imgui-rs-vulkan-renderer = { version = "1.12.0", features = ["vk-mem", "dynamic-
 imgui = "0.12.0"
 imgui-winit-support = "0.12.0"
 
-raw-window-handle = { version = "0.6.2", features = ["std"] }
-shaderc = "0.8.3"
+
 
 env_logger = "0.10"
 log = "0.4"
