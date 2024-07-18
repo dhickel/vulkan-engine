@@ -168,16 +168,16 @@ pub struct TextureMeta {
 }
 
 impl TextureMeta {
-    pub fn from_gltf_texture(data: &gltf::image::Data) -> Self {
-        Self {
-            bytes: data.pixels.clone(),
-            width: data.width,
-            height: data.height,
-            format: gltf_util::gltf_format_to_vk_format(data.format),
-            mips_levels: 1,
-            sampler: Sampler::Linear,
-        }
-    }
+    // pub fn from_gltf_texture(data: &gltf::image::Data) -> Self {
+    //     Self {
+    //         bytes: data.pixels.clone(),
+    //         width: data.width,
+    //         height: data.height,
+    //         format: gltf_util::gltf_format_to_vk_format(data.format),
+    //         mips_levels: 1,
+    //         sampler: Sampler::Linear,
+    //     }
+    // }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -192,13 +192,13 @@ pub struct MeshMeta {
     pub name: String,
     pub indices: Vec<u32>,
     pub vertices: Vec<Vertex>,
-    pub surfaces: Vec<SurfaceMeta>,
+    pub material_index: Option<u32>,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct NodeMeta {
     pub name: String,
-    pub mesh_index: Option<u32>,
+    pub mesh_indices: Vec<u32>,
     pub local_transform: Transform,
     pub og_matrix: Mat4,
     pub children: Vec<u32>,
@@ -350,9 +350,9 @@ impl Transform {
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
-    pub meshes: Option<u32>,
+    pub meshes: Vec<u32>,
     pub world_transform: Mat4,
-    pub local_transform: Transform,
+    pub local_transform: Mat4,
     pub dirty: bool,
 }
 
@@ -361,13 +361,9 @@ impl Default for Node {
         Self {
             parent: None,
             children: vec![],
-            meshes: None,
+            meshes: vec![],
             world_transform: Mat4::IDENTITY,
-            local_transform: Transform {
-                position: glam::vec3(0.0, 0.0, 0.0),
-                scale: glam::vec3(1.0, 1.0, 1.0),
-                rotation: glam::Quat::IDENTITY,
-            },
+            local_transform: Mat4::IDENTITY,
             dirty: true,
         }
     }
@@ -382,34 +378,31 @@ impl Node {
         tex_cache: &TextureCache,
     ) {
         if self.dirty {
-            self.refresh_transform(&top_matrix);
+            self.refresh_transform(*top_matrix);
         }
 
-        if let Some(id) = self.meshes {
-            let mesh = mesh_cache.get_loaded_mesh_unchecked(id);
-            let node_transform = top_matrix.mul_mat4(&self.world_transform);
+        for mesh_id in &self.meshes {
+            let mesh = mesh_cache.get_loaded_mesh_unchecked(*mesh_id);
 
-            for surface in &mesh.meta.surfaces {
-                if let Some(id) = surface.material_index {
-                    let material = tex_cache.get_loaded_material_unchecked(id);
-                    let material_ptr = material as *const VkLoadedMaterial;
-                    let ro = RenderObject {
-                        index_count: surface.count,
-                        first_index: surface.start_index,
-                        index_buffer: mesh.buffer.index_buffer.buffer,
-                        material: material_ptr,
-                        transform: node_transform,
-                        vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
-                    };
+            if let Some(id) = mesh.meta.material_index {
+                let material = tex_cache.get_loaded_material_unchecked(id);
+                let material_ptr = material as *const VkLoadedMaterial;
+                let ro = RenderObject {
+                    index_count: mesh.meta.indices.len() as u32,
+                    first_index: 0,
+                    index_buffer: mesh.buffer.index_buffer.buffer,
+                    material: material_ptr,
+                    transform: self.world_transform,
+                    vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
+                };
 
-                    // FIXME, should use something more performant than a hash set since all types are known
-                    ctx.active_pipelines.insert(material.pipeline);
+                // FIXME, should use something more performant than a hash set since all types are known
+                ctx.active_pipelines.insert(material.pipeline);
 
-                    unsafe {
-                        ctx.render_objects
-                            .get_unchecked_mut(material.pipeline as usize)
-                            .push(ro);
-                    }
+                unsafe {
+                    ctx.render_objects
+                        .get_unchecked_mut(material.pipeline as usize)
+                        .push(ro);
                 }
             }
         }
@@ -421,13 +414,13 @@ impl Node {
         }
     }
 
-    pub fn refresh_transform(&mut self, parent_transform: &Mat4) {
-        self.world_transform = parent_transform.mul_mat4(&self.local_transform.compose());
+    pub fn refresh_transform(&mut self, parent_transform: Mat4) {
+        self.world_transform = parent_transform.mul_mat4(&self.local_transform);
         self.dirty = false;
 
         for child in &self.children {
             let mut child = child.borrow_mut();
-            child.refresh_transform(&self.world_transform);
+            child.refresh_transform(self.world_transform);
         }
     }
 
