@@ -103,7 +103,7 @@ impl TextureCache {
         });
 
         let def_rough = CachedTexture::UnLoaded(TextureMeta {
-            bytes: vec![128, 128, 128, 255],
+            bytes: vec![0, 127, 0, 255],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
@@ -425,7 +425,7 @@ impl TextureCache {
 
         if let CacheMaterial::Unloaded(meta) = material {
             let loaded_material: VkLoadedMaterial;
-            if 1 ==2 && meta.is_ext() { // FIXME ext pipeline is disable
+            if false && meta.is_ext() { // FIXME ext pipeline is disabled
                 let shader_consts = MetRoughUniformExt {
                     color_factors: meta.base_color_factor,
                     metal_rough_factors: vec4(
@@ -905,10 +905,16 @@ pub enum CoreShaderType {
     MetRoughFrag,
     MetRoughVertExt,
     MetRoughFragExt,
+    BrtFlutVert,
+    BrtFlutFrag
+}
+
+impl CoreShaderType {
+    const COUNT : usize = 6;
 }
 
 pub struct VkShaderCache {
-    pub core_shader_cache: [vk::ShaderModule; 4],
+    pub core_shader_cache: [vk::ShaderModule; CoreShaderType::COUNT],
     pub user_shader_cache: Vec<vk::ShaderModule>,
 }
 
@@ -926,7 +932,7 @@ impl VkShaderCache {
 
         compiled_shaders.sort_by_key(|(typ, path)| *typ);
 
-        let sorted_shaders: [vk::ShaderModule; 4] = compiled_shaders
+        let sorted_shaders: [vk::ShaderModule; CoreShaderType::COUNT] = compiled_shaders
             .into_iter()
             .map(|(_, shader)| shader)
             .collect::<Vec<_>>()
@@ -969,12 +975,16 @@ pub enum VkPipelineType {
     PbrMetRoughAlpha,
     PbrMetRoughOpaqueExt,
     PbrMetRoughAlphaExt,
-    // Mesh,
+    BrdFlut,
+}
+
+impl VkPipelineType {
+    const COUNT : usize = 5;
 }
 
 //#[derive(Clone, Copy)]
 pub struct VkPipelineCache {
-    pipelines: [VkPipeline; 4],
+    pipelines: [VkPipeline; VkPipelineType::COUNT],
 }
 
 impl VkPipelineCache {
@@ -982,7 +992,7 @@ impl VkPipelineCache {
         pipelines.sort_by_key(|(typ, _)| *typ);
 
         // Convert sorted vectors to fixed-size arrays
-        let sorted_pipelines: [VkPipeline; 4] = pipelines
+        let sorted_pipelines: [VkPipeline; VkPipelineType::COUNT] = pipelines
             .into_iter()
             .map(|(_, pipeline)| pipeline)
             .collect::<Vec<_>>()
@@ -1018,16 +1028,21 @@ pub enum VkDescType {
     GpuScene,
     PbrMetRough,
     PbrMetRoughExt,
+    Empty
+}
+
+impl VkDescType {
+    const COUNT : usize = 5;
 }
 pub struct VkDescLayoutCache {
-    layouts: [vk::DescriptorSetLayout; 4],
+    layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
 }
 
 impl VkDescLayoutCache {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
         layouts.sort();
 
-        let sorted_layouts: [vk::DescriptorSetLayout; 4] = layouts
+        let sorted_layouts: [vk::DescriptorSetLayout; VkDescType::COUNT] = layouts
             .into_iter()
             .map(|(_, layout)| layout)
             .collect::<Vec<_>>()

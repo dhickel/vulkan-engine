@@ -1,5 +1,6 @@
 use crate::data::data_cache;
 use crate::data::data_cache::VkDescType;
+use crate::vulkan::vk_descriptor;
 use crate::vulkan::vk_types::*;
 use ash::prelude::VkResult;
 use ash::vk::{DescriptorPool, DescriptorSetLayoutCreateFlags};
@@ -8,8 +9,6 @@ use std::backtrace::Backtrace;
 use std::collections::VecDeque;
 use std::vec;
 use vk_mem::Allocator;
-use crate::vulkan::vk_descriptor;
-
 
 pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,
@@ -411,7 +410,6 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .unwrap();
 
-
     let pbr_met_rough_ext = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
         .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -426,11 +424,17 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .unwrap();
 
+    let empty = DescriptorLayoutBuilder::default().build(
+        device,
+        vk::ShaderStageFlags::empty(),
+        vk::DescriptorSetLayoutCreateFlags::empty(),
+    ).unwrap();
 
     data_cache::VkDescLayoutCache::new(vec![
         (VkDescType::DrawImage, draw_image_layout),
         (VkDescType::GpuScene, gpu_scene_desc),
         (VkDescType::PbrMetRough, pbr_met_rough),
-        (VkDescType::PbrMetRoughExt, pbr_met_rough_ext)
+        (VkDescType::PbrMetRoughExt, pbr_met_rough_ext),
+        (VkDescType::Empty, empty)
     ])
 }

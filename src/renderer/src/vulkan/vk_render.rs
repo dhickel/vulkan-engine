@@ -114,6 +114,16 @@ pub fn init_caches(
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh_ext.vert.spv"
                 .to_string(),
         ),
+        (
+            CoreShaderType::BrtFlutFrag,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"
+                .to_string(),
+        ),
+        (
+            CoreShaderType::BrtFlutVert,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"
+                .to_string(),
+        ),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -583,12 +593,11 @@ impl VkRender {
         // )
         // .unwrap();
 
-
         let loaded_scene = assimp_util::load_model_to_assimp(
             "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
             texture_cache,
             mesh_cache,
-            false
+            false,
         )?;
         render.render_context.scene_tree = loaded_scene;
         render.load_caches();
@@ -1356,7 +1365,7 @@ impl VkRender {
 
         self.scene_data.ambient_color = Vec4::splat(0.1);
         self.scene_data.sunlight_color = Vec4::splat(1.0);
-        self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 1.0);
+        self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 100.0);
 
         self.render_context.scene_tree.borrow_mut().draw(
             &glam::Mat4::IDENTITY,

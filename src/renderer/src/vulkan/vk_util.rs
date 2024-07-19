@@ -4,7 +4,10 @@ use std::ffi::CStr;
 use crate::data::gpu_data::VkGpuMeshBuffers;
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ClearValue, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2, RenderingInfo};
+use ash::vk::{
+    AccessFlags2, ClearValue, Extent3D, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2,
+    RenderingInfo,
+};
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::align_of;
 use std::rc::Rc;
@@ -202,7 +205,7 @@ pub fn attachment_info<'a>(
         .store_op(vk::AttachmentStoreOp::STORE);
 
     if let Some(clear) = clear {
-         info = info.clear_value(clear);
+        info = info.clear_value(clear);
     };
     info
 }
@@ -456,4 +459,38 @@ pub fn destroy_mesh_buffers(allocator: &Allocator, mut buffer: VkGpuMeshBuffers)
 }
 pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
     unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
+}
+
+pub fn generate_brd_flut(device: &ash::Device, allocator: &Allocator) {
+    let format = vk::Format::R16G16B16A16_SFLOAT;
+    let size = Extent3D::default().width(512).height(512);
+    let brd_img = create_image(
+        device,
+        allocator,
+        size,
+        format,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+        false,
+    );
+
+    let brd_img_view = image_view_create_info(
+        format,
+        vk::ImageViewType::TYPE_2D,
+        brd_img.image,
+        vk::ImageAspectFlags::COLOR,
+    );
+
+    let brd_sampler_ci = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::LINEAR)
+        .min_filter(vk::Filter::LINEAR)
+        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .min_lod(0.0)
+        .max_lod(1.0)
+        .max_anisotropy(1.0)
+        .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
+
+    let brd_sampler = unsafe { device.create_sampler(&brd_sampler_ci, None) };
 }
