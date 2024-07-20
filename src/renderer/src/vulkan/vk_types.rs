@@ -763,6 +763,7 @@ pub struct VkBuffer {
 pub struct VkBrdFlut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
+    pub extent: Extent2D
 }
 
 impl VkBuffer {

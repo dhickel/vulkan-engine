@@ -475,9 +475,7 @@ pub fn generate_brd_flut(
     let size = Extent3D::default().width(512).height(512).depth(1);
     let dim_extent = Extent2D::default().width(512).height(512);
     let dim_rect = Rect2D::default().extent(dim_extent);
-
-   
-
+    
     let brd_img = create_image(
         device,
         &allocator.lock().unwrap(),
@@ -486,11 +484,6 @@ pub fn generate_brd_flut(
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         false,
     );
-
-    
-
-
-
 
     let brd_sampler = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::LINEAR)
@@ -566,8 +559,43 @@ pub fn generate_brd_flut(
             pipeline
         );
         device.cmd_draw(cmd_buffer, 3, 1, 0, 0);
+        
+        
+        
 
         device.cmd_end_rendering(cmd_buffer);
+        
+        
+        
+        // Transition to final shader formatting
+
+        let subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(brd_img.image)
+            .subresource_range(subresource_range)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ);
+
+        device.cmd_pipeline_barrier(
+            cmd_buffer,
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            vk::DependencyFlags::BY_REGION,
+            &[],
+            &[],
+            &[barrier],
+        );
+        
         device.end_command_buffer(cmd_buffer).unwrap();
         
         let cmd_info = [command_buffer_submit_info(cmd_buffer)];
@@ -580,5 +608,6 @@ pub fn generate_brd_flut(
     VkBrdFlut {
         sampler: brd_sampler,
         image_alloc: brd_img,
+        extent: dim_extent
     }
 }

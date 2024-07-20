@@ -614,7 +614,7 @@ impl VkRender {
         // .unwrap();
 
         let loaded_scene = assimp_util::load_model_to_assimp(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
             texture_cache,
             mesh_cache,
             false,
@@ -795,7 +795,7 @@ impl VkRender {
             self.draw_geometry();
 
             // Transition draw image and present image for copy compatability
-
+            
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -803,7 +803,7 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
-
+            
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -811,7 +811,7 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
-
+            
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
                 &self.device,
@@ -821,7 +821,7 @@ impl VkRender {
                 present_image,
                 extent,
             );
-
+            
             //re transition present to draw gui on
             vk_util::transition_image(
                 &self.device,
@@ -830,10 +830,10 @@ impl VkRender {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
-
+            
             // draw gpu upon present image
             self.draw_imgui(cmd_buffer, present_view);
-
+            
             // transition draw again for presentation
             vk_util::transition_image(
                 &self.device,
