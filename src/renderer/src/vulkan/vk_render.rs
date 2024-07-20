@@ -84,6 +84,7 @@ pub struct VkRender {
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
     pub data_cache: DataCache,
+    pub brd_flut: VkBrdFlut,
     pub global_desc_allocator: VkDynamicDescriptorAllocator,
     pub main_deletion_queue: Vec<VkDeletable>,
     pub resize_requested: bool,
@@ -560,6 +561,23 @@ impl VkRender {
         );
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
+        let brd_pipeline = data_cache
+            .pipeline_cache
+            .get_pipeline(VkPipelineType::BrdFlut)
+            .pipeline;
+
+        let brd_flut = vk_util::generate_brd_flut(
+            &device,
+            allocator.clone(),
+            brd_pipeline,
+            presentation
+                .frame_data
+                .first()
+                .unwrap()
+                .cmd_pool
+                .get(QueueType::Graphics),
+        );
+
         let mut render = VkRender {
             window_state,
             allocator,
@@ -580,6 +598,7 @@ impl VkRender {
             scene_data: GPUSceneData::default(),
             render_context: RenderContext::default(),
             data_cache,
+            brd_flut,
             resize_requested: false,
             global_desc_allocator: global_alloc,
         };
@@ -956,10 +975,10 @@ impl VkRender {
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
-         
-
-            self.device.cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-            self.device.cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
+            self.device
+                .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
+            self.device
+                .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
 
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
@@ -997,8 +1016,10 @@ impl VkRender {
             let draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
 
-                self.device.cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-                self.device.cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
+                self.device
+                    .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
+                self.device
+                    .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
                 // This is a static descriptor set for the material the is allocated once
                 // internally to the cache, only reallocated if a change to the material
                 // occurs (Currently doesn't happen)
@@ -1363,5 +1384,9 @@ impl VkRender {
             &self.data_cache.mesh_cache,
             &self.data_cache.texture_cache,
         )
+    }
+
+    pub fn draw_brd_lut(&mut self) {
+        let dim = 512;
     }
 }

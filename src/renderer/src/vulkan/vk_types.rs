@@ -760,6 +760,11 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
+pub struct VkBrdFlut {
+    pub sampler: vk::Sampler,
+    pub image_alloc: VkImageAlloc,
+}
+
 impl VkBuffer {
     pub fn new(
         buffer: vk::Buffer,
@@ -782,16 +787,6 @@ impl VkDestroyable for VkBuffer {
     }
 }
 
-// macro_rules! enum_byte_variant_count {
-//     ($enum:ty) => {{
-//         let mut count = 0;
-//         while <$enum as std::convert::TryFrom<u8>>::try_from(count).is_ok() {
-//             count += 1;
-//         }
-//         println!("Count is:{}", count);
-//         count as usize
-//     }};
-// }
 
 pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),

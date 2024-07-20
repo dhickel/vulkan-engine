@@ -5,8 +5,8 @@ use crate::data::gpu_data::VkGpuMeshBuffers;
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
-    AccessFlags2, ClearValue, Extent3D, ImageType, PipelineLayoutCreateInfo, PipelineStageFlags2,
-    RenderingInfo,
+    AccessFlags2, ClearValue, Extent2D, Extent3D, ImageType, PipelineLayoutCreateInfo,
+    PipelineStageFlags2, Rect2D, RenderingInfo,
 };
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -125,6 +125,7 @@ pub fn create_image(
     usage_flags: vk::ImageUsageFlags,
     mip_mapped: bool,
 ) -> VkImageAlloc {
+
     let mut image_info = image_create_info(
         format,
         usage_flags,
@@ -461,26 +462,37 @@ pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
     unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
 }
 
-pub fn generate_brd_flut(device: &ash::Device, allocator: &Allocator) {
+pub fn generate_brd_flut(
+    device: &ash::Device,
+    allocator: Arc<Mutex<Allocator>>,
+    pipeline: vk::Pipeline,
+    cmd_pool: &VkCommandPool,
+) -> VkBrdFlut {
+    let cmd_buffer = *cmd_pool.buffers.get(0).unwrap();
+    let queue = cmd_pool.queue;
+    
     let format = vk::Format::R16G16B16A16_SFLOAT;
-    let size = Extent3D::default().width(512).height(512);
+    let size = Extent3D::default().width(512).height(512).depth(1);
+    let dim_extent = Extent2D::default().width(512).height(512);
+    let dim_rect = Rect2D::default().extent(dim_extent);
+
+   
+
     let brd_img = create_image(
         device,
-        allocator,
+        &allocator.lock().unwrap(),
         size,
         format,
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         false,
     );
 
-    let brd_img_view = image_view_create_info(
-        format,
-        vk::ImageViewType::TYPE_2D,
-        brd_img.image,
-        vk::ImageAspectFlags::COLOR,
-    );
+    
 
-    let brd_sampler_ci = vk::SamplerCreateInfo::default()
+
+
+
+    let brd_sampler = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::LINEAR)
         .min_filter(vk::Filter::LINEAR)
         .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
@@ -492,5 +504,81 @@ pub fn generate_brd_flut(device: &ash::Device, allocator: &Allocator) {
         .max_anisotropy(1.0)
         .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
 
-    let brd_sampler = unsafe { device.create_sampler(&brd_sampler_ci, None) };
+    let brd_sampler = unsafe { device.create_sampler(&brd_sampler, None).unwrap() };
+
+    let color_attachment_format = vk::Format::R16G16B16A16_SFLOAT;
+    let pipeline_rendering_create_info = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&[color_attachment_format]);
+
+    let clear_value = vk::ClearValue {
+        color: vk::ClearColorValue {
+            float32: [0.0, 0.0, 0.0, 1.0],
+        },
+    };
+
+    let color_attachment = [attachment_info(
+        brd_img.image_view,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        Some(clear_value),
+    )];
+
+    let rendering_info = vk::RenderingInfo::default()
+        .render_area(dim_rect)
+        .layer_count(1)
+        .color_attachments(&color_attachment);
+
+    let viewport = vk::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: dim_extent.height as f32,
+        height: dim_extent.width as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    };
+
+    let scissor = vk::Rect2D {
+        offset: vk::Offset2D { x: 0, y: 0 },
+        extent: dim_extent,
+    };
+
+    unsafe {
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        device.begin_command_buffer(cmd_buffer, &begin_info).unwrap();
+
+        transition_image(
+            device,
+            cmd_buffer,
+            brd_img.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        );
+
+        
+        device.cmd_begin_rendering(cmd_buffer, &rendering_info);
+
+        device.cmd_set_viewport(cmd_buffer, 0, &[viewport]);
+        device.cmd_set_scissor(cmd_buffer, 0, &[scissor]);
+        device.cmd_bind_pipeline(
+            cmd_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline
+        );
+        device.cmd_draw(cmd_buffer, 3, 1, 0, 0);
+
+        device.cmd_end_rendering(cmd_buffer);
+        device.end_command_buffer(cmd_buffer).unwrap();
+        
+        let cmd_info = [command_buffer_submit_info(cmd_buffer)];
+        let submit_info = [submit_info_2(&cmd_info, &[], &[])];
+        device.queue_submit2(queue, &submit_info, vk::Fence::null()).unwrap();
+        
+        device.device_wait_idle().unwrap();
+    }
+
+    VkBrdFlut {
+        sampler: brd_sampler,
+        image_alloc: brd_img,
+    }
 }
