@@ -1,4 +1,6 @@
+use crate::data::camera::FPSController;
 use crate::vulkan::vk_descriptor::{DescriptorAllocator, VkDynamicDescriptorAllocator};
+use ash::vk::Extent2D;
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
@@ -7,8 +9,6 @@ use std::ffi::{CStr, CString};
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::{mem, slice};
-
-use crate::data::camera::FPSController;
 use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
@@ -33,9 +33,11 @@ pub enum VkError {
 pub struct VkWindowState {
     pub window: winit::window::Window,
     pub resize_requested: bool,
-    pub max_extent: vk::Extent2D,
-    pub curr_extent: vk::Extent2D,
+    max_extent: vk::Extent2D,
+    curr_extent: vk::Extent2D,
+    curr_aspect_ratio: f32,
     pub render_scale: f32,
+    viewport_scissor: ([vk::Viewport; 1], [vk::Rect2D; 1]),
     pub controller: Rc<RefCell<FPSController>>,
 }
 
@@ -46,12 +48,28 @@ impl VkWindowState {
         max_extent: vk::Extent2D,
         controller: FPSController,
     ) -> Self {
+        let viewport = [vk::Viewport::default()
+            .x(0.0)
+            .y(curr_extent.height as f32)
+            .width(curr_extent.width as f32)
+            .height(-(curr_extent.height as f32))
+            .min_depth(0.0)
+            .max_depth(1.0)];
+
+        let scissor = [vk::Rect2D::default()
+            .offset(vk::Offset2D::default().y(0).y(0))
+            .extent(curr_extent)];
+
+        let curr_aspect_ratio = curr_extent.width as f32 / curr_extent.height as f32;
+
         Self {
             window,
             curr_extent,
             max_extent,
             controller: Rc::new(RefCell::new(controller)),
+            viewport_scissor: (viewport, scissor),
             resize_requested: false,
+            curr_aspect_ratio,
             render_scale: 1.0,
         }
     }
@@ -63,6 +81,54 @@ impl VkWindowState {
         }
         self.curr_extent.height = (self.curr_extent.height as f32 * self.render_scale) as u32;
         self.curr_extent.width = (self.curr_extent.width as f32 * self.render_scale) as u32;
+    }
+
+    pub fn update_curr_size(&mut self, extent: Extent2D) {
+        self.curr_extent = extent;
+
+        let viewport = [vk::Viewport::default()
+            .x(0.0)
+            .y(self.curr_extent.height as f32)
+            .width(self.curr_extent.width as f32)
+            .height(-(self.curr_extent.height as f32))
+            .min_depth(0.0)
+            .max_depth(1.0)];
+
+        let scissor = [vk::Rect2D::default()
+            .offset(vk::Offset2D::default().y(0).y(0))
+            .extent(self.curr_extent)];
+
+        self.viewport_scissor = (viewport, scissor);
+
+        self.curr_aspect_ratio = self.curr_extent.width as f32 / self.curr_extent.height as f32;
+    }
+
+    pub fn get_curr_width(&self) -> u32 {
+        self.curr_extent.width
+    }
+
+    pub fn get_curr_height(&self) -> u32 {
+        self.curr_extent.height
+    }
+
+    pub fn get_curr_extent(&self) -> Extent2D {
+        self.curr_extent
+    }
+
+    pub fn get_aspect_ratio(&self) -> f32 {
+        self.curr_aspect_ratio
+    }
+    
+    pub fn get_max_extent(&self) -> vk::Extent2D {
+        self.max_extent
+    }
+
+    pub fn get_viewport(&self) -> &[vk::Viewport; 1] {
+        &self.viewport_scissor.0
+    }
+
+    pub fn get_scissor(&self) -> &[vk::Rect2D; 1] {
+        &self.viewport_scissor.1
     }
 
     pub fn center_cursor(&self) {
@@ -163,7 +229,6 @@ impl VkCommandPoolMap {
         &self.pools[typ as usize]
     }
 }
-
 
 #[derive(Debug)]
 pub struct VkCommandPool {
@@ -292,7 +357,6 @@ impl VkFrame {
             .for_each(|d| d.delete(device, allocator));
         self.deletions.clear();
     }
-    
 }
 
 pub struct VkPresent {
@@ -359,8 +423,7 @@ impl VkPresent {
             max_frames_active: data_len as u32,
         })
     }
-    
-    
+
     pub fn get_next_frame(&mut self) -> &VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
         let frame = &self.frame_data[index as usize]; // FIXME
@@ -522,7 +585,9 @@ impl VkImmediate {
 impl VkDestroyable for VkImmediate {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.command_pool.destroy(device, allocator);
-        unsafe {device.destroy_fence(self.fence[0], None);}
+        unsafe {
+            device.destroy_fence(self.fence[0], None);
+        }
     }
 }
 
@@ -662,7 +727,6 @@ pub struct VkDescriptors {
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
 }
 
-
 impl VkDestroyable for VkDescriptors {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.allocator.destroy(device);
@@ -712,11 +776,11 @@ impl VkBuffer {
 
 impl VkDestroyable for VkBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-       unsafe { allocator.destroy_buffer(self.buffer, &mut self.allocation); }
+        unsafe {
+            allocator.destroy_buffer(self.buffer, &mut self.allocation);
+        }
     }
 }
-
-
 
 // macro_rules! enum_byte_variant_count {
 //     ($enum:ty) => {{
@@ -728,8 +792,6 @@ impl VkDestroyable for VkBuffer {
 //         count as usize
 //     }};
 // }
-
-
 
 pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),

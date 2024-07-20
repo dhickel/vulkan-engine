@@ -396,7 +396,7 @@ impl VkRender {
             &device,
             &device_queues,
             &surface,
-            window_state.curr_extent,
+            window_state.get_curr_extent(),
             Some(2),
             None,
             Some(vk::PresentModeKHR::MAILBOX),
@@ -404,8 +404,9 @@ impl VkRender {
             true,
         )?;
 
-        if swapchain.extent != window_state.curr_extent {
-            window_state.curr_extent = swapchain.extent;
+        // FIXME why is this here?
+        if swapchain.extent != window_state.get_curr_extent() {
+            window_state.update_curr_size(swapchain.extent);
         }
 
         let command_pools = vk_init::create_command_pools(&device, &device_queues, 2, 1)?;
@@ -434,7 +435,7 @@ impl VkRender {
         // Set images to max extent, so they can be reused on window resizing
 
         let draw_images =
-            vk_init::allocate_draw_images(&allocator, &device, window_state.max_extent, 2)?;
+            vk_init::allocate_draw_images(&allocator, &device, window_state.get_max_extent(), 2)?;
         let draw_format = draw_images[0].image_format;
 
         let draw_views: Vec<vk::ImageView> =
@@ -446,7 +447,7 @@ impl VkRender {
         let layout = [descriptors.descriptor_layouts[0]];
 
         let depth_images =
-            vk_init::allocate_depth_images(&allocator, &device, window_state.max_extent, 2)?;
+            vk_init::allocate_depth_images(&allocator, &device, window_state.get_max_extent(), 2)?;
         let depth_format = depth_images[0].image_format;
 
         // FIXME, this needs generalized
@@ -634,7 +635,7 @@ impl VkRender {
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
-        self.window_state.curr_extent = new_size;
+        self.window_state.update_curr_size(new_size);
 
         unsafe { self.device.device_wait_idle().unwrap() }
 
@@ -735,7 +736,7 @@ impl VkRender {
             // println!("render Image: {:?}", draw_image);
             // println!("render View: {:?}", draw_view);
 
-            let extent = self.window_state.curr_extent;
+            let extent = self.window_state.get_curr_extent();
 
             // Transition Depth/Draw Images for use
             vk_util::transition_image(
@@ -875,7 +876,7 @@ impl VkRender {
         )];
 
         let render_info =
-            vk_util::rendering_info(self.window_state.curr_extent, &attachment_info, None);
+            vk_util::rendering_info(self.window_state.get_curr_extent(), &attachment_info, None);
 
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &render_info);
@@ -947,7 +948,7 @@ impl VkRender {
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
         );
 
-        let extent = self.window_state.curr_extent;
+        let extent = self.window_state.get_curr_extent();
 
         let rendering_info =
             vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
@@ -955,20 +956,10 @@ impl VkRender {
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
-            let viewport = [vk::Viewport::default()
-                .x(0.0)
-                .y(extent.height as f32)
-                .width(extent.width as f32)
-                .height(-(extent.height as f32))
-                .min_depth(0.0)
-                .max_depth(1.0)];
+         
 
-            let scissor = [vk::Rect2D::default()
-                .offset(vk::Offset2D::default().y(0).y(0))
-                .extent(extent)];
-
-            self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
-            self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
+            self.device.cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
+            self.device.cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
 
             let allocator = self.allocator.lock().unwrap();
             let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
@@ -1006,8 +997,8 @@ impl VkRender {
             let draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
 
-                self.device.cmd_set_viewport(cmd_buffer, 0, &viewport);
-                self.device.cmd_set_scissor(cmd_buffer, 0, &scissor);
+                self.device.cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
+                self.device.cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
                 // This is a static descriptor set for the material the is allocated once
                 // internally to the cache, only reallocated if a change to the material
                 // occurs (Currently doesn't happen)
@@ -1153,8 +1144,8 @@ impl VkRender {
 
             self.device.cmd_dispatch(
                 cmd_buffer,
-                (self.window_state.curr_extent.width as f32 / 16.0).ceil() as u32,
-                (self.window_state.curr_extent.height as f32 / 16.0).ceil() as u32,
+                (self.window_state.get_curr_width() as f32 / 16.0).ceil() as u32,
+                (self.window_state.get_curr_height() as f32 / 16.0).ceil() as u32,
                 1,
             );
         }
@@ -1349,8 +1340,7 @@ impl VkRender {
             .get_view_matrix();
 
         let fovy = 70_f32.to_radians();
-        let aspect_ratio = self.window_state.curr_extent.width as f32
-            / self.window_state.curr_extent.height as f32;
+        let aspect_ratio = self.window_state.get_aspect_ratio();
 
         // reversed depth
         let far = 0.1;
