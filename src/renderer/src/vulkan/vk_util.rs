@@ -1,18 +1,24 @@
 use std::cmp::max;
 use std::ffi::CStr;
 
-use crate::data::gpu_data::VkGpuMeshBuffers;
+use crate::data::gpu_data::{TextureMeta, VkCubeMap, VkGpuMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
     AccessFlags2, ClearValue, Extent2D, Extent3D, ImageType, PipelineLayoutCreateInfo,
     PipelineStageFlags2, Rect2D, RenderingInfo,
 };
+use log::info;
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use vk_mem::{Alloc, Allocator};
+
+use shaderc::{CompileOptions, Compiler, ShaderKind};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -125,7 +131,6 @@ pub fn create_image(
     usage_flags: vk::ImageUsageFlags,
     mip_mapped: bool,
 ) -> VkImageAlloc {
-
     let mut image_info = image_create_info(
         format,
         usage_flags,
@@ -429,7 +434,12 @@ pub fn allocate_and_write_buffer(
     usage: vk::BufferUsageFlags,
 ) -> Result<VkBuffer, String> {
     let buffer_size = data.len();
-    let mut buffer = allocate_buffer(allocator, buffer_size, usage, vk_mem::MemoryUsage::Auto)?;
+    let mut buffer = allocate_buffer(
+        allocator,
+        buffer_size,
+        usage,
+        vk_mem::MemoryUsage::AutoPreferDevice,
+    )?;
 
     unsafe {
         let data_ptr = allocator
@@ -462,23 +472,30 @@ pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
     unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
 }
 
-pub fn generate_brd_flut(
+//////////////////
+// ENGINE UTIL ///
+//////////////////
+
+pub fn generate_brdf_lut(
     device: &ash::Device,
-    allocator: Arc<Mutex<Allocator>>,
+    allocator: &Allocator,
     pipeline: vk::Pipeline,
     cmd_pool: &VkCommandPool,
-) -> VkBrdFlut {
+) -> VkBrdfLut {
+    info!("Generating BRDF LUT");
+    let start = SystemTime::now();
+
     let cmd_buffer = *cmd_pool.buffers.get(0).unwrap();
     let queue = cmd_pool.queue;
-    
+
     let format = vk::Format::R16G16B16A16_SFLOAT;
     let size = Extent3D::default().width(512).height(512).depth(1);
     let dim_extent = Extent2D::default().width(512).height(512);
     let dim_rect = Rect2D::default().extent(dim_extent);
-    
+
     let brd_img = create_image(
         device,
-        &allocator.lock().unwrap(),
+        allocator,
         size,
         format,
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
@@ -538,7 +555,9 @@ pub fn generate_brd_flut(
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        device.begin_command_buffer(cmd_buffer, &begin_info).unwrap();
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .unwrap();
 
         transition_image(
             device,
@@ -548,27 +567,17 @@ pub fn generate_brd_flut(
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
 
-        
         device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
         device.cmd_set_viewport(cmd_buffer, 0, &[viewport]);
         device.cmd_set_scissor(cmd_buffer, 0, &[scissor]);
-        device.cmd_bind_pipeline(
-            cmd_buffer,
-            vk::PipelineBindPoint::GRAPHICS,
-            pipeline
-        );
+        device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+
         device.cmd_draw(cmd_buffer, 3, 1, 0, 0);
-        
-        
-        
 
         device.cmd_end_rendering(cmd_buffer);
-        
-        
-        
-        // Transition to final shader formatting
 
+        // Transition to final shader formatting
         let subresource_range = vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
@@ -583,7 +592,9 @@ pub fn generate_brd_flut(
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(brd_img.image)
             .subresource_range(subresource_range)
-            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .src_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            )
             .dst_access_mask(vk::AccessFlags::MEMORY_READ);
 
         device.cmd_pipeline_barrier(
@@ -595,19 +606,262 @@ pub fn generate_brd_flut(
             &[],
             &[barrier],
         );
-        
+
         device.end_command_buffer(cmd_buffer).unwrap();
-        
+
         let cmd_info = [command_buffer_submit_info(cmd_buffer)];
         let submit_info = [submit_info_2(&cmd_info, &[], &[])];
-        device.queue_submit2(queue, &submit_info, vk::Fence::null()).unwrap();
-        
+        device
+            .queue_submit2(queue, &submit_info, vk::Fence::null())
+            .unwrap();
+
         device.device_wait_idle().unwrap();
+        let end = SystemTime::now().duration_since(start).unwrap().as_millis();
+
+        info!("BRDF LUT generation took: {} ms", end);
     }
 
-    VkBrdFlut {
+    VkBrdfLut {
         sampler: brd_sampler,
         image_alloc: brd_img,
-        extent: dim_extent
+        extent: dim_extent,
     }
+}
+
+pub fn upload_cube_map(
+    device: &ash::Device,
+    allocator: &Allocator,
+    tex_meta: TextureMeta,
+    pipeline: vk::Pipeline,
+    cmd_pool: &VkCommandPool,
+) -> VkCubeMap {
+    let face_width = tex_meta.width / 6;
+
+    let staging_buffer = allocate_and_write_buffer(
+        allocator,
+        &tex_meta.bytes,
+        vk::BufferUsageFlags::TRANSFER_DST,
+    )
+    .unwrap();
+
+    // TODO handle mips
+    let image_create_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(tex_meta.format)
+        .mip_levels(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .extent(
+            vk::Extent3D::default()
+                .width(face_width)
+                .height(tex_meta.height)
+                .depth(1),
+        )
+        .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+        .array_layers(6)
+        .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE);
+
+    let image = unsafe { device.create_image(&image_create_info, None).unwrap() };
+
+    let alloc_info = vk_mem::AllocationCreateInfo {
+        usage: vk_mem::MemoryUsage::Unknown,
+        flags: vk_mem::AllocationCreateFlags::MAPPED
+            | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+        ..Default::default()
+    };
+
+    let (allocation, device_memory, alloc_offset) = unsafe {
+        let alloc = allocator
+            .allocate_memory_for_image(image, &alloc_info)
+            .unwrap();
+
+        let alloc_info = allocator.get_allocation_info(&alloc);
+        let device_memory = alloc_info.device_memory;
+        let offset = alloc_info.offset;
+
+        device
+            .bind_image_memory(image, device_memory, offset)
+            .unwrap();
+
+        (alloc, device_memory, offset)
+    };
+
+    let cmd_buffer = *cmd_pool.buffers.get(0).unwrap();
+    unsafe {
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .unwrap();
+
+        // Map regions
+        let regions: Vec<vk::BufferImageCopy> = (0..6)
+            .map(|i| {
+                vk::BufferImageCopy::default()
+                    .buffer_offset((i as u64) * (face_width * tex_meta.height * 4) as u64)
+                    .buffer_row_length(tex_meta.width)
+                    .buffer_image_height(tex_meta.height)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: i,
+                        layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D {
+                        width: face_width,
+                        height: tex_meta.height,
+                        depth: 1,
+                    })
+            })
+            .collect();
+
+        // transition image for copy
+        transition_image(
+            device,
+            cmd_buffer,
+            image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        );
+
+        // Copy full staging image buffer to image regions
+        device.cmd_copy_buffer_to_image(
+            cmd_buffer,
+            staging_buffer.buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &regions,
+        );
+
+        // Transitions for shader reads
+        transition_image(
+            device,
+            cmd_buffer,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        let sampler_create_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .anisotropy_enable(true)
+            .max_anisotropy(16.0)
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .unnormalized_coordinates(false)
+            .compare_enable(false)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(0.0);
+
+        let sampler = device.create_sampler(&sampler_create_info, None).unwrap();
+
+        let view_create_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::CUBE)
+            .format(tex_meta.format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+
+        let image_view = device.create_image_view(&view_create_info, None).unwrap();
+
+        destroy_buffer(allocator, staging_buffer);
+
+        let full_extent = Extent3D {
+            width: tex_meta.width,
+            height: tex_meta.height,
+            depth: 1,
+        };
+
+        let face_extent = Extent3D {
+            width: face_width,
+            height: tex_meta.height,
+            depth: 1,
+        };
+
+        VkCubeMap {
+            texture_meta: tex_meta,
+            full_extent,
+            face_extent,
+            allocation,
+            image,
+            image_view,
+            sampler,
+        }
+    }
+}
+
+pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Create a shader compiler
+    let compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
+    let mut options = CompileOptions::new().ok_or("Failed to create compile options")?;
+    options.add_macro_definition("GL_EXT_buffer_reference", Some("1"));
+    options.add_macro_definition("GL_GOOGLE_include_directive", Some("1"));
+
+    let shader_dir_path = Path::new(shader_dir);
+    options.set_include_callback(move |name, _include_type, _source_file, _depth| {
+        let path = shader_dir_path.join(name);
+        if path.exists() {
+            Ok(shaderc::ResolvedInclude {
+                resolved_name: path.to_str().unwrap().to_string(),
+                content: fs::read_to_string(&path)
+                    .map_err(|err| " Failed to read shader includes".to_string())?,
+            })
+        } else {
+            Err(format!("Failed to find include file: {}", name))
+        }
+    });
+
+    // Iterate over the shader files in the shader directory
+    for entry in fs::read_dir(shader_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if let Some(extension) = path.extension() {
+            if ["vert", "frag", "comp"].contains(&extension.to_str().unwrap()) {
+                // Read the shader source code
+                let shader_source = fs::read_to_string(&path)?;
+
+                // Compile the shader
+                let shader_kind = match extension.to_str().unwrap() {
+                    "vert" => ShaderKind::Vertex,
+                    "frag" => ShaderKind::Fragment,
+                    "comp" => ShaderKind::Compute,
+                    _ => continue, // Skip unsupported shader types
+                };
+
+                let binary_result = compiler.compile_into_spirv(
+                    &shader_source,
+                    shader_kind,
+                    path.file_name().unwrap().to_str().unwrap(),
+                    "main",
+                    Some(&options),
+                )?;
+
+                // Write the compiled SPIR-V to the output directory
+                let output_path = PathBuf::from(out_dir).join(format!(
+                    "{}.spv",
+                    path.file_name().unwrap().to_str().unwrap()
+                ));
+                fs::write(&output_path, binary_result.as_binary_u8())?;
+                println!("Compiled shader: {:?}", output_path);
+            }
+        }
+    }
+
+    Ok(())
 }

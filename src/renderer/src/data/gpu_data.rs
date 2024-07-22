@@ -57,6 +57,8 @@ pub enum AlphaMode {
     Blend,
 }
 
+
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum PbrTexture {
     MetallicRough(PbrMetallicRoughness),
@@ -167,6 +169,16 @@ pub struct TextureMeta {
     pub sampler: Sampler,
 }
 
+pub struct VkCubeMap {
+    pub texture_meta: TextureMeta,
+    pub full_extent: vk::Extent3D,
+    pub face_extent: vk::Extent3D,
+    pub allocation: vk_mem::Allocation,
+    pub image : vk::Image,
+    pub image_view : vk::ImageView,
+    pub sampler : vk::Sampler
+}
+
 impl TextureMeta {
     // pub fn from_gltf_texture(data: &gltf::image::Data) -> Self {
     //     Self {
@@ -271,6 +283,40 @@ impl GPUSceneData {
         bytemuck::bytes_of(self)
     }
 }
+
+
+#[repr(C)]
+#[derive(Default, Copy, Clone, Pod, Zeroable)]
+pub struct UBOMatrices {
+    pub projection: Mat4,
+    pub model: Mat4,
+    pub view: Mat4,
+    pub cam_pos: Vec3,
+    pad: f32
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct SkyboxPushConstants {
+    pub projection: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    pub exposure: f32,
+    pub gamma: f32,
+
+}
+
+impl Default for SkyboxPushConstants {
+    fn default() -> Self {
+        Self {
+            projection: Default::default(),
+            vertex_buffer_addr: vk::DeviceAddress::default(),
+            exposure: 4.5,
+            gamma: 2.2,
+        }
+    }
+}
+
 
 ////////////////////////////
 // VULKAN ALLOCATION DATA //

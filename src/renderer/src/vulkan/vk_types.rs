@@ -760,7 +760,7 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
-pub struct VkBrdFlut {
+pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
     pub extent: Extent2D

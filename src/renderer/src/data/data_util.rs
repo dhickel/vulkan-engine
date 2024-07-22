@@ -5,6 +5,7 @@ use crate::vulkan::vk_util;
 use ash::vk;
 use glam::{vec4, Vec4};
 use std::collections::HashMap;
+use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use vk_mem::Alloc;
 
 pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
@@ -28,3 +29,11 @@ impl PackUnorm for Vec4 {
     }
 }
 
+pub fn convert_rgb32f_to_rgba32f(img: ImageBuffer<Rgb<f32>, Vec<f32>>) -> ImageBuffer<Rgba<f32>, Vec<f32>> {
+    let (width, height) = img.dimensions();
+
+    ImageBuffer::from_fn(width, height, |x, y| {
+        let pixel = img.get_pixel(x, y);
+        Rgba([pixel[0], pixel[1], pixel[2], 1.0])
+    })
+}

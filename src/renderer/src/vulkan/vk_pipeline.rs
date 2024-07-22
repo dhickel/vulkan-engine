@@ -1,7 +1,7 @@
 use crate::data::data_cache::{
     CoreShaderType, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
 };
-use crate::data::gpu_data::VkGpuPushConsts;
+use crate::data::gpu_data::{SkyboxPushConstants, VkGpuPushConsts};
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_util};
 use ash::vk;
@@ -279,13 +279,22 @@ pub fn init_pipeline_cache(
         color_format,
         depth_format,
     );
+    
+    let skybox_pipeline = init_skybox_pipeline(
+        device,
+        desc_layout_cache,
+        shader_cache,
+        color_format,
+        depth_format
+    );
 
     VkPipelineCache::new(vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
         (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
         (VkPipelineType::PbrMetRoughOpaqueExt, pbr_opaque_ext),
         (VkPipelineType::PbrMetRoughAlphaExt, pbr_alpha_ext),
-        (VkPipelineType::BrdFlut, brd_flut_pipeline)
+        (VkPipelineType::BrdfLut, brd_flut_pipeline),
+        (VkPipelineType::Skybox, skybox_pipeline),
     ])
     .unwrap()
 }
@@ -440,6 +449,53 @@ fn init_brd_flut_pipeline(
         .set_multisample_none()
         .disable_blending()
         .disable_depth_test()
+        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
+        .set_pipeline_layout(layout);
+
+    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+
+    VkPipeline::new(pipeline, layout)
+}
+
+fn init_skybox_pipeline(
+    device: &ash::Device,
+    desc_layout_cache: &VkDescLayoutCache,
+    shader_cache: &VkShaderCache,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+) -> VkPipeline {
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxVert);
+    let frag_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxFrag);
+
+    let push_constant_range = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(std::mem::size_of::<SkyboxPushConstants>() as u32)];
+    
+
+    let layouts = [desc_layout_cache.get(VkDescType::Skybox)];
+    
+    let layout_info = vk_util::pipeline_layout_create_info()
+        .set_layouts(&layouts)
+        .push_constant_ranges(&push_constant_range);
+
+    let layout = unsafe {
+        device
+            .create_pipeline_layout(&layout_info, None)
+            .unwrap()
+    };
+
+    let entry = CString::new("main").unwrap();
+
+    let mut pipeline_builder = PipelineBuilder::default()
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .set_color_attachment_format(color_format)
+        .set_depth_format(depth_format)
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 

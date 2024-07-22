@@ -90,7 +90,7 @@ pub fn run() {
     let mut frame: u32 = 0;
     let mut fps_timer = SystemTime::now();
 
-    let mut app = vk_render::VkRender::new(window_state, true).unwrap();
+    let mut app = vk_render::VkRender::new(window_state, true, true).unwrap();
     
     event_loop
         .run(move |event, control_flow| {

@@ -1,12 +1,9 @@
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache,
-    VkPipelineType, VkShaderCache,
+    CoreShaderType, EnvironmentCache, MeshCache, TextureCache, VkDescLayoutCache, VkDescType,
+    VkPipelineCache, VkPipelineType, VkShaderCache,
 };
 
-use crate::data::gpu_data::{
-    DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, Vertex,
-    VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer,
-};
+use crate::data::gpu_data::{DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, SkyboxPushConstants, UBOMatrices, Vertex, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer};
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
@@ -19,8 +16,10 @@ use data_util::PackUnorm;
 use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
+use log::{error, info, log};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::rc::Rc;
@@ -39,6 +38,7 @@ pub struct DataCache {
     pipeline_cache: VkPipelineCache,
     mesh_cache: MeshCache,
     texture_cache: TextureCache,
+    environment_cache: EnvironmentCache,
 }
 
 impl VkDestroyable for DataCache {
@@ -51,9 +51,17 @@ impl VkDestroyable for DataCache {
     }
 }
 
+#[derive(Default)]
+pub struct SkyBox {
+    pub skybox_consts: SkyboxPushConstants,
+    pub env_id: u32,
+    pub mesh_id: u32,
+}
+
 pub struct RenderContext {
     pub draw_context: DrawContext,
     pub scene_tree: Rc<RefCell<gpu_data::Node>>,
+    pub sky_box: SkyBox,
 }
 
 impl Default for RenderContext {
@@ -61,6 +69,7 @@ impl Default for RenderContext {
         Self {
             draw_context: Default::default(),
             scene_tree: Rc::new(RefCell::new(Default::default())),
+            sky_box: Default::default(),
         }
     }
 }
@@ -84,7 +93,7 @@ pub struct VkRender {
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
     pub data_cache: DataCache,
-    pub brd_flut: VkBrdFlut,
+    pub brdf_lut: VkBrdfLut,
     pub global_desc_allocator: VkDynamicDescriptorAllocator,
     pub main_deletion_queue: Vec<VkDeletable>,
     pub resize_requested: bool,
@@ -125,6 +134,16 @@ pub fn init_caches(
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"
                 .to_string(),
         ),
+        (
+            CoreShaderType::SkyBoxFrag,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"
+                .to_string(),
+        ),
+        (
+            CoreShaderType::SkyBoxVert,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"
+                .to_string(),
+        ),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -137,8 +156,12 @@ pub fn init_caches(
         color_format,
         depth_format,
     );
-    let texture_cache = TextureCache::new(device, supported_formats);
+    let texture_cache = TextureCache::new(device, supported_formats.clone());
     let mesh_cache = MeshCache::default();
+    let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
+    let id = environment_cache.add_cube_map_file(
+        "/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/basic_cube_map.hdr",
+    );
 
     DataCache {
         shader_cache,
@@ -146,6 +169,7 @@ pub fn init_caches(
         pipeline_cache,
         mesh_cache,
         texture_cache,
+        environment_cache,
     }
 }
 
@@ -333,7 +357,26 @@ impl VkRender {
         unsafe { std::mem::drop(self) }
     }
 
-    pub fn new(mut window_state: VkWindowState, with_validation: bool) -> Result<Self, String> {
+    pub fn new(
+        mut window_state: VkWindowState,
+        with_validation: bool,
+        compile_shaders: bool,
+    ) -> Result<Self, String> {
+        
+        if compile_shaders {
+            info!("Compiling Shaders");
+            let shader_dir = "/home/mindspice/code/rust/engine/src/renderer/src/shaders";
+            match vk_util::compile_shaders(shader_dir, shader_dir) {
+                Ok(_) => {
+                    info!("Successfully Compiled Shaders")
+                }
+                Err(err) => {
+                    error!("Error Compiling Shaders: {:?}", err);
+                    panic!("Error Compiling Shaders: {:?}", err)
+                }
+            }
+        }
+
         let entry = vk_init::init_entry();
 
         let mut instance_ext = vk_init::get_winit_extensions(&window_state.window);
@@ -563,12 +606,12 @@ impl VkRender {
 
         let brd_pipeline = data_cache
             .pipeline_cache
-            .get_pipeline(VkPipelineType::BrdFlut)
+            .get_pipeline(VkPipelineType::BrdfLut)
             .pipeline;
 
-        let brd_flut = vk_util::generate_brd_flut(
+        let brd_flut = vk_util::generate_brdf_lut(
             &device,
-            allocator.clone(),
+            &allocator.lock().unwrap(),
             brd_pipeline,
             presentation
                 .frame_data
@@ -598,7 +641,7 @@ impl VkRender {
             scene_data: GPUSceneData::default(),
             render_context: RenderContext::default(),
             data_cache,
-            brd_flut,
+            brdf_lut: brd_flut,
             resize_requested: false,
             global_desc_allocator: global_alloc,
         };
@@ -612,6 +655,13 @@ impl VkRender {
         //     mesh_cache,
         // )
         // .unwrap();
+
+        let sky_box_mesh = assimp_util::load_model_to_assimp(
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/Box.gltf",
+            texture_cache,
+            mesh_cache,
+            false,
+        )?;
 
         let loaded_scene = assimp_util::load_model_to_assimp(
             "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
@@ -629,8 +679,13 @@ impl VkRender {
         let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
         let tex_cache_ref = &self.data_cache.texture_cache;
         let tex_cache_ptr = tex_cache_ref as *const TextureCache as *mut TextureCache;
+        let env_cache_ref = &self.data_cache.environment_cache;
+        let env_cache_ptr = env_cache_ref as *const EnvironmentCache as *mut EnvironmentCache;
         let frame_data_ref = &self.presentation.frame_data;
         let frame_data_ptr = frame_data_ref as *const Vec<VkFrame> as *mut Vec<VkFrame>;
+
+        // FIXME: this can all just be replace with direct method calls and is hack to use
+        //  existing tutorial code
 
         let mesh_upload_fn =
             |indices: &[u32], vertices: &[Vertex]| self.upload_mesh(indices, vertices);
@@ -650,6 +705,26 @@ impl VkRender {
                 self.allocator.clone(),
                 &self.data_cache.desc_layout_cache,
             );
+
+            let pipeline = self
+                .data_cache
+                .pipeline_cache
+                .get_pipeline(VkPipelineType::BrdfLut)
+                .pipeline;
+            let cmd_pool = self
+                .presentation
+                .frame_data
+                .get(0)
+                .unwrap()
+                .cmd_pool
+                .get(QueueType::Transfer);
+            (*env_cache_ptr).allocate_cube_map(
+                0,
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                pipeline,
+                cmd_pool,
+            )
         }
     }
 
@@ -795,7 +870,7 @@ impl VkRender {
             self.draw_geometry();
 
             // Transition draw image and present image for copy compatability
-            
+
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -803,7 +878,7 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             );
-            
+
             vk_util::transition_image(
                 &self.device,
                 cmd_buffer,
@@ -811,7 +886,7 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             );
-            
+
             //copy render image onto present image
             vk_util::blit_copy_image_to_image(
                 &self.device,
@@ -821,7 +896,7 @@ impl VkRender {
                 present_image,
                 extent,
             );
-            
+
             //re transition present to draw gui on
             vk_util::transition_image(
                 &self.device,
@@ -830,10 +905,10 @@ impl VkRender {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
-            
+
             // draw gpu upon present image
             self.draw_imgui(cmd_buffer, present_view);
-            
+
             // transition draw again for presentation
             vk_util::transition_image(
                 &self.device,

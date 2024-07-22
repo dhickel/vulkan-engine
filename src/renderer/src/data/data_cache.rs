@@ -1,20 +1,23 @@
 use crate::data::data_util::PackUnorm;
-use crate::data::gpu_data;
 use crate::data::gpu_data::{
     AlphaMode, EmissiveMap, MaterialMeta, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap,
-    OcclusionMap, Sampler, SurfaceMeta, TextureMeta, Vertex, VkGpuMeshBuffers,
+    OcclusionMap, Sampler, SurfaceMeta, TextureMeta, Vertex, VkCubeMap, VkGpuMeshBuffers,
 };
+use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
     DescriptorAllocator, DescriptorWriter, PoolSizeRatio, VkDynamicDescriptorAllocator,
 };
-use crate::vulkan::vk_types::{VkBuffer, VkDestroyable, VkImageAlloc, VkPipeline};
+use crate::vulkan::vk_types::{VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
 use ash::vk::Format;
 use ash::{vk, Device};
 use glam::{vec3, vec4, Vec3, Vec4};
-use image::ImageBuffer;
+use gltf::json::Path;
+use image::{EncodableLayout, GenericImageView, ImageBuffer, ImageResult};
+use log::info;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
+use std::path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
@@ -161,13 +164,13 @@ impl TextureCache {
             emissive_map: None,
         });
 
-       let error_tex : [u8; 16] = [
-            255, 20, 147, 255,   // Pixel 1: R, G, B, A
-            255, 20, 147, 255,   // Pixel 2: R, G, B, A
-            255, 20, 147, 255,   // Pixel 3: R, G, B, A
-            255, 20, 147, 255    // Pixel 4: R, G, B, A
+        let error_tex: [u8; 16] = [
+            255, 20, 147, 255, // Pixel 1: R, G, B, A
+            255, 20, 147, 255, // Pixel 2: R, G, B, A
+            255, 20, 147, 255, // Pixel 3: R, G, B, A
+            255, 20, 147, 255, // Pixel 4: R, G, B, A
         ];
-    
+
         let def_error = CachedTexture::UnLoaded(TextureMeta {
             bytes: error_tex.to_vec(),
             width: 2,
@@ -247,9 +250,14 @@ impl TextureCache {
 
     pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
         let index = self.cached_textures.len();
-       
+
         // TODO roughness textures can actually just be R8 UNORM to save space and bandwidth
         if !self.supported_formats.contains(&data.format) {
+            info!(
+                "Unsupported Format: {:?}, converting to R8G8B8A8_UNORM",
+                data.format
+            );
+
             let converted =
                 ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, data.bytes);
 
@@ -271,7 +279,6 @@ impl TextureCache {
     }
 
     pub fn add_textures(&mut self, data: Vec<(u32, TextureMeta)>) -> HashMap<u32, u32> {
-     
         let mut index = self.cached_textures.len() as u32;
         let mut index_pairs = HashMap::<u32, u32>::with_capacity(data.len());
 
@@ -425,7 +432,8 @@ impl TextureCache {
 
         if let CacheMaterial::Unloaded(meta) = material {
             let loaded_material: VkLoadedMaterial;
-            if false && meta.is_ext() { // FIXME ext pipeline is disabled
+            if false && meta.is_ext() {
+                // FIXME ext pipeline is disabled
                 let shader_consts = MetRoughUniformExt {
                     color_factors: meta.base_color_factor,
                     metal_rough_factors: vec4(
@@ -774,6 +782,7 @@ pub struct MeshCache {
     cached_surface: Vec<SurfaceMeta>,
 }
 
+
 impl MeshCache {
     pub fn add_mesh(&mut self, data: MeshMeta) -> u32 {
         let index = self.cached_meshes.len();
@@ -906,11 +915,13 @@ pub enum CoreShaderType {
     MetRoughVertExt,
     MetRoughFragExt,
     BrtFlutVert,
-    BrtFlutFrag
+    BrtFlutFrag,
+    SkyBoxVert,
+    SkyBoxFrag,
 }
 
 impl CoreShaderType {
-    const COUNT : usize = 6;
+    const COUNT: usize = 8;
 }
 
 pub struct VkShaderCache {
@@ -975,11 +986,12 @@ pub enum VkPipelineType {
     PbrMetRoughAlpha,
     PbrMetRoughOpaqueExt,
     PbrMetRoughAlphaExt,
-    BrdFlut,
+    BrdfLut,
+    Skybox
 }
 
 impl VkPipelineType {
-    const COUNT : usize = 5;
+    const COUNT: usize = 6;
 }
 
 //#[derive(Clone, Copy)]
@@ -1028,11 +1040,12 @@ pub enum VkDescType {
     GpuScene,
     PbrMetRough,
     PbrMetRoughExt,
-    Empty
+    Skybox,
+    Empty,
 }
 
 impl VkDescType {
-    const COUNT : usize = 5;
+    const COUNT: usize = 6;
 }
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
@@ -1064,5 +1077,103 @@ impl VkDestroyable for VkDescLayoutCache {
         self.layouts.iter().for_each(|layout| unsafe {
             device.destroy_descriptor_set_layout(*layout, None);
         })
+    }
+}
+
+pub enum CachedEnvironment {
+    Unloaded(TextureMeta),
+    Loaded(VkCubeMap),
+}
+pub struct EnvironmentCache {
+    environments: Vec<CachedEnvironment>,
+    supported_formats: HashSet<vk::Format>,
+}
+
+impl EnvironmentCache {
+    pub fn new(supported_formats: HashSet<vk::Format>) -> Self {
+        Self {
+            environments: Vec::<CachedEnvironment>::with_capacity(10),
+            supported_formats,
+        }
+    }
+
+    pub fn add_cube_map_file(&mut self, path: &str) -> Result<u32, String> {
+        let path = path::Path::new(path);
+        match image::open(path) {
+            Ok(mut image) => {
+                let index = self.environments.len() as u32;
+                let mut format = assimp_util::to_vk_format(&image);
+
+                let image_bytes = if !self.supported_formats.contains(&format) {
+                    if self
+                        .supported_formats
+                        .contains(&vk::Format::R32G32B32A32_SFLOAT)
+                    {
+                        format = vk::Format::R32G32B32A32_SFLOAT;
+                        data_util::convert_rgb32f_to_rgba32f(image.to_rgb32f())
+                            .as_bytes()
+                            .to_vec()
+                    } else {
+                        panic!("No Fallback format") // Not sure if falling back to rgba8 is acceptable
+                    }
+                } else {
+                    image.as_bytes().to_vec()
+                };
+
+                info!(
+                    "Added cube map file as Unloaded: {:?} \tformat: {:?}  \twidth: {:?}, height: {:?}",
+                    path,
+                    format,
+                    image.width(),
+                    image.height()
+                );
+
+                let meta = TextureMeta {
+                    bytes: image_bytes,
+                    width: image.width(),
+                    height: image.height(),
+                    format,
+                    mips_levels: 0,
+                    sampler: Sampler::Linear,
+                };
+
+                self.environments.push(CachedEnvironment::Unloaded(meta));
+                Ok(index)
+            }
+            Err(err) => Err(format!("Failed to add cube map file: {:?}", err)),
+        }
+    }
+
+    pub fn allocate_cube_map(
+        &mut self,
+        env_id: u32,
+        device: &ash::Device,
+        allocator: &Allocator,
+        pipeline: vk::Pipeline,
+        cmd_pool: &VkCommandPool,
+    ) {
+        let env_id = env_id as usize;
+        let texture = std::mem::replace(
+            &mut self.environments[env_id],
+            CachedEnvironment::Unloaded(TextureMeta {
+                bytes: vec![],
+                width: 0,
+                height: 0,
+                format: vk::Format::UNDEFINED,
+                mips_levels: 0,
+                sampler: Sampler::Linear,
+            }),
+        );
+
+        if let CachedEnvironment::Unloaded(meta) = texture {
+            let cube_map = vk_util::upload_cube_map(device, allocator, meta, pipeline, cmd_pool);
+            self.environments[env_id] = CachedEnvironment::Loaded(cube_map);
+        } else {
+            self.environments[env_id] = texture;
+            log::info!(
+                "Attempted to allocate, already allocated texture: {}",
+                env_id
+            );
+        }
     }
 }
