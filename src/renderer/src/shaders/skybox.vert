@@ -12,12 +12,13 @@ struct Vertex {
 	vec4 tangent;
 };
 
-layout(buffer_reference, std430) readonly buffer VertexBuffer{
+layout(buffer_reference, std430) readonly buffer VertexBuffer {
 	Vertex vertices[];
 };
 
 layout(push_constant) uniform PushConstants {
-	mat4 projection_model;
+	mat4 projection;
+	mat4 model;
 	VertexBuffer vertexBuffer;
 	float exposure;
 	float gamma;
@@ -29,5 +30,7 @@ void main()
 {
 	Vertex v = pc.vertexBuffer.vertices[gl_VertexIndex];
 	outUVW = v.position;
-	gl_Position = pc.projection_model * vec4(v.position, 1.0);
+
+	mat4 viewMat = mat4(mat3(pc.model));
+	gl_Position = pc.projection * viewMat * vec4(v.position.xyz, 1.0);
 }

@@ -403,7 +403,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .build(
             device,
-             vk::ShaderStageFlags::FRAGMENT,
+             vk::ShaderStageFlags::FRAGMENT ,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         ).unwrap();
 

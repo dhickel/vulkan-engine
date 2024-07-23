@@ -679,11 +679,8 @@ pub fn upload_cube_map(
         &tex_meta.bytes,
         vk::BufferUsageFlags::TRANSFER_SRC,
     ).unwrap();
-    
-    
-    
 
-    // Create the image with cube compatibility flag
+    
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(tex_meta.format)
@@ -728,9 +725,12 @@ pub fn upload_cube_map(
         // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
             .map(|i| {
+                let face_size = face_width * tex_meta.height * 4; // Assuming 4 bytes per pixel
+                let buffer_offset = (i as u64) * face_size as u64;
+
                 vk::BufferImageCopy::default()
-                    .buffer_offset((i as u64) * (face_width * tex_meta.height * 4) as u64)
-                    .buffer_row_length(face_width)
+                    .buffer_offset(buffer_offset)
+                    .buffer_row_length(tex_meta.width)
                     .buffer_image_height(tex_meta.height)
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -775,7 +775,7 @@ pub fn upload_cube_map(
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             6
         );
-        
+
         device.end_command_buffer(cmd_buffer).unwrap();
 
         let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
@@ -787,19 +787,19 @@ pub fn upload_cube_map(
             .unwrap();
 
         device.device_wait_idle();
-        
+
         let sampler_create_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .anisotropy_enable(true)
-            .max_anisotropy(16.0)
-            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .anisotropy_enable(false)
+            .max_anisotropy(1.0)
+            .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE)
             .unnormalized_coordinates(false)
             .compare_enable(false)
-            .compare_op(vk::CompareOp::ALWAYS)
+            .compare_op(vk::CompareOp::NEVER)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
             .mip_lod_bias(0.0)
             .min_lod(0.0)
@@ -819,7 +819,7 @@ pub fn upload_cube_map(
                 layer_count: 6,
             });
 
-      
+
         let image_view = device.create_image_view(&view_create_info, None).unwrap();
 
         destroy_buffer(allocator, staging_buffer);
@@ -847,6 +847,8 @@ pub fn upload_cube_map(
         }
     }
 }
+
+
 
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Create a shader compiler
@@ -908,3 +910,5 @@ pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn st
 
     Ok(())
 }
+
+

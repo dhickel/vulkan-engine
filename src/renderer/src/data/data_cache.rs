@@ -788,214 +788,50 @@ impl Default for MeshCache {
 
         let vertices = vec![
             // Front face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, 1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, 1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, 1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, 1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, 0.0, 1.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
+            Vertex { position: Vec3::new(-1.0, -1.0,  1.0), uv_x: 0.0, normal: Vec3::Z, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new( 1.0, -1.0,  1.0), uv_x: 1.0, normal: Vec3::Z, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new( 1.0,  1.0,  1.0), uv_x: 1.0, normal: Vec3::Z, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new(-1.0,  1.0,  1.0), uv_x: 0.0, normal: Vec3::Z, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::X },
+
             // Back face
-            Vertex {
-                position: Vec3::new(1.0, -1.0, -1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, 0.0, -1.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, -1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, 0.0, -1.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, -1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, 0.0, -1.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, -1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, 0.0, -1.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            // Left face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, -1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(-1.0, 0.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, 1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(-1.0, 0.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, 1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(-1.0, 0.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, -1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(-1.0, 0.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            // Right face
-            Vertex {
-                position: Vec3::new(1.0, -1.0, 1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(1.0, 0.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, -1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(1.0, 0.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, -1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(1.0, 0.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, 1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(1.0, 0.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-            },
+            Vertex { position: Vec3::new(-1.0, -1.0, -1.0), uv_x: 1.0, normal: -Vec3::Z, uv_y: 0.0, color: Vec4::ONE, tangent: -Vec4::X },
+            Vertex { position: Vec3::new(-1.0,  1.0, -1.0), uv_x: 1.0, normal: -Vec3::Z, uv_y: 1.0, color: Vec4::ONE, tangent: -Vec4::X },
+            Vertex { position: Vec3::new( 1.0,  1.0, -1.0), uv_x: 0.0, normal: -Vec3::Z, uv_y: 1.0, color: Vec4::ONE, tangent: -Vec4::X },
+            Vertex { position: Vec3::new( 1.0, -1.0, -1.0), uv_x: 0.0, normal: -Vec3::Z, uv_y: 0.0, color: Vec4::ONE, tangent: -Vec4::X },
+
             // Top face
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, 1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, 1.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, 1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, 1.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, -1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, 1.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, -1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, 1.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
+            Vertex { position: Vec3::new(-1.0,  1.0, -1.0), uv_x: 0.0, normal: Vec3::Y, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new(-1.0,  1.0,  1.0), uv_x: 0.0, normal: Vec3::Y, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new( 1.0,  1.0,  1.0), uv_x: 1.0, normal: Vec3::Y, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new( 1.0,  1.0, -1.0), uv_x: 1.0, normal: Vec3::Y, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::X },
+
             // Bottom face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, -1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, -1.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, -1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, -1.0, 0.0),
-                uv_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, 1.0),
-                uv_x: 1.0,
-                normal: Vec3::new(0.0, -1.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, 1.0),
-                uv_x: 0.0,
-                normal: Vec3::new(0.0, -1.0, 0.0),
-                uv_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-            },
+            Vertex { position: Vec3::new(-1.0, -1.0, -1.0), uv_x: 0.0, normal: -Vec3::Y, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new( 1.0, -1.0, -1.0), uv_x: 1.0, normal: -Vec3::Y, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new( 1.0, -1.0,  1.0), uv_x: 1.0, normal: -Vec3::Y, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::X },
+            Vertex { position: Vec3::new(-1.0, -1.0,  1.0), uv_x: 0.0, normal: -Vec3::Y, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::X },
+
+            // Right face
+            Vertex { position: Vec3::new( 1.0, -1.0, -1.0), uv_x: 1.0, normal: Vec3::X, uv_y: 0.0, color: Vec4::ONE, tangent: -Vec4::Z },
+            Vertex { position: Vec3::new( 1.0,  1.0, -1.0), uv_x: 1.0, normal: Vec3::X, uv_y: 1.0, color: Vec4::ONE, tangent: -Vec4::Z },
+            Vertex { position: Vec3::new( 1.0,  1.0,  1.0), uv_x: 0.0, normal: Vec3::X, uv_y: 1.0, color: Vec4::ONE, tangent: -Vec4::Z },
+            Vertex { position: Vec3::new( 1.0, -1.0,  1.0), uv_x: 0.0, normal: Vec3::X, uv_y: 0.0, color: Vec4::ONE, tangent: -Vec4::Z },
+
+            // Left face
+            Vertex { position: Vec3::new(-1.0, -1.0, -1.0), uv_x: 0.0, normal: -Vec3::X, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::Z },
+            Vertex { position: Vec3::new(-1.0, -1.0,  1.0), uv_x: 1.0, normal: -Vec3::X, uv_y: 0.0, color: Vec4::ONE, tangent: Vec4::Z },
+            Vertex { position: Vec3::new(-1.0,  1.0,  1.0), uv_x: 1.0, normal: -Vec3::X, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::Z },
+            Vertex { position: Vec3::new(-1.0,  1.0, -1.0), uv_x: 0.0, normal: -Vec3::X, uv_y: 1.0, color: Vec4::ONE, tangent: Vec4::Z },
         ];
 
         let indices = vec![
-            0, 1, 2, 2, 3, 0, // front
-            4, 5, 6, 6, 7, 4, // back
-            8, 9, 10, 10, 11, 8, // left
-            12, 13, 14, 14, 15, 12, // right
-            16, 17, 18, 18, 19, 16, // top
-            20, 21, 22, 22, 23, 20, // bottom
+            0,  1,  2,  2,  3,  0,  // front
+            4,  5,  6,  6,  7,  4,  // back
+            8,  9,  10, 10, 11, 8,  // top
+            12, 13, 14, 14, 15, 12, // bottom
+            16, 17, 18, 18, 19, 16, // right
+            20, 21, 22, 22, 23, 20  // left
         ];
-
         let mut cached_meshes = Vec::<CachedMesh>::with_capacity(100);
 
         let skybox = MeshMeta {
@@ -1015,7 +851,7 @@ impl Default for MeshCache {
 }
 
 impl MeshCache {
-   pub  const SKYBOX_MESH: u32 = 0;
+    pub const SKYBOX_MESH: u32 = 0;
 
     pub fn add_mesh(&mut self, data: MeshMeta) -> u32 {
         let index = self.cached_meshes.len();

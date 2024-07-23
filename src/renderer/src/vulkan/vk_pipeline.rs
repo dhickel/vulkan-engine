@@ -491,7 +491,7 @@ fn init_skybox_pipeline(
         .set_shaders(vert_shader, &entry, frag_shader, &entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::COUNTER_CLOCKWISE)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
         .set_color_attachment_format(color_format)

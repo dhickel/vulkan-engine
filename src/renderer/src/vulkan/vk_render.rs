@@ -695,7 +695,7 @@ impl VkRender {
     pub fn load_caches(&self) {
         let mesh_cache_ref = &self.data_cache.mesh_cache;
         let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
-        let tex_cache_ref = &self.data_cache.texture_cache;
+        let tex_cache_ref = &self.data_cache.texture_cache; 
         let tex_cache_ptr = tex_cache_ref as *const TextureCache as *mut TextureCache;
         let env_cache_ref = &self.data_cache.environment_cache;
         let env_cache_ptr = env_cache_ref as *const EnvironmentCache as *mut EnvironmentCache;
@@ -1076,25 +1076,7 @@ impl VkRender {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
-
-
-        // let image = if let CachedEnvironment::Loaded(map) = self.data_cache.environment_cache.get_environment(0) {
-        //     map.image
-        // } else {
-        //     panic!()
-        // };
-        // 
-        // 
-        // 
-        // vk_util::transition_image_layered(
-        //     &self.device,
-        //     cmd_buffer,
-        //    image,
-        //     vk::ImageLayout::UNDEFINED,
-        //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        //     6
-        // );
-
+        
         let extent = self.window_state.get_curr_extent();
 
         let rendering_info =
@@ -1111,35 +1093,13 @@ impl VkRender {
             panic!("No skybox descriptor")
         };
 
-        let scene_data = self.scene_data;
-
-        let view = glam::Mat4::from_cols(
-            scene_data.view.x_axis,
-            scene_data.view.y_axis,
-            scene_data.view.z_axis,
-            glam::vec4(0.0, 0.0, 0.0, 1.0),
-        );
-
-        let (_, rotation, _) = view.to_scale_rotation_translation();
-
-        // Create a rotation matrix from the quaternion
-        let rotation_matrix = glam::Mat4::from_quat(rotation);
-
-        let projection_model = scene_data.projection * rotation_matrix;
-        
-        self.render_context.sky_box.skybox_consts.projection = projection_model;
+  
+        self.render_context.sky_box.skybox_consts.projection = self.scene_data.projection;
+        self.render_context.sky_box.skybox_consts.model = self.scene_data.view;
+        let mesh = self.data_cache.mesh_cache.get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
 
         unsafe {
-
-
-            let skybox_image = if let CachedEnvironment::Loaded(map) =
-                self.data_cache.environment_cache.get_environment(self.render_context.sky_box.env_id) {
-                map.image
-            } else{
-                panic!("COuldnt get skybox image")
-            };
-
-
+            
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
             self.device
@@ -1162,6 +1122,13 @@ impl VkRender {
                 &[],
             );
 
+            self.device.cmd_bind_index_buffer(
+                cmd_buffer,
+                mesh.buffer.index_buffer.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+
             self.device.cmd_push_constants(
                 cmd_buffer,
                 skybox_pipeline.layout,
@@ -1170,7 +1137,7 @@ impl VkRender {
                 self.render_context.sky_box.skybox_consts.as_byte_slice(),
             );
 
-            self.device.cmd_draw(cmd_buffer, 36, 1, 0, 0);
+            self.device.cmd_draw_indexed(cmd_buffer, mesh.meta.indices.len() as u32, 1, 0, 0,0);
 
             // End dynamic rendering
             self.device.cmd_end_rendering(cmd_buffer);

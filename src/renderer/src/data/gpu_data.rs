@@ -300,6 +300,7 @@ pub struct UBOMatrices {
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct SkyboxPushConstants {
     pub projection: Mat4,
+    pub model: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
     pub exposure: f32,
     pub gamma: f32,
@@ -316,6 +317,7 @@ impl Default for SkyboxPushConstants {
     fn default() -> Self {
         Self {
             projection: Default::default(),
+            model: Default::default(),
             vertex_buffer_addr: vk::DeviceAddress::default(),
             exposure: 4.5,
             gamma: 2.2,
