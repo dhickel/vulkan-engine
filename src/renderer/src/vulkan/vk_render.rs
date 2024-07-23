@@ -983,10 +983,11 @@ impl VkRender {
     }
 
     pub fn init_skybox(&mut self) {
-        
+
         let skybox_tex_id = self.data_cache.environment_cache
             .load_cubemap_file("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/basic_cube_map.hdr")
             .unwrap();
+        
 
         let pipeline = self
             .data_cache
@@ -1037,17 +1038,9 @@ impl VkRender {
 
         let mut sb_desc_writer = DescriptorWriter::default();
         let cmd_buffer = self.presentation.frame_data[0].cmd_pool.get(QueueType::Graphics).buffers[0];
-        
-        // Transitions for shader reads
-        vk_util::transition_image(
-            &self.device,
-            cmd_buffer,
-            skybox_image_data.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        );
 
-        
+
+
         sb_desc_writer.write_image(
             0,
             skybox_image_data.image_view,
@@ -1084,15 +1077,28 @@ impl VkRender {
             None,
         )];
 
-        let depth_attachment = vk_util::depth_attachment_info(
-            curr_frame.depth.image_view,
-            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-        );
+
+        // let image = if let CachedEnvironment::Loaded(map) = self.data_cache.environment_cache.get_environment(0) {
+        //     map.image
+        // } else {
+        //     panic!()
+        // };
+        // 
+        // 
+        // 
+        // vk_util::transition_image_layered(
+        //     &self.device,
+        //     cmd_buffer,
+        //    image,
+        //     vk::ImageLayout::UNDEFINED,
+        //     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        //     6
+        // );
 
         let extent = self.window_state.get_curr_extent();
 
         let rendering_info =
-            vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
+            vk_util::rendering_info(extent, &color_attachment, None);
 
         let skybox_pipeline = self
             .data_cache
@@ -1114,9 +1120,13 @@ impl VkRender {
             glam::vec4(0.0, 0.0, 0.0, 1.0),
         );
 
-        let rotation = glam::Mat4::from_rotation_translation( scene_data.view.to_scale_rotation_translation().1, glam::Vec3::ZERO);
-        let projection_model = scene_data.projection * rotation;
+        let (_, rotation, _) = view.to_scale_rotation_translation();
 
+        // Create a rotation matrix from the quaternion
+        let rotation_matrix = glam::Mat4::from_quat(rotation);
+
+        let projection_model = scene_data.projection * rotation_matrix;
+        
         self.render_context.sky_box.skybox_consts.projection = projection_model;
 
         unsafe {
@@ -1129,7 +1139,7 @@ impl VkRender {
                 panic!("COuldnt get skybox image")
             };
 
-       
+
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
             self.device
@@ -1650,7 +1660,7 @@ impl VkRender {
         let near = 10_000.0;
 
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
-        // proj.y_axis.y *= -1.0; // Flip the Y-axis
+         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = view;
         self.scene_data.projection = proj;

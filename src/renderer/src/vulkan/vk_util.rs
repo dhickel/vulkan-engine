@@ -19,6 +19,8 @@ use vk_mem::{Alloc, Allocator};
 use shaderc::{CompileOptions, Compiler, ShaderKind};
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::vulkan::vk_util;
+
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -362,6 +364,41 @@ pub fn transition_image(
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
 
+pub fn transition_image_layered(
+    device: &ash::Device,
+    cmd_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+    layer_count: u32,
+) {
+    let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
+    };
+
+    let image_barrier = [vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count,
+        })
+        .image(image)];
+
+    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barrier);
+
+    unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
+}
+
 pub fn load_shader_module(
     device: &ash::Device,
     file_path: &str,
@@ -438,7 +475,7 @@ pub fn allocate_and_write_buffer(
         allocator,
         buffer_size,
         usage,
-        vk_mem::MemoryUsage::AutoPreferDevice,
+        vk_mem::MemoryUsage::Auto,
     )?;
 
     unsafe {
@@ -640,11 +677,13 @@ pub fn upload_cube_map(
     let staging_buffer = allocate_and_write_buffer(
         allocator,
         &tex_meta.bytes,
-        vk::BufferUsageFlags::TRANSFER_DST,
-    )
-    .unwrap();
+        vk::BufferUsageFlags::TRANSFER_SRC,
+    ).unwrap();
+    
+    
+    
 
-    // TODO handle mips
+    // Create the image with cube compatibility flag
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(tex_meta.format)
@@ -653,12 +692,7 @@ pub fn upload_cube_map(
         .tiling(vk::ImageTiling::OPTIMAL)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
-        .extent(
-            vk::Extent3D::default()
-                .width(face_width)
-                .height(tex_meta.height)
-                .depth(1),
-        )
+        .extent(vk::Extent3D::default().width(face_width).height(tex_meta.height).depth(1))
         .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
         .array_layers(6)
         .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE);
@@ -673,17 +707,13 @@ pub fn upload_cube_map(
     };
 
     let (allocation, device_memory, alloc_offset) = unsafe {
-        let alloc = allocator
-            .allocate_memory_for_image(image, &alloc_info)
-            .unwrap();
+        let alloc = allocator.allocate_memory_for_image(image, &alloc_info).unwrap();
 
         let alloc_info = allocator.get_allocation_info(&alloc);
         let device_memory = alloc_info.device_memory;
         let offset = alloc_info.offset;
 
-        device
-            .bind_image_memory(image, device_memory, offset)
-            .unwrap();
+        device.bind_image_memory(image, device_memory, offset).unwrap();
 
         (alloc, device_memory, offset)
     };
@@ -693,16 +723,14 @@ pub fn upload_cube_map(
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-        device
-            .begin_command_buffer(cmd_buffer, &begin_info)
-            .unwrap();
+        device.begin_command_buffer(cmd_buffer, &begin_info).unwrap();
 
-        // Map regions
+        // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
             .map(|i| {
                 vk::BufferImageCopy::default()
                     .buffer_offset((i as u64) * (face_width * tex_meta.height * 4) as u64)
-                    .buffer_row_length(tex_meta.width)
+                    .buffer_row_length(face_width)
                     .buffer_image_height(tex_meta.height)
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -719,16 +747,17 @@ pub fn upload_cube_map(
             })
             .collect();
 
-        // transition image for copy
-        transition_image(
+        // Transition image for copy
+        transition_image_layered(
             device,
             cmd_buffer,
             image,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            6
         );
 
-        // Copy full staging image buffer to image regions
+        // Copy buffer to image
         device.cmd_copy_buffer_to_image(
             cmd_buffer,
             staging_buffer.buffer,
@@ -737,15 +766,28 @@ pub fn upload_cube_map(
             &regions,
         );
 
-        // Transitions for shader reads
-        transition_image(
+        // Transition image for shader read
+        transition_image_layered(
             device,
             cmd_buffer,
             image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            6
         );
+        
+        device.end_command_buffer(cmd_buffer).unwrap();
 
+        let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
+        let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+
+        // Submit the command buffer and signal the fence correctly
+       device
+            .queue_submit2(cmd_pool.queue, &submit_info, vk::Fence::null())
+            .unwrap();
+
+        device.device_wait_idle();
+        
         let sampler_create_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -777,6 +819,7 @@ pub fn upload_cube_map(
                 layer_count: 6,
             });
 
+      
         let image_view = device.create_image_view(&view_create_info, None).unwrap();
 
         destroy_buffer(allocator, staging_buffer);
