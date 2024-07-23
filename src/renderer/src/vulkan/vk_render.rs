@@ -1,16 +1,10 @@
-use crate::data::data_cache::{
-    CoreShaderType, EnvironmentCache, MeshCache, TextureCache, VkDescLayoutCache, VkDescType,
-    VkPipelineCache, VkPipelineType, VkShaderCache,
-};
+use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvironmentCache, MeshCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache};
 
 use crate::data::gpu_data::{DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, SkyboxPushConstants, UBOMatrices, Vertex, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer};
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
-use ash::vk::{
-    AllocationCallbacks, DescriptorSetLayoutCreateFlags, ExtendsPhysicalDeviceFeatures2, Extent2D,
-    ImageLayout, PipelineCache, ShaderStageFlags,
-};
+use ash::vk::{AllocationCallbacks, DescriptorSetLayoutCreateFlags, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D, ImageLayout, PipelineCache, ShaderStageFlags};
 use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
@@ -51,13 +45,41 @@ impl VkDestroyable for DataCache {
     }
 }
 
-#[derive(Default)]
 pub struct SkyBox {
     pub skybox_consts: SkyboxPushConstants,
+    pub descriptor: Option<SingleDescriptor>,
     pub env_id: u32,
     pub mesh_id: u32,
 }
 
+
+impl Default for SkyBox {
+    fn default() -> Self {
+        Self {
+            skybox_consts: Default::default(),
+            descriptor: None,
+            env_id: 0,
+            mesh_id: MeshCache::SKYBOX_MESH,
+        }
+    }
+}
+pub struct SingleDescriptor {
+    pub desc_alloc: VkDescriptorAllocator,
+    pub descriptor: [vk::DescriptorSet; 1],
+}
+
+impl SingleDescriptor {
+    pub fn new(desc_alloc: VkDescriptorAllocator, descriptor: vk::DescriptorSet) -> Self {
+        Self {
+            desc_alloc,
+            descriptor: [descriptor],
+        }
+    }
+
+    pub fn get_raw_descriptor(&self) -> vk::DescriptorSet {
+        unsafe { *self.descriptor.get_unchecked(0) }
+    }
+}
 pub struct RenderContext {
     pub draw_context: DrawContext,
     pub scene_tree: Rc<RefCell<gpu_data::Node>>,
@@ -159,7 +181,7 @@ pub fn init_caches(
     let texture_cache = TextureCache::new(device, supported_formats.clone());
     let mesh_cache = MeshCache::default();
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
-    let id = environment_cache.add_cube_map_file(
+    let id = environment_cache.load_cubemap_file(
         "/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/basic_cube_map.hdr",
     );
 
@@ -176,7 +198,7 @@ pub fn init_caches(
 pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
     let sizes = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 1.0)];
 
-    let alloc = DescriptorAllocator::new(&device, 10, &sizes).unwrap();
+    let alloc = VkDescriptorAllocator::new(&device, 10, &sizes).unwrap();
 
     let mut descriptors = VkDescriptors::new(alloc);
     for view in image_views {
@@ -657,21 +679,16 @@ impl VkRender {
         // )
         // .unwrap();
 
-        let sky_box_mesh = assimp_util::load_model_to_assimp(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/Box.gltf",
-            texture_cache,
-            mesh_cache,
-            false,
-        )?;
 
         let loaded_scene = assimp_util::load_model_to_assimp(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
             texture_cache,
             mesh_cache,
             false,
         )?;
         render.render_context.scene_tree = loaded_scene;
         render.load_caches();
+        render.init_skybox();
         Ok(render)
     }
 
@@ -868,6 +885,8 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
+
+            self.draw_skybox();
             self.draw_geometry();
 
             // Transition draw image and present image for copy compatability
@@ -962,6 +981,193 @@ impl VkRender {
         //     SystemTime::now().duration_since(start).unwrap().as_millis()
         // )
     }
+
+    pub fn init_skybox(&mut self) {
+        
+        let skybox_tex_id = self.data_cache.environment_cache
+            .load_cubemap_file("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/basic_cube_map.hdr")
+            .unwrap();
+
+        let pipeline = self
+            .data_cache
+            .pipeline_cache
+            .get_pipeline(VkPipelineType::Skybox);
+
+        let cmd_pool = self
+            .presentation
+            .frame_data.first()
+            .unwrap()
+            .cmd_pool
+            .get(QueueType::Graphics);
+
+        self.data_cache.environment_cache.allocate_cube_map(
+            skybox_tex_id,
+            &self.device,
+            &self.allocator.lock().unwrap(),
+            pipeline.pipeline,
+            cmd_pool,
+        );
+
+        let skybox_image_data = if let CachedEnvironment::Loaded(map) = self
+            .data_cache
+            .environment_cache
+            .get_environment(skybox_tex_id)
+        {
+            map
+        } else {
+            panic!("Env map not loaded")
+        };
+
+        let skybox_desc_alloc = VkDescriptorAllocator::new(
+            &self.device,
+            1,
+            &[PoolSizeRatio::new(
+                DescriptorType::COMBINED_IMAGE_SAMPLER,
+                1.0,
+            )],
+        )
+            .unwrap();
+
+        let skybox_desc = skybox_desc_alloc
+            .allocate(
+                &self.device,
+                &[self.data_cache.desc_layout_cache.get(VkDescType::Skybox)],
+            )
+            .unwrap();
+
+        let mut sb_desc_writer = DescriptorWriter::default();
+        let cmd_buffer = self.presentation.frame_data[0].cmd_pool.get(QueueType::Graphics).buffers[0];
+        
+        // Transitions for shader reads
+        vk_util::transition_image(
+            &self.device,
+            cmd_buffer,
+            skybox_image_data.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        
+        sb_desc_writer.write_image(
+            0,
+            skybox_image_data.image_view,
+            skybox_image_data.sampler,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        );
+
+        sb_desc_writer.update_set(&self.device, skybox_desc);
+
+        self.render_context.sky_box.descriptor =
+            Some(SingleDescriptor::new(skybox_desc_alloc, skybox_desc));
+
+        let skybox_mesh_data = self
+            .data_cache
+            .mesh_cache
+            .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
+
+        println!("SkyBox Mesh: {:#?}", skybox_mesh_data);
+
+        self.render_context.sky_box.skybox_consts.vertex_buffer_addr =
+            skybox_mesh_data.buffer.vertex_buffer_addr;
+    }
+
+    pub fn draw_skybox(&mut self) {
+        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let frame_index = curr_frame.index;
+        let cmd_pool = curr_frame.cmd_pool.get(QueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffers[0];
+
+        let color_attachment = [vk_util::attachment_info(
+            curr_frame.draw.image_view,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            None,
+        )];
+
+        let depth_attachment = vk_util::depth_attachment_info(
+            curr_frame.depth.image_view,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        );
+
+        let extent = self.window_state.get_curr_extent();
+
+        let rendering_info =
+            vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
+
+        let skybox_pipeline = self
+            .data_cache
+            .pipeline_cache
+            .get_pipeline(VkPipelineType::Skybox);
+
+        let skybox_desc = if let Some(desc) = &self.render_context.sky_box.descriptor {
+            desc.descriptor
+        } else {
+            panic!("No skybox descriptor")
+        };
+
+        let scene_data = self.scene_data;
+
+        let view = glam::Mat4::from_cols(
+            scene_data.view.x_axis,
+            scene_data.view.y_axis,
+            scene_data.view.z_axis,
+            glam::vec4(0.0, 0.0, 0.0, 1.0),
+        );
+
+        let rotation = glam::Mat4::from_rotation_translation( scene_data.view.to_scale_rotation_translation().1, glam::Vec3::ZERO);
+        let projection_model = scene_data.projection * rotation;
+
+        self.render_context.sky_box.skybox_consts.projection = projection_model;
+
+        unsafe {
+
+
+            let skybox_image = if let CachedEnvironment::Loaded(map) =
+                self.data_cache.environment_cache.get_environment(self.render_context.sky_box.env_id) {
+                map.image
+            } else{
+                panic!("COuldnt get skybox image")
+            };
+
+       
+            self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
+
+            self.device
+                .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
+            self.device
+                .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
+
+            self.device.cmd_bind_pipeline(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                skybox_pipeline.pipeline,
+            );
+
+            self.device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                skybox_pipeline.layout,
+                0,
+                &skybox_desc,
+                &[],
+            );
+
+            self.device.cmd_push_constants(
+                cmd_buffer,
+                skybox_pipeline.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                self.render_context.sky_box.skybox_consts.as_byte_slice(),
+            );
+
+            self.device.cmd_draw(cmd_buffer, 36, 1, 0, 0);
+
+            // End dynamic rendering
+            self.device.cmd_end_rendering(cmd_buffer);
+        }
+    }
+
+
 
     pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
         let attachment_info = [vk_util::attachment_info(

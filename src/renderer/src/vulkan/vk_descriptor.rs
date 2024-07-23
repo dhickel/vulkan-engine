@@ -76,11 +76,11 @@ impl PoolSizeRatio {
 }
 
 #[derive(Clone, Copy)]
-pub struct DescriptorAllocator {
+pub struct VkDescriptorAllocator {
     pool: vk::DescriptorPool,
 }
 
-impl DescriptorAllocator {
+impl VkDescriptorAllocator {
     pub fn new(
         device: &ash::Device,
         max_sets: u32,

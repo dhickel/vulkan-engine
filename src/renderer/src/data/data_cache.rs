@@ -5,7 +5,7 @@ use crate::data::gpu_data::{
 };
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
-    DescriptorAllocator, DescriptorWriter, PoolSizeRatio, VkDynamicDescriptorAllocator,
+    DescriptorWriter, PoolSizeRatio, VkDescriptorAllocator, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_types::{VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
@@ -776,14 +776,247 @@ pub struct VkLoadedMesh {
     pub buffer: VkGpuMeshBuffers,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct MeshCache {
     cached_meshes: Vec<CachedMesh>,
     cached_surface: Vec<SurfaceMeta>,
 }
 
+impl Default for MeshCache {
+    fn default() -> Self {
+        use glam::{Vec3, Vec4};
+
+        let vertices = vec![
+            // Front face
+            Vertex {
+                position: Vec3::new(-1.0, -1.0, 1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, -1.0, 1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, 1.0, 1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, 1.0, 1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, 0.0, 1.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            // Back face
+            Vertex {
+                position: Vec3::new(1.0, -1.0, -1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, 0.0, -1.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, -1.0, -1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, 0.0, -1.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, 1.0, -1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, 0.0, -1.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, 1.0, -1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, 0.0, -1.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            // Left face
+            Vertex {
+                position: Vec3::new(-1.0, -1.0, -1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(-1.0, 0.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, -1.0, 1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(-1.0, 0.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, 1.0, 1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(-1.0, 0.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, 1.0, -1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(-1.0, 0.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            // Right face
+            Vertex {
+                position: Vec3::new(1.0, -1.0, 1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(1.0, 0.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            Vertex {
+                position: Vec3::new(1.0, -1.0, -1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(1.0, 0.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            Vertex {
+                position: Vec3::new(1.0, 1.0, -1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(1.0, 0.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            Vertex {
+                position: Vec3::new(1.0, 1.0, 1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(1.0, 0.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::Z,
+            },
+            // Top face
+            Vertex {
+                position: Vec3::new(-1.0, 1.0, 1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, 1.0, 1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, 1.0, -1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, 1.0, -1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            // Bottom face
+            Vertex {
+                position: Vec3::new(-1.0, -1.0, -1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, -1.0, -1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                uv_y: 0.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(1.0, -1.0, 1.0),
+                uv_x: 1.0,
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+            Vertex {
+                position: Vec3::new(-1.0, -1.0, 1.0),
+                uv_x: 0.0,
+                normal: Vec3::new(0.0, -1.0, 0.0),
+                uv_y: 1.0,
+                color: Vec4::ONE,
+                tangent: Vec4::X,
+            },
+        ];
+
+        let indices = vec![
+            0, 1, 2, 2, 3, 0, // front
+            4, 5, 6, 6, 7, 4, // back
+            8, 9, 10, 10, 11, 8, // left
+            12, 13, 14, 14, 15, 12, // right
+            16, 17, 18, 18, 19, 16, // top
+            20, 21, 22, 22, 23, 20, // bottom
+        ];
+
+        let mut cached_meshes = Vec::<CachedMesh>::with_capacity(100);
+
+        let skybox = MeshMeta {
+            name: "Skybox Cube".to_string(),
+            indices,
+            vertices,
+            material_index: None,
+        };
+
+        cached_meshes.push(CachedMesh::UnLoaded(skybox));
+
+        Self {
+            cached_meshes,
+            cached_surface: vec![],
+        }
+    }
+}
 
 impl MeshCache {
+   pub  const SKYBOX_MESH: u32 = 0;
+
     pub fn add_mesh(&mut self, data: MeshMeta) -> u32 {
         let index = self.cached_meshes.len();
 
@@ -987,7 +1220,7 @@ pub enum VkPipelineType {
     PbrMetRoughOpaqueExt,
     PbrMetRoughAlphaExt,
     BrdfLut,
-    Skybox
+    Skybox,
 }
 
 impl VkPipelineType {
@@ -1097,7 +1330,11 @@ impl EnvironmentCache {
         }
     }
 
-    pub fn add_cube_map_file(&mut self, path: &str) -> Result<u32, String> {
+    pub fn get_environment(&self, env_id: u32) -> &CachedEnvironment {
+        unsafe { self.environments.get_unchecked(env_id as usize) }
+    }
+
+    pub fn load_cubemap_file(&mut self, path: &str) -> Result<u32, String> {
         let path = path::Path::new(path);
         match image::open(path) {
             Ok(mut image) => {

@@ -306,6 +306,12 @@ pub struct SkyboxPushConstants {
 
 }
 
+impl SkyboxPushConstants {
+    pub fn as_byte_slice(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+}
+
 impl Default for SkyboxPushConstants {
     fn default() -> Self {
         Self {
@@ -316,7 +322,6 @@ impl Default for SkyboxPushConstants {
         }
     }
 }
-
 
 ////////////////////////////
 // VULKAN ALLOCATION DATA //

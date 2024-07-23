@@ -1,5 +1,5 @@
 use crate::data::camera::FPSController;
-use crate::vulkan::vk_descriptor::{DescriptorAllocator, VkDynamicDescriptorAllocator};
+use crate::vulkan::vk_descriptor::{VkDescriptorAllocator, VkDynamicDescriptorAllocator};
 use ash::vk::Extent2D;
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
@@ -722,7 +722,7 @@ impl Default for ComputeData {
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
 pub struct VkDescriptors {
-    pub allocator: DescriptorAllocator,
+    pub allocator: VkDescriptorAllocator,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
 }
@@ -739,7 +739,7 @@ impl VkDestroyable for VkDescriptors {
 }
 
 impl VkDescriptors {
-    pub fn new(allocator: DescriptorAllocator) -> Self {
+    pub fn new(allocator: VkDescriptorAllocator) -> Self {
         Self {
             allocator,
             descriptor_sets: vec![],
