@@ -249,7 +249,7 @@ pub fn init_scene_data(device: &ash::Device, layout: &VkDescriptors) -> ComputeD
         .stage(stage_info)];
 
     let gradient_data = Compute4x4PushConstants::default()
-        .set_data_1(glam::vec4(1.0, 0.0, 0.0, 1.0))
+        .set_data_1(glam::vec4(0.5, 0.2, 0.4, 0.2))
         .set_data_2(glam::vec4(0.0, 0.0, 1.0, 1.0));
 
     let gradient_pipeline = unsafe {
@@ -298,8 +298,9 @@ pub fn init_scene_data(device: &ash::Device, layout: &VkDescriptors) -> ComputeD
     }
 
     let mut scene_data = ComputeData::default();
-    scene_data.effects.push(gradient);
     scene_data.effects.push(sky);
+    scene_data.effects.push(gradient);
+
 
     scene_data
 }
@@ -664,7 +665,7 @@ impl VkRender {
         )?;
 
         let loaded_scene = assimp_util::load_model_to_assimp(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/sponza.glb",
             texture_cache,
             mesh_cache,
             false,
@@ -1449,9 +1450,9 @@ impl VkRender {
         self.scene_data.projection = proj;
         self.scene_data.view_projection = proj * view;
 
-        self.scene_data.ambient_color = Vec4::splat(0.1);
-        self.scene_data.sunlight_color = Vec4::splat(1.0);
-        self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 100.0);
+        self.scene_data.ambient_color = Vec4::splat(0.2);
+        self.scene_data.sunlight_color = Vec4::splat(0.4);
+        self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 10.0);
 
         self.render_context.scene_tree.borrow_mut().draw(
             &glam::Mat4::IDENTITY,
