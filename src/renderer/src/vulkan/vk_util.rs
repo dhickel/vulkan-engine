@@ -672,7 +672,7 @@ pub fn upload_cube_map(
     pipeline: vk::Pipeline,
     cmd_pool: &VkCommandPool,
 ) -> VkCubeMap {
-    let face_width = tex_meta.width / 6;
+    let face_width = tex_meta.width / 6 ;
 
     let staging_buffer = allocate_and_write_buffer(
         allocator,
@@ -725,17 +725,15 @@ pub fn upload_cube_map(
         // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
             .map(|i| {
-                let face_size = face_width * tex_meta.height * 4; // Assuming 4 bytes per pixel
-                let buffer_offset = (i as u64) * face_size as u64;
-
+                let buffer_offset =  i * (tex_meta.bytes.len() / 6) as u64;
                 vk::BufferImageCopy::default()
                     .buffer_offset(buffer_offset)
-                    .buffer_row_length(tex_meta.width)
+                    .buffer_row_length(face_width)
                     .buffer_image_height(tex_meta.height)
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: 0,
-                        base_array_layer: i,
+                        base_array_layer: i as u32,
                         layer_count: 1,
                     })
                     .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
@@ -846,6 +844,31 @@ pub fn upload_cube_map(
             sampler,
         }
     }
+}
+
+fn create_buffer_image_copy(
+    face_index: u32, // 0-based index of the face in the horizontal strip
+    face_width: u32, face_height: u32,
+    total_width: u32,
+    layer: u32
+) -> vk::BufferImageCopy {
+    let buffer_offset = (face_index * face_width * face_height * 4) as u64;
+    vk::BufferImageCopy::default()
+        .buffer_offset(buffer_offset)
+        .buffer_row_length(total_width)
+        .buffer_image_height(face_height)
+        .image_subresource(vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: layer,
+            layer_count: 1,
+        })
+        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+        .image_extent(vk::Extent3D {
+            width: face_width,
+            height: face_height,
+            depth: 1,
+        })
 }
 
 

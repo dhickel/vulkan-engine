@@ -181,9 +181,11 @@ pub fn init_caches(
     let texture_cache = TextureCache::new(device, supported_formats.clone());
     let mesh_cache = MeshCache::default();
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
-    let id = environment_cache.load_cubemap_file(
-        "/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/basic_cube_map.hdr",
+    let id = environment_cache.load_cubemap_dir(
+        "/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky",
     );
+
+
 
     DataCache {
         shader_cache,
@@ -984,10 +986,7 @@ impl VkRender {
 
     pub fn init_skybox(&mut self) {
 
-        let skybox_tex_id = self.data_cache.environment_cache
-            .load_cubemap_file("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/basic_cube_map.hdr")
-            .unwrap();
-        
+      
 
         let pipeline = self
             .data_cache
@@ -1002,7 +1001,7 @@ impl VkRender {
             .get(QueueType::Graphics);
 
         self.data_cache.environment_cache.allocate_cube_map(
-            skybox_tex_id,
+            0,
             &self.device,
             &self.allocator.lock().unwrap(),
             pipeline.pipeline,
@@ -1012,7 +1011,7 @@ impl VkRender {
         let skybox_image_data = if let CachedEnvironment::Loaded(map) = self
             .data_cache
             .environment_cache
-            .get_environment(skybox_tex_id)
+            .get_environment(0)
         {
             map
         } else {
@@ -1058,8 +1057,7 @@ impl VkRender {
             .data_cache
             .mesh_cache
             .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
-
-        println!("SkyBox Mesh: {:#?}", skybox_mesh_data);
+        
 
         self.render_context.sky_box.skybox_consts.vertex_buffer_addr =
             skybox_mesh_data.buffer.vertex_buffer_addr;
