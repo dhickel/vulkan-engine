@@ -19,7 +19,7 @@ use std::os::raw;
 use std::path::Path;
 use std::rc::Rc;
 
-pub fn load_model_to_assimp(
+pub fn load_model(
     path: &str,
     texture_cache: &mut TextureCache,
     mesh_cache: &mut MeshCache,

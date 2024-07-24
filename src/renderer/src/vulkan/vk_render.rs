@@ -111,7 +111,6 @@ pub struct VkRender {
     pub supported_image_formats: HashSet<vk::Format>,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
-    pub compute_data: ComputeData,
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
     pub data_cache: DataCache,
@@ -236,99 +235,6 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
     descriptors
 }
 
-pub fn init_scene_data(device: &ash::Device, layout: &VkDescriptors) -> ComputeData {
-    let desc_layout = &layout.descriptor_layouts;
-
-    let push_constants = [vk::PushConstantRange::default()
-        .offset(0)
-        .size(std::mem::size_of::<Compute4x4PushConstants>() as u32)
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)];
-
-    let compute_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(desc_layout)
-        .push_constant_ranges(&push_constants);
-
-    let compute_layout = unsafe { device.create_pipeline_layout(&compute_info, None).unwrap() };
-
-    let gradient_shader = vk_util::load_shader_module(
-        device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gradient_color.comp.spv",
-    )
-    .expect("Error loading shader");
-
-    let sky_shader = vk_util::load_shader_module(
-        device,
-        "/home/mindspice/code/rust/engine/src/renderer/src/shaders/sky.comp.spv",
-    )
-    .expect("Error loading shader");
-
-    let name = CString::new("main").unwrap();
-    let stage_info = vk::PipelineShaderStageCreateInfo::default()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(gradient_shader)
-        .name(&name);
-
-    let pipeline_info = [vk::ComputePipelineCreateInfo::default()
-        .layout(compute_layout)
-        .stage(stage_info)];
-
-    let gradient_data = Compute4x4PushConstants::default()
-        .set_data_1(glam::vec4(0.5, 0.2, 0.4, 0.2))
-        .set_data_2(glam::vec4(0.0, 0.0, 1.0, 1.0));
-
-    let gradient_pipeline = unsafe {
-        device
-            .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
-            .unwrap()[0]
-    };
-
-    let gradient = ComputeEffect {
-        name: "gradient".to_string(),
-        pipeline: gradient_pipeline,
-        layout: compute_layout,
-        descriptors: layout.clone(),
-        data: gradient_data,
-    };
-
-    let stage_info = vk::PipelineShaderStageCreateInfo::default()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(sky_shader)
-        .name(&name);
-
-    let pipeline_info = [vk::ComputePipelineCreateInfo::default()
-        .layout(compute_layout)
-        .stage(stage_info)];
-
-    let sky_pipeline = unsafe {
-        device
-            .create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
-            .unwrap()[0]
-    };
-
-    let sky_data =
-        Compute4x4PushConstants::default().set_data_1(glam::Vec4::new(0.1, 0.2, 0.4, 0.97));
-
-    let sky = ComputeEffect {
-        name: "sky".to_string(),
-        pipeline: sky_pipeline,
-        layout: compute_layout,
-        descriptors: layout.clone(),
-        data: sky_data,
-    };
-
-    unsafe {
-        device.destroy_shader_module(gradient_shader, None);
-        device.destroy_shader_module(sky_shader, None);
-    }
-
-    let mut scene_data = ComputeData::default();
-    scene_data.effects.push(sky);
-    scene_data.effects.push(gradient);
-
-
-    scene_data
-}
-
 impl Drop for VkRender {
     fn drop(&mut self) {
         unsafe {
@@ -346,10 +252,7 @@ impl Drop for VkRender {
 
             self.data_cache
                 .destroy(&self.device, &self.allocator.lock().unwrap());
-
-            self.compute_data
-                .destroy(&self.device, &self.allocator.lock().unwrap());
-
+            
             self.global_desc_allocator
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
@@ -518,9 +421,7 @@ impl VkRender {
         let depth_images =
             vk_init::allocate_depth_images(&allocator, &device, window_state.get_max_extent(), 2)?;
         let depth_format = depth_images[0].image_format;
-
-        // FIXME, this needs generalized
-        let compute_data = init_scene_data(&device, &descriptors);
+        
 
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
@@ -660,7 +561,6 @@ impl VkRender {
             supported_image_formats,
             presentation,
             immediate,
-            compute_data,
             imgui,
             main_deletion_queue: Vec::new(),
             scene_data: GPUSceneData::default(),
@@ -682,8 +582,8 @@ impl VkRender {
         // .unwrap();
 
 
-        let loaded_scene = assimp_util::load_model_to_assimp(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+        let loaded_scene = assimp_util::load_model(
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/egypt.glb",
             texture_cache,
             mesh_cache,
             false,
@@ -868,15 +768,8 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
-
-            // draw background // TODO this doesnt need its own structure?
-            let ds = [self
-                .compute_data
-                .get_current_effect()
-                .descriptors
-                .descriptor_sets[image_index as usize]];
-
-            self.draw_background(draw_image, cmd_buffer, &ds);
+            
+         
 
             //image from general for background draw, and read for color draw
             vk_util::transition_image(
@@ -888,7 +781,7 @@ impl VkRender {
             );
 
 
-            self.draw_skybox();
+            self.draw_skybox(); // FIXME switch this to draw last with depth
             self.draw_geometry();
 
             // Transition draw image and present image for copy compatability
@@ -1386,46 +1279,6 @@ impl VkRender {
             self.device
                 .wait_for_fences(&self.immediate.fence, true, u64::MAX)
                 .unwrap();
-        }
-    }
-
-    pub fn draw_background(
-        &self,
-        image: vk::Image,
-        cmd_buffer: vk::CommandBuffer,
-        descriptor_set: &[vk::DescriptorSet],
-    ) {
-        let compute_effect = self.compute_data.get_current_effect();
-        unsafe {
-            self.device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                compute_effect.pipeline,
-            );
-
-            self.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::COMPUTE,
-                compute_effect.layout,
-                0,
-                &descriptor_set,
-                &[],
-            );
-
-            self.device.cmd_push_constants(
-                cmd_buffer,
-                compute_effect.layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                compute_effect.data.as_byte_slice(),
-            );
-
-            self.device.cmd_dispatch(
-                cmd_buffer,
-                (self.window_state.get_curr_width() as f32 / 16.0).ceil() as u32,
-                (self.window_state.get_curr_height() as f32 / 16.0).ceil() as u32,
-                1,
-            );
         }
     }
 
