@@ -5,7 +5,7 @@ use crate::data::gpu_data::{
 };
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
-    DescriptorWriter, PoolSizeRatio, VkDescriptorAllocator, VkDynamicDescriptorAllocator,
+    VkDescriptorWriter, PoolSizeRatio, VkDescriptorAllocator, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_types::{VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
@@ -13,7 +13,9 @@ use ash::vk::Format;
 use ash::{vk, Device};
 use glam::{vec3, vec4, Vec3, Vec4};
 use gltf::json::Path;
-use image::{EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba32FImage};
+use image::{
+    EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba32FImage,
+};
 use log::info;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
@@ -509,7 +511,7 @@ impl TextureCache {
             AlphaMode::Opaque => VkPipelineType::PbrMetRoughOpaque,
             AlphaMode::Mask | AlphaMode::Blend => VkPipelineType::PbrMetRoughAlpha,
         };
-        let mut writer = DescriptorWriter::default();
+        let mut writer = VkDescriptorWriter::default();
 
         writer.write_buffer(
             0,
@@ -579,7 +581,7 @@ impl TextureCache {
             AlphaMode::Opaque => VkPipelineType::PbrMetRoughOpaqueExt,
             AlphaMode::Mask | AlphaMode::Blend => VkPipelineType::PbrMetRoughAlphaExt,
         };
-        let mut writer = DescriptorWriter::default();
+        let mut writer = VkDescriptorWriter::default();
 
         writer.write_buffer(
             0,
@@ -1150,10 +1152,13 @@ pub enum CoreShaderType {
     BrtFlutFrag,
     SkyBoxVert,
     SkyBoxFrag,
+    CubeFilterVert,
+    EnvIrradianceFrag,
+    EnvPrefilterFrag,
 }
 
 impl CoreShaderType {
-    const COUNT: usize = 8;
+    const COUNT: usize = 11;
 }
 
 pub struct VkShaderCache {
@@ -1220,10 +1225,12 @@ pub enum VkPipelineType {
     PbrMetRoughAlphaExt,
     BrdfLut,
     Skybox,
+    EnvPreFilter,
+    EnvIrradiance,
 }
 
 impl VkPipelineType {
-    const COUNT: usize = 6;
+    const COUNT: usize = 8;
 }
 
 //#[derive(Clone, Copy)]
@@ -1235,7 +1242,6 @@ impl VkPipelineCache {
     pub fn new(mut pipelines: Vec<(VkPipelineType, VkPipeline)>) -> Result<Self, String> {
         pipelines.sort_by_key(|(typ, _)| *typ);
 
-        // Convert sorted vectors to fixed-size arrays
         let sorted_pipelines: [VkPipeline; VkPipelineType::COUNT] = pipelines
             .into_iter()
             .map(|(_, pipeline)| pipeline)
@@ -1274,10 +1280,12 @@ pub enum VkDescType {
     PbrMetRoughExt,
     Skybox,
     Empty,
+    EnvIrradiance,
+    EnvPreFilter,
 }
 
 impl VkDescType {
-    const COUNT: usize = 6;
+    const COUNT: usize = 8;
 }
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
@@ -1316,28 +1324,35 @@ pub enum CachedEnvironment {
     Unloaded(TextureMeta),
     Loaded(VkCubeMap),
 }
+
+pub struct EnvMaps {
+    pub irradiance: VkCubeMap,
+    pub pre_filter: VkCubeMap,
+}
 pub struct EnvironmentCache {
-    environments: Vec<CachedEnvironment>,
+    skyboxes: Vec<CachedEnvironment>,
+    env_maps: Vec<Option<EnvMaps>>,
     supported_formats: HashSet<vk::Format>,
 }
 
 impl EnvironmentCache {
     pub fn new(supported_formats: HashSet<vk::Format>) -> Self {
         Self {
-            environments: Vec::<CachedEnvironment>::with_capacity(10),
+            skyboxes: Vec::with_capacity(10),
+            env_maps: Vec::with_capacity(10),
             supported_formats,
         }
     }
 
-    pub fn get_environment(&self, env_id: u32) -> &CachedEnvironment {
-        unsafe { self.environments.get_unchecked(env_id as usize) }
+    pub fn get_skybox(&self, env_id: u32) -> &CachedEnvironment {
+        unsafe { self.skyboxes.get_unchecked(env_id as usize) }
     }
 
     pub fn load_cubemap_file(&mut self, path: &str) -> Result<u32, String> {
         let path = path::Path::new(path);
         match image::open(path) {
             Ok(mut image) => {
-                let index = self.environments.len() as u32;
+                let index = self.skyboxes.len() as u32;
                 let mut format = assimp_util::to_vk_format(&image);
 
                 let image_bytes = if !self.supported_formats.contains(&format) {
@@ -1373,14 +1388,21 @@ impl EnvironmentCache {
                     sampler: Sampler::Linear,
                 };
 
-                self.environments.push(CachedEnvironment::Unloaded(meta));
+                self.skyboxes.push(CachedEnvironment::Unloaded(meta));
+                self.env_maps.push(None);
                 Ok(index)
             }
             Err(err) => Err(format!("Failed to add cube map file: {:?}", err)),
         }
     }
 
+    pub fn add_env_maps(&mut self, env_id: u32, env_maps: EnvMaps) {
+        self.env_maps.insert(env_id as usize, Some(env_maps))
+    }
 
+    pub fn get_env_map(&self, env_id: u32) -> &Option<EnvMaps> {
+        unsafe { self.env_maps.get_unchecked(env_id as usize) }
+    }
 
     pub fn load_cubemap_dir(&mut self, dir: &str) -> Result<u32, String> {
         let face_files = ["px.hdr", "nx.hdr", "py.hdr", "ny.hdr", "pz.hdr", "nz.hdr"];
@@ -1407,28 +1429,32 @@ impl EnvironmentCache {
                     face_images.push(rgba32f);
 
                     info!(
-                    "Loaded cubemap face: {:?} \tformat: {:?} \twidth: {:?}, height: {:?}",
-                    path, format, width, height
-                );
+                        "Loaded cubemap face: {:?} \tformat: {:?} \twidth: {:?}, height: {:?}",
+                        path, format, width, height
+                    );
                 }
                 Err(err) => return Err(format!("Failed to load face {}: {:?}", face_file, err)),
             }
         }
 
         // Combine all face data into a single vector of f32
-        let combined_data: Vec<f32> = face_images.into_iter()
+        let combined_data: Vec<f32> = face_images
+            .into_iter()
             .flat_map(|img| img.into_raw())
             .collect();
 
         // Convert f32 data to bytes
         let byte_data: Vec<u8> = bytemuck::cast_slice(&combined_data).to_vec();
 
-        let index = self.environments.len() as u32;
-         width *=6;
+        let index = self.skyboxes.len() as u32;
+        width *= 6;
         info!(
-        "Loaded cubemap meta: \tformat: {:?}, width: {:?}, height: {:?}, total bytes: {:?}",
-        format, width, height, byte_data.len()
-    );
+            "Loaded cubemap meta: \tformat: {:?}, width: {:?}, height: {:?}, total bytes: {:?}",
+            format,
+            width,
+            height,
+            byte_data.len()
+        );
 
         let meta = TextureMeta {
             bytes: byte_data,
@@ -1439,10 +1465,10 @@ impl EnvironmentCache {
             sampler: Sampler::Linear,
         };
 
-        self.environments.push(CachedEnvironment::Unloaded(meta));
+        self.skyboxes.push(CachedEnvironment::Unloaded(meta));
         Ok(index)
     }
-    
+
     pub fn allocate_cube_map(
         &mut self,
         env_id: u32,
@@ -1453,7 +1479,7 @@ impl EnvironmentCache {
     ) {
         let env_id = env_id as usize;
         let texture = std::mem::replace(
-            &mut self.environments[env_id],
+            &mut self.skyboxes[env_id],
             CachedEnvironment::Unloaded(TextureMeta {
                 bytes: vec![],
                 width: 0,
@@ -1465,10 +1491,10 @@ impl EnvironmentCache {
         );
 
         if let CachedEnvironment::Unloaded(meta) = texture {
-            let cube_map = vk_util::upload_cube_map(device, allocator, meta, pipeline, cmd_pool);
-            self.environments[env_id] = CachedEnvironment::Loaded(cube_map);
+            let cube_map = vk_util::upload_skybox(device, allocator, meta, pipeline, cmd_pool);
+            self.skyboxes[env_id] = CachedEnvironment::Loaded(cube_map);
         } else {
-            self.environments[env_id] = texture;
+            self.skyboxes[env_id] = texture;
             log::info!(
                 "Attempted to allocate, already allocated texture: {}",
                 env_id

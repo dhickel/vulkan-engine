@@ -1,3 +1,4 @@
+use std::cmp::max;
 use crate::data::gpu_data;
 use crate::data::gpu_data::{MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
 use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
@@ -36,4 +37,9 @@ pub fn convert_rgb32f_to_rgba32f(img: ImageBuffer<Rgb<f32>, Vec<f32>>) -> ImageB
         let pixel = img.get_pixel(x, y);
         Rgba([pixel[0], pixel[1], pixel[2], 1.0])
     })
+}
+
+pub fn calc_mips_count(width: u32, height: u32) -> u32 {
+    let max_dimension = max(width, height) as f64;
+    (max_dimension.log2().floor() as u32) + 1
 }

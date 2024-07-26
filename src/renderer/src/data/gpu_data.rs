@@ -3,7 +3,7 @@ use crate::data::data_cache::{
 };
 use crate::data::gltf_util;
 use crate::vulkan::vk_descriptor::{
-    DescriptorLayoutBuilder, DescriptorWriter, VkDescWriterType, VkDynamicDescriptorAllocator,
+    DescriptorLayoutBuilder, VkDescWriterType, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
@@ -56,8 +56,6 @@ pub enum AlphaMode {
     Mask,
     Blend,
 }
-
-
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum PbrTexture {
@@ -170,13 +168,13 @@ pub struct TextureMeta {
 }
 
 pub struct VkCubeMap {
-    pub texture_meta: TextureMeta,
+    pub texture_meta: Option<TextureMeta>,
     pub full_extent: vk::Extent3D,
     pub face_extent: vk::Extent3D,
     pub allocation: vk_mem::Allocation,
-    pub image : vk::Image,
-    pub image_view : vk::ImageView,
-    pub sampler : vk::Sampler
+    pub image: vk::Image,
+    pub image_view: vk::ImageView,
+    pub sampler: vk::Sampler,
 }
 
 impl TextureMeta {
@@ -216,11 +214,19 @@ pub struct NodeMeta {
     pub children: Vec<u32>,
 }
 
-/////////////////
-// SHADER DATA //
-/////////////////
+/////////////////////
+// SHADER UNIFORMS //
+/////////////////////
 
 // VERTEX - See top of file
+
+pub trait AsByteSlice: Pod {
+    fn as_byte_slice(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+}
+
+impl<T> AsByteSlice for T where T: Pod + bytemuck::Zeroable {}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -243,6 +249,10 @@ pub struct MetRoughUniformExt {
     pub extra: [Vec4; 11],
 }
 
+////////////////////////
+// SHADER PUSH CONSTS //
+////////////////////////
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct VkGpuPushConsts {
@@ -257,14 +267,6 @@ impl VkGpuPushConsts {
             vertex_buffer_addr,
         }
     }
-
-    pub fn as_byte_slice(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-        // unsafe {
-        //     let ptr = self as *const VkGpuPushConsts as *const u8;
-        //     slice::from_raw_parts(ptr, mem::size_of::<VkGpuPushConsts>())
-        // }
-    }
 }
 
 #[repr(C)]
@@ -278,13 +280,6 @@ pub struct GPUSceneData {
     pub sunlight_color: Vec4,
 }
 
-impl GPUSceneData {
-    pub fn as_byte_slice(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-    }
-}
-
-
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct UBOMatrices {
@@ -292,28 +287,20 @@ pub struct UBOMatrices {
     pub model: Mat4,
     pub view: Mat4,
     pub cam_pos: Vec3,
-    pad: f32
+    pad: f32,
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-pub struct SkyboxPushConstants {
-    pub projection: Mat4,
+pub struct PushConstSkyBox {
+    pub projection: Mat4, // FIXME this need combined to to stay under 128byte push const
     pub model: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
     pub exposure: f32,
     pub gamma: f32,
-
 }
 
-impl SkyboxPushConstants {
-    pub fn as_byte_slice(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-    }
-}
-
-impl Default for SkyboxPushConstants {
+impl Default for PushConstSkyBox {
     fn default() -> Self {
         Self {
             projection: Default::default(),
@@ -321,6 +308,46 @@ impl Default for SkyboxPushConstants {
             vertex_buffer_addr: vk::DeviceAddress::default(),
             exposure: 4.5,
             gamma: 2.2,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PushConstIrradiance {
+    pub mvp: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    delta_phi: f32,
+    delta_theta: f32,
+}
+
+impl PushConstIrradiance {
+    pub fn new(mvp: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            mvp,
+            vertex_buffer_addr,
+            delta_phi: (2.0 * PI) / 180.0,
+            delta_theta: (0.5 * PI) / 64.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PushConstPrefilterEnv {
+    pub mvp: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    pub roughness: f32,
+    pub num_samples: u32,
+}
+
+impl PushConstPrefilterEnv {
+    pub fn new(mvp: Mat4, roughness: f32, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            mvp,
+            roughness,
+            vertex_buffer_addr,
+            num_samples: 32,
         }
     }
 }

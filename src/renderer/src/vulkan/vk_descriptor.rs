@@ -142,13 +142,13 @@ pub enum VkDescWriterType {
     Buffer,
 }
 
-pub struct DescriptorWriter<'a> {
+pub struct VkDescriptorWriter<'a> {
     image_infos: Vec<[vk::DescriptorImageInfo; 1]>,
     buffer_infos: Vec<[vk::DescriptorBufferInfo; 1]>,
     writes: Vec<(VkDescWriterType, vk::WriteDescriptorSet<'a>)>,
 }
 
-impl<'a> Default for DescriptorWriter<'a> {
+impl<'a> Default for VkDescriptorWriter<'a> {
     fn default() -> Self {
         Self {
             image_infos: Vec::with_capacity(10),
@@ -158,7 +158,7 @@ impl<'a> Default for DescriptorWriter<'a> {
     }
 }
 
-impl<'a> DescriptorWriter<'a> {
+impl<'a> VkDescriptorWriter<'a> {
     pub fn write_image(
         &mut self,
         binding: u32,
@@ -381,7 +381,7 @@ impl VkDestroyable for VkDynamicDescriptorAllocator {
 }
 
 pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCache {
-    let draw_image_layout = DescriptorLayoutBuilder::default()
+    let compute_store_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
         .build(
             device,
@@ -390,7 +390,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .unwrap();
 
-    let gpu_scene_desc = DescriptorLayoutBuilder::default()
+    let vert_frag_uniform = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
         .build(
             device,
@@ -399,13 +399,14 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .unwrap();
 
-    let sky_box_desc = DescriptorLayoutBuilder::default()
+    let frag_combined_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .build(
             device,
              vk::ShaderStageFlags::FRAGMENT ,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         ).unwrap();
+    
 
     let pbr_met_rough = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
@@ -441,11 +442,13 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         .unwrap();
 
     data_cache::VkDescLayoutCache::new(vec![
-        (VkDescType::DrawImage, draw_image_layout),
-        (VkDescType::GpuScene, gpu_scene_desc),
+        (VkDescType::DrawImage, compute_store_image),
+        (VkDescType::GpuScene, vert_frag_uniform),
         (VkDescType::PbrMetRough, pbr_met_rough),
         (VkDescType::PbrMetRoughExt, pbr_met_rough_ext),
-        (VkDescType::Skybox, sky_box_desc),
+        (VkDescType::Skybox, frag_combined_image),
+        (VkDescType::EnvIrradiance, frag_combined_image),
+        (VkDescType::EnvPreFilter, frag_combined_image),
         (VkDescType::Empty, empty),
     ])
 }

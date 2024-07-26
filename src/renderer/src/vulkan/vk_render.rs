@@ -1,10 +1,21 @@
-use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvironmentCache, MeshCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache};
+use crate::data::data_cache::{
+    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, MeshCache, TextureCache,
+    VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
+};
 
-use crate::data::gpu_data::{DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, RenderObject, SkyboxPushConstants, UBOMatrices, Vertex, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer};
+use crate::data::gpu_data::{
+    AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node,
+    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, UBOMatrices, Vertex,
+    VkCubeMap, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer,
+};
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
-use ash::vk::{AllocationCallbacks, DescriptorSetLayoutCreateFlags, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D, ImageLayout, PipelineCache, ShaderStageFlags};
+use ash::vk::{
+    AllocationCallbacks, DescriptorSetLayoutCreateFlags, DescriptorType,
+    ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, ImageLayout, PipelineCache,
+    ShaderStageFlags,
+};
 use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
@@ -14,6 +25,7 @@ use log::{error, info, log};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::f32::consts::FRAC_PI_2;
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::rc::Rc;
@@ -27,12 +39,12 @@ use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 
 pub struct DataCache {
-    shader_cache: VkShaderCache,
-    desc_layout_cache: VkDescLayoutCache,
-    pipeline_cache: VkPipelineCache,
-    mesh_cache: MeshCache,
-    texture_cache: TextureCache,
-    environment_cache: EnvironmentCache,
+    pub shader_cache: VkShaderCache,
+    pub desc_layout_cache: VkDescLayoutCache,
+    pub pipeline_cache: VkPipelineCache,
+    pub mesh_cache: MeshCache,
+    pub texture_cache: TextureCache,
+    pub environment_cache: EnvironmentCache,
 }
 
 impl VkDestroyable for DataCache {
@@ -46,12 +58,11 @@ impl VkDestroyable for DataCache {
 }
 
 pub struct SkyBox {
-    pub skybox_consts: SkyboxPushConstants,
-    pub descriptor: Option<SingleDescriptor>,
+    pub skybox_consts: PushConstSkyBox,
+    pub descriptor: Option<VkSingleDescriptor>,
     pub env_id: u32,
     pub mesh_id: u32,
 }
-
 
 impl Default for SkyBox {
     fn default() -> Self {
@@ -63,12 +74,12 @@ impl Default for SkyBox {
         }
     }
 }
-pub struct SingleDescriptor {
+pub struct VkSingleDescriptor {
     pub desc_alloc: VkDescriptorAllocator,
     pub descriptor: [vk::DescriptorSet; 1],
 }
 
-impl SingleDescriptor {
+impl VkSingleDescriptor {
     pub fn new(desc_alloc: VkDescriptorAllocator, descriptor: vk::DescriptorSet) -> Self {
         Self {
             desc_alloc,
@@ -165,6 +176,21 @@ pub fn init_caches(
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"
                 .to_string(),
         ),
+        (
+            CoreShaderType::CubeFilterVert,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"
+                .to_string(),
+        ),
+        (
+            CoreShaderType::EnvIrradianceFrag,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"
+                .to_string(),
+        ),
+        (
+            CoreShaderType::EnvPrefilterFrag,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"
+                .to_string(),
+        ),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -180,11 +206,8 @@ pub fn init_caches(
     let texture_cache = TextureCache::new(device, supported_formats.clone());
     let mesh_cache = MeshCache::default();
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
-    let id = environment_cache.load_cubemap_dir(
-        "/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky",
-    );
-
-
+    let id = environment_cache
+        .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
 
     DataCache {
         shader_cache,
@@ -252,7 +275,7 @@ impl Drop for VkRender {
 
             self.data_cache
                 .destroy(&self.device, &self.allocator.lock().unwrap());
-            
+
             self.global_desc_allocator
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
@@ -290,7 +313,6 @@ impl VkRender {
         with_validation: bool,
         compile_shaders: bool,
     ) -> Result<Self, String> {
-        
         if compile_shaders {
             info!("Compiling Shaders");
             let shader_dir = "/home/mindspice/code/rust/engine/src/renderer/src/shaders";
@@ -421,7 +443,6 @@ impl VkRender {
         let depth_images =
             vk_init::allocate_depth_images(&allocator, &device, window_state.get_max_extent(), 2)?;
         let depth_format = depth_images[0].image_format;
-        
 
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
@@ -571,8 +592,6 @@ impl VkRender {
             global_desc_allocator: global_alloc,
         };
 
-        let texture_cache = &mut render.data_cache.texture_cache;
-        let mesh_cache = &mut render.data_cache.mesh_cache;
         //
         // let loaded_scene = gltf_util::parse_gltf_to_raw(
         //     "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
@@ -581,23 +600,34 @@ impl VkRender {
         // )
         // .unwrap();
 
-
         let loaded_scene = assimp_util::load_model(
             "/home/mindspice/code/rust/engine/src/renderer/src/assets/egypt.glb",
-            texture_cache,
-            mesh_cache,
+            &mut render.data_cache.texture_cache,
+            &mut render.data_cache.mesh_cache,
             false,
         )?;
         render.render_context.scene_tree = loaded_scene;
         render.load_caches();
         render.init_skybox();
+
+        // FIXME properly implement this in the setup (or pre-sample and save)
+        if let CachedEnvironment::Loaded(env) = render.data_cache.environment_cache.get_skybox(0) {
+            let env_maps = render.generate_environment(env)?;
+            render
+                .data_cache
+                .environment_cache
+                .add_env_maps(0, env_maps)
+        } else {
+            panic!("No env for generation")
+        };
+
         Ok(render)
     }
 
     pub fn load_caches(&self) {
         let mesh_cache_ref = &self.data_cache.mesh_cache;
         let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
-        let tex_cache_ref = &self.data_cache.texture_cache; 
+        let tex_cache_ref = &self.data_cache.texture_cache;
         let tex_cache_ptr = tex_cache_ref as *const TextureCache as *mut TextureCache;
         let env_cache_ref = &self.data_cache.environment_cache;
         let env_cache_ptr = env_cache_ref as *const EnvironmentCache as *mut EnvironmentCache;
@@ -634,7 +664,7 @@ impl VkRender {
             let cmd_pool = self
                 .presentation
                 .frame_data
-                .get(0)
+                .first()
                 .unwrap()
                 .cmd_pool
                 .get(QueueType::Transfer);
@@ -768,8 +798,6 @@ impl VkRender {
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
             );
-            
-         
 
             //image from general for background draw, and read for color draw
             vk_util::transition_image(
@@ -779,7 +807,6 @@ impl VkRender {
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
-
 
             self.draw_skybox(); // FIXME switch this to draw last with depth
             self.draw_geometry();
@@ -878,9 +905,6 @@ impl VkRender {
     }
 
     pub fn init_skybox(&mut self) {
-
-      
-
         let pipeline = self
             .data_cache
             .pipeline_cache
@@ -888,7 +912,8 @@ impl VkRender {
 
         let cmd_pool = self
             .presentation
-            .frame_data.first()
+            .frame_data
+            .first()
             .unwrap()
             .cmd_pool
             .get(QueueType::Graphics);
@@ -901,10 +926,8 @@ impl VkRender {
             cmd_pool,
         );
 
-        let skybox_image_data = if let CachedEnvironment::Loaded(map) = self
-            .data_cache
-            .environment_cache
-            .get_environment(0)
+        let skybox_image_data = if let CachedEnvironment::Loaded(map) =
+            self.data_cache.environment_cache.get_skybox(0)
         {
             map
         } else {
@@ -919,7 +942,7 @@ impl VkRender {
                 1.0,
             )],
         )
-            .unwrap();
+        .unwrap();
 
         let skybox_desc = skybox_desc_alloc
             .allocate(
@@ -928,10 +951,11 @@ impl VkRender {
             )
             .unwrap();
 
-        let mut sb_desc_writer = DescriptorWriter::default();
-        let cmd_buffer = self.presentation.frame_data[0].cmd_pool.get(QueueType::Graphics).buffers[0];
-
-
+        let mut sb_desc_writer = VkDescriptorWriter::default();
+        let cmd_buffer = self.presentation.frame_data[0]
+            .cmd_pool
+            .get(QueueType::Graphics)
+            .buffers[0];
 
         sb_desc_writer.write_image(
             0,
@@ -944,13 +968,12 @@ impl VkRender {
         sb_desc_writer.update_set(&self.device, skybox_desc);
 
         self.render_context.sky_box.descriptor =
-            Some(SingleDescriptor::new(skybox_desc_alloc, skybox_desc));
+            Some(VkSingleDescriptor::new(skybox_desc_alloc, skybox_desc));
 
         let skybox_mesh_data = self
             .data_cache
             .mesh_cache
             .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
-        
 
         self.render_context.sky_box.skybox_consts.vertex_buffer_addr =
             skybox_mesh_data.buffer.vertex_buffer_addr;
@@ -967,11 +990,10 @@ impl VkRender {
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             None,
         )];
-        
+
         let extent = self.window_state.get_curr_extent();
 
-        let rendering_info =
-            vk_util::rendering_info(extent, &color_attachment, None);
+        let rendering_info = vk_util::rendering_info(extent, &color_attachment, None);
 
         let skybox_pipeline = self
             .data_cache
@@ -984,13 +1006,14 @@ impl VkRender {
             panic!("No skybox descriptor")
         };
 
-  
         self.render_context.sky_box.skybox_consts.projection = self.scene_data.projection;
         self.render_context.sky_box.skybox_consts.model = self.scene_data.view;
-        let mesh = self.data_cache.mesh_cache.get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
+        let mesh = self
+            .data_cache
+            .mesh_cache
+            .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
 
         unsafe {
-            
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
             self.device
@@ -1028,14 +1051,13 @@ impl VkRender {
                 self.render_context.sky_box.skybox_consts.as_byte_slice(),
             );
 
-            self.device.cmd_draw_indexed(cmd_buffer, mesh.meta.indices.len() as u32, 1, 0, 0,0);
+            self.device
+                .cmd_draw_indexed(cmd_buffer, mesh.meta.indices.len() as u32, 1, 0, 0, 0);
 
             // End dynamic rendering
             self.device.cmd_end_rendering(cmd_buffer);
         }
     }
-
-
 
     pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
         let attachment_info = [vk_util::attachment_info(
@@ -1138,7 +1160,7 @@ impl VkRender {
             )
             .unwrap();
 
-            let mut writer = DescriptorWriter::default();
+            let mut writer = VkDescriptorWriter::default();
             writer.write_buffer(
                 0,
                 gpu_scene_buffer.buffer,
@@ -1300,6 +1322,7 @@ impl VkRender {
             &allocator,
             v_buffer_size,
             vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::VERTEX_BUFFER // TODO maybe remove this, as we paint just device addresses and all shaders should be set to use that
                 | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
             vk_mem::MemoryUsage::AutoPreferDevice,
@@ -1478,7 +1501,7 @@ impl VkRender {
         let near = 10_000.0;
 
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
-         //proj.y_axis.y *= -1.0; // Flip the Y-axis
+        //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = view;
         self.scene_data.projection = proj;
@@ -1496,7 +1519,404 @@ impl VkRender {
         )
     }
 
-    pub fn draw_brd_lut(&mut self) {
-        let dim = 512;
+    pub fn generate_environment(&self, env_skybox: &VkCubeMap) -> Result<EnvMaps, String> {
+        let start = SystemTime::now();
+
+        #[repr(C)]
+        #[derive(PartialEq, Debug)]
+        pub enum Target {
+            Irradiance,
+            PreFiltered,
+        }
+        let targets = [Target::Irradiance, Target::PreFiltered];
+
+        let device = &self.device;
+        let pipeline_cache = &self.data_cache.pipeline_cache;
+        let descriptor_cache = &self.data_cache.desc_layout_cache;
+        let cmd_pool = &self.presentation.frame_data[0].cmd_pool;
+        let render_pool = cmd_pool.get(QueueType::Graphics);
+        let render_buffer = render_pool.buffers[0];
+        let transfer_pool = cmd_pool.get(QueueType::Transfer);
+        let skybox_image = env_skybox.image;
+        let skybox_view = env_skybox.image_view;
+        let skybox_sampler = env_skybox.sampler;
+
+        let mut irradiance_cubemap: Option<VkCubeMap> = None;
+        let mut prefiltered_cubemap: Option<VkCubeMap> = None;
+
+        let desc_pool = VkDescriptorAllocator::new(
+            device,
+            2,
+            &[PoolSizeRatio::new(
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                1.0,
+            )],
+        )?;
+
+        let irr_desc =
+            desc_pool.allocate(device, &[descriptor_cache.get(VkDescType::EnvIrradiance)])?;
+        let filter_desc =
+            desc_pool.allocate(device, &[descriptor_cache.get(VkDescType::EnvPreFilter)])?;
+
+        let skybox_mesh = self
+            .data_cache
+            .mesh_cache
+            .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
+
+        let skybox_v_buff_addr = skybox_mesh.buffer.vertex_buffer_addr;
+        let skybox_index_buff = skybox_mesh.buffer.index_buffer.buffer;
+        let skybox_indices_count = skybox_mesh.meta.indices.len() as u32;
+
+        for target in targets {
+            let target_start = SystemTime::now();
+            info!("Generating Environment Map: {:?}", target);
+
+            let (format, dim) = match target {
+                Target::Irradiance => (vk::Format::R32G32B32A32_SFLOAT, 64),
+                Target::PreFiltered => (vk::Format::R16G16B16A16_SFLOAT, 512),
+            };
+
+            let dim_extent = Extent2D {
+                width: dim,
+                height: dim,
+            };
+
+            let mut offscreen_image = vk_util::create_image(
+                device,
+                &self.allocator.lock().unwrap(),
+                vk::Extent3D::from(dim_extent).depth(1),
+                format,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                false,
+            );
+
+            let mut viewport = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: dim as f32,
+                height: dim as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+
+            let scissor = [vk::Rect2D::default()
+                .offset(vk::Offset2D::default().y(0).y(0))
+                .extent(dim_extent)];
+
+            let pipeline = pipeline_cache.get_pipeline(if target == Target::Irradiance {
+                VkPipelineType::EnvIrradiance
+            } else {
+                VkPipelineType::EnvPreFilter
+            });
+
+            let desc_set = if target == Target::Irradiance {
+                [irr_desc]
+            } else {
+                [filter_desc]
+            };
+
+            // bind the skybox image to the descriptor for shader usage
+            let mut desc_writer = VkDescriptorWriter::default();
+            desc_writer.write_image(
+                0,
+                skybox_view,
+                skybox_sampler,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            );
+
+            desc_writer.update_set(device, desc_set[0]);
+
+            let mips_count = data_util::calc_mips_count(dim, dim);
+
+            // Create the cubemap for writing render output too
+
+            let (cubemap_image, cubemap_sampler) = unsafe {
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+                device
+                    .begin_command_buffer(render_buffer, &begin_info)
+                    .unwrap();
+
+                let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
+                    device,
+                    &self.allocator.lock().unwrap(),
+                    format,
+                    dim,
+                    mips_count,
+                )?;
+
+                // Transition cubemap to writable
+                vk_util::transition_image_layered(
+                    device,
+                    render_buffer,
+                    cubemap_image.image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    6,
+                    mips_count,
+                );
+                device.end_command_buffer(render_buffer).unwrap();
+
+                let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
+                let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+
+                // Submit the command buffer and await queue
+                device
+                    .queue_submit2(render_pool.queue, &submit_info, vk::Fence::null())
+                    .unwrap();
+
+                device.queue_wait_idle(render_pool.queue).unwrap();
+
+                (cubemap_image, cubemap_sampler)
+            };
+
+            let matrices: Vec<glam::Mat4> = vec![
+                glam::Mat4::from_rotation_y(90.0f32.to_radians())
+                    * glam::Mat4::from_rotation_x(180.0f32.to_radians()),
+                glam::Mat4::from_rotation_y(-90.0f32.to_radians())
+                    * glam::Mat4::from_rotation_x(180.0f32.to_radians()),
+                glam::Mat4::from_rotation_x(-90.0f32.to_radians()),
+                glam::Mat4::from_rotation_x(90.0f32.to_radians()),
+                glam::Mat4::from_rotation_x(180.0f32.to_radians()),
+                glam::Mat4::from_rotation_z(180.0f32.to_radians()),
+            ];
+
+            for mip in 0..mips_count {
+                for face in 0..6 {
+                    info!(
+                        "Generating face: {}, mip: {}, for {:?} Map",
+                        mip, face, target
+                    );
+
+                    //Set view to mips level
+                    viewport[0].width = (dim as f32) * 0.5f32.powi(mip as i32);
+                    viewport[0].height = (dim as f32) * 0.5f32.powi(mip as i32);
+
+                    let begin_info = vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+                    unsafe {
+                        device
+                            .begin_command_buffer(render_buffer, &begin_info)
+                            .unwrap();
+
+                        // Transition draw image for color attachment
+                        vk_util::transition_image(
+                            device,
+                            render_buffer,
+                            offscreen_image.image,
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        );
+
+                        let color_attachment_info = [vk::RenderingAttachmentInfo::default()
+                            .image_view(offscreen_image.image_view)
+                            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                            .load_op(vk::AttachmentLoadOp::CLEAR)
+                            .store_op(vk::AttachmentStoreOp::STORE)
+                            .clear_value(vk::ClearValue {
+                                color: vk::ClearColorValue {
+                                    float32: [0.0, 0.0, 0.0, 1.0],
+                                },
+                            })];
+
+                        let rendering_info = vk::RenderingInfo::default()
+                            .render_area(scissor[0])
+                            .layer_count(1)
+                            .color_attachments(&color_attachment_info);
+
+                        device.cmd_begin_rendering(render_buffer, &rendering_info);
+
+                        device.cmd_set_viewport(render_buffer, 0, &viewport);
+                        device.cmd_set_scissor(render_buffer, 0, &scissor);
+
+                        device.cmd_bind_pipeline(
+                            render_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            pipeline.pipeline,
+                        );
+
+                        device.cmd_bind_descriptor_sets(
+                            render_buffer,
+                            vk::PipelineBindPoint::GRAPHICS,
+                            pipeline.layout,
+                            0,
+                            &desc_set,
+                            &[],
+                        );
+
+                        let perspective = glam::Mat4::perspective_rh(FRAC_PI_2, 1.0, 0.1, 512.0);
+                        let mvp = perspective * matrices[face];
+
+                        // Push constant to gpu, depending on target type
+                        match target {
+                            Target::Irradiance => {
+                                let pc = PushConstIrradiance::new(mvp, skybox_v_buff_addr);
+                                device.cmd_push_constants(
+                                    render_buffer,
+                                    pipeline.layout,
+                                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                    0,
+                                    pc.as_byte_slice(),
+                                );
+                            }
+                            Target::PreFiltered => {
+                                let pc = PushConstPrefilterEnv::new(
+                                    mvp,
+                                    mip as f32 / (mips_count - 1) as f32,
+                                    skybox_v_buff_addr,
+                                );
+                                device.cmd_push_constants(
+                                    render_buffer,
+                                    pipeline.layout,
+                                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                                    0,
+                                    pc.as_byte_slice(),
+                                );
+                            }
+                        }
+
+                        
+                        device.cmd_bind_index_buffer(
+                            render_buffer,
+                            skybox_index_buff,
+                            0, // offset
+                            vk::IndexType::UINT32,
+                        );
+
+                     
+                        device.cmd_draw_indexed(render_buffer, skybox_indices_count, 1, 0, 0, 0);
+
+
+                        device.cmd_end_rendering(render_buffer);
+
+
+                        // Setup copy region onto cube map
+                        let copy_region = vk::ImageCopy::default()
+                            .src_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                            .dst_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: mip,
+                                base_array_layer: face as u32,
+                                layer_count: 1,
+                            })
+                            .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                            .extent(vk::Extent3D {
+                                width: viewport[0].width as u32,
+                                height: viewport[0].height as u32,
+                                depth: 1,
+                            });
+
+                        // Transition offscreen image to transfer source
+                        vk_util::transition_image(
+                            device,
+                            render_buffer,
+                            offscreen_image.image,
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        );
+
+                        // Copy image
+                        device.cmd_copy_image(
+                            render_buffer,
+                            offscreen_image.image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            cubemap_image.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[copy_region],
+                        );
+                        
+                        device.end_command_buffer(render_buffer).unwrap();
+
+                        // Submit and await queue
+                        let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
+                        let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+                        device
+                            .queue_submit2(render_pool.queue, &submit_info, vk::Fence::null())
+                            .unwrap();
+
+                        device.queue_wait_idle(render_pool.queue).unwrap();
+                    }
+                }
+            }
+
+            unsafe {
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+                device
+                    .begin_command_buffer(render_buffer, &begin_info)
+                    .unwrap();
+
+                // Transition cubemap to writable
+                vk_util::transition_image_layered(
+                    device,
+                    render_buffer,
+                    cubemap_image.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    6,
+                    mips_count,
+                );
+
+                device.end_command_buffer(render_buffer).unwrap();
+
+                let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
+                let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+
+                device
+                    .queue_submit2(render_pool.queue, &submit_info, vk::Fence::null())
+                    .unwrap();
+
+                device.queue_wait_idle(render_pool.queue).unwrap();
+            }
+            // TODO add mips level and we may want to change this tbh to a differ struct for skybox and env
+            let final_cubemap = VkCubeMap {
+                texture_meta: None,
+                full_extent: Extent3D::from(dim_extent).depth(1),
+                face_extent: Extent3D::from(dim_extent).depth(1),
+                allocation: cubemap_image.allocation,
+                image: cubemap_image.image,
+                image_view: cubemap_image.image_view,
+                sampler: cubemap_sampler,
+            };
+
+            match target {
+                Target::Irradiance => irradiance_cubemap = Some(final_cubemap),
+                Target::PreFiltered => prefiltered_cubemap = Some(final_cubemap),
+            }
+            offscreen_image.destroy(device, &self.allocator.lock().unwrap());
+
+            let target_end = SystemTime::now()
+                .duration_since(target_start)
+                .unwrap()
+                .as_millis();
+
+            info!(
+                "Finished Generating: {:?}, Generation took: {} ms",
+                target, target_end
+            )
+        }
+
+        desc_pool.destroy(device);
+
+        let end = SystemTime::now().duration_since(start).unwrap().as_millis();
+        info!(
+            "Finished Generating Environment Maps, Generation took: {} ms",
+            end
+        );
+
+        Ok(EnvMaps {
+            irradiance: irradiance_cubemap.ok_or("No Irradiance Map")?,
+            pre_filter: prefiltered_cubemap.ok_or("No Cube Map")?,
+        })
     }
 }
