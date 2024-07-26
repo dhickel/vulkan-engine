@@ -2,19 +2,9 @@
 #extension GL_ARB_separate_shader_objects : enable
 #extension GL_ARB_shading_language_420pack : enable
 #extension GL_EXT_buffer_reference : require
+#extension GL_GOOGLE_include_directive : enable
 
-struct Vertex {
-	vec3 position;
-	float uv_x;
-	vec3 normal;
-	float uv_y;
-	vec4 color;
-	vec4 tangent;
-};
-
-layout(buffer_reference, std430) readonly buffer VertexBuffer {
-	Vertex vertices[];
-};
+#include "vertex_struct.glsl"
 
 layout(push_constant) uniform PushConstants {
 	mat4 projection;
@@ -25,6 +15,7 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 layout (location = 0) out vec3 outUVW;
+
 
 void main()
 {
