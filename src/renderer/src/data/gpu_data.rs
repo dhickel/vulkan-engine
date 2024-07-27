@@ -13,6 +13,7 @@ use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
 use glam::{vec4, Mat4, Quat, Vec2, Vec3, Vec4};
+use gltf::json::extensions::material::EmissiveStrength;
 use imgui::sys::igSetClipboardText;
 use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
@@ -20,7 +21,6 @@ use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
-
 //////////////////////////
 //  MESH & TEXTURE DATA //
 //////////////////////////
@@ -46,6 +46,16 @@ pub enum AlphaMode {
     Opaque = 0,
     Blend = 1,
     Mask = 2,
+}
+
+impl AlphaMode {
+    pub fn to_float_value(&self) -> f32 {
+        match self {
+            AlphaMode::Opaque => 0.0,
+            AlphaMode::Blend => 1.0,
+            AlphaMode::Mask => 2.0,
+        }
+    }
 }
 
 // #[derive(Copy, Clone, PartialEq)]
@@ -86,21 +96,6 @@ pub enum AlphaMode {
 //     pub specular_color_tex_id: u32,
 // }
 
-pub struct MaterialValues {
-    pub base_color_factor: Vec4,
-    pub emissive_factor: Vec4,
-    pub base_color_uv_set: u32,
-    pub metallic_roughness_uv_set: u32,
-    pub normal_uv_set: u32,
-    pub occlusion_uv_set: u32,
-    pub emissive_uv_set: u32,
-    pub metallic_factor: f32,
-    pub roughness_factor: f32,
-    pub emissive_strength: f32,
-    pub alpha_mask: f32, // FIXME: why is shader using f32?
-    pub alpha_mash_cutoff: f32,
-}
-
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct EmissiveMap {
     pub factor: Vec3,
@@ -119,20 +114,130 @@ pub struct OcclusionMap {
     pub texture_id: u32,
 }
 
-// MESH & TEXTURE METADATA
+/////////////////////////////
+// MESH & TEXTURE METADATA //
+/////////////////////////////
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct MaterialMeta {
-    pub base_color_factor: Vec4,
+    pub texture_ids: TextureIds,
+    pub material_values: MaterialValues,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct TextureIds {
     pub base_color_tex_id: u32,
+    pub met_rough_tex_id: u32,
+    pub normal_tex_id: u32,
+    pub occlusion_tex_id: u32,
+    pub emissive_tex_id: u32,
+}
+
+impl Default for TextureIds {
+    fn default() -> Self {
+        Self {
+            base_color_tex_id: TextureCache::DEFAULT_COLOR_TEX,
+            met_rough_tex_id: TextureCache::DEFAULT_ROUGH_TEX,
+            normal_tex_id: TextureCache::DEFAULT_NORMAL_TEX,
+            occlusion_tex_id: TextureCache::DEFAULT_OCCLUSION_TEX,
+            emissive_tex_id: TextureCache::DEFAULT_EMISSIVE_TEX,
+        }
+    }
+}
+
+impl Default for MaterialMeta {
+    fn default() -> Self {
+        Self {
+            texture_ids: TextureIds::default(),
+            material_values: MaterialValues::default(),
+        }
+    }
+}
+
+impl MaterialMeta {
+    pub fn add_base_color(&mut self, tex_id: u32, factor: Vec4, uv_set: u32) {
+        self.texture_ids.base_color_tex_id = tex_id;
+        self.material_values.base_color_factor = factor;
+        self.material_values.base_color_uv_set = uv_set;
+    }
+
+    pub fn add_metallic_roughness(
+        &mut self,
+        tex_id: u32,
+        metallic_factor: f32,
+        roughness_factor: f32,
+        uv_set: u32,
+    ) {
+        self.texture_ids.met_rough_tex_id = tex_id;
+        self.material_values.metallic_factor = metallic_factor;
+        self.material_values.roughness_factor = roughness_factor;
+        self.material_values.met_rough_uv_set = uv_set;
+    }
+
+    pub fn add_normal(&mut self, tex_id: u32, normal_scale: f32, uv_set: u32) {
+        self.texture_ids.normal_tex_id = tex_id;
+        self.material_values.normal_scale = normal_scale;
+        self.material_values.normal_uv_set = uv_set;
+    }
+
+    pub fn add_occlusion(&mut self, tex_id: u32, occlusion_strength: f32, uv_set: u32) {
+        self.texture_ids.occlusion_tex_id = tex_id;
+        self.material_values.occlusion_strength = occlusion_strength;
+        self.material_values.occlusion_uv_set = uv_set;
+    }
+
+    pub fn add_emissive(
+        &mut self,
+        tex_id: u32,
+        emissive_factor: Vec3,
+        emissive_strength: f32,
+        uv_set: u32,
+    ) {
+        self.texture_ids.emissive_tex_id = tex_id;
+        self.material_values.emissive_factor = emissive_factor.extend(0.0);
+        self.material_values.emissive_strength = emissive_strength;
+        self.material_values.emissive_uv_set = uv_set;
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Debug, Pod, Zeroable)]
+pub struct MaterialValues {
+    pub base_color_factor: Vec4,
+    pub emissive_factor: Vec4,
+    pub base_color_uv_set: u32,
+    pub met_rough_uv_set: u32,
+    pub normal_uv_set: u32,
+    pub occlusion_uv_set: u32,
+    pub emissive_uv_set: u32,
     pub metallic_factor: f32,
     pub roughness_factor: f32,
-    pub metallic_roughness_tex_id: u32,
-    pub alpha_mode: AlphaMode,
-    pub alpha_cutoff: f32,
-    pub normal_map: NormalMap,
-    pub occlusion_map: OcclusionMap,
-    pub emissive_map: EmissiveMap,
+    pub emissive_strength: f32,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    pub alpha_mask: f32,
+    pub alpha_mask_cutoff: f32,
+}
+
+impl Default for MaterialValues {
+    fn default() -> Self {
+        Self {
+            base_color_factor: TextureCache::DEFAULT_BASE_COLOR_FACTOR,
+            emissive_factor: TextureCache::DEFAULT_EMISSIVE_FACTOR.extend(0.0),
+            base_color_uv_set: 0,
+            met_rough_uv_set: 0,
+            normal_uv_set: 0,
+            occlusion_uv_set: 0,
+            emissive_uv_set: 0,
+            metallic_factor: TextureCache::DEFAULT_METALLIC_FACTOR,
+            roughness_factor: TextureCache::DEFAULT_ROUGHNESS_FACTOR,
+            emissive_strength: TextureCache::DEFAULT_EMISSIVE_STRENGTH,
+            normal_scale: TextureCache::DEFAULT_NORMAL_SCALE,
+            occlusion_strength: TextureCache::DEFAULT_OCCLUSION_STRENGTH,
+            alpha_mask: 0.0,
+            alpha_mask_cutoff: 0.5,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

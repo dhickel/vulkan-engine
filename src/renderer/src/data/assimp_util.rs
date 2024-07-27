@@ -8,7 +8,24 @@ use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
 use log::__private_api::loc;
-use russimp_sys::{aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray, aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile, aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps, aiPostProcessSteps_aiProcess_CalcTangentSpace, aiPostProcessSteps_aiProcess_FixInfacingNormals, aiPostProcessSteps_aiProcess_FlipUVs, aiPostProcessSteps_aiProcess_GenSmoothNormals, aiPostProcessSteps_aiProcess_JoinIdenticalVertices, aiPostProcessSteps_aiProcess_LimitBoneWeights, aiPostProcessSteps_aiProcess_PreTransformVertices, aiPostProcessSteps_aiProcess_Triangulate, aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger, aiString, aiTexture, aiTextureType, aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION, aiTextureType_aiTextureType_BASE_COLOR, aiTextureType_aiTextureType_DIFFUSE, aiTextureType_aiTextureType_EMISSIVE, aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP, aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS, aiTextureType_aiTextureType_SPECULAR, ai_real, AI_DEFAULT_MATERIAL_NAME, aiShadingMode_aiShadingMode_PBR_BRDF, aiTextureType_aiTextureType_UNKNOWN};
+use russimp_sys::{
+    aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray,
+    aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile,
+    aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps,
+    aiPostProcessSteps_aiProcess_CalcTangentSpace, aiPostProcessSteps_aiProcess_FixInfacingNormals,
+    aiPostProcessSteps_aiProcess_FlipUVs, aiPostProcessSteps_aiProcess_GenSmoothNormals,
+    aiPostProcessSteps_aiProcess_JoinIdenticalVertices,
+    aiPostProcessSteps_aiProcess_LimitBoneWeights,
+    aiPostProcessSteps_aiProcess_PreTransformVertices, aiPostProcessSteps_aiProcess_Triangulate,
+    aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger,
+    aiShadingMode_aiShadingMode_PBR_BRDF, aiString, aiTexture, aiTextureType,
+    aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
+    aiTextureType_aiTextureType_BASE_COLOR, aiTextureType_aiTextureType_DIFFUSE,
+    aiTextureType_aiTextureType_EMISSIVE, aiTextureType_aiTextureType_HEIGHT,
+    aiTextureType_aiTextureType_LIGHTMAP, aiTextureType_aiTextureType_METALNESS,
+    aiTextureType_aiTextureType_NORMALS, aiTextureType_aiTextureType_SPECULAR,
+    aiTextureType_aiTextureType_UNKNOWN, ai_real, AI_DEFAULT_MATERIAL_NAME,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::default::Default;
@@ -20,8 +37,6 @@ use std::os::raw;
 use std::os::raw::c_int;
 use std::path::Path;
 use std::rc::Rc;
-
-
 
 pub fn load_model(
     path: &str,
@@ -36,7 +51,7 @@ pub fn load_model(
      //   | aiPostProcessSteps_aiProcess_PreTransformVertices
         | aiPostProcessSteps_aiProcess_FixInfacingNormals
         | aiPostProcessSteps_aiProcess_CalcTangentSpace;
-      //  | aiPostProcessSteps_aiProcess_LimitBoneWeights;
+    //  | aiPostProcessSteps_aiProcess_LimitBoneWeights;
 
     if has_animation {
         flags = flags | aiPostProcessSteps_aiProcess_PreTransformVertices;
@@ -108,14 +123,16 @@ pub fn process_materials(
     unsafe {
         for i in 0..mat_count {
             let ai_material_ptr = *ai_scene.mMaterials.add(i);
-
+            
             if ai_material_ptr.is_null() {
                 return Err(format!("Failed to resolve pointer for material: {}", i));
             }
 
             let ai_material = &*ai_material_ptr;
-
-            let base_color = if let Some(meta) = get_texture_meta(
+            let mut material_meta = MaterialMeta::default();
+            
+            // Base Color
+            if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_DIFFUSE,
@@ -123,7 +140,9 @@ pub fn process_materials(
                 tex_cache,
             ) {
                 let color = get_color_factor(ai_material);
-                Some((meta, color))
+                let uv_set = meta.uv_index;
+                let tex_id = tex_cache.add_texture(meta);
+                material_meta.add_base_color(tex_id, color, uv_set);
             } else if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
@@ -132,12 +151,14 @@ pub fn process_materials(
                 tex_cache,
             ) {
                 let color = get_color_factor(ai_material);
-                Some((meta, color))
-            } else {
-                None
-            };
+                let uv_set = meta.uv_index;
+                let tex_id = tex_cache.add_texture(meta);
 
-            let metalness = if let Some(meta) = get_texture_meta(
+                material_meta.add_base_color(tex_id, color, uv_set);
+            }
+
+            // Metallic Roughness
+            if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_UNKNOWN,
@@ -154,12 +175,19 @@ pub fn process_materials(
                     AI_MATKEY_ROUGHNESS_FACTOR,
                     TextureCache::DEFAULT_ROUGHNESS_FACTOR,
                 );
-                Some((meta, metallic_factor, roughness_factor))
-            } else {
-                None
-            };
+                let uv_set = meta.uv_index;
+                let tex_id = tex_cache.add_texture(meta);
 
-            let normal = if let Some(meta) = get_texture_meta(
+                material_meta.add_metallic_roughness(
+                    tex_id,
+                    metallic_factor,
+                    roughness_factor,
+                    uv_set,
+                );
+            }
+
+            // Normal 
+            if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_NORMALS,
@@ -171,12 +199,14 @@ pub fn process_materials(
                     AI_MATKEY_BUMPSCALING,
                     TextureCache::DEFAULT_ROUGHNESS_FACTOR,
                 );
-                Some((meta, normal_scale))
-            } else {
-                None
-            };
+                let uv_set = meta.uv_index;
+                let tex_id = tex_cache.add_texture(meta);
 
-            let occlusion = if let Some(meta) = get_texture_meta(
+                material_meta.add_normal(tex_id, normal_scale, uv_set);
+            }
+
+            // Occlusion
+            if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_LIGHTMAP,
@@ -188,12 +218,14 @@ pub fn process_materials(
                     AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION,
                     TextureCache::DEFAULT_ROUGHNESS_FACTOR,
                 );
-                Some((meta, occlusion_strength))
-            } else {
-                None
-            };
+                let uv_set = meta.uv_index;
+                let tex_id = tex_cache.add_texture(meta);
 
-            let emissive = if let Some(meta) = get_texture_meta(
+                material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
+            }
+
+            // Emissive
+            if let Some(meta) = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_EMISSIVE,
@@ -201,78 +233,17 @@ pub fn process_materials(
                 tex_cache,
             ) {
                 let emissive_factor = get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE);
-                Some((meta, emissive_factor))
-            } else {
-                None
-            };
+                let emissive_strength =
+                    get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
+                let uv_set = meta.uv_index;
+                let tex_id = tex_cache.add_texture(meta);
 
-            let (base_color_tex_id, base_color_factor) = if let Some(base_color) = base_color {
-                let texture_id = tex_cache.add_texture(base_color.0);
-                (texture_id, base_color.1)
-            } else {
-                (
-                    TextureCache::DEFAULT_COLOR_TEX,
-                    TextureCache::DEFAULT_BASE_COLOR_FACTOR,
-                )
-            };
-
-            let (metallic_roughness_tex_id, metallic_factor, roughness_factor) =
-                if let Some(metallic) = metalness {
-                    let texture_id = tex_cache.add_texture(metallic.0);
-                    (texture_id, metallic.1, metallic.2)
-                } else {
-                    (
-                        TextureCache::DEFAULT_ROUGH_TEX,
-                        TextureCache::DEFAULT_METALLIC_FACTOR,
-                        TextureCache::DEFAULT_ROUGHNESS_FACTOR,
-                    )
-                };
-
-            let normal_map = if let Some(normal) = normal {
-                let texture_id = tex_cache.add_texture(normal.0);
-
-               NormalMap { scale: normal.1, texture_id, }
-            } else {
-                TextureCache::DEFAULT_NORMAL_MAP
-            };
-
-            let occlusion_map = if let Some(occlusion) = occlusion {
-                let texture_id = tex_cache.add_texture(occlusion.0);
-                OcclusionMap {
-                    strength: occlusion.1,
-                    texture_id,
-                }
-            } else {
-                TextureCache::DEFAULT_OCCLUSION_MAP
-            };
-
-            let emissive_map = if let Some(emissive) = emissive {
-                let texture_id = tex_cache.add_texture(emissive.0);
-                EmissiveMap {
-                    factor: emissive.1,
-                    texture_id,
-                }
-            } else {
-                TextureCache::DEFAULT_EMISSIVE_MAP
-            };
-
-            let material = MaterialMeta {
-                base_color_factor,
-                base_color_tex_id,
-                metallic_factor,
-                roughness_factor,
-                metallic_roughness_tex_id,
-                alpha_mode: get_alpha_mode(ai_material),
-                alpha_cutoff: get_alpha_cutoff(ai_material),
-                normal_map,
-                occlusion_map,
-                emissive_map,
-            };
-
-            materials.push(material);
+                material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
+            }
+            
+            materials.push(material_meta);
         }
     }
-
     Ok(materials)
 }
 
@@ -316,6 +287,17 @@ unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam:
         glam::Vec3::new(factor[0], factor[1], factor[2])
     } else {
         TextureCache::DEFAULT_EMISSIVE_FACTOR
+    }
+}
+
+unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32 {
+    let mut strength = [0.0; 1];
+    if aiGetMaterialFloatArray(ai_material, key, 0, 0, strength.as_mut_ptr(), &mut 1)
+        == aiReturn_aiReturn_SUCCESS
+    {
+        strength[0]
+    } else {
+        TextureCache::DEFAULT_EMISSIVE_STRENGTH
     }
 }
 
@@ -365,8 +347,8 @@ unsafe fn get_texture_meta(
             length: 0,
             data: [c_char::from_be(0x0); 1024],
         };
-        
-        let mut uv_index :c_uint = 0;
+
+        let mut uv_index: c_uint = 0;
 
         if aiGetMaterialTexture(
             ai_material,
@@ -432,7 +414,7 @@ unsafe fn get_texture_meta(
                         height,
                         format,
                         mips_levels: 1,
-                        uv_index: uv_index as u32
+                        uv_index: uv_index as u32,
                     });
                 }
             }
@@ -527,7 +509,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
                     position,
                     uv0_x,
                     normal,
-                     uv0_y,
+                    uv0_y,
                     color,
                     tangent,
                     uv1_x,

@@ -15,6 +15,8 @@ struct ShaderMaterial {
 	float metallicFactor;	
 	float roughnessFactor;
 	float emissiveStrength;
+	float normalScale;
+	float occlusionStrength;
 	float alphaMask;	
 	float alphaMaskCutoff;
 

@@ -80,6 +80,7 @@ impl TextureCache {
     pub const DEFAULT_ROUGHNESS_FACTOR: f32 = 1.0;
     pub const DEFAULT_NORMAL_SCALE: f32 = 1.0;
     pub const DEFAULT_OCCLUSION_STRENGTH: f32 = 1.0;
+    pub const DEFAULT_EMISSIVE_STRENGTH: f32 = 1.0;
     pub const DEFAULT_EMISSIVE_FACTOR: Vec3 = Vec3::ZERO;
 
     pub const DEFAULT_MAT_ROUGH_MAT: u32 = 0;
