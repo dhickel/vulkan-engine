@@ -11,13 +11,17 @@ use log::__private_api::loc;
 use russimp_sys::{aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray, aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile, aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps, aiPostProcessSteps_aiProcess_CalcTangentSpace, aiPostProcessSteps_aiProcess_FixInfacingNormals, aiPostProcessSteps_aiProcess_FlipUVs, aiPostProcessSteps_aiProcess_GenSmoothNormals, aiPostProcessSteps_aiProcess_JoinIdenticalVertices, aiPostProcessSteps_aiProcess_LimitBoneWeights, aiPostProcessSteps_aiProcess_PreTransformVertices, aiPostProcessSteps_aiProcess_Triangulate, aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger, aiString, aiTexture, aiTextureType, aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION, aiTextureType_aiTextureType_BASE_COLOR, aiTextureType_aiTextureType_DIFFUSE, aiTextureType_aiTextureType_EMISSIVE, aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP, aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS, aiTextureType_aiTextureType_SPECULAR, ai_real, AI_DEFAULT_MATERIAL_NAME, aiShadingMode_aiShadingMode_PBR_BRDF, aiTextureType_aiTextureType_UNKNOWN};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::default::Default;
 use std::ffi::{c_char, c_uint, CStr, CString};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hasher};
 use std::io::Read;
 use std::os::raw;
+use std::os::raw::c_int;
 use std::path::Path;
 use std::rc::Rc;
+
+
 
 pub fn load_model(
     path: &str,
@@ -227,32 +231,29 @@ pub fn process_materials(
             let normal_map = if let Some(normal) = normal {
                 let texture_id = tex_cache.add_texture(normal.0);
 
-                Some(NormalMap {
-                    scale: normal.1,
-                    texture_id,
-                })
+               NormalMap { scale: normal.1, texture_id, }
             } else {
-                None
+                TextureCache::DEFAULT_NORMAL_MAP
             };
 
             let occlusion_map = if let Some(occlusion) = occlusion {
                 let texture_id = tex_cache.add_texture(occlusion.0);
-                Some(OcclusionMap {
+                OcclusionMap {
                     strength: occlusion.1,
                     texture_id,
-                })
+                }
             } else {
-                None
+                TextureCache::DEFAULT_OCCLUSION_MAP
             };
 
             let emissive_map = if let Some(emissive) = emissive {
                 let texture_id = tex_cache.add_texture(emissive.0);
-                Some(EmissiveMap {
+                EmissiveMap {
                     factor: emissive.1,
                     texture_id,
-                })
+                }
             } else {
-                None
+                TextureCache::DEFAULT_EMISSIVE_MAP
             };
 
             let material = MaterialMeta {
@@ -364,6 +365,8 @@ unsafe fn get_texture_meta(
             length: 0,
             data: [c_char::from_be(0x0); 1024],
         };
+        
+        let mut uv_index :c_uint = 0;
 
         if aiGetMaterialTexture(
             ai_material,
@@ -371,7 +374,7 @@ unsafe fn get_texture_meta(
             0,
             &mut path,
             std::ptr::null_mut(),
-            std::ptr::null_mut(),
+            &mut uv_index,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -381,7 +384,7 @@ unsafe fn get_texture_meta(
             let texture_path = CStr::from_ptr(path.data.as_ptr()).to_string_lossy();
 
             let texture_data = if texture_path.starts_with("*") {
-                // Embedded texture
+                // Embedded texture .....This is a doozy
                 if let Ok(index) = texture_path[1..].parse::<usize>() {
                     if index < ai_scene.mNumTextures as usize {
                         let embedded_texture = *ai_scene.mTextures.add(index);
@@ -429,7 +432,7 @@ unsafe fn get_texture_meta(
                         height,
                         format,
                         mips_levels: 1,
-                        sampler: Sampler::Linear,
+                        uv_index: uv_index as u32
                     });
                 }
             }
@@ -492,7 +495,14 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
                     Vec3::ZERO
                 };
 
-                let (uv_x, uv_y) = if !ai_mesh.mTextureCoords[0].is_null() {
+                let (uv0_x, uv0_y) = if !ai_mesh.mTextureCoords[0].is_null() {
+                    let uv = ai_mesh.mTextureCoords[0].add(i).read();
+                    (uv.x, uv.y)
+                } else {
+                    (0.0, 0.0)
+                };
+
+                let (uv1_x, uv1_y) = if !ai_mesh.mTextureCoords[1].is_null() {
                     let uv = ai_mesh.mTextureCoords[0].add(i).read();
                     (uv.x, uv.y)
                 } else {
@@ -515,11 +525,14 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
 
                 vertices.push(Vertex {
                     position,
-                    uv_x,
+                    uv0_x,
                     normal,
-                    uv_y,
+                     uv0_y,
                     color,
                     tangent,
+                    uv1_x,
+                    uv1_y,
+                    ..Default::default()
                 });
             }
 

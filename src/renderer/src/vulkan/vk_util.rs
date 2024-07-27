@@ -1,7 +1,7 @@
 use std::cmp::{max, PartialEq};
 use std::ffi::CStr;
 
-use crate::data::gpu_data::{TextureMeta, VkCubeMap, VkGpuMeshBuffers};
+use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkGpuMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
@@ -16,7 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use vk_mem::{Alloc, Allocator};
 
-use crate::data::data_cache::{VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType};
+use crate::data::data_cache::{
+    LodBias, SamplerCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+    VkSamplerInfo,
+};
 use crate::data::data_util;
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
 use crate::vulkan::vk_render::{DataCache, VkSingleDescriptor};
@@ -145,10 +148,7 @@ pub fn create_image(
     );
 
     let mips = if mip_mapped {
-        let max_dimension = max(size.width, size.height) as f64;
-        let mips = (max_dimension.log2().floor() as u32) + 1;
-        image_info = image_info.mip_levels(mips);
-        mips
+        data_util::calc_mips_count(size.width, size.height)
     } else {
         1
     };
@@ -177,6 +177,7 @@ pub fn create_image(
         allocation,
         image_extent: size,
         image_format: format,
+        mip_levels: mips,
     }
 }
 
@@ -944,8 +945,6 @@ pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn st
     Ok(())
 }
 
-
-
 pub(crate) fn create_cubemap(
     device: &ash::Device,
     allocator: &Allocator,
@@ -1028,7 +1027,304 @@ pub(crate) fn create_cubemap(
         allocation,
         image_extent: extent,
         image_format: format,
+        mip_levels: num_mips,
     };
 
     Ok((vk_image, sampler))
+}
+
+/////////////////
+// UPLOAD UTIL //
+/////////////////
+
+pub fn immediate_submit<F>(device: &ash::Device, immediate: &VkImmediate, function: F)
+where
+    F: FnOnce(&ash::Device, vk::CommandBuffer),
+{
+    unsafe {
+        let cmd_buffer = immediate.command_pool.buffers[0];
+        let queue = immediate.command_pool.queue;
+
+        // Reset the fence correctly
+        device.reset_fences(&immediate.fence).unwrap();
+
+        device
+            .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
+            .unwrap();
+
+        let begin_info =
+            vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .unwrap();
+
+        function(device, cmd_buffer);
+
+        device.end_command_buffer(cmd_buffer).unwrap();
+
+        let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
+        let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+
+        // Submit the command buffer and signal the fence correctly
+        device
+            .queue_submit2(queue, &submit_info, immediate.fence[0])
+            .unwrap();
+
+        // Wait for the fence to be signaled
+        device
+            .wait_for_fences(&immediate.fence, true, u64::MAX)
+            .unwrap();
+    }
+}
+
+pub fn upload_mesh(
+    device: &ash::Device,
+    allocator: Arc<Mutex<Allocator>>,
+    immediate: &VkImmediate,
+    indices: &[u32],
+    vertices: &[Vertex],
+) -> VkGpuMeshBuffers {
+    let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
+    let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
+
+    let allocator = allocator.lock().unwrap();
+
+    let index_buffer = vk_util::allocate_buffer(
+        &allocator,
+        i_buffer_size,
+        vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+        vk_mem::MemoryUsage::AutoPreferDevice,
+    )
+    .expect("Failed to allocate index buffer");
+
+    let vertex_buffer = vk_util::allocate_buffer(
+        &allocator,
+        v_buffer_size,
+        vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_DST
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        vk_mem::MemoryUsage::AutoPreferDevice,
+    )
+    .expect("Failed to allocate vertex buffer");
+
+    let v_buffer_addr_info = vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer.buffer);
+
+    let vertex_buffer_addr = unsafe { device.get_buffer_device_address(&v_buffer_addr_info) };
+
+    let new_surface = VkGpuMeshBuffers {
+        index_buffer,
+        vertex_buffer,
+        vertex_buffer_addr,
+    };
+
+    let staging_buffer = vk_util::allocate_buffer(
+        &allocator,
+        v_buffer_size + i_buffer_size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk_mem::MemoryUsage::AutoPreferHost,
+    )
+    .expect("Failed to allocate staging buffer");
+
+    let staging_data = staging_buffer.alloc_info.mapped_data as *mut u8;
+
+    unsafe {
+        // Copy vertex data to the staging buffer
+        std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, staging_data, v_buffer_size);
+
+        // Copy index data to the staging buffer
+        std::ptr::copy_nonoverlapping(
+            indices.as_ptr() as *const u8,
+            staging_data.add(v_buffer_size),
+            i_buffer_size,
+        );
+    }
+
+    immediate_submit(device, immediate, |device, cmd| {
+        let vertex_copy = [vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(v_buffer_size as vk::DeviceSize)];
+
+        let index_copy = [vk::BufferCopy::default()
+            .dst_offset(0)
+            .src_offset(v_buffer_size as vk::DeviceSize)
+            .size(i_buffer_size as vk::DeviceSize)];
+
+        unsafe {
+            device.cmd_copy_buffer(
+                cmd,
+                staging_buffer.buffer,
+                new_surface.vertex_buffer.buffer,
+                &vertex_copy,
+            );
+        }
+
+        unsafe {
+            device.cmd_copy_buffer(
+                cmd,
+                staging_buffer.buffer,
+                new_surface.index_buffer.buffer,
+                &index_copy,
+            );
+        }
+    });
+
+    vk_util::destroy_buffer(&allocator, staging_buffer);
+
+    new_surface
+}
+
+pub fn upload_image(
+    device: &ash::Device,
+    allocator: Arc<Mutex<Allocator>>,
+    immediate: &VkImmediate,
+    sampler_cache: &mut SamplerCache,
+    data: &[u8],
+    size: vk::Extent3D,
+    format: vk::Format,
+    usage_flags: vk::ImageUsageFlags,
+    mip_mapped: bool,
+) -> (VkImageAlloc, vk::Sampler) {
+    let allocator = allocator.lock().unwrap();
+
+    // Calculate mip levels
+    let mip_levels = if mip_mapped {
+        (size.width.max(size.height) as f32).log2().floor() as u32 + 1
+    } else {
+        1
+    };
+
+    let upload_buffer =
+        vk_util::allocate_and_write_buffer(&allocator, data, vk::BufferUsageFlags::TRANSFER_SRC)
+            .unwrap();
+
+    let new_image = create_image(
+        device,
+        &allocator,
+        size,
+        format,
+        usage_flags | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+        mip_mapped,
+    );
+
+    immediate_submit(device, immediate, |device, cmd| {
+        vk_util::transition_image(
+            device,
+            cmd,
+            new_image.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        );
+
+        let copy_region = [vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .image_extent(size)];
+
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                cmd,
+                upload_buffer.buffer,
+                new_image.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &copy_region,
+            );
+        }
+
+        // Generate mipmaps
+        if mip_levels > 1 {
+            let mut mip_width = size.width;
+            let mut mip_height = size.height;
+
+            for i in 1..mip_levels {
+                let blit = vk::ImageBlit::default()
+                    .src_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: mip_width as i32,
+                            y: mip_height as i32,
+                            z: 1,
+                        },
+                    ])
+                    .src_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(i - 1)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .dst_offsets([
+                        vk::Offset3D { x: 0, y: 0, z: 0 },
+                        vk::Offset3D {
+                            x: if mip_width > 1 { mip_width / 2 } else { 1 } as i32,
+                            y: if mip_height > 1 { mip_height / 2 } else { 1 } as i32,
+                            z: 1,
+                        },
+                    ])
+                    .dst_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(i)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    );
+
+                unsafe {
+                    device.cmd_blit_image(
+                        cmd,
+                        new_image.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        new_image.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[blit],
+                        vk::Filter::LINEAR,
+                    );
+                }
+
+                // Update dimensions for next iteration
+                mip_width = if mip_width > 1 { mip_width / 2 } else { 1 };
+                mip_height = if mip_height > 1 { mip_height / 2 } else { 1 };
+            }
+        }
+
+        vk_util::transition_image(
+            device,
+            cmd,
+            new_image.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+    });
+    vk_util::destroy_buffer(&allocator, upload_buffer);
+
+    let sampler_info = VkSamplerInfo {
+        mag_filter: vk::Filter::LINEAR,
+        min_filter: vk::Filter::LINEAR,
+        mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+        address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        mip_lod_bias: LodBias::Sharp,
+        anisotropy_enable: false, // FIXME, we need to implement this in engine
+        max_anisotropy: 0,
+        compare_enable: false,
+        compare_op: Default::default(),
+        min_lod: 0,
+        max_lod: mip_levels,
+        border_color: Default::default(),
+        unnormalized_coordinates: false,
+    };
+
+    let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
+
+    (new_image, sampler)
 }

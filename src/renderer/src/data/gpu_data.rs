@@ -27,73 +27,78 @@ use std::rc::{Rc, Weak};
 
 // Used In shaders as well
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Default, Copy, PartialEq, Debug)]
 pub struct Vertex {
     pub position: Vec3,
-    pub uv_x: f32, // pad with uv_x in between to optimize
+    pub uv0_x: f32, // pad with uv_x inbetween to optimize
     pub normal: Vec3,
-    pub uv_y: f32,
+    pub uv0_y: f32,
     pub color: Vec4,
     pub tangent: Vec4,
+    pub uv1_x: f32,
+    pub uv1_y: f32,
+    pub _pad: u64,
 }
 
-impl Default for Vertex {
-    fn default() -> Self {
-        Self {
-            position: Default::default(),
-            normal: Default::default(),
-            color: Default::default(),
-            tangent: Default::default(),
-            uv_x: 0.0,
-            uv_y: 0.0,
-        }
-    }
-}
-
+#[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum AlphaMode {
-    Opaque,
-    Mask,
-    Blend,
+    Opaque = 0,
+    Blend = 1,
+    Mask = 2,
 }
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum PbrTexture {
-    MetallicRough(PbrMetallicRoughness),
-    SpecularGloss(PbrSpecularGlossiness),
-    Transmission(PbrTransmission),
-}
+// #[derive(Copy, Clone, PartialEq)]
+// pub enum PbrTexture {
+//     MetallicRough(PbrMetallicRoughness),
+//     SpecularGloss(PbrSpecularGlossiness),
+//     Transmission(PbrTransmission),
+// }
+//
+// #[derive(Copy, Clone, PartialEq)]
+// pub struct PbrSpecularGlossiness {
+//     pub diffuse_factor: Vec4,
+//     pub diffuse_tex_idx: u32,
+//     pub specular_factor: Vec3,
+//     pub glossiness_factor: f32,
+//     pub specular_glossiness_tex_id: u32,
+// }
+//
+// #[derive(Copy, Clone, PartialEq)]
+// pub struct PbrTransmission {
+//     pub transmission_factor: f32,
+//     pub transmission_tex_id: u32,
+// }
 
-#[derive(Copy, Clone, PartialEq)]
-pub struct PbrMetallicRoughness {
+// #[derive(Copy, Clone, PartialEq, Debug)]
+// pub struct VolumeMap {
+//     pub thickness_factor: f32,
+//     pub thickness_tex_id: u32,
+//     pub attenuation_distance: f32,
+//     pub attenuation_color: Vec3,
+// }
+//
+// #[derive(Copy, Clone, PartialEq)]
+// pub struct SpecularMap {
+//     pub specular_factor: f32,
+//     pub specular_tex_id: u32,
+//     pub specular_color_factor: Vec3,
+//     pub specular_color_tex_id: u32,
+// }
+
+pub struct MaterialValues {
     pub base_color_factor: Vec4,
-    pub base_color_tex_id: u32,
+    pub emissive_factor: Vec4,
+    pub base_color_uv_set: u32,
+    pub metallic_roughness_uv_set: u32,
+    pub normal_uv_set: u32,
+    pub occlusion_uv_set: u32,
+    pub emissive_uv_set: u32,
     pub metallic_factor: f32,
     pub roughness_factor: f32,
-    pub metallic_roughness_tex_id: u32,
-}
-
-#[derive(Copy, Clone, PartialEq)]
-pub struct PbrSpecularGlossiness {
-    pub diffuse_factor: Vec4,
-    pub diffuse_tex_idx: u32,
-    pub specular_factor: Vec3,
-    pub glossiness_factor: f32,
-    pub specular_glossiness_tex_id: u32,
-}
-
-#[derive(Copy, Clone, PartialEq)]
-pub struct PbrTransmission {
-    pub transmission_factor: f32,
-    pub transmission_tex_id: u32,
-}
-
-#[derive(Copy, Clone, PartialEq)]
-pub struct SpecularMap {
-    pub specular_factor: f32,
-    pub specular_tex_id: u32,
-    pub specular_color_factor: Vec3,
-    pub specular_color_tex_id: u32,
+    pub emissive_strength: f32,
+    pub alpha_mask: f32, // FIXME: why is shader using f32?
+    pub alpha_mash_cutoff: f32,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -114,14 +119,6 @@ pub struct OcclusionMap {
     pub texture_id: u32,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct VolumeMap {
-    pub thickness_factor: f32,
-    pub thickness_tex_id: u32,
-    pub attenuation_distance: f32,
-    pub attenuation_color: Vec3,
-}
-
 // MESH & TEXTURE METADATA
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -133,38 +130,25 @@ pub struct MaterialMeta {
     pub metallic_roughness_tex_id: u32,
     pub alpha_mode: AlphaMode,
     pub alpha_cutoff: f32,
-    pub normal_map: Option<NormalMap>,
-    pub occlusion_map: Option<OcclusionMap>,
-    pub emissive_map: Option<EmissiveMap>,
+    pub normal_map: NormalMap,
+    pub occlusion_map: OcclusionMap,
+    pub emissive_map: EmissiveMap,
 }
 
-impl MaterialMeta {
-    pub fn has_normal(&self) -> bool {
-        self.normal_map.is_some()
-    }
-
-    pub fn has_occlusion(&self) -> bool {
-        self.occlusion_map.is_some()
-    }
-
-    pub fn is_ext(&self) -> bool {
-        self.normal_map.is_some() || self.occlusion_map.is_some() || self.emissive_map.is_some()
-    }
-}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sampler {
     Linear,
     Nearest,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub struct TextureMeta {
     pub bytes: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub format: vk::Format,
     pub mips_levels: u32,
-    pub sampler: Sampler,
+    pub uv_index: u32,
 }
 
 pub struct VkCubeMap {
@@ -177,19 +161,6 @@ pub struct VkCubeMap {
     pub sampler: vk::Sampler,
 }
 
-impl TextureMeta {
-    // pub fn from_gltf_texture(data: &gltf::image::Data) -> Self {
-    //     Self {
-    //         bytes: data.pixels.clone(),
-    //         width: data.width,
-    //         height: data.height,
-    //         format: gltf_util::gltf_format_to_vk_format(data.format),
-    //         mips_levels: 1,
-    //         sampler: Sampler::Linear,
-    //     }
-    // }
-}
-
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct SurfaceMeta {
     pub start_index: u32,
@@ -197,7 +168,7 @@ pub struct SurfaceMeta {
     pub material_index: Option<u32>,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub struct MeshMeta {
     pub name: String,
     pub indices: Vec<u32>,

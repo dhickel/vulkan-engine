@@ -1,6 +1,7 @@
 use crate::data::data_cache::{
-    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, MeshCache, TextureCache,
-    VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
+    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, SamplerCache,
+    TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo,
+    VkShaderCache,
 };
 
 use crate::data::gpu_data::{
@@ -45,6 +46,7 @@ pub struct DataCache {
     pub mesh_cache: MeshCache,
     pub texture_cache: TextureCache,
     pub environment_cache: EnvironmentCache,
+    pub sampler_cache: SamplerCache,
 }
 
 impl VkDestroyable for DataCache {
@@ -205,6 +207,7 @@ pub fn init_caches(
     );
     let texture_cache = TextureCache::new(device, supported_formats.clone());
     let mesh_cache = MeshCache::default();
+    let sampler_cache = SamplerCache::default();
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
     let id = environment_cache
         .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
@@ -216,6 +219,7 @@ pub fn init_caches(
         mesh_cache,
         texture_cache,
         environment_cache,
+        sampler_cache,
     }
 }
 
@@ -624,7 +628,7 @@ impl VkRender {
         Ok(render)
     }
 
-    pub fn load_caches(&self) {
+    pub fn load_caches(&mut self) {
         let mesh_cache_ref = &self.data_cache.mesh_cache;
         let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
         let tex_cache_ref = &self.data_cache.texture_cache;
@@ -634,48 +638,39 @@ impl VkRender {
         let frame_data_ref = &self.presentation.frame_data;
         let frame_data_ptr = frame_data_ref as *const Vec<VkFrame> as *mut Vec<VkFrame>;
 
-        // FIXME: this can all just be replace with direct method calls and is hack to use
-        //  existing tutorial code
+        self.data_cache.mesh_cache.allocate_all(
+            &self.device,
+            self.allocator.clone(),
+            &self.immediate,
+        );
+        self.data_cache.texture_cache.allocate_all(
+            &self.device,
+            self.allocator.clone(),
+            &self.immediate,
+            &mut self.data_cache.sampler_cache,
+            &self.data_cache.desc_layout_cache,
+        );
 
-        let mesh_upload_fn =
-            |indices: &[u32], vertices: &[Vertex]| self.upload_mesh(indices, vertices);
-
-        let texture_upload_fn =
-            |data: &[u8],
-             extent: vk::Extent3D,
-             format: vk::Format,
-             usage_flags: vk::ImageUsageFlags,
-             mips: bool| { self.upload_image(data, extent, format, usage_flags, mips) };
-
-        unsafe {
-            (*mesh_cache_ptr).allocate_all(mesh_upload_fn);
-            (*tex_cache_ptr).allocate_all(
-                texture_upload_fn,
-                &self.device,
-                self.allocator.clone(),
-                &self.data_cache.desc_layout_cache,
-            );
-
-            let pipeline = self
-                .data_cache
-                .pipeline_cache
-                .get_pipeline(VkPipelineType::BrdfLut)
-                .pipeline;
-            let cmd_pool = self
-                .presentation
-                .frame_data
-                .first()
-                .unwrap()
-                .cmd_pool
-                .get(QueueType::Transfer);
-            (*env_cache_ptr).allocate_cube_map(
-                0,
-                &self.device,
-                &self.allocator.lock().unwrap(),
-                pipeline,
-                cmd_pool,
-            )
-        }
+        let pipeline = self
+            .data_cache
+            .pipeline_cache
+            .get_pipeline(VkPipelineType::BrdfLut)
+            .pipeline;
+        let cmd_pool = self
+            .presentation
+            .frame_data
+            .first()
+            .unwrap()
+            .cmd_pool
+            .get(QueueType::Transfer);
+        
+        self.data_cache.environment_cache.allocate_cube_map(
+            0,
+            &self.device,
+            &self.allocator.lock().unwrap(),
+            pipeline,
+            cmd_pool,
+        )
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
@@ -1263,227 +1258,6 @@ impl VkRender {
     }
 
     // TODO decide if this is only used for transfers
-    pub fn immediate_submit<F>(&self, function: F)
-    where
-        F: FnOnce(vk::CommandBuffer),
-    {
-        unsafe {
-            let cmd_buffer = self.immediate.command_pool.buffers[0];
-            let queue = self.immediate.command_pool.queue;
-
-            // Reset the fence correctly
-            self.device.reset_fences(&self.immediate.fence).unwrap();
-
-            self.device
-                .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
-                .unwrap();
-
-            let begin_info =
-                vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-            self.device
-                .begin_command_buffer(cmd_buffer, &begin_info)
-                .unwrap();
-
-            function(cmd_buffer);
-
-            self.device.end_command_buffer(cmd_buffer).unwrap();
-
-            let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
-            let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
-
-            // Submit the command buffer and signal the fence correctly
-            self.device
-                .queue_submit2(queue, &submit_info, self.immediate.fence[0])
-                .unwrap();
-
-            // Wait for the fence to be signaled
-            self.device
-                .wait_for_fences(&self.immediate.fence, true, u64::MAX)
-                .unwrap();
-        }
-    }
-
-    pub fn upload_mesh(&self, indices: &[u32], vertices: &[Vertex]) -> VkGpuMeshBuffers {
-        let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
-        let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
-
-        let allocator = self.allocator.lock().unwrap();
-
-        let index_buffer = vk_util::allocate_buffer(
-            &allocator,
-            i_buffer_size,
-            vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-        )
-        .expect("Failed to allocate index buffer");
-
-        let vertex_buffer = vk_util::allocate_buffer(
-            &allocator,
-            v_buffer_size,
-            vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::VERTEX_BUFFER // TODO maybe remove this, as we paint just device addresses and all shaders should be set to use that
-                | vk::BufferUsageFlags::TRANSFER_DST
-                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-            vk_mem::MemoryUsage::AutoPreferDevice,
-        )
-        .expect("Failed to allocate vertex buffer");
-
-        let v_buffer_addr_info =
-            vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer.buffer);
-
-        let vertex_buffer_addr =
-            unsafe { self.device.get_buffer_device_address(&v_buffer_addr_info) };
-
-        let new_surface = VkGpuMeshBuffers {
-            index_buffer,
-            vertex_buffer,
-            vertex_buffer_addr,
-        };
-
-        /*
-        With the buffers allocated, we need to write the data into them. For that, we will be using a
-        staging buffer. This is a very common pattern with Vulkan. As GPU_ONLY memory can't be written
-        on the CPU, we first write the memory on a temporal staging buffer that is CPU writable,
-        and then execute a copy command to copy this buffer into the GPU buffers. It's not necessary
-        for meshes to use GPU_ONLY vertex buffers, but it's highly recommended unless
-        it's something like a CPU-side particle system or other dynamic effects.
-         */
-
-        let staging_buffer = vk_util::allocate_buffer(
-            &allocator,
-            v_buffer_size + i_buffer_size,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk_mem::MemoryUsage::AutoPreferHost,
-        )
-        .expect("Failed to allocate staging buffer");
-
-        let staging_data = staging_buffer.alloc_info.mapped_data as *mut u8;
-
-        unsafe {
-            // Copy vertex data to the staging buffer
-            std::ptr::copy_nonoverlapping(
-                vertices.as_ptr() as *const u8,
-                staging_data,
-                v_buffer_size,
-            );
-
-            // Copy index data to the staging buffer
-            std::ptr::copy_nonoverlapping(
-                indices.as_ptr() as *const u8,
-                staging_data.add(v_buffer_size),
-                i_buffer_size,
-            );
-        }
-
-        self.immediate_submit(|cmd| {
-            let vertex_copy = [vk::BufferCopy::default()
-                .src_offset(0)
-                .dst_offset(0)
-                .size(v_buffer_size as vk::DeviceSize)];
-
-            let index_copy = [vk::BufferCopy::default()
-                .dst_offset(0)
-                .src_offset(v_buffer_size as vk::DeviceSize)
-                .size(i_buffer_size as vk::DeviceSize)];
-
-            unsafe {
-                self.device.cmd_copy_buffer(
-                    cmd,
-                    staging_buffer.buffer,
-                    new_surface.vertex_buffer.buffer,
-                    &vertex_copy,
-                );
-            }
-
-            unsafe {
-                self.device.cmd_copy_buffer(
-                    cmd,
-                    staging_buffer.buffer,
-                    new_surface.index_buffer.buffer,
-                    &index_copy,
-                );
-            }
-        });
-
-        vk_util::destroy_buffer(&allocator, staging_buffer);
-
-        new_surface
-    }
-
-    pub fn upload_image(
-        &self,
-        data: &[u8],
-        size: vk::Extent3D,
-        format: vk::Format,
-        usage_flags: vk::ImageUsageFlags,
-        mip_mapped: bool,
-    ) -> VkImageAlloc {
-        //let data_size = data.len();
-        let allocator = self.allocator.lock().unwrap();
-
-        let upload_buffer = vk_util::allocate_and_write_buffer(
-            &allocator,
-            data,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-        )
-        .unwrap();
-        let new_image = vk_util::create_image(
-            &self.device,
-            &allocator,
-            size,
-            format,
-            usage_flags | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-            mip_mapped,
-        );
-
-        self.immediate_submit(|cmd| {
-            // let curr_frame = self.presentation.get_curr_frame();
-
-            vk_util::transition_image(
-                &self.device,
-                cmd,
-                new_image.image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            );
-
-            let copy_region = [vk::BufferImageCopy::default()
-                .buffer_offset(0)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(0)
-                        .layer_count(1),
-                )
-                .image_extent(size)];
-
-            unsafe {
-                self.device.cmd_copy_buffer_to_image(
-                    cmd,
-                    upload_buffer.buffer,
-                    new_image.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &copy_region,
-                );
-            }
-
-            vk_util::transition_image(
-                &self.device,
-                cmd,
-                new_image.image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            );
-        });
-
-        // FIXME we can reuse the same buffer for this,
-        vk_util::destroy_buffer(&allocator, upload_buffer);
-        new_image
-    }
 
     pub fn update_scene(&mut self) {
         let view = self
@@ -1778,7 +1552,6 @@ impl VkRender {
                             }
                         }
 
-                        
                         device.cmd_bind_index_buffer(
                             render_buffer,
                             skybox_index_buff,
@@ -1786,12 +1559,9 @@ impl VkRender {
                             vk::IndexType::UINT32,
                         );
 
-                     
                         device.cmd_draw_indexed(render_buffer, skybox_indices_count, 1, 0, 0, 0);
 
-
                         device.cmd_end_rendering(render_buffer);
-
 
                         // Setup copy region onto cube map
                         let copy_region = vk::ImageCopy::default()
@@ -1833,7 +1603,7 @@ impl VkRender {
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                             &[copy_region],
                         );
-                        
+
                         device.end_command_buffer(render_buffer).unwrap();
 
                         // Submit and await queue

@@ -5,9 +5,11 @@ use crate::data::gpu_data::{
 };
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
-    VkDescriptorWriter, PoolSizeRatio, VkDescriptorAllocator, VkDynamicDescriptorAllocator,
+    PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
-use crate::vulkan::vk_types::{VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkPipeline};
+use crate::vulkan::vk_types::{
+    VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkImmediate, VkPipeline,
+};
 use crate::vulkan::vk_util;
 use ash::vk::Format;
 use ash::{vk, Device};
@@ -17,6 +19,7 @@ use image::{
     EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba32FImage,
 };
 use log::info;
+use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
 use std::path;
@@ -30,12 +33,12 @@ use vk_mem::Allocator;
 
 #[derive(Debug)]
 pub enum CachedTexture {
-    UnLoaded(TextureMeta),
+    Unloaded(TextureMeta),
     Loaded(VkLoadedTexture),
 }
 
 #[derive(Debug)]
-pub enum CacheMaterial {
+pub enum CachedMaterial {
     Unloaded(MaterialMeta),
     Loaded(VkLoadedMaterial),
 }
@@ -58,11 +61,10 @@ pub struct VkLoadedTexture {
 #[derive(Debug)]
 pub struct TextureCache {
     cached_textures: Vec<CachedTexture>,
-    cached_materials: Vec<CacheMaterial>,
+    cached_materials: Vec<CachedMaterial>,
     image_descriptors: [VkDynamicDescriptorAllocator; 2],
     supported_formats: HashSet<vk::Format>,
-    pub linear_sampler: vk::Sampler,
-    pub nearest_sampler: vk::Sampler,
+    linear_sampler: vk::Sampler,
 }
 
 impl TextureCache {
@@ -87,6 +89,7 @@ impl TextureCache {
         scale: Self::DEFAULT_NORMAL_SCALE,
         texture_id: Self::DEFAULT_NORMAL_TEX,
     };
+
     pub const DEFAULT_OCCLUSION_MAP: OcclusionMap = OcclusionMap {
         strength: Self::DEFAULT_OCCLUSION_STRENGTH,
         texture_id: Self::DEFAULT_OCCLUSION_TEX,
@@ -97,28 +100,41 @@ impl TextureCache {
         texture_id: Self::DEFAULT_EMISSIVE_TEX,
     };
 
+    const PLACEHOLDER_MAT: CachedMaterial = CachedMaterial::Unloaded(MaterialMeta {
+        base_color_factor: Vec4::ZERO,
+        base_color_tex_id: 0,
+        metallic_factor: 0.0,
+        roughness_factor: 0.0,
+        metallic_roughness_tex_id: 0,
+        alpha_mode: gpu_data::AlphaMode::Opaque,
+        alpha_cutoff: 0.0,
+        normal_map: Self::DEFAULT_NORMAL_MAP,
+        occlusion_map: Self::DEFAULT_OCCLUSION_MAP,
+        emissive_map: Self::DEFAULT_EMISSIVE_MAP,
+    });
+
     pub fn new(device: &ash::Device, supported_formats: HashSet<vk::Format>) -> Self {
-        let def_color = CachedTexture::UnLoaded(TextureMeta {
+        let def_color = CachedTexture::Unloaded(TextureMeta {
             bytes: vec![255, 255, 255, 255],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
-            sampler: Sampler::Linear,
+            uv_index: 0,
         });
 
-        let def_rough = CachedTexture::UnLoaded(TextureMeta {
+        let def_rough = CachedTexture::Unloaded(TextureMeta {
             bytes: vec![0, 127, 0, 255],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
-            sampler: Sampler::Linear,
+            uv_index: 0,
         });
 
         let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
 
-        let def_occlusion = CachedTexture::UnLoaded(TextureMeta {
+        let def_occlusion = CachedTexture::Unloaded(TextureMeta {
             bytes: if r8_support {
                 vec![255]
             } else {
@@ -132,28 +148,28 @@ impl TextureCache {
                 vk::Format::R8G8B8A8_UNORM
             },
             mips_levels: 1,
-            sampler: Sampler::Linear,
+            uv_index: 0,
         });
 
-        let def_normal = CachedTexture::UnLoaded(TextureMeta {
+        let def_normal = CachedTexture::Unloaded(TextureMeta {
             bytes: vec![128, 128, 128, 255],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
-            sampler: Sampler::Nearest,
+            uv_index: 0,
         });
 
-        let def_emissive = CachedTexture::UnLoaded(TextureMeta {
+        let def_emissive = CachedTexture::Unloaded(TextureMeta {
             bytes: vec![0, 0, 0, 0],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
-            sampler: Sampler::Linear,
+            uv_index: 0,
         });
 
-        let def_mat = CacheMaterial::Unloaded(MaterialMeta {
+        let def_mat = CachedMaterial::Unloaded(MaterialMeta {
             base_color_factor: Vec4::new(1.0, 1.0, 1.0, 1.0),
             base_color_tex_id: 0,
             metallic_factor: 0.0,
@@ -161,9 +177,9 @@ impl TextureCache {
             metallic_roughness_tex_id: 1,
             alpha_mode: gpu_data::AlphaMode::Opaque,
             alpha_cutoff: 0.5,
-            normal_map: None,
-            occlusion_map: None,
-            emissive_map: None,
+            normal_map: Self::DEFAULT_NORMAL_MAP,
+            occlusion_map: Self::DEFAULT_OCCLUSION_MAP,
+            emissive_map: Self::DEFAULT_EMISSIVE_MAP,
         });
 
         let error_tex: [u8; 16] = [
@@ -173,16 +189,16 @@ impl TextureCache {
             255, 20, 147, 255, // Pixel 4: R, G, B, A
         ];
 
-        let def_error = CachedTexture::UnLoaded(TextureMeta {
+        let def_error = CachedTexture::Unloaded(TextureMeta {
             bytes: error_tex.to_vec(),
             width: 2,
             height: 2,
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
-            sampler: Sampler::Linear,
+            uv_index: 0,
         });
 
-        let err_mat = CacheMaterial::Unloaded(MaterialMeta {
+        let err_mat = CachedMaterial::Unloaded(MaterialMeta {
             base_color_factor: Vec4::new(1.0, 1.0, 1.0, 1.0),
             base_color_tex_id: 2,
             metallic_factor: 0.0,
@@ -190,9 +206,9 @@ impl TextureCache {
             metallic_roughness_tex_id: 1,
             alpha_mode: gpu_data::AlphaMode::Opaque,
             alpha_cutoff: 0.5,
-            normal_map: None,
-            occlusion_map: None,
-            emissive_map: None,
+            normal_map: Self::DEFAULT_NORMAL_MAP,
+            occlusion_map: Self::DEFAULT_OCCLUSION_MAP,
+            emissive_map: Self::DEFAULT_EMISSIVE_MAP,
         });
 
         let mut cached_textures = Vec::with_capacity(100);
@@ -233,21 +249,13 @@ impl TextureCache {
             cached_textures,
             cached_materials,
             supported_formats,
-            linear_sampler,
-            nearest_sampler,
             image_descriptors,
+            linear_sampler,
         }
     }
 
     pub fn is_supported_format(&self, format: vk::Format) -> bool {
         self.supported_formats.contains(&format)
-    }
-
-    pub fn get_sampler(&self, sampler: Sampler) -> vk::Sampler {
-        match sampler {
-            Sampler::Linear => self.linear_sampler,
-            Sampler::Nearest => self.nearest_sampler,
-        }
     }
 
     pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
@@ -276,7 +284,7 @@ impl TextureCache {
             }
         }
 
-        self.cached_textures.push(CachedTexture::UnLoaded(data));
+        self.cached_textures.push(CachedTexture::Unloaded(data));
         index as u32
     }
 
@@ -287,41 +295,29 @@ impl TextureCache {
         for (ext_idx, data) in data {
             index_pairs.insert(ext_idx, index);
             index += 1;
-            self.cached_textures.push(CachedTexture::UnLoaded(data))
+            self.cached_textures.push(CachedTexture::Unloaded(data))
         }
         index_pairs
     }
 
     pub fn add_material(&mut self, mut data: MaterialMeta) -> u32 {
-        if data.is_ext() {
-            if data.normal_map.is_none() {
-                data.normal_map = Some(Self::DEFAULT_NORMAL_MAP);
-            }
-            if data.occlusion_map.is_none() {
-                data.occlusion_map = Some(Self::DEFAULT_OCCLUSION_MAP)
-            }
-            if data.emissive_map.is_none() {
-                data.emissive_map = Some(Self::DEFAULT_EMISSIVE_MAP)
-            }
-        }
-
         let index = self.cached_materials.len();
-        self.cached_materials.push(CacheMaterial::Unloaded(data));
+        self.cached_materials.push(CachedMaterial::Unloaded(data));
         index as u32
     }
 
-    pub fn get_material(&self, id: u32) -> Option<&CacheMaterial> {
+    pub fn get_material(&self, id: u32) -> Option<&CachedMaterial> {
         self.cached_materials.get(id as usize)
     }
 
-    pub fn get_material_unchecked(&self, id: u32) -> &CacheMaterial {
+    pub fn get_material_unchecked(&self, id: u32) -> &CachedMaterial {
         unsafe { self.cached_materials.get_unchecked(id as usize) }
     }
 
     pub fn get_loaded_material_unchecked(&self, id: u32) -> &VkLoadedMaterial {
         unsafe {
             match self.cached_materials.get_unchecked(id as usize) {
-                CacheMaterial::Loaded(loaded) => loaded,
+                CachedMaterial::Loaded(loaded) => loaded,
                 _ => std::hint::unreachable_unchecked(),
             }
         }
@@ -330,7 +326,7 @@ impl TextureCache {
     pub fn get_loaded_material_unchecked_ptr(&self, id: u32) -> *const VkLoadedMaterial {
         unsafe {
             match self.cached_materials.get_unchecked(id as usize) {
-                CacheMaterial::Loaded(loaded) => loaded,
+                CachedMaterial::Loaded(loaded) => loaded,
                 _ => std::hint::unreachable_unchecked(),
             }
         }
@@ -365,31 +361,33 @@ impl TextureCache {
         unsafe { self.image_descriptors.get_unchecked(index as usize) }
     }
 
-    pub fn allocate_texture<F>(&mut self, mut upload_fn: F, tex_id: u32)
-    where
-        F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
-    {
+    pub fn allocate_texture(
+        &mut self,
+        device: &ash::Device,
+        allocator: Arc<Mutex<Allocator>>,
+        immediate: &VkImmediate,
+        sampler_cache: &mut SamplerCache,
+        tex_id: u32,
+    ) {
         let tex_id = tex_id as usize;
         let texture = std::mem::replace(
             &mut self.cached_textures[tex_id],
-            CachedTexture::UnLoaded(TextureMeta {
-                bytes: vec![],
-                width: 0,
-                height: 0,
-                format: vk::Format::UNDEFINED,
-                mips_levels: 0,
-                sampler: Sampler::Linear,
-            }),
+            CachedTexture::Unloaded(TextureMeta::default()),
         );
 
-        if let CachedTexture::UnLoaded(meta) = texture {
+        if let CachedTexture::Unloaded(meta) = texture {
             let size = vk::Extent3D {
                 width: meta.width,
                 height: meta.height,
                 depth: 1,
             };
 
-            let alloc = upload_fn(
+            // fixme, sampler needs to be stored for binding to material shader descriptor
+            let (alloc, sampler) = vk_util::upload_image(
+                device,
+                allocator,
+                immediate,
+                sampler_cache,
                 &meta.bytes,
                 size,
                 meta.format,
@@ -401,7 +399,7 @@ impl TextureCache {
             self.cached_textures[tex_id] = CachedTexture::Loaded(loaded_texture);
         } else {
             self.cached_textures[tex_id] = texture;
-            log::info!(
+            info!(
                 "Attempted to allocate, already allocated texture: {}",
                 tex_id
             );
@@ -416,77 +414,55 @@ impl TextureCache {
         mat_id: u32,
     ) {
         let mat_id = mat_id as usize;
-        let material = std::mem::replace(
-            &mut self.cached_materials[mat_id],
-            CacheMaterial::Unloaded(MaterialMeta {
-                base_color_factor: Default::default(),
-                base_color_tex_id: 0,
-                metallic_factor: 0.0,
-                roughness_factor: 0.0,
-                metallic_roughness_tex_id: 0,
-                alpha_mode: gpu_data::AlphaMode::Opaque,
-                alpha_cutoff: 0.0,
-                normal_map: None,
-                occlusion_map: None,
-                emissive_map: None,
-            }),
-        );
+        let material = std::mem::replace(&mut self.cached_materials[mat_id], Self::PLACEHOLDER_MAT);
 
-        if let CacheMaterial::Unloaded(meta) = material {
+        if let CachedMaterial::Unloaded(meta) = material {
             let loaded_material: VkLoadedMaterial;
-            if false && meta.is_ext() {
-                // FIXME ext pipeline is disabled
-                let shader_consts = MetRoughUniformExt {
-                    color_factors: meta.base_color_factor,
-                    metal_rough_factors: vec4(
-                        meta.metallic_factor,
-                        meta.roughness_factor,
-                        0.0,
-                        0.0,
-                    ),
-                    normal_scale: vec4(meta.normal_map.unwrap().scale, 0.0, 0.0, 0.0),
-                    occlusion_strength: vec4(meta.occlusion_map.unwrap().strength, 0.0, 0.0, 0.0),
-                    emissive_factor: meta.emissive_map.unwrap().factor.extend(0.0),
-                    extra: [Vec4::ZERO; 11],
-                };
+            // let shader_consts = MetRoughUniformExt {
+            //     color_factors: meta.base_color_factor,
+            //     metal_rough_factors: vec4(
+            //         meta.metallic_factor,
+            //         meta.roughness_factor,
+            //         0.0,
+            //         0.0,
+            //     ),
+            //     normal_scale: vec4(meta.normal_map.scale, 0.0, 0.0, 0.0),
+            //     occlusion_strength: vec4(meta.occlusion_map.strength, 0.0, 0.0, 0.0),
+            //     emissive_factor: meta.emissive_map.factor.extend(0.0),
+            //     extra: [Vec4::ZERO; 11],
+            // };
+            //
+            // let const_bytes = bytemuck::bytes_of(&shader_consts);
+            //
+            // let uniform_buffer = vk_util::allocate_and_write_buffer(
+            //     &allocator.lock().unwrap(),
+            //     const_bytes,
+            //     vk::BufferUsageFlags::UNIFORM_BUFFER,
+            // )
+            //     .unwrap();
+            //
+            // loaded_material =
+            //     self.write_material_ext(meta, uniform_buffer, 0, device, desc_layout_cache);
 
-                let const_bytes = bytemuck::bytes_of(&shader_consts);
+            let shader_consts = MetRoughUniform {
+                color_factors: meta.base_color_factor,
+                metal_rough_factors: vec4(meta.metallic_factor, meta.roughness_factor, 0.0, 0.0),
+                extra: [Vec4::ZERO; 14],
+            };
 
-                let uniform_buffer = vk_util::allocate_and_write_buffer(
-                    &allocator.lock().unwrap(),
-                    const_bytes,
-                    vk::BufferUsageFlags::UNIFORM_BUFFER,
-                )
-                .unwrap();
+            let const_bytes = bytemuck::bytes_of(&shader_consts);
 
-                loaded_material =
-                    self.write_material_ext(meta, uniform_buffer, 0, device, desc_layout_cache);
-            } else {
-                let shader_consts = MetRoughUniform {
-                    color_factors: meta.base_color_factor,
-                    metal_rough_factors: vec4(
-                        meta.metallic_factor,
-                        meta.roughness_factor,
-                        0.0,
-                        0.0,
-                    ),
-                    extra: [Vec4::ZERO; 14],
-                };
+            let uniform_buffer = vk_util::allocate_and_write_buffer(
+                &allocator.lock().unwrap(),
+                const_bytes,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+            )
+            .unwrap();
 
-                let const_bytes = bytemuck::bytes_of(&shader_consts);
+            loaded_material =
+                self.write_material(meta, uniform_buffer, 0, device, desc_layout_cache);
 
-                let uniform_buffer = vk_util::allocate_and_write_buffer(
-                    &allocator.lock().unwrap(),
-                    const_bytes,
-                    vk::BufferUsageFlags::UNIFORM_BUFFER,
-                )
-                .unwrap();
-
-                loaded_material =
-                    self.write_material(meta, uniform_buffer, 0, device, desc_layout_cache);
-            }
-
-            self.cached_materials[mat_id] = CacheMaterial::Loaded(loaded_material);
+            self.cached_materials[mat_id] = CachedMaterial::Loaded(loaded_material);
         } else {
             self.cached_materials[mat_id] = material;
             log::info!(
@@ -524,7 +500,7 @@ impl TextureCache {
         writer.write_image(
             1,
             color_tex.alloc.image_view,
-            self.get_sampler(color_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -532,7 +508,7 @@ impl TextureCache {
         writer.write_image(
             2,
             metallic_tex.alloc.image_view,
-            self.get_sampler(metallic_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -572,10 +548,9 @@ impl TextureCache {
     ) -> VkLoadedMaterial {
         let color_tex = self.get_loaded_texture_unchecked(meta.base_color_tex_id);
         let metallic_tex = self.get_loaded_texture_unchecked(meta.metallic_roughness_tex_id);
-        let normal_tex = self.get_loaded_texture_unchecked(meta.normal_map.unwrap().texture_id);
-        let occlusion_tex =
-            self.get_loaded_texture_unchecked(meta.occlusion_map.unwrap().texture_id);
-        let emissive_tex = self.get_loaded_texture_unchecked(meta.emissive_map.unwrap().texture_id);
+        let normal_tex = self.get_loaded_texture_unchecked(meta.normal_map.texture_id);
+        let occlusion_tex = self.get_loaded_texture_unchecked(meta.occlusion_map.texture_id);
+        let emissive_tex = self.get_loaded_texture_unchecked(meta.emissive_map.texture_id);
 
         let pipeline = match meta.alpha_mode {
             AlphaMode::Opaque => VkPipelineType::PbrMetRoughOpaqueExt,
@@ -594,7 +569,7 @@ impl TextureCache {
         writer.write_image(
             1,
             color_tex.alloc.image_view,
-            self.get_sampler(color_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -602,7 +577,7 @@ impl TextureCache {
         writer.write_image(
             2,
             metallic_tex.alloc.image_view,
-            self.get_sampler(metallic_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -610,7 +585,7 @@ impl TextureCache {
         writer.write_image(
             3,
             normal_tex.alloc.image_view,
-            self.get_sampler(normal_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -618,7 +593,7 @@ impl TextureCache {
         writer.write_image(
             4,
             occlusion_tex.alloc.image_view,
-            self.get_sampler(occlusion_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -626,7 +601,7 @@ impl TextureCache {
         writer.write_image(
             5,
             emissive_tex.alloc.image_view,
-            self.get_sampler(emissive_tex.meta.sampler),
+            self.linear_sampler,
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
@@ -658,25 +633,11 @@ impl TextureCache {
 
     pub fn deallocate_material(&mut self, allocator: &vk_mem::Allocator, mat_id: u32) {
         let mat_id = mat_id as usize;
-        let material = std::mem::replace(
-            &mut self.cached_materials[mat_id],
-            CacheMaterial::Unloaded(MaterialMeta {
-                base_color_factor: Default::default(),
-                base_color_tex_id: 0,
-                metallic_factor: 0.0,
-                roughness_factor: 0.0,
-                metallic_roughness_tex_id: 0,
-                alpha_mode: gpu_data::AlphaMode::Opaque,
-                alpha_cutoff: 0.0,
-                normal_map: None,
-                occlusion_map: None,
-                emissive_map: None,
-            }),
-        );
+        let material = std::mem::replace(&mut self.cached_materials[mat_id], Self::PLACEHOLDER_MAT);
 
-        if let CacheMaterial::Loaded(loaded_material) = material {
+        if let CachedMaterial::Loaded(loaded_material) = material {
             vk_util::destroy_buffer(allocator, loaded_material.uniform_buffer);
-            let unloaded_material = CacheMaterial::Unloaded(loaded_material.meta);
+            let unloaded_material = CachedMaterial::Unloaded(loaded_material.meta);
             self.cached_materials[mat_id] = unloaded_material;
         } else {
             self.cached_materials[mat_id] = material;
@@ -687,36 +648,28 @@ impl TextureCache {
         let tex_id = tex_id as usize;
         let texture = std::mem::replace(
             &mut self.cached_textures[tex_id],
-            CachedTexture::UnLoaded(TextureMeta {
-                bytes: vec![],
-                width: 0,
-                height: 0,
-                format: vk::Format::UNDEFINED,
-                mips_levels: 0,
-                sampler: Sampler::Linear,
-            }),
+            CachedTexture::Unloaded(TextureMeta::default()),
         );
 
         if let CachedTexture::Loaded(loaded_texture) = texture {
             vk_util::destroy_image(allocator, loaded_texture.alloc);
-            let unloaded_texture = CachedTexture::UnLoaded(loaded_texture.meta);
+            let unloaded_texture = CachedTexture::Unloaded(loaded_texture.meta);
             self.cached_textures[tex_id] = unloaded_texture;
         } else {
             self.cached_textures[tex_id] = texture;
         }
     }
 
-    pub fn allocate_all<F>(
+    pub fn allocate_all(
         &mut self,
-        upload_fn: F,
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
+        immediate: &VkImmediate,
+        sampler_cache: &mut SamplerCache,
         desc_layout_cache: &VkDescLayoutCache,
-    ) where
-        F: Fn(&[u8], vk::Extent3D, vk::Format, vk::ImageUsageFlags, bool) -> VkImageAlloc,
-    {
+    ) {
         for x in 0..self.cached_textures.len() {
-            self.allocate_texture(&upload_fn, x as u32);
+            self.allocate_texture(device, allocator.clone(),immediate,sampler_cache, x as u32)
         }
 
         for x in 0..self.cached_materials.len() {
@@ -746,7 +699,7 @@ impl VkDestroyable for TextureCache {
         }
 
         for mat in self.cached_materials.drain(..) {
-            if let CacheMaterial::Loaded(mut loaded) = mat {
+            if let CachedMaterial::Loaded(mut loaded) = mat {
                 loaded.uniform_buffer.destroy(device, allocator);
             }
         }
@@ -754,11 +707,6 @@ impl VkDestroyable for TextureCache {
         self.image_descriptors
             .iter_mut()
             .for_each(|desc| desc.destroy(device, allocator));
-
-        unsafe {
-            device.destroy_sampler(self.linear_sampler, None);
-            device.destroy_sampler(self.nearest_sampler, None);
-        }
     }
 }
 
@@ -792,200 +740,224 @@ impl Default for MeshCache {
             // Front face
             Vertex {
                 position: Vec3::new(-1.0, -1.0, 1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: Vec3::Z,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, -1.0, 1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: Vec3::Z,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, 1.0, 1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: Vec3::Z,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, 1.0, 1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: Vec3::Z,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             // Back face
             Vertex {
                 position: Vec3::new(-1.0, -1.0, -1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: -Vec3::Z,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, 1.0, -1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: -Vec3::Z,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, 1.0, -1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: -Vec3::Z,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, -1.0, -1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: -Vec3::Z,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::X,
+                ..Default::default()
             },
             // Top face
             Vertex {
                 position: Vec3::new(-1.0, 1.0, -1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: Vec3::Y,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, 1.0, 1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: Vec3::Y,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, 1.0, 1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: Vec3::Y,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, 1.0, -1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: Vec3::Y,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             // Bottom face
             Vertex {
                 position: Vec3::new(-1.0, -1.0, -1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: -Vec3::Y,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, -1.0, -1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: -Vec3::Y,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, -1.0, 1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: -Vec3::Y,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, -1.0, 1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: -Vec3::Y,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::X,
+                ..Default::default()
             },
             // Right face
             Vertex {
                 position: Vec3::new(1.0, -1.0, -1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: Vec3::X,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::Z,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, 1.0, -1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: Vec3::X,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::Z,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, 1.0, 1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: Vec3::X,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::Z,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(1.0, -1.0, 1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: Vec3::X,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: -Vec4::Z,
+                ..Default::default()
             },
             // Left face
             Vertex {
                 position: Vec3::new(-1.0, -1.0, -1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: -Vec3::X,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::Z,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, -1.0, 1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: -Vec3::X,
-                uv_y: 0.0,
+                uv0_y: 0.0,
                 color: Vec4::ONE,
                 tangent: Vec4::Z,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, 1.0, 1.0),
-                uv_x: 1.0,
+                uv0_x: 1.0,
                 normal: -Vec3::X,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::Z,
+                ..Default::default()
             },
             Vertex {
                 position: Vec3::new(-1.0, 1.0, -1.0),
-                uv_x: 0.0,
+                uv0_x: 0.0,
                 normal: -Vec3::X,
-                uv_y: 1.0,
+                uv0_y: 1.0,
                 color: Vec4::ONE,
                 tangent: Vec4::Z,
+                ..Default::default()
             },
         ];
 
@@ -1062,22 +1034,21 @@ impl MeshCache {
         }
     }
 
-    pub fn allocate_mesh<F>(&mut self, mut upload_fn: F, mesh_id: usize)
-    where
-        F: Fn(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
-    {
+    pub fn allocate_mesh(
+        &mut self,
+        device: &ash::Device,
+        allocator: Arc<Mutex<Allocator>>,
+        immediate: &VkImmediate,
+        mesh_id: usize,
+    ) {
         let mesh = std::mem::replace(
             &mut self.cached_meshes[mesh_id],
-            CachedMesh::UnLoaded(MeshMeta {
-                name: "".to_string(),
-                indices: vec![],
-                vertices: vec![],
-                material_index: None,
-            }),
+            CachedMesh::UnLoaded(MeshMeta::default()),
         );
 
         if let CachedMesh::UnLoaded(meta) = mesh {
-            let buffer = upload_fn(&meta.indices, &meta.vertices);
+            let buffer =
+                vk_util::upload_mesh(device, allocator, immediate, &meta.indices, &meta.vertices);
 
             let loaded_mesh = VkLoadedMesh { meta, buffer };
             self.cached_meshes[mesh_id] = CachedMesh::Loaded(loaded_mesh);
@@ -1110,12 +1081,14 @@ impl MeshCache {
         }
     }
 
-    pub fn allocate_all<F>(&mut self, upload_fn: F)
-    where
-        F: Fn(&[u32], &[Vertex]) -> VkGpuMeshBuffers,
-    {
+    pub fn allocate_all(
+        &mut self,
+        device: &ash::Device,
+        allocator: Arc<Mutex<Allocator>>,
+        immediate: &VkImmediate,
+    ) {
         for x in 0..self.cached_meshes.len() {
-            self.allocate_mesh(&upload_fn, x);
+            self.allocate_mesh(device, allocator.clone(), immediate, x);
         }
     }
 
@@ -1385,7 +1358,7 @@ impl EnvironmentCache {
                     height: image.height(),
                     format,
                     mips_levels: 1,
-                    sampler: Sampler::Linear,
+                    ..Default::default()
                 };
 
                 self.skyboxes.push(CachedEnvironment::Unloaded(meta));
@@ -1462,7 +1435,7 @@ impl EnvironmentCache {
             height,
             format,
             mips_levels: 1,
-            sampler: Sampler::Linear,
+            ..Default::default()
         };
 
         self.skyboxes.push(CachedEnvironment::Unloaded(meta));
@@ -1486,7 +1459,7 @@ impl EnvironmentCache {
                 height: 0,
                 format: vk::Format::UNDEFINED,
                 mips_levels: 0,
-                sampler: Sampler::Linear,
+                ..Default::default()
             }),
         );
 
@@ -1499,6 +1472,92 @@ impl EnvironmentCache {
                 "Attempted to allocate, already allocated texture: {}",
                 env_id
             );
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LodBias {
+    Sharp,
+    Normal,
+    Soft,
+}
+
+impl LodBias {
+    fn to_float(&self) -> f32 {
+        match self {
+            LodBias::Sharp => -0.5,
+            LodBias::Normal => 0.0,
+            LodBias::Soft => 0.5,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct VkSamplerInfo {
+    pub mag_filter: vk::Filter,
+    pub min_filter: vk::Filter,
+    pub mipmap_mode: vk::SamplerMipmapMode,
+    pub address_mode_u: vk::SamplerAddressMode,
+    pub address_mode_v: vk::SamplerAddressMode,
+    pub address_mode_w: vk::SamplerAddressMode,
+    pub mip_lod_bias: LodBias,
+    pub anisotropy_enable: bool,
+    pub max_anisotropy: u32,
+    pub compare_enable: bool,
+    pub compare_op: vk::CompareOp,
+    pub min_lod: u32,
+    pub max_lod: u32,
+    pub border_color: vk::BorderColor,
+    pub unnormalized_coordinates: bool,
+}
+
+impl VkSamplerInfo {
+    pub fn to_create_info(&self) -> vk::SamplerCreateInfo {
+        vk::SamplerCreateInfo::default()
+            .mag_filter(self.mag_filter)
+            .min_filter(self.min_filter)
+            .mipmap_mode(self.mipmap_mode)
+            .address_mode_u(self.address_mode_u)
+            .address_mode_v(self.address_mode_v)
+            .address_mode_w(self.address_mode_w)
+            .mip_lod_bias(self.mip_lod_bias.to_float())
+            .anisotropy_enable(self.anisotropy_enable)
+            .max_anisotropy(self.max_anisotropy as f32)
+            .compare_enable(self.compare_enable)
+            .compare_op(self.compare_op)
+            .min_lod(self.min_lod as f32)
+            .max_lod(self.max_lod as f32)
+            .border_color(self.border_color)
+            .unnormalized_coordinates(self.unnormalized_coordinates)
+    }
+}
+
+pub struct SamplerCache {
+    pub samplers: HashMap<VkSamplerInfo, vk::Sampler>,
+}
+
+impl Default for SamplerCache {
+    fn default() -> Self {
+        Self {
+            samplers: HashMap::with_capacity(20),
+        }
+    }
+}
+
+impl SamplerCache {
+    pub fn get_or_create_sampler(
+        &mut self,
+        device: &ash::Device,
+        info: VkSamplerInfo,
+    ) -> vk::Sampler {
+        if let Some(sampler) = self.samplers.get(&info) {
+            *sampler
+        } else {
+            let create_info = info.to_create_info();
+            let sampler = unsafe { device.create_sampler(&create_info, None).unwrap() };
+            self.samplers.insert(info, sampler);
+            sampler
         }
     }
 }

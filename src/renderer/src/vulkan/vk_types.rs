@@ -295,6 +295,7 @@ pub struct VkImageAlloc {
     pub allocation: vk_mem::Allocation,
     pub image_extent: vk::Extent3D,
     pub image_format: vk::Format,
+    pub mip_levels: u32,
 }
 
 impl VkDestroyable for VkImageAlloc {

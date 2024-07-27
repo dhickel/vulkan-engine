@@ -890,6 +890,7 @@ pub fn allocate_draw_images(
                 allocation,
                 image_extent,
                 image_format,
+                mip_levels: 1,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -959,6 +960,7 @@ pub fn allocate_depth_images(
                 allocation,
                 image_extent,
                 image_format,
+                mip_levels: 1
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
