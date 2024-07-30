@@ -4,7 +4,7 @@ use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DeviceAddress;
 use shaderc::ResourceKind::StorageBuffer;
-use std::cmp::{Ordering, PartialEq};
+use std::cmp::{max_by, Ordering, PartialEq};
 use std::marker::PhantomData;
 use std::ops::{Add, IndexMut};
 use std::sync::{Arc, Mutex};
@@ -46,6 +46,7 @@ where
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
         limits: &VkBufferAndDescriptorLimits,
+        max_upload_size: u64,
         usage_flags: vk::BufferUsageFlags,
         memory_usage: vk_mem::MemoryUsage,
         max_allocations: u64,
@@ -78,7 +79,7 @@ where
 
         let buffer_addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer);
         let buffer_address = unsafe { device.get_buffer_device_address(&buffer_addr_info) };
-        let buffer = VkStorageBuffer::new(buffer_size as u64, stride, buffer_address, buffer);
+        let buffer = VkStorageBuffer::new(buffer_size as u64, stride, max_upload_size, buffer_address, buffer);
 
         Ok(Self {
             buffer,
@@ -101,6 +102,7 @@ struct VkStorageBuffer {
     max_size: u64,
     curr_size: u64,
     stride: u64,
+    max_upload_bytes: u64,
     buffer_tail: FreeChunk,
     buffer_start_addr: DeviceAddress,
     buffer_end_addr: DeviceAddress,
@@ -112,6 +114,7 @@ impl VkStorageBuffer {
     pub fn new(
         buffer_size: u64,
         stride: u64,
+        max_upload_bytes: u64,
         buffer_address: DeviceAddress,
         buffer: VkBuffer,
     ) -> Self {
@@ -119,15 +122,37 @@ impl VkStorageBuffer {
             max_size: buffer_size,
             curr_size: 0,
             stride,
+            max_upload_bytes,
             buffer_tail: FreeChunk {
                 start_addr: buffer_address,
                 size: buffer_size,
             },
+
             buffer_start_addr: buffer_address,
             buffer_end_addr: buffer_address.add(buffer_size),
             buffer,
             free_chunks: FreeChunkVec::default(),
         }
+    }
+
+    fn bytes_exceeded_error_single(&self, byte_len: usize) -> VkSingleAllocResult {
+        VkSingleAllocResult::Error(
+            format!(
+                "Bytes exceed max upload limit | Upload Limit: {}, Bytes{} ",
+                self.max_upload_bytes, byte_len
+            )
+            .to_string(),
+        )
+    }
+
+    fn bytes_exceeded_error_multi(&self, index: usize, byte_len: usize) -> VkMultiAllocResult {
+        VkMultiAllocResult::Error(
+            format!(
+                "Bytes exceed max upload limit for item: {} | Upload Limit: {}, Bytes{} ",
+                index, self.max_upload_bytes, byte_len
+            )
+            .to_string(),
+        )
     }
 
     pub fn add_item(
@@ -140,6 +165,10 @@ impl VkStorageBuffer {
             bytes.extend(std::iter::repeat(0).take(padding));
         }
         let byte_len = bytes.len() as u64;
+
+        if byte_len > self.max_upload_bytes {
+            return self.bytes_exceeded_error_single(byte_len as usize);
+        }
 
         if matches!(
             buffer_placement,
@@ -177,61 +206,113 @@ impl VkStorageBuffer {
         mut item_bytes: Vec<Vec<u8>>,
         buffer_placement: BufferPlacement,
     ) -> VkMultiAllocResult {
-        let max_bytes = item_bytes
-            .iter()
-            .map(|b| b.len().next_multiple_of(self.stride as usize))
-            .max()
-            .unwrap_or(0) as u64;
+        let mut total_bytes: u64 = 0;
+        let mut alloc_sizes = Vec::with_capacity(item_bytes.len());
+        let mut sub_allocations = Vec::<VkSubAlloc>::with_capacity(item_bytes.len());
 
-        let mut max_bytes: u64 = 0;
-        let mut sizes = Vec::<u64>::with_capacity(item_bytes.len());
-        let mut flat_bytes = Vec::<u8>::with_capacity(max_bytes as usize);
+        // Pad if needed and calc each item's final size
+        for (index, item) in item_bytes.iter_mut().enumerate() {
+            if item.len() & (self.stride as usize - 1) == 0 {
+                let padding = item.len().next_multiple_of(self.stride as usize) - item.len();
+                item.extend(std::iter::repeat(0).take(padding));
+            }
 
-        // Pad bytes to align if needed, keep track of these sizes for the return sub allocation vec
-        // This size array is used to map 1-1 with bytes vecs in to allocations out to hand back to the caller
-        for mut chunk in item_bytes.into_iter() {
-            let original_len = chunk.len();
-            let size = if original_len & (self.stride as usize - 1) == 0 {
-                original_len
-            } else {
-                // pad to match stride
-                let padding = chunk.len().next_multiple_of(self.stride as usize) - original_len;
-                chunk.extend(std::iter::repeat(0).take(padding));
-                chunk.len()
-            };
-            max_bytes += size as u64;
-            sizes.push(size as u64);
-            flat_bytes.append(&mut chunk);
+            if item.len() > self.max_upload_bytes as usize {
+                return self.bytes_exceeded_error_multi(index, item.len());
+            }
+            
+            total_bytes += item.len() as u64;
+            alloc_sizes.push(item.len() as u64)
         }
 
         // Handle end only
-        if buffer_placement == BufferPlacement::EndOnly {
-            if self.buffer_tail.size >= max_bytes {
-                todo!("Contigious add end") // FIXME
-            } else {
-                return VkMultiAllocResult::OutOfSpace {
-                    fulfilled: vec![],
-                    remaining: vec![],
-                };
+        if buffer_placement == BufferPlacement::EndOnly && self.buffer_tail.size >= total_bytes {
+            let mut start_range = 0;
+            let mut end_range = 0;
+            let mut curr_allot = 0_u64;
+            let mut address = self.buffer_tail.start_addr;
+
+            for (i, bytes) in item_bytes.iter().enumerate() {
+                let byte_size = bytes.len() as u64;
+
+                if (curr_allot + byte_size) > self.max_size {
+                    if start_range < end_range {
+                        let upload_slice = &item_bytes[start_range..end_range];
+                        // upload this slice here, check success and extend sub allocations
+                        self.buffer_tail.remove_from_chunk(curr_allot);
+                    }
+                    
+                    address = address.add(curr_allot);
+                    assert_eq!(
+                        address, self.buffer_tail.start_addr,
+                        "Buffer tail does not match iter address"
+                    );
+                    
+                    start_range = i;
+                    end_range = i;
+                    curr_allot = 0;
+                }
+                curr_allot += byte_size;
+                end_range = i + 1;
             }
+
+            if start_range < end_range {
+                let upload_slice = &item_bytes[start_range..end_range];
+                // upload this slice here, check success and extend sub allocations
+            }
+
+            assert_eq!(
+                sub_allocations.len(),
+                item_bytes.len(),
+                "Allocation amount did not match item amount"
+            );
+        } else {
+            return VkMultiAllocResult::OutOfSpace {
+                fulfilled: vec![],
+                remaining: item_bytes,
+            };
         }
 
         if matches!(
             buffer_placement,
             BufferPlacement::ContiguousOnly | BufferPlacement::ContiguousPreferred
         ) {
-            if self.free_chunks.max_free() >= max_bytes {
-                todo!("Contigious add") // FIXME
-            } else if self.buffer_tail.size >= max_bytes {
-                todo!("Contigious add") // FIXME
-            } else if buffer_placement == BufferPlacement::ContiguousOnly {
-                return None;
+            
+            // check this here to early abort if no contiguous space found
+            if buffer_placement == BufferPlacement::ContiguousOnly
+                && self.free_chunks.max_free() < total_bytes
+                && self.buffer_tail.size < total_bytes
+            {
+                return VkMultiAllocResult::OutOfSpace {
+                    fulfilled: vec![],
+                    remaining: item_bytes,
+                };
             }
+            
+            // Select the starting chunk either as contiguous(which is pre validated if cont-only) 
+            // or the largest contiguous space, free_chunk_index keeps track of what chunk to update
+            let mut free_chunk_index: Option<usize> = None;
+            let curr_chunk = if let Some((index, size)) = self.free_chunks.find_best_fit(self.max_size) {
+                free_chunk_index = Some(index);
+                unsafe { self.free_chunks.get_chunk_unchecked(index) }
+            } else if buffer_placement == BufferPlacement::ContiguousOnly || self.buffer_tail.size > self.free_chunks.max_free() {
+                &self.buffer_tail
+            } else if let Some((index, size)) = self.free_chunks.get_largest_chunk() {
+                free_chunk_index = Some(index);
+                unsafe { self.free_chunks.get_chunk_unchecked(index) }
+            } else {
+                return VkMultiAllocResult::OutOfSpace { fulfilled: vec![], remaining: item_bytes };
+            };
+            
+            for (i, bytes) in item_bytes.iter().enumerate()
+            
+
+todo!()
         }
 
         // Fall through if contiguous preferred attempting to allocate most as contiguous, then best fits
         if buffer_placement == BufferPlacement::ContiguousPreferred {
-            let mut total_bytes_left = max_bytes;
+            let mut total_bytes_left = total_bytes;
             let mut upload_slices = Vec::with_capacity(10);
             let mut sub_allocs = Vec::with_capacity(10);
 
