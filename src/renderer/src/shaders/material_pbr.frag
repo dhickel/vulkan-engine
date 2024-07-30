@@ -59,9 +59,9 @@ layout (std430, set = 3, binding = 0) buffer SSBO
     ShaderMaterial materials[];
 };
 
-layout (push_constant) uniform PushConstants {
-    int materialIndex;
-} pushConstants;
+layout (push_constant) uniform constants {
+    layout (offset = 76) uint materialIndex;
+} pc;
 
 layout (location = 0) out vec4 outColor;
 
@@ -192,7 +192,7 @@ float convertMetallic(vec3 diffuse, vec3 specular, float maxSpecular) {
 
 void main()
 {
-    ShaderMaterial material = materials[pushConstants.materialIndex];
+    ShaderMaterial material = materials[pc.materialIndex];
 
     float perceptualRoughness;
     float metallic;
@@ -236,7 +236,6 @@ void main()
     } else {
         baseColor = material.baseColorFactor;
     }
-
 
 
 

@@ -1,7 +1,8 @@
 use crate::data::data_util::PackUnorm;
 use crate::data::gpu_data::{
-    AlphaMode, EmissiveMap, MaterialMeta, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap,
-    OcclusionMap, Sampler, SurfaceMeta, TextureMeta, Vertex, VkCubeMap, VkGpuMeshBuffers,
+    AlphaMode, AsByteSlice, EmissiveMap, MaterialMeta, MeshMeta, MetRoughUniform,
+    MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta, TextureIds, TextureMeta,
+    TextureSamplers, Vertex, VkCubeMap, VkGpuMeshBuffers,
 };
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
@@ -18,7 +19,7 @@ use gltf::json::Path;
 use image::{
     EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba32FImage,
 };
-use log::info;
+use log::{error, info};
 use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
@@ -56,6 +57,7 @@ pub struct VkLoadedMaterial {
 pub struct VkLoadedTexture {
     pub meta: TextureMeta,
     pub alloc: VkImageAlloc,
+    pub sampler: vk::Sampler,
 }
 
 #[derive(Debug)]
@@ -100,19 +102,6 @@ impl TextureCache {
         factor: Self::DEFAULT_EMISSIVE_FACTOR,
         texture_id: Self::DEFAULT_EMISSIVE_TEX,
     };
-
-    const PLACEHOLDER_MAT: CachedMaterial = CachedMaterial::Unloaded(MaterialMeta {
-        base_color_factor: Vec4::ZERO,
-        base_color_tex_id: 0,
-        metallic_factor: 0.0,
-        roughness_factor: 0.0,
-        metallic_roughness_tex_id: 0,
-        alpha_mode: gpu_data::AlphaMode::Opaque,
-        alpha_cutoff: 0.0,
-        normal_map: Self::DEFAULT_NORMAL_MAP,
-        occlusion_map: Self::DEFAULT_OCCLUSION_MAP,
-        emissive_map: Self::DEFAULT_EMISSIVE_MAP,
-    });
 
     pub fn new(device: &ash::Device, supported_formats: HashSet<vk::Format>) -> Self {
         let def_color = CachedTexture::Unloaded(TextureMeta {
@@ -170,24 +159,8 @@ impl TextureCache {
             uv_index: 0,
         });
 
-        let def_mat = CachedMaterial::Unloaded(MaterialMeta {
-            base_color_factor: Vec4::new(1.0, 1.0, 1.0, 1.0),
-            base_color_tex_id: 0,
-            metallic_factor: 0.0,
-            roughness_factor: 1.0,
-            metallic_roughness_tex_id: 1,
-            alpha_mode: gpu_data::AlphaMode::Opaque,
-            alpha_cutoff: 0.5,
-            normal_map: Self::DEFAULT_NORMAL_MAP,
-            occlusion_map: Self::DEFAULT_OCCLUSION_MAP,
-            emissive_map: Self::DEFAULT_EMISSIVE_MAP,
-        });
-
         let error_tex: [u8; 16] = [
-            255, 20, 147, 255, // Pixel 1: R, G, B, A
-            255, 20, 147, 255, // Pixel 2: R, G, B, A
-            255, 20, 147, 255, // Pixel 3: R, G, B, A
-            255, 20, 147, 255, // Pixel 4: R, G, B, A
+            255, 20, 147, 255, 255, 20, 147, 255, 255, 20, 147, 255, 255, 20, 147, 255,
         ];
 
         let def_error = CachedTexture::Unloaded(TextureMeta {
@@ -200,16 +173,11 @@ impl TextureCache {
         });
 
         let err_mat = CachedMaterial::Unloaded(MaterialMeta {
-            base_color_factor: Vec4::new(1.0, 1.0, 1.0, 1.0),
-            base_color_tex_id: 2,
-            metallic_factor: 0.0,
-            roughness_factor: 1.0,
-            metallic_roughness_tex_id: 1,
-            alpha_mode: gpu_data::AlphaMode::Opaque,
-            alpha_cutoff: 0.5,
-            normal_map: Self::DEFAULT_NORMAL_MAP,
-            occlusion_map: Self::DEFAULT_OCCLUSION_MAP,
-            emissive_map: Self::DEFAULT_EMISSIVE_MAP,
+            texture_ids: TextureIds {
+                base_color: 2,
+                ..Default::default()
+            },
+            material_values: Default::default(),
         });
 
         let mut cached_textures = Vec::with_capacity(100);
@@ -221,14 +189,12 @@ impl TextureCache {
         cached_textures.push(def_emissive);
 
         let mut cached_materials = Vec::with_capacity(100);
-        cached_materials.push(def_mat);
+        cached_materials.push(CachedMaterial::Unloaded(MaterialMeta::default()));
         cached_materials.push(err_mat);
 
         let mut sampler = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::NEAREST)
             .min_filter(vk::Filter::NEAREST);
-
-        let nearest_sampler = unsafe { device.create_sampler(&sampler, None).unwrap() };
 
         sampler.mag_filter = vk::Filter::LINEAR;
         sampler.min_filter = vk::Filter::LINEAR;
@@ -242,8 +208,10 @@ impl TextureCache {
         ];
 
         let image_descriptors = [
-            VkDynamicDescriptorAllocator::new(device, 10_000, &pool_ratios).unwrap(),
-            VkDynamicDescriptorAllocator::new(device, 10_000, &pool_ratios).unwrap(),
+            // TODO fallback values if fails to allocate
+            //  These are also static so only one pool needed?
+            VkDynamicDescriptorAllocator::new(device, 5_000, &pool_ratios).unwrap(),
+            VkDynamicDescriptorAllocator::new(device, 5_000, &pool_ratios).unwrap(),
         ];
 
         Self {
@@ -262,7 +230,6 @@ impl TextureCache {
     pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
         let index = self.cached_textures.len();
 
-        // TODO roughness textures can actually just be R8 UNORM to save space and bandwidth
         if !self.supported_formats.contains(&data.format) {
             info!(
                 "Unsupported Format: {:?}, converting to R8G8B8A8_UNORM",
@@ -396,7 +363,11 @@ impl TextureCache {
                 meta.mips_levels > 1,
             );
 
-            let loaded_texture = VkLoadedTexture { meta, alloc };
+            let loaded_texture = VkLoadedTexture {
+                meta,
+                alloc,
+                sampler,
+            };
             self.cached_textures[tex_id] = CachedTexture::Loaded(loaded_texture);
         } else {
             self.cached_textures[tex_id] = texture;
@@ -415,44 +386,16 @@ impl TextureCache {
         mat_id: u32,
     ) {
         let mat_id = mat_id as usize;
-        let material = std::mem::replace(&mut self.cached_materials[mat_id], Self::PLACEHOLDER_MAT);
+        let material = std::mem::replace(
+            &mut self.cached_materials[mat_id],
+            CachedMaterial::Unloaded(MaterialMeta::default()),
+        );
 
         if let CachedMaterial::Unloaded(meta) = material {
             let loaded_material: VkLoadedMaterial;
-            // let shader_consts = MetRoughUniformExt {
-            //     color_factors: meta.base_color_factor,
-            //     metal_rough_factors: vec4(
-            //         meta.metallic_factor,
-            //         meta.roughness_factor,
-            //         0.0,
-            //         0.0,
-            //     ),
-            //     normal_scale: vec4(meta.normal_map.scale, 0.0, 0.0, 0.0),
-            //     occlusion_strength: vec4(meta.occlusion_map.strength, 0.0, 0.0, 0.0),
-            //     emissive_factor: meta.emissive_map.factor.extend(0.0),
-            //     extra: [Vec4::ZERO; 11],
-            // };
-            //
-            // let const_bytes = bytemuck::bytes_of(&shader_consts);
-            //
-            // let uniform_buffer = vk_util::allocate_and_write_buffer(
-            //     &allocator.lock().unwrap(),
-            //     const_bytes,
-            //     vk::BufferUsageFlags::UNIFORM_BUFFER,
-            // )
-            //     .unwrap();
-            //
-            // loaded_material =
-            //     self.write_material_ext(meta, uniform_buffer, 0, device, desc_layout_cache);
 
-            let shader_consts = MetRoughUniform {
-                color_factors: meta.base_color_factor,
-                metal_rough_factors: vec4(meta.metallic_factor, meta.roughness_factor, 0.0, 0.0),
-                extra: [Vec4::ZERO; 14],
-            };
-
-            let const_bytes = bytemuck::bytes_of(&shader_consts);
-
+            let const_bytes = meta.material_values.as_byte_slice();
+            // TODO see how material_values should be stored
             let uniform_buffer = vk_util::allocate_and_write_buffer(
                 &allocator.lock().unwrap(),
                 const_bytes,
@@ -466,76 +409,10 @@ impl TextureCache {
             self.cached_materials[mat_id] = CachedMaterial::Loaded(loaded_material);
         } else {
             self.cached_materials[mat_id] = material;
-            log::info!(
+            error!(
                 "Attempted to allocate already allocated material: {}",
                 mat_id
             );
-        }
-    }
-
-    fn write_material(
-        &mut self,
-        meta: MaterialMeta,
-        uniform_buffer: VkBuffer,
-        buffer_offset: u32,
-        device: &ash::Device,
-        desc_layout_cache: &VkDescLayoutCache,
-    ) -> VkLoadedMaterial {
-        let color_tex = self.get_loaded_texture_unchecked(meta.base_color_tex_id);
-        let metallic_tex = self.get_loaded_texture_unchecked(meta.metallic_roughness_tex_id);
-
-        let pipeline = match meta.alpha_mode {
-            AlphaMode::Opaque => VkPipelineType::PbrMetRoughOpaque,
-            AlphaMode::Mask | AlphaMode::Blend => VkPipelineType::PbrMetRoughAlpha,
-        };
-        let mut writer = VkDescriptorWriter::default();
-
-        writer.write_buffer(
-            0,
-            uniform_buffer.buffer,
-            std::mem::size_of::<MetRoughUniform>(),
-            buffer_offset as usize,
-            vk::DescriptorType::UNIFORM_BUFFER,
-        );
-
-        writer.write_image(
-            1,
-            color_tex.alloc.image_view,
-            self.linear_sampler,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        );
-
-        writer.write_image(
-            2,
-            metallic_tex.alloc.image_view,
-            self.linear_sampler,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-        );
-
-        // TODO maybe store the size rations with the layouts?
-        let layout = [desc_layout_cache.get(VkDescType::PbrMetRough)];
-
-        let descriptors: [vk::DescriptorSet; 2] = [
-            {
-                let descriptor = &self.image_descriptors[0].allocate(device, &layout).unwrap();
-                writer.update_set(device, *descriptor);
-                *descriptor
-            },
-            {
-                let descriptor = &self.image_descriptors[1].allocate(device, &layout).unwrap();
-                writer.update_set(device, *descriptor);
-                *descriptor
-            },
-        ];
-
-        VkLoadedMaterial {
-            meta,
-            descriptors,
-            pipeline,
-            uniform_buffer,
-            buffer_offset,
         }
     }
 
@@ -547,15 +424,19 @@ impl TextureCache {
         device: &ash::Device,
         desc_layout_cache: &VkDescLayoutCache,
     ) -> VkLoadedMaterial {
-        let color_tex = self.get_loaded_texture_unchecked(meta.base_color_tex_id);
-        let metallic_tex = self.get_loaded_texture_unchecked(meta.metallic_roughness_tex_id);
-        let normal_tex = self.get_loaded_texture_unchecked(meta.normal_map.texture_id);
-        let occlusion_tex = self.get_loaded_texture_unchecked(meta.occlusion_map.texture_id);
-        let emissive_tex = self.get_loaded_texture_unchecked(meta.emissive_map.texture_id);
+        let color_tex = self.get_loaded_texture_unchecked(meta.texture_ids.base_color);
+        let metallic_tex = self.get_loaded_texture_unchecked(meta.texture_ids.metallic_roughness);
+        let normal_tex = self.get_loaded_texture_unchecked(meta.texture_ids.normal_map);
+        let occlusion_tex = self.get_loaded_texture_unchecked(meta.texture_ids.occlusion_map);
+        let emissive_tex = self.get_loaded_texture_unchecked(meta.texture_ids.emissive_map);
 
-        let pipeline = match meta.alpha_mode {
-            AlphaMode::Opaque => VkPipelineType::PbrMetRoughOpaqueExt,
-            AlphaMode::Mask | AlphaMode::Blend => VkPipelineType::PbrMetRoughAlphaExt,
+        let pipeline = match meta.material_values.alpha_mask {
+            0.0 => VkPipelineType::PbrMetRoughOpaque,
+            1.0.. => VkPipelineType::PbrMetRoughAlpha, // TODO make sure both can use same pipeline
+            _ => panic!(
+                "Invalid alpha mask (Valid values: 0.0..=2.0, found: {:?}",
+                meta.material_values.alpha_mask
+            ),
         };
         let mut writer = VkDescriptorWriter::default();
 
@@ -634,7 +515,10 @@ impl TextureCache {
 
     pub fn deallocate_material(&mut self, allocator: &vk_mem::Allocator, mat_id: u32) {
         let mat_id = mat_id as usize;
-        let material = std::mem::replace(&mut self.cached_materials[mat_id], Self::PLACEHOLDER_MAT);
+        let material = std::mem::replace(
+            &mut self.cached_materials[mat_id],
+            CachedMaterial::Unloaded(MaterialMeta::default()),
+        );
 
         if let CachedMaterial::Loaded(loaded_material) = material {
             vk_util::destroy_buffer(allocator, loaded_material.uniform_buffer);
@@ -670,7 +554,13 @@ impl TextureCache {
         desc_layout_cache: &VkDescLayoutCache,
     ) {
         for x in 0..self.cached_textures.len() {
-            self.allocate_texture(device, allocator.clone(),immediate,sampler_cache, x as u32)
+            self.allocate_texture(
+                device,
+                allocator.clone(),
+                immediate,
+                sampler_cache,
+                x as u32,
+            )
         }
 
         for x in 0..self.cached_materials.len() {
@@ -1120,8 +1010,7 @@ impl VkDestroyable for MeshCache {
 pub enum CoreShaderType {
     MetRoughVert,
     MetRoughFrag,
-    MetRoughVertExt,
-    MetRoughFragExt,
+    MetRoughFragUnlit,
     BrtFlutVert,
     BrtFlutFrag,
     SkyBoxVert,
@@ -1132,7 +1021,7 @@ pub enum CoreShaderType {
 }
 
 impl CoreShaderType {
-    const COUNT: usize = 11;
+    const COUNT: usize = 10;
 }
 
 pub struct VkShaderCache {
@@ -1143,7 +1032,7 @@ pub struct VkShaderCache {
 impl VkShaderCache {
     pub fn new(
         device: &ash::Device,
-        shader_paths: Vec<(CoreShaderType, String)>,
+        shader_paths: Vec<(CoreShaderType, &str)>,
     ) -> Result<Self, String> {
         let mut compiled_shaders = shader_paths
             .iter()

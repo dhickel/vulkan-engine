@@ -2,7 +2,7 @@ use crate::data::data_cache::{
     CoreShaderType, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
 };
 use crate::data::gpu_data::{
-    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, VkGpuPushConsts,
+    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, VkModelPushConsts,
 };
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_util};
@@ -328,7 +328,7 @@ fn init_met_rough_pipelines(
 
     let matrix_range = [vk::PushConstantRange::default()
         .offset(0)
-        .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
+        .size(std::mem::size_of::<VkModelPushConsts>() as u32)
         .stage_flags(vk::ShaderStageFlags::VERTEX)];
 
     let layouts = [
@@ -387,7 +387,7 @@ fn init_met_rough_ext_pipelines(
 
     let matrix_range = [vk::PushConstantRange::default()
         .offset(0)
-        .size(std::mem::size_of::<VkGpuPushConsts>() as u32)
+        .size(std::mem::size_of::<VkModelPushConsts>() as u32)
         .stage_flags(vk::ShaderStageFlags::VERTEX)];
 
     let layouts = [

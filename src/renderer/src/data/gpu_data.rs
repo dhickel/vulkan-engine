@@ -12,8 +12,7 @@ use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
-use glam::{vec4, Mat4, Quat, Vec2, Vec3, Vec4};
-use gltf::json::extensions::material::EmissiveStrength;
+use glam::{vec4, Mat4, Quat, UVec4, Vec2, Vec3, Vec4};
 use imgui::sys::igSetClipboardText;
 use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
@@ -37,7 +36,9 @@ pub struct Vertex {
     pub tangent: Vec4,
     pub uv1_x: f32,
     pub uv1_y: f32,
-    pub _pad: u64,
+    pub joints: UVec4,
+    pub weights: Vec4,
+    _pad: u64,
 }
 
 #[repr(C)]
@@ -126,21 +127,21 @@ pub struct MaterialMeta {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct TextureIds {
-    pub base_color_tex_id: u32,
-    pub met_rough_tex_id: u32,
-    pub normal_tex_id: u32,
-    pub occlusion_tex_id: u32,
-    pub emissive_tex_id: u32,
+    pub base_color: u32,
+    pub metallic_roughness: u32,
+    pub normal_map: u32,
+    pub occlusion_map: u32,
+    pub emissive_map: u32,
 }
 
 impl Default for TextureIds {
     fn default() -> Self {
         Self {
-            base_color_tex_id: TextureCache::DEFAULT_COLOR_TEX,
-            met_rough_tex_id: TextureCache::DEFAULT_ROUGH_TEX,
-            normal_tex_id: TextureCache::DEFAULT_NORMAL_TEX,
-            occlusion_tex_id: TextureCache::DEFAULT_OCCLUSION_TEX,
-            emissive_tex_id: TextureCache::DEFAULT_EMISSIVE_TEX,
+            base_color: TextureCache::DEFAULT_COLOR_TEX,
+            metallic_roughness: TextureCache::DEFAULT_ROUGH_TEX,
+            normal_map: TextureCache::DEFAULT_NORMAL_TEX,
+            occlusion_map: TextureCache::DEFAULT_OCCLUSION_TEX,
+            emissive_map: TextureCache::DEFAULT_EMISSIVE_TEX,
         }
     }
 }
@@ -156,7 +157,7 @@ impl Default for MaterialMeta {
 
 impl MaterialMeta {
     pub fn add_base_color(&mut self, tex_id: u32, factor: Vec4, uv_set: u32) {
-        self.texture_ids.base_color_tex_id = tex_id;
+        self.texture_ids.base_color = tex_id;
         self.material_values.base_color_factor = factor;
         self.material_values.base_color_uv_set = uv_set;
     }
@@ -168,20 +169,20 @@ impl MaterialMeta {
         roughness_factor: f32,
         uv_set: u32,
     ) {
-        self.texture_ids.met_rough_tex_id = tex_id;
+        self.texture_ids.metallic_roughness = tex_id;
         self.material_values.metallic_factor = metallic_factor;
         self.material_values.roughness_factor = roughness_factor;
         self.material_values.met_rough_uv_set = uv_set;
     }
 
     pub fn add_normal(&mut self, tex_id: u32, normal_scale: f32, uv_set: u32) {
-        self.texture_ids.normal_tex_id = tex_id;
+        self.texture_ids.normal_map = tex_id;
         self.material_values.normal_scale = normal_scale;
         self.material_values.normal_uv_set = uv_set;
     }
 
     pub fn add_occlusion(&mut self, tex_id: u32, occlusion_strength: f32, uv_set: u32) {
-        self.texture_ids.occlusion_tex_id = tex_id;
+        self.texture_ids.occlusion_map = tex_id;
         self.material_values.occlusion_strength = occlusion_strength;
         self.material_values.occlusion_uv_set = uv_set;
     }
@@ -193,7 +194,7 @@ impl MaterialMeta {
         emissive_strength: f32,
         uv_set: u32,
     ) {
-        self.texture_ids.emissive_tex_id = tex_id;
+        self.texture_ids.emissive_map = tex_id;
         self.material_values.emissive_factor = emissive_factor.extend(0.0);
         self.material_values.emissive_strength = emissive_strength;
         self.material_values.emissive_uv_set = uv_set;
@@ -238,6 +239,15 @@ impl Default for MaterialValues {
             alpha_mask_cutoff: 0.5,
         }
     }
+}
+
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
+pub struct TextureSamplers {
+    base_color: vk::Sampler,
+    met_rough: vk::Sampler,
+    normal: vk::Sampler,
+    occlusion: vk::Sampler,
+    emissive: vk::Sampler,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -302,6 +312,7 @@ pub trait AsByteSlice: Pod {
     }
 }
 
+
 impl<T> AsByteSlice for T where T: Pod + bytemuck::Zeroable {}
 
 #[repr(C)]
@@ -331,16 +342,33 @@ pub struct MetRoughUniformExt {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-pub struct VkGpuPushConsts {
-    pub world_matrix: [[f32; 4]; 4],
+pub struct VkModelPushConsts {
+    pub model_matrix: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
+    pub joint_count: u32,
+    _pad: u32,
 }
 
-impl VkGpuPushConsts {
-    pub fn new(world_matrix: glam::Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+impl VkModelPushConsts {
+    pub fn new(model_matrix: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
         Self {
-            world_matrix: world_matrix.to_cols_array_2d(),
+            model_matrix,
             vertex_buffer_addr,
+            joint_count: 0,
+            _pad: 0,
+        }
+    }
+
+    pub fn new_anim(
+        model_matrix: Mat4,
+        joint_count: u32,
+        vertex_buffer_addr: vk::DeviceAddress,
+    ) -> Self {
+        Self {
+            model_matrix,
+            vertex_buffer_addr,
+            joint_count,
+            _pad: 0,
         }
     }
 }

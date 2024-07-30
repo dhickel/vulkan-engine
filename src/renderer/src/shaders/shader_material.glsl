@@ -4,7 +4,7 @@
  *
  */
 
-struct ShaderMaterial {
+struct MaterialMeta {
 	vec4 baseColorFactor;
 	vec4 emissiveFactor;
 	int baseColorTextureSet;
@@ -19,5 +19,8 @@ struct ShaderMaterial {
 	float occlusionStrength;
 	float alphaMask;	
 	float alphaMaskCutoff;
+};
 
+layout (buffer_reference, std430) readonly buffer MatMetaBuffer {
+	MaterialMeta matMetas[];
 };

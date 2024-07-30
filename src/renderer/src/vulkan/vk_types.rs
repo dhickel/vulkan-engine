@@ -118,7 +118,7 @@ impl VkWindowState {
     pub fn get_aspect_ratio(&self) -> f32 {
         self.curr_aspect_ratio
     }
-    
+
     pub fn get_max_extent(&self) -> vk::Extent2D {
         self.max_extent
     }
@@ -174,6 +174,38 @@ pub struct PhyDevice {
 pub struct LogicalDevice {
     pub device: ash::Device,
     pub queues: DeviceQueues,
+}
+
+pub struct VkBufferAndDescriptorLimits {
+    // Buffer limits
+    pub max_storage_buffer_range: vk::DeviceSize,
+    pub max_uniform_buffer_range: vk::DeviceSize,
+    pub max_push_constants_size: u32,
+
+    // Alignment limits
+    pub min_uniform_buffer_offset_alignment: vk::DeviceSize,
+    pub min_storage_buffer_offset_alignment: vk::DeviceSize,
+    pub min_texel_buffer_offset_alignment: vk::DeviceSize,
+    pub buffer_image_granularity: vk::DeviceSize,
+    pub non_coherent_atom_size: vk::DeviceSize,
+
+    // Descriptor limits
+    pub max_bound_descriptor_sets: u32,
+    pub max_per_stage_descriptor_storage_buffers: u32,
+    pub max_per_stage_descriptor_uniform_buffers: u32,
+    pub max_descriptor_set_storage_buffers: u32,
+    pub max_descriptor_set_uniform_buffers: u32,
+    pub max_descriptor_set_storage_buffers_dynamic: u32,
+    pub max_descriptor_set_uniform_buffers_dynamic: u32,
+
+    // Vulkan 1.2+ properties
+    pub max_update_after_bind_descriptors_in_all_pools: u32,
+    pub max_per_stage_descriptor_update_after_bind_storage_buffers: u32,
+    pub max_per_stage_descriptor_update_after_bind_uniform_buffers: u32,
+    pub max_descriptor_set_update_after_bind_storage_buffers: u32,
+    pub max_descriptor_set_update_after_bind_uniform_buffers: u32,
+    pub max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
+    pub max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
 }
 
 #[derive(Debug)]
@@ -761,10 +793,17 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
+pub struct VkSubAlloc {
+    pub address: vk::DeviceAddress,
+    pub size: u64,
+}
+
+
+
 pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
-    pub extent: Extent2D
+    pub extent: Extent2D,
 }
 
 impl VkBuffer {
@@ -788,7 +827,6 @@ impl VkDestroyable for VkBuffer {
         }
     }
 }
-
 
 pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),

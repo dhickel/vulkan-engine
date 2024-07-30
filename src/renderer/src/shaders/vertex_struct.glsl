@@ -3,18 +3,20 @@
 
 struct Vertex {
     vec3 position;
-    float uv_x;
+    float uv0_x;
     vec3 normal;
-    float uv_y;
+    float uv0_y;
     vec4 color;
     vec4 tangent;
     float uv1_x;
     float uv1_y;
+    uvec4 joints;
+    vec4 weights;
     int _pad1;
     int _pad2;
 };
 
-layout(buffer_reference, std430) readonly buffer VertexBuffer {
+layout (buffer_reference, std430) readonly buffer VertexBuffer {
     Vertex vertices[];
 };
 

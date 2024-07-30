@@ -1271,6 +1271,52 @@ pub fn get_supported_image_formats(instance: &ash::Instance, physical_device: vk
     supported
 }
 
+pub fn get_buffer_and_descriptor_limits(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> VkBufferAndDescriptorLimits {
+    unsafe {
+        let mut properties2 = vk::PhysicalDeviceProperties2::default();
+        let mut vulkan12_properties = vk::PhysicalDeviceVulkan12Properties::default();
+        properties2.p_next = &mut vulkan12_properties as *mut _ as *mut std::ffi::c_void;
+
+        instance.get_physical_device_properties2(physical_device, &mut properties2);
+
+        let properties = properties2.properties;
+        let limits = properties.limits;
+
+        VkBufferAndDescriptorLimits {
+
+            max_storage_buffer_range: limits.max_storage_buffer_range as vk::DeviceSize,
+            max_uniform_buffer_range: limits.max_uniform_buffer_range as vk::DeviceSize,
+            max_push_constants_size: limits.max_push_constants_size,
+
+            min_uniform_buffer_offset_alignment: limits.min_uniform_buffer_offset_alignment,
+            min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
+            min_texel_buffer_offset_alignment: limits.min_texel_buffer_offset_alignment,
+            buffer_image_granularity: limits.buffer_image_granularity,
+            non_coherent_atom_size: limits.non_coherent_atom_size,
+
+            max_bound_descriptor_sets: limits.max_bound_descriptor_sets,
+            max_per_stage_descriptor_storage_buffers: limits.max_per_stage_descriptor_storage_buffers,
+            max_per_stage_descriptor_uniform_buffers: limits.max_per_stage_descriptor_uniform_buffers,
+            max_descriptor_set_storage_buffers: limits.max_descriptor_set_storage_buffers,
+            max_descriptor_set_uniform_buffers: limits.max_descriptor_set_uniform_buffers,
+            max_descriptor_set_storage_buffers_dynamic: limits.max_descriptor_set_storage_buffers_dynamic,
+            max_descriptor_set_uniform_buffers_dynamic: limits.max_descriptor_set_uniform_buffers_dynamic,
+
+            max_update_after_bind_descriptors_in_all_pools: vulkan12_properties.max_update_after_bind_descriptors_in_all_pools,
+            max_per_stage_descriptor_update_after_bind_storage_buffers: vulkan12_properties.max_per_stage_descriptor_update_after_bind_storage_buffers,
+            max_per_stage_descriptor_update_after_bind_uniform_buffers: vulkan12_properties.max_per_stage_descriptor_update_after_bind_uniform_buffers,
+            max_descriptor_set_update_after_bind_storage_buffers: vulkan12_properties.max_descriptor_set_update_after_bind_storage_buffers,
+            max_descriptor_set_update_after_bind_uniform_buffers: vulkan12_properties.max_descriptor_set_update_after_bind_uniform_buffers,
+            max_descriptor_set_update_after_bind_storage_buffers_dynamic: vulkan12_properties.max_descriptor_set_update_after_bind_storage_buffers_dynamic,
+            max_descriptor_set_update_after_bind_uniform_buffers_dynamic: vulkan12_properties.max_descriptor_set_update_after_bind_uniform_buffers_dynamic,
+        }
+    }
+}
+
+
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
     vec![
         ash::khr::swapchain::NAME,

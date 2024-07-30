@@ -7,7 +7,7 @@ use crate::data::data_cache::{
 use crate::data::gpu_data::{
     AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node,
     PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, UBOMatrices, Vertex,
-    VkCubeMap, VkGpuMeshBuffers, VkGpuPushConsts, VkGpuTextureBuffer,
+    VkCubeMap, VkGpuMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts,
 };
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
@@ -122,6 +122,7 @@ pub struct VkRender {
     pub swapchain: VkSwapchain,
     pub presentation: VkPresent,
     pub supported_image_formats: HashSet<vk::Format>,
+    pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
     pub immediate: VkImmediate,
     pub imgui: VkImgui,
     pub scene_data: GPUSceneData,
@@ -141,57 +142,44 @@ pub fn init_caches(
 ) -> DataCache {
     let shader_paths = vec![
         (
-            CoreShaderType::MetRoughFrag,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.frag.spv".to_string(),
-        ),
-        (
             CoreShaderType::MetRoughVert,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh.vert.spv".to_string(),
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/pbr_base.vert.spv",
         ),
         (
-            CoreShaderType::MetRoughFragExt,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh_ext.frag.spv"
-                .to_string(),
+            CoreShaderType::MetRoughFrag,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_pbr.frag.spv",
         ),
         (
-            CoreShaderType::MetRoughVertExt,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/mesh_ext.vert.spv"
-                .to_string(),
+            CoreShaderType::MetRoughFragUnlit,
+            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_unlit.frag.spv"
         ),
         (
             CoreShaderType::BrtFlutFrag,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"
-                .to_string(),
         ),
         (
             CoreShaderType::BrtFlutVert,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"
-                .to_string(),
         ),
         (
             CoreShaderType::SkyBoxFrag,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"
-                .to_string(),
         ),
         (
             CoreShaderType::SkyBoxVert,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"
-                .to_string(),
         ),
         (
             CoreShaderType::CubeFilterVert,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"
-                .to_string(),
         ),
         (
             CoreShaderType::EnvIrradianceFrag,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"
-                .to_string(),
         ),
         (
             CoreShaderType::EnvPrefilterFrag,
             "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"
-                .to_string(),
         ),
     ];
 
@@ -513,6 +501,7 @@ impl VkRender {
             color_attachment_format: swapchain.surface_format.format,
             depth_attachment_format: None,
         };
+
         let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
             allocator.clone(),
             device.clone(),
@@ -546,6 +535,9 @@ impl VkRender {
 
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
+
+        let buffer_and_desc_limits =
+            vk_init::get_buffer_and_descriptor_limits(&instance, physical_device.p_device);
 
         let data_cache = init_caches(
             &device,
@@ -584,6 +576,7 @@ impl VkRender {
             surface,
             swapchain,
             supported_image_formats,
+            buffer_and_desc_limits,
             presentation,
             immediate,
             imgui,
@@ -663,7 +656,7 @@ impl VkRender {
             .unwrap()
             .cmd_pool
             .get(QueueType::Transfer);
-        
+
         self.data_cache.environment_cache.allocate_cube_map(
             0,
             &self.device,
@@ -1217,7 +1210,7 @@ impl VkRender {
                     vk::IndexType::UINT32,
                 );
 
-                let push_consts = VkGpuPushConsts::new(obj.transform, obj.vertex_buffer_addr);
+                let push_consts = VkModelPushConsts::new(obj.transform, obj.vertex_buffer_addr);
 
                 self.device.cmd_push_constants(
                     cmd_buffer,
