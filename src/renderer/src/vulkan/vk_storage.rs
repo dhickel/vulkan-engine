@@ -3,7 +3,6 @@ use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkSubAlloc}
 use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DeviceAddress;
-use shaderc::ResourceKind::StorageBuffer;
 use std::cmp::{max_by, Ordering, PartialEq};
 use std::marker::PhantomData;
 use std::ops::{Add, IndexMut};
@@ -17,19 +16,20 @@ pub enum BufferPlacement {
     EndOnly,
 }
 
-pub enum VkSingleAllocResult {
-    Success(VkSubAlloc),
-    OutOfSpace(Vec<u8>),
-    Error(String),
+#[derive(Clone, PartialEq)]
+pub enum VkAllocResult {
+    Success(Vec<VkSubAlloc>),
+    OutOfSpace(PartialAlloc),
+    Error {
+        error_msg: String,
+        alloc_state: PartialAlloc,
+    },
 }
 
-pub enum VkMultiAllocResult {
-    Success(Vec<VkSubAlloc>),
-    Error(String),
-    OutOfSpace {
-        fulfilled: Vec<VkSubAlloc>,
-        remaining: Vec<Vec<u8>>,
-    },
+#[derive(Clone, PartialEq)]
+pub struct PartialAlloc {
+    pub fulfilled: Vec<VkSubAlloc>,
+    pub remaining: Vec<Vec<u8>>,
 }
 
 pub struct VkStorageAllocator<T> {
@@ -79,7 +79,13 @@ where
 
         let buffer_addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer);
         let buffer_address = unsafe { device.get_buffer_device_address(&buffer_addr_info) };
-        let buffer = VkStorageBuffer::new(buffer_size as u64, stride, max_upload_size, buffer_address, buffer);
+        let buffer = VkStorageBuffer::new(
+            buffer_size as u64,
+            stride,
+            max_upload_size,
+            buffer_address,
+            buffer,
+        );
 
         Ok(Self {
             buffer,
@@ -101,7 +107,7 @@ pub struct VkRawStorageAllocator {
 struct VkStorageBuffer {
     max_size: u64,
     curr_size: u64,
-    stride: u64,
+    alignment: u64,
     max_upload_bytes: u64,
     buffer_tail: FreeChunk,
     buffer_start_addr: DeviceAddress,
@@ -121,13 +127,12 @@ impl VkStorageBuffer {
         Self {
             max_size: buffer_size,
             curr_size: 0,
-            stride,
+            alignment: stride,
             max_upload_bytes,
             buffer_tail: FreeChunk {
                 start_addr: buffer_address,
                 size: buffer_size,
             },
-
             buffer_start_addr: buffer_address,
             buffer_end_addr: buffer_address.add(buffer_size),
             buffer,
@@ -135,310 +140,213 @@ impl VkStorageBuffer {
         }
     }
 
-    fn bytes_exceeded_error_single(&self, byte_len: usize) -> VkSingleAllocResult {
-        VkSingleAllocResult::Error(
-            format!(
-                "Bytes exceed max upload limit | Upload Limit: {}, Bytes{} ",
-                self.max_upload_bytes, byte_len
-            )
-            .to_string(),
-        )
-    }
-
-    fn bytes_exceeded_error_multi(&self, index: usize, byte_len: usize) -> VkMultiAllocResult {
-        VkMultiAllocResult::Error(
-            format!(
+    fn bytes_exceeded_error(
+        &self,
+        index: usize,
+        byte_len: usize,
+        alloc: PartialAlloc,
+    ) -> VkAllocResult {
+        VkAllocResult::Error {
+            error_msg: format!(
                 "Bytes exceed max upload limit for item: {} | Upload Limit: {}, Bytes{} ",
                 index, self.max_upload_bytes, byte_len
             )
             .to_string(),
-        )
+            alloc_state: alloc,
+        }
     }
 
-    pub fn add_item(
-        &mut self,
-        mut bytes: Vec<u8>,
-        buffer_placement: BufferPlacement,
-    ) -> VkSingleAllocResult {
-        if !(bytes.len() & (self.stride as usize - 1) == 0) {
-            let padding = bytes.len().next_multiple_of(self.stride as usize) - bytes.len();
-            bytes.extend(std::iter::repeat(0).take(padding));
+    fn to_partial_alloc(successes: Vec<VkSubAlloc>, failures: &[Vec<u8>]) -> PartialAlloc {
+        PartialAlloc {
+            fulfilled: successes,
+            remaining: failures.to_vec(),
         }
-        let byte_len = bytes.len() as u64;
+    }
 
-        if byte_len > self.max_upload_bytes {
-            return self.bytes_exceeded_error_single(byte_len as usize);
+    fn tail_as_mem_chunk(&self) -> MemChunk {
+        MemChunk::Tail {
+            size: self.buffer_tail.size,
+            address: self.buffer_tail.start_addr,
         }
+    }
 
-        if matches!(
-            buffer_placement,
-            BufferPlacement::ContiguousPreferred | BufferPlacement::ContiguousOnly
-        ) && self.free_chunks.max_free() >= byte_len
+    fn select_best_chunk(&self, total_bytes: u64) -> MemChunk {
+        // Prefer to use contiguous space from a free chunk
+        if let Some(free_chunk) = self.free_chunks.find_best_fit(self.max_size) {
+            free_chunk
+        }
+        // Revert to  tail for contiguous space if possible
+        else if self.buffer_tail.size >= total_bytes
+            || self.buffer_tail.size > self.free_chunks.max_free()
         {
-            let (index, free_size) = unsafe { self.free_chunks.find_best_fit_unchecked(byte_len) };
-
-            let chunk = unsafe { self.free_chunks.get_chunk_unchecked(index) };
-            let addr = chunk.start_addr;
-
-            //(record cmd buffer to pass item here)
-            unsafe { self.free_chunks.update_chunk(index, byte_len) };
-            // return alloc
-            todo!()
+            self.tail_as_mem_chunk()
         }
-
-        // Couldn't allocate from free space, revert to tail allocation
-        if byte_len > self.buffer_tail.size {
-            return VkSingleAllocResult::OutOfSpace(bytes);
+        // At this point disjoint allocation is happening, prefer the largest contiguous space
+        else if let Some(free_chunk) = self.free_chunks.get_largest_chunk() {
+            if free_chunk.size() < self.buffer_tail.size {
+                self.tail_as_mem_chunk()
+            } else {
+                free_chunk
+            }
         }
-
-        if self.buffer_tail.size < byte_len {
-            return VkSingleAllocResult::OutOfSpace(bytes);
+        // No space left at all
+        else {
+            MemChunk::Null
         }
-        let addr = self.buffer_tail.start_addr;
-        // record and pass here
-        self.buffer_tail.remove_from_chunk(byte_len);
-        //return alloc
-        todo!()
     }
 
     pub fn add_items(
         &mut self,
         mut item_bytes: Vec<Vec<u8>>,
         buffer_placement: BufferPlacement,
-    ) -> VkMultiAllocResult {
+    ) -> VkAllocResult {
         let mut total_bytes: u64 = 0;
         let mut alloc_sizes = Vec::with_capacity(item_bytes.len());
         let mut sub_allocations = Vec::<VkSubAlloc>::with_capacity(item_bytes.len());
 
-        // Pad if needed and calc each item's final size
+        // Pad if needed and calc each item's final size, make sure no obj exceeds max
         for (index, item) in item_bytes.iter_mut().enumerate() {
-            if item.len() & (self.stride as usize - 1) == 0 {
-                let padding = item.len().next_multiple_of(self.stride as usize) - item.len();
+            if item.len() & (self.alignment as usize - 1) == 0 {
+                let padding = item.len().next_multiple_of(self.alignment as usize) - item.len();
                 item.extend(std::iter::repeat(0).take(padding));
             }
 
             if item.len() > self.max_upload_bytes as usize {
-                return self.bytes_exceeded_error_multi(index, item.len());
+                return self.bytes_exceeded_error(
+                    index,
+                    item.len(),
+                    Self::to_partial_alloc(sub_allocations, &item_bytes),
+                );
             }
-            
-            total_bytes += item.len() as u64;
+
+            total_bytes = item.len() as u64;
             alloc_sizes.push(item.len() as u64)
         }
 
-        // Handle end only
-        if buffer_placement == BufferPlacement::EndOnly && self.buffer_tail.size >= total_bytes {
-            let mut start_range = 0;
-            let mut end_range = 0;
-            let mut curr_allot = 0_u64;
-            let mut address = self.buffer_tail.start_addr;
-
-            for (i, bytes) in item_bytes.iter().enumerate() {
-                let byte_size = bytes.len() as u64;
-
-                if (curr_allot + byte_size) > self.max_size {
-                    if start_range < end_range {
-                        let upload_slice = &item_bytes[start_range..end_range];
-                        // upload this slice here, check success and extend sub allocations
-                        self.buffer_tail.remove_from_chunk(curr_allot);
-                    }
-                    
-                    address = address.add(curr_allot);
-                    assert_eq!(
-                        address, self.buffer_tail.start_addr,
-                        "Buffer tail does not match iter address"
-                    );
-                    
-                    start_range = i;
-                    end_range = i;
-                    curr_allot = 0;
-                }
-                curr_allot += byte_size;
-                end_range = i + 1;
-            }
-
-            if start_range < end_range {
-                let upload_slice = &item_bytes[start_range..end_range];
-                // upload this slice here, check success and extend sub allocations
-            }
-
-            assert_eq!(
-                sub_allocations.len(),
-                item_bytes.len(),
-                "Allocation amount did not match item amount"
-            );
-        } else {
-            return VkMultiAllocResult::OutOfSpace {
-                fulfilled: vec![],
-                remaining: item_bytes,
-            };
-        }
-
-        if matches!(
-            buffer_placement,
-            BufferPlacement::ContiguousOnly | BufferPlacement::ContiguousPreferred
-        ) {
-            
-            // check this here to early abort if no contiguous space found
-            if buffer_placement == BufferPlacement::ContiguousOnly
+        // check this here to early abort if no contiguous space or tail space (end-only) found
+        if (buffer_placement == BufferPlacement::EndOnly && self.buffer_tail.size < total_bytes)
+            || (buffer_placement == BufferPlacement::ContiguousOnly
                 && self.free_chunks.max_free() < total_bytes
-                && self.buffer_tail.size < total_bytes
-            {
-                return VkMultiAllocResult::OutOfSpace {
-                    fulfilled: vec![],
-                    remaining: item_bytes,
-                };
-            }
-            
-            // Select the starting chunk either as contiguous(which is pre validated if cont-only) 
-            // or the largest contiguous space, free_chunk_index keeps track of what chunk to update
-            let mut free_chunk_index: Option<usize> = None;
-            let curr_chunk = if let Some((index, size)) = self.free_chunks.find_best_fit(self.max_size) {
-                free_chunk_index = Some(index);
-                unsafe { self.free_chunks.get_chunk_unchecked(index) }
-            } else if buffer_placement == BufferPlacement::ContiguousOnly || self.buffer_tail.size > self.free_chunks.max_free() {
-                &self.buffer_tail
-            } else if let Some((index, size)) = self.free_chunks.get_largest_chunk() {
-                free_chunk_index = Some(index);
-                unsafe { self.free_chunks.get_chunk_unchecked(index) }
-            } else {
-                return VkMultiAllocResult::OutOfSpace { fulfilled: vec![], remaining: item_bytes };
-            };
-            
-            for (i, bytes) in item_bytes.iter().enumerate()
-            
-
-todo!()
+                && self.buffer_tail.size < total_bytes)
+        {
+            return VkAllocResult::OutOfSpace(Self::to_partial_alloc(sub_allocations, &item_bytes));
         }
 
-        // Fall through if contiguous preferred attempting to allocate most as contiguous, then best fits
-        if buffer_placement == BufferPlacement::ContiguousPreferred {
-            let mut total_bytes_left = total_bytes;
-            let mut upload_slices = Vec::with_capacity(10);
-            let mut sub_allocs = Vec::with_capacity(10);
+        // Either return tail chunk, or select best chunk for ContiguousOnly/Preferred
+        // Due to prior checks these can be combined and a proper chunk will be returned
+        let mut curr_mem_chunk = match buffer_placement {
+            BufferPlacement::EndOnly => self.tail_as_mem_chunk(),
+            BufferPlacement::ContiguousOnly | BufferPlacement::ContiguousPreferred => {
+                self.select_best_chunk(total_bytes)
+            }
+        };
 
-            // A contiguous allocation was not found, select the largest chunk from either the
-            // end of the buffer or the freed allocations
-            let mut free_index: Option<usize> = None;
-            let mut free_chunk = if self.buffer_tail.size > self.free_chunks.max_free() {
-                &self.buffer_tail
-            } else if let Some((index, size)) = self.free_chunks.get_largest_chunk() {
-                free_index = Some(index);
-                unsafe { self.free_chunks.get_chunk_unchecked(index) }
-            } else {
-                panic!("Fatal: No buffer space left, invalid state should not be reach");
-            };
+        // Short circuit if no space
+        if curr_mem_chunk == MemChunk::Null {
+            return VkAllocResult::OutOfSpace(Self::to_partial_alloc(sub_allocations, &item_bytes));
+        }
 
-            // Keep track of the current index into the item sizes, and a pointer value into the
-            // current head of flatten bytes for range selection
-            let mut curr_idx = 0;
-            let mut curr_bytes_head = 0;
-            while total_bytes_left > 0 {
-                // On a new outer iteration, a new chunk has been assigned, the tail starts at the head
-                // and the amount of bytes left in a chunk is kept track of along with the current address
-                // into the buffer which is assigned to each sub allocation returned
-                let chunk_bytes_left = free_chunk.size;
-                let mut address = free_chunk.start_addr;
-                let mut curr_bytes_tail = curr_bytes_head;
+        let mut start_range = 0;
+        let mut end_range = 0;
 
-                for i in curr_idx..sizes.len() {
-                    let size = sizes[i];
+        let mut curr_allot = 0_u64;
+        let mut total_chunk_allotment = 0_u64;
+        let mut bytes_left = total_bytes;
 
-                    if chunk_bytes_left
-                        .checked_sub(size)
-                        .is_some_and(|val| val > 0)
-                    {
-                        // set curr_idx to the current position in the items left to be allocated
-                        curr_idx = i;
+        let mut curr_address = curr_mem_chunk.address();
 
-                        // push slice to be uploaded to gpu, reset current head to the tail for the
-                        // next upload to start from
-                        let upload_slice = &flat_bytes[curr_bytes_head..curr_bytes_tail];
-                        upload_slices.push(upload_slice);
-                        curr_bytes_head = curr_bytes_tail;
+        for (i, bytes) in item_bytes.iter().enumerate() {
+            let byte_size = bytes.len() as u64;
 
-                        // Update chunk, updates size, removes chunk from free chunks if size == 0
-                        let used_byte_amount = free_chunk.size - chunk_bytes_left;
-                        if let Some(index) = free_index {
-                            unsafe { self.free_chunks.update_chunk(index, used_byte_amount) };
-                        } else {
-                            self.buffer_tail.remove_from_chunk(used_byte_amount);
-                        }
+            // Test if at upload bytes limit, submitting if next item is over max
+            if (curr_allot + byte_size) > self.max_upload_bytes {
+                // upload this slice here, check success and extend sub allocations
+                let upload_slice = &item_bytes[start_range..end_range];
+                // update address to the start of next allocation group
+                curr_address = curr_address.add(curr_allot);
+                // on success add to returned sub allocations, and update the used chunk
 
-                        // Select the next chunk with the best fit
-                        if let Some((index, size)) =
-                            self.free_chunks.find_best_fit(total_bytes_left)
-                        {
-                            free_chunk = unsafe { self.free_chunks.get_chunk_unchecked(index) };
-                            free_index = Some(index);
-                        } else if self.buffer_tail.size < total_bytes_left {
-                            panic!(
-                                "Fatal: No buffer space left, invalid state should not be reach"
-                            );
-                        } else {
-                            free_chunk = &self.buffer_tail;
-                            free_index = None;
-                        }
-                        break;
+                // set start range for next allocation to current yet to be allocated index,
+                // set new end range to current, and reset curr allotment
+                start_range = i;
+                end_range = i;
+                bytes_left -= curr_allot;
+                curr_allot = 0;
+            }
+
+            // Test if current memory chunk being allocated to is out of free memory
+            // for next allocation
+            if (total_chunk_allotment + byte_size) > curr_mem_chunk.size() {
+                // upload this slice here, check success and extend sub allocations
+                let upload_slice = &item_bytes[start_range..end_range];
+                // update address to the start of next allocation group
+                curr_address = curr_address.add(curr_allot);
+                // on success add to returned sub allocations, and update the used chunk
+
+                match curr_mem_chunk {
+                    MemChunk::Tail { size, .. } => {
+                        self.buffer_tail.remove_from_chunk(total_chunk_allotment)
+                    }
+                    MemChunk::FreeChunk { index, .. } => {
+                        self.free_chunks.update_chunk(index, total_chunk_allotment)
                     }
 
-                    // Create the sub allocation to be return, using the current address
-                    // along with its size after alignment which is needed when freeing
-                    let sub_alloc = VkSubAlloc { address, size };
-                    // Update the address to the next location
-                    address = address.add(size);
-                    sub_allocs.push(sub_alloc);
+                    MemChunk::Null => panic!("Fatal: Branch should not be reached"),
+                }
 
-                    total_bytes_left -= size;
-                    curr_bytes_tail += size as usize;
+                start_range = i;
+                end_range = i;
+                bytes_left -= curr_allot;
+                curr_allot = 0;
+                total_chunk_allotment = 0;
+
+                // Select next chunk and assign address, or return current allotment state if out of space
+                curr_mem_chunk = self.select_best_chunk(bytes_left);
+                match curr_mem_chunk {
+                    MemChunk::Null => {
+                        return VkAllocResult::OutOfSpace(Self::to_partial_alloc(
+                            sub_allocations,
+                            &item_bytes[start_range..],
+                        ));
+                    }
+                    MemChunk::Tail { address, .. } | MemChunk::FreeChunk { address, .. } => {
+                        curr_address = address
+                    }
                 }
             }
-            return None;
+
+            // Continue assigning upload allotments
+            curr_allot += byte_size;
+            total_chunk_allotment += byte_size;
+            end_range = i + 1;
         }
-        return None;
-    }
 
-    unsafe fn split_vec_by_sizes(
-        mut data: Vec<u8>,
-        start_index: usize,
-        sizes: &[usize],
-    ) -> Vec<Vec<u8>> {
-        let mut result = Vec::with_capacity(sizes.len());
-        let mut current_index = start_index;
-        let data_ptr = data.as_mut_ptr().add(start_index);
-        let data_len = data.len() - start_index;
-        let data_cap = data.capacity() - start_index;
+        if curr_allot > 0 {
+            // upload this slice here, check success and extend sub allocations
+            let upload_slice = &item_bytes[start_range..end_range];
+            bytes_left -= curr_allot;
+        }
 
-        // Forget to avoid freeing
-        std::mem::forget(data);
-
-        for &size in sizes {
-            if current_index - start_index + size > data_len {
-                panic!("Remaining sizes left to split, but no data left")
+        if total_chunk_allotment > 0 {
+            match curr_mem_chunk {
+                MemChunk::Tail { size, .. } => {
+                    self.buffer_tail.remove_from_chunk(total_chunk_allotment)
+                }
+                MemChunk::FreeChunk { index, .. } => {
+                    self.free_chunks.update_chunk(index, total_chunk_allotment)
+                }
+                MemChunk::Null => panic!("Fatal: Branch should not be reached"),
             }
-
-            let vec = Vec::from_raw_parts(data_ptr.add(current_index), size, size);
-            result.push(vec);
-            current_index += size;
         }
 
-        // Create a vec for the remaining data to ensure all memory is accounted for to avoid leaking
-        let remaining_size = data_len - (current_index - start_index);
-        let remaining = Vec::from_raw_parts(
-            data_ptr.add(current_index - start_index),
-            remaining_size,
-            data_cap - (current_index - start_index),
+        assert_eq!(0, bytes_left, "Failed to upload all bytes");
+        assert_eq!(
+            sub_allocations.len(),
+            item_bytes.len(),
+            "Allocation amount did not match item amount"
         );
-        result.push(remaining);
 
-        result
-    }
-
-    fn record_upload_single() -> vk::CommandBuffer {}
-
-    fn record_upload_multiple(
-        bytes: &Vec<Vec<u8>>,
-        addresses: &[DeviceAddress],
-    ) -> vk::CommandBuffer {
+        VkAllocResult::Success(sub_allocations)
     }
 }
 
@@ -486,30 +394,43 @@ impl Default for FreeChunkVec {
 }
 
 impl FreeChunkVec {
-    pub fn insert(&mut self, new_chunk: FreeChunk) {
+    pub fn insert(&mut self, mut new_chunk: FreeChunk) {
         self.total_free += new_chunk.size;
-        let mut next_size_index = None;
+        let mut front_adj: Option<usize> = None;
+        let mut back_adj: Option<usize> = None;
 
-        for (i, chunk) in self.chunks.iter_mut().enumerate() {
-            if chunk.start_addr + chunk.size == new_chunk.start_addr {
-                chunk.size += new_chunk.size;
-                return;
+        for (i, iter_chunk) in self.chunks.iter_mut().enumerate() {
+            if (iter_chunk.start_addr + iter_chunk.size) == new_chunk.start_addr {
+                front_adj = Some(i)
             }
-            if new_chunk.start_addr + new_chunk.size == chunk.start_addr {
-                chunk.start_addr = new_chunk.start_addr;
-                chunk.size += new_chunk.size;
-                return;
-            }
-            if next_size_index.is_none() && chunk.size > new_chunk.size {
-                next_size_index = Some(i);
+            if (new_chunk.start_addr + new_chunk.size) == iter_chunk.start_addr {
+                back_adj = Some(i)
             }
         }
 
-        if let Some(index) = next_size_index {
-            self.chunks.insert(index, new_chunk);
-        } else {
-            self.chunks.push(new_chunk);
+        // if front_adj, set new chunks start addr to it and increase size
+        if let Some(index) = front_adj {
+            let front_chunk = unsafe { self.chunks.get_unchecked(index) };
+            new_chunk.start_addr = front_chunk.start_addr;
+            new_chunk.size += front_chunk.size;
         }
+
+        // if back_adj, increase new chunks size
+        if let Some(index) = back_adj {
+            let back_chunk_size = unsafe { self.chunks.get_unchecked(index).size };
+            new_chunk.size += back_chunk_size;
+        }
+
+        // Now that new chunk has "consumed" any adjacent chunks, remove them
+        if let Some(index) = front_adj {
+            self.chunks.swap_remove(index);
+        }
+
+        if let Some(index) = back_adj {
+            self.chunks.swap_remove(index);
+        }
+
+        self.chunks.push(new_chunk)
     }
 
     pub fn max_free(&self) -> u64 {
@@ -519,77 +440,81 @@ impl FreeChunkVec {
             .max()
             .unwrap_or(0)
     }
+    
+    pub fn update_chunk(&mut self, index: usize, amount: u64) {
+        unsafe {
+            let chunk = self.chunks.get_unchecked_mut(index);
+            chunk.remove_from_chunk(amount);
+            self.total_free - amount;
 
-    pub fn de_frag(&mut self) {
-        if self.chunks.is_empty() {
-            return;
-        }
-        self.chunks.sort_by_key(|chunk| chunk.start_addr);
-
-        let mut i = 0;
-        while i < self.chunks.len() - 1 {
-            let current_end = self.chunks[i].start_addr + self.chunks[i].size;
-            let next_start = self.chunks[i + 1].start_addr;
-
-            if current_end == next_start {
-                let next_size = self.chunks[i + 1].size;
-                self.chunks[i].size += next_size;
-                self.chunks.remove(i + 1);
-            } else {
-                i += 1;
+            if chunk.size == 0 {
+                self.chunks.swap_remove(index);
             }
         }
     }
+    
+    pub fn get_largest_chunk(&self) -> Option<MemChunk> {
+        let chunk = self
+            .chunks
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, chunk)| chunk.size);
 
-    pub unsafe fn update_chunk(&mut self, index: usize, amount: u64) {
-        let chunk = self.chunks.get_unchecked_mut(index);
-        chunk.remove_from_chunk(amount);
-        self.total_free - amount;
-
-        if chunk.size == 0 {
-            self.chunks.swap_remove(index);
+        if let Some((index, chunk)) = chunk {
+            Some(MemChunk::FreeChunk {
+                index,
+                size: chunk.size,
+                address: chunk.start_addr,
+            })
+        } else {
+            None
         }
     }
 
-    pub unsafe fn get_chunk_unchecked(&self, index: usize) -> &FreeChunk {
-        self.chunks.get_unchecked(index)
-    }
-
-    pub fn get_chunk(&self, index: usize) -> Option<&FreeChunk> {
-        self.chunks.get(index)
-    }
-
-    pub fn get_largest_chunk(&self) -> Option<(usize, u64)> {
-        self.chunks
+    pub fn find_best_fit(&self, size: u64) -> Option<MemChunk> {
+        let chunk = self
+            .chunks
             .iter()
             .enumerate()
-            .max_by_key(|(i, chunk)| chunk.size)
-            .map(|(i, chunk)| (i, chunk.size))
-    }
+            .find(|(_, chunk)| chunk.size >= size);
 
-    pub unsafe fn get_largest_chunk_unchecked(&self) -> (usize, u64) {
-        self.chunks
-            .iter()
-            .enumerate()
-            .max_by_key(|(i, chunk)| chunk.size)
-            .map(|(i, chunk)| (i, chunk.size))
-            .unwrap()
+        if let Some((index, chunk)) = chunk {
+            Some(MemChunk::FreeChunk {
+                index,
+                size: chunk.size,
+                address: chunk.start_addr,
+            })
+        } else {
+            None
+        }
     }
+}
 
-    pub unsafe fn find_best_fit_unchecked(&self, size: u64) -> (usize, u64) {
-        self.chunks
-            .iter()
-            .enumerate()
-            .find(|(_, chunk)| chunk.size >= size)
-            .map(|(index, chunk)| (index, chunk.size))
-            .unwrap()
+#[derive(Clone, Copy, PartialEq)]
+pub enum MemChunk {
+    Null,
+    Tail {
+        size: u64,
+        address: DeviceAddress,
+    },
+    FreeChunk {
+        index: usize,
+        size: u64,
+        address: DeviceAddress,
+    },
+}
+
+impl MemChunk {
+    pub fn size(&self) -> u64 {
+        match self {
+            MemChunk::Null => 0,
+            MemChunk::FreeChunk { size, .. } | MemChunk::Tail { size, .. } => *size,
+        }
     }
-
-    pub fn find_best_fit(&self, size: u64) -> Option<(usize, u64)> {
-        self.chunks
-            .iter()
-            .enumerate()
-            .find(|(_, chunk)| chunk.size >= size)
-            .map(|(index, chunk)| (index, chunk.size))
+    pub fn address(&self) -> DeviceAddress {
+        match self {
+            MemChunk::Null => panic!("Called address on Null chunk"),
+            MemChunk::Tail { address, .. } | MemChunk::FreeChunk { address, .. } => *address,
+        }
     }
 }

@@ -793,6 +793,7 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
+#[derive(Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
     pub address: vk::DeviceAddress,
     pub size: u64,
