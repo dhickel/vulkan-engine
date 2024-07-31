@@ -250,7 +250,7 @@ impl VkStorageBuffer {
         let mut end_range = 0;
 
         let mut curr_allot = 0_u64;
-        let mut total_chunk_allotment = 0_u64;
+        let mut total_chunk_allot = 0_u64;
         let mut bytes_left = total_bytes;
 
         let mut curr_address = curr_mem_chunk.address();
@@ -276,7 +276,7 @@ impl VkStorageBuffer {
 
             // Test if current memory chunk being allocated to is out of free memory
             // for next allocation
-            if (total_chunk_allotment + byte_size) > curr_mem_chunk.size() {
+            if (total_chunk_allot + byte_size) > curr_mem_chunk.size() {
                 // upload this slice here, check success and extend sub allocations
                 let upload_slice = &item_bytes[start_range..end_range];
                 // update address to the start of next allocation group
@@ -285,12 +285,11 @@ impl VkStorageBuffer {
 
                 match curr_mem_chunk {
                     MemChunk::Tail { size, .. } => {
-                        self.buffer_tail.remove_from_chunk(total_chunk_allotment)
+                        self.buffer_tail.remove_from_chunk(total_chunk_allot)
                     }
                     MemChunk::FreeChunk { index, .. } => {
-                        self.free_chunks.update_chunk(index, total_chunk_allotment)
+                        self.free_chunks.update_chunk(index, total_chunk_allot)
                     }
-
                     MemChunk::Null => panic!("Fatal: Branch should not be reached"),
                 }
 
@@ -298,7 +297,7 @@ impl VkStorageBuffer {
                 end_range = i;
                 bytes_left -= curr_allot;
                 curr_allot = 0;
-                total_chunk_allotment = 0;
+                total_chunk_allot = 0;
 
                 // Select next chunk and assign address, or return current allotment state if out of space
                 curr_mem_chunk = self.select_best_chunk(bytes_left);
@@ -317,7 +316,7 @@ impl VkStorageBuffer {
 
             // Continue assigning upload allotments
             curr_allot += byte_size;
-            total_chunk_allotment += byte_size;
+            total_chunk_allot += byte_size;
             end_range = i + 1;
         }
 
@@ -327,13 +326,13 @@ impl VkStorageBuffer {
             bytes_left -= curr_allot;
         }
 
-        if total_chunk_allotment > 0 {
+        if total_chunk_allot > 0 {
             match curr_mem_chunk {
                 MemChunk::Tail { size, .. } => {
-                    self.buffer_tail.remove_from_chunk(total_chunk_allotment)
+                    self.buffer_tail.remove_from_chunk(total_chunk_allot)
                 }
                 MemChunk::FreeChunk { index, .. } => {
-                    self.free_chunks.update_chunk(index, total_chunk_allotment)
+                    self.free_chunks.update_chunk(index, total_chunk_allot)
                 }
                 MemChunk::Null => panic!("Fatal: Branch should not be reached"),
             }
@@ -421,15 +420,16 @@ impl FreeChunkVec {
             new_chunk.size += back_chunk_size;
         }
 
-        // Now that new chunk has "consumed" any adjacent chunks, remove them
-        if let Some(index) = front_adj {
-            self.chunks.swap_remove(index);
-        }
-
+        // Now that new chunk has "consumed" any adjacent chunks
+        // Swap remove is done on back_adj first to avoid invalidating indices
         if let Some(index) = back_adj {
             self.chunks.swap_remove(index);
         }
-
+        
+        if let Some(index) = front_adj {
+            self.chunks.swap_remove(index);
+        }
+        
         self.chunks.push(new_chunk)
     }
 
