@@ -1,11 +1,15 @@
 use crate::data::gpu_data::AsByteSlice;
-use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkSubAlloc};
+use crate::vulkan::vk_types::{
+    VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkHostBuffer, VkHostBufferLease,
+    VkSubAlloc,
+};
 use crate::vulkan::vk_util;
+use crate::vulkan::vk_util::immediate_submit;
 use ash::vk;
 use ash::vk::DeviceAddress;
 use std::cmp::{max_by, Ordering, PartialEq};
 use std::marker::PhantomData;
-use std::ops::{Add, IndexMut};
+use std::ops::{Add, AddAssign, IndexMut, Sub};
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
 
@@ -17,94 +21,182 @@ pub enum BufferPlacement {
 }
 
 #[derive(Clone, PartialEq)]
-pub enum VkAllocResult {
+pub enum VkAllocResult<'a> {
     Success(Vec<VkSubAlloc>),
-    OutOfSpace(PartialAlloc),
+    OutOfSpace(PartialAlloc<'a>),
     Error {
         error_msg: String,
-        alloc_state: PartialAlloc,
+        successful_allocs: Vec<VkSubAlloc>,
     },
 }
 
 #[derive(Clone, PartialEq)]
-pub struct PartialAlloc {
+pub struct PartialAlloc<'a> {
     pub fulfilled: Vec<VkSubAlloc>,
-    pub remaining: Vec<Vec<u8>>,
+    pub remaining: Vec<&'a [u8]>,
 }
 
-pub struct VkStorageAllocator<T> {
+impl<'a> PartialAlloc<'a> {
+    pub fn new(successes: Vec<VkSubAlloc>, failures: Vec<&'a [u8]>) -> PartialAlloc {
+        PartialAlloc {
+            fulfilled: successes,
+            remaining: failures,
+        }
+    }
+}
+
+pub struct VkStorageAllocator {
+    device: ash::Device,
+    allocator: Arc<Mutex<Allocator>>,
     buffer: VkStorageBuffer,
+    transfer_buffer: Arc<VkHostBuffer>,
     extra_buffers: Vec<VkStorageBuffer>,
-    _type: std::marker::PhantomData<T>,
+    usage_flags: vk::BufferUsageFlags,
+    memory_usage: vk_mem::MemoryUsage,
 }
 
-impl<T> VkStorageAllocator<T>
-where
-    T: AsByteSlice,
-{
+impl VkStorageAllocator {
     pub fn new(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
+        transfer_buffer: Arc<VkHostBuffer>,
         limits: &VkBufferAndDescriptorLimits,
-        max_upload_size: u64,
+        buffer_size: usize,
         usage_flags: vk::BufferUsageFlags,
         memory_usage: vk_mem::MemoryUsage,
-        max_allocations: u64,
+        max_upload_size: u64,
     ) -> Result<Self, String> {
-        let type_size = std::mem::size_of::<T>() as u64;
-        let stride = type_size.next_multiple_of(limits.min_storage_buffer_offset_alignment);
+        let alignment = limits.min_storage_buffer_offset_alignment;
 
-        let max_allocations_by_range = (limits.max_storage_buffer_range / stride) as u64;
-        let mut max_allocations = max_allocations.min(max_allocations_by_range);
-        let mut buffer_size = max_allocations as usize * stride as usize;
+        let buffer = Self::allocate_buffer(
+            device,
+            allocator.clone(),
+            alignment,
+            usage_flags,
+            memory_usage,
+            buffer_size,
+            max_upload_size,
+        )?;
 
+        Ok(Self {
+            device: device.clone(),
+            allocator,
+            buffer,
+            transfer_buffer,
+            extra_buffers: vec![],
+            usage_flags,
+            memory_usage,
+        })
+    }
+
+    fn allocate_buffer(
+        device: &ash::Device,
+        allocator: Arc<Mutex<Allocator>>,
+        alignment: u64,
+        usage_flags: vk::BufferUsageFlags,
+        memory_usage: vk_mem::MemoryUsage,
+        buffer_size: usize,
+        max_upload_size: u64,
+    ) -> Result<VkStorageBuffer, String> {
         let allocator = allocator
             .lock()
             .map_err(|err| format!("Failed to acquire allocator lock: {:?}", err))?;
 
+        let mut buffer_size = buffer_size;
         let mut iter = 10;
         let buffer = loop {
             match vk_util::allocate_buffer(&allocator, buffer_size, usage_flags, memory_usage) {
                 Ok(allocation) => break allocation,
                 Err(err) => {
                     iter -= 1;
-                    if iter < 0 || max_allocations == 0 {
+                    if iter < 0 || buffer_size == 0 {
                         return Err(format!("Failed to allocate, likely due to lack of memory | Last allocation Attempt: {} bytes", buffer_size));
                     }
-                    max_allocations = max_allocations - (max_allocations / 4);
-                    buffer_size = max_allocations as usize * stride as usize;
+                    buffer_size = buffer_size.checked_sub(buffer_size / 4)
+                        .ok_or(format!("Failed to allocate, likely due to lack of memory | Last allocation Attempt: {} bytes", buffer_size))?;
                 }
             }
         };
 
         let buffer_addr_info = vk::BufferDeviceAddressInfo::default().buffer(buffer.buffer);
         let buffer_address = unsafe { device.get_buffer_device_address(&buffer_addr_info) };
-        let buffer = VkStorageBuffer::new(
+        Ok(VkStorageBuffer::new(
+            0,
             buffer_size as u64,
-            stride,
+            alignment,
             max_upload_size,
             buffer_address,
             buffer,
-        );
-
-        Ok(Self {
-            buffer,
-            extra_buffers: vec![],
-            _type: PhantomData::default(),
-        })
+        ))
     }
 
-    pub fn item_space_left(&self) -> u64 {
-        self.buffer.max_size - self.buffer.curr_size
-    }
-}
+    pub fn allocate_bytes<'a>(
+        &mut self,
+        data: Vec<&'a [u8]>,
+        buffer_placement: BufferPlacement,
+    ) -> VkAllocResult<'a> {
+        // Acquires a semaphore that will release when dropped
+        let host_lease = self.transfer_buffer.acquire();
 
-pub struct VkRawStorageAllocator {
-    free_sections: Vec<u32>,
-    buffer: VkBuffer,
+        let result = self
+            .buffer
+            .add_items(data, buffer_placement, &self.device, &host_lease);
+
+        if let VkAllocResult::OutOfSpace(mut partial_alloc) = result {
+            let mut new_buffer = match Self::allocate_buffer(
+                &self.device,
+                self.allocator.clone(),
+                self.buffer.alignment,
+                self.usage_flags,
+                self.memory_usage,
+                self.buffer.max_size as usize,
+                self.buffer.max_upload_bytes,
+            ) {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    return VkAllocResult::Error {
+                        error_msg: err,
+                        successful_allocs: partial_alloc.fulfilled,
+                    };
+                }
+            };
+
+            match new_buffer.add_items(
+                partial_alloc.remaining,
+                buffer_placement,
+                &self.device,
+                &host_lease,
+            ) {
+                VkAllocResult::Success(mut items) => {
+                    items.append(&mut partial_alloc.fulfilled);
+                    VkAllocResult::Success(items)
+                }
+                VkAllocResult::OutOfSpace(mut other_partial) => {
+                    other_partial.fulfilled.append(&mut partial_alloc.fulfilled);
+                    return VkAllocResult::Error {
+                        error_msg: "Out of space on fresh buffer".to_string(),
+                        successful_allocs: other_partial.fulfilled,
+                    };
+                }
+                VkAllocResult::Error {
+                    error_msg,
+                    mut successful_allocs,
+                } => {
+                    partial_alloc.fulfilled.append(&mut successful_allocs);
+                    return VkAllocResult::Error {
+                        error_msg: "Out of space on fresh buffer".to_string(),
+                        successful_allocs: partial_alloc.fulfilled,
+                    };
+                }
+            }
+        } else {
+            result
+        }
+    }
 }
 
 struct VkStorageBuffer {
+    buffer_index: u32,
     max_size: u64,
     curr_size: u64,
     alignment: u64,
@@ -118,6 +210,7 @@ struct VkStorageBuffer {
 
 impl VkStorageBuffer {
     pub fn new(
+        buffer_index: u32,
         buffer_size: u64,
         stride: u64,
         max_upload_bytes: u64,
@@ -125,6 +218,7 @@ impl VkStorageBuffer {
         buffer: VkBuffer,
     ) -> Self {
         Self {
+            buffer_index,
             max_size: buffer_size,
             curr_size: 0,
             alignment: stride,
@@ -140,26 +234,25 @@ impl VkStorageBuffer {
         }
     }
 
-    fn bytes_exceeded_error(
-        &self,
-        index: usize,
-        byte_len: usize,
-        alloc: PartialAlloc,
-    ) -> VkAllocResult {
+    fn bytes_exceeded_error(&self, index: usize, byte_len: usize) -> VkAllocResult<'static> {
         VkAllocResult::Error {
             error_msg: format!(
                 "Bytes exceed max upload limit for item: {} | Upload Limit: {}, Bytes{} ",
                 index, self.max_upload_bytes, byte_len
             )
             .to_string(),
-            alloc_state: alloc,
+            successful_allocs: vec![],
         }
     }
 
-    fn to_partial_alloc(successes: Vec<VkSubAlloc>, failures: &[Vec<u8>]) -> PartialAlloc {
-        PartialAlloc {
-            fulfilled: successes,
-            remaining: failures.to_vec(),
+    fn partial_error(
+        &self,
+        error_msg: String,
+        successful_allocs: Vec<VkSubAlloc>,
+    ) -> VkAllocResult<'static> {
+        VkAllocResult::Error {
+            error_msg,
+            successful_allocs,
         }
     }
 
@@ -167,6 +260,39 @@ impl VkStorageBuffer {
         MemChunk::Tail {
             size: self.buffer_tail.size,
             address: self.buffer_tail.start_addr,
+        }
+    }
+
+    fn add_sub_allocations(
+        &self,
+        alloc_start_addr: DeviceAddress,
+        alloc_sizes: &[u64],
+        sub_alloc_vec: &mut Vec<VkSubAlloc>,
+    ) {
+        let mut curr_address = alloc_start_addr;
+        for size in alloc_sizes {
+            let alloc = VkSubAlloc {
+                address: curr_address,
+                offset: curr_address.sub(self.buffer_start_addr),
+                buffer: self.buffer.buffer,
+                size: *size,
+                sub_buffer_index: self.buffer_index,
+            };
+
+            curr_address.add_assign(size);
+            sub_alloc_vec.push(alloc);
+        }
+    }
+
+    fn await_allocation_fence(
+        &self,
+        device: &ash::Device,
+        fence: [vk::Fence; 1],
+    ) -> Result<(), String> {
+        unsafe {
+            device
+                .wait_for_fences(&fence, true, (6e+10) as u64)
+                .map_err(|err| format!("Error awaiting host transfer fence: {:?}", err))
         }
     }
 
@@ -195,41 +321,62 @@ impl VkStorageBuffer {
         }
     }
 
-    pub fn add_items(
+    pub fn get_offset_from(&self, alloc_address: DeviceAddress) -> u64 {
+        alloc_address.sub(self.buffer_start_addr)
+    }
+
+    pub fn allocate_data(
+        &self,
+        device: &ash::Device,
+        host_lease: &VkHostBufferLease,
+        curr_address: u64,
+        upload_slice: &[&[u8]],
+    ) -> Result<(), String> {
+        vk_util::transfer_data_host_to_device(
+            device,
+            host_lease.cmd_pool.buffer,
+            host_lease.buffer,
+            &self.buffer,
+            curr_address.sub(self.buffer_start_addr),
+            upload_slice,
+            self.alignment,
+        )
+    }
+
+    pub fn add_items<'a>(
         &mut self,
-        mut item_bytes: Vec<Vec<u8>>,
+        mut item_bytes: Vec<&'a [u8]>,
         buffer_placement: BufferPlacement,
-    ) -> VkAllocResult {
+        device: &ash::Device,
+        host_lease: &VkHostBufferLease,
+    ) -> VkAllocResult<'a> {
         let mut total_bytes: u64 = 0;
         let mut alloc_sizes = Vec::with_capacity(item_bytes.len());
         let mut sub_allocations = Vec::<VkSubAlloc>::with_capacity(item_bytes.len());
 
         // Pad if needed and calc each item's final size, make sure no obj exceeds max
         for (index, item) in item_bytes.iter_mut().enumerate() {
-            if item.len() & (self.alignment as usize - 1) == 0 {
-                let padding = item.len().next_multiple_of(self.alignment as usize) - item.len();
-                item.extend(std::iter::repeat(0).take(padding));
-            }
+            let size = if item.len() & (self.alignment as usize - 1) == 0 {
+                item.len().next_multiple_of(self.alignment as usize)
+            } else {
+                item.len()
+            };
 
-            if item.len() > self.max_upload_bytes as usize {
-                return self.bytes_exceeded_error(
-                    index,
-                    item.len(),
-                    Self::to_partial_alloc(sub_allocations, &item_bytes),
-                );
+            if size > self.max_upload_bytes as usize {
+                return self.bytes_exceeded_error(index, item.len());
             }
 
             total_bytes = item.len() as u64;
             alloc_sizes.push(item.len() as u64)
         }
 
-        // check this here to early abort if no contiguous space or tail space (end-only) found
+        // check this here and early abort if no contiguous space or tail space (end-only) found
         if (buffer_placement == BufferPlacement::EndOnly && self.buffer_tail.size < total_bytes)
             || (buffer_placement == BufferPlacement::ContiguousOnly
                 && self.free_chunks.max_free() < total_bytes
                 && self.buffer_tail.size < total_bytes)
         {
-            return VkAllocResult::OutOfSpace(Self::to_partial_alloc(sub_allocations, &item_bytes));
+            return VkAllocResult::OutOfSpace(PartialAlloc::new(sub_allocations, item_bytes));
         }
 
         // Either return tail chunk, or select best chunk for ContiguousOnly/Preferred
@@ -243,7 +390,7 @@ impl VkStorageBuffer {
 
         // Short circuit if no space
         if curr_mem_chunk == MemChunk::Null {
-            return VkAllocResult::OutOfSpace(Self::to_partial_alloc(sub_allocations, &item_bytes));
+            return VkAllocResult::OutOfSpace(PartialAlloc::new(sub_allocations, item_bytes));
         }
 
         let mut start_range = 0;
@@ -258,31 +405,43 @@ impl VkStorageBuffer {
         for (i, bytes) in item_bytes.iter().enumerate() {
             let byte_size = bytes.len() as u64;
 
-            // Test if at upload bytes limit, submitting if next item is over max
-            if (curr_allot + byte_size) > self.max_upload_bytes {
-                // upload this slice here, check success and extend sub allocations
-                let upload_slice = &item_bytes[start_range..end_range];
-                // update address to the start of next allocation group
-                curr_address = curr_address.add(curr_allot);
-                // on success add to returned sub allocations, and update the used chunk
+            // Check upload bytes and chunk byte limits
+            let max_upload_reached = (curr_allot + byte_size) > self.max_upload_bytes;
+            let end_buffer_reached = (total_chunk_allot + byte_size) > curr_mem_chunk.size();
 
-                // set start range for next allocation to current yet to be allocated index,
-                // set new end range to current, and reset curr allotment
+            // handle upload if needed, and reset params
+            if max_upload_reached || end_buffer_reached {
+                let upload_slice = &item_bytes[start_range..end_range];
+                let upload_offset = self.get_offset_from(curr_address);
+
+                if let Err(error_msg) =
+                    self.allocate_data(device, &host_lease, curr_address, upload_slice)
+                {
+                    return self.partial_error(error_msg, sub_allocations);
+                }
+
+                // Channel submit here
+
+                if let Err(error_msg) = self.await_allocation_fence(device, host_lease.fence) {
+                    return self.partial_error(error_msg, sub_allocations);
+                }
+
+                self.add_sub_allocations(
+                    curr_address,
+                    &alloc_sizes[start_range..end_range],
+                    &mut sub_allocations,
+                );
+
                 start_range = i;
                 end_range = i;
                 bytes_left -= curr_allot;
                 curr_allot = 0;
+
+                curr_address = curr_address.add(curr_allot);
             }
 
-            // Test if current memory chunk being allocated to is out of free memory
-            // for next allocation
-            if (total_chunk_allot + byte_size) > curr_mem_chunk.size() {
-                // upload this slice here, check success and extend sub allocations
-                let upload_slice = &item_bytes[start_range..end_range];
-                // update address to the start of next allocation group
-                curr_address = curr_address.add(curr_allot);
-                // on success add to returned sub allocations, and update the used chunk
-
+            // get new buffer if needed
+            if end_buffer_reached {
                 match curr_mem_chunk {
                     MemChunk::Tail { size, .. } => {
                         self.buffer_tail.remove_from_chunk(total_chunk_allot)
@@ -293,19 +452,15 @@ impl VkStorageBuffer {
                     MemChunk::Null => panic!("Fatal: Branch should not be reached"),
                 }
 
-                start_range = i;
-                end_range = i;
-                bytes_left -= curr_allot;
-                curr_allot = 0;
                 total_chunk_allot = 0;
 
                 // Select next chunk and assign address, or return current allotment state if out of space
                 curr_mem_chunk = self.select_best_chunk(bytes_left);
                 match curr_mem_chunk {
                     MemChunk::Null => {
-                        return VkAllocResult::OutOfSpace(Self::to_partial_alloc(
+                        return VkAllocResult::OutOfSpace(PartialAlloc::new(
                             sub_allocations,
-                            &item_bytes[start_range..],
+                            item_bytes[start_range..].to_vec(),
                         ));
                     }
                     MemChunk::Tail { address, .. } | MemChunk::FreeChunk { address, .. } => {
@@ -320,13 +475,31 @@ impl VkStorageBuffer {
             end_range = i + 1;
         }
 
+        // check and upload any remaining data
         if curr_allot > 0 {
-            // upload this slice here, check success and extend sub allocations
             let upload_slice = &item_bytes[start_range..end_range];
-            bytes_left -= curr_allot;
-        }
+            let upload_offset = self.get_offset_from(curr_address);
 
-        if total_chunk_allot > 0 {
+            if let Err(error_msg) =
+                self.allocate_data(device, &host_lease, curr_address, upload_slice)
+            {
+                return self.partial_error(error_msg, sub_allocations);
+            }
+
+            // Channel submit here
+
+            if let Err(error_msg) = self.await_allocation_fence(device, host_lease.fence) {
+                return self.partial_error(error_msg, sub_allocations);
+            }
+
+            self.add_sub_allocations(
+                curr_address,
+                &alloc_sizes[start_range..end_range],
+                &mut sub_allocations,
+            );
+
+            bytes_left -= curr_allot;
+
             match curr_mem_chunk {
                 MemChunk::Tail { size, .. } => {
                     self.buffer_tail.remove_from_chunk(total_chunk_allot)
@@ -420,16 +593,16 @@ impl FreeChunkVec {
             new_chunk.size += back_chunk_size;
         }
 
-        // Now that new chunk has "consumed" any adjacent chunks
+        // Now new chunk has "consumed" any adjacent chunks
         // Swap remove is done on back_adj first to avoid invalidating indices
         if let Some(index) = back_adj {
             self.chunks.swap_remove(index);
         }
-        
+
         if let Some(index) = front_adj {
             self.chunks.swap_remove(index);
         }
-        
+
         self.chunks.push(new_chunk)
     }
 
@@ -440,7 +613,7 @@ impl FreeChunkVec {
             .max()
             .unwrap_or(0)
     }
-    
+
     pub fn update_chunk(&mut self, index: usize, amount: u64) {
         unsafe {
             let chunk = self.chunks.get_unchecked_mut(index);
@@ -452,7 +625,7 @@ impl FreeChunkVec {
             }
         }
     }
-    
+
     pub fn get_largest_chunk(&self) -> Option<MemChunk> {
         let chunk = self
             .chunks

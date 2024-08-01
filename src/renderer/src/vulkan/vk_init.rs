@@ -383,10 +383,10 @@ pub fn create_logical_device(
         let queue: vk::Queue = unsafe { device.get_device_queue(index.index, 0) };
         for typ in &index.queue_types {
             match typ {
-                QueueType::Present => queues.present_queue = (index.index, queue),
-                QueueType::Graphics => queues.graphics_queue = (index.index, queue),
-                QueueType::Compute => queues.compute_queue = (index.index, queue),
-                QueueType::Transfer => queues.transfer_queue = (index.index, queue),
+                VkQueueType::Present => queues.present_queue = (index.index, queue),
+                VkQueueType::Graphics => queues.graphics_queue = (index.index, queue),
+                VkQueueType::Compute => queues.compute_queue = (index.index, queue),
+                VkQueueType::Transfer => queues.transfer_queue = (index.index, queue),
             }
         }
     }
@@ -431,7 +431,7 @@ pub fn graphics_only_queue_indices(
     if let Some(index) = gfx_index {
         let index_data = QueueIndex {
             index,
-            queue_types: vec![QueueType::Present, QueueType::Graphics],
+            queue_types: vec![VkQueueType::Present, VkQueueType::Graphics],
         };
         indices.push(index_data)
     } else {
@@ -508,7 +508,7 @@ pub fn queue_indices_with_preferences(
     if let Some(index) = graphics_present_index {
         indices.push(QueueIndex {
             index,
-            queue_types: vec![QueueType::Present, QueueType::Graphics],
+            queue_types: vec![VkQueueType::Present, VkQueueType::Graphics],
         });
     } else {
         return Err("Fatal: Failed to find suitable graphics/present queue".to_string());
@@ -517,14 +517,14 @@ pub fn queue_indices_with_preferences(
     if let Some(index) = compute_index {
         indices.push(QueueIndex {
             index,
-            queue_types: vec![QueueType::Compute],
+            queue_types: vec![VkQueueType::Compute],
         });
     }
 
     if let Some(index) = transfer_index {
         indices.push(QueueIndex {
             index,
-            queue_types: vec![QueueType::Transfer],
+            queue_types: vec![VkQueueType::Transfer],
         });
     }
     
@@ -776,8 +776,8 @@ pub fn create_swapchain(
         .image_array_layers(1);
 
     let present_gfx_indices = [
-        device_queues.get_queue_index(QueueType::Graphics),
-        device_queues.get_queue_index(QueueType::Present),
+        device_queues.get_queue_index(VkQueueType::Graphics),
+        device_queues.get_queue_index(VkQueueType::Present),
     ];
 
     sc_create_info = if present_gfx_indices[0] != present_gfx_indices[1] {
@@ -1089,13 +1089,12 @@ pub fn create_command_pools(
     device: &ash::Device,
     device_queues: &DeviceQueues,
     pool_count: u32,
-    buffer_count: u32,
 ) -> Result<Vec<VkCommandPoolMap>, String> {
     log::info!("Creating command pools");
     
-    let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<QueueType>, vk::CommandPool)>::new();
+    let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<VkQueueType>, vk::CommandPool)>::new();
 
-    for &t in QueueType::iter() {
+    for &t in VkQueueType::iter() {
         if device_queues.has_queue_type(t) {
             let queue = device_queues.get_queue(t);
             let index = device_queues.get_queue_index(t);
@@ -1133,7 +1132,7 @@ pub fn create_command_pools(
                 device,
                 &pool,
                 vk::CommandBufferLevel::PRIMARY,
-                buffer_count,
+                1,
             )
             .map_err(|e| format!("Error creating command buffers: {:?}", e))?;
 
@@ -1142,7 +1141,7 @@ pub fn create_command_pools(
                 queue,
                 queue_type: queue_types.clone(),
                 pool,
-                buffers: command_buffers,
+                buffer: command_buffers[0],
             };
 
             for &queue_type in queue_types {
@@ -1157,10 +1156,9 @@ pub fn create_command_pools(
     Ok(command_pool_maps)
 }
 
-pub fn create_immediate_command_pool(
+pub fn create_transfer_pool(
     device: &ash::Device,
     index_queue: (u32, vk::Queue),
-    queue_types: Vec<QueueType>,
 ) -> Result<VkCommandPool, String> {
     let (queue_index, queue) = index_queue;
 
@@ -1188,9 +1186,9 @@ pub fn create_immediate_command_pool(
     let vk_command_pool = VkCommandPool {
         queue_index,
         queue,
-        queue_type: queue_types,
+        queue_type: vec![VkQueueType::Transfer],
         pool: command_pool,
-        buffers: vec![command_buffer],
+        buffer: command_buffer,
     };
 
     Ok(vk_command_pool)

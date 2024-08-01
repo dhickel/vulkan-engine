@@ -466,7 +466,7 @@ impl VkRender {
         //  and should be using its own transfer queue, as we dont need them in the per frame?
         let im_index = queue_indices
             .iter()
-            .find(|q| q.queue_types.contains(&QueueType::Graphics))
+            .find(|q| q.queue_types.contains(&VkQueueType::Graphics))
             .unwrap();
 
         print!("Queue Types Immediate: {:?}", im_index.queue_types);
@@ -474,7 +474,7 @@ impl VkRender {
         let im_queue = device_queues.get_queue_by_index(im_index.index).unwrap();
 
         let im_command_pool =
-            vk_init::create_immediate_command_pool(&device, im_queue, im_index.queue_types.clone())
+            vk_init::create_transfer_pool(&device, im_queue, im_index.queue_types.clone())
                 .unwrap();
 
         let im_fence_create_info =
@@ -561,7 +561,7 @@ impl VkRender {
                 .first()
                 .unwrap()
                 .cmd_pool
-                .get(QueueType::Graphics),
+                .get(VkQueueType::Graphics),
         );
 
         let mut render = VkRender {
@@ -655,7 +655,7 @@ impl VkRender {
             .first()
             .unwrap()
             .cmd_pool
-            .get(QueueType::Transfer);
+            .get(VkQueueType::Transfer);
 
         self.data_cache.environment_cache.allocate_cube_map(
             0,
@@ -704,7 +704,7 @@ impl VkRender {
         self.update_scene();
         let mut frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
-        let cmd_pool = frame_data.cmd_pool.get(QueueType::Graphics);
+        let cmd_pool = frame_data.cmd_pool.get(VkQueueType::Graphics);
         let draw_image = frame_data.draw.image;
         let draw_view = frame_data.draw.image_view;
         let depth_image = frame_data.depth.image;
@@ -713,7 +713,7 @@ impl VkRender {
         let present_view = frame_data.present_image_view;
 
         let queue = cmd_pool.queue;
-        let cmd_buffer = cmd_pool.buffers[0];
+        let cmd_buffer = cmd_pool.buffer[0];
         let fence = &[frame_sync.render_fence];
 
         let swapchain = [self.swapchain.swapchain];
@@ -904,7 +904,7 @@ impl VkRender {
             .first()
             .unwrap()
             .cmd_pool
-            .get(QueueType::Graphics);
+            .get(VkQueueType::Graphics);
 
         self.data_cache.environment_cache.allocate_cube_map(
             0,
@@ -942,8 +942,8 @@ impl VkRender {
         let mut sb_desc_writer = VkDescriptorWriter::default();
         let cmd_buffer = self.presentation.frame_data[0]
             .cmd_pool
-            .get(QueueType::Graphics)
-            .buffers[0];
+            .get(VkQueueType::Graphics)
+            .buffer;
 
         sb_desc_writer.write_image(
             0,
@@ -970,8 +970,8 @@ impl VkRender {
     pub fn draw_skybox(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_pool.get(QueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffers[0];
+        let cmd_pool = curr_frame.cmd_pool.get(VkQueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffer;
 
         let color_attachment = [vk_util::attachment_info(
             curr_frame.draw.image_view,
@@ -1113,8 +1113,8 @@ impl VkRender {
     pub fn draw_geometry(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_pool.get(QueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffers[0];
+        let cmd_pool = curr_frame.cmd_pool.get(VkQueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffer;
 
         let color_attachment = [vk_util::attachment_info(
             curr_frame.draw.image_view,
@@ -1301,9 +1301,9 @@ impl VkRender {
         let pipeline_cache = &self.data_cache.pipeline_cache;
         let descriptor_cache = &self.data_cache.desc_layout_cache;
         let cmd_pool = &self.presentation.frame_data[0].cmd_pool;
-        let render_pool = cmd_pool.get(QueueType::Graphics);
-        let render_buffer = render_pool.buffers[0];
-        let transfer_pool = cmd_pool.get(QueueType::Transfer);
+        let render_pool = cmd_pool.get(VkQueueType::Graphics);
+        let render_buffer = render_pool.buffer;
+        let transfer_pool = cmd_pool.get(VkQueueType::Transfer);
         let skybox_image = env_skybox.image;
         let skybox_view = env_skybox.image_view;
         let skybox_sampler = env_skybox.sampler;

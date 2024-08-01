@@ -8,8 +8,8 @@ use ash::vk::{
     AccessFlags2, ClearValue, Extent2D, Extent3D, ImageType, PipelineCache,
     PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo,
 };
-use log::info;
-use std::io::{Read, Seek, SeekFrom};
+use log::{error, info};
+use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -24,6 +24,7 @@ use crate::data::data_util;
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
 use crate::vulkan::vk_render::{DataCache, VkSingleDescriptor};
 use crate::vulkan::{vk_init, vk_util};
+use ash::prelude::VkResult;
 use shaderc::{CompileOptions, Compiler, ShaderKind};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -465,6 +466,7 @@ pub fn allocate_buffer(
 
     Ok(VkBuffer {
         buffer,
+        size,
         allocation,
         alloc_info,
     })
@@ -522,7 +524,7 @@ pub fn generate_brdf_lut(
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
 
-    let cmd_buffer = *cmd_pool.buffers.get(0).unwrap();
+    let cmd_buffer = cmd_pool.buffer;
     let queue = cmd_pool.queue;
 
     let format = vk::Format::R16G16B16A16_SFLOAT;
@@ -724,7 +726,7 @@ pub fn upload_skybox(
         (alloc, device_memory, offset)
     };
 
-    let cmd_buffer = *cmd_pool.buffers.get(0).unwrap();
+    let cmd_buffer = cmd_pool.buffer;
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1042,7 +1044,7 @@ where
     F: FnOnce(&ash::Device, vk::CommandBuffer),
 {
     unsafe {
-        let cmd_buffer = immediate.command_pool.buffers[0];
+        let cmd_buffer = immediate.command_pool.buffer;
         let queue = immediate.command_pool.queue;
 
         // Reset the fence correctly
@@ -1076,6 +1078,57 @@ where
             .wait_for_fences(&immediate.fence, true, u64::MAX)
             .unwrap();
     }
+}
+
+
+pub fn transfer_data_host_to_device(
+    device: &ash::Device,
+    cmd_buffer: vk::CommandBuffer,
+    host_buffer: &VkBuffer,
+    device_buffer: &VkBuffer,
+    device_offset: u64,
+    bytes: &[&[u8]],
+    alignment: u64,
+) -> Result<(), String> {
+    
+    let mut total_size = 0;
+
+    let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
+    for chunk in bytes {
+        let size = chunk.len().next_multiple_of(alignment as usize);
+        unsafe {
+            std::ptr::copy_nonoverlapping(chunk.as_ptr(), host_ptr, size);
+            let host_ptr = host_ptr.add(size);
+            total_size += size;
+        }
+    }
+
+    let copy_info = [vk::BufferCopy::default()
+        .dst_offset(device_offset)
+        .src_offset(0)
+        .size(total_size as vk::DeviceSize)];
+
+    let begin_info =
+        vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .map_err(|err| format!("Error beginning buffer: {}", err))?;
+        
+        device.cmd_copy_buffer(
+            cmd_buffer,
+            host_buffer.buffer,
+            device_buffer.buffer,
+            &copy_info,
+        );
+
+        device
+            .end_command_buffer(cmd_buffer)
+            .map_err(|err| format!("Error ending buffer: {}", err))?;
+    }
+
+    Ok(())
 }
 
 pub fn upload_mesh(

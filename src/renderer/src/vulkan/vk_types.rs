@@ -1,4 +1,5 @@
 use crate::data::camera::FPSController;
+use crate::data::data_util::{Semaphore, SemaphorePermit};
 use crate::vulkan::vk_descriptor::{VkDescriptorAllocator, VkDynamicDescriptorAllocator};
 use ash::vk::Extent2D;
 use ash::{vk, Device};
@@ -211,28 +212,28 @@ pub struct VkBufferAndDescriptorLimits {
 #[derive(Debug)]
 pub struct QueueIndex {
     pub index: u32,
-    pub queue_types: Vec<QueueType>,
+    pub queue_types: Vec<VkQueueType>,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum QueueType {
+pub enum VkQueueType {
     Present = 0,
     Graphics = 1,
     Compute = 2,
     Transfer = 3,
 }
 
-impl QueueType {
+impl VkQueueType {
     // Define an array of all the enum variants
-    const ALL_QUEUE_TYPES: [QueueType; 4] = [
-        QueueType::Present,
-        QueueType::Graphics,
-        QueueType::Compute,
-        QueueType::Transfer,
+    const ALL_QUEUE_TYPES: [VkQueueType; 4] = [
+        VkQueueType::Present,
+        VkQueueType::Graphics,
+        VkQueueType::Compute,
+        VkQueueType::Transfer,
     ];
 
-    pub fn iter() -> std::slice::Iter<'static, QueueType> {
+    pub fn iter() -> std::slice::Iter<'static, VkQueueType> {
         Self::ALL_QUEUE_TYPES.iter()
     }
 }
@@ -257,7 +258,7 @@ impl VkCommandPoolMap {
         Self { pools }
     }
 
-    pub fn get(&self, typ: QueueType) -> &VkCommandPool {
+    pub fn get(&self, typ: VkQueueType) -> &VkCommandPool {
         &self.pools[typ as usize]
     }
 }
@@ -266,9 +267,16 @@ impl VkCommandPoolMap {
 pub struct VkCommandPool {
     pub queue_index: u32,
     pub queue: vk::Queue,
-    pub queue_type: Vec<QueueType>,
+    pub queue_type: Vec<VkQueueType>,
     pub pool: vk::CommandPool,
-    pub buffers: Vec<vk::CommandBuffer>,
+    pub buffer: vk::CommandBuffer,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct VkCmdSubmitInfo {
+    pub queue: vk::Queue,
+    pub cmd_buffer: vk::CommandBuffer,
+    pub fence: [vk::Fence; 1],
 }
 
 impl Clone for VkCommandPool {
@@ -278,7 +286,7 @@ impl Clone for VkCommandPool {
             queue: self.queue,
             queue_type: self.queue_type.clone(),
             pool: self.pool,
-            buffers: self.buffers.clone(),
+            buffer: self.buffer.clone(),
         }
     }
 }
@@ -290,7 +298,7 @@ impl Default for VkCommandPool {
             queue: Default::default(),
             queue_type: vec![],
             pool: Default::default(),
-            buffers: vec![],
+            buffer: vk::CommandBuffer::null(),
         }
     }
 }
@@ -299,6 +307,16 @@ impl VkDestroyable for VkCommandPool {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
             device.destroy_command_pool(self.pool, None);
+        }
+    }
+}
+
+impl VkCommandPool {
+    pub fn get_submit_info(&self, fence: [vk::Fence; 1]) -> VkCmdSubmitInfo {
+        VkCmdSubmitInfo {
+            queue: self.queue,
+            cmd_buffer: self.buffer,
+            fence,
         }
     }
 }
@@ -529,21 +547,21 @@ impl Default for DeviceQueues {
 }
 
 impl DeviceQueues {
-    pub fn get_queue(&self, typ: QueueType) -> vk::Queue {
+    pub fn get_queue(&self, typ: VkQueueType) -> vk::Queue {
         match typ {
-            QueueType::Present => self.present_queue.1,
-            QueueType::Graphics => self.graphics_queue.1,
-            QueueType::Compute => self.compute_queue.1,
-            QueueType::Transfer => self.transfer_queue.1,
+            VkQueueType::Present => self.present_queue.1,
+            VkQueueType::Graphics => self.graphics_queue.1,
+            VkQueueType::Compute => self.compute_queue.1,
+            VkQueueType::Transfer => self.transfer_queue.1,
         }
     }
 
-    pub fn get_queue_index(&self, typ: QueueType) -> u32 {
+    pub fn get_queue_index(&self, typ: VkQueueType) -> u32 {
         match typ {
-            QueueType::Present => self.present_queue.0,
-            QueueType::Graphics => self.graphics_queue.0,
-            QueueType::Compute => self.compute_queue.0,
-            QueueType::Transfer => self.transfer_queue.0,
+            VkQueueType::Present => self.present_queue.0,
+            VkQueueType::Graphics => self.graphics_queue.0,
+            VkQueueType::Compute => self.compute_queue.0,
+            VkQueueType::Transfer => self.transfer_queue.0,
         }
     }
     pub fn get_queue_by_index(&self, index: u32) -> Option<(u32, vk::Queue)> {
@@ -560,18 +578,18 @@ impl DeviceQueues {
         }
     }
 
-    pub fn has_queue_type(&self, typ: QueueType) -> bool {
+    pub fn has_queue_type(&self, typ: VkQueueType) -> bool {
         match typ {
-            QueueType::Present => {
+            VkQueueType::Present => {
                 self.present_queue.0 < u32::MAX && self.present_queue.1 != vk::Queue::null()
             }
-            QueueType::Graphics => {
+            VkQueueType::Graphics => {
                 self.graphics_queue.0 < u32::MAX && self.graphics_queue.1 != vk::Queue::null()
             }
-            QueueType::Compute => {
+            VkQueueType::Compute => {
                 self.compute_queue.0 < u32::MAX && self.compute_queue.1 != vk::Queue::null()
             }
-            QueueType::Transfer => {
+            VkQueueType::Transfer => {
                 self.transfer_queue.0 < u32::MAX && self.transfer_queue.1 != vk::Queue::null()
             }
         }
@@ -611,6 +629,41 @@ impl VkImmediate {
         Self {
             command_pool,
             fence: [fence],
+        }
+    }
+}
+
+pub struct VkHostBuffer {
+    semaphore: Semaphore,
+    buffer: VkBuffer,
+    cmd_pool: VkCommandPool,
+    fence: [vk::Fence; 1],
+}
+
+pub struct VkHostBufferLease<'a> {
+    pub permit: SemaphorePermit<'a>,
+    pub buffer: &'a VkBuffer,
+    pub cmd_pool: &'a VkCommandPool,
+    pub fence: [vk::Fence; 1],
+}
+
+impl VkHostBuffer {
+    pub fn new(host_buffer: VkBuffer, cmd_pool: VkCommandPool, fence: vk::Fence) -> Self {
+        Self {
+            buffer: host_buffer,
+            cmd_pool,
+            semaphore: Semaphore::new(1),
+            fence: [fence],
+        }
+    }
+
+    pub fn acquire(&self) -> VkHostBufferLease {
+        let permit = self.semaphore.acquire();
+        VkHostBufferLease {
+            permit,
+            buffer: &self.buffer,
+            cmd_pool: &self.cmd_pool,
+            fence: self.fence,
         }
     }
 }
@@ -789,6 +842,7 @@ impl VkDescriptors {
 #[derive(Debug)]
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
+    pub size: usize,
     pub allocation: vk_mem::Allocation,
     pub alloc_info: vk_mem::AllocationInfo,
 }
@@ -796,10 +850,11 @@ pub struct VkBuffer {
 #[derive(Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
     pub address: vk::DeviceAddress,
+    pub offset: u64,
+    pub buffer: vk::Buffer,
     pub size: u64,
+    pub sub_buffer_index: u32,
 }
-
-
 
 pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
@@ -810,11 +865,13 @@ pub struct VkBrdfLut {
 impl VkBuffer {
     pub fn new(
         buffer: vk::Buffer,
+        size: usize,
         allocation: vk_mem::Allocation,
         alloc_info: vk_mem::AllocationInfo,
     ) -> Self {
         Self {
             buffer,
+            size,
             allocation,
             alloc_info,
         }

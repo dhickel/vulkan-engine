@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::cmp::max;
 use crate::data::gpu_data;
 use crate::data::gpu_data::{MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
@@ -6,6 +7,7 @@ use crate::vulkan::vk_util;
 use ash::vk;
 use glam::{vec4, Vec4};
 use std::collections::HashMap;
+use std::sync::{Condvar, Mutex};
 use half::f16;
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use vk_mem::Alloc;
@@ -60,5 +62,77 @@ pub fn bytes_per_pixel(format : vk::Format) -> u32 {
         vk::Format::R32G32B32_SFLOAT => 12,
         vk::Format::R32G32B32A32_SFLOAT => 16,
         _ => panic!("Cannot calculate bytes per pixel: Unsupported format")
+    }
+}
+
+pub struct Semaphore {
+    permits: Mutex<usize>,
+    condvar: Condvar,
+}
+
+pub struct SemaphorePermit<'a> {
+    semaphore: &'a Semaphore,
+    released: Cell<bool>,
+}
+
+impl<'a> SemaphorePermit<'a> {
+    // Take self to consume permit to avoid duplicated release calls on drop
+    pub fn release(self) {
+        if !self.released.get() {
+            let mut permits = self.semaphore.permits.lock().unwrap();
+            *permits += 1;
+            self.semaphore.condvar.notify_one();
+            self.released.set(true);
+        }
+    }
+}
+
+impl<'a> Drop for SemaphorePermit<'a> {
+    fn drop(&mut self) {
+        // Release on drop if not already released
+        if !self.released.get() {
+            let mut permits = self.semaphore.permits.lock().unwrap();
+            *permits += 1;
+            self.semaphore.condvar.notify_one();
+            self.released.set(true);
+        }
+    }
+}
+
+impl Semaphore {
+    pub fn new(count: usize) -> Self {
+        Semaphore {
+            permits: Mutex::new(count),
+            condvar: Condvar::new(),
+        }
+    }
+
+    pub fn acquire(&self) -> SemaphorePermit {
+        let mut permits = self.permits.lock().unwrap();
+        while *permits == 0 {
+            permits = self.condvar.wait(permits).unwrap();
+        }
+        *permits -= 1;
+        SemaphorePermit {
+            semaphore: self,
+            released: Cell::new(false),
+        }
+    }
+
+    pub fn try_acquire(&self) -> Option<SemaphorePermit> {
+        let mut permits = self.permits.lock().unwrap();
+        if *permits > 0 {
+            *permits -= 1;
+            Some(SemaphorePermit {
+                semaphore: self,
+                released: Cell::new(false),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn available_permits(&self) -> usize {
+        *self.permits.lock().unwrap()
     }
 }
