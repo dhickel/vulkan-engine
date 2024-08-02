@@ -8,7 +8,8 @@ use glam::Vec4;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::{mem, slice};
 use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
@@ -634,37 +635,63 @@ impl VkImmediate {
 }
 
 pub struct VkHostBuffer {
-    semaphore: Semaphore,
-    buffer: VkBuffer,
-    cmd_pool: VkCommandPool,
-    fence: [vk::Fence; 1],
-}
-
-pub struct VkHostBufferLease<'a> {
-    pub permit: SemaphorePermit<'a>,
-    pub buffer: &'a VkBuffer,
-    pub cmd_pool: &'a VkCommandPool,
+    pub buffer: VkBuffer,
+    pub render_sender: Sender<VkCmdSubmitInfo>,
+    pub cmd_pool: VkCommandPool,
     pub fence: [vk::Fence; 1],
 }
 
 impl VkHostBuffer {
-    pub fn new(host_buffer: VkBuffer, cmd_pool: VkCommandPool, fence: vk::Fence) -> Self {
+    pub fn new(
+        host_buffer: VkBuffer,
+        cmd_pool: VkCommandPool,
+        fence: vk::Fence,
+        render_sender: Sender<VkCmdSubmitInfo>,
+    ) -> Self {
         Self {
             buffer: host_buffer,
             cmd_pool,
-            semaphore: Semaphore::new(1),
             fence: [fence],
+            render_sender,
         }
     }
 
-    pub fn acquire(&self) -> VkHostBufferLease {
-        let permit = self.semaphore.acquire();
-        VkHostBufferLease {
-            permit,
-            buffer: &self.buffer,
-            cmd_pool: &self.cmd_pool,
-            fence: self.fence,
+    pub fn submit_commands(&self) -> Result<(), SendError<VkCmdSubmitInfo>> {
+        self.render_sender
+            .send(self.cmd_pool.get_submit_info(self.fence))
+    }
+}
+
+pub struct VkTransfer {
+    host_buffers: Vec<Arc<Mutex<VkHostBuffer>>>,
+    sender: Sender<VkCmdSubmitInfo>,
+    receiver: Receiver<VkCmdSubmitInfo>,
+    transfer_pool: VkCommandPool,
+}
+
+impl VkTransfer {
+    pub fn new(transfer_pool: VkCommandPool) -> Self {
+        let (sender, receiver) = channel::<VkCmdSubmitInfo>();
+        Self {
+            host_buffers: vec![],
+            sender,
+            receiver,
+            transfer_pool,
         }
+    }
+
+    pub fn query_channel(&self) -> Option<VkCmdSubmitInfo> {
+        match self.receiver.try_recv() {
+            Ok(info) => Some(info),
+            Err(error) => {
+                log::error!("Error receiving transfer data: {:?}", error);
+                None
+            },
+        }
+    }
+
+    pub fn send_to_self(&self, info: VkCmdSubmitInfo) -> Result<(), SendError<VkCmdSubmitInfo>> {
+        self.sender.send(info)
     }
 }
 

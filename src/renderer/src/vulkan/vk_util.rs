@@ -22,7 +22,7 @@ use crate::data::data_cache::{
 };
 use crate::data::data_util;
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
-use crate::vulkan::vk_render::{DataCache, VkSingleDescriptor};
+use crate::vulkan::vk_render::{VkDataCache, VkSingleDescriptor};
 use crate::vulkan::{vk_init, vk_util};
 use ash::prelude::VkResult;
 use shaderc::{CompileOptions, Compiler, ShaderKind};
@@ -623,6 +623,7 @@ pub fn generate_brdf_lut(
             .level_count(1)
             .base_array_layer(0)
             .layer_count(1);
+
 
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)

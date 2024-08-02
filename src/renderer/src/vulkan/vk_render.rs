@@ -31,6 +31,7 @@ use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Sender;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
@@ -39,7 +40,10 @@ use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 
-pub struct DataCache {
+
+
+
+pub struct VkDataCache {
     pub shader_cache: VkShaderCache,
     pub desc_layout_cache: VkDescLayoutCache,
     pub pipeline_cache: VkPipelineCache,
@@ -49,7 +53,7 @@ pub struct DataCache {
     pub sampler_cache: SamplerCache,
 }
 
-impl VkDestroyable for DataCache {
+impl VkDestroyable for VkDataCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.shader_cache.destroy(device, allocator);
         self.mesh_cache.destroy(device, allocator);
@@ -127,7 +131,7 @@ pub struct VkRender {
     pub imgui: VkImgui,
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
-    pub data_cache: DataCache,
+    pub data_cache: VkDataCache,
     pub brdf_lut: VkBrdfLut,
     pub global_desc_allocator: VkDynamicDescriptorAllocator,
     pub main_deletion_queue: Vec<VkDeletable>,
@@ -139,7 +143,7 @@ pub fn init_caches(
     color_format: vk::Format,
     depth_format: vk::Format,
     supported_formats: HashSet<vk::Format>,
-) -> DataCache {
+) -> VkDataCache {
     let shader_paths = vec![
         (
             CoreShaderType::MetRoughVert,
@@ -200,7 +204,7 @@ pub fn init_caches(
     let id = environment_cache
         .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
 
-    DataCache {
+    VkDataCache {
         shader_cache,
         desc_layout_cache,
         pipeline_cache,
@@ -473,13 +477,12 @@ impl VkRender {
 
         let im_queue = device_queues.get_queue_by_index(im_index.index).unwrap();
 
-        let im_command_pool =
-            vk_init::create_transfer_pool(&device, im_queue, im_index.queue_types.clone())
-                .unwrap();
-
-        let im_fence_create_info =
-            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        let im_fence = unsafe { device.create_fence(&im_fence_create_info, None) }.unwrap();
+        // let im_command_pool =
+        //     vk_init::create_transfer_pool(&device, im_queue);
+        // 
+        // let im_fence_create_info =
+        //     vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        // let im_fence = unsafe { device.create_fence(&im_fence_create_info, None) }.unwrap();
 
         // GUI
 
@@ -512,8 +515,7 @@ impl VkRender {
             Some(imgui_opts),
         )
         .unwrap();
-
-        let immediate = VkImmediate::new(im_command_pool, im_fence);
+        
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
 
         // let gpu_descriptor = DescriptorLayoutBuilder::default()
@@ -713,7 +715,7 @@ impl VkRender {
         let present_view = frame_data.present_image_view;
 
         let queue = cmd_pool.queue;
-        let cmd_buffer = cmd_pool.buffer[0];
+        let cmd_buffer = cmd_pool.buffer;
         let fence = &[frame_sync.render_fence];
 
         let swapchain = [self.swapchain.swapchain];

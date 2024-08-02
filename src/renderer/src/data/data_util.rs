@@ -8,6 +8,7 @@ use ash::vk;
 use glam::{vec4, Vec4};
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use half::f16;
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use vk_mem::Alloc;
@@ -134,5 +135,72 @@ impl Semaphore {
 
     pub fn available_permits(&self) -> usize {
         *self.permits.lock().unwrap()
+    }
+}
+
+
+pub struct SimpleLock {
+    locked: AtomicBool,
+    condvar: Condvar,
+    mutex: Mutex<()>,
+}
+
+pub struct SimpleLockGuard<'a> {
+    lock: &'a SimpleLock,
+    released: Cell<bool>,
+}
+
+impl SimpleLock {
+    pub fn new() -> Self {
+        SimpleLock {
+            locked: AtomicBool::new(false),
+            condvar: Condvar::new(),
+            mutex: Mutex::new(()),
+        }
+    }
+
+    pub fn acquire(&self) -> SimpleLockGuard {
+        let mut guard = self.mutex.lock().unwrap();
+        while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            guard = self.condvar.wait(guard).unwrap();
+        }
+        SimpleLockGuard {
+            lock: self,
+            released: Cell::new(false),
+        }
+    }
+
+    pub fn try_acquire(&self) -> Option<SimpleLockGuard> {
+        if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            Some(SimpleLockGuard {
+                lock: self,
+                released: Cell::new(false),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn release(&self) {
+        self.locked.store(false, Ordering::Release);
+        self.condvar.notify_one();
+    }
+}
+
+impl<'a> SimpleLockGuard<'a> {
+    pub fn release(self) {
+        if !self.released.get() {
+            self.lock.release();
+            self.released.set(true);
+        }
+    }
+}
+
+impl<'a> Drop for SimpleLockGuard<'a> {
+    fn drop(&mut self) {
+        if !self.released.get() {
+            self.lock.release();
+            self.released.set(true);
+        }
     }
 }

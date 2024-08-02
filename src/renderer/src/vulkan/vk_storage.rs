@@ -1,6 +1,6 @@
 use crate::data::gpu_data::AsByteSlice;
 use crate::vulkan::vk_types::{
-    VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkHostBuffer, VkHostBufferLease,
+    VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkHostBuffer,
     VkSubAlloc,
 };
 use crate::vulkan::vk_util;
@@ -49,7 +49,7 @@ pub struct VkStorageAllocator {
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
     buffer: VkStorageBuffer,
-    transfer_buffer: Arc<VkHostBuffer>,
+    transfer_buffer: Arc<Mutex<VkHostBuffer>>,
     extra_buffers: Vec<VkStorageBuffer>,
     usage_flags: vk::BufferUsageFlags,
     memory_usage: vk_mem::MemoryUsage,
@@ -59,7 +59,7 @@ impl VkStorageAllocator {
     pub fn new(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
-        transfer_buffer: Arc<VkHostBuffer>,
+        transfer_buffer: Arc<Mutex<VkHostBuffer>>,
         limits: &VkBufferAndDescriptorLimits,
         buffer_size: usize,
         usage_flags: vk::BufferUsageFlags,
@@ -135,12 +135,19 @@ impl VkStorageAllocator {
         data: Vec<&'a [u8]>,
         buffer_placement: BufferPlacement,
     ) -> VkAllocResult<'a> {
-        // Acquires a semaphore that will release when dropped
-        let host_lease = self.transfer_buffer.acquire();
+        
+        // Acquire the host buffer lock, as some host buffers may he shared
+        let host_buffer = match self.transfer_buffer.lock() {
+            Ok(buffer) => buffer,
+            Err(_) => return VkAllocResult::Error {
+                error_msg: "Error acquiring host buffer lock".to_string(),
+                successful_allocs: vec![],
+            },
+        };
 
         let result = self
             .buffer
-            .add_items(data, buffer_placement, &self.device, &host_lease);
+            .add_items(data, buffer_placement, &self.device, &host_buffer);
 
         if let VkAllocResult::OutOfSpace(mut partial_alloc) = result {
             let mut new_buffer = match Self::allocate_buffer(
@@ -165,7 +172,7 @@ impl VkStorageAllocator {
                 partial_alloc.remaining,
                 buffer_placement,
                 &self.device,
-                &host_lease,
+                &host_buffer,
             ) {
                 VkAllocResult::Success(mut items) => {
                     items.append(&mut partial_alloc.fulfilled);
@@ -291,8 +298,12 @@ impl VkStorageBuffer {
     ) -> Result<(), String> {
         unsafe {
             device
-                .wait_for_fences(&fence, true, (6e+10) as u64)
-                .map_err(|err| format!("Error awaiting host transfer fence: {:?}", err))
+                .wait_for_fences(&fence, true, 1e+10 as u64)
+                .map_err(|err| format!("Error awaiting host transfer fence: {:?}", err))?;
+
+            device
+                .reset_fences(&fence)
+                .map_err(|err| format!("Error resetting host transfer fence: {:?}", err))
         }
     }
 
@@ -328,14 +339,14 @@ impl VkStorageBuffer {
     pub fn allocate_data(
         &self,
         device: &ash::Device,
-        host_lease: &VkHostBufferLease,
+        host_lease: &VkHostBuffer,
         curr_address: u64,
         upload_slice: &[&[u8]],
     ) -> Result<(), String> {
         vk_util::transfer_data_host_to_device(
             device,
             host_lease.cmd_pool.buffer,
-            host_lease.buffer,
+            &host_lease.buffer,
             &self.buffer,
             curr_address.sub(self.buffer_start_addr),
             upload_slice,
@@ -348,7 +359,7 @@ impl VkStorageBuffer {
         mut item_bytes: Vec<&'a [u8]>,
         buffer_placement: BufferPlacement,
         device: &ash::Device,
-        host_lease: &VkHostBufferLease,
+        host_lease: &VkHostBuffer,
     ) -> VkAllocResult<'a> {
         let mut total_bytes: u64 = 0;
         let mut alloc_sizes = Vec::with_capacity(item_bytes.len());
