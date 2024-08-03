@@ -1,7 +1,6 @@
 use crate::data::gpu_data::AsByteSlice;
-use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkDestroyable, VkHostBuffer, VkSubAlloc};
+use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkDestroyable, VkHostBufferInfo, VkSubAlloc};
 use crate::vulkan::vk_util;
-use crate::vulkan::vk_util::immediate_submit;
 use ash::{Device, vk};
 use ash::vk::DeviceAddress;
 use std::cmp::{max_by, Ordering, PartialEq};
@@ -51,7 +50,7 @@ pub struct VkSubAllocator {
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
     buffer: VkStorageBuffer,
-    transfer_buffer: Arc<Mutex<VkHostBuffer>>,
+    transfer_buffer: Arc<Mutex<VkHostBufferInfo>>,
     extra_buffers: Vec<VkStorageBuffer>,
     usage_flags: vk::BufferUsageFlags,
     memory_usage: vk_mem::MemoryUsage,
@@ -69,7 +68,7 @@ impl VkSubAllocator {
     pub fn new(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
-        transfer_buffer: Arc<Mutex<VkHostBuffer>>,
+        transfer_buffer: Arc<Mutex<VkHostBufferInfo>>,
         limits: &VkBufferAndDescriptorLimits,
         buffer_size: usize,
         usage_flags: vk::BufferUsageFlags,
@@ -350,14 +349,13 @@ impl VkStorageBuffer {
     fn allocate_data(
         &self,
         device: &ash::Device,
-        host_buffer: &VkHostBuffer,
+        host_buffer: &VkHostBufferInfo,
         curr_address: u64,
         upload_slice: &[&[u8]],
     ) -> Result<(), String> {
-        vk_util::transfer_data_host_to_device(
+        vk_util::record_host_to_storage_buffer(
             device,
-            host_buffer.cmd_pool.buffers[0],
-            &host_buffer.buffer,
+            host_buffer,
             &self.buffer,
             curr_address.sub(self.buffer_start_addr),
             upload_slice,
@@ -378,7 +376,7 @@ impl VkStorageBuffer {
         mut item_bytes: &mut [&'a [u8]],
         buffer_placement: BufferPlacement,
         device: &ash::Device,
-        host_lease: &VkHostBuffer,
+        host_lease: &VkHostBufferInfo,
     ) -> VkAllocResult<'a> {
         let mut total_bytes: u64 = 0;
         let mut alloc_sizes = Vec::with_capacity(item_bytes.len());

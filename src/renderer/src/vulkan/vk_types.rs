@@ -190,6 +190,7 @@ pub struct VkBufferAndDescriptorLimits {
     pub min_storage_buffer_offset_alignment: vk::DeviceSize,
     pub min_texel_buffer_offset_alignment: vk::DeviceSize,
     pub buffer_image_granularity: vk::DeviceSize,
+    pub optimal_buffer_copy_offset_alignment: vk::DeviceSize,
     pub non_coherent_atom_size: vk::DeviceSize,
 
     // Descriptor limits
@@ -209,6 +210,8 @@ pub struct VkBufferAndDescriptorLimits {
     pub max_descriptor_set_update_after_bind_uniform_buffers: u32,
     pub max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
     pub max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
+    
+    
 }
 
 #[derive(Debug)]
@@ -627,28 +630,16 @@ impl VkImmediate {
 }
 
 #[derive(Debug)]
-pub struct VkHostBuffer {
+pub struct VkHostBufferInfo {
     pub buffer: VkBuffer,
     pub render_sender: Sender<VkCmdSubmitInfo>,
     pub cmd_pool: VkCommandPool,
     pub fence: [vk::Fence; 1],
+    pub transfer_queue_index: u32,
+    pub graphics_queue_index: u32,
 }
 
-impl VkHostBuffer {
-    pub fn new(
-        host_buffer: VkBuffer,
-        cmd_pool: VkCommandPool,
-        fence: vk::Fence,
-        render_sender: Sender<VkCmdSubmitInfo>,
-    ) -> Self {
-        Self {
-            buffer: host_buffer,
-            cmd_pool,
-            fence: [fence],
-            render_sender,
-        }
-    }
-
+impl VkHostBufferInfo {
     pub fn submit_commands(&self) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.cmd_pool.buffers[0],
@@ -659,7 +650,7 @@ impl VkHostBuffer {
     }
 }
 
-impl VkDestroyable for VkHostBuffer {
+impl VkDestroyable for VkHostBufferInfo {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.buffer.destroy(device, allocator);
         unsafe { device.destroy_fence(self.fence[0], None) }
@@ -667,7 +658,7 @@ impl VkDestroyable for VkHostBuffer {
 }
 
 pub struct VkTransfer {
-    host_buffers: Vec<Arc<Mutex<VkHostBuffer>>>,
+    host_buffers: Vec<Arc<Mutex<VkHostBufferInfo>>>,
     sender: Sender<VkCmdSubmitInfo>,
     receiver: Receiver<VkCmdSubmitInfo>,
     transfer_pool: VkCommandPool,

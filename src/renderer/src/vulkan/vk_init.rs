@@ -863,6 +863,7 @@ pub fn allocate_draw_images(
         image_extent,
         image_type,
         sample_flags,
+        1
     );
 
     let images: Vec<VkImageAlloc> = (0..count)
@@ -933,6 +934,7 @@ pub fn allocate_depth_images(
         image_extent,
         image_type,
         sample_flags,
+        1
     );
 
     let images: Vec<VkImageAlloc> = (0..count)
@@ -1245,6 +1247,7 @@ pub fn get_buffer_and_descriptor_limits(
             min_storage_buffer_offset_alignment: limits.min_storage_buffer_offset_alignment,
             min_texel_buffer_offset_alignment: limits.min_texel_buffer_offset_alignment,
             buffer_image_granularity: limits.buffer_image_granularity,
+            optimal_buffer_copy_offset_alignment: limits.optimal_buffer_copy_offset_alignment,
             non_coherent_atom_size: limits.non_coherent_atom_size,
 
             max_bound_descriptor_sets: limits.max_bound_descriptor_sets,

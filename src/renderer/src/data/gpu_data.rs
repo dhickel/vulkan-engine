@@ -41,6 +41,7 @@ pub struct Vertex {
     _pad: u64,
 }
 
+
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum AlphaMode {
@@ -48,6 +49,7 @@ pub enum AlphaMode {
     Blend = 1,
     Mask = 2,
 }
+
 
 impl AlphaMode {
     pub fn to_float_value(&self) -> f32 {
@@ -103,11 +105,13 @@ pub struct EmissiveMap {
     pub texture_id: u32,
 }
 
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct NormalMap {
     pub scale: f32,
     pub texture_id: u32,
 }
+
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct OcclusionMap {
@@ -125,6 +129,7 @@ pub struct MaterialMeta {
     pub material_values: MaterialValues,
 }
 
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct TextureIds {
     pub base_color: u32,
@@ -133,6 +138,18 @@ pub struct TextureIds {
     pub occlusion_map: u32,
     pub emissive_map: u32,
 }
+
+
+impl Into<Vec<u32>> for TextureIds {
+    fn into(self) -> Vec<u32> {
+        vec![self.base_color,
+            self.metallic_roughness,
+            self.normal_map,
+            self.occlusion_map,
+            self.emissive_map]
+    }
+}
+
 
 impl Default for TextureIds {
     fn default() -> Self {
@@ -146,6 +163,7 @@ impl Default for TextureIds {
     }
 }
 
+
 impl Default for MaterialMeta {
     fn default() -> Self {
         Self {
@@ -154,6 +172,7 @@ impl Default for MaterialMeta {
         }
     }
 }
+
 
 impl MaterialMeta {
     pub fn add_base_color(&mut self, tex_id: u32, factor: Vec4, uv_set: u32) {
@@ -201,6 +220,7 @@ impl MaterialMeta {
     }
 }
 
+
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug, Pod, Zeroable)]
 pub struct MaterialValues {
@@ -219,6 +239,7 @@ pub struct MaterialValues {
     pub alpha_mask: f32,
     pub alpha_mask_cutoff: f32,
 }
+
 
 impl Default for MaterialValues {
     fn default() -> Self {
@@ -241,6 +262,7 @@ impl Default for MaterialValues {
     }
 }
 
+
 #[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct TextureSamplers {
     base_color: vk::Sampler,
@@ -250,11 +272,13 @@ pub struct TextureSamplers {
     emissive: vk::Sampler,
 }
 
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sampler {
     Linear,
     Nearest,
 }
+
 
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct TextureMeta {
@@ -266,6 +290,7 @@ pub struct TextureMeta {
     pub uv_index: u32,
 }
 
+
 pub struct VkCubeMap {
     pub texture_meta: Option<TextureMeta>,
     pub full_extent: vk::Extent3D,
@@ -276,12 +301,14 @@ pub struct VkCubeMap {
     pub sampler: vk::Sampler,
 }
 
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct SurfaceMeta {
     pub start_index: u32,
     pub count: u32,
     pub material_index: Option<u32>,
 }
+
 
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct MeshMeta {
@@ -290,6 +317,7 @@ pub struct MeshMeta {
     pub vertices: Vec<Vertex>,
     pub material_index: Option<u32>,
 }
+
 
 #[derive(Clone, PartialEq)]
 pub struct NodeMeta {
@@ -315,6 +343,7 @@ pub trait AsByteSlice: Pod {
 
 impl<T> AsByteSlice for T where T: Pod + bytemuck::Zeroable {}
 
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct MetRoughUniform {
@@ -323,6 +352,7 @@ pub struct MetRoughUniform {
     //padding
     pub extra: [Vec4; 14],
 }
+
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -349,6 +379,7 @@ pub struct VkModelPushConsts {
     _pad: u32,
 }
 
+
 impl VkModelPushConsts {
     pub fn new(model_matrix: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
         Self {
@@ -373,6 +404,7 @@ impl VkModelPushConsts {
     }
 }
 
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct GPUSceneData {
@@ -384,6 +416,7 @@ pub struct GPUSceneData {
     pub sunlight_color: Vec4,
 }
 
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct UBOMatrices {
@@ -394,6 +427,7 @@ pub struct UBOMatrices {
     pad: f32,
 }
 
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstSkyBox {
@@ -403,6 +437,7 @@ pub struct PushConstSkyBox {
     pub exposure: f32,
     pub gamma: f32,
 }
+
 
 impl Default for PushConstSkyBox {
     fn default() -> Self {
@@ -416,6 +451,7 @@ impl Default for PushConstSkyBox {
     }
 }
 
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstIrradiance {
@@ -424,6 +460,7 @@ pub struct PushConstIrradiance {
     delta_phi: f32,
     delta_theta: f32,
 }
+
 
 impl PushConstIrradiance {
     pub fn new(mvp: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
@@ -436,6 +473,7 @@ impl PushConstIrradiance {
     }
 }
 
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstPrefilterEnv {
@@ -444,6 +482,7 @@ pub struct PushConstPrefilterEnv {
     pub roughness: f32,
     pub num_samples: u32,
 }
+
 
 impl PushConstPrefilterEnv {
     pub fn new(mvp: Mat4, roughness: f32, vertex_buffer_addr: vk::DeviceAddress) -> Self {
@@ -469,12 +508,14 @@ pub struct VkMeshBuffers {
     pub vertex_buffer: VkSubAlloc,
 }
 
+
 #[derive(Debug)]
 pub struct VkGpuTextureBuffer {
     pub image_alloc: VkImageAlloc,
     pub data_buffer: vk::Buffer,
     pub data_buffer_offset: u32,
 }
+
 
 #[derive(Debug)]
 pub struct VkGpuMetRoughBuffer {
@@ -483,6 +524,7 @@ pub struct VkGpuMetRoughBuffer {
     pub data_buffer: vk::Buffer,
     pub data_buffer_offset: u32,
 }
+
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -506,6 +548,7 @@ pub struct RenderObject {
     pub vertex_buffer_addr: vk::DeviceAddress,
 }
 
+
 // pub trait Renderable {
 //     fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext);
 //     fn refresh_transform(&mut self);
@@ -517,6 +560,7 @@ pub struct Transform {
     pub scale: Vec3,
     pub rotation: Quat,
 }
+
 
 impl Transform {
     pub fn compose(&mut self) -> Mat4 {
@@ -532,6 +576,7 @@ impl Transform {
     }
 }
 
+
 #[derive(Debug)]
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
@@ -541,6 +586,7 @@ pub struct Node {
     pub local_transform: Mat4,
     pub dirty: bool,
 }
+
 
 impl Default for Node {
     fn default() -> Self {
@@ -554,6 +600,7 @@ impl Default for Node {
         }
     }
 }
+
 
 impl Node {
     pub(crate) fn draw(
@@ -615,10 +662,12 @@ impl Node {
     }
 }
 
+
 pub struct DrawContext {
     pub active_pipelines: HashSet<VkPipelineType>,
     pub render_objects: [Vec<RenderObject>; 4],
 }
+
 
 impl DrawContext {
     pub fn new(vector_capacity: usize) -> Self {
@@ -642,11 +691,13 @@ impl DrawContext {
     }
 }
 
+
 impl Default for DrawContext {
     fn default() -> Self {
         Self::new(400)
     }
 }
+
 
 #[repr(C)]
 #[derive(PartialEq, Debug, Copy, Clone)]

@@ -1,5 +1,5 @@
 use crate::data::data_cache::{
-    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, SamplerCache,
+    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache,
     TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo,
     VkShaderCache,
 };
@@ -43,7 +43,7 @@ pub struct VkDataCache {
     pub mesh_cache: MeshCache,
     pub texture_cache: TextureCache,
     pub environment_cache: EnvironmentCache,
-    pub sampler_cache: SamplerCache,
+    pub sampler_cache: VkSamplerCache,
 }
 
 impl VkDestroyable for VkDataCache {
@@ -192,7 +192,7 @@ pub fn init_caches(
     );
     let texture_cache = TextureCache::new(device, supported_formats.clone());
     let mesh_cache = MeshCache::default();
-    let sampler_cache = SamplerCache::default();
+    let sampler_cache = VkSamplerCache::default();
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
     let id = environment_cache
         .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
@@ -1399,7 +1399,7 @@ impl VkRender {
                 vk::Extent3D::from(dim_extent).depth(1),
                 format,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
-                false,
+                1,
             );
 
             let mut viewport = [vk::Viewport {

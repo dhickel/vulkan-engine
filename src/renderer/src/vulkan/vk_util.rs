@@ -4,10 +4,7 @@ use std::ffi::CStr;
 use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{
-    AccessFlags2, ClearValue, Extent2D, Extent3D, ImageType, PipelineCache,
-    PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo,
-};
+use ash::vk::{AccessFlags2, ClearValue, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -17,7 +14,7 @@ use std::time::SystemTime;
 use vk_mem::{Alloc, Allocator};
 
 use crate::data::data_cache::{
-    LodBias, SamplerCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+    LodBias, VkSamplerCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
     VkSamplerInfo,
 };
 use crate::data::data_util;
@@ -27,7 +24,10 @@ use crate::vulkan::{vk_init, vk_util};
 use ash::prelude::VkResult;
 use shaderc::{CompileOptions, Compiler, ShaderKind};
 use std::fs;
+use std::fs::metadata;
+use std::ops::{Add, Sub};
 use std::path::{Path, PathBuf};
+
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -37,6 +37,7 @@ pub fn command_pool_create_info<'a>(
         .queue_family_index(queue_family_index)
         .flags(flags)
 }
+
 
 pub fn command_buffer_allocate_info<'a>(
     command_pool: vk::CommandPool,
@@ -49,19 +50,23 @@ pub fn command_buffer_allocate_info<'a>(
         .level(level)
 }
 
+
 pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
     vk::FenceCreateInfo::default().flags(flags)
 }
 
+
 pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
     vk::SemaphoreCreateInfo::default().flags(flags)
 }
+
 
 pub fn command_buffer_begin_info<'a>(
     flags: vk::CommandBufferUsageFlags,
 ) -> vk::CommandBufferBeginInfo<'a> {
     vk::CommandBufferBeginInfo::default().flags(flags)
 }
+
 
 pub fn image_subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
@@ -71,6 +76,7 @@ pub fn image_subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSu
         .base_array_layer(0)
         .layer_count(vk::REMAINING_ARRAY_LAYERS)
 }
+
 
 pub fn semaphore_submit_info<'a>(
     stage_flags: vk::PipelineStageFlags2,
@@ -83,11 +89,13 @@ pub fn semaphore_submit_info<'a>(
         .value(0)
 }
 
+
 pub fn command_buffer_submit_info<'a>(cmd: vk::CommandBuffer) -> vk::CommandBufferSubmitInfo<'a> {
     vk::CommandBufferSubmitInfo::default()
         .command_buffer(cmd)
         .device_mask(0)
 }
+
 
 pub fn submit_info_2<'a>(
     cmd_info: &'a [vk::CommandBufferSubmitInfo],
@@ -99,6 +107,7 @@ pub fn submit_info_2<'a>(
         .wait_semaphore_infos(wait_semaphore)
         .signal_semaphore_infos(signal_semaphore)
 }
+
 
 pub fn render_pass_begin_info<'a>(
     render_pass: vk::RenderPass,
@@ -115,22 +124,26 @@ pub fn render_pass_begin_info<'a>(
         .framebuffer(frame_buffer)
 }
 
+
 pub fn image_create_info<'a>(
     format: vk::Format,
     usage_flags: vk::ImageUsageFlags,
     extent: vk::Extent3D,
     image_type: vk::ImageType,
     sample_flags: vk::SampleCountFlags,
+    mips_levels: u32,
 ) -> vk::ImageCreateInfo<'a> {
     vk::ImageCreateInfo::default()
         .image_type(image_type)
         .format(format)
         .extent(extent)
-        .mip_levels(1)
+        .mip_levels(mips_levels)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .array_layers(1)
         .samples(sample_flags)
         .usage(usage_flags)
 }
+
 
 pub fn create_image(
     device: &ash::Device,
@@ -138,28 +151,22 @@ pub fn create_image(
     size: vk::Extent3D,
     format: vk::Format,
     usage_flags: vk::ImageUsageFlags,
-    mip_mapped: bool,
+    mips_levels: u32,
 ) -> VkImageAlloc {
-    let mut image_info = image_create_info(
+    let image_info = image_create_info(
         format,
         usage_flags,
         size,
         ImageType::TYPE_2D,
         vk::SampleCountFlags::TYPE_1,
+        mips_levels,
     );
-
-    let mips = if mip_mapped {
-        data_util::calc_mips_count(size.width, size.height)
-    } else {
-        1
-    };
 
     let mut alloc_info = vk_mem::AllocationCreateInfo::default();
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
     let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
-
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
         vk::ImageAspectFlags::DEPTH
     } else {
@@ -168,7 +175,7 @@ pub fn create_image(
 
     let mut view_info =
         image_view_create_info(format, vk::ImageViewType::TYPE_2D, image, aspect_flag);
-    view_info.subresource_range.level_count = mips;
+    view_info.subresource_range.level_count = mips_levels;
 
     let image_view = unsafe { device.create_image_view(&view_info, None).unwrap() };
 
@@ -178,9 +185,10 @@ pub fn create_image(
         allocation,
         image_extent: size,
         image_format: format,
-        mip_levels: mips,
+        mip_levels: mips_levels,
     }
 }
+
 
 pub fn image_view_create_info<'a>(
     format: vk::Format,
@@ -202,6 +210,7 @@ pub fn image_view_create_info<'a>(
         )
 }
 
+
 pub fn attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
@@ -222,6 +231,7 @@ pub fn attachment_info<'a>(
     };
     info
 }
+
 
 pub fn rendering_info<'a>(
     extent: vk::Extent2D,
@@ -246,6 +256,7 @@ pub fn rendering_info<'a>(
     render_info
 }
 
+
 pub fn depth_attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
@@ -265,6 +276,7 @@ pub fn depth_attachment_info<'a>(
         .clear_value(clear_value)
 }
 
+
 pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
@@ -276,9 +288,11 @@ pub fn pipeline_shader_stage_create_info(
         .module(module)
 }
 
+
 pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
     vk::PipelineLayoutCreateInfo::default()
 }
+
 
 pub fn find_memory_type(
     physical_device: vk::PhysicalDevice,
@@ -287,6 +301,7 @@ pub fn find_memory_type(
 ) -> u32 {
     todo!()
 }
+
 
 pub fn blit_copy_image_to_image(
     device: &ash::Device,
@@ -341,6 +356,7 @@ pub fn blit_copy_image_to_image(
     unsafe { device.cmd_blit_image2(cmd, &blit_info) }
 }
 
+
 pub fn transition_image(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -368,6 +384,7 @@ pub fn transition_image(
 
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
+
 
 pub fn transition_image_layered(
     device: &ash::Device,
@@ -405,6 +422,7 @@ pub fn transition_image_layered(
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
 
+
 pub fn load_shader_module(
     device: &ash::Device,
     file_path: &str,
@@ -441,6 +459,7 @@ pub fn load_shader_module(
     Ok(shader_module)
 }
 
+
 pub fn allocate_buffer(
     allocator: &Allocator,
     size: usize,
@@ -472,6 +491,7 @@ pub fn allocate_buffer(
     })
 }
 
+
 pub fn allocate_and_write_buffer(
     allocator: &Allocator,
     data: &[u8],
@@ -491,22 +511,12 @@ pub fn allocate_and_write_buffer(
     Ok(buffer)
 }
 
+
 pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
     unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
 }
 
-pub fn destroy_mesh_buffers(allocator: &Allocator, mut buffer: VkMeshBuffers) {
-    unsafe {
-        allocator.destroy_buffer(
-            buffer.index_buffer.buffer,
-            &mut buffer.index_buffer.allocation,
-        );
-        allocator.destroy_buffer(
-            buffer.vertex_buffer.buffer,
-            &mut buffer.vertex_buffer.allocation,
-        )
-    }
-}
+
 pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
     unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
 }
@@ -519,13 +529,13 @@ pub fn generate_brdf_lut(
     device: &ash::Device,
     allocator: &Allocator,
     pipeline: vk::Pipeline,
-    cmd_pool: &VkCmdBufferContext,
+    cmd_pool: &VkCommandPool,
+    queue: vk::Queue,
 ) -> VkBrdfLut {
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
 
-    let cmd_buffer = cmd_pool.buffer;
-    let queue = cmd_pool.queue;
+    let cmd_buffer = cmd_pool.buffers[0];
 
     let format = vk::Format::R16G16B16A16_SFLOAT;
     let size = Extent3D::default().width(512).height(512).depth(1);
@@ -538,7 +548,7 @@ pub fn generate_brdf_lut(
         size,
         format,
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
-        false,
+        1,
     );
 
     let brd_sampler = vk::SamplerCreateInfo::default()
@@ -668,12 +678,13 @@ pub fn generate_brdf_lut(
     }
 }
 
+
 pub fn upload_skybox(
     device: &ash::Device,
     allocator: &Allocator,
     tex_meta: TextureMeta,
     pipeline: vk::Pipeline,
-    cmd_pool: &VkCmdBufferContext,
+    cmd_pool: &VkCommandPool,
 ) -> VkCubeMap {
     let face_width = tex_meta.width / 6;
 
@@ -682,7 +693,7 @@ pub fn upload_skybox(
         &tex_meta.bytes,
         vk::BufferUsageFlags::TRANSFER_SRC,
     )
-    .unwrap();
+        .unwrap();
 
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
@@ -727,7 +738,7 @@ pub fn upload_skybox(
         (alloc, device_memory, offset)
     };
 
-    let cmd_buffer = cmd_pool.buffer;
+    let cmd_buffer = cmd_pool.buffers[0];
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -861,6 +872,7 @@ pub fn upload_skybox(
     }
 }
 
+
 fn create_buffer_image_copy(
     face_index: u32, // 0-based index of the face in the horizontal strip
     face_width: u32,
@@ -886,6 +898,7 @@ fn create_buffer_image_copy(
             depth: 1,
         })
 }
+
 
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Create a shader compiler
@@ -947,6 +960,7 @@ pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn st
 
     Ok(())
 }
+
 
 pub(crate) fn create_cubemap(
     device: &ash::Device,
@@ -1040,58 +1054,17 @@ pub(crate) fn create_cubemap(
 // UPLOAD UTIL //
 /////////////////
 
-pub fn immediate_submit<F>(device: &ash::Device, immediate: &VkImmediate, function: F)
-where
-    F: FnOnce(&ash::Device, vk::CommandBuffer),
-{
-    unsafe {
-        let cmd_buffer = immediate.command_pool.buffer;
-        let queue = immediate.command_pool.queue;
-
-        // Reset the fence correctly
-        device.reset_fences(&immediate.fence).unwrap();
-
-        device
-            .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
-            .unwrap();
-
-        let begin_info =
-            vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-        device
-            .begin_command_buffer(cmd_buffer, &begin_info)
-            .unwrap();
-
-        function(device, cmd_buffer);
-
-        device.end_command_buffer(cmd_buffer).unwrap();
-
-        let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
-        let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
-
-        // Submit the command buffer and signal the fence correctly
-        device
-            .queue_submit2(queue, &submit_info, immediate.fence[0])
-            .unwrap();
-
-        // Wait for the fence to be signaled
-        device
-            .wait_for_fences(&immediate.fence, true, u64::MAX)
-            .unwrap();
-    }
-}
-
-
-pub fn transfer_data_host_to_device(
+pub fn record_host_to_storage_buffer(
     device: &ash::Device,
-    cmd_buffer: vk::CommandBuffer,
-    host_buffer: &VkBuffer,
+    host_info: &VkHostBufferInfo,
     device_buffer: &VkBuffer,
     device_offset: u64,
     bytes: &[&[u8]],
     alignment: u64,
 ) -> Result<(), String> {
-    
+    let cmd_buffer = host_info.cmd_pool.buffers[0];
+    let host_buffer = &host_info.buffer;
+
     let mut total_size = 0;
 
     let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
@@ -1116,12 +1089,51 @@ pub fn transfer_data_host_to_device(
         device
             .begin_command_buffer(cmd_buffer, &begin_info)
             .map_err(|err| format!("Error beginning buffer: {}", err))?;
-        
+
+        let src_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::HOST_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(host_info.transfer_queue_index)
+            .buffer(host_buffer.buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+
+        device.cmd_pipeline_barrier(
+            cmd_buffer,
+            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[src_barrier],
+            &[],
+        );
+
         device.cmd_copy_buffer(
             cmd_buffer,
             host_buffer.buffer,
             device_buffer.buffer,
             &copy_info,
+        );
+
+        // Destination buffer barrier: Ensure transfer is complete before graphics queue access
+        let dst_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .src_queue_family_index(host_info.transfer_queue_index)
+            .dst_queue_family_index(host_info.graphics_queue_index)
+            .buffer(device_buffer.buffer)
+            .offset(device_offset)
+            .size(total_size as vk::DeviceSize);
+
+        device.cmd_pipeline_barrier(
+            cmd_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::ALL_GRAPHICS,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[dst_barrier],
+            &[],
         );
 
         device
@@ -1132,147 +1144,91 @@ pub fn transfer_data_host_to_device(
     Ok(())
 }
 
-pub fn upload_mesh(
+pub fn record_host_to_image_buffer(
     device: &ash::Device,
-    allocator: Arc<Mutex<Allocator>>,
-    immediate: &VkImmediate,
-    indices: &[u32],
-    vertices: &[Vertex],
-) -> VkMeshBuffers {
-    let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
-    let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
+    allocator: &vk_mem::Allocator,
+    sampler_cache: &mut VkSamplerCache,
+    host_info: &VkHostBufferInfo,
+    image_meta: &[&TextureMeta],
+    alignment: u64,
+) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
+    let host_buffer = &host_info.buffer;
+    let cmd_buffer = host_info.cmd_pool.buffers[0];
 
-    let allocator = allocator.lock().unwrap();
+    let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
+    let mut offset: DeviceSize = 0;
+    let image_offsets: Vec<DeviceSize> = image_meta.iter().map(|meta| {
+        let size = meta.bytes.len().next_multiple_of(alignment as usize);
+        unsafe {
+            std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, size);
+            let host_ptr = host_ptr.add(size);
+            let curr_offset = offset;
+            offset = offset.add(size as u64);
+            curr_offset as DeviceSize
+        }
+    }).collect();
 
-    let index_buffer = vk_util::allocate_buffer(
-        &allocator,
-        i_buffer_size,
-        vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-        vk_mem::MemoryUsage::AutoPreferDevice,
-    )
-    .expect("Failed to allocate index buffer");
 
-    let vertex_buffer = vk_util::allocate_buffer(
-        &allocator,
-        v_buffer_size,
-        vk::BufferUsageFlags::STORAGE_BUFFER
-            | vk::BufferUsageFlags::TRANSFER_DST
-            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-        vk_mem::MemoryUsage::AutoPreferDevice,
-    )
-    .expect("Failed to allocate vertex buffer");
+    let mut image_allocs = Vec::<VkImageAlloc>::with_capacity(image_meta.len());
+    let mut pre_transitions = Vec::<vk::ImageMemoryBarrier>::with_capacity(image_meta.len());
+    for meta in image_meta {
+        let size = Extent3D::default().height(meta.height).width(meta.width).depth(1);
+        let new_image = create_image(
+            device,
+            &allocator,
+            size,
+            meta.format,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            meta.mips_levels,
+        );
 
-    let v_buffer_addr_info = vk::BufferDeviceAddressInfo::default().buffer(vertex_buffer.buffer);
+        let initial_transition = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(host_info.transfer_queue_index)
+            .image(new_image.image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: meta.mips_levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .src_access_mask(vk::AccessFlags::NONE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
 
-    let vertex_buffer_addr = unsafe { device.get_buffer_device_address(&v_buffer_addr_info) };
+        image_allocs.push(new_image);
+        pre_transitions.push(initial_transition);
+    }
 
-    let new_surface = VkMeshBuffers {
-        index_buffer,
-        vertex_buffer,
-        vertex_buffer_addr,
-    };
-
-    let staging_buffer = vk_util::allocate_buffer(
-        &allocator,
-        v_buffer_size + i_buffer_size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-        vk_mem::MemoryUsage::AutoPreferHost,
-    )
-    .expect("Failed to allocate staging buffer");
-
-    let staging_data = staging_buffer.alloc_info.mapped_data as *mut u8;
+    let begin_info = vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    unsafe {
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .map_err(|err| format!("Error beginning buffer: {:?}", err))?
+    }
 
     unsafe {
-        // Copy vertex data to the staging buffer
-        std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const u8, staging_data, v_buffer_size);
-
-        // Copy index data to the staging buffer
-        std::ptr::copy_nonoverlapping(
-            indices.as_ptr() as *const u8,
-            staging_data.add(v_buffer_size),
-            i_buffer_size,
+        device.cmd_pipeline_barrier(
+            cmd_buffer,
+            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &pre_transitions,
         );
     }
 
-    immediate_submit(device, immediate, |device, cmd| {
-        let vertex_copy = [vk::BufferCopy::default()
-            .src_offset(0)
-            .dst_offset(0)
-            .size(v_buffer_size as vk::DeviceSize)];
 
-        let index_copy = [vk::BufferCopy::default()
-            .dst_offset(0)
-            .src_offset(v_buffer_size as vk::DeviceSize)
-            .size(i_buffer_size as vk::DeviceSize)];
+    let mut uploaded_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_meta.len());
+    let mut final_transitions = Vec::<vk::ImageMemoryBarrier>::with_capacity(image_meta.len());
 
-        unsafe {
-            device.cmd_copy_buffer(
-                cmd,
-                staging_buffer.buffer,
-                new_surface.vertex_buffer.buffer,
-                &vertex_copy,
-            );
-        }
 
-        unsafe {
-            device.cmd_copy_buffer(
-                cmd,
-                staging_buffer.buffer,
-                new_surface.index_buffer.buffer,
-                &index_copy,
-            );
-        }
-    });
-
-    vk_util::destroy_buffer(&allocator, staging_buffer);
-
-    new_surface
-}
-
-pub fn upload_image(
-    device: &ash::Device,
-    allocator: Arc<Mutex<Allocator>>,
-    immediate: &VkImmediate,
-    sampler_cache: &mut SamplerCache,
-    data: &[u8],
-    size: vk::Extent3D,
-    format: vk::Format,
-    usage_flags: vk::ImageUsageFlags,
-    mip_mapped: bool,
-) -> (VkImageAlloc, vk::Sampler) {
-    let allocator = allocator.lock().unwrap();
-
-    // Calculate mip levels
-    let mip_levels = if mip_mapped {
-        (size.width.max(size.height) as f32).log2().floor() as u32 + 1
-    } else {
-        1
-    };
-
-    let upload_buffer =
-        vk_util::allocate_and_write_buffer(&allocator, data, vk::BufferUsageFlags::TRANSFER_SRC)
-            .unwrap();
-
-    let new_image = create_image(
-        device,
-        &allocator,
-        size,
-        format,
-        usage_flags | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-        mip_mapped,
-    );
-
-    immediate_submit(device, immediate, |device, cmd| {
-        vk_util::transition_image(
-            device,
-            cmd,
-            new_image.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        );
-
+    for (image_alloc, offset) in image_allocs.into_iter().zip(image_offsets.iter()) {
         let copy_region = [vk::BufferImageCopy::default()
-            .buffer_offset(0)
+            .buffer_offset(*offset)
             .buffer_row_length(0)
             .buffer_image_height(0)
             .image_subresource(
@@ -1282,103 +1238,143 @@ pub fn upload_image(
                     .base_array_layer(0)
                     .layer_count(1),
             )
-            .image_extent(size)];
+            .image_extent(image_alloc.image_extent)];
 
         unsafe {
             device.cmd_copy_buffer_to_image(
-                cmd,
-                upload_buffer.buffer,
-                new_image.image,
+                cmd_buffer,
+                host_buffer.buffer,
+                image_alloc.image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &copy_region,
             );
         }
 
-        // Generate mipmaps
-        if mip_levels > 1 {
-            let mut mip_width = size.width;
-            let mut mip_height = size.height;
-
-            for i in 1..mip_levels {
-                let blit = vk::ImageBlit::default()
-                    .src_offsets([
-                        vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D {
-                            x: mip_width as i32,
-                            y: mip_height as i32,
-                            z: 1,
-                        },
-                    ])
-                    .src_subresource(
-                        vk::ImageSubresourceLayers::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .mip_level(i - 1)
-                            .base_array_layer(0)
-                            .layer_count(1),
-                    )
-                    .dst_offsets([
-                        vk::Offset3D { x: 0, y: 0, z: 0 },
-                        vk::Offset3D {
-                            x: if mip_width > 1 { mip_width / 2 } else { 1 } as i32,
-                            y: if mip_height > 1 { mip_height / 2 } else { 1 } as i32,
-                            z: 1,
-                        },
-                    ])
-                    .dst_subresource(
-                        vk::ImageSubresourceLayers::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .mip_level(i)
-                            .base_array_layer(0)
-                            .layer_count(1),
-                    );
-
-                unsafe {
-                    device.cmd_blit_image(
-                        cmd,
-                        new_image.image,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        new_image.image,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &[blit],
-                        vk::Filter::LINEAR,
-                    );
-                }
-
-                // Update dimensions for next iteration
-                mip_width = if mip_width > 1 { mip_width / 2 } else { 1 };
-                mip_height = if mip_height > 1 { mip_height / 2 } else { 1 };
-            }
+        if image_alloc.mip_levels > 1 {
+            record_mip_maps_generation(
+                device,
+                cmd_buffer,
+                image_alloc.image,
+                image_alloc.image_extent.width,
+                image_alloc.image_extent.height,
+                image_alloc.mip_levels,
+            );
         }
 
-        vk_util::transition_image(
-            device,
-            cmd,
-            new_image.image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        let final_transition = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(host_info.transfer_queue_index)
+            .dst_queue_family_index(host_info.graphics_queue_index)
+            .image(image_alloc.image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: image_alloc.mip_levels,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+
+        final_transitions.push(final_transition);
+
+        let sampler_info = VkSamplerInfo {
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+            address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            mip_lod_bias: LodBias::Sharp,
+            anisotropy_enable: false, // FIXME, we need to implement this in engine
+            max_anisotropy: 0,
+            compare_enable: false,
+            compare_op: Default::default(),
+            min_lod: 0,
+            max_lod: image_alloc.mip_levels,
+            border_color: Default::default(),
+            unnormalized_coordinates: false,
+        };
+
+        let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
+        uploaded_images.push((image_alloc, sampler));
+    }
+
+    unsafe {
+        device.cmd_pipeline_barrier(
+            cmd_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &final_transitions,
         );
-    });
-    vk_util::destroy_buffer(&allocator, upload_buffer);
 
-    let sampler_info = VkSamplerInfo {
-        mag_filter: vk::Filter::LINEAR,
-        min_filter: vk::Filter::LINEAR,
-        mipmap_mode: vk::SamplerMipmapMode::LINEAR,
-        address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-        address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-        address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-        mip_lod_bias: LodBias::Sharp,
-        anisotropy_enable: false, // FIXME, we need to implement this in engine
-        max_anisotropy: 0,
-        compare_enable: false,
-        compare_op: Default::default(),
-        min_lod: 0,
-        max_lod: mip_levels,
-        border_color: Default::default(),
-        unnormalized_coordinates: false,
-    };
+        device.end_command_buffer(cmd_buffer)
+            .map_err(|err| format!("Error ending buffer: {:?}", err))?
+    }
+    
+    Ok(uploaded_images)
+}
 
-    let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
 
-    (new_image, sampler)
+pub fn record_mip_maps_generation(
+    device: &ash::Device,
+    cmd_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+) {
+    let mut mip_width = width;
+    let mut mip_height = height;
+
+    for i in 1..mip_levels {
+        let blit = vk::ImageBlit::default()
+            .src_offsets([
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D {
+                    x: mip_width as i32,
+                    y: mip_height as i32,
+                    z: 1,
+                },
+            ])
+            .src_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: i - 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .dst_offsets([
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D {
+                    x: if mip_width > 1 { mip_width / 2 } else { 1 } as i32,
+                    y: if mip_height > 1 { mip_height / 2 } else { 1 } as i32,
+                    z: 1,
+                },
+            ])
+            .dst_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: i,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        unsafe {
+            device.cmd_blit_image(
+                cmd_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[blit],
+                vk::Filter::LINEAR,
+            );
+        }
+
+        mip_width = if mip_width > 1 { mip_width / 2 } else { 1 };
+        mip_height = if mip_height > 1 { mip_height / 2 } else { 1 };
+    }
 }

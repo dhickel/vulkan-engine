@@ -9,7 +9,7 @@ use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
-use crate::vulkan::vk_types::{VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc};
+use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBufferInfo, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc};
 use crate::vulkan::vk_util;
 use ash::vk::Format;
 use ash::{vk, Device};
@@ -37,17 +37,11 @@ pub enum LoadResult<T> {
 }
 
 
-pub enum AllocFlag {
-    KeepMeta,
-    DropMeta,
-    DropAll,
-}
-
-
 #[derive(Debug)]
 pub enum CachedTexture {
     Unloaded(TextureMeta),
     Loaded(VkLoadedTexture),
+    _NULL,
 }
 
 
@@ -55,6 +49,7 @@ pub enum CachedTexture {
 pub enum CachedMaterial {
     Unloaded(MaterialMeta),
     Loaded(VkLoadedMaterial),
+    _NULL,
 }
 
 
@@ -70,19 +65,23 @@ pub struct VkLoadedMaterial {
 
 #[derive(Debug)]
 pub struct VkLoadedTexture {
-    pub meta: TextureMeta,
     pub alloc: VkImageAlloc,
     pub sampler: vk::Sampler,
 }
 
 
-#[derive(Debug)]
 pub struct TextureCache {
+    device: ash::Device,
+    allocator: Arc<Mutex<Allocator>>,
     cached_textures: Vec<CachedTexture>,
     cached_materials: Vec<CachedMaterial>,
-    image_descriptors: [VkDynamicDescriptorAllocator; 2],
+    desc_allocator: VkDynamicDescriptorAllocator,
     supported_formats: HashSet<vk::Format>,
-    linear_sampler: vk::Sampler,
+    sampler_cache: VkSamplerCache,
+    material_meta_storage: VkSubAllocator,
+    host_buffer: Arc<Mutex<VkHostBufferInfo>>,
+    free_ids: Vec<u32>,
+    host_alignment: u64,
 }
 
 
@@ -93,6 +92,7 @@ impl TextureCache {
     pub const DEFAULT_NORMAL_TEX: u32 = 3;
     pub const DEFAULT_OCCLUSION_TEX: u32 = 4;
     pub const DEFAULT_EMISSIVE_TEX: u32 = 5;
+    pub const DEFAULT_TEX_ITER_START: usize = 6;
 
     pub const DEFAULT_BASE_COLOR_FACTOR: Vec4 = vec4(1.0, 1.0, 1.0, 1.0);
     pub const DEFAULT_METALLIC_FACTOR: f32 = 0.0;
@@ -104,6 +104,7 @@ impl TextureCache {
 
     pub const DEFAULT_MAT_ROUGH_MAT: u32 = 0;
     pub const DEFAULT_ERROR_MAT: u32 = 1;
+    pub const DEFAULT_MAT_ITER_START: usize = 2;
 
     pub const DEFAULT_NORMAL_MAP: NormalMap = NormalMap {
         scale: Self::DEFAULT_NORMAL_SCALE,
@@ -120,7 +121,15 @@ impl TextureCache {
         texture_id: Self::DEFAULT_EMISSIVE_TEX,
     };
 
-    pub fn new(device: &ash::Device, supported_formats: HashSet<vk::Format>) -> Self {
+    pub fn new(
+        device: ash::Device,
+        allocator: Arc<Mutex<Allocator>>,
+        supported_formats: HashSet<vk::Format>,
+        material_meta_storage: VkSubAllocator,
+        host_buffer: Arc<Mutex<VkHostBufferInfo>>,
+        sampler_cache: VkSamplerCache,
+        limits: VkBufferAndDescriptorLimits,
+    ) -> Self {
         let def_color = CachedTexture::Unloaded(TextureMeta {
             bytes: vec![255, 255, 255, 255],
             width: 1,
@@ -209,14 +218,6 @@ impl TextureCache {
         cached_materials.push(CachedMaterial::Unloaded(MaterialMeta::default()));
         cached_materials.push(err_mat);
 
-        let mut sampler = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::NEAREST)
-            .min_filter(vk::Filter::NEAREST);
-
-        sampler.mag_filter = vk::Filter::LINEAR;
-        sampler.min_filter = vk::Filter::LINEAR;
-
-        let linear_sampler = unsafe { device.create_sampler(&sampler, None).unwrap() };
 
         let pool_ratios = [
             PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
@@ -224,19 +225,20 @@ impl TextureCache {
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 7.0),
         ];
 
-        let image_descriptors = [
-            // TODO fallback values if fails to allocate
-            //  These are also static so only one pool needed?
-            VkDynamicDescriptorAllocator::new(device, 5_000, &pool_ratios).unwrap(),
-            VkDynamicDescriptorAllocator::new(device, 5_000, &pool_ratios).unwrap(),
-        ];
+        let desc_allocator = VkDynamicDescriptorAllocator::new(&device, 5_000, &pool_ratios).unwrap();
 
         Self {
+            device,
+            allocator,
             cached_textures,
             cached_materials,
             supported_formats,
-            image_descriptors,
-            linear_sampler,
+            desc_allocator,
+            material_meta_storage,
+            host_buffer,
+            sampler_cache,
+            free_ids: vec![],
+            host_alignment: limits.optimal_buffer_copy_offset_alignment,
         }
     }
 
@@ -295,9 +297,6 @@ impl TextureCache {
         self.cached_materials.get(id as usize)
     }
 
-    pub fn get_material_unchecked(&self, id: u32) -> &CachedMaterial {
-        unsafe { self.cached_materials.get_unchecked(id as usize) }
-    }
 
     pub fn get_loaded_material_unchecked(&self, id: u32) -> &VkLoadedMaterial {
         unsafe {
@@ -342,8 +341,91 @@ impl TextureCache {
         }
     }
 
-    pub fn get_descriptor_allocator(&self, index: u32) -> &VkDynamicDescriptorAllocator {
-        unsafe { self.image_descriptors.get_unchecked(index as usize) }
+
+    pub fn allocate_textures(
+        &mut self,
+        texture_ids: Vec<u32>,
+    ) {
+        let host_buffer = self.host_buffer.lock().unwrap();
+        let max_upload_bytes = host_buffer.buffer.size;
+
+        let mut curr_bytes = 0;
+        let mut next_upload = Vec::<&TextureMeta>::with_capacity(texture_ids.len());
+        let mut loaded = Vec::<CachedTexture>::with_capacity(texture_ids.len());
+
+        for id in texture_ids.iter().copied() {
+            match self.cached_textures.get(id as usize) {
+                Some(CachedTexture::Unloaded(meta)) => {
+                    if curr_bytes + meta.bytes.len().next_multiple_of(self.host_alignment as usize) > max_upload_bytes {
+                        let alloc_result = vk_util::record_host_to_image_buffer(
+                            &self.device,
+                            &self.allocator.lock().unwrap(),
+                            &mut self.sampler_cache,
+                            &host_buffer,
+                            &next_upload,
+                            self.host_alignment,
+                        );
+
+                        match alloc_result {
+                            Ok(images) => {
+                                curr_bytes = 0;
+                                next_upload.clear();
+
+                                for image in images {
+                                    let loaded_tex = VkLoadedTexture {
+                                        alloc: image.0,
+                                        sampler: image.1,
+                                    };
+                                    loaded.push(CachedTexture::Loaded(loaded_tex));
+                                }
+                            }
+                            Err(err) => {
+                                error!("Error loading textures: {:?}", err);
+                                return;
+                            }
+                        }
+                    }
+                    curr_bytes += meta.bytes.len().next_multiple_of(self.host_alignment as usize);
+                    next_upload.push(meta);
+                }
+                Some(CachedTexture::Loaded(_)) => continue,
+                _ => {
+                    error!("Error loading textures: Invalid texture index");
+                    return;
+                }
+            }
+        }
+
+        for (id, tex) in texture_ids.into_iter().zip(loaded.into_iter()) {
+            self.cached_textures[id as usize] = tex;
+        }
+    }
+
+
+    pub fn allocate_materials(
+        &mut self,
+        material_ids: Vec<u32>,
+        rtn_alloc: bool,
+    ) -> LoadResult<vk::DescriptorSet> {
+        let texture_ids: Vec<u32> = material_ids
+            .iter()
+            .copied()
+            .filter_map(|id| {
+                if let Some(CachedMaterial::Unloaded(mat)) = self.cached_materials.get(id as usize) {
+                    let t_ids: Vec<u32> = mat.texture_ids.into();
+                    Some(t_ids)
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
+        
+        self.allocate_textures(texture_ids);
+        
+        
+        
+        todo!()
     }
 
     pub fn allocate_texture(
@@ -351,7 +433,7 @@ impl TextureCache {
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
         immediate: &VkImmediate,
-        sampler_cache: &mut SamplerCache,
+        sampler_cache: &mut VkSamplerCache,
         tex_id: u32,
     ) {
         let tex_id = tex_id as usize;
@@ -433,7 +515,7 @@ impl TextureCache {
         }
     }
 
-    fn write_material_ext(
+    fn write_texture_descriptors(
         &mut self,
         meta: MaterialMeta,
         uniform_buffer: VkBuffer,
@@ -510,12 +592,12 @@ impl TextureCache {
 
         let descriptors: [vk::DescriptorSet; 2] = [
             {
-                let descriptor = &self.image_descriptors[0].allocate(device, &layout).unwrap();
+                let descriptor = &self.desc_allocator[0].allocate(device, &layout).unwrap();
                 writer.update_set(device, *descriptor);
                 *descriptor
             },
             {
-                let descriptor = &self.image_descriptors[1].allocate(device, &layout).unwrap();
+                let descriptor = &self.desc_allocator[1].allocate(device, &layout).unwrap();
                 writer.update_set(device, *descriptor);
                 *descriptor
             },
@@ -567,7 +649,7 @@ impl TextureCache {
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
         immediate: &VkImmediate,
-        sampler_cache: &mut SamplerCache,
+        sampler_cache: &mut VkSamplerCache,
         desc_layout_cache: &VkDescLayoutCache,
     ) {
         for x in 0..self.cached_textures.len() {
@@ -613,7 +695,7 @@ impl VkDestroyable for TextureCache {
             }
         }
 
-        self.image_descriptors
+        self.desc_allocator
             .iter_mut()
             .for_each(|desc| desc.destroy(device, allocator));
     }
@@ -647,6 +729,8 @@ pub struct MeshCache {
 
 
 impl MeshCache {
+    const DEFAULT_MESH_ITER_START: usize = 1;
+
     fn new(vertex_storage: VkSubAllocator, index_storage: VkSubAllocator) -> Self {
         use glam::{Vec3, Vec4};
 
@@ -690,20 +774,20 @@ impl MeshCache {
         &mut self,
         data: MeshMeta,
         buffer_placement: BufferPlacement,
-        alloc_flag: AllocFlag,
+        alloc_flag: CacheFlag,
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         let id = self.add(data);
         self.allocate_id(id, buffer_placement, alloc_flag, return_buffers)
     }
-    
-    
+
+
     pub fn add_and_allocate_multi(
         &mut self,
         data: Vec<MeshMeta>,
         buffer_placement: BufferPlacement,
-        alloc_flag: AllocFlag,
-        return_buffers:bool
+        alloc_flag: CacheFlag,
+        return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         let ids = self.add_multi(data);
         self.allocate_ids(&ids, buffer_placement, alloc_flag, return_buffers)
@@ -729,7 +813,6 @@ impl MeshCache {
         &mut self,
         meshes: Vec<(u32, *const MeshMeta)>,
         buffer_placement: BufferPlacement,
-        alloc_flag: AllocFlag,
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         let mut vertex_data = Vec::<&[u8]>::with_capacity(meshes.len());
@@ -782,9 +865,9 @@ impl MeshCache {
                         rtn_meshes.push(buffer)
                     }
 
-                    if matches!(alloc_flag, AllocFlag::KeepMeta | AllocFlag::DropMeta) {
+                    if matches!(alloc_flag, CacheFlag::KeepMeta | CacheFlag::DropMeta) {
                         let loaded_mesh = VkLoadedMesh {
-                            meta: if matches!(alloc_flag, AllocFlag::KeepMeta) { Some(meta) } else { None },
+                            meta: if matches!(alloc_flag, CacheFlag::KeepMeta) { Some(meta) } else { None },
                             buffer,
                         };
                         *mesh = CachedMesh::Loaded(loaded_mesh);
@@ -808,7 +891,7 @@ impl MeshCache {
     pub fn allocate_all(
         &mut self,
         buffer_placement: BufferPlacement,
-        alloc_flag: AllocFlag,
+        alloc_flag: CacheFlag,
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         let id_meshes: Vec<(u32, *const MeshMeta)> = self.cached_meshes.iter()
@@ -828,7 +911,7 @@ impl MeshCache {
         &mut self,
         mesh_ids: &[u32],
         buffer_placement: BufferPlacement,
-        alloc_flag: AllocFlag,
+        alloc_flag: CacheFlag,
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         let id_meshes: Vec<(u32, *const MeshMeta)> = mesh_ids.iter()
@@ -848,7 +931,7 @@ impl MeshCache {
         &mut self,
         mesh_id: u32,
         buffer_placement: BufferPlacement,
-        alloc_flag: AllocFlag,
+        alloc_flag: CacheFlag,
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         if let Some(CachedMesh::Unloaded(meta)) = self.cached_meshes.get(mesh_id as usize) {
@@ -897,7 +980,7 @@ impl MeshCache {
 
 
     pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator, drop: bool) {
-        (1..self.cached_meshes.len()).for_each(|i| self.deallocate_id(i as u32, drop))
+        (Self::DEFAULT_MESH_ITER_START..self.cached_meshes.len()).for_each(|i| self.deallocate_id(i as u32, drop))
     }
 }
 
@@ -1356,12 +1439,12 @@ impl VkSamplerInfo {
 }
 
 
-pub struct SamplerCache {
+pub struct VkSamplerCache {
     pub samplers: HashMap<VkSamplerInfo, vk::Sampler>,
 }
 
 
-impl Default for SamplerCache {
+impl Default for VkSamplerCache {
     fn default() -> Self {
         Self {
             samplers: HashMap::with_capacity(20),
@@ -1370,7 +1453,7 @@ impl Default for SamplerCache {
 }
 
 
-impl SamplerCache {
+impl VkSamplerCache {
     pub fn get_or_create_sampler(
         &mut self,
         device: &ash::Device,
