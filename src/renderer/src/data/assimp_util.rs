@@ -99,7 +99,7 @@ pub fn load_model(
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(meshes.len());
     for (og_idx, mesh) in meshes.into_iter().enumerate() {
-        let id = mesh_cache.add_mesh(mesh);
+        let id = mesh_cache.add(mesh);
         mapped_meshes.insert(og_idx as u32, id);
     }
 

@@ -4,4 +4,4 @@ pub mod vk_pipeline;
 pub mod vk_render;
 pub mod vk_util;
 pub mod vk_types;
-mod vk_storage;
+pub mod vk_storage;

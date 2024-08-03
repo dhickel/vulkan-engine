@@ -1,7 +1,7 @@
 use std::cmp::{max, PartialEq};
 use std::ffi::CStr;
 
-use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkGpuMeshBuffers};
+use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
@@ -495,7 +495,7 @@ pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
     unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
 }
 
-pub fn destroy_mesh_buffers(allocator: &Allocator, mut buffer: VkGpuMeshBuffers) {
+pub fn destroy_mesh_buffers(allocator: &Allocator, mut buffer: VkMeshBuffers) {
     unsafe {
         allocator.destroy_buffer(
             buffer.index_buffer.buffer,
@@ -519,7 +519,7 @@ pub fn generate_brdf_lut(
     device: &ash::Device,
     allocator: &Allocator,
     pipeline: vk::Pipeline,
-    cmd_pool: &VkCommandPool,
+    cmd_pool: &VkCmdBufferContext,
 ) -> VkBrdfLut {
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
@@ -673,7 +673,7 @@ pub fn upload_skybox(
     allocator: &Allocator,
     tex_meta: TextureMeta,
     pipeline: vk::Pipeline,
-    cmd_pool: &VkCommandPool,
+    cmd_pool: &VkCmdBufferContext,
 ) -> VkCubeMap {
     let face_width = tex_meta.width / 6;
 
@@ -1138,7 +1138,7 @@ pub fn upload_mesh(
     immediate: &VkImmediate,
     indices: &[u32],
     vertices: &[Vertex],
-) -> VkGpuMeshBuffers {
+) -> VkMeshBuffers {
     let i_buffer_size = indices.len() * std::mem::size_of::<u32>();
     let v_buffer_size = vertices.len() * std::mem::size_of::<Vertex>();
 
@@ -1166,7 +1166,7 @@ pub fn upload_mesh(
 
     let vertex_buffer_addr = unsafe { device.get_buffer_device_address(&v_buffer_addr_info) };
 
-    let new_surface = VkGpuMeshBuffers {
+    let new_surface = VkMeshBuffers {
         index_buffer,
         vertex_buffer,
         vertex_buffer_addr,

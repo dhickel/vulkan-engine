@@ -1,16 +1,19 @@
-use std::cell::Cell;
-use std::cmp::max;
 use crate::data::gpu_data;
-use crate::data::gpu_data::{MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex, VkGpuMeshBuffers, VkGpuTextureBuffer};
+use crate::data::gpu_data::{
+    MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex,
+    VkMeshBuffers, VkGpuTextureBuffer,
+};
 use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
 use ash::vk;
-use glam::{vec4, Vec4};
-use std::collections::HashMap;
-use std::sync::{Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use glam::{vec4, Vec3, Vec4};
 use half::f16;
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
+use std::cell::Cell;
+use std::cmp::max;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex};
 use vk_mem::Alloc;
 
 pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
@@ -34,7 +37,9 @@ impl PackUnorm for Vec4 {
     }
 }
 
-pub fn convert_rgb32f_to_rgba32f(img: ImageBuffer<Rgb<f32>, Vec<f32>>) -> ImageBuffer<Rgba<f32>, Vec<f32>> {
+pub fn convert_rgb32f_to_rgba32f(
+    img: ImageBuffer<Rgb<f32>, Vec<f32>>,
+) -> ImageBuffer<Rgba<f32>, Vec<f32>> {
     let (width, height) = img.dimensions();
 
     ImageBuffer::from_fn(width, height, |x, y| {
@@ -48,7 +53,7 @@ pub fn calc_mips_count(width: u32, height: u32) -> u32 {
     (max_dimension.log2().floor() as u32) + 1
 }
 
-pub fn bytes_per_pixel(format : vk::Format) -> u32 {
+pub fn bytes_per_pixel(format: vk::Format) -> u32 {
     match format {
         vk::Format::R8_UNORM => 1,
         vk::Format::R8G8_UNORM => 2,
@@ -62,145 +67,244 @@ pub fn bytes_per_pixel(format : vk::Format) -> u32 {
         vk::Format::R32G32_SFLOAT => 8,
         vk::Format::R32G32B32_SFLOAT => 12,
         vk::Format::R32G32B32A32_SFLOAT => 16,
-        _ => panic!("Cannot calculate bytes per pixel: Unsupported format")
+        _ => panic!("Cannot calculate bytes per pixel: Unsupported format"),
     }
 }
 
-pub struct Semaphore {
-    permits: Mutex<usize>,
-    condvar: Condvar,
-}
+pub fn get_skybox_mesh() -> (Vec<Vertex>, Vec<u32>) {
+    let vertices = vec![
+        // Front face
+        Vertex {
+            position: Vec3::new(-1.0, -1.0, 1.0),
+            uv0_x: 0.0,
+            normal: Vec3::Z,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, -1.0, 1.0),
+            uv0_x: 1.0,
+            normal: Vec3::Z,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, 1.0, 1.0),
+            uv0_x: 1.0,
+            normal: Vec3::Z,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, 1.0, 1.0),
+            uv0_x: 0.0,
+            normal: Vec3::Z,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        // Back face
+        Vertex {
+            position: Vec3::new(-1.0, -1.0, -1.0),
+            uv0_x: 1.0,
+            normal: -Vec3::Z,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, 1.0, -1.0),
+            uv0_x: 1.0,
+            normal: -Vec3::Z,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, 1.0, -1.0),
+            uv0_x: 0.0,
+            normal: -Vec3::Z,
+            uv0_y: 1.0,
+            color: glam::Vec4,
+            tangent: -Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, -1.0, -1.0),
+            uv0_x: 0.0,
+            normal: -Vec3::Z,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::X,
+            ..Default::default()
+        },
+        // Top face
+        Vertex {
+            position: Vec3::new(-1.0, 1.0, -1.0),
+            uv0_x: 0.0,
+            normal: Vec3::Y,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, 1.0, 1.0),
+            uv0_x: 0.0,
+            normal: Vec3::Y,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, 1.0, 1.0),
+            uv0_x: 1.0,
+            normal: Vec3::Y,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, 1.0, -1.0),
+            uv0_x: 1.0,
+            normal: Vec3::Y,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        // Bottom face
+        Vertex {
+            position: Vec3::new(-1.0, -1.0, -1.0),
+            uv0_x: 0.0,
+            normal: -Vec3::Y,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, -1.0, -1.0),
+            uv0_x: 1.0,
+            normal: -Vec3::Y,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, -1.0, 1.0),
+            uv0_x: 1.0,
+            normal: -Vec3::Y,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, -1.0, 1.0),
+            uv0_x: 0.0,
+            normal: -Vec3::Y,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::X,
+            ..Default::default()
+        },
+        // Right face
+        Vertex {
+            position: Vec3::new(1.0, -1.0, -1.0),
+            uv0_x: 1.0,
+            normal: Vec3::X,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::Z,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, 1.0, -1.0),
+            uv0_x: 1.0,
+            normal: Vec3::X,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::Z,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, 1.0, 1.0),
+            uv0_x: 0.0,
+            normal: Vec3::X,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::Z,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(1.0, -1.0, 1.0),
+            uv0_x: 0.0,
+            normal: Vec3::X,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: -Vec4::Z,
+            ..Default::default()
+        },
+        // Left face
+        Vertex {
+            position: Vec3::new(-1.0, -1.0, -1.0),
+            uv0_x: 0.0,
+            normal: -Vec3::X,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::Z,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, -1.0, 1.0),
+            uv0_x: 1.0,
+            normal: -Vec3::X,
+            uv0_y: 0.0,
+            color: Vec4::ONE,
+            tangent: Vec4::Z,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, 1.0, 1.0),
+            uv0_x: 1.0,
+            normal: -Vec3::X,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::Z,
+            ..Default::default()
+        },
+        Vertex {
+            position: Vec3::new(-1.0, 1.0, -1.0),
+            uv0_x: 0.0,
+            normal: -Vec3::X,
+            uv0_y: 1.0,
+            color: Vec4::ONE,
+            tangent: Vec4::Z,
+            ..Default::default()
+        },
+    ];
 
-pub struct SemaphorePermit<'a> {
-    semaphore: &'a Semaphore,
-    released: Cell<bool>,
-}
+    let indices = vec![
+        0, 1, 2, 2, 3, 0, // front
+        4, 5, 6, 6, 7, 4, // back
+        8, 9, 10, 10, 11, 8, // top
+        12, 13, 14, 14, 15, 12, // bottom
+        16, 17, 18, 18, 19, 16, // right
+        20, 21, 22, 22, 23, 20, // left
+    ];
 
-impl<'a> SemaphorePermit<'a> {
-    // Take self to consume permit to avoid duplicated release calls on drop
-    pub fn release(self) {
-        if !self.released.get() {
-            let mut permits = self.semaphore.permits.lock().unwrap();
-            *permits += 1;
-            self.semaphore.condvar.notify_one();
-            self.released.set(true);
-        }
-    }
-}
-
-impl<'a> Drop for SemaphorePermit<'a> {
-    fn drop(&mut self) {
-        // Release on drop if not already released
-        if !self.released.get() {
-            let mut permits = self.semaphore.permits.lock().unwrap();
-            *permits += 1;
-            self.semaphore.condvar.notify_one();
-            self.released.set(true);
-        }
-    }
-}
-
-impl Semaphore {
-    pub fn new(count: usize) -> Self {
-        Semaphore {
-            permits: Mutex::new(count),
-            condvar: Condvar::new(),
-        }
-    }
-
-    pub fn acquire(&self) -> SemaphorePermit {
-        let mut permits = self.permits.lock().unwrap();
-        while *permits == 0 {
-            permits = self.condvar.wait(permits).unwrap();
-        }
-        *permits -= 1;
-        SemaphorePermit {
-            semaphore: self,
-            released: Cell::new(false),
-        }
-    }
-
-    pub fn try_acquire(&self) -> Option<SemaphorePermit> {
-        let mut permits = self.permits.lock().unwrap();
-        if *permits > 0 {
-            *permits -= 1;
-            Some(SemaphorePermit {
-                semaphore: self,
-                released: Cell::new(false),
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn available_permits(&self) -> usize {
-        *self.permits.lock().unwrap()
-    }
-}
-
-
-pub struct SimpleLock {
-    locked: AtomicBool,
-    condvar: Condvar,
-    mutex: Mutex<()>,
-}
-
-pub struct SimpleLockGuard<'a> {
-    lock: &'a SimpleLock,
-    released: Cell<bool>,
-}
-
-impl SimpleLock {
-    pub fn new() -> Self {
-        SimpleLock {
-            locked: AtomicBool::new(false),
-            condvar: Condvar::new(),
-            mutex: Mutex::new(()),
-        }
-    }
-
-    pub fn acquire(&self) -> SimpleLockGuard {
-        let mut guard = self.mutex.lock().unwrap();
-        while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            guard = self.condvar.wait(guard).unwrap();
-        }
-        SimpleLockGuard {
-            lock: self,
-            released: Cell::new(false),
-        }
-    }
-
-    pub fn try_acquire(&self) -> Option<SimpleLockGuard> {
-        if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            Some(SimpleLockGuard {
-                lock: self,
-                released: Cell::new(false),
-            })
-        } else {
-            None
-        }
-    }
-
-    fn release(&self) {
-        self.locked.store(false, Ordering::Release);
-        self.condvar.notify_one();
-    }
-}
-
-impl<'a> SimpleLockGuard<'a> {
-    pub fn release(self) {
-        if !self.released.get() {
-            self.lock.release();
-            self.released.set(true);
-        }
-    }
-}
-
-impl<'a> Drop for SimpleLockGuard<'a> {
-    fn drop(&mut self) {
-        if !self.released.get() {
-            self.lock.release();
-            self.released.set(true);
-        }
-    }
+    (vertices, indices)
 }

@@ -2,15 +2,14 @@ use crate::data::data_util::PackUnorm;
 use crate::data::gpu_data::{
     AlphaMode, AsByteSlice, EmissiveMap, MaterialMeta, MeshMeta, MetRoughUniform,
     MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta, TextureIds, TextureMeta,
-    TextureSamplers, Vertex, VkCubeMap, VkGpuMeshBuffers,
+    TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers,
 };
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
-use crate::vulkan::vk_types::{
-    VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkImmediate, VkPipeline,
-};
+use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
+use crate::vulkan::vk_types::{VkBuffer, VkCommandPool, VkDestroyable, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc};
 use crate::vulkan::vk_util;
 use ash::vk::Format;
 use ash::{vk, Device};
@@ -32,17 +31,32 @@ use vk_mem::Allocator;
 // TEXTURE CACHE //
 ///////////////////
 
+pub enum LoadResult<T> {
+    Success(Option<Vec<T>>),
+    Failed(Option<Vec<T>>),
+}
+
+
+pub enum AllocFlag {
+    KeepMeta,
+    DropMeta,
+    DropAll,
+}
+
+
 #[derive(Debug)]
 pub enum CachedTexture {
     Unloaded(TextureMeta),
     Loaded(VkLoadedTexture),
 }
 
+
 #[derive(Debug)]
 pub enum CachedMaterial {
     Unloaded(MaterialMeta),
     Loaded(VkLoadedMaterial),
 }
+
 
 #[derive(Debug)]
 pub struct VkLoadedMaterial {
@@ -53,12 +67,14 @@ pub struct VkLoadedMaterial {
     pub buffer_offset: u32,
 }
 
+
 #[derive(Debug)]
 pub struct VkLoadedTexture {
     pub meta: TextureMeta,
     pub alloc: VkImageAlloc,
     pub sampler: vk::Sampler,
 }
+
 
 #[derive(Debug)]
 pub struct TextureCache {
@@ -68,6 +84,7 @@ pub struct TextureCache {
     supported_formats: HashSet<vk::Format>,
     linear_sampler: vk::Sampler,
 }
+
 
 impl TextureCache {
     pub const DEFAULT_COLOR_TEX: u32 = 0;
@@ -401,7 +418,7 @@ impl TextureCache {
                 const_bytes,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
-            .unwrap();
+                .unwrap();
 
             loaded_material =
                 self.write_material(meta, uniform_buffer, 0, device, desc_layout_cache);
@@ -581,6 +598,7 @@ impl TextureCache {
     // pub fn get_loaded_texture_unchecked(&self, id : u32) -> &
 }
 
+
 impl VkDestroyable for TextureCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         for tex in self.cached_textures.drain(..) {
@@ -607,261 +625,33 @@ impl VkDestroyable for TextureCache {
 
 #[derive(Debug)]
 pub enum CachedMesh {
-    UnLoaded(MeshMeta),
+    Unloaded(MeshMeta),
     Loaded(VkLoadedMesh),
+    _NULL,
 }
+
 
 #[derive(Debug)]
 pub struct VkLoadedMesh {
-    pub meta: MeshMeta,
-    pub buffer: VkGpuMeshBuffers,
+    pub meta: Option<MeshMeta>,
+    pub buffer: VkMeshBuffers,
 }
 
-#[derive(Debug)]
+
 pub struct MeshCache {
+    vertex_storage: VkSubAllocator,
+    index_storage: VkSubAllocator,
     cached_meshes: Vec<CachedMesh>,
-    cached_surface: Vec<SurfaceMeta>,
+    free_ids: Vec<u32>,
 }
 
-impl Default for MeshCache {
-    fn default() -> Self {
+
+impl MeshCache {
+    fn new(vertex_storage: VkSubAllocator, index_storage: VkSubAllocator) -> Self {
         use glam::{Vec3, Vec4};
 
-        let vertices = vec![
-            // Front face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, 1.0),
-                uv0_x: 0.0,
-                normal: Vec3::Z,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, 1.0),
-                uv0_x: 1.0,
-                normal: Vec3::Z,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, 1.0),
-                uv0_x: 1.0,
-                normal: Vec3::Z,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, 1.0),
-                uv0_x: 0.0,
-                normal: Vec3::Z,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            // Back face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, -1.0),
-                uv0_x: 1.0,
-                normal: -Vec3::Z,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, -1.0),
-                uv0_x: 1.0,
-                normal: -Vec3::Z,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, -1.0),
-                uv0_x: 0.0,
-                normal: -Vec3::Z,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, -1.0),
-                uv0_x: 0.0,
-                normal: -Vec3::Z,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::X,
-                ..Default::default()
-            },
-            // Top face
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, -1.0),
-                uv0_x: 0.0,
-                normal: Vec3::Y,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, 1.0),
-                uv0_x: 0.0,
-                normal: Vec3::Y,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, 1.0),
-                uv0_x: 1.0,
-                normal: Vec3::Y,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, -1.0),
-                uv0_x: 1.0,
-                normal: Vec3::Y,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            // Bottom face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, -1.0),
-                uv0_x: 0.0,
-                normal: -Vec3::Y,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, -1.0),
-                uv0_x: 1.0,
-                normal: -Vec3::Y,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, 1.0),
-                uv0_x: 1.0,
-                normal: -Vec3::Y,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, 1.0),
-                uv0_x: 0.0,
-                normal: -Vec3::Y,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::X,
-                ..Default::default()
-            },
-            // Right face
-            Vertex {
-                position: Vec3::new(1.0, -1.0, -1.0),
-                uv0_x: 1.0,
-                normal: Vec3::X,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::Z,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, -1.0),
-                uv0_x: 1.0,
-                normal: Vec3::X,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::Z,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, 1.0, 1.0),
-                uv0_x: 0.0,
-                normal: Vec3::X,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::Z,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(1.0, -1.0, 1.0),
-                uv0_x: 0.0,
-                normal: Vec3::X,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: -Vec4::Z,
-                ..Default::default()
-            },
-            // Left face
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, -1.0),
-                uv0_x: 0.0,
-                normal: -Vec3::X,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, -1.0, 1.0),
-                uv0_x: 1.0,
-                normal: -Vec3::X,
-                uv0_y: 0.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, 1.0),
-                uv0_x: 1.0,
-                normal: -Vec3::X,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-                ..Default::default()
-            },
-            Vertex {
-                position: Vec3::new(-1.0, 1.0, -1.0),
-                uv0_x: 0.0,
-                normal: -Vec3::X,
-                uv0_y: 1.0,
-                color: Vec4::ONE,
-                tangent: Vec4::Z,
-                ..Default::default()
-            },
-        ];
-
-        let indices = vec![
-            0, 1, 2, 2, 3, 0, // front
-            4, 5, 6, 6, 7, 4, // back
-            8, 9, 10, 10, 11, 8, // top
-            12, 13, 14, 14, 15, 12, // bottom
-            16, 17, 18, 18, 19, 16, // right
-            20, 21, 22, 22, 23, 20, // left
-        ];
         let mut cached_meshes = Vec::<CachedMesh>::with_capacity(100);
-
+        let (vertices, indices) = data_util::get_skybox_mesh();
         let skybox = MeshMeta {
             name: "Skybox Cube".to_string(),
             indices,
@@ -869,46 +659,65 @@ impl Default for MeshCache {
             material_index: None,
         };
 
-        cached_meshes.push(CachedMesh::UnLoaded(skybox));
+        cached_meshes.push(CachedMesh::Unloaded(skybox));
 
         Self {
             cached_meshes,
-            cached_surface: vec![],
+            vertex_storage,
+            index_storage,
+            free_ids: vec![],
         }
     }
-}
 
-impl MeshCache {
     pub const SKYBOX_MESH: u32 = 0;
 
-    pub fn add_mesh(&mut self, data: MeshMeta) -> u32 {
-        let index = self.cached_meshes.len();
-
-        self.cached_meshes.push(CachedMesh::UnLoaded(data));
-        index as u32
-    }
-
-    pub fn add_meshes(&mut self, data: Vec<(u32, MeshMeta)>) -> HashMap<u32, u32> {
-        let mut index = self.cached_meshes.len() as u32;
-        let mut index_pairs = HashMap::<u32, u32>::with_capacity(data.len());
-
-        for (ext_idx, data) in data {
-            index_pairs.insert(ext_idx, index);
-            index += 1;
-            self.cached_meshes.push(CachedMesh::UnLoaded(data))
+    pub fn add(&mut self, data: MeshMeta) -> u32 {
+        if let Some(id) = self.free_ids.pop() {
+            self.cached_meshes[id as usize] = CachedMesh::Unloaded(data);
+            id
+        } else {
+            let index = self.cached_meshes.len();
+            self.cached_meshes.push(CachedMesh::Unloaded(data));
+            index as u32
         }
-        index_pairs
     }
 
-    pub fn get_mesh(&self, id: u32) -> Option<&CachedMesh> {
+    pub fn add_multi(&mut self, data: Vec<MeshMeta>) -> Vec<u32> {
+        data.into_iter().map(|mesh| self.add(mesh)).collect()
+    }
+
+    pub fn add_and_allocate(
+        &mut self,
+        data: MeshMeta,
+        buffer_placement: BufferPlacement,
+        alloc_flag: AllocFlag,
+        return_buffers: bool,
+    ) -> LoadResult<VkMeshBuffers> {
+        let id = self.add(data);
+        self.allocate_id(id, buffer_placement, alloc_flag, return_buffers)
+    }
+    
+    
+    pub fn add_and_allocate_multi(
+        &mut self,
+        data: Vec<MeshMeta>,
+        buffer_placement: BufferPlacement,
+        alloc_flag: AllocFlag,
+        return_buffers:bool
+    ) -> LoadResult<VkMeshBuffers> {
+        let ids = self.add_multi(data);
+        self.allocate_ids(&ids, buffer_placement, alloc_flag, return_buffers)
+    }
+
+    pub fn get_id(&self, id: u32) -> Option<&CachedMesh> {
         self.cached_meshes.get(id as usize)
     }
 
-    pub fn get_mesh_unchecked(&self, id: u32) -> &CachedMesh {
-        unsafe { self.cached_meshes.get_unchecked(id as usize) }
+    pub fn get_ids(&self, ids: Vec<u32>) -> Vec<Option<&CachedMesh>> {
+        ids.into_iter().map(|id| self.get_id(id)).collect()
     }
 
-    pub fn is_mesh_loaded(&self, id: u32) -> bool {
+    pub fn is_id_loaded(&self, id: u32) -> bool {
         if let Some(found) = self.cached_meshes.get(id as usize) {
             matches!(found, CachedMesh::Loaded(_))
         } else {
@@ -916,88 +725,189 @@ impl MeshCache {
         }
     }
 
-    pub fn get_loaded_mesh_unchecked(&self, id: u32) -> &VkLoadedMesh {
-        unsafe {
-            match self.cached_meshes.get_unchecked(id as usize) {
-                CachedMesh::Loaded(loaded) => loaded,
-                _ => std::hint::unreachable_unchecked(),
+    unsafe fn allocate(
+        &mut self,
+        meshes: Vec<(u32, *const MeshMeta)>,
+        buffer_placement: BufferPlacement,
+        alloc_flag: AllocFlag,
+        return_buffers: bool,
+    ) -> LoadResult<VkMeshBuffers> {
+        let mut vertex_data = Vec::<&[u8]>::with_capacity(meshes.len());
+        let mut index_data = Vec::<&[u8]>::with_capacity(meshes.len());
+
+        for (_, mesh_ptr) in &meshes {
+            unsafe {
+                let mesh = &**mesh_ptr;
+                vertex_data.push(bytemuck::cast_slice(&mesh.vertices));
+                index_data.push(bytemuck::cast_slice(&mesh.indices));
             }
         }
-    }
 
-    pub fn allocate_mesh(
-        &mut self,
-        device: &ash::Device,
-        allocator: Arc<Mutex<Allocator>>,
-        immediate: &VkImmediate,
-        mesh_id: usize,
-    ) {
-        let mesh = std::mem::replace(
-            &mut self.cached_meshes[mesh_id],
-            CachedMesh::UnLoaded(MeshMeta::default()),
-        );
+        let (vert_success, vertex_allocs) = self
+            .vertex_storage
+            .allocate_bytes(&mut vertex_data, buffer_placement);
 
-        if let CachedMesh::UnLoaded(meta) = mesh {
-            let buffer =
-                vk_util::upload_mesh(device, allocator, immediate, &meta.indices, &meta.vertices);
-
-            let loaded_mesh = VkLoadedMesh { meta, buffer };
-            self.cached_meshes[mesh_id] = CachedMesh::Loaded(loaded_mesh);
+        let (index_success, index_allocs) = if !vert_success {
+            self.index_storage.allocate_bytes(&mut index_data[..vertex_allocs.len()], buffer_placement)
         } else {
-            self.cached_meshes[mesh_id] = mesh;
-            log::info!(
-                "Attempted to allocate, already allocated texture: {}",
-                mesh_id
-            );
-        }
-    }
+            self.index_storage.allocate_bytes(&mut index_data, buffer_placement)
+        };
 
-    pub fn deallocate_mesh(&mut self, allocator: &vk_mem::Allocator, mesh_id: usize) {
-        let texture = std::mem::replace(
-            &mut self.cached_meshes[mesh_id],
-            CachedMesh::UnLoaded(MeshMeta {
-                name: "".to_string(),
-                indices: vec![],
-                vertices: vec![],
-                material_index: None,
-            }),
-        );
+        let total_len = vertex_allocs.len() as u32;
 
-        if let CachedMesh::Loaded(loaded_mesh) = texture {
-            vk_util::destroy_mesh_buffers(allocator, loaded_mesh.buffer);
-            let unloaded_mesh = CachedMesh::UnLoaded(loaded_mesh.meta);
-            self.cached_meshes[mesh_id] = unloaded_mesh;
+        let mut rtn_buffers = if return_buffers {
+            Some(Vec::<VkMeshBuffers>::with_capacity(total_len as usize))
         } else {
-            self.cached_meshes[mesh_id] = texture;
+            None
+        };
+
+
+        meshes.iter()
+            .map(|(id, meta)| *id)
+            .zip(vertex_allocs.into_iter())
+            .zip(index_allocs.into_iter())
+            .for_each(|((id, vert_alloc), index_alloc)| {
+                let mesh = unsafe { self.cached_meshes.get_unchecked_mut(id as usize) };
+
+                if let CachedMesh::Unloaded(meta) = std::mem::replace(mesh, CachedMesh::_NULL) {
+                    let buffer = VkMeshBuffers {
+                        cache_id: id,
+                        index_count: meta.indices.len() as u32,
+                        vertex_count: meta.vertices.len() as u32,
+                        index_buffer: index_alloc.clone(),
+                        vertex_buffer: vert_alloc.clone(),
+                    };
+
+                    if let Some(rtn_meshes) = &mut rtn_buffers {
+                        rtn_meshes.push(buffer)
+                    }
+
+                    if matches!(alloc_flag, AllocFlag::KeepMeta | AllocFlag::DropMeta) {
+                        let loaded_mesh = VkLoadedMesh {
+                            meta: if matches!(alloc_flag, AllocFlag::KeepMeta) { Some(meta) } else { None },
+                            buffer,
+                        };
+                        *mesh = CachedMesh::Loaded(loaded_mesh);
+                    } else {
+                        self.free_ids.push(id);
+                        *mesh = CachedMesh::_NULL
+                    }
+                } else {
+                    panic!("Unreachable")
+                }
+            });
+
+
+        if vert_success && index_success {
+            LoadResult::Success(rtn_buffers)
+        } else {
+            LoadResult::Failed(rtn_buffers)
         }
     }
 
     pub fn allocate_all(
         &mut self,
-        device: &ash::Device,
-        allocator: Arc<Mutex<Allocator>>,
-        immediate: &VkImmediate,
-    ) {
-        for x in 0..self.cached_meshes.len() {
-            self.allocate_mesh(device, allocator.clone(), immediate, x);
+        buffer_placement: BufferPlacement,
+        alloc_flag: AllocFlag,
+        return_buffers: bool,
+    ) -> LoadResult<VkMeshBuffers> {
+        let id_meshes: Vec<(u32, *const MeshMeta)> = self.cached_meshes.iter()
+            .enumerate()
+            .filter_map(|(i, mesh)| {
+                if let CachedMesh::Unloaded(meta) = mesh {
+                    Some((i as u32, meta as *const MeshMeta))
+                } else {
+                    None
+                }
+            }).collect();
+
+        unsafe { self.allocate(id_meshes, buffer_placement, alloc_flag, return_buffers) }
+    }
+
+    pub fn allocate_ids(
+        &mut self,
+        mesh_ids: &[u32],
+        buffer_placement: BufferPlacement,
+        alloc_flag: AllocFlag,
+        return_buffers: bool,
+    ) -> LoadResult<VkMeshBuffers> {
+        let id_meshes: Vec<(u32, *const MeshMeta)> = mesh_ids.iter()
+            .filter_map(|id| {
+                if let Some(CachedMesh::Unloaded(meta)) = self.cached_meshes.get(*id as usize) {
+                    Some((*id, meta as *const MeshMeta))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        unsafe { self.allocate(id_meshes, buffer_placement, alloc_flag, return_buffers) }
+    }
+
+    pub fn allocate_id(
+        &mut self,
+        mesh_id: u32,
+        buffer_placement: BufferPlacement,
+        alloc_flag: AllocFlag,
+        return_buffers: bool,
+    ) -> LoadResult<VkMeshBuffers> {
+        if let Some(CachedMesh::Unloaded(meta)) = self.cached_meshes.get(mesh_id as usize) {
+            unsafe { self.allocate(vec![(mesh_id, meta as *const MeshMeta)], buffer_placement, alloc_flag, return_buffers) }
+        } else {
+            LoadResult::Failed(None)
         }
     }
 
-    pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator) {
-        for x in 0..self.cached_meshes.len() {
-            self.deallocate_mesh(allocator, x)
+
+    fn drop_id(&mut self, id: u32) {
+        if let Some(mesh) = self.cached_meshes.get_mut(id as usize) {
+            *mesh = CachedMesh::_NULL;
+            self.free_ids.push(id)
         }
+    }
+    pub fn deallocate_id(&mut self, mesh_id: u32, drop: bool) {
+        if let Some(mesh) = self.cached_meshes.get_mut(mesh_id as usize) {
+            if let CachedMesh::Loaded(loaded_mesh) = std::mem::replace(mesh, CachedMesh::_NULL) {
+                self.index_storage.deallocate(loaded_mesh.buffer.index_buffer);
+                self.vertex_storage.deallocate(loaded_mesh.buffer.vertex_buffer);
+
+                if drop {
+                    self.free_ids.push(mesh_id);
+                } else if let Some(meta) = loaded_mesh.meta {
+                    *mesh = CachedMesh::Unloaded(meta);
+                }
+            }
+        }
+    }
+
+    pub fn deallocate_mesh(&mut self, buffer: VkMeshBuffers) {
+        self.index_storage.deallocate(buffer.index_buffer);
+        self.vertex_storage.deallocate(buffer.vertex_buffer);
+        // implicitly drop since no index was passed, it's assume it's not even stored
+        self.drop_id(buffer.cache_id);
+    }
+
+    pub fn deallocate_ids(&mut self, mesh_ids: &[u32], drop: bool) {
+        mesh_ids.iter().for_each(|&id| self.deallocate_id(id, drop))
+    }
+
+    pub fn deallocate_meshes(&mut self, mesh_buffers: Vec<VkMeshBuffers>) {
+        mesh_buffers.into_iter().for_each(|mesh| self.deallocate_mesh(mesh))
+    }
+
+
+    pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator, drop: bool) {
+        (1..self.cached_meshes.len()).for_each(|i| self.deallocate_id(i as u32, drop))
     }
 }
 
+
 impl VkDestroyable for MeshCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        for mesh in self.cached_meshes.drain(..) {
-            if let CachedMesh::Loaded(mut loaded) = mesh {
-                loaded.buffer.index_buffer.destroy(device, allocator);
-                loaded.buffer.vertex_buffer.destroy(device, allocator);
-            }
-        }
+        self.cached_meshes.clear();
+        self.free_ids.clear();
+        self.index_storage.destroy(device, allocator);
+        self.vertex_storage.destroy(device, allocator)
     }
 }
 
@@ -1020,14 +930,17 @@ pub enum CoreShaderType {
     EnvPrefilterFrag,
 }
 
+
 impl CoreShaderType {
     const COUNT: usize = 10;
 }
+
 
 pub struct VkShaderCache {
     pub core_shader_cache: [vk::ShaderModule; CoreShaderType::COUNT],
     pub user_shader_cache: Vec<vk::ShaderModule>,
 }
+
 
 impl VkShaderCache {
     pub fn new(
@@ -1063,6 +976,7 @@ impl VkShaderCache {
     pub fn destory_all(&mut self, device: &ash::Device) {}
 }
 
+
 impl VkDestroyable for VkShaderCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.core_shader_cache
@@ -1092,14 +1006,17 @@ pub enum VkPipelineType {
     EnvIrradiance,
 }
 
+
 impl VkPipelineType {
     const COUNT: usize = 8;
 }
+
 
 //#[derive(Clone, Copy)]
 pub struct VkPipelineCache {
     pipelines: [VkPipeline; VkPipelineType::COUNT],
 }
+
 
 impl VkPipelineCache {
     pub fn new(mut pipelines: Vec<(VkPipelineType, VkPipeline)>) -> Result<Self, String> {
@@ -1121,6 +1038,7 @@ impl VkPipelineCache {
         unsafe { self.pipelines.get_unchecked(typ as usize) }
     }
 }
+
 
 impl VkDestroyable for VkPipelineCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1147,12 +1065,16 @@ pub enum VkDescType {
     EnvPreFilter,
 }
 
+
 impl VkDescType {
     const COUNT: usize = 8;
 }
+
+
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
 }
+
 
 impl VkDescLayoutCache {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
@@ -1175,6 +1097,7 @@ impl VkDescLayoutCache {
     }
 }
 
+
 impl VkDestroyable for VkDescLayoutCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.layouts.iter().for_each(|layout| unsafe {
@@ -1183,20 +1106,25 @@ impl VkDestroyable for VkDescLayoutCache {
     }
 }
 
+
 pub enum CachedEnvironment {
     Unloaded(TextureMeta),
     Loaded(VkCubeMap),
 }
 
+
 pub struct EnvMaps {
     pub irradiance: VkCubeMap,
     pub pre_filter: VkCubeMap,
 }
+
+
 pub struct EnvironmentCache {
     skyboxes: Vec<CachedEnvironment>,
     env_maps: Vec<Option<EnvMaps>>,
     supported_formats: HashSet<vk::Format>,
 }
+
 
 impl EnvironmentCache {
     pub fn new(supported_formats: HashSet<vk::Format>) -> Self {
@@ -1366,12 +1294,14 @@ impl EnvironmentCache {
     }
 }
 
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LodBias {
     Sharp,
     Normal,
     Soft,
 }
+
 
 impl LodBias {
     fn to_float(&self) -> f32 {
@@ -1382,6 +1312,7 @@ impl LodBias {
         }
     }
 }
+
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct VkSamplerInfo {
@@ -1401,6 +1332,7 @@ pub struct VkSamplerInfo {
     pub border_color: vk::BorderColor,
     pub unnormalized_coordinates: bool,
 }
+
 
 impl VkSamplerInfo {
     pub fn to_create_info(&self) -> vk::SamplerCreateInfo {
@@ -1423,9 +1355,11 @@ impl VkSamplerInfo {
     }
 }
 
+
 pub struct SamplerCache {
     pub samplers: HashMap<VkSamplerInfo, vk::Sampler>,
 }
+
 
 impl Default for SamplerCache {
     fn default() -> Self {
@@ -1434,6 +1368,7 @@ impl Default for SamplerCache {
         }
     }
 }
+
 
 impl SamplerCache {
     pub fn get_or_create_sampler(

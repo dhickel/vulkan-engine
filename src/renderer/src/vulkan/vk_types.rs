@@ -1,6 +1,7 @@
 use crate::data::camera::FPSController;
 use crate::data::data_util::{Semaphore, SemaphorePermit};
 use crate::vulkan::vk_descriptor::{VkDescriptorAllocator, VkDynamicDescriptorAllocator};
+use crate::vulkan::vk_util;
 use ash::vk::Extent2D;
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
@@ -267,15 +268,13 @@ impl VkCommandPoolMap {
 #[derive(Debug)]
 pub struct VkCommandPool {
     pub queue_index: u32,
-    pub queue: vk::Queue,
-    pub queue_type: Vec<VkQueueType>,
+    pub queue_type: VkQueueType,
     pub pool: vk::CommandPool,
-    pub buffer: vk::CommandBuffer,
+    pub buffers: Vec<vk::CommandBuffer>,
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct VkCmdSubmitInfo {
-    pub queue: vk::Queue,
     pub cmd_buffer: vk::CommandBuffer,
     pub fence: [vk::Fence; 1],
 }
@@ -284,40 +283,28 @@ impl Clone for VkCommandPool {
     fn clone(&self) -> Self {
         VkCommandPool {
             queue_index: self.queue_index,
-            queue: self.queue,
-            queue_type: self.queue_type.clone(),
+            queue_type: self.queue_type,
             pool: self.pool,
-            buffer: self.buffer.clone(),
+            buffers: self.buffers.clone(),
         }
     }
 }
 
-impl Default for VkCommandPool {
-    fn default() -> Self {
-        Self {
-            queue_index: 0,
-            queue: Default::default(),
-            queue_type: vec![],
-            pool: Default::default(),
-            buffer: vk::CommandBuffer::null(),
-        }
-    }
-}
+// impl Default for VkCommandPool {
+//     fn default() -> Self {
+//         Self {
+//             queue_index: 0,
+//             queue_type: Default::default(),
+//             pool: Default::default(),
+//             buffers: vec![],
+//         }
+//     }
+// }
 
 impl VkDestroyable for VkCommandPool {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
             device.destroy_command_pool(self.pool, None);
-        }
-    }
-}
-
-impl VkCommandPool {
-    pub fn get_submit_info(&self, fence: [vk::Fence; 1]) -> VkCmdSubmitInfo {
-        VkCmdSubmitInfo {
-            queue: self.queue,
-            cmd_buffer: self.buffer,
-            fence,
         }
     }
 }
@@ -366,7 +353,7 @@ pub struct VkFrame {
     pub depth: VkImageAlloc,
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
-    pub cmd_pool: VkCommandPoolMap,
+    pub cmd_buffer: vk::CommandBuffer,
     pub descriptors: VkDynamicDescriptorAllocator,
     deletions: Vec<VkDeletable>,
 }
@@ -379,7 +366,6 @@ impl VkDestroyable for VkFrame {
             self.depth.destroy(device, allocator);
             // device.destroy_image_view(self.present_image_view, None);
             // device.destroy_image(self.present_image, None);
-            self.cmd_pool.destroy(device, allocator)
         }
     }
 }
@@ -389,14 +375,14 @@ impl VkFrame {
         &mut self,
         device: &Device,
         allocator: &Allocator,
-    ) -> (VkFrameSync, VkCommandPoolMap) {
+    ) -> (VkFrameSync, vk::CommandBuffer) {
         unsafe {
             self.draw.destroy(device, allocator);
             self.depth.destroy(device, allocator);
             // device.destroy_image_view(self.present_image_view, None);
             // device.destroy_image(self.present_image, None);
         }
-        (self.sync, self.cmd_pool.clone())
+        (self.sync, self.cmd_buffer)
     }
 
     pub fn add_deletion(&mut self, deletion: VkDeletable) {
@@ -415,6 +401,7 @@ pub struct VkPresent {
     pub frame_data: Vec<VkFrame>,
     curr_frame_count: u32,
     max_frames_active: u32,
+    pub cmd_pool: vk::CommandPool
 }
 
 impl VkDestroyable for VkPresent {
@@ -422,6 +409,10 @@ impl VkDestroyable for VkPresent {
         self.frame_data
             .iter_mut()
             .for_each(|frame| frame.destroy(device, allocator));
+        
+        unsafe {
+            device.destroy_command_pool(self.cmd_pool, None);
+        }
     }
 }
 
@@ -432,7 +423,7 @@ impl VkPresent {
         mut draw_images: Vec<VkImageAlloc>,
         mut depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
-        mut command_pool: Vec<VkCommandPoolMap>,
+        mut command_pool: VkCommandPool,
         mut descriptor_allocators: Vec<VkDynamicDescriptorAllocator>,
     ) -> Result<Self, VkError> {
         let lengths = [
@@ -440,7 +431,7 @@ impl VkPresent {
             draw_images.len(),
             depth_images.len(),
             present_images.len(),
-            command_pool.len(),
+            command_pool.buffers.len(),
             descriptor_allocators.len(),
         ];
 
@@ -463,7 +454,7 @@ impl VkPresent {
                 depth: depth_images.remove(0),
                 present_image: present_images[i].0,
                 present_image_view: present_images[i].1,
-                cmd_pool: command_pool.remove(0),
+                cmd_buffer: command_pool.buffers.remove(0),
                 descriptors: descriptor_allocators.remove(0),
                 deletions: Vec::with_capacity(100),
             };
@@ -473,6 +464,7 @@ impl VkPresent {
             frame_data,
             curr_frame_count: 0,
             max_frames_active: data_len as u32,
+            cmd_pool: command_pool.pool
         })
     }
 
@@ -517,14 +509,14 @@ impl VkPresent {
         &mut self,
         device: &Device,
         allocator: &Allocator,
-    ) -> (Vec<VkFrameSync>, Vec<VkCommandPoolMap>) {
-        let (frame_sync, cmd_pools): (Vec<_>, Vec<_>) = self
+    ) -> (Vec<VkFrameSync>, Vec<vk::CommandBuffer>) {
+        let (frame_sync, cmd_buffers): (Vec<_>, Vec<_>) = self
             .frame_data
             .iter_mut()
             .map(|frame| frame.destroy_for_rebuild(device, allocator))
             .unzip();
 
-        (frame_sync, cmd_pools)
+        (frame_sync, cmd_buffers)
     }
 }
 
@@ -634,6 +626,7 @@ impl VkImmediate {
     }
 }
 
+#[derive(Debug)]
 pub struct VkHostBuffer {
     pub buffer: VkBuffer,
     pub render_sender: Sender<VkCmdSubmitInfo>,
@@ -657,8 +650,19 @@ impl VkHostBuffer {
     }
 
     pub fn submit_commands(&self) -> Result<(), SendError<VkCmdSubmitInfo>> {
-        self.render_sender
-            .send(self.cmd_pool.get_submit_info(self.fence))
+        let submit_info = VkCmdSubmitInfo {
+            cmd_buffer: self.cmd_pool.buffers[0],
+            fence: self.fence,
+        };
+
+        self.render_sender.send(submit_info)
+    }
+}
+
+impl VkDestroyable for VkHostBuffer {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.buffer.destroy(device, allocator);
+        unsafe { device.destroy_fence(self.fence[0], None) }
     }
 }
 
@@ -686,7 +690,7 @@ impl VkTransfer {
             Err(error) => {
                 log::error!("Error receiving transfer data: {:?}", error);
                 None
-            },
+            }
         }
     }
 
@@ -695,12 +699,12 @@ impl VkTransfer {
     }
 }
 
-impl VkDestroyable for VkImmediate {
+impl VkDestroyable for VkTransfer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.command_pool.destroy(device, allocator);
-        unsafe {
-            device.destroy_fence(self.fence[0], None);
-        }
+        self.transfer_pool.destroy(device, allocator);
+        self.host_buffers
+            .iter()
+            .for_each(|buf| buf.lock().unwrap().destroy(device, allocator));
     }
 }
 
@@ -874,7 +878,7 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
     pub address: vk::DeviceAddress,
     pub offset: u64,

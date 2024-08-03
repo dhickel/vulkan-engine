@@ -7,16 +7,12 @@ use crate::data::data_cache::{
 use crate::data::gpu_data::{
     AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node,
     PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, UBOMatrices, Vertex,
-    VkCubeMap, VkGpuMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts,
+    VkCubeMap, VkMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts,
 };
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
-use ash::vk::{
-    AllocationCallbacks, DescriptorSetLayoutCreateFlags, DescriptorType,
-    ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, ImageLayout, PipelineCache,
-    ShaderStageFlags,
-};
+use ash::vk::{AllocationCallbacks, CommandBufferLevel, DescriptorSetLayoutCreateFlags, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, ImageLayout, PipelineCache, ShaderStageFlags};
 use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
@@ -30,8 +26,8 @@ use std::f32::consts::FRAC_PI_2;
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
@@ -39,9 +35,6 @@ use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
-
-
-
 
 pub struct VkDataCache {
     pub shader_cache: VkShaderCache,
@@ -127,7 +120,7 @@ pub struct VkRender {
     pub presentation: VkPresent,
     pub supported_image_formats: HashSet<vk::Format>,
     pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
-    pub immediate: VkImmediate,
+    pub transfer: VkTransfer,
     pub imgui: VkImgui,
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
@@ -263,7 +256,7 @@ impl Drop for VkRender {
 
             self.imgui.renderer.destroy();
 
-            self.immediate
+            self.transfer
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.presentation
@@ -322,9 +315,13 @@ impl VkRender {
                 }
             }
         }
-
+        
+        
+        ////////////////////////////
+        // Create Core Structures //
+        ////////////////////////////
+        
         let entry = vk_init::init_entry();
-
         let mut instance_ext = vk_init::get_winit_extensions(&window_state.window);
         let (instance, debug) = vk_init::init_instance(
             &entry,
@@ -398,9 +395,80 @@ impl VkRender {
         if swapchain.extent != window_state.get_curr_extent() {
             window_state.update_curr_size(swapchain.extent);
         }
+        
+        ////////////////////////////////////
+        // Create Command Pools & Buffers //
+        ////////////////////////////////////
+        
+        let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(2);
+            
+        for i in 0..2 {
+            let cmd_pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Transfer),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )?;
+            let buffers = vk_init::create_command_buffers(
+                &device,
+                &cmd_pool,
+                CommandBufferLevel::PRIMARY,
+                1
+            )?;
+             host_buffer_pools.push(VkCommandPool {
+                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
+                queue_type: VkQueueType::Transfer,
+                pool: cmd_pool,
+                buffers: buffers,
+            });
+        }
+        
+        let local_transfer_pool = {
+            let cmd_pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Transfer),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )?;
+            let buffers = vk_init::create_command_buffers(
+                &device,
+                &cmd_pool,
+                CommandBufferLevel::PRIMARY,
+                1
+            )?;
+            VkCommandPool {
+                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
+                queue_type: VkQueueType::Transfer,
+                pool: cmd_pool,
+                buffers: buffers,
+            }
+        };
+        
+        
+        // Graphics/Present share the same queue and pool
+        let present_pool = {
+            let cmd_pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Graphics),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )?;
+            let buffers = vk_init::create_command_buffers(
+                &device,
+                &cmd_pool,
+                CommandBufferLevel::PRIMARY,
+                2 // one for each frame
+            )?;
+            VkCommandPool {
+                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
+                queue_type: VkQueueType::Transfer,
+                pool: cmd_pool,
+                buffers: buffers,
+            }
+        };
+        
 
-        let command_pools = vk_init::create_command_pools(&device, &device_queues, 2, 1)?;
-
+        
+        //////////////////////////////////////////
+        // Generate Structures For presentation //
+        //////////////////////////////////////////
         let frame_buffers: Vec<VkFrameSync> = (0..2)
             .map(|_| vk_init::create_frame_sync(&device))
             .collect::<Result<Vec<_>, _>>()?;
@@ -457,37 +525,14 @@ impl VkRender {
             draw_images,
             depth_images,
             present_images,
-            command_pools,
+            present_pool,
             descriptor_allocators,
         )
         .unwrap();
 
-        //create command pool for immediate usage
-        // TODO this selection needs cleaned up, or we need to properly include all the of
-        //  flags a queue support not just the ones we are using it for, right now selecting graphics
-        //  which also supports transfer, but we are also using this as a queue for gui rendering
-        //  maybe give the gui its own graphics queue as well, since immediate is mainly for transfer
-        //  and should be using its own transfer queue, as we dont need them in the per frame?
-        let im_index = queue_indices
-            .iter()
-            .find(|q| q.queue_types.contains(&VkQueueType::Graphics))
-            .unwrap();
-
-        print!("Queue Types Immediate: {:?}", im_index.queue_types);
-
-        let im_queue = device_queues.get_queue_by_index(im_index.index).unwrap();
-
-        // let im_command_pool =
-        //     vk_init::create_transfer_pool(&device, im_queue);
-        // 
-        // let im_fence_create_info =
-        //     vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-        // let im_fence = unsafe { device.create_fence(&im_fence_create_info, None) }.unwrap();
-
-        // GUI
-
+        
+        // ImGUI
         let mut imgui_context = imgui::Context::create();
-
         let mut platform = WinitPlatform::init(&mut imgui_context);
         platform.attach_window(
             imgui_context.io_mut(),
@@ -508,33 +553,31 @@ impl VkRender {
         let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
             allocator.clone(),
             device.clone(),
-            im_command_pool.queue,
-            im_command_pool.pool,
+            device_queues.get_queue(VkQueueType::Graphics),
+            presentation.cmd_pool,
             imgui_dynamic,
             &mut imgui_context,
             Some(imgui_opts),
         )
         .unwrap();
-        
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
+        
 
-        // let gpu_descriptor = DescriptorLayoutBuilder::default()
-        //     .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
-        //     .build(
-        //         &logical_device,
-        //         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-        //         vk::DescriptorSetLayoutCreateFlags::empty(),
-        //     );
-
-        let pool_ratios = [
-            PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
-            PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
-            PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
-            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
-        ];
-
-        let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
-
+        // let pool_ratios = [
+        //     PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
+        //     PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
+        //     PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+        //     PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
+        // ];
+        // 
+        // let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
+        
+        
+        
+        //////////////////////////////////////////
+        // Create Transfer Buffers & DataCaches //
+        //////////////////////////////////////////
+        
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
 
@@ -562,7 +605,7 @@ impl VkRender {
                 .frame_data
                 .first()
                 .unwrap()
-                .cmd_pool
+                .cmd_buffer
                 .get(VkQueueType::Graphics),
         );
 
@@ -656,7 +699,7 @@ impl VkRender {
             .frame_data
             .first()
             .unwrap()
-            .cmd_pool
+            .cmd_buffer
             .get(VkQueueType::Transfer);
 
         self.data_cache.environment_cache.allocate_cube_map(
@@ -706,7 +749,7 @@ impl VkRender {
         self.update_scene();
         let mut frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
-        let cmd_pool = frame_data.cmd_pool.get(VkQueueType::Graphics);
+        let cmd_pool = frame_data.cmd_buffer.get(VkQueueType::Graphics);
         let draw_image = frame_data.draw.image;
         let draw_view = frame_data.draw.image_view;
         let depth_image = frame_data.depth.image;
@@ -905,7 +948,7 @@ impl VkRender {
             .frame_data
             .first()
             .unwrap()
-            .cmd_pool
+            .cmd_buffer
             .get(VkQueueType::Graphics);
 
         self.data_cache.environment_cache.allocate_cube_map(
@@ -943,7 +986,7 @@ impl VkRender {
 
         let mut sb_desc_writer = VkDescriptorWriter::default();
         let cmd_buffer = self.presentation.frame_data[0]
-            .cmd_pool
+            .cmd_buffer
             .get(VkQueueType::Graphics)
             .buffer;
 
@@ -972,7 +1015,7 @@ impl VkRender {
     pub fn draw_skybox(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_pool.get(VkQueueType::Graphics);
+        let cmd_pool = curr_frame.cmd_buffer.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffer;
 
         let color_attachment = [vk_util::attachment_info(
@@ -1115,7 +1158,7 @@ impl VkRender {
     pub fn draw_geometry(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_pool.get(VkQueueType::Graphics);
+        let cmd_pool = curr_frame.cmd_buffer.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffer;
 
         let color_attachment = [vk_util::attachment_info(
@@ -1302,7 +1345,7 @@ impl VkRender {
         let device = &self.device;
         let pipeline_cache = &self.data_cache.pipeline_cache;
         let descriptor_cache = &self.data_cache.desc_layout_cache;
-        let cmd_pool = &self.presentation.frame_data[0].cmd_pool;
+        let cmd_pool = &self.presentation.frame_data[0].cmd_buffer;
         let render_pool = cmd_pool.get(VkQueueType::Graphics);
         let render_buffer = render_pool.buffer;
         let transfer_pool = cmd_pool.get(VkQueueType::Transfer);

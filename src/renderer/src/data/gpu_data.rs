@@ -7,7 +7,7 @@ use crate::vulkan::vk_descriptor::{
 };
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
-use crate::vulkan::vk_types::{LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline};
+use crate::vulkan::vk_types::{LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline, VkSubAlloc};
 use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
@@ -26,7 +26,7 @@ use std::rc::{Rc, Weak};
 
 // Used In shaders as well
 #[repr(C)]
-#[derive(Clone, Default, Copy, PartialEq, Debug)]
+#[derive(Clone, Default, Copy, PartialEq, Debug, Pod, Zeroable)]
 pub struct Vertex {
     pub position: Vec3,
     pub uv0_x: f32, // pad with uv_x inbetween to optimize
@@ -460,11 +460,13 @@ impl PushConstPrefilterEnv {
 // VULKAN ALLOCATION DATA //
 ////////////////////////////
 
-#[derive(Debug)]
-pub struct VkGpuMeshBuffers {
-    pub index_buffer: VkBuffer,
-    pub vertex_buffer: VkBuffer,
-    pub vertex_buffer_addr: vk::DeviceAddress,
+#[derive(Debug, Copy, Clone)]
+pub struct VkMeshBuffers {
+    pub cache_id: u32,
+    pub index_count: u32,
+    pub vertex_count: u32,
+    pub index_buffer: VkSubAlloc,
+    pub vertex_buffer: VkSubAlloc,
 }
 
 #[derive(Debug)]

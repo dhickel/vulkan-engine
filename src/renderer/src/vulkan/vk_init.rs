@@ -468,6 +468,10 @@ pub fn queue_indices_with_preferences(
             break;
         }
     }
+    
+    if graphics_present_index == None {
+        return Err("Failed to find shared graphics and present pool".to_string())
+    }
 
     // Second pass: find compute and transfer queues
     for (index, qf) in qf_properties.iter().enumerate() {
@@ -1084,115 +1088,63 @@ pub fn select_sc_extent(
     }
 }
 
-
-pub fn create_command_pools(
+pub fn create_command_pool(
     device: &ash::Device,
-    device_queues: &DeviceQueues,
-    pool_count: u32,
-) -> Result<Vec<VkCommandPoolMap>, String> {
-    log::info!("Creating command pools");
-    
-    let mut mapped_queues = Vec::<(u32, vk::Queue, Vec<VkQueueType>, vk::CommandPool)>::new();
-
-    for &t in VkQueueType::iter() {
-        if device_queues.has_queue_type(t) {
-            let queue = device_queues.get_queue(t);
-            let index = device_queues.get_queue_index(t);
-            let existing = mapped_queues.iter_mut().find(|q| q.1 == queue);
-            if let Some(existing) = existing {
-                existing.2.push(t);
-            } else {
-                let command_pool_info = vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(index)
-                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-
-                let pool = unsafe {
-                    device
-                        .create_command_pool(&command_pool_info, None)
-                        .map_err(|err| format!("Error creating command pool: {:?}", err))?
-                };
-
-                mapped_queues.push((index, queue, vec![t], pool));
-            }
-        }
-    }
-
-    let mut command_pool_maps: Vec<VkCommandPoolMap> = Vec::new();
-
-    for _ in 0..pool_count {
-        let mut pools = [
-            VkCommandPool::default(),
-            VkCommandPool::default(),
-            VkCommandPool::default(),
-            VkCommandPool::default(),
-        ];
-
-        for &(queue_index, queue, ref queue_types, pool) in &mapped_queues {
-            let command_buffers = create_command_buffers(
-                device,
-                &pool,
-                vk::CommandBufferLevel::PRIMARY,
-                1,
-            )
-            .map_err(|e| format!("Error creating command buffers: {:?}", e))?;
-
-            let vk_command_pool = VkCommandPool {
-                queue_index,
-                queue,
-                queue_type: queue_types.clone(),
-                pool,
-                buffer: command_buffers[0],
-            };
-
-            for &queue_type in queue_types {
-                pools[queue_type as usize] = vk_command_pool.clone();
-            }
-        }
-
-        command_pool_maps.push(VkCommandPoolMap::new(pools));
-    }
-
-    log::info!("Command pools created");
-    Ok(command_pool_maps)
-}
-
-pub fn create_transfer_pool(
-    device: &ash::Device,
-    index_queue: (u32, vk::Queue),
-) -> Result<VkCommandPool, String> {
-    let (queue_index, queue) = index_queue;
+    queue_index: u32,
+    flags: vk::CommandPoolCreateFlags,
+) -> Result<vk::CommandPool, String> {
+    log::info!("Creating command pool for queue index {}", queue_index);
 
     let command_pool_info = vk::CommandPoolCreateInfo::default()
         .queue_family_index(queue_index)
-        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        .flags(flags);
 
-    let command_pool = unsafe {
+    let pool = unsafe {
         device
             .create_command_pool(&command_pool_info, None)
             .map_err(|err| format!("Error creating command pool: {:?}", err))?
     };
 
-    let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-
-    let command_buffer = unsafe {
-        device
-            .allocate_command_buffers(&command_buffer_allocate_info)
-            .map_err(|err| format!("Error allocating command buffer: {:?}", err))?[0]
-    };
-
-    let vk_command_pool = VkCommandPool {
-        queue_index,
-        queue,
-        queue_type: vec![VkQueueType::Transfer],
-        pool: command_pool,
-        buffer: command_buffer,
-    };
-
-    Ok(vk_command_pool)
+    log::info!("Command pool created successfully");
+    Ok(pool)
 }
+
+// pub fn create_transfer_pool(
+//     device: &ash::Device,
+//     index_queue: (u32, vk::Queue),
+// ) -> Result<VkCmdBufferContext, String> {
+//     let (queue_index, queue) = index_queue;
+// 
+//     let command_pool_info = vk::CommandPoolCreateInfo::default()
+//         .queue_family_index(queue_index)
+//         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+// 
+//     let command_pool = unsafe {
+//         device
+//             .create_command_pool(&command_pool_info, None)
+//             .map_err(|err| format!("Error creating command pool: {:?}", err))?
+//     };
+// 
+//     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
+//         .command_pool(command_pool)
+//         .level(vk::CommandBufferLevel::PRIMARY)
+//         .command_buffer_count(1);
+// 
+//     let command_buffer = unsafe {
+//         device
+//             .allocate_command_buffers(&command_buffer_allocate_info)
+//             .map_err(|err| format!("Error allocating command buffer: {:?}", err))?[0]
+//     };
+// 
+//     let vk_command_pool = VkCmdBufferContext {
+//         queue_index,
+//         queue,
+//         pool: command_pool,
+//         buffer: command_buffer,
+//     };
+// 
+//     Ok(vk_command_pool)
+// }
 
 pub fn create_command_buffers(
     device: &ash::Device,
