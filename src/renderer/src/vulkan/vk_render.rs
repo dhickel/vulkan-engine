@@ -1,8 +1,4 @@
-use crate::data::data_cache::{
-    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache,
-    TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo,
-    VkShaderCache,
-};
+use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo, VkShaderCache, VkDataCache};
 
 use crate::data::gpu_data::{
     AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node,
@@ -35,26 +31,8 @@ use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
+use crate::vulkan::vk_storage::VkSubAllocator;
 
-pub struct VkDataCache {
-    pub shader_cache: VkShaderCache,
-    pub desc_layout_cache: VkDescLayoutCache,
-    pub pipeline_cache: VkPipelineCache,
-    pub mesh_cache: MeshCache,
-    pub texture_cache: TextureCache,
-    pub environment_cache: EnvironmentCache,
-    pub sampler_cache: VkSamplerCache,
-}
-
-impl VkDestroyable for VkDataCache {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.shader_cache.destroy(device, allocator);
-        self.mesh_cache.destroy(device, allocator);
-        self.texture_cache.destroy(device, allocator);
-        self.desc_layout_cache.destroy(device, allocator);
-        self.pipeline_cache.destroy(device, allocator);
-    }
-}
 
 pub struct SkyBox {
     pub skybox_consts: PushConstSkyBox,
@@ -62,6 +40,7 @@ pub struct SkyBox {
     pub env_id: u32,
     pub mesh_id: u32,
 }
+
 
 impl Default for SkyBox {
     fn default() -> Self {
@@ -73,10 +52,13 @@ impl Default for SkyBox {
         }
     }
 }
+
+
 pub struct VkSingleDescriptor {
     pub desc_alloc: VkDescriptorAllocator,
     pub descriptor: [vk::DescriptorSet; 1],
 }
+
 
 impl VkSingleDescriptor {
     pub fn new(desc_alloc: VkDescriptorAllocator, descriptor: vk::DescriptorSet) -> Self {
@@ -90,11 +72,14 @@ impl VkSingleDescriptor {
         unsafe { *self.descriptor.get_unchecked(0) }
     }
 }
+
+
 pub struct RenderContext {
     pub draw_context: DrawContext,
     pub scene_tree: Rc<RefCell<gpu_data::Node>>,
     pub sky_box: SkyBox,
 }
+
 
 impl Default for RenderContext {
     fn default() -> Self {
@@ -105,6 +90,7 @@ impl Default for RenderContext {
         }
     }
 }
+
 
 pub struct VkRender {
     pub window_state: VkWindowState,
@@ -124,19 +110,28 @@ pub struct VkRender {
     pub imgui: VkImgui,
     pub scene_data: GPUSceneData,
     pub render_context: RenderContext,
-    pub data_cache: VkDataCache,
+    pub data_cache: Arc<VkDataCache>,
     pub brdf_lut: VkBrdfLut,
     pub global_desc_allocator: VkDynamicDescriptorAllocator,
     pub main_deletion_queue: Vec<VkDeletable>,
     pub resize_requested: bool,
 }
 
+
 pub fn init_caches(
     device: &ash::Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    meta_desc_layout: vk::DescriptorSetLayout,
+    image_descript_layout: vk::DescriptorSetLayout,
+    texture_host_buffer: &Arc<Mutex<VkHostBuffer>>,
+    texture_meta_buffer_size: u64,
+    mesh_host_buffer: &Arc<Mutex<VkHostBuffer>>,
+    mesh_buffer_size: u64,
     color_format: vk::Format,
     depth_format: vk::Format,
     supported_formats: HashSet<vk::Format>,
-) -> VkDataCache {
+    limits: VkBufferAndDescriptorLimits,
+) -> Arc<VkDataCache> {
     let shader_paths = vec![
         (
             CoreShaderType::MetRoughVert,
@@ -190,23 +185,43 @@ pub fn init_caches(
         color_format,
         depth_format,
     );
-    let texture_cache = TextureCache::new(device, supported_formats.clone());
-    let mesh_cache = MeshCache::default();
+    
     let sampler_cache = VkSamplerCache::default();
+    
+    let texture_cache = TextureCache::new(
+        device, allocator.clone(), sampler_cache, supported_formats.clone(),
+        meta_desc_layout, image_descript_layout, texture_host_buffer.clone(),
+        texture_meta_buffer_size, &limits,
+    ).unwrap();
+
+    let vertex_allocator = VkSubAllocator::new_storage_buffer(
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits
+    ).unwrap();
+    
+    let index_allocator = VkSubAllocator::new_storage_buffer(
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits
+    ).unwrap();
+    
+ 
+
+    let mesh_cache = MeshCache::new(vertex_allocator, index_allocator);
+
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
     let id = environment_cache
         .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
 
-    VkDataCache {
-        shader_cache,
-        desc_layout_cache,
-        pipeline_cache,
-        mesh_cache,
-        texture_cache,
-        environment_cache,
-        sampler_cache,
-    }
+   let cache =  VkDataCache {
+        shader_cache: Mutex::new(shader_cache),
+        desc_layout_cache: Mutex::new(desc_layout_cache),
+        pipeline_cache: Mutex::new(pipeline_cache),
+        mesh_cache: Mutex::new(mesh_cache),
+        texture_cache: Mutex::new(texture_cache),
+        environment_cache: Mutex::new(environment_cache),
+    };
+    
+    Arc::new(cache)
 }
+
 
 pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
     let sizes = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 1.0)];
@@ -246,6 +261,7 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
 
     descriptors
 }
+
 
 impl Drop for VkRender {
     fn drop(&mut self) {
@@ -292,6 +308,7 @@ impl Drop for VkRender {
     }
 }
 
+
 impl VkRender {
     fn destroy(&mut self) {
         unsafe { std::mem::drop(self) }
@@ -315,12 +332,12 @@ impl VkRender {
                 }
             }
         }
-        
-        
+
+
         ////////////////////////////
         // Create Core Structures //
         ////////////////////////////
-        
+
         let entry = vk_init::init_entry();
         let mut instance_ext = vk_init::get_winit_extensions(&window_state.window);
         let (instance, debug) = vk_init::init_instance(
@@ -337,7 +354,7 @@ impl VkRender {
             Some(&surface),
             &vk_init::simple_device_suitability,
         )?
-        .remove(0);
+            .remove(0);
 
         let queue_indices = vk_init::queue_indices_with_preferences(
             &instance,
@@ -395,13 +412,13 @@ impl VkRender {
         if swapchain.extent != window_state.get_curr_extent() {
             window_state.update_curr_size(swapchain.extent);
         }
-        
+
         ////////////////////////////////////
         // Create Command Pools & Buffers //
         ////////////////////////////////////
-        
+
         let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(2);
-            
+
         for i in 0..2 {
             let cmd_pool = vk_init::create_command_pool(
                 &device,
@@ -412,16 +429,16 @@ impl VkRender {
                 &device,
                 &cmd_pool,
                 CommandBufferLevel::PRIMARY,
-                1
+                1,
             )?;
-             host_buffer_pools.push(VkCommandPool {
+            host_buffer_pools.push(VkCommandPool {
                 queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
                 queue_type: VkQueueType::Transfer,
                 pool: cmd_pool,
                 buffers: buffers,
             });
         }
-        
+
         let local_transfer_pool = {
             let cmd_pool = vk_init::create_command_pool(
                 &device,
@@ -432,7 +449,7 @@ impl VkRender {
                 &device,
                 &cmd_pool,
                 CommandBufferLevel::PRIMARY,
-                1
+                1,
             )?;
             VkCommandPool {
                 queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
@@ -441,8 +458,8 @@ impl VkRender {
                 buffers: buffers,
             }
         };
-        
-        
+
+
         // Graphics/Present share the same queue and pool
         let present_pool = {
             let cmd_pool = vk_init::create_command_pool(
@@ -454,7 +471,7 @@ impl VkRender {
                 &device,
                 &cmd_pool,
                 CommandBufferLevel::PRIMARY,
-                2 // one for each frame
+                2, // one for each frame
             )?;
             VkCommandPool {
                 queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
@@ -463,9 +480,8 @@ impl VkRender {
                 buffers: buffers,
             }
         };
-        
 
-        
+
         //////////////////////////////////////////
         // Generate Structures For presentation //
         //////////////////////////////////////////
@@ -528,9 +544,9 @@ impl VkRender {
             present_pool,
             descriptor_allocators,
         )
-        .unwrap();
+            .unwrap();
 
-        
+
         // ImGUI
         let mut imgui_context = imgui::Context::create();
         let mut platform = WinitPlatform::init(&mut imgui_context);
@@ -559,9 +575,9 @@ impl VkRender {
             &mut imgui_context,
             Some(imgui_opts),
         )
-        .unwrap();
+            .unwrap();
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
-        
+
 
         // let pool_ratios = [
         //     PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
@@ -571,13 +587,12 @@ impl VkRender {
         // ];
         // 
         // let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
-        
-        
-        
+
+
         //////////////////////////////////////////
         // Create Transfer Buffers & DataCaches //
         //////////////////////////////////////////
-        
+
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
 
@@ -729,7 +744,7 @@ impl VkRender {
             Some(self.swapchain.swapchain),
             true,
         )
-        .unwrap();
+            .unwrap();
 
         // FIXME, I think we will need to destory the old images view when we reassign
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
@@ -741,6 +756,7 @@ impl VkRender {
         self.resize_requested = false;
     }
 }
+
 
 impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
@@ -975,7 +991,7 @@ impl VkRender {
                 1.0,
             )],
         )
-        .unwrap();
+            .unwrap();
 
         let skybox_desc = skybox_desc_alloc
             .allocate(
@@ -1191,7 +1207,7 @@ impl VkRender {
                 self.scene_data.as_byte_slice(),
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
             )
-            .unwrap();
+                .unwrap();
 
             let mut writer = VkDescriptorWriter::default();
             writer.write_buffer(
@@ -1202,7 +1218,7 @@ impl VkRender {
                 vk::DescriptorType::UNIFORM_BUFFER,
             );
 
-            let desc_layout = [self.data_cache.desc_layout_cache.get(VkDescType::GpuScene)];
+            let desc_layout = [self.data_cache.desc_layout_cache.get(VkDescType::SceneData)];
 
             // This is allocated on the per-frame descriptor pool, which is reset after each draw
             // and handles dynamic data
@@ -1228,7 +1244,7 @@ impl VkRender {
                 // This is a static descriptor set for the material the is allocated once
                 // internally to the cache, only reallocated if a change to the material
                 // occurs (Currently doesn't happen)
-                let mat_desc = [material.descriptors[frame_index as usize]];
+                let mat_desc = [material.descriptor[frame_index as usize]];
 
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,

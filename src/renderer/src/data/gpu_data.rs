@@ -26,18 +26,18 @@ use std::rc::{Rc, Weak};
 
 // Used In shaders as well
 #[repr(C)]
-#[derive(Clone, Default, Copy, PartialEq, Debug, Pod, Zeroable)]
+#[derive(Clone, Default, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
     pub position: Vec3,
-    pub uv0_x: f32, // pad with uv_x inbetween to optimize
+    pub uv0_x: f32,
     pub normal: Vec3,
     pub uv0_y: f32,
     pub color: Vec4,
     pub tangent: Vec4,
-    pub uv1_x: f32,
-    pub uv1_y: f32,
     pub joints: UVec4,
     pub weights: Vec4,
+    pub uv1_x: f32,
+    pub uv1_y: f32,
     _pad: u64,
 }
 
@@ -140,8 +140,8 @@ pub struct TextureIds {
 }
 
 
-impl Into<Vec<u32>> for TextureIds {
-    fn into(self) -> Vec<u32> {
+impl TextureIds {
+    pub fn to_vec(self) -> Vec<u32> {
         vec![self.base_color,
             self.metallic_roughness,
             self.normal_map,
@@ -375,18 +375,24 @@ pub struct MetRoughUniformExt {
 pub struct VkModelPushConsts {
     pub model_matrix: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
+    pub mat_meta_buffer_addr: vk::DeviceAddress,
     pub joint_count: u32,
-    _pad: u32,
+    _pad: [u32; 3],
 }
 
 
 impl VkModelPushConsts {
-    pub fn new(model_matrix: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+    pub fn new(
+        model_matrix: Mat4, 
+        vertex_buffer_addr: vk::DeviceAddress,
+        mat_meta_buffer_addr: 
+        vk::DeviceAddress) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
+            mat_meta_buffer_addr,
             joint_count: 0,
-            _pad: 0,
+            _pad: [0;3],
         }
     }
 
@@ -394,12 +400,14 @@ impl VkModelPushConsts {
         model_matrix: Mat4,
         joint_count: u32,
         vertex_buffer_addr: vk::DeviceAddress,
+        mat_meta_buffer_addr: vk::DeviceAddress
     ) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
+            mat_meta_buffer_addr,
             joint_count,
-            _pad: 0,
+            _pad: [0;3]
         }
     }
 }

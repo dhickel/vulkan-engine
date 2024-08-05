@@ -266,13 +266,6 @@ pub fn init_pipeline_cache(
         draw_depth_format,
     );
 
-    let (pbr_opaque_ext, pbr_alpha_ext) = init_met_rough_ext_pipelines(
-        device,
-        desc_layout_cache,
-        shader_cache,
-        draw_color_format,
-        draw_depth_format,
-    );
 
     let brd_flut_pipeline = init_brd_flut_pipeline(
         device,
@@ -305,8 +298,6 @@ pub fn init_pipeline_cache(
     VkPipelineCache::new(vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
         (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
-        (VkPipelineType::PbrMetRoughOpaqueExt, pbr_opaque_ext),
-        (VkPipelineType::PbrMetRoughAlphaExt, pbr_alpha_ext),
         (VkPipelineType::BrdfLut, brd_flut_pipeline),
         (VkPipelineType::Skybox, skybox_pipeline),
         (VkPipelineType::EnvIrradiance, env_irradiance_pipeline),
@@ -329,11 +320,13 @@ fn init_met_rough_pipelines(
     let matrix_range = [vk::PushConstantRange::default()
         .offset(0)
         .size(std::mem::size_of::<VkModelPushConsts>() as u32)
-        .stage_flags(vk::ShaderStageFlags::VERTEX)];
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
 
     let layouts = [
-        desc_layout_cache.get(VkDescType::GpuScene),
-        desc_layout_cache.get(VkDescType::PbrMetRough),
+        desc_layout_cache.get(VkDescType::SceneData),
+        desc_layout_cache.get(VkDescType::SkinData),
+        desc_layout_cache.get(VkDescType::PbrSamplers),
+        desc_layout_cache.get(VkDescType::PbrProperties),
     ];
 
     let mesh_layout_info = vk_util::pipeline_layout_create_info()
@@ -374,64 +367,7 @@ fn init_met_rough_pipelines(
     )
 }
 
-fn init_met_rough_ext_pipelines(
-    device: &ash::Device,
-    desc_layout_cache: &VkDescLayoutCache,
-    shader_cache: &VkShaderCache,
-    color_format: vk::Format,
-    depth_format: vk::Format,
-) -> (VkPipeline, VkPipeline) {
-    let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVertExt);
 
-    let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFragExt);
-
-    let matrix_range = [vk::PushConstantRange::default()
-        .offset(0)
-        .size(std::mem::size_of::<VkModelPushConsts>() as u32)
-        .stage_flags(vk::ShaderStageFlags::VERTEX)];
-
-    let layouts = [
-        desc_layout_cache.get(VkDescType::GpuScene),
-        desc_layout_cache.get(VkDescType::PbrMetRoughExt),
-    ];
-
-    let mesh_layout_info = vk_util::pipeline_layout_create_info()
-        .set_layouts(&layouts)
-        .push_constant_ranges(&matrix_range);
-
-    let layout = unsafe {
-        device
-            .create_pipeline_layout(&mesh_layout_info, None)
-            .unwrap()
-    };
-
-    let entry = CString::new("main").unwrap();
-
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(color_format)
-        .set_depth_format(depth_format)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
-
-    let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
-
-    let mut pipeline_builder = pipeline_builder
-        .enable_blending_additive()
-        .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
-
-    let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
-
-    (
-        VkPipeline::new(opaque_pipeline, layout),
-        VkPipeline::new(transparent_pipeline, layout),
-    )
-}
 
 fn init_brd_flut_pipeline(
     device: &ash::Device,

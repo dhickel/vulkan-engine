@@ -4,7 +4,9 @@ use std::ffi::CStr;
 use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ClearValue, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
+use ash::vk::{AccessFlags2, ClearValue, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageType, 
+    PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo
+};
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -19,7 +21,7 @@ use crate::data::data_cache::{
 };
 use crate::data::data_util;
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
-use crate::vulkan::vk_render::{VkDataCache, VkSingleDescriptor};
+use crate::vulkan::vk_render::VkSingleDescriptor;
 use crate::vulkan::{vk_init, vk_util};
 use ash::prelude::VkResult;
 use shaderc::{CompileOptions, Compiler, ShaderKind};
@@ -462,7 +464,7 @@ pub fn load_shader_module(
 
 pub fn allocate_buffer(
     allocator: &Allocator,
-    size: usize,
+    size: u64,
     usage_flags: vk::BufferUsageFlags,
     memory_usage: vk_mem::MemoryUsage,
 ) -> Result<VkBuffer, String> {
@@ -497,7 +499,7 @@ pub fn allocate_and_write_buffer(
     data: &[u8],
     usage: vk::BufferUsageFlags,
 ) -> Result<VkBuffer, String> {
-    let buffer_size = data.len();
+    let buffer_size = data.len() as u64;
     let mut buffer = allocate_buffer(allocator, buffer_size, usage, vk_mem::MemoryUsage::Auto)?;
 
     unsafe {
@@ -683,8 +685,8 @@ pub fn upload_skybox(
     device: &ash::Device,
     allocator: &Allocator,
     tex_meta: TextureMeta,
-    pipeline: vk::Pipeline,
-    cmd_pool: &VkCommandPool,
+    transfer_pool: VkCommandPool,
+    transfer_queue: vk::Queue
 ) -> VkCubeMap {
     let face_width = tex_meta.width / 6;
 
@@ -738,7 +740,7 @@ pub fn upload_skybox(
         (alloc, device_memory, offset)
     };
 
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = transfer_pool.buffers[0];
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -808,7 +810,7 @@ pub fn upload_skybox(
 
         // Submit the command buffer and signal the fence correctly
         device
-            .queue_submit2(cmd_pool.queue, &submit_info, vk::Fence::null())
+            .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
             .unwrap();
 
         device.device_wait_idle();
@@ -1056,11 +1058,12 @@ pub(crate) fn create_cubemap(
 
 pub fn record_host_to_storage_buffer(
     device: &ash::Device,
-    host_info: &VkHostBufferInfo,
+    host_info: &VkHostBuffer,
     device_buffer: &VkBuffer,
     device_offset: u64,
     bytes: &[&[u8]],
     alignment: u64,
+    dst_barrier: vk::BufferMemoryBarrier,
 ) -> Result<(), String> {
     let cmd_buffer = host_info.cmd_pool.buffers[0];
     let host_buffer = &host_info.buffer;
@@ -1116,12 +1119,7 @@ pub fn record_host_to_storage_buffer(
             &copy_info,
         );
 
-        // Destination buffer barrier: Ensure transfer is complete before graphics queue access
-        let dst_barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .src_queue_family_index(host_info.transfer_queue_index)
-            .dst_queue_family_index(host_info.graphics_queue_index)
+        let dst_barrier = dst_barrier
             .buffer(device_buffer.buffer)
             .offset(device_offset)
             .size(total_size as vk::DeviceSize);
@@ -1144,11 +1142,12 @@ pub fn record_host_to_storage_buffer(
     Ok(())
 }
 
+
 pub fn record_host_to_image_buffer(
     device: &ash::Device,
     allocator: &vk_mem::Allocator,
     sampler_cache: &mut VkSamplerCache,
-    host_info: &VkHostBufferInfo,
+    host_info: &VkHostBuffer,
     image_meta: &[&TextureMeta],
     alignment: u64,
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
@@ -1315,7 +1314,7 @@ pub fn record_host_to_image_buffer(
         device.end_command_buffer(cmd_buffer)
             .map_err(|err| format!("Error ending buffer: {:?}", err))?
     }
-    
+
     Ok(uploaded_images)
 }
 

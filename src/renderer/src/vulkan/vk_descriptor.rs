@@ -187,10 +187,11 @@ impl<'a> VkDescriptorWriter<'a> {
         &mut self,
         binding: u32,
         buffer: vk::Buffer,
-        size: usize,
+        size: u64,
         offset: usize,
         typ: vk::DescriptorType,
     ) {
+        
         let info = vk::DescriptorBufferInfo::default()
             .buffer(buffer)
             .offset(offset as vk::DeviceSize)
@@ -257,7 +258,7 @@ impl VkDynamicDescriptorAllocator {
 
         let new_pool = Self::create_pool(device, max_sets, pool_ratios)?;
 
-        pool.sets_per_pool = (max_sets as f32 * 1.5) as u32;
+        pool.sets_per_pool = (max_sets) as u32;
         pool.ready_pools.push(new_pool);
         Ok(pool)
     }
@@ -381,56 +382,47 @@ impl VkDestroyable for VkDynamicDescriptorAllocator {
 }
 
 pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCache {
-    let compute_store_image = DescriptorLayoutBuilder::default()
+    let compute_draw_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
-        .build(
-            device,
-            vk::ShaderStageFlags::COMPUTE,
-            DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .unwrap();
+        .build(device, vk::ShaderStageFlags::COMPUTE, DescriptorSetLayoutCreateFlags::empty()).unwrap();
 
-    let vert_frag_uniform = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
-        .build(
-            device,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .unwrap();
 
     let frag_combined_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .build(device, vk::ShaderStageFlags::FRAGMENT , vk::DescriptorSetLayoutCreateFlags::empty())
+        .unwrap();
+    
+    
+    let scene_data =  DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)          
+        .add_binding(1, vk::DescriptorType::UNIFORM_BUFFER)        
+        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)  
+        .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)  
+        .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER) 
         .build(
             device,
-             vk::ShaderStageFlags::FRAGMENT ,
-            vk::DescriptorSetLayoutCreateFlags::empty(),
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 
+            vk::DescriptorSetLayoutCreateFlags::empty()
         ).unwrap();
     
 
-    let pbr_met_rough = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
-        .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .build(
-            &device,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            vk::DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .unwrap();
-
-    let pbr_met_rough_ext = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+    let pbr_samplers = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .add_binding(5, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .build(
-            &device,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-            vk::DescriptorSetLayoutCreateFlags::empty(),
-        )
+        .build(&device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
+        .unwrap();
+    
+    let pbr_properties = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::STORAGE_BUFFER)
+        .build(&device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
+        .unwrap();
+    
+    let skin_data = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)         
+        .build(device, vk::ShaderStageFlags::VERTEX, vk::DescriptorSetLayoutCreateFlags::empty())
         .unwrap();
 
     let empty = DescriptorLayoutBuilder::default()
@@ -442,10 +434,11 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         .unwrap();
 
     data_cache::VkDescLayoutCache::new(vec![
-        (VkDescType::DrawImage, compute_store_image),
-        (VkDescType::GpuScene, vert_frag_uniform),
-        (VkDescType::PbrMetRough, pbr_met_rough),
-        (VkDescType::PbrMetRoughExt, pbr_met_rough_ext),
+        (VkDescType::DrawImage, compute_draw_image),
+        (VkDescType::SceneData, scene_data),
+        (VkDescType::PbrSamplers, pbr_samplers),
+        (VkDescType::PbrProperties, pbr_properties),
+        (VkDescType::SkinData, skin_data),
         (VkDescType::Skybox, frag_combined_image),
         (VkDescType::EnvIrradiance, frag_combined_image),
         (VkDescType::EnvPreFilter, frag_combined_image),

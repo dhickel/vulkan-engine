@@ -1,5 +1,5 @@
 use crate::data::camera::FPSController;
-use crate::data::data_util::{Semaphore, SemaphorePermit};
+
 use crate::vulkan::vk_descriptor::{VkDescriptorAllocator, VkDynamicDescriptorAllocator};
 use crate::vulkan::vk_util;
 use ash::vk::Extent2D;
@@ -268,7 +268,7 @@ impl VkCommandPoolMap {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VkCommandPool {
     pub queue_index: u32,
     pub queue_type: VkQueueType,
@@ -282,27 +282,6 @@ pub struct VkCmdSubmitInfo {
     pub fence: [vk::Fence; 1],
 }
 
-impl Clone for VkCommandPool {
-    fn clone(&self) -> Self {
-        VkCommandPool {
-            queue_index: self.queue_index,
-            queue_type: self.queue_type,
-            pool: self.pool,
-            buffers: self.buffers.clone(),
-        }
-    }
-}
-
-// impl Default for VkCommandPool {
-//     fn default() -> Self {
-//         Self {
-//             queue_index: 0,
-//             queue_type: Default::default(),
-//             pool: Default::default(),
-//             buffers: vec![],
-//         }
-//     }
-// }
 
 impl VkDestroyable for VkCommandPool {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -630,7 +609,7 @@ impl VkImmediate {
 }
 
 #[derive(Debug)]
-pub struct VkHostBufferInfo {
+pub struct VkHostBuffer {
     pub buffer: VkBuffer,
     pub render_sender: Sender<VkCmdSubmitInfo>,
     pub cmd_pool: VkCommandPool,
@@ -639,7 +618,7 @@ pub struct VkHostBufferInfo {
     pub graphics_queue_index: u32,
 }
 
-impl VkHostBufferInfo {
+impl VkHostBuffer {
     pub fn submit_commands(&self) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.cmd_pool.buffers[0],
@@ -650,7 +629,7 @@ impl VkHostBufferInfo {
     }
 }
 
-impl VkDestroyable for VkHostBufferInfo {
+impl VkDestroyable for VkHostBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.buffer.destroy(device, allocator);
         unsafe { device.destroy_fence(self.fence[0], None) }
@@ -658,7 +637,7 @@ impl VkDestroyable for VkHostBufferInfo {
 }
 
 pub struct VkTransfer {
-    host_buffers: Vec<Arc<Mutex<VkHostBufferInfo>>>,
+    host_buffers: Vec<Arc<Mutex<VkHostBuffer>>>,
     sender: Sender<VkCmdSubmitInfo>,
     receiver: Receiver<VkCmdSubmitInfo>,
     transfer_pool: VkCommandPool,
@@ -864,14 +843,14 @@ impl VkDescriptors {
 #[derive(Debug)]
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
-    pub size: usize,
+    pub size: u64,
     pub allocation: vk_mem::Allocation,
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
-    pub address: vk::DeviceAddress,
+    pub alloc_address: vk::DeviceAddress,
     pub offset: u64,
     pub buffer: vk::Buffer,
     pub size: u64,

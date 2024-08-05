@@ -8,10 +8,10 @@ struct Vertex {
     float uv0_y;
     vec4 color;
     vec4 tangent;
-    float uv1_x;
-    float uv1_y;
     uvec4 joints;
     vec4 weights;
+    float uv1_x;
+    float uv1_y;
     int _pad1;
     int _pad2;
 };
