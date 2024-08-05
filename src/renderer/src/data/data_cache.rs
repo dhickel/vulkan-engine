@@ -7,8 +7,7 @@ use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
-use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable,
-    VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc};
+use crate::vulkan::vk_types::{VkDeviceQueues, VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc};
 
 use crate::vulkan::vk_util;
 use ash::vk::{Format, PFN_vkFreeDescriptorSets};
@@ -101,22 +100,39 @@ impl DescriptorManager {
 
 
 pub struct VkDataCache {
-    pub shader_cache: Mutex<VkShaderCache>,
-    pub desc_layout_cache: Mutex<VkDescLayoutCache>,
-    pub pipeline_cache: Mutex<VkPipelineCache>,
     pub mesh_cache: Mutex<MeshCache>,
     pub texture_cache: Mutex<TextureCache>,
     pub environment_cache: Mutex<EnvironmentCache>,
+    supported_image_formats: HashSet<vk::Format>
 }
 
 
 impl VkDataCache {
-    fn destroy(&self, device: &Device, allocator: &Allocator) {
-        self.shader_cache.lock().unwrap().destroy(device, allocator);
+    pub fn is_supported_image_format(&self, format: vk::Format) -> bool {
+        self.supported_image_formats.contains(&format)
+    }
+}
+
+pub struct VkCache {
+    pub shaders: VkShaderCache,
+    pub desc_layouts: VkDescLayoutCache,
+    pub pipelines: VkPipelineCache,
+    pub queues: VkDeviceQueues
+}
+
+impl VkDestroyable for VkCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.shaders.destroy(device, allocator);
+        self.desc_layouts.destroy(device, allocator);
+        self.pipelines.destroy(device, allocator);
+    }
+}
+
+
+impl VkDataCache {
+    pub fn destroy(&self, device: &Device, allocator: &Allocator) {
         self.mesh_cache.lock().unwrap().destroy(device, allocator);
         self.texture_cache.lock().unwrap().destroy(device, allocator);
-        self.desc_layout_cache.lock().unwrap().destroy(device, allocator);
-        self.pipeline_cache.lock().unwrap().destroy(device, allocator);
     }
 }
 

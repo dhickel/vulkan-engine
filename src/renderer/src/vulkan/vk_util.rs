@@ -4,8 +4,8 @@ use std::ffi::CStr;
 use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ClearValue, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageType, 
-    PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo
+use ash::vk::{AccessFlags2, ClearValue, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageType,
+    PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo,
 };
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
@@ -494,6 +494,40 @@ pub fn allocate_buffer(
 }
 
 
+pub fn allocate_host_buffer(
+    allocator: &Allocator,
+    size: u64,
+) -> Result<VkBuffer, String> {
+    let buffer_info = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let alloc_create_info = vk_mem::AllocationCreateInfo {
+        usage: vk_mem::MemoryUsage::AutoPreferHost,
+        flags: vk_mem::AllocationCreateFlags::MAPPED
+            | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+        ..Default::default()
+    };
+
+    let (buffer, allocation) = unsafe {
+        allocator
+            .create_buffer(&buffer_info, &alloc_create_info)
+            .map_err(|err| format!("Failed to allocate buffer, reason: {:?}", err))?
+    };
+
+    let alloc_info = unsafe { allocator.get_allocation_info(&allocation) };
+
+    Ok(VkBuffer {
+        buffer,
+        size,
+        allocation,
+        alloc_info,
+    })
+}
+
+
+
 pub fn allocate_and_write_buffer(
     allocator: &Allocator,
     data: &[u8],
@@ -531,13 +565,12 @@ pub fn generate_brdf_lut(
     device: &ash::Device,
     allocator: &Allocator,
     pipeline: vk::Pipeline,
-    cmd_pool: &VkCommandPool,
-    queue: vk::Queue,
+    graphics_cmd_buffer: vk::CommandBuffer,
+    graphics_queue: vk::Queue,
 ) -> VkBrdfLut {
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
-
-    let cmd_buffer = cmd_pool.buffers[0];
+    
 
     let format = vk::Format::R16G16B16A16_SFLOAT;
     let size = Extent3D::default().width(512).height(512).depth(1);
@@ -607,26 +640,26 @@ pub fn generate_brdf_lut(
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         device
-            .begin_command_buffer(cmd_buffer, &begin_info)
+            .begin_command_buffer(graphics_cmd_buffer, &begin_info)
             .unwrap();
 
         transition_image(
             device,
-            cmd_buffer,
+            graphics_cmd_buffer,
             brd_img.image,
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
 
-        device.cmd_begin_rendering(cmd_buffer, &rendering_info);
+        device.cmd_begin_rendering(graphics_cmd_buffer, &rendering_info);
 
-        device.cmd_set_viewport(cmd_buffer, 0, &[viewport]);
-        device.cmd_set_scissor(cmd_buffer, 0, &[scissor]);
-        device.cmd_bind_pipeline(cmd_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        device.cmd_set_viewport(graphics_cmd_buffer, 0, &[viewport]);
+        device.cmd_set_scissor(graphics_cmd_buffer, 0, &[scissor]);
+        device.cmd_bind_pipeline(graphics_cmd_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
 
-        device.cmd_draw(cmd_buffer, 3, 1, 0, 0);
+        device.cmd_draw(graphics_cmd_buffer, 3, 1, 0, 0);
 
-        device.cmd_end_rendering(cmd_buffer);
+        device.cmd_end_rendering(graphics_cmd_buffer);
 
         // Transition to final shader formatting
         let subresource_range = vk::ImageSubresourceRange::default()
@@ -650,7 +683,7 @@ pub fn generate_brdf_lut(
             .dst_access_mask(vk::AccessFlags::MEMORY_READ);
 
         device.cmd_pipeline_barrier(
-            cmd_buffer,
+            graphics_cmd_buffer,
             vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             vk::PipelineStageFlags::BOTTOM_OF_PIPE,
             vk::DependencyFlags::BY_REGION,
@@ -659,12 +692,12 @@ pub fn generate_brdf_lut(
             &[barrier],
         );
 
-        device.end_command_buffer(cmd_buffer).unwrap();
+        device.end_command_buffer(graphics_cmd_buffer).unwrap();
 
-        let cmd_info = [command_buffer_submit_info(cmd_buffer)];
+        let cmd_info = [command_buffer_submit_info(graphics_cmd_buffer)];
         let submit_info = [submit_info_2(&cmd_info, &[], &[])];
         device
-            .queue_submit2(queue, &submit_info, vk::Fence::null())
+            .queue_submit2(graphics_queue, &submit_info, vk::Fence::null())
             .unwrap();
 
         device.device_wait_idle().unwrap();
@@ -686,7 +719,7 @@ pub fn upload_skybox(
     allocator: &Allocator,
     tex_meta: TextureMeta,
     transfer_pool: VkCommandPool,
-    transfer_queue: vk::Queue
+    transfer_queue: vk::Queue,
 ) -> VkCubeMap {
     let face_width = tex_meta.width / 6;
 

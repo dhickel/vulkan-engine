@@ -333,7 +333,7 @@ pub fn create_logical_device(
     core_features: &mut vk::PhysicalDeviceFeatures,
     other_features: Option<&mut [Box<dyn vk::ExtendsPhysicalDeviceFeatures2>]>,
     required_extensions: Option<&[*const c_char]>,
-) -> Result<(ash::Device, DeviceQueues), String> {
+) -> Result<(ash::Device, VkDeviceQueues), String> {
     log::info!("Creating Logical Device");
     let queue_family_properties =
         unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
@@ -378,7 +378,7 @@ pub fn create_logical_device(
     };
 
     log::info!("Logical Device: Mapping device queues");
-    let mut queues = DeviceQueues::default();
+    let mut queues = VkDeviceQueues::default();
     for index in queue_indices {
         let queue: vk::Queue = unsafe { device.get_device_queue(index.index, 0) };
         for typ in &index.queue_types {
@@ -697,7 +697,7 @@ pub fn create_swapchain(
     instance: &ash::Instance,
     physical_device: &PhyDevice,
     device: &ash::Device,
-    device_queues: &DeviceQueues,
+    device_queues: &VkDeviceQueues,
     surface_info: &VkSurface,
     requested_extent: Extent2D,
     image_count: Option<u32>,

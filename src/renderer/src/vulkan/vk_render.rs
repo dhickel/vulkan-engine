@@ -1,4 +1,4 @@
-use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo, VkShaderCache, VkDataCache};
+use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo, VkShaderCache, VkDataCache, VkCache};
 
 use crate::data::gpu_data::{
     AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node,
@@ -32,6 +32,7 @@ use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 use crate::vulkan::vk_storage::VkSubAllocator;
+use crate::vulkan::vk_util::allocate_buffer;
 
 
 pub struct SkyBox {
@@ -100,7 +101,7 @@ pub struct VkRender {
     pub debug: Option<VkDebug>,
     pub physical_device: PhyDevice,
     pub device: ash::Device,
-    pub device_queues: DeviceQueues,
+    pub vulkan_cache: VkCache,
     pub surface: VkSurface,
     pub swapchain: VkSwapchain,
     pub presentation: VkPresent,
@@ -112,7 +113,6 @@ pub struct VkRender {
     pub render_context: RenderContext,
     pub data_cache: Arc<VkDataCache>,
     pub brdf_lut: VkBrdfLut,
-    pub global_desc_allocator: VkDynamicDescriptorAllocator,
     pub main_deletion_queue: Vec<VkDeletable>,
     pub resize_requested: bool,
 }
@@ -121,63 +121,31 @@ pub struct VkRender {
 pub fn init_caches(
     device: &ash::Device,
     allocator: &Arc<Mutex<Allocator>>,
-    meta_desc_layout: vk::DescriptorSetLayout,
-    image_descript_layout: vk::DescriptorSetLayout,
-    texture_host_buffer: &Arc<Mutex<VkHostBuffer>>,
+    texture_host_buffer: Arc<Mutex<VkHostBuffer>>,
     texture_meta_buffer_size: u64,
-    mesh_host_buffer: &Arc<Mutex<VkHostBuffer>>,
+    mesh_host_buffer: Arc<Mutex<VkHostBuffer>>,
     mesh_buffer_size: u64,
     color_format: vk::Format,
     depth_format: vk::Format,
     supported_formats: HashSet<vk::Format>,
-    limits: VkBufferAndDescriptorLimits,
-) -> Arc<VkDataCache> {
+    limits: &VkBufferAndDescriptorLimits,
+    device_queues: VkDeviceQueues,
+) -> (Arc<VkDataCache>, VkCache) {
     let shader_paths = vec![
-        (
-            CoreShaderType::MetRoughVert,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/pbr_base.vert.spv",
-        ),
-        (
-            CoreShaderType::MetRoughFrag,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_pbr.frag.spv",
-        ),
-        (
-            CoreShaderType::MetRoughFragUnlit,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_unlit.frag.spv"
-        ),
-        (
-            CoreShaderType::BrtFlutFrag,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"
-        ),
-        (
-            CoreShaderType::BrtFlutVert,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"
-        ),
-        (
-            CoreShaderType::SkyBoxFrag,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"
-        ),
-        (
-            CoreShaderType::SkyBoxVert,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"
-        ),
-        (
-            CoreShaderType::CubeFilterVert,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"
-        ),
-        (
-            CoreShaderType::EnvIrradianceFrag,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"
-        ),
-        (
-            CoreShaderType::EnvPrefilterFrag,
-            "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"
-        ),
+        (CoreShaderType::MetRoughVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/pbr_base.vert.spv"),
+        (CoreShaderType::MetRoughFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_pbr.frag.spv",),
+        (CoreShaderType::MetRoughFragUnlit, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_unlit.frag.spv"),
+        (CoreShaderType::BrtFlutFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"),
+        (CoreShaderType::BrtFlutVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"),
+        (CoreShaderType::SkyBoxFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"),
+        (CoreShaderType::SkyBoxVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"),
+        (CoreShaderType::CubeFilterVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"),
+        (CoreShaderType::EnvIrradianceFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
+        (CoreShaderType::EnvPrefilterFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
-
     let pipeline_cache = vk_pipeline::init_pipeline_cache(
         device,
         &desc_layout_cache,
@@ -185,41 +153,47 @@ pub fn init_caches(
         color_format,
         depth_format,
     );
-    
+
+    let meta_desc_layout = desc_layout_cache.get(VkDescType::PbrProperties);
+    let image_desc_layout = desc_layout_cache.get(VkDescType::PbrSamplers);
+
     let sampler_cache = VkSamplerCache::default();
-    
     let texture_cache = TextureCache::new(
         device, allocator.clone(), sampler_cache, supported_formats.clone(),
-        meta_desc_layout, image_descript_layout, texture_host_buffer.clone(),
+        meta_desc_layout, image_desc_layout, texture_host_buffer.clone(),
         texture_meta_buffer_size, &limits,
     ).unwrap();
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits,
     ).unwrap();
-    
+
     let index_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits,
     ).unwrap();
-    
- 
+
 
     let mesh_cache = MeshCache::new(vertex_allocator, index_allocator);
-
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
+
     let id = environment_cache
         .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
 
-   let cache =  VkDataCache {
-        shader_cache: Mutex::new(shader_cache),
-        desc_layout_cache: Mutex::new(desc_layout_cache),
-        pipeline_cache: Mutex::new(pipeline_cache),
+    let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
         texture_cache: Mutex::new(texture_cache),
         environment_cache: Mutex::new(environment_cache),
+        supported_image_formats: supported_formats
     };
-    
-    Arc::new(cache)
+
+    let vulkan_cache = VkCache {
+        shaders: shader_cache,
+        desc_layouts: desc_layout_cache,
+        pipelines: pipeline_cache,
+        queues: device_queues,
+    };
+
+    (Arc::new(data_cache), vulkan_cache)
 }
 
 
@@ -279,9 +253,6 @@ impl Drop for VkRender {
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.data_cache
-                .destroy(&self.device, &self.allocator.lock().unwrap());
-
-            self.global_desc_allocator
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.main_deletion_queue
@@ -445,6 +416,7 @@ impl VkRender {
                 device_queues.get_queue_index(VkQueueType::Transfer),
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             )?;
+
             let buffers = vk_init::create_command_buffers(
                 &device,
                 &cmd_pool,
@@ -488,11 +460,6 @@ impl VkRender {
         let frame_buffers: Vec<VkFrameSync> = (0..2)
             .map(|_| vk_init::create_frame_sync(&device))
             .collect::<Result<Vec<_>, _>>()?;
-
-        // TODO will have to separate compute pools when we get to that stage
-        //  currently we share present and graphics and just have a simple pool returned
-        //  it needs to be ironed out how to manage separate pools in relation, maybe just
-        //  store them all in the frame buffer?
 
         let mut allocator_info =
             AllocatorCreateInfo::new(&instance, &device, physical_device.p_device);
@@ -574,24 +541,44 @@ impl VkRender {
             imgui_dynamic,
             &mut imgui_context,
             Some(imgui_opts),
-        )
-            .unwrap();
+        ).unwrap();
+        
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
-
-
-        // let pool_ratios = [
-        //     PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
-        //     PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
-        //     PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
-        //     PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
-        // ];
-        // 
-        // let global_alloc = VkDynamicDescriptorAllocator::new(&device, 10, &pool_ratios).unwrap();
 
 
         //////////////////////////////////////////
         // Create Transfer Buffers & DataCaches //
         //////////////////////////////////////////
+
+        let transfer = VkTransfer::new(local_transfer_pool);
+
+        let fence_info = vk::FenceCreateInfo::default();
+        let (mesh_host_fence, texture_host_fence) = unsafe {
+            (device.create_fence(&fence_info, None).unwrap(), device.create_fence(&fence_info, None).unwrap())
+        };
+
+        let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
+        let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
+
+        let mesh_host_buffer = VkHostBuffer {
+            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(96)).unwrap(),
+            render_sender: transfer.get_sender(),
+            cmd_pool: host_buffer_pools.pop().unwrap(),
+            fence: [mesh_host_fence],
+            transfer_queue_index,
+            graphics_queue_index,
+        };
+        let mesh_host_buffer = Arc::new(Mutex::new(mesh_host_buffer));
+
+        let texture_host_buffer = VkHostBuffer {
+            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(32)).unwrap(),
+            render_sender: transfer.get_sender(),
+            cmd_pool: host_buffer_pools.pop().unwrap(),
+            fence: [mesh_host_fence],
+            transfer_queue_index,
+            graphics_queue_index,
+        };
+        let texture_host_buffer = Arc::new(Mutex::new(texture_host_buffer));
 
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
@@ -599,29 +586,41 @@ impl VkRender {
         let buffer_and_desc_limits =
             vk_init::get_buffer_and_descriptor_limits(&instance, physical_device.p_device);
 
-        let data_cache = init_caches(
+        let (data_cache, vulkan_cache) = init_caches(
             &device,
+            &allocator,
+            texture_host_buffer,
+            data_util::mb_to_bytes(128),
+            mesh_host_buffer,
+            data_util::mb_to_bytes(384),
             draw_format,
             depth_format,
             supported_image_formats.clone(),
+            &buffer_and_desc_limits,
+            device_queues,
         );
+
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
-        let brd_pipeline = data_cache
-            .pipeline_cache
+
+        ///////////////////
+        // GENERATE BRDF //
+        ///////////////////
+        let brdf_pipeline = vulkan_cache
+            .pipelines
             .get_pipeline(VkPipelineType::BrdfLut)
             .pipeline;
 
         let brd_flut = vk_util::generate_brdf_lut(
             &device,
             &allocator.lock().unwrap(),
-            brd_pipeline,
+            brdf_pipeline,
             presentation
                 .frame_data
                 .first()
                 .unwrap()
-                .cmd_buffer
-                .get(VkQueueType::Graphics),
+                .cmd_buffer,
+            vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         );
 
         let mut render = VkRender {
@@ -632,13 +631,13 @@ impl VkRender {
             debug,
             physical_device,
             device,
-            device_queues,
+            vulkan_cache,
             surface,
             swapchain,
             supported_image_formats,
             buffer_and_desc_limits,
             presentation,
-            immediate,
+            transfer,
             imgui,
             main_deletion_queue: Vec::new(),
             scene_data: GPUSceneData::default(),
@@ -646,7 +645,6 @@ impl VkRender {
             data_cache,
             brdf_lut: brd_flut,
             resize_requested: false,
-            global_desc_allocator: global_alloc,
         };
 
         //

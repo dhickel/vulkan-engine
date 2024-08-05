@@ -1,4 +1,4 @@
-use crate::data::data_cache::{MeshCache, TextureCache};
+use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     AlphaMode, EmissiveMap, MaterialMeta, MeshMeta, Node, NormalMap, OcclusionMap, Sampler,
@@ -27,7 +27,7 @@ use russimp_sys::{
     aiTextureType_aiTextureType_UNKNOWN, ai_real, AI_DEFAULT_MATERIAL_NAME,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::ffi::{c_char, c_uint, CStr, CString};
 use std::fs::File;
@@ -37,18 +37,26 @@ use std::os::raw;
 use std::os::raw::c_int;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
+
+
+pub struct ModelMeta {
+    pub node: Rc<RefCell<gpu_data::Node>>,
+    pub material_ids: Vec<u32>,
+    pub mesh_ids: Vec<u32>,
+}
+
 
 pub fn load_model(
     path: &str,
-    texture_cache: &mut TextureCache,
-    mesh_cache: &mut MeshCache,
+    data_cache: Arc<VkDataCache>,
     has_animation: bool,
-) -> Result<Rc<RefCell<gpu_data::Node>>, String> {
+) -> Result<ModelMeta, String> {
     let mut flags = aiPostProcessSteps_aiProcess_GenSmoothNormals
         | aiPostProcessSteps_aiProcess_JoinIdenticalVertices
         | aiPostProcessSteps_aiProcess_Triangulate
         | aiPostProcessSteps_aiProcess_FlipUVs
-     //   | aiPostProcessSteps_aiProcess_PreTransformVertices
+        //   | aiPostProcessSteps_aiProcess_PreTransformVertices
         | aiPostProcessSteps_aiProcess_FixInfacingNormals
         | aiPostProcessSteps_aiProcess_CalcTangentSpace;
     //  | aiPostProcessSteps_aiProcess_LimitBoneWeights;
@@ -87,20 +95,24 @@ pub fn load_model(
         }
     }?;
 
-    let materials = process_materials(ai_scene, base_path, texture_cache)?;
+    let materials = process_materials(ai_scene, base_path, &data_cache)?;
+    let mat_indices = (0..materials.len());
 
     let mut mapped_materials = HashMap::<u32, u32>::with_capacity(materials.len());
-    for (og_idx, material) in materials.into_iter().enumerate() {
-        let id = texture_cache.add_material(material);
-        mapped_materials.insert(og_idx as u32, id);
+    let material_ids = data_cache.texture_cache.lock().unwrap().add_materials(materials);
+
+    for (og_idx, id) in mat_indices.into_iter().zip(material_ids.iter()) {
+        mapped_materials.insert(og_idx as u32, *id);
     }
 
     let meshes = process_meshes(ai_scene, mapped_materials);
+    let mesh_indices = (0..meshes.len());
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(meshes.len());
-    for (og_idx, mesh) in meshes.into_iter().enumerate() {
-        let id = mesh_cache.add(mesh);
-        mapped_meshes.insert(og_idx as u32, id);
+    let mesh_ids = data_cache.mesh_cache.lock().unwrap().add_multi(meshes);
+
+    for (og_idx, id) in mesh_indices.into_iter().zip(mesh_ids.iter()) {
+        mapped_meshes.insert(og_idx as u32, *id);
     }
 
     let root_ai_node = (*ai_scene).mRootNode;
@@ -108,37 +120,81 @@ pub fn load_model(
     if root_ai_node.is_null() {
         Err("Failed to find root node in model".to_string())
     } else {
-        Ok(process_node(root_ai_node, &mapped_meshes, None))
+        let node = process_node(root_ai_node, &mapped_meshes, None);
+        Ok(
+            ModelMeta {
+                node,
+                material_ids,
+                mesh_ids,
+            }
+        )
     }
 }
+
 
 pub fn process_materials(
     ai_scene: &aiScene,
     base_path: Option<&str>,
-    tex_cache: &mut TextureCache,
+    data_cache: &Arc<VkDataCache>,
 ) -> Result<Vec<MaterialMeta>, String> {
     let mat_count = ai_scene.mNumMaterials as usize;
     let mut materials = Vec::<MaterialMeta>::with_capacity(mat_count);
 
+
     unsafe {
         for i in 0..mat_count {
             let ai_material_ptr = *ai_scene.mMaterials.add(i);
-            
+
             if ai_material_ptr.is_null() {
                 return Err(format!("Failed to resolve pointer for material: {}", i));
             }
 
             let ai_material = &*ai_material_ptr;
             let mut material_meta = MaterialMeta::default();
-            
-            // Base Color
-            if let Some(meta) = get_texture_meta(
+
+            let base_color = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_DIFFUSE,
                 base_path,
-                tex_cache,
-            ) {
+                data_cache,
+            );
+
+            let met_rough = get_texture_meta(
+                ai_material,
+                ai_scene,
+                aiTextureType_aiTextureType_UNKNOWN,
+                base_path,
+                data_cache,
+            );
+
+            let normal = get_texture_meta(
+                ai_material,
+                ai_scene,
+                aiTextureType_aiTextureType_NORMALS,
+                base_path,
+                data_cache,
+            );
+
+            let occlusion = get_texture_meta(
+                ai_material,
+                ai_scene,
+                aiTextureType_aiTextureType_LIGHTMAP,
+                base_path,
+                data_cache,
+            );
+
+            let emissive = get_texture_meta(
+                ai_material,
+                ai_scene,
+                aiTextureType_aiTextureType_EMISSIVE,
+                base_path,
+                data_cache,
+            );
+
+            let mut tex_cache = data_cache.texture_cache.lock().unwrap();
+
+            if let Some(meta) = base_color {
                 let color = get_color_factor(ai_material);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
@@ -148,7 +204,7 @@ pub fn process_materials(
                 ai_scene,
                 aiTextureType_aiTextureType_BASE_COLOR,
                 base_path,
-                tex_cache,
+                data_cache,
             ) {
                 let color = get_color_factor(ai_material);
                 let uv_set = meta.uv_index;
@@ -157,14 +213,7 @@ pub fn process_materials(
                 material_meta.add_base_color(tex_id, color, uv_set);
             }
 
-            // Metallic Roughness
-            if let Some(meta) = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_UNKNOWN,
-                base_path,
-                tex_cache,
-            ) {
+            if let Some(meta) = met_rough {
                 let metallic_factor = get_float_factor(
                     ai_material,
                     AI_MATKEY_METALLIC_FACTOR,
@@ -186,14 +235,7 @@ pub fn process_materials(
                 );
             }
 
-            // Normal 
-            if let Some(meta) = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_NORMALS,
-                base_path,
-                tex_cache,
-            ) {
+            if let Some(meta) = normal {
                 let normal_scale = get_float_factor(
                     ai_material,
                     AI_MATKEY_BUMPSCALING,
@@ -205,14 +247,7 @@ pub fn process_materials(
                 material_meta.add_normal(tex_id, normal_scale, uv_set);
             }
 
-            // Occlusion
-            if let Some(meta) = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_LIGHTMAP,
-                base_path,
-                tex_cache,
-            ) {
+            if let Some(meta) = occlusion {
                 let occlusion_strength = get_float_factor(
                     ai_material,
                     AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION,
@@ -224,14 +259,7 @@ pub fn process_materials(
                 material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
             }
 
-            // Emissive
-            if let Some(meta) = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_EMISSIVE,
-                base_path,
-                tex_cache,
-            ) {
+            if let Some(meta) = emissive {
                 let emissive_factor = get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE);
                 let emissive_strength =
                     get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
@@ -240,12 +268,13 @@ pub fn process_materials(
 
                 material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
             }
-            
+
             materials.push(material_meta);
         }
     }
     Ok(materials)
 }
+
 
 unsafe fn get_color_factor(ai_material: &aiMaterial) -> glam::Vec4 {
     let mut color = aiColor4D {
@@ -268,6 +297,7 @@ unsafe fn get_color_factor(ai_material: &aiMaterial) -> glam::Vec4 {
     }
 }
 
+
 unsafe fn get_float_factor(ai_material: &aiMaterial, key: *const i8, default: f32) -> f32 {
     let mut value = 0.0;
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, &mut value, &mut 1)
@@ -278,6 +308,7 @@ unsafe fn get_float_factor(ai_material: &aiMaterial, key: *const i8, default: f3
         default
     }
 }
+
 
 unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam::Vec3 {
     let mut factor = [0.0; 3];
@@ -290,6 +321,7 @@ unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam:
     }
 }
 
+
 unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32 {
     let mut strength = [0.0; 1];
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, strength.as_mut_ptr(), &mut 1)
@@ -300,6 +332,7 @@ unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32
         TextureCache::DEFAULT_EMISSIVE_STRENGTH
     }
 }
+
 
 unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> AlphaMode {
     let mut alpha_mode = aiString {
@@ -322,6 +355,7 @@ unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> AlphaMode {
     }
 }
 
+
 unsafe fn get_alpha_cutoff(ai_material: &aiMaterial) -> f32 {
     let mut alpha_cutoff = 0.5; // Default value
     aiGetMaterialFloatArray(
@@ -335,12 +369,13 @@ unsafe fn get_alpha_cutoff(ai_material: &aiMaterial) -> f32 {
     alpha_cutoff
 }
 
+
 unsafe fn get_texture_meta(
     ai_material: &aiMaterial,
     ai_scene: &aiScene,
     texture_type: aiTextureType,
     base_path: Option<&str>,
-    tex_cache: &mut TextureCache,
+    data_cache: &Arc<VkDataCache>,
 ) -> Option<TextureMeta> {
     if aiGetMaterialTextureCount(ai_material, texture_type) > 0 {
         let mut path = aiString {
@@ -377,7 +412,7 @@ unsafe fn get_texture_meta(
                                     texture.pcData as *const u8,
                                     texture.mWidth as usize,
                                 )
-                                .to_vec(),
+                                    .to_vec(),
                             )
                         } else {
                             None
@@ -401,7 +436,7 @@ unsafe fn get_texture_meta(
                     let (width, height) = img.dimensions();
                     let mut format = to_vk_format(&img);
 
-                    let bytes = if tex_cache.is_supported_format(format) {
+                    let bytes = if data_cache.is_supported_image_format(format) {
                         img.as_bytes().to_vec()
                     } else {
                         format = vk::Format::R8G8B8A8_UNORM;
@@ -422,6 +457,7 @@ unsafe fn get_texture_meta(
     }
     None
 }
+
 
 pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> Vec<MeshMeta> {
     let mesh_count = ai_scene.mNumMeshes as usize;
@@ -540,6 +576,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
     meshes
 }
 
+
 fn process_node(
     ai_node: *const aiNode,
     mapped_meshes: &HashMap<u32, u32>,
@@ -613,6 +650,7 @@ fn process_node(
     }
 }
 
+
 pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
     match format {
         DynamicImage::ImageLuma8(_) => vk::Format::R8_UNORM,
@@ -629,10 +667,12 @@ pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
     }
 }
 
+
 struct MeshTemp {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
+
 
 const AI_MATKEY_BASE_COLOR: *const c_char = b"$clr.base\0".as_ptr() as *const c_char;
 const AI_MATKEY_COLOR_DIFFUSE: *const c_char = b"$clr.diffuse\0".as_ptr() as *const c_char;

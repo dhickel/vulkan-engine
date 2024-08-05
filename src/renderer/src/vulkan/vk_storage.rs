@@ -151,7 +151,7 @@ impl VkSubAllocator {
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
         transfer_buffer: Arc<Mutex<VkHostBuffer>>,
-        buffer_size: usize,
+        buffer_size: u64,
         limits: &VkBufferAndDescriptorLimits,
     ) -> Result<Self, String> {
         let usage_flags = vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
@@ -255,7 +255,7 @@ impl VkSubAllocator {
                     self.usage_flags,
                     self.memory_usage,
                     self.buffer.dst_barrier,
-                    self.buffer.max_size as usize,
+                    self.buffer.max_size,
                     self.buffer.max_upload_bytes,
                     self.extra_buffers.len() as u32,
                 ) {

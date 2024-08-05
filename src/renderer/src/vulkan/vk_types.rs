@@ -17,9 +17,12 @@ use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
 
+
 pub trait VkDestroyable {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator);
 }
+
+
 #[derive(Debug)]
 pub enum VkError {
     Present(String),
@@ -43,6 +46,7 @@ pub struct VkWindowState {
     viewport_scissor: ([vk::Viewport; 1], [vk::Rect2D; 1]),
     pub controller: Rc<RefCell<FPSController>>,
 }
+
 
 impl VkWindowState {
     pub fn new(
@@ -144,16 +148,19 @@ impl VkWindowState {
     }
 }
 
+
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
     pub debug_callback: vk::DebugUtilsMessengerEXT,
 }
+
 
 pub struct SwapchainSupport {
     pub capabilities: vk::SurfaceCapabilitiesKHR,
     pub formats: Vec<vk::SurfaceFormatKHR>,
     pub present_modes: Vec<vk::PresentModeKHR>,
 }
+
 
 pub struct VkSwapchain {
     pub swapchain_loader: ash::khr::swapchain::Device,
@@ -163,10 +170,12 @@ pub struct VkSwapchain {
     pub extent: vk::Extent2D,
 }
 
+
 pub struct VkSurface {
     pub surface: vk::SurfaceKHR,
     pub surface_instance: ash::khr::surface::Instance,
 }
+
 
 pub struct PhyDevice {
     pub name: String,
@@ -174,10 +183,12 @@ pub struct PhyDevice {
     pub p_device: vk::PhysicalDevice,
 }
 
+
 pub struct LogicalDevice {
     pub device: ash::Device,
-    pub queues: DeviceQueues,
+    pub queues: VkDeviceQueues,
 }
+
 
 pub struct VkBufferAndDescriptorLimits {
     // Buffer limits
@@ -210,15 +221,16 @@ pub struct VkBufferAndDescriptorLimits {
     pub max_descriptor_set_update_after_bind_uniform_buffers: u32,
     pub max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
     pub max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
-    
-    
+
 }
+
 
 #[derive(Debug)]
 pub struct QueueIndex {
     pub index: u32,
     pub queue_types: Vec<VkQueueType>,
 }
+
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -228,6 +240,7 @@ pub enum VkQueueType {
     Compute = 2,
     Transfer = 3,
 }
+
 
 impl VkQueueType {
     // Define an array of all the enum variants
@@ -250,6 +263,7 @@ pub struct VkCommandPoolMap {
     pools: [VkCommandPool; 4],
 }
 
+
 impl VkDestroyable for VkCommandPoolMap {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.pools
@@ -257,6 +271,7 @@ impl VkDestroyable for VkCommandPoolMap {
             .for_each(|mut pool| pool.destroy(device, allocator));
     }
 }
+
 
 impl VkCommandPoolMap {
     pub fn new(pools: [VkCommandPool; 4]) -> Self {
@@ -268,6 +283,7 @@ impl VkCommandPoolMap {
     }
 }
 
+
 #[derive(Debug, Clone)]
 pub struct VkCommandPool {
     pub queue_index: u32,
@@ -275,6 +291,7 @@ pub struct VkCommandPool {
     pub pool: vk::CommandPool,
     pub buffers: Vec<vk::CommandBuffer>,
 }
+
 
 #[derive(Debug, Copy, Clone)]
 pub struct VkCmdSubmitInfo {
@@ -291,12 +308,14 @@ impl VkDestroyable for VkCommandPool {
     }
 }
 
+
 #[derive(Debug, Copy, Clone)]
 pub struct VkFrameSync {
     pub swap_semaphore: vk::Semaphore,
     pub render_semaphore: vk::Semaphore,
     pub render_fence: vk::Fence,
 }
+
 
 impl VkDestroyable for VkFrameSync {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -308,6 +327,7 @@ impl VkDestroyable for VkFrameSync {
     }
 }
 
+
 #[derive(Debug)]
 pub struct VkImageAlloc {
     pub image: vk::Image,
@@ -318,6 +338,7 @@ pub struct VkImageAlloc {
     pub mip_levels: u32,
 }
 
+
 impl VkDestroyable for VkImageAlloc {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
         unsafe {
@@ -326,6 +347,7 @@ impl VkDestroyable for VkImageAlloc {
         }
     }
 }
+
 
 // TODO we are going to want more control over the descriptor sets
 pub struct VkFrame {
@@ -340,6 +362,7 @@ pub struct VkFrame {
     deletions: Vec<VkDeletable>,
 }
 
+
 impl VkDestroyable for VkFrame {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
@@ -351,6 +374,7 @@ impl VkDestroyable for VkFrame {
         }
     }
 }
+
 
 impl VkFrame {
     pub fn destroy_for_rebuild(
@@ -379,24 +403,27 @@ impl VkFrame {
     }
 }
 
+
 pub struct VkPresent {
     pub frame_data: Vec<VkFrame>,
     curr_frame_count: u32,
     max_frames_active: u32,
-    pub cmd_pool: vk::CommandPool
+    pub cmd_pool: vk::CommandPool,
 }
+
 
 impl VkDestroyable for VkPresent {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.frame_data
             .iter_mut()
             .for_each(|frame| frame.destroy(device, allocator));
-        
+
         unsafe {
             device.destroy_command_pool(self.cmd_pool, None);
         }
     }
 }
+
 
 // TODO allow for multiple buffers and related sync structures
 impl VkPresent {
@@ -446,7 +473,7 @@ impl VkPresent {
             frame_data,
             curr_frame_count: 0,
             max_frames_active: data_len as u32,
-            cmd_pool: command_pool.pool
+            cmd_pool: command_pool.pool,
         })
     }
 
@@ -502,15 +529,17 @@ impl VkPresent {
     }
 }
 
+
 #[derive(Debug)]
-pub struct DeviceQueues {
-    pub graphics_queue: (u32, vk::Queue),
-    pub present_queue: (u32, vk::Queue),
-    pub compute_queue: (u32, vk::Queue),
-    pub transfer_queue: (u32, vk::Queue),
+pub struct VkDeviceQueues {
+    graphics_queue: (u32, vk::Queue),
+    present_queue: (u32, vk::Queue),
+    compute_queue: (u32, vk::Queue),
+    transfer_queue: (u32, vk::Queue),
 }
 
-impl Default for DeviceQueues {
+
+impl Default for VkDeviceQueues {
     fn default() -> Self {
         Self {
             graphics_queue: (u32::MAX, vk::Queue::null()),
@@ -521,7 +550,8 @@ impl Default for DeviceQueues {
     }
 }
 
-impl DeviceQueues {
+
+impl VkDeviceQueues {
     pub fn get_queue(&self, typ: VkQueueType) -> vk::Queue {
         match typ {
             VkQueueType::Present => self.present_queue.1,
@@ -570,11 +600,14 @@ impl DeviceQueues {
         }
     }
 }
+
+
 #[derive(Debug, Clone, Copy)]
 pub struct VkPipeline {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
 }
+
 
 impl VkPipeline {
     pub fn new(pipeline: vk::Pipeline, pipeline_layout: vk::PipelineLayout) -> Self {
@@ -585,6 +618,7 @@ impl VkPipeline {
     }
 }
 
+
 impl VkDestroyable for VkPipeline {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
@@ -594,10 +628,12 @@ impl VkDestroyable for VkPipeline {
     }
 }
 
+
 pub struct VkImmediate {
     pub command_pool: VkCommandPool,
     pub fence: [vk::Fence; 1],
 }
+
 
 impl VkImmediate {
     pub fn new(command_pool: VkCommandPool, fence: vk::Fence) -> Self {
@@ -608,6 +644,7 @@ impl VkImmediate {
     }
 }
 
+
 #[derive(Debug)]
 pub struct VkHostBuffer {
     pub buffer: VkBuffer,
@@ -617,6 +654,7 @@ pub struct VkHostBuffer {
     pub transfer_queue_index: u32,
     pub graphics_queue_index: u32,
 }
+
 
 impl VkHostBuffer {
     pub fn submit_commands(&self) -> Result<(), SendError<VkCmdSubmitInfo>> {
@@ -629,6 +667,7 @@ impl VkHostBuffer {
     }
 }
 
+
 impl VkDestroyable for VkHostBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.buffer.destroy(device, allocator);
@@ -636,12 +675,14 @@ impl VkDestroyable for VkHostBuffer {
     }
 }
 
+
 pub struct VkTransfer {
     host_buffers: Vec<Arc<Mutex<VkHostBuffer>>>,
     sender: Sender<VkCmdSubmitInfo>,
     receiver: Receiver<VkCmdSubmitInfo>,
     transfer_pool: VkCommandPool,
 }
+
 
 impl VkTransfer {
     pub fn new(transfer_pool: VkCommandPool) -> Self {
@@ -664,10 +705,15 @@ impl VkTransfer {
         }
     }
 
+    pub fn get_sender(&self) -> Sender<VkCmdSubmitInfo> {
+        self.sender.clone()
+    }
+
     pub fn send_to_self(&self, info: VkCmdSubmitInfo) -> Result<(), SendError<VkCmdSubmitInfo>> {
         self.sender.send(info)
     }
 }
+
 
 impl VkDestroyable for VkTransfer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -678,12 +724,14 @@ impl VkDestroyable for VkTransfer {
     }
 }
 
+
 pub struct VkImgui {
     pub context: imgui::Context,
     pub platform: imgui_winit_support::WinitPlatform,
     pub renderer: imgui_rs_vulkan_renderer::Renderer,
     pub opened: bool,
 }
+
 
 impl VkImgui {
     pub fn new(
@@ -715,6 +763,7 @@ impl VkImgui {
     }
 }
 
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Compute4x4PushConstants {
@@ -723,6 +772,7 @@ pub struct Compute4x4PushConstants {
     pub data_3: glam::Vec4,
     pub data_4: glam::Vec4,
 }
+
 
 impl Default for Compute4x4PushConstants {
     fn default() -> Self {
@@ -734,6 +784,7 @@ impl Default for Compute4x4PushConstants {
         }
     }
 }
+
 
 impl Compute4x4PushConstants {
     pub fn set_data_1(mut self, data: glam::Vec4) -> Self {
@@ -754,11 +805,13 @@ impl Compute4x4PushConstants {
     }
 }
 
+
 impl Compute4x4PushConstants {
     pub fn as_byte_slice(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 }
+
 
 pub struct ComputeEffect {
     pub name: String,
@@ -767,6 +820,7 @@ pub struct ComputeEffect {
     pub descriptors: VkDescriptors,
     pub data: Compute4x4PushConstants,
 }
+
 
 impl VkDestroyable for ComputeEffect {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -778,16 +832,19 @@ impl VkDestroyable for ComputeEffect {
     }
 }
 
+
 pub struct ComputeData {
     pub effects: Vec<ComputeEffect>,
     pub current: u32,
 }
+
 
 impl ComputeData {
     pub fn get_current_effect(&self) -> &ComputeEffect {
         self.effects.get(self.current as usize).unwrap()
     }
 }
+
 
 impl VkDestroyable for ComputeData {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -796,6 +853,7 @@ impl VkDestroyable for ComputeData {
             .for_each(|e| e.destroy(device, allocator));
     }
 }
+
 
 impl Default for ComputeData {
     fn default() -> Self {
@@ -806,6 +864,7 @@ impl Default for ComputeData {
     }
 }
 
+
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
 pub struct VkDescriptors {
@@ -813,6 +872,7 @@ pub struct VkDescriptors {
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
 }
+
 
 impl VkDestroyable for VkDescriptors {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -824,6 +884,7 @@ impl VkDestroyable for VkDescriptors {
         }
     }
 }
+
 
 impl VkDescriptors {
     pub fn new(allocator: VkDescriptorAllocator) -> Self {
@@ -840,6 +901,7 @@ impl VkDescriptors {
     }
 }
 
+
 #[derive(Debug)]
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
@@ -847,6 +909,7 @@ pub struct VkBuffer {
     pub allocation: vk_mem::Allocation,
     pub alloc_info: vk_mem::AllocationInfo,
 }
+
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
@@ -857,16 +920,18 @@ pub struct VkSubAlloc {
     pub sub_buffer_index: u32,
 }
 
+
 pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
     pub extent: Extent2D,
 }
 
+
 impl VkBuffer {
     pub fn new(
         buffer: vk::Buffer,
-        size: usize,
+        size: u64,
         allocation: vk_mem::Allocation,
         alloc_info: vk_mem::AllocationInfo,
     ) -> Self {
@@ -879,6 +944,7 @@ impl VkBuffer {
     }
 }
 
+
 impl VkDestroyable for VkBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
@@ -887,9 +953,11 @@ impl VkDestroyable for VkBuffer {
     }
 }
 
+
 pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),
 }
+
 
 impl VkDeletable {
     pub fn delete(&mut self, device: &ash::Device, allocator: &Allocator) {

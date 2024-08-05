@@ -37,6 +37,10 @@ impl PackUnorm for Vec4 {
     }
 }
 
+pub fn mb_to_bytes(mb: u64) -> u64 {
+    mb * 1_048_576
+}
+
 pub fn convert_rgb32f_to_rgba32f(
     img: ImageBuffer<Rgb<f32>, Vec<f32>>,
 ) -> ImageBuffer<Rgba<f32>, Vec<f32>> {
