@@ -718,7 +718,7 @@ pub fn upload_skybox(
     device: &ash::Device,
     allocator: &Allocator,
     tex_meta: TextureMeta,
-    transfer_pool: VkCommandPool,
+    transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
 ) -> VkCubeMap {
     let face_width = tex_meta.width / 6;

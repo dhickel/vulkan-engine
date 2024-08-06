@@ -21,6 +21,3 @@ struct MaterialMeta {
 	float alphaMaskCutoff;
 };
 
-layout (buffer_reference, std430) readonly buffer MatMetaBuffer {
-	MaterialMeta matMetas[];
-};

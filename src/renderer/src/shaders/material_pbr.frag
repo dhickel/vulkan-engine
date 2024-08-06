@@ -21,7 +21,6 @@ layout (location = 4) in vec4 inColor0;
 
 layout (set = 0, binding = 0) uniform UBO {
     mat4 projection;
-    mat4 model;
     mat4 view;
     vec3 camPos;
 } ubo;
@@ -44,23 +43,22 @@ layout (set = 0, binding = 4) uniform sampler2D samplerBRDFLUT;
 
 // Textures
 
-layout (set = 1, binding = 0) uniform sampler2D colorMap;
-layout (set = 1, binding = 1) uniform sampler2D roughnessMap;
-layout (set = 1, binding = 2) uniform sampler2D normalMap;
-layout (set = 1, binding = 3) uniform sampler2D aoMap;
-layout (set = 1, binding = 4) uniform sampler2D emissiveMap;
+layout (set = 2, binding = 0) uniform sampler2D colorMap;
+layout (set = 2, binding = 1) uniform sampler2D roughnessMap;
+layout (set = 2, binding = 2) uniform sampler2D normalMap;
+layout (set = 2, binding = 3) uniform sampler2D aoMap;
+layout (set = 2, binding = 4) uniform sampler2D emissiveMap;
 
 // Properties
 
 #include "shader_material.glsl"
 
-layout (std430, set = 3, binding = 0) buffer SSBO
-{
-    ShaderMaterial materials[];
-};
 
 layout (push_constant) uniform constants {
-    layout (offset = 76) uint materialIndex;
+    mat4 modelMatrix;
+    VertexBuffer vertexBuffer;
+    MaterialMeta mataterialMeta;
+    uint jointCount;
 } pc;
 
 layout (location = 0) out vec4 outColor;
@@ -192,7 +190,7 @@ float convertMetallic(vec3 diffuse, vec3 specular, float maxSpecular) {
 
 void main()
 {
-    ShaderMaterial material = materials[pc.materialIndex];
+    MaterialMeta material = pc.mataterialMeta;
 
     float perceptualRoughness;
     float metallic;

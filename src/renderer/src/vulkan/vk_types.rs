@@ -1,8 +1,8 @@
 use crate::data::camera::FPSController;
 
-use crate::vulkan::vk_descriptor::{VkDescriptorAllocator, VkDynamicDescriptorAllocator};
+use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator};
 use crate::vulkan::vk_util;
-use ash::vk::Extent2D;
+use ash::vk::{DeviceSize, Extent2D};
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
@@ -16,6 +16,8 @@ use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
+use crate::data::data_cache::{EnvMaps, VkPipelineType};
+use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 
 
 pub trait VkDestroyable {
@@ -233,7 +235,7 @@ pub struct QueueIndex {
 
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum VkQueueType {
     Present = 0,
     Graphics = 1,
@@ -256,7 +258,6 @@ impl VkQueueType {
     }
 }
 
-// TODO this with need refactored when it comes to to request separate compute/graphics pools
 
 #[derive(Debug, Clone)]
 pub struct VkCommandPoolMap {
@@ -274,8 +275,16 @@ impl VkDestroyable for VkCommandPoolMap {
 
 
 impl VkCommandPoolMap {
-    pub fn new(pools: [VkCommandPool; 4]) -> Self {
-        Self { pools }
+    pub fn new(mut pools: Vec<(VkQueueType, VkCommandPool)>) -> Result<Self, String> {
+        pools.sort_by_key(|(typ, _)| *typ);
+
+        let sorted_pools: [VkCommandPool; 4] = pools.into_iter()
+            .map(|(_, pool)| pool)
+            .collect::<Vec<_>>()
+            .try_into()
+            .map_err(|_| "Invalid pool count, expected 4".to_string())?;
+
+        Ok(Self { pools: sorted_pools })
     }
 
     pub fn get(&self, typ: VkQueueType) -> &VkCommandPool {
@@ -357,7 +366,7 @@ pub struct VkFrame {
     pub depth: VkImageAlloc,
     pub present_image: vk::Image,
     pub present_image_view: vk::ImageView,
-    pub cmd_buffer: vk::CommandBuffer,
+    pub cmd_pools: VkCommandPoolMap,
     pub descriptors: VkDynamicDescriptorAllocator,
     deletions: Vec<VkDeletable>,
 }
@@ -369,6 +378,8 @@ impl VkDestroyable for VkFrame {
             self.sync.destroy(device, allocator);
             self.draw.destroy(device, allocator);
             self.depth.destroy(device, allocator);
+            self.cmd_pools.destroy(device, allocator);
+            self.descriptors.destroy(device, allocator);
             // device.destroy_image_view(self.present_image_view, None);
             // device.destroy_image(self.present_image, None);
         }
@@ -381,14 +392,14 @@ impl VkFrame {
         &mut self,
         device: &Device,
         allocator: &Allocator,
-    ) -> (VkFrameSync, vk::CommandBuffer) {
+    ) -> (VkFrameSync, VkCommandPoolMap) {
         unsafe {
             self.draw.destroy(device, allocator);
             self.depth.destroy(device, allocator);
             // device.destroy_image_view(self.present_image_view, None);
             // device.destroy_image(self.present_image, None);
         }
-        (self.sync, self.cmd_buffer)
+        (self.sync, self.cmd_pools.clone())
     }
 
     pub fn add_deletion(&mut self, deletion: VkDeletable) {
@@ -401,6 +412,7 @@ impl VkFrame {
             .for_each(|d| d.delete(device, allocator));
         self.deletions.clear();
     }
+    
 }
 
 
@@ -408,7 +420,6 @@ pub struct VkPresent {
     pub frame_data: Vec<VkFrame>,
     curr_frame_count: u32,
     max_frames_active: u32,
-    pub cmd_pool: vk::CommandPool,
 }
 
 
@@ -416,11 +427,9 @@ impl VkDestroyable for VkPresent {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.frame_data
             .iter_mut()
-            .for_each(|frame| frame.destroy(device, allocator));
-
-        unsafe {
-            device.destroy_command_pool(self.cmd_pool, None);
-        }
+            .for_each(|frame| {
+                frame.destroy(device, allocator)
+            });
     }
 }
 
@@ -432,7 +441,7 @@ impl VkPresent {
         mut draw_images: Vec<VkImageAlloc>,
         mut depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
-        mut command_pool: VkCommandPool,
+        mut command_pools: Vec<VkCommandPoolMap>,
         mut descriptor_allocators: Vec<VkDynamicDescriptorAllocator>,
     ) -> Result<Self, VkError> {
         let lengths = [
@@ -440,7 +449,7 @@ impl VkPresent {
             draw_images.len(),
             depth_images.len(),
             present_images.len(),
-            command_pool.buffers.len(),
+            command_pools.len(),
             descriptor_allocators.len(),
         ];
 
@@ -463,7 +472,7 @@ impl VkPresent {
                 depth: depth_images.remove(0),
                 present_image: present_images[i].0,
                 present_image_view: present_images[i].1,
-                cmd_buffer: command_pool.buffers.remove(0),
+                cmd_pools: command_pools.remove(0),
                 descriptors: descriptor_allocators.remove(0),
                 deletions: Vec::with_capacity(100),
             };
@@ -473,7 +482,6 @@ impl VkPresent {
             frame_data,
             curr_frame_count: 0,
             max_frames_active: data_len as u32,
-            cmd_pool: command_pool.pool,
         })
     }
 
@@ -518,24 +526,24 @@ impl VkPresent {
         &mut self,
         device: &Device,
         allocator: &Allocator,
-    ) -> (Vec<VkFrameSync>, Vec<vk::CommandBuffer>) {
-        let (frame_sync, cmd_buffers): (Vec<_>, Vec<_>) = self
+    ) -> (Vec<VkFrameSync>, Vec<VkCommandPoolMap>) {
+        let (frame_sync, cmd_pools): (Vec<_>, Vec<_>) = self
             .frame_data
             .iter_mut()
             .map(|frame| frame.destroy_for_rebuild(device, allocator))
             .unzip();
 
-        (frame_sync, cmd_buffers)
+        (frame_sync, cmd_pools)
     }
 }
 
 
 #[derive(Debug)]
 pub struct VkDeviceQueues {
-    graphics_queue: (u32, vk::Queue),
-    present_queue: (u32, vk::Queue),
-    compute_queue: (u32, vk::Queue),
-    transfer_queue: (u32, vk::Queue),
+    pub(crate) graphics_queue: (u32, vk::Queue),
+    pub(crate) present_queue: (u32, vk::Queue),
+    pub(crate) compute_queue: (u32, vk::Queue),
+    pub(crate) transfer_queue: (u32, vk::Queue),
 }
 
 
@@ -602,7 +610,7 @@ impl VkDeviceQueues {
 }
 
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VkPipeline {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
@@ -711,6 +719,10 @@ impl VkTransfer {
 
     pub fn send_to_self(&self, info: VkCmdSubmitInfo) -> Result<(), SendError<VkCmdSubmitInfo>> {
         self.sender.send(info)
+    }
+
+    pub fn get_local_transfer_pool(&self) -> &VkCommandPool {
+        &self.transfer_pool
     }
 }
 
@@ -968,3 +980,187 @@ impl VkDeletable {
         }
     }
 }
+
+pub struct VkSceneDescriptors {
+    descriptor_pool: VkDynamicDescriptorAllocator,
+    scene_descriptors: [vk::DescriptorSet; 2],
+    scene_buffer: VkBuffer,
+    env_buffer: VkBuffer,
+}
+
+
+impl VkSceneDescriptors {
+    pub fn new(
+        device: &ash::Device,
+        allocator: &Allocator,
+        uniform_alignment: DeviceSize,
+        scene_desc_layout: vk::DescriptorSetLayout,
+        env_maps: &EnvMaps,
+        brdf_lut: &VkBrdfLut,
+    ) -> Self {
+        let pool_ratios = vec![
+            PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0),
+            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 3.0),
+        ];
+        let mut descriptor_pool = VkDynamicDescriptorAllocator::new(device, 2, &pool_ratios).unwrap();
+
+        let scene_buffer = vk_util::allocate_buffer(
+            allocator,
+            (std::mem::size_of::<SceneDataUBO>()
+                .next_multiple_of(uniform_alignment as usize) * 2) as DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk_mem::MemoryUsage::Auto,
+        ).unwrap();
+
+        let env_buffer = vk_util::allocate_buffer(
+            allocator,
+            (std::mem::size_of::<EnvironmentUBO>()
+                .next_multiple_of(uniform_alignment as usize) * 2) as DeviceSize,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk_mem::MemoryUsage::Auto,
+        ).unwrap();
+
+
+        let scene_descriptors: [vk::DescriptorSet; 2] = (0..2).into_iter().map(|i| {
+            let scene_data = SceneDataUBO::default();
+            let scene_data_size = std::mem::size_of::<SceneDataUBO>() as DeviceSize;
+            let env_data_size = std::mem::size_of::<EnvironmentUBO>() as DeviceSize;
+            unsafe {
+                let data_ptr = device.map_memory(
+                    scene_buffer.alloc_info.device_memory,
+                    i * scene_data_size,
+                    scene_data_size as DeviceSize,
+                    vk::MemoryMapFlags::empty(),
+                ).expect("Failed to map memory for scene uniform");
+
+                std::ptr::copy_nonoverlapping(
+                    &scene_data as *const SceneDataUBO as *const u8,
+                    data_ptr.cast(),
+                    scene_data_size as usize,
+                );
+
+                device.unmap_memory(scene_buffer.alloc_info.device_memory);
+
+
+                let data_ptr = device.map_memory(
+                    env_buffer.alloc_info.device_memory,
+                    i * scene_data_size,
+                    env_data_size as DeviceSize,
+                    vk::MemoryMapFlags::empty(),
+                ).expect("Failed to map memory for scene uniform");
+
+                std::ptr::copy_nonoverlapping(
+                    &env_maps.environment_ubo as *const EnvironmentUBO as *const u8,
+                    data_ptr.cast(),
+                    env_data_size as usize,
+                );
+
+                device.unmap_memory(env_buffer.alloc_info.device_memory);
+            }
+
+
+            let desc_set = descriptor_pool.allocate(&device, &[scene_desc_layout]).unwrap();
+
+            let mut writer = VkDescriptorWriter::default();
+            writer.write_buffer(
+                0,
+                scene_buffer.buffer,
+                scene_data_size,
+                (scene_data_size * i) as usize,
+                vk::DescriptorType::UNIFORM_BUFFER,
+            );
+
+            writer.write_buffer(
+                1,
+                env_buffer.buffer,
+                env_data_size,
+                (env_data_size * i) as usize,
+                vk::DescriptorType::UNIFORM_BUFFER,
+            );
+
+            writer.write_image(
+                2,
+                env_maps.irradiance.image_view,
+                env_maps.irradiance.sampler,
+                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+            );
+
+            writer.write_image(
+                3,
+                env_maps.pre_filter.image_view,
+                env_maps.pre_filter.sampler,
+                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+            );
+
+            writer.write_image(
+                4,
+                brdf_lut.image_alloc.image_view,
+                brdf_lut.sampler,
+                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+            );
+
+            writer.update_set(device, desc_set);
+
+            desc_set
+
+        }).collect::<Vec<_>>().try_into().unwrap();
+
+
+        Self {
+            descriptor_pool,
+            scene_descriptors,
+            scene_buffer,
+            env_buffer,
+        }
+    }
+
+
+    pub fn update_scene_uniform(
+        &mut self,
+        device: &ash::Device,
+        scene_data: SceneDataUBO,
+        index: u32,
+    ) -> vk::DescriptorSet {
+        let data_size = std::mem::size_of::<SceneDataUBO>() as vk::DeviceSize;
+        unsafe {
+            let data_ptr = device.map_memory(
+                self.scene_buffer.alloc_info.device_memory,
+                0,
+                data_size,
+                vk::MemoryMapFlags::empty(),
+            ).expect("Failed to map memory for scene uniform");
+
+            std::ptr::copy_nonoverlapping(
+                &scene_data as *const SceneDataUBO as *const u8,
+                data_ptr.cast(),
+                std::mem::size_of::<SceneDataUBO>(),
+            );
+
+            device.unmap_memory(self.scene_buffer.alloc_info.device_memory);
+        }
+
+
+        let mut writer = VkDescriptorWriter::default();
+        writer.write_buffer(
+            0,
+            self.scene_buffer.buffer,
+            data_size,
+            0,
+            vk::DescriptorType::UNIFORM_BUFFER,
+        );
+
+        let desc = self.scene_descriptors[index as usize];
+        writer.update_set(device, desc);
+        desc
+    }
+
+    
+
+    pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
+        self.scene_descriptors[index as usize]
+    }
+}
+

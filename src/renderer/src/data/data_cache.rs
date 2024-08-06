@@ -1,7 +1,5 @@
 use crate::data::data_util::PackUnorm;
-use crate::data::gpu_data::{AlphaMode, AsByteSlice, EmissiveMap, MaterialMeta, MaterialValues,
-    MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta,
-    TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers};
+use crate::data::gpu_data::{AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
@@ -19,6 +17,7 @@ use log::{error, info};
 use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
+use std::marker::PhantomData;
 use std::path;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -53,7 +52,6 @@ pub enum CachedMaterial {
 pub struct VkLoadedMaterial {
     pub texture_ids: TextureIds,
     pub meta_alloc: VkSubAlloc,
-    pub meta_descriptor: vk::DescriptorSet,
     pub image_descriptor: vk::DescriptorSet,
     pub pipeline: VkPipelineType,
 }
@@ -68,28 +66,12 @@ pub struct VkLoadedTexture {
 
 pub struct DescriptorManager {
     image_desc_allocator: VkDynamicDescriptorAllocator,
-    meta_desc_allocator: VkDynamicDescriptorAllocator,
-    meta_descriptors: HashMap<u32, vk::DescriptorSet>,
-    meta_desc_layout: vk::DescriptorSetLayout,
     image_desc_layout: vk::DescriptorSetLayout,
 }
 
 
 impl DescriptorManager {
-    pub fn get_or_alloc_meta_desc(&mut self, device: &ash::Device, meta_sub_alloc: VkSubAlloc) -> vk::DescriptorSet {
-        if let Some(desc) = self.meta_descriptors.get(&meta_sub_alloc.sub_buffer_index) {
-            *desc
-        } else {
-            let descriptor = self.meta_desc_allocator.allocate(device, &[self.meta_desc_layout]).unwrap();
 
-            let mut writer = VkDescriptorWriter::default();
-            writer.write_buffer(0, meta_sub_alloc.buffer, vk::WHOLE_SIZE, 0, vk::DescriptorType::STORAGE_BUFFER);
-            writer.update_set(device, descriptor);
-
-            self.meta_descriptors.insert(meta_sub_alloc.sub_buffer_index, descriptor);
-            descriptor
-        }
-    }
 
     pub fn alloc_image_desc(&mut self, device: &ash::Device) -> vk::DescriptorSet {
         self.image_desc_allocator
@@ -99,11 +81,17 @@ impl DescriptorManager {
 }
 
 
+unsafe impl Send for MeshCache {}
+
+
+unsafe impl Send for TextureCache {}
+
+
 pub struct VkDataCache {
     pub mesh_cache: Mutex<MeshCache>,
     pub texture_cache: Mutex<TextureCache>,
     pub environment_cache: Mutex<EnvironmentCache>,
-    supported_image_formats: HashSet<vk::Format>
+    pub supported_image_formats: HashSet<vk::Format>,
 }
 
 
@@ -113,12 +101,14 @@ impl VkDataCache {
     }
 }
 
+
 pub struct VkCache {
     pub shaders: VkShaderCache,
     pub desc_layouts: VkDescLayoutCache,
     pub pipelines: VkPipelineCache,
-    pub queues: VkDeviceQueues
+    pub queues: VkDeviceQueues,
 }
+
 
 impl VkDestroyable for VkCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -304,9 +294,6 @@ impl TextureCache {
 
         let desc_manager = DescriptorManager {
             image_desc_allocator,
-            meta_desc_allocator,
-            meta_descriptors: HashMap::with_capacity(10),
-            meta_desc_layout,
             image_desc_layout,
         };
 
@@ -382,16 +369,16 @@ impl TextureCache {
     }
 
 
-    pub unsafe fn get_loaded_material_unchecked(&self, id: u32) -> &VkLoadedMaterial {
+    pub unsafe fn get_loaded_material_unchecked(&self, id: u32) -> VkLoadedMaterial {
         unsafe {
             match self.cached_materials.get_unchecked(id as usize) {
-                CachedMaterial::Loaded(loaded) => loaded,
+                CachedMaterial::Loaded(loaded) => *loaded,
                 _ => std::hint::unreachable_unchecked(),
             }
         }
     }
 
-    pub fn get_loaded_material_unchecked_ptr(&self, id: u32) -> *const VkLoadedMaterial {
+    pub unsafe fn get_loaded_material_unchecked_ptr(&self, id: u32) -> *const VkLoadedMaterial {
         unsafe {
             match self.cached_materials.get_unchecked(id as usize) {
                 CachedMaterial::Loaded(loaded) => loaded,
@@ -544,8 +531,7 @@ impl TextureCache {
                 meta.material_values.alpha_mask
             ),
         };
-
-        let meta_descriptor = self.desc_manager.get_or_alloc_meta_desc(&self.device, meta_alloc);
+        
 
         let color_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.base_color) };
         let metallic_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.metallic_roughness) };
@@ -601,7 +587,6 @@ impl TextureCache {
         VkLoadedMaterial {
             texture_ids: meta.texture_ids,
             meta_alloc,
-            meta_descriptor,
             image_descriptor,
             pipeline,
         }
@@ -734,16 +719,28 @@ pub struct MeshCache {
     vertex_storage: VkSubAllocator,
     index_storage: VkSubAllocator,
     cached_meshes: Vec<CachedMesh>,
+    joint_desc_pool: VkDynamicDescriptorAllocator,
+    default_joint_desc: vk::DescriptorSet,
+    default_joint_buffer: VkBuffer,
 }
 
 
 impl MeshCache {
+    const DEFAULT_JOINTS: [glam::Mat4; 128] = [glam::Mat4::IDENTITY; 128];
     const DEFAULT_MESH_ITER_START: usize = 1;
+    pub const SKYBOX_MESH: u32 = 0;
 
-    pub fn new(vertex_storage: VkSubAllocator, index_storage: VkSubAllocator) -> Self {
+    pub fn new(
+        device: &ash::Device,
+        allocator: &Allocator,
+        joint_desc_layout: vk::DescriptorSetLayout,
+        vertex_storage: VkSubAllocator,
+        index_storage: VkSubAllocator,
+    ) -> Self {
         use glam::{Vec3, Vec4};
 
         let mut cached_meshes = Vec::<CachedMesh>::with_capacity(100);
+
         let (vertices, indices) = data_util::get_skybox_mesh();
         let skybox = MeshMeta {
             name: "Skybox Cube".to_string(),
@@ -754,14 +751,46 @@ impl MeshCache {
 
         cached_meshes.push(CachedMesh::Unloaded(skybox));
 
+        let default_joint_buffer = vk_util::allocate_and_write_buffer(
+            allocator,
+            Self::DEFAULT_JOINTS.as_byte_slice(),
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+        ).unwrap();
+
+        let mut joint_desc_pool = VkDynamicDescriptorAllocator::new(
+            device,
+            1,
+            &[PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER,
+                1.0)],
+        ).unwrap();
+
+        let default_joint_desc = joint_desc_pool.allocate(device, &[joint_desc_layout]).unwrap();
+
+
+        let mut writer = VkDescriptorWriter::default();
+        writer.write_buffer(
+            0,
+            default_joint_buffer.buffer
+            , 0,
+            std::mem::size_of::<glam::Mat4>() * 128,
+            vk::DescriptorType::UNIFORM_BUFFER)
+        ;
+
+
         Self {
             cached_meshes,
             vertex_storage,
             index_storage,
+            joint_desc_pool,
+            default_joint_buffer,
+            default_joint_desc,
         }
     }
 
-    pub const SKYBOX_MESH: u32 = 0;
+    pub fn get_default_joint_desc(&self) -> vk::DescriptorSet {
+        self.default_joint_desc
+    }
+
 
     pub fn add(&mut self, data: MeshMeta) -> u32 {
         let index = self.cached_meshes.len();
@@ -796,6 +825,15 @@ impl MeshCache {
 
     pub fn get_id(&self, id: u32) -> Option<&CachedMesh> {
         self.cached_meshes.get(id as usize)
+    }
+
+    pub fn get_loaded_id_unchecked(&self, id: u32) -> VkMeshBuffers {
+        unsafe {
+            match self.cached_meshes.get_unchecked(id as usize) {
+                CachedMesh::Loaded(buffers) => *buffers,
+                _ => std::hint::unreachable_unchecked(),
+            }
+        }
     }
 
     pub fn get_ids(&self, ids: Vec<u32>) -> Vec<Option<&CachedMesh>> {
@@ -863,6 +901,8 @@ impl MeshCache {
                         vertex_count: meta.vertices.len() as u32,
                         index_buffer: index_alloc.clone(),
                         vertex_buffer: vert_alloc.clone(),
+                        joint_desc: self.default_joint_desc,
+                        material_id: meta.material_index.unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT),
                     };
 
                     if let Some(rtn_meshes) = &mut rtn_buffers {
@@ -1175,6 +1215,7 @@ pub enum CachedEnvironment {
 
 
 pub struct EnvMaps {
+    pub environment_ubo: EnvironmentUBO,
     pub irradiance: VkCubeMap,
     pub pre_filter: VkCubeMap,
 }
@@ -1326,8 +1367,8 @@ impl EnvironmentCache {
         env_id: u32,
         device: &ash::Device,
         allocator: &Allocator,
-        pipeline: vk::Pipeline,
-        cmd_pool: &VkCommandPool,
+        transfer_pool: &VkCommandPool,
+        transfer_queue: vk::Queue,
     ) {
         let env_id = env_id as usize;
         let texture = std::mem::replace(
@@ -1343,7 +1384,7 @@ impl EnvironmentCache {
         );
 
         if let CachedEnvironment::Unloaded(meta) = texture {
-            let cube_map = vk_util::upload_skybox(device, allocator, meta, pipeline, cmd_pool);
+            let cube_map = vk_util::upload_skybox(device, allocator, meta, transfer_pool, transfer_queue);
             self.skyboxes[env_id] = CachedEnvironment::Loaded(cube_map);
         } else {
             self.skyboxes[env_id] = texture;

@@ -38,7 +38,7 @@ pub struct Vertex {
     pub weights: Vec4,
     pub uv1_x: f32,
     pub uv1_y: f32,
-    _pad: u64,
+    pub _pad: u64,
 }
 
 
@@ -310,7 +310,7 @@ pub struct SurfaceMeta {
 }
 
 
-#[derive(Clone, Default, PartialEq, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct MeshMeta {
     pub name: String,
     pub indices: Vec<u32>,
@@ -383,16 +383,16 @@ pub struct VkModelPushConsts {
 
 impl VkModelPushConsts {
     pub fn new(
-        model_matrix: Mat4, 
+        model_matrix: Mat4,
         vertex_buffer_addr: vk::DeviceAddress,
-        mat_meta_buffer_addr: 
+        mat_meta_buffer_addr:
         vk::DeviceAddress) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
             mat_meta_buffer_addr,
             joint_count: 0,
-            _pad: [0;3],
+            _pad: [0; 3],
         }
     }
 
@@ -400,14 +400,14 @@ impl VkModelPushConsts {
         model_matrix: Mat4,
         joint_count: u32,
         vertex_buffer_addr: vk::DeviceAddress,
-        mat_meta_buffer_addr: vk::DeviceAddress
+        mat_meta_buffer_addr: vk::DeviceAddress,
     ) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
             mat_meta_buffer_addr,
             joint_count,
-            _pad: [0;3]
+            _pad: [0; 3],
         }
     }
 }
@@ -427,12 +427,41 @@ pub struct GPUSceneData {
 
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
-pub struct UBOMatrices {
+pub struct SceneDataUBO {
     pub projection: Mat4,
-    pub model: Mat4,
     pub view: Mat4,
     pub cam_pos: Vec3,
     pad: f32,
+}
+
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct EnvironmentUBO {
+    pub light_dir: Vec4,
+    pub exposure: f32,
+    pub gamma: f32,
+    pub prefilter_mips_levels: f32,
+    pub ibl_ambient_scale: f32,
+    pub debug_view_inputs: f32,
+    pub debug_view_equation: f32,
+    _pad: u64,
+}
+
+
+impl Default for EnvironmentUBO {
+    fn default() -> Self {
+        Self {
+            light_dir: Vec4::new(0.0, 1.0, 0.5, 0.0),
+            exposure: 4.5,
+            gamma: 2.2,
+            prefilter_mips_levels: 5.0,
+            ibl_ambient_scale: 1.0,
+            debug_view_inputs: 0.0,
+            debug_view_equation: 0.0,
+            _pad: 0,
+        }
+    }
 }
 
 
@@ -512,8 +541,10 @@ pub struct VkMeshBuffers {
     pub cache_id: u32,
     pub index_count: u32,
     pub vertex_count: u32,
+    pub material_id: u32,
     pub index_buffer: VkSubAlloc,
     pub vertex_buffer: VkSubAlloc,
+    pub joint_desc: vk::DescriptorSet,
 }
 
 
@@ -551,6 +582,7 @@ pub struct RenderObject {
     pub index_count: u32,
     pub first_index: u32,
     pub index_buffer: vk::Buffer,
+    pub joint_desc: vk::DescriptorSet,
     pub material: *const VkLoadedMaterial,
     pub transform: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
@@ -623,28 +655,27 @@ impl Node {
         }
 
         for mesh_id in &self.meshes {
-            let mesh = mesh_cache.get_loaded_mesh_unchecked(*mesh_id);
+            let mesh = mesh_cache.get_loaded_id_unchecked(*mesh_id);
+            let material_ptr = unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
+            let material = unsafe { *material_ptr };
 
-            if let Some(id) = mesh.meta.material_index {
-                let material = tex_cache.get_loaded_material_unchecked(id);
-                let material_ptr = material as *const VkLoadedMaterial;
-                let ro = RenderObject {
-                    index_count: mesh.meta.indices.len() as u32,
-                    first_index: 0,
-                    index_buffer: mesh.buffer.index_buffer.buffer,
-                    material: material_ptr,
-                    transform: self.world_transform,
-                    vertex_buffer_addr: mesh.buffer.vertex_buffer_addr,
-                };
+            let ro = RenderObject {
+                index_count: mesh.index_count as u32,
+                joint_desc: mesh.joint_desc,
+                first_index: 0,
+                index_buffer: mesh.index_buffer.buffer,
+                material: material_ptr,
+                transform: self.world_transform,
+                vertex_buffer_addr: mesh.vertex_buffer.alloc_address,
+            };
 
-                // FIXME, should use something more performant than a hash set since all types are known
-                ctx.active_pipelines.insert(material.pipeline);
+            // FIXME, should use something more performant than a hash set since all types are known
+            ctx.active_pipelines.insert(material.pipeline);
 
-                unsafe {
-                    ctx.render_objects
-                        .get_unchecked_mut(material.pipeline as usize)
-                        .push(ro);
-                }
+            unsafe {
+                ctx.render_objects
+                    .get_unchecked_mut(material.pipeline as usize)
+                    .push(ro);
             }
         }
 

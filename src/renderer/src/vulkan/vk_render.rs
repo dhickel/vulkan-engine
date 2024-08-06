@@ -1,14 +1,10 @@
 use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo, VkShaderCache, VkDataCache, VkCache};
 
-use crate::data::gpu_data::{
-    AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node,
-    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, UBOMatrices, Vertex,
-    VkCubeMap, VkMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts,
-};
+use crate::data::gpu_data::{AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap, VkMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts, EnvironmentUBO};
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
-use ash::vk::{AllocationCallbacks, CommandBufferLevel, DescriptorSetLayoutCreateFlags, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, ImageLayout, PipelineCache, ShaderStageFlags};
+use ash::vk::{AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags, DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags};
 use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
@@ -31,7 +27,7 @@ use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
-use crate::vulkan::vk_storage::VkSubAllocator;
+use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
 
 
@@ -108,8 +104,9 @@ pub struct VkRender {
     pub supported_image_formats: HashSet<vk::Format>,
     pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
     pub transfer: VkTransfer,
+    pub scene_descriptors: Option<VkSceneDescriptors>,
     pub imgui: VkImgui,
-    pub scene_data: GPUSceneData,
+    pub scene_data: SceneDataUBO,
     pub render_context: RenderContext,
     pub data_cache: Arc<VkDataCache>,
     pub brdf_lut: VkBrdfLut,
@@ -173,7 +170,14 @@ pub fn init_caches(
     ).unwrap();
 
 
-    let mesh_cache = MeshCache::new(vertex_allocator, index_allocator);
+    let mesh_cache = MeshCache::new(
+        device,
+        &allocator.lock().unwrap(),
+        desc_layout_cache.get(VkDescType::SkinData),
+        vertex_allocator,
+        index_allocator
+    );
+    
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
@@ -183,7 +187,7 @@ pub fn init_caches(
         mesh_cache: Mutex::new(mesh_cache),
         texture_cache: Mutex::new(texture_cache),
         environment_cache: Mutex::new(environment_cache),
-        supported_image_formats: supported_formats
+        supported_image_formats: supported_formats,
     };
 
     let vulkan_cache = VkCache {
@@ -234,6 +238,87 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
     }
 
     descriptors
+}
+
+
+pub fn init_present_pools(
+    device: &ash::Device,
+    device_queues:
+    &VkDeviceQueues,
+) -> Vec<VkCommandPoolMap> {
+    // Graphics/Present share the same queue and pool
+    (0..2).map(|_| {
+        let graphics_pool = vk_init::create_command_pool(
+            &device,
+            device_queues.get_queue_index(VkQueueType::Graphics),
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+        ).unwrap();
+
+        let graphics_buffers = vk_init::create_command_buffers(
+            &device,
+            &graphics_pool,
+            CommandBufferLevel::PRIMARY,
+            1,
+        ).unwrap();
+
+        let transfer_pool = vk_init::create_command_pool(
+            &device,
+            device_queues.get_queue_index(VkQueueType::Transfer),
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+        ).unwrap();
+
+        let transfer_buffers = vk_init::create_command_buffers(
+            &device,
+            &transfer_pool,
+            CommandBufferLevel::PRIMARY,
+            1,
+        ).unwrap();
+
+        let compute_pool = vk_init::create_command_pool(
+            &device,
+            device_queues.get_queue_index(VkQueueType::Compute),
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+        ).unwrap();
+
+        let compute_buffers = vk_init::create_command_buffers(
+            &device,
+            &compute_pool,
+            CommandBufferLevel::PRIMARY,
+            1,
+        ).unwrap();
+
+        let graphics_pool = VkCommandPool {
+            queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
+            queue_type: VkQueueType::Graphics,
+            pool: graphics_pool,
+            buffers: graphics_buffers,
+        };
+
+        let present_pool = graphics_pool.clone();
+
+        let transfer_pool = VkCommandPool {
+            queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
+            queue_type: VkQueueType::Transfer,
+            pool: transfer_pool,
+            buffers: transfer_buffers,
+        };
+
+        let compute_pool = VkCommandPool {
+            queue_index: device_queues.get_queue_index(VkQueueType::Compute),
+            queue_type: VkQueueType::Compute,
+            pool: compute_pool,
+            buffers: compute_buffers,
+        };
+
+        VkCommandPoolMap::new(
+            vec![
+                (VkQueueType::Graphics, graphics_pool),
+                (VkQueueType::Present, present_pool),
+                (VkQueueType::Transfer, transfer_pool),
+                (VkQueueType::Compute, compute_pool),
+            ]
+        ).unwrap()
+    }).collect()
 }
 
 
@@ -303,7 +388,6 @@ impl VkRender {
                 }
             }
         }
-
 
         ////////////////////////////
         // Create Core Structures //
@@ -431,27 +515,7 @@ impl VkRender {
             }
         };
 
-
-        // Graphics/Present share the same queue and pool
-        let present_pool = {
-            let cmd_pool = vk_init::create_command_pool(
-                &device,
-                device_queues.get_queue_index(VkQueueType::Graphics),
-                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )?;
-            let buffers = vk_init::create_command_buffers(
-                &device,
-                &cmd_pool,
-                CommandBufferLevel::PRIMARY,
-                2, // one for each frame
-            )?;
-            VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-                queue_type: VkQueueType::Transfer,
-                pool: cmd_pool,
-                buffers: buffers,
-            }
-        };
+        let present_pools = init_present_pools(&device, &device_queues);
 
 
         //////////////////////////////////////////
@@ -503,15 +567,20 @@ impl VkRender {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
+        // we can just let imgui use one of the graphics pools
+        let imgui_pool = present_pools
+            .get(0).unwrap()
+            .get(VkQueueType::Graphics)
+            .pool;
+
         let presentation = VkPresent::new(
             frame_buffers,
             draw_images,
             depth_images,
             present_images,
-            present_pool,
+            present_pools,
             descriptor_allocators,
-        )
-            .unwrap();
+        ).unwrap();
 
 
         // ImGUI
@@ -537,12 +606,12 @@ impl VkRender {
             allocator.clone(),
             device.clone(),
             device_queues.get_queue(VkQueueType::Graphics),
-            presentation.cmd_pool,
+            imgui_pool,
             imgui_dynamic,
             &mut imgui_context,
             Some(imgui_opts),
         ).unwrap();
-        
+
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
 
 
@@ -611,15 +680,13 @@ impl VkRender {
             .get_pipeline(VkPipelineType::BrdfLut)
             .pipeline;
 
+
+        // Use one of the frame cmd buffers for this one-off generation
         let brd_flut = vk_util::generate_brdf_lut(
             &device,
             &allocator.lock().unwrap(),
             brdf_pipeline,
-            presentation
-                .frame_data
-                .first()
-                .unwrap()
-                .cmd_buffer,
+            presentation.frame_data[0].cmd_pools.get(VkQueueType::Graphics).buffers[0],
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         );
 
@@ -638,90 +705,116 @@ impl VkRender {
             buffer_and_desc_limits,
             presentation,
             transfer,
+            scene_descriptors: None,
             imgui,
             main_deletion_queue: Vec::new(),
-            scene_data: GPUSceneData::default(),
+            scene_data: SceneDataUBO::default(),
             render_context: RenderContext::default(),
             data_cache,
             brdf_lut: brd_flut,
             resize_requested: false,
         };
 
-        //
-        // let loaded_scene = gltf_util::parse_gltf_to_raw(
-        //     "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
-        //     texture_cache,
-        //     mesh_cache,
-        // )
-        // .unwrap();
-
         let loaded_scene = assimp_util::load_model(
             "/home/mindspice/code/rust/engine/src/renderer/src/assets/egypt.glb",
-            &mut render.data_cache.texture_cache,
-            &mut render.data_cache.mesh_cache,
+            render.data_cache.clone(),
             false,
         )?;
-        render.render_context.scene_tree = loaded_scene;
-        render.load_caches();
+
+
+        let data_cache_clone1 = render.data_cache.clone();
+        let data_cache_clone2 = render.data_cache.clone();
+
+        std::thread::spawn(move || {
+            // Inside the new thread
+            data_cache_clone1.mesh_cache.lock().unwrap().allocate_ids(
+                &loaded_scene.mesh_ids.clone(),
+                BufferPlacement::ContiguousPreferred,
+                false,
+            );
+        });
+
+        std::thread::spawn(move || {
+            // Inside the new thread
+            data_cache_clone2.texture_cache.lock().unwrap().allocate_ids(
+                &loaded_scene.material_ids.clone(),
+                BufferPlacement::ContiguousPreferred,
+                false,
+            );
+        });
+
+
+        // loop to test threaded loading, since the env needs some preloads to be preloaded
+        let start = std::time::SystemTime::now();
+
+        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(30) {
+            if let Some(cmd) = render.transfer.query_channel() {
+                let cmd_info = [vk_util::command_buffer_submit_info(cmd.cmd_buffer)];
+                let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+
+                // Submit the command buffer and signal the fence correctly
+                unsafe {
+                    render.device
+                        .queue_submit2(
+                            render.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+                            &submit_info,
+                            cmd.fence[0],
+                        )
+                        .unwrap();
+                }
+            }
+        }
+
+
+        render.render_context.scene_tree = loaded_scene.node;
+        render.allocate_skymap();
         render.init_skybox();
 
         // FIXME properly implement this in the setup (or pre-sample and save)
-        if let CachedEnvironment::Loaded(env) = render.data_cache.environment_cache.get_skybox(0) {
+        if let CachedEnvironment::Loaded(env)
+            = render.data_cache.environment_cache.lock().unwrap().get_skybox(0) {
             let env_maps = render.generate_environment(env)?;
+
+            let scene_descriptors = VkSceneDescriptors::new(
+                &render.device,
+                &render.allocator.lock().unwrap(),
+                render.buffer_and_desc_limits.min_uniform_buffer_offset_alignment,
+                render.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
+                &env_maps,
+                &render.brdf_lut,
+            );
+
+            render.scene_descriptors = Some(scene_descriptors);
+
             render
                 .data_cache
                 .environment_cache
+                .lock()
+                .unwrap()
                 .add_env_maps(0, env_maps)
         } else {
             panic!("No env for generation")
         };
 
+
         Ok(render)
     }
 
-    pub fn load_caches(&mut self) {
-        let mesh_cache_ref = &self.data_cache.mesh_cache;
-        let mesh_cache_ptr = mesh_cache_ref as *const MeshCache as *mut MeshCache;
-        let tex_cache_ref = &self.data_cache.texture_cache;
-        let tex_cache_ptr = tex_cache_ref as *const TextureCache as *mut TextureCache;
-        let env_cache_ref = &self.data_cache.environment_cache;
-        let env_cache_ptr = env_cache_ref as *const EnvironmentCache as *mut EnvironmentCache;
-        let frame_data_ref = &self.presentation.frame_data;
-        let frame_data_ptr = frame_data_ref as *const Vec<VkFrame> as *mut Vec<VkFrame>;
-
-        self.data_cache.mesh_cache.allocate_all(
-            &self.device,
-            self.allocator.clone(),
-            &self.immediate,
-        );
-        self.data_cache.texture_cache.allocate_all(
-            &self.device,
-            self.allocator.clone(),
-            &self.immediate,
-            &mut self.data_cache.sampler_cache,
-            &self.data_cache.desc_layout_cache,
-        );
-
-        let pipeline = self
-            .data_cache
-            .pipeline_cache
-            .get_pipeline(VkPipelineType::BrdfLut)
-            .pipeline;
+    pub fn allocate_skymap(&mut self) {
         let cmd_pool = self
-            .presentation
-            .frame_data
-            .first()
-            .unwrap()
-            .cmd_buffer
-            .get(VkQueueType::Transfer);
+            .transfer
+            .get_local_transfer_pool();
 
-        self.data_cache.environment_cache.allocate_cube_map(
-            0,
-            &self.device,
-            &self.allocator.lock().unwrap(),
-            pipeline,
-            cmd_pool,
-        )
+        self.data_cache.environment_cache
+            .lock()
+            .unwrap()
+            .allocate_cube_map(
+                0,
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                cmd_pool,
+                self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+            )
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
@@ -733,7 +826,7 @@ impl VkRender {
             &self.instance,
             &self.physical_device,
             &self.device,
-            &self.device_queues,
+            &self.vulkan_cache.queues,
             &self.surface,
             new_size,
             Some(2),
@@ -763,16 +856,16 @@ impl VkRender {
         self.update_scene();
         let mut frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
-        let cmd_pool = frame_data.cmd_buffer.get(VkQueueType::Graphics);
         let draw_image = frame_data.draw.image;
         let draw_view = frame_data.draw.image_view;
         let depth_image = frame_data.depth.image;
+        let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
         let depth_view = frame_data.depth.image_view;
         let present_image = frame_data.present_image;
         let present_view = frame_data.present_image_view;
 
-        let queue = cmd_pool.queue;
-        let cmd_buffer = cmd_pool.buffer;
+        let queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffers[0];
         let fence = &[frame_sync.render_fence];
 
         let swapchain = [self.swapchain.swapchain];
@@ -953,8 +1046,8 @@ impl VkRender {
 
     pub fn init_skybox(&mut self) {
         let pipeline = self
-            .data_cache
-            .pipeline_cache
+            .vulkan_cache
+            .pipelines
             .get_pipeline(VkPipelineType::Skybox);
 
         let cmd_pool = self
@@ -962,20 +1055,23 @@ impl VkRender {
             .frame_data
             .first()
             .unwrap()
-            .cmd_buffer
+            .cmd_pools
             .get(VkQueueType::Graphics);
 
-        self.data_cache.environment_cache.allocate_cube_map(
-            0,
-            &self.device,
-            &self.allocator.lock().unwrap(),
-            pipeline.pipeline,
-            cmd_pool,
-        );
+        self.data_cache.environment_cache
+            .lock()
+            .unwrap()
+            .allocate_cube_map(
+                0,
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                &self.transfer.get_local_transfer_pool(),
+                self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+            );
 
-        let skybox_image_data = if let CachedEnvironment::Loaded(map) =
-            self.data_cache.environment_cache.get_skybox(0)
-        {
+        let env_cache = self.data_cache.environment_cache.lock().unwrap();
+
+        let skybox_image_data = if let CachedEnvironment::Loaded(map) = env_cache.get_skybox(0) {
             map
         } else {
             panic!("Env map not loaded")
@@ -994,15 +1090,15 @@ impl VkRender {
         let skybox_desc = skybox_desc_alloc
             .allocate(
                 &self.device,
-                &[self.data_cache.desc_layout_cache.get(VkDescType::Skybox)],
+                &[self.vulkan_cache.desc_layouts.get(VkDescType::Skybox)],
             )
             .unwrap();
 
         let mut sb_desc_writer = VkDescriptorWriter::default();
         let cmd_buffer = self.presentation.frame_data[0]
-            .cmd_buffer
+            .cmd_pools
             .get(VkQueueType::Graphics)
-            .buffer;
+            .buffers[0];
 
         sb_desc_writer.write_image(
             0,
@@ -1020,17 +1116,19 @@ impl VkRender {
         let skybox_mesh_data = self
             .data_cache
             .mesh_cache
-            .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
+            .lock()
+            .unwrap()
+            .get_loaded_id_unchecked(MeshCache::SKYBOX_MESH);
 
         self.render_context.sky_box.skybox_consts.vertex_buffer_addr =
-            skybox_mesh_data.buffer.vertex_buffer_addr;
+            skybox_mesh_data.vertex_buffer.alloc_address;
     }
 
     pub fn draw_skybox(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_buffer.get(VkQueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffer;
+        let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffers[0];
 
         let color_attachment = [vk_util::attachment_info(
             curr_frame.draw.image_view,
@@ -1043,8 +1141,8 @@ impl VkRender {
         let rendering_info = vk_util::rendering_info(extent, &color_attachment, None);
 
         let skybox_pipeline = self
-            .data_cache
-            .pipeline_cache
+            .vulkan_cache
+            .pipelines
             .get_pipeline(VkPipelineType::Skybox);
 
         let skybox_desc = if let Some(desc) = &self.render_context.sky_box.descriptor {
@@ -1055,10 +1153,13 @@ impl VkRender {
 
         self.render_context.sky_box.skybox_consts.projection = self.scene_data.projection;
         self.render_context.sky_box.skybox_consts.model = self.scene_data.view;
+
         let mesh = self
             .data_cache
             .mesh_cache
-            .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
+            .lock()
+            .unwrap()
+            .get_loaded_id_unchecked(MeshCache::SKYBOX_MESH);
 
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
@@ -1085,7 +1186,7 @@ impl VkRender {
 
             self.device.cmd_bind_index_buffer(
                 cmd_buffer,
-                mesh.buffer.index_buffer.buffer,
+                mesh.index_buffer.buffer,
                 0,
                 vk::IndexType::UINT32,
             );
@@ -1099,7 +1200,7 @@ impl VkRender {
             );
 
             self.device
-                .cmd_draw_indexed(cmd_buffer, mesh.meta.indices.len() as u32, 1, 0, 0, 0);
+                .cmd_draw_indexed(cmd_buffer, mesh.index_count, 1, 0, 0, 0);
 
             // End dynamic rendering
             self.device.cmd_end_rendering(cmd_buffer);
@@ -1172,8 +1273,8 @@ impl VkRender {
     pub fn draw_geometry(&mut self) {
         let mut curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_buffer.get(VkQueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffer;
+        let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffers[0];
 
         let color_attachment = [vk_util::attachment_info(
             curr_frame.draw.image_view,
@@ -1191,76 +1292,104 @@ impl VkRender {
         let rendering_info =
             vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
 
+
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
+            // Write the new scene view/pos
+            self.scene_descriptors.as_mut().unwrap()
+                .update_scene_uniform(&self.device, self.scene_data, frame_index);
+
+            let scene_desc = self.scene_descriptors.as_ref().unwrap()
+                .get_scene_descriptor(frame_index);
+
+
+            let mut curr_pipeline = *self.vulkan_cache.pipelines.get_pipeline(VkPipelineType::PbrMetRoughOpaque);
+            let mut curr_joint_desc = self.data_cache.mesh_cache.lock().unwrap().get_default_joint_desc();
+
+            self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
+
+
+            // Bind set 0 (SceneData) to the first pipeline and set viewport/scissor
             self.device
                 .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
             self.device
                 .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
 
-            let allocator = self.allocator.lock().unwrap();
-            let gpu_scene_buffer = vk_util::allocate_and_write_buffer(
-                &allocator,
-                self.scene_data.as_byte_slice(),
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-            )
-                .unwrap();
 
-            let mut writer = VkDescriptorWriter::default();
-            writer.write_buffer(
+            self.device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                curr_pipeline.layout,
                 0,
-                gpu_scene_buffer.buffer,
-                std::mem::size_of::<GPUSceneData>(),
-                0,
-                vk::DescriptorType::UNIFORM_BUFFER,
+                &[scene_desc, curr_joint_desc],
+                &[],
             );
 
-            let desc_layout = [self.data_cache.desc_layout_cache.get(VkDescType::SceneData)];
 
-            // This is allocated on the per-frame descriptor pool, which is reset after each draw
-            // and handles dynamic data
-            let desc_set = curr_frame
-                .descriptors
-                .allocate(&self.device, &desc_layout)
-                .unwrap();
-
-            writer.update_set(&self.device, desc_set);
-            let global_desc = [desc_set];
-            //
-            // for obj in &self.render_context.draw_context.opaque_surfaces {
-            //
-            // }
-
-            let draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
+            let mut draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
 
-                self.device
-                    .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-                self.device
-                    .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
-                // This is a static descriptor set for the material the is allocated once
-                // internally to the cache, only reallocated if a change to the material
-                // occurs (Currently doesn't happen)
-                let mat_desc = [material.descriptor[frame_index as usize]];
+                // Rebind on pipeline changes
+                if *pipeline != curr_pipeline {
+                    self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
 
+                    self.device
+                        .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
+                    self.device
+                        .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
+
+
+                    self.device.cmd_bind_descriptor_sets(
+                        cmd_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        curr_pipeline.layout,
+                        0,
+                        &[scene_desc],
+                        &[],
+                    );
+
+                    // check if current joints needs updated, before binding again
+                    if obj.joint_desc != curr_joint_desc {
+                        curr_joint_desc = obj.joint_desc
+                    }
+
+                    self.device.cmd_bind_descriptor_sets(
+                        cmd_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        curr_pipeline.layout,
+                        1,
+                        &[curr_joint_desc],
+                        &[],
+                    );
+
+                    curr_pipeline = *pipeline;
+                }
+
+                // Bind joints if changed (set 1)
+                if obj.joint_desc != curr_joint_desc {
+                    self.device.cmd_bind_descriptor_sets(
+                        cmd_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        curr_pipeline.layout,
+                        1,
+                        &[curr_joint_desc],
+                        &[],
+                    );
+
+                    curr_joint_desc = obj.joint_desc
+                }
+
+                // Bind material image descriptor (set 2)
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
                     pipeline.layout,
-                    0,
-                    &global_desc,
+                    2,
+                    &[material.image_descriptor],
                     &[],
                 );
 
-                self.device.cmd_bind_descriptor_sets(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline.layout,
-                    1,
-                    &mat_desc,
-                    &[],
-                );
 
                 self.device.cmd_bind_index_buffer(
                     cmd_buffer,
@@ -1269,7 +1398,12 @@ impl VkRender {
                     vk::IndexType::UINT32,
                 );
 
-                let push_consts = VkModelPushConsts::new(obj.transform, obj.vertex_buffer_addr);
+
+                let push_consts = VkModelPushConsts::new(
+                    obj.transform,
+                    obj.vertex_buffer_addr,
+                    material.meta_alloc.alloc_address,
+                );
 
                 self.device.cmd_push_constants(
                     cmd_buffer,
@@ -1284,7 +1418,7 @@ impl VkRender {
             };
 
             for pipeline in &self.render_context.draw_context.active_pipelines {
-                let mat_pipeline = self.data_cache.pipeline_cache.get_pipeline(*pipeline);
+                let mat_pipeline = self.vulkan_cache.pipelines.get_pipeline(*pipeline);
 
                 self.device.cmd_bind_pipeline(
                     cmd_buffer,
@@ -1298,11 +1432,10 @@ impl VkRender {
                     .render_objects
                     .get_unchecked(*pipeline as usize)
                 {
-                    draw_fn(ro, mat_pipeline)
+                    draw_fn(ro, mat_pipeline);
                 }
             }
 
-            curr_frame.add_deletion(VkDeletable::AllocatedBuffer(gpu_scene_buffer));
             self.render_context.draw_context.clear();
 
             self.device.cmd_end_rendering(cmd_buffer);
@@ -1312,12 +1445,10 @@ impl VkRender {
     // TODO decide if this is only used for transfers
 
     pub fn update_scene(&mut self) {
-        let view = self
-            .window_state
-            .controller
-            .borrow()
-            .get_camera()
-            .get_view_matrix();
+        let (camera_view, camera_pos) = {
+            let cont = self.window_state.controller.borrow();
+            (cont.get_camera().get_view_matrix(), cont.get_camera().get_position())
+        };
 
         let fovy = 70_f32.to_radians();
         let aspect_ratio = self.window_state.get_aspect_ratio();
@@ -1329,19 +1460,15 @@ impl VkRender {
         let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
-        self.scene_data.view = view;
+        self.scene_data.view = camera_view;
         self.scene_data.projection = proj;
-        self.scene_data.view_projection = proj * view;
-
-        self.scene_data.ambient_color = Vec4::splat(0.2);
-        self.scene_data.sunlight_color = Vec4::splat(0.4);
-        self.scene_data.sunlight_direction = Vec4::new(0.0, 1.0, 0.5, 10.0);
+        self.scene_data.cam_pos = camera_pos;
 
         self.render_context.scene_tree.borrow_mut().draw(
             &glam::Mat4::IDENTITY,
             &mut self.render_context.draw_context,
-            &self.data_cache.mesh_cache,
-            &self.data_cache.texture_cache,
+            &self.data_cache.mesh_cache.lock().unwrap(),
+            &self.data_cache.texture_cache.lock().unwrap(),
         )
     }
 
@@ -1357,12 +1484,13 @@ impl VkRender {
         let targets = [Target::Irradiance, Target::PreFiltered];
 
         let device = &self.device;
-        let pipeline_cache = &self.data_cache.pipeline_cache;
-        let descriptor_cache = &self.data_cache.desc_layout_cache;
-        let cmd_pool = &self.presentation.frame_data[0].cmd_buffer;
-        let render_pool = cmd_pool.get(VkQueueType::Graphics);
-        let render_buffer = render_pool.buffer;
+        let pipeline_cache = &self.vulkan_cache.pipelines;
+        let descriptor_cache = &self.vulkan_cache.desc_layouts;
+        let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
+        let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
         let transfer_pool = cmd_pool.get(VkQueueType::Transfer);
+        let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
+
         let skybox_image = env_skybox.image;
         let skybox_view = env_skybox.image_view;
         let skybox_sampler = env_skybox.sampler;
@@ -1387,12 +1515,15 @@ impl VkRender {
         let skybox_mesh = self
             .data_cache
             .mesh_cache
-            .get_loaded_mesh_unchecked(MeshCache::SKYBOX_MESH);
+            .lock()
+            .unwrap()
+            .get_loaded_id_unchecked(MeshCache::SKYBOX_MESH);
 
-        let skybox_v_buff_addr = skybox_mesh.buffer.vertex_buffer_addr;
-        let skybox_index_buff = skybox_mesh.buffer.index_buffer.buffer;
-        let skybox_indices_count = skybox_mesh.meta.indices.len() as u32;
+        let skybox_v_buff_addr = skybox_mesh.vertex_buffer.alloc_address;
+        let skybox_index_buff = skybox_mesh.index_buffer.buffer;
+        let skybox_indices_count = skybox_mesh.index_count;
 
+        let mut prefilter_mips_count: f32 = 1.0;
         for target in targets {
             let target_start = SystemTime::now();
             info!("Generating Environment Map: {:?}", target);
@@ -1455,6 +1586,10 @@ impl VkRender {
 
             let mips_count = data_util::calc_mips_count(dim, dim);
 
+            if target == Target::PreFiltered {
+                prefilter_mips_count = mips_count as f32;
+            }
+
             // Create the cubemap for writing render output too
 
             let (cubemap_image, cubemap_sampler) = unsafe {
@@ -1489,11 +1624,12 @@ impl VkRender {
                 let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
                 // Submit the command buffer and await queue
+
                 device
-                    .queue_submit2(render_pool.queue, &submit_info, vk::Fence::null())
+                    .queue_submit2(render_queue, &submit_info, vk::Fence::null())
                     .unwrap();
 
-                device.queue_wait_idle(render_pool.queue).unwrap();
+                device.queue_wait_idle(render_queue).unwrap();
 
                 (cubemap_image, cubemap_sampler)
             };
@@ -1662,10 +1798,10 @@ impl VkRender {
                         let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
                         let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
                         device
-                            .queue_submit2(render_pool.queue, &submit_info, vk::Fence::null())
+                            .queue_submit2(render_queue, &submit_info, vk::Fence::null())
                             .unwrap();
 
-                        device.queue_wait_idle(render_pool.queue).unwrap();
+                        device.queue_wait_idle(render_queue).unwrap();
                     }
                 }
             }
@@ -1695,10 +1831,10 @@ impl VkRender {
                 let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
                 device
-                    .queue_submit2(render_pool.queue, &submit_info, vk::Fence::null())
+                    .queue_submit2(render_queue, &submit_info, vk::Fence::null())
                     .unwrap();
 
-                device.queue_wait_idle(render_pool.queue).unwrap();
+                device.queue_wait_idle(render_queue).unwrap();
             }
             // TODO add mips level and we may want to change this tbh to a differ struct for skybox and env
             let final_cubemap = VkCubeMap {
@@ -1736,7 +1872,11 @@ impl VkRender {
             end
         );
 
+        let mut environment_ubo = EnvironmentUBO::default();
+        environment_ubo.prefilter_mips_levels = prefilter_mips_count;
+
         Ok(EnvMaps {
+            environment_ubo,
             irradiance: irradiance_cubemap.ok_or("No Irradiance Map")?,
             pre_filter: prefiltered_cubemap.ok_or("No Cube Map")?,
         })

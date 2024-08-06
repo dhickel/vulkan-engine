@@ -326,7 +326,6 @@ fn init_met_rough_pipelines(
         desc_layout_cache.get(VkDescType::SceneData),
         desc_layout_cache.get(VkDescType::SkinData),
         desc_layout_cache.get(VkDescType::PbrSamplers),
-        desc_layout_cache.get(VkDescType::PbrProperties),
     ];
 
     let mesh_layout_info = vk_util::pipeline_layout_create_info()

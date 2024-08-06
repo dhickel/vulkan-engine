@@ -138,7 +138,7 @@ pub fn get_skybox_mesh() -> (Vec<Vertex>, Vec<u32>) {
             uv0_x: 0.0,
             normal: -Vec3::Z,
             uv0_y: 1.0,
-            color: glam::Vec4,
+            color: Vec4::ONE,
             tangent: -Vec4::X,
             ..Default::default()
         },

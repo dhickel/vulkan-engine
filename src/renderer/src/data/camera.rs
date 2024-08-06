@@ -5,12 +5,14 @@ use std::collections::HashSet;
 use winit::event::Modifiers;
 use winit::keyboard::KeyCode;
 
+
 pub struct Camera {
     position: Vec3,
     orientation: Quat,
     pitch: f32,
     yaw: f32,
 }
+
 
 impl Default for Camera {
     fn default() -> Self {
@@ -22,6 +24,7 @@ impl Default for Camera {
         }
     }
 }
+
 
 impl Camera {
     pub fn new(position: Vec3) -> Self {
@@ -35,6 +38,10 @@ impl Camera {
         let translation = Mat4::from_translation(self.position);
         let rotation = Mat4::from_quat(self.orientation);
         (translation * rotation).inverse()
+    }
+
+    pub fn get_position(&self) -> Vec3 {
+        self.position
     }
 
     pub fn update_rotation(&mut self, delta_x: f32, delta_y: f32) {
@@ -61,6 +68,7 @@ impl Camera {
     }
 }
 
+
 pub struct FPSController {
     id: u32,
     prev_m_pos: glam::Vec2,
@@ -74,6 +82,7 @@ pub struct FPSController {
     move_vec: glam::Vec3,
 }
 
+
 #[repr(C)]
 pub enum InputAction {
     MoveUp = 0,
@@ -81,6 +90,7 @@ pub enum InputAction {
     MoveLeft = 2,
     MoveRight = 3,
 }
+
 
 impl FPSController {
     pub fn new(id: u32, camera: Camera, m_sensitivity: f64, move_speed: f32) -> Self {
@@ -101,6 +111,7 @@ impl FPSController {
     pub fn get_camera(&self) -> &Camera {
         &self.camera
     }
+
 
     pub fn update(&mut self, delta: u128) {
         let rot_x = self.m_delta.0 * self.m_sensitivity;
@@ -135,6 +146,7 @@ impl FPSController {
     }
 }
 
+
 impl MousePosListener for FPSController {
     fn listener_type(&self) -> ListenerType {
         ListenerType::GameInput
@@ -148,6 +160,7 @@ impl MousePosListener for FPSController {
         self.m_delta = delta;
     }
 }
+
 
 impl KeyboardListener for FPSController {
     fn listener_type(&self) -> ListenerType {
