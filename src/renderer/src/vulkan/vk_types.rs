@@ -706,10 +706,7 @@ impl VkTransfer {
     pub fn query_channel(&self) -> Option<VkCmdSubmitInfo> {
         match self.receiver.try_recv() {
             Ok(info) => Some(info),
-            Err(error) => {
-                log::error!("Error receiving transfer data: {:?}", error);
-                None
-            }
+            Err(_) => None,
         }
     }
 

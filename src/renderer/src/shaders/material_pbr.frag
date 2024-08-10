@@ -10,6 +10,14 @@
 
 #version 450
 #extension GL_GOOGLE_include_directive: require
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+#include "vertex_struct.glsl"
+#include "shader_material.glsl"
+#include "srgbtolinear.glsl"
+#include "tonemapping.glsl"
+
 
 layout (location = 0) in vec3 inWorldPos;
 layout (location = 1) in vec3 inNormal;
@@ -51,7 +59,7 @@ layout (set = 2, binding = 4) uniform sampler2D emissiveMap;
 
 // Properties
 
-#include "shader_material.glsl"
+
 
 
 layout (push_constant) uniform constants {
@@ -88,12 +96,12 @@ const float c_MinRoughness = 0.04;
 const float PBR_WORKFLOW_METALLIC_ROUGHNESS = 0.0;
 const float PBR_WORKFLOW_SPECULAR_GLOSSINESS = 1.0;
 
-#include "tonemapping.glsl"
-#include "srgbtolinear.glsl"
+
+
 
 // Find the normal for this fragment, pulling either from a predefined normal map
 // or from the interpolated mesh normal and tangent attributes.
-vec3 getNormal(ShaderMaterial material)
+vec3 getNormal(MaterialMeta material)
 {
     // Perturb normal, see http://www.thetenthplanet.de/archives/1180
     vec3 tangentNormal = texture(normalMap, material.normalTextureSet == 0 ? inUV0 : inUV1).xyz * 2.0 - 1.0;
@@ -119,9 +127,9 @@ vec3 getIBLContribution(PBRInfo pbrInputs, vec3 n, vec3 reflection)
     float lod = (pbrInputs.perceptualRoughness * uboParams.prefilteredCubeMipLevels);
     // retrieve a scale and bias to F0. See [1], Figure 3
     vec3 brdf = (texture(samplerBRDFLUT, vec2(pbrInputs.NdotV, 1.0 - pbrInputs.perceptualRoughness))).rgb;
-    vec3 diffuseLight = SRGBtoLINEAR(tonemap(texture(samplerIrradiance, n))).rgb;
+    vec3 diffuseLight = SRGBtoLINEAR(tonemap(texture(samplerIrradiance, n), uboParams.exposure, uboParams.gamma)).rgb;
 
-    vec3 specularLight = SRGBtoLINEAR(tonemap(textureLod(prefilteredMap, reflection, lod))).rgb;
+    vec3 specularLight = SRGBtoLINEAR(tonemap(textureLod(prefilteredMap, reflection, lod), uboParams.exposure, uboParams.gamma)).rgb;
 
     vec3 diffuse = diffuseLight * pbrInputs.diffuseColor;
     vec3 specular = specularLight * (pbrInputs.specularColor * brdf.x + brdf.y);
@@ -215,10 +223,10 @@ void main()
     // or from a metallic-roughness map
     perceptualRoughness = material.roughnessFactor;
     metallic = material.metallicFactor;
-    if (material.physicalDescriptorTextureSet > -1) {
+    if (material.metallicRoughnessSet > -1) {
         // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
         // This layout intentionally reserves the 'r' channel for (optional) occlusion map data
-        vec4 mrSample = texture(roughnessMap, material.physicalDescriptorTextureSet == 0 ? inUV0 : inUV1);
+        vec4 mrSample = texture(roughnessMap, material.metallicRoughnessSet == 0 ? inUV0 : inUV1);
         perceptualRoughness = mrSample.g * perceptualRoughness;
         metallic = mrSample.b * metallic;
     } else {

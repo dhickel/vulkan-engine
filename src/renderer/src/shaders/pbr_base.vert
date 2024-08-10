@@ -3,8 +3,14 @@
  * SPDX-License-Identifier: MIT
  *
  */
-        
+
 #version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_buffer_reference : enable
+#extension GL_EXT_buffer_reference2 : enable
+
+#include "vertex_struct.glsl"
+#include "shader_material.glsl"
 
 layout (set = 0, binding = 0) uniform UBO {
     mat4 projection;
@@ -33,7 +39,7 @@ layout (location = 4) out vec4 outColor0;
 
 void main()
 {
-    Vertex v = pc.vertexBuffer[gl_VertexIndex];
+    Vertex v = pc.vertexBuffer.vertices[gl_VertexIndex];
     outColor0 = v.color;
 
     vec4 worldPos;

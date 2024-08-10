@@ -1130,7 +1130,7 @@ pub fn record_host_to_storage_buffer(
             .src_access_mask(vk::AccessFlags::HOST_WRITE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(host_info.transfer_queue_index)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED) 
             .buffer(host_buffer.buffer)
             .offset(0)
             .size(vk::WHOLE_SIZE);
@@ -1213,12 +1213,11 @@ pub fn record_host_to_image_buffer(
             vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             meta.mips_levels,
         );
-
         let initial_transition = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(host_info.transfer_queue_index)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED) // Change this
             .image(new_image.image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1244,7 +1243,7 @@ pub fn record_host_to_image_buffer(
     unsafe {
         device.cmd_pipeline_barrier(
             cmd_buffer,
-            vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
             vk::PipelineStageFlags::TRANSFER,
             vk::DependencyFlags::empty(),
             &[],
