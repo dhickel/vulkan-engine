@@ -54,7 +54,7 @@ pub fn gltf(str : String) {
 pub fn run() {
     env_logger::Builder::new()
         .target(env_logger::Target::Stdout)
-        .parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+        .parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "debug".to_string()))
         .init();
 
     let mut input_manager = InputManager::default();

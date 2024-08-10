@@ -10,7 +10,7 @@ use data_util::PackUnorm;
 use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
-use log::{error, info, log};
+use log::{debug, error, info, log};
 use std::cell::{Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -111,6 +111,7 @@ pub struct VkRender {
     pub data_cache: Arc<VkDataCache>,
     pub brdf_lut: VkBrdfLut,
     pub main_deletion_queue: Vec<VkDeletable>,
+    pub fence_await_queue: VkFenceQueue,
     pub resize_requested: bool,
 }
 
@@ -175,9 +176,9 @@ pub fn init_caches(
         &allocator.lock().unwrap(),
         desc_layout_cache.get(VkDescType::SkinData),
         vertex_allocator,
-        index_allocator
+        index_allocator,
     );
-    
+
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
@@ -625,6 +626,7 @@ impl VkRender {
         let (mesh_host_fence, texture_host_fence) = unsafe {
             (device.create_fence(&fence_info, None).unwrap(), device.create_fence(&fence_info, None).unwrap())
         };
+        debug!("Mesh Fence: {:?}, Texture Fence: {:?}", mesh_host_fence, texture_host_fence);
 
         let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
         let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
@@ -643,7 +645,7 @@ impl VkRender {
             buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(32)).unwrap(),
             render_sender: transfer.get_sender(),
             cmd_pool: host_buffer_pools.pop().unwrap(),
-            fence: [mesh_host_fence],
+            fence: [texture_host_fence],
             transfer_queue_index,
             graphics_queue_index,
         };
@@ -708,6 +710,7 @@ impl VkRender {
             scene_descriptors: None,
             imgui,
             main_deletion_queue: Vec::new(),
+            fence_await_queue: VkFenceQueue::new(),
             scene_data: SceneDataUBO::default(),
             render_context: RenderContext::default(),
             data_cache,
@@ -725,6 +728,7 @@ impl VkRender {
         let data_cache_clone1 = render.data_cache.clone();
         let data_cache_clone2 = render.data_cache.clone();
 
+        println!("Spawning thread");
         std::thread::spawn(move || {
             // Inside the new thread
             data_cache_clone1.mesh_cache.lock().unwrap().allocate_ids(
@@ -733,7 +737,7 @@ impl VkRender {
                 false,
             );
         });
-
+        println!("Spawning thread");
         std::thread::spawn(move || {
             // Inside the new thread
             data_cache_clone2.texture_cache.lock().unwrap().allocate_ids(
@@ -746,13 +750,19 @@ impl VkRender {
 
         // loop to test threaded loading, since the env needs some preloads to be preloaded
         let start = std::time::SystemTime::now();
-
-        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(30) {
+        println!("Staring proc loop");
+        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(10) {
+            render.fence_await_queue.check_fences(&render.device);
+            
             if let Some(cmd) = render.transfer.query_channel() {
                 let cmd_info = [vk_util::command_buffer_submit_info(cmd.cmd_buffer)];
                 let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
                 // Submit the command buffer and signal the fence correctly
+
+                info!("Submitting: {:#?}", submit_info);
+               render.fence_await_queue.queue_fence(cmd.fence, cmd.resp_channel);
+                
                 unsafe {
                     render.device
                         .queue_submit2(
@@ -762,6 +772,8 @@ impl VkRender {
                         )
                         .unwrap();
                 }
+                
+                
             }
         }
 
@@ -771,7 +783,7 @@ impl VkRender {
         render.init_skybox();
 
         // FIXME properly implement this in the setup (or pre-sample and save)
-        if let CachedEnvironment::Loaded(env)
+        let env_maps = if let CachedEnvironment::Loaded(env)
             = render.data_cache.environment_cache.lock().unwrap().get_skybox(0) {
             let env_maps = render.generate_environment(env)?;
 
@@ -785,17 +797,17 @@ impl VkRender {
             );
 
             render.scene_descriptors = Some(scene_descriptors);
-
-            render
-                .data_cache
-                .environment_cache
-                .lock()
-                .unwrap()
-                .add_env_maps(0, env_maps)
+            env_maps
         } else {
             panic!("No env for generation")
         };
 
+        render
+            .data_cache
+            .environment_cache
+            .lock()
+            .unwrap()
+            .add_env_maps(0, env_maps);
 
         Ok(render)
     }

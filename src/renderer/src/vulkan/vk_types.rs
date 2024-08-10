@@ -10,13 +10,15 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, mpsc, Mutex};
 use std::{mem, slice};
+use log::{debug, error};
 use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
 use crate::data::data_cache::{EnvMaps, VkPipelineType};
+use crate::data::data_util::BinarySemaphore;
 use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 
 
@@ -302,10 +304,12 @@ pub struct VkCommandPool {
 }
 
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct VkCmdSubmitInfo {
     pub cmd_buffer: vk::CommandBuffer,
     pub fence: [vk::Fence; 1],
+    pub queue_type: VkQueueType,
+    pub resp_channel: mpsc::Sender<()>,
 }
 
 
@@ -412,7 +416,6 @@ impl VkFrame {
             .for_each(|d| d.delete(device, allocator));
         self.deletions.clear();
     }
-    
 }
 
 
@@ -665,13 +668,18 @@ pub struct VkHostBuffer {
 
 
 impl VkHostBuffer {
-    pub fn submit_commands(&self) -> Result<(), SendError<VkCmdSubmitInfo>> {
+    pub fn submit_commands(&self, queue_type: VkQueueType) -> Result<Receiver<()>, SendError<VkCmdSubmitInfo>> {
+        let (sender, receiver) = mpsc::channel();
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.cmd_pool.buffers[0],
             fence: self.fence,
+            queue_type,
+            resp_channel: sender,
         };
 
-        self.render_sender.send(submit_info)
+        if let Err(err) = self.render_sender.send(submit_info) {
+            Err(err)
+        } else { Ok(receiver) }
     }
 }
 
@@ -978,6 +986,7 @@ impl VkDeletable {
     }
 }
 
+
 pub struct VkSceneDescriptors {
     descriptor_pool: VkDynamicDescriptorAllocator,
     scene_descriptors: [vk::DescriptorSet; 2],
@@ -1080,7 +1089,7 @@ impl VkSceneDescriptors {
                 env_maps.irradiance.image_view,
                 env_maps.irradiance.sampler,
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
 
             writer.write_image(
@@ -1088,7 +1097,7 @@ impl VkSceneDescriptors {
                 env_maps.pre_filter.image_view,
                 env_maps.pre_filter.sampler,
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
 
             writer.write_image(
@@ -1096,13 +1105,12 @@ impl VkSceneDescriptors {
                 brdf_lut.image_alloc.image_view,
                 brdf_lut.sampler,
                 vk::ImageLayout::READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
 
             writer.update_set(device, desc_set);
 
             desc_set
-
         }).collect::<Vec<_>>().try_into().unwrap();
 
 
@@ -1154,10 +1162,50 @@ impl VkSceneDescriptors {
         desc
     }
 
-    
 
     pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
         self.scene_descriptors[index as usize]
+    }
+}
+
+
+pub struct VkFenceQueue {
+    fence_awaits: Vec<(vk::Fence, Sender<()>)>,
+}
+
+
+impl VkFenceQueue {
+    pub fn new() -> Self {
+        Self { fence_awaits: Vec::with_capacity(4) }
+    }
+
+    pub fn queue_fence(&mut self, fence: [vk::Fence; 1], signal: Sender<()>) {
+        self.fence_awaits.push((fence[0], signal));
+    }
+
+    pub fn check_fences(&mut self, device: &ash::Device) {
+        if self.fence_awaits.is_empty() {
+            return;
+        }
+
+        let removals: Vec::<usize> = self.fence_awaits
+            .iter().rev().enumerate()
+            .filter_map(|(i, (fence, signal))| {
+                if unsafe { device.get_fence_status(*fence).unwrap() } {
+                    unsafe { device.reset_fences(&[*fence]).unwrap() };
+                    debug!("Signaling fence: {:?} | {:?}",i, fence);
+                    signal.send(())
+                        .map_err(|err| error!("Error sending upload response: {:?}", err))
+                        .ok();
+                    
+                    Some(i)
+                } else { None }
+            }).collect();
+
+        removals.into_iter().for_each(|i| {
+            debug!("removing fence: {:?}", i);
+            drop(self.fence_awaits.swap_remove(i))
+        });
     }
 }
 

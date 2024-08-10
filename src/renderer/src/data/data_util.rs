@@ -13,8 +13,9 @@ use std::cell::Cell;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use vk_mem::Alloc;
+
 
 pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
     width: 1,
@@ -22,9 +23,11 @@ pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
     depth: 1,
 };
 
+
 pub trait PackUnorm {
     fn pack_unorm_4x8(&self) -> u32;
 }
+
 
 impl PackUnorm for Vec4 {
     fn pack_unorm_4x8(&self) -> u32 {
@@ -37,9 +40,11 @@ impl PackUnorm for Vec4 {
     }
 }
 
+
 pub fn mb_to_bytes(mb: u64) -> u64 {
     mb * 1_048_576
 }
+
 
 pub fn convert_rgb32f_to_rgba32f(
     img: ImageBuffer<Rgb<f32>, Vec<f32>>,
@@ -52,10 +57,12 @@ pub fn convert_rgb32f_to_rgba32f(
     })
 }
 
+
 pub fn calc_mips_count(width: u32, height: u32) -> u32 {
     let max_dimension = max(width, height) as f64;
     (max_dimension.log2().floor() as u32) + 1
 }
+
 
 pub fn bytes_per_pixel(format: vk::Format) -> u32 {
     match format {
@@ -74,6 +81,7 @@ pub fn bytes_per_pixel(format: vk::Format) -> u32 {
         _ => panic!("Cannot calculate bytes per pixel: Unsupported format"),
     }
 }
+
 
 pub fn get_skybox_mesh() -> (Vec<Vertex>, Vec<u32>) {
     let vertices = vec![
@@ -312,3 +320,43 @@ pub fn get_skybox_mesh() -> (Vec<Vertex>, Vec<u32>) {
 
     (vertices, indices)
 }
+
+
+pub struct BinarySemaphore {
+    state: AtomicBool,
+    lock: Mutex<()>,
+    condvar: Condvar,
+}
+
+
+impl BinarySemaphore {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicBool::new(false),
+            lock: Mutex::new(()),
+            condvar: Condvar::new(),
+        })
+    }
+
+    pub fn signal(&self) {
+        self.state.store(true, Ordering::Release);
+        let _guard = self.lock.lock().unwrap();
+        self.condvar.notify_all();
+    }
+
+    pub fn wait(&self) {
+        if !self.state.load(Ordering::Acquire) {
+            let mut guard = self.lock.lock().unwrap();
+            while !self.state.load(Ordering::Acquire) {
+                guard = self.condvar.wait(guard).unwrap();
+            }
+        }
+        self.state.store(false, Ordering::Release);
+    }
+
+    pub fn is_signaled(&self) -> bool {
+        self.state.load(Ordering::Acquire)
+    }
+}
+
+

@@ -1,5 +1,5 @@
 use crate::data::gpu_data::AsByteSlice;
-use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkDestroyable, VkHostBuffer, VkSubAlloc};
+use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkDestroyable, VkHostBuffer, VkQueueType, VkSubAlloc};
 use crate::vulkan::vk_util;
 use ash::{Device, vk};
 use ash::vk::DeviceAddress;
@@ -7,6 +7,9 @@ use std::cmp::{max_by, Ordering, PartialEq};
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, IndexMut, Sub};
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError};
+use std::time::Duration;
+use log::{debug, info};
 use vk_mem::Allocator;
 
 
@@ -405,21 +408,21 @@ impl VkStorageBuffer {
         }
     }
 
-    fn await_allocation_fence(
-        &self,
-        device: &ash::Device,
-        fence: [vk::Fence; 1],
-    ) -> Result<(), String> {
-        unsafe {
-            device
-                .wait_for_fences(&fence, true, 1e+10 as u64)
-                .map_err(|err| format!("Error awaiting host transfer fence: {:?}", err))?;
-
-            device
-                .reset_fences(&fence)
-                .map_err(|err| format!("Error resetting host transfer fence: {:?}", err))
-        }
-    }
+    // fn await_allocation_fence(
+    //     &self,
+    //     device: &ash::Device,
+    //     fence: [vk::Fence; 1],
+    // ) -> Result<(), String> {
+    //     unsafe {
+    //         device
+    //             .wait_for_fences(&fence, true, 1e+10 as u64)
+    //             .map_err(|err| format!("Error awaiting host transfer fence: {:?}", err))?;
+    // 
+    //         device
+    //             .reset_fences(&fence)
+    //             .map_err(|err| format!("Error resetting host transfer fence: {:?}", err))
+    //     }
+    // }
 
     fn select_best_chunk(&self, total_bytes: u64) -> MemChunk {
         // Prefer to use contiguous space from a free chunk
@@ -481,7 +484,7 @@ impl VkStorageBuffer {
         item_bytes: &[&'a [u8]],
         buffer_placement: BufferPlacement,
         device: &ash::Device,
-        host_lease: &VkHostBuffer,
+        host_buffer: &VkHostBuffer,
     ) -> VkBufferResult<'a> {
         let mut total_bytes: u64 = 0;
         let mut alloc_sizes = Vec::with_capacity(item_bytes.len());
@@ -499,7 +502,7 @@ impl VkStorageBuffer {
                 return self.bytes_exceeded_error(index, item.len());
             }
 
-            total_bytes = item.len() as u64;
+            total_bytes += item.len() as u64;
             alloc_sizes.push(item.len() as u64)
         }
 
@@ -546,22 +549,30 @@ impl VkStorageBuffer {
                 let upload_slice = &item_bytes[start_range..end_range];
                 let upload_offset = self.get_offset_from(curr_address);
 
-                if let Err(error_msg) = self.allocate_data(device, &host_lease, curr_address, upload_slice) {
+                debug!("Recording upload buffer");
+                if let Err(error_msg) = self.allocate_data(device, &host_buffer, curr_address, upload_slice) {
                     return self.partial_error(error_msg, sub_allocations);
                 }
 
-                // Channel submit here
-
-                if let Err(error_msg) = self.await_allocation_fence(device, host_lease.fence) {
-                    return self.partial_error(error_msg, sub_allocations);
+                debug!("Submitting upload buffer commands");
+                match host_buffer.submit_commands(VkQueueType::Transfer) {
+                    Ok(resp_channel) => {
+                        if let Err(error) = resp_channel.recv_timeout(Duration::from_secs(30)) {
+                            return self.partial_error(format!("Error awaiting upload response: {:?}", error), sub_allocations);
+                        }
+                    }
+                    Err(err) => {
+                        return self.partial_error("Error submitting upload".to_string(), sub_allocations);
+                    }
                 }
+                
 
                 self.add_sub_allocations(curr_address, &alloc_sizes[start_range..end_range], &mut sub_allocations);
 
                 start_range = i;
                 bytes_left -= curr_allot;
                 curr_allot = 0;
-
+                
                 curr_address = curr_address.add(curr_allot);
             }
 
@@ -589,7 +600,6 @@ impl VkStorageBuffer {
                     }
                 }
             }
-
             // Continue assigning upload allotments
             curr_allot += byte_size;
             total_chunk_allot += byte_size;
@@ -602,19 +612,24 @@ impl VkStorageBuffer {
             let upload_offset = self.get_offset_from(curr_address);
 
             if let Err(error_msg) =
-                self.allocate_data(device, &host_lease, curr_address, upload_slice)
+                self.allocate_data(device, &host_buffer, curr_address, upload_slice)
             {
                 return self.partial_error(error_msg, sub_allocations);
             }
-
-            // Channel submit here
-
-            if let Err(error_msg) = self.await_allocation_fence(device, host_lease.fence) {
-                return self.partial_error(error_msg, sub_allocations);
+            
+            debug!("Submitting upload buffer commands");
+            match host_buffer.submit_commands(VkQueueType::Transfer) {
+                Ok(resp_channel) => {
+                    if let Err(error) = resp_channel.recv_timeout(Duration::from_secs(30)) {
+                        return self.partial_error(format!("Error awaiting upload response: {:?}", error), sub_allocations);
+                    }
+                }
+                Err(err) => {
+                    return self.partial_error("Error submitting upload".to_string(), sub_allocations);
+                }
             }
 
             self.add_sub_allocations(curr_address, &alloc_sizes[start_range..end_range], &mut sub_allocations);
-
             bytes_left -= curr_allot;
 
             match curr_mem_chunk {

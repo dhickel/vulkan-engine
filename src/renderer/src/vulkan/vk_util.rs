@@ -527,7 +527,6 @@ pub fn allocate_host_buffer(
 }
 
 
-
 pub fn allocate_and_write_buffer(
     allocator: &Allocator,
     data: &[u8],
@@ -570,7 +569,7 @@ pub fn generate_brdf_lut(
 ) -> VkBrdfLut {
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
-    
+
 
     let format = vk::Format::R16G16B16A16_SFLOAT;
     let size = Extent3D::default().width(512).height(512).depth(1);
@@ -1130,7 +1129,7 @@ pub fn record_host_to_storage_buffer(
             .src_access_mask(vk::AccessFlags::HOST_WRITE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED) 
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .buffer(host_buffer.buffer)
             .offset(0)
             .size(vk::WHOLE_SIZE);
@@ -1160,7 +1159,7 @@ pub fn record_host_to_storage_buffer(
         device.cmd_pipeline_barrier(
             cmd_buffer,
             vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::ALL_GRAPHICS,
+            vk::PipelineStageFlags::TRANSFER,
             vk::DependencyFlags::empty(),
             &[],
             &[dst_barrier],
@@ -1184,6 +1183,9 @@ pub fn record_host_to_image_buffer(
     image_meta: &[&TextureMeta],
     alignment: u64,
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
+    
+    let alignment = if alignment < 4 { 4 } else { alignment };
+
     let host_buffer = &host_info.buffer;
     let cmd_buffer = host_info.cmd_pool.buffers[0];
 
@@ -1191,6 +1193,7 @@ pub fn record_host_to_image_buffer(
     let mut offset: DeviceSize = 0;
     let image_offsets: Vec<DeviceSize> = image_meta.iter().map(|meta| {
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
+      
         unsafe {
             std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, size);
             let host_ptr = host_ptr.add(size);
@@ -1336,7 +1339,7 @@ pub fn record_host_to_image_buffer(
         device.cmd_pipeline_barrier(
             cmd_buffer,
             vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
             vk::DependencyFlags::empty(),
             &[],
             &[],

@@ -5,7 +5,7 @@ use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
-use crate::vulkan::vk_types::{VkDeviceQueues, VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc};
+use crate::vulkan::vk_types::{VkDeviceQueues, VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc, VkQueueType, VkCmdSubmitInfo};
 
 use crate::vulkan::vk_util;
 use ash::vk::{Format, PFN_vkFreeDescriptorSets};
@@ -13,7 +13,7 @@ use ash::{vk, Device};
 use glam::{vec3, vec4, Vec3, Vec4};
 use gltf::json::Path;
 use image::{EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba32FImage};
-use log::{error, info};
+use log::{debug, error, info};
 use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hasher};
@@ -21,6 +21,9 @@ use std::marker::PhantomData;
 use std::path;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::mpsc::{Receiver, SendError};
+use std::time::Duration;
+use ash::prelude::VkResult;
 use vk_mem::Allocator;
 
 ///////////////////
@@ -71,8 +74,6 @@ pub struct DescriptorManager {
 
 
 impl DescriptorManager {
-
-
     pub fn alloc_image_desc(&mut self, device: &ash::Device) -> vk::DescriptorSet {
         self.image_desc_allocator
             .allocate(device, &[self.image_desc_layout])
@@ -430,7 +431,7 @@ impl TextureCache {
                     if curr_bytes + meta.bytes.len()
                         .next_multiple_of(self.host_alignment as usize) > max_upload_bytes as usize
                     {
-                        let alloc_result = vk_util::record_host_to_image_buffer(
+                        let image_allocs = vk_util::record_host_to_image_buffer(
                             &self.device,
                             &self.allocator.lock().unwrap(),
                             &mut self.sampler_cache,
@@ -439,7 +440,22 @@ impl TextureCache {
                             self.host_alignment,
                         );
 
-                        match alloc_result {
+                        // Submit texture uploads, requires graphics queue for mips
+                        info!("Submitting image upload");
+                        debug!("Awaiting Response");
+                        match host_buffer.submit_commands(VkQueueType::Graphics) {
+                            Ok(resp_channel) => {
+                                if let Err(err) = resp_channel.recv_timeout(Duration::from_secs(30)) {
+                                    error!("Error awaiting texture upload: {:?}", err);
+                                } else { debug!("Received Response"); }
+                            }
+                            Err(err) => {
+                                error!("Error submitting texture upload: {:?}", err);
+                            }
+                        }
+
+
+                        match image_allocs {
                             Ok(images) => {
                                 curr_bytes = 0;
                                 next_upload.clear();
@@ -461,9 +477,58 @@ impl TextureCache {
                     curr_bytes += meta.bytes.len().next_multiple_of(self.host_alignment as usize);
                     next_upload.push(meta);
                 }
-                Some(CachedTexture::Loaded(_)) => continue,
+                Some(CachedTexture::Loaded(_)) => {
+                    info!("Existing texture found for id: {}", id);
+                    continue;
+                }
                 _ => {
                     error!("Error loading textures: Invalid texture index");
+                    return false;
+                }
+            }
+        }
+
+
+        // Upload any remaining data
+        if curr_bytes > 0 {
+            let image_allocs = vk_util::record_host_to_image_buffer(
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                &mut self.sampler_cache,
+                &host_buffer,
+                &next_upload,
+                self.host_alignment,
+            );
+
+            // Submit texture uploads, requires graphics queue for mips
+            info!("Submitting image upload");
+            debug!("Awaiting Response");
+            match host_buffer.submit_commands(VkQueueType::Graphics) {
+                Ok(resp_channel) => {
+                    if let Err(err) = resp_channel.recv_timeout(Duration::from_secs(30)) {
+                        error!("Error awaiting upload response for textures: {:?}", err);
+                    } else { debug!("Received Response"); }
+                }
+                Err(err) => {
+                    error!("Error submitting command for textures: {:?}", err);
+                }
+            }
+            
+            match image_allocs {
+                Ok(images) => {
+                    curr_bytes = 0;
+                    next_upload.clear();
+
+                    for image in images {
+                        let loaded_tex = VkLoadedTexture {
+                            alloc: image.0,
+                            sampler: image.1,
+                        };
+                        loaded.push(CachedTexture::Loaded(loaded_tex));
+                    }
+                }
+                Err(err) => {
+                    error!("Error loading textures: {:?}", err);
                     return false;
                 }
             }
@@ -481,10 +546,14 @@ impl TextureCache {
         buffer_placement: BufferPlacement,
         rtn_alloc: bool,
     ) -> LoadResult<VkLoadedMaterial> {
-        let texture_ids = materials.iter().flat_map(|(id, meta)| {
+        let mut texture_ids : Vec<u32> = materials.iter().flat_map(|(id, meta)| {
             (&**meta).texture_ids.to_vec()
         }).collect();
-
+        
+        // Dedupe
+        texture_ids.sort_unstable();
+        texture_ids.dedup();
+        
         if !self.allocate_textures(texture_ids) {
             return LoadResult::Failed(None);
         }
@@ -531,7 +600,7 @@ impl TextureCache {
                 meta.material_values.alpha_mask
             ),
         };
-        
+
 
         let color_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.base_color) };
         let metallic_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.metallic_roughness) };
@@ -865,6 +934,7 @@ impl MeshCache {
             }
         }
 
+
         let vertex_allocs = match self.vertex_storage.allocate_bytes(&mut vertex_data, buffer_placement) {
             VkAllocResult::Success(allocs) => allocs,
             VkAllocResult::Failure { error_msg, successful_allocs } => {
@@ -873,6 +943,7 @@ impl MeshCache {
                 return LoadResult::Failed(None);
             }
         };
+
 
         let index_allocs = match self.index_storage.allocate_bytes(&mut index_data, buffer_placement) {
             VkAllocResult::Success(allocs) => allocs,
