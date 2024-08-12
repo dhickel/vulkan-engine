@@ -5,7 +5,7 @@ use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
-use crate::vulkan::vk_types::{VkDeviceQueues, VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc, VkQueueType, VkCmdSubmitInfo};
+use crate::vulkan::vk_types::{VkDeviceQueues, VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc, VkQueueType, VkCmdSubmitInfo, VkFenceQueue, VkSubmitParam};
 
 use crate::vulkan::vk_util;
 use ash::vk::{Format, PFN_vkFreeDescriptorSets};
@@ -291,6 +291,7 @@ impl TextureCache {
             host_buffer.clone(),
             meta_buffer_size,
             &limits,
+            vk::BufferUsageFlags::empty()
         )?;
 
         let desc_manager = DescriptorManager {
@@ -397,10 +398,15 @@ impl TextureCache {
     }
 
     pub unsafe fn get_loaded_texture_unchecked(&self, id: u32) -> &VkLoadedTexture {
+        debug!("Getting Unchecked Texture: {:?}", id);
+
         unsafe {
             match self.cached_textures.get_unchecked(id as usize) {
                 CachedTexture::Loaded(loaded) => loaded,
-                _ => std::hint::unreachable_unchecked(),
+                _ => {
+                    error!("Unloaded texture: {:?}", id);
+                    std::hint::unreachable_unchecked()
+                }
             }
         }
     }
@@ -416,7 +422,7 @@ impl TextureCache {
 
     pub fn allocate_textures(
         &mut self,
-        texture_ids: Vec<u32>,
+        mut texture_ids: Vec<u32>,
     ) -> bool {
         let host_buffer = self.host_buffer.lock().unwrap();
         let max_upload_bytes = host_buffer.buffer.size;
@@ -424,6 +430,11 @@ impl TextureCache {
         let mut curr_bytes = 0;
         let mut next_upload = Vec::<&TextureMeta>::with_capacity(texture_ids.len());
         let mut loaded = Vec::<CachedTexture>::with_capacity(texture_ids.len());
+
+        texture_ids.retain(|id| {
+            let tex = self.cached_textures.get(*id as usize);
+            matches!( tex, Some(CachedTexture::Unloaded(_)))
+        });
 
         for id in texture_ids.iter().copied() {
             match self.cached_textures.get(id as usize) {
@@ -441,17 +452,17 @@ impl TextureCache {
                         );
 
                         // Submit texture uploads, requires graphics queue for mips
-                        info!("Submitting image upload");
-                        debug!("Awaiting Response");
-                        match host_buffer.submit_commands(VkQueueType::Graphics) {
-                            Ok(resp_channel) => {
-                                if let Err(err) = resp_channel.recv_timeout(Duration::from_secs(30)) {
-                                    error!("Error awaiting texture upload: {:?}", err);
-                                } else { debug!("Received Response"); }
-                            }
-                            Err(err) => {
-                                error!("Error submitting texture upload: {:?}", err);
-                            }
+
+                        debug!("Submitting Material Commands");
+                        host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
+                        host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
+
+                        if let Err(error) = host_buffer.await_done(10) {
+                            error!("Error awaiting tx upload response for textures: {:?}", error);
+                            return false;
+                        } else {
+                            host_buffer.reset_buffers(&self.device);
+                            debug!("Storage upload latch passed")
                         }
 
 
@@ -459,7 +470,7 @@ impl TextureCache {
                             Ok(images) => {
                                 curr_bytes = 0;
                                 next_upload.clear();
-
+                                assert!(!images.is_empty());
                                 for image in images {
                                     let loaded_tex = VkLoadedTexture {
                                         alloc: image.0,
@@ -476,10 +487,6 @@ impl TextureCache {
                     }
                     curr_bytes += meta.bytes.len().next_multiple_of(self.host_alignment as usize);
                     next_upload.push(meta);
-                }
-                Some(CachedTexture::Loaded(_)) => {
-                    info!("Existing texture found for id: {}", id);
-                    continue;
                 }
                 _ => {
                     error!("Error loading textures: Invalid texture index");
@@ -500,25 +507,26 @@ impl TextureCache {
                 self.host_alignment,
             );
 
+            debug!("Submitting Material Commands");
             // Submit texture uploads, requires graphics queue for mips
-            info!("Submitting image upload");
-            debug!("Awaiting Response");
-            match host_buffer.submit_commands(VkQueueType::Graphics) {
-                Ok(resp_channel) => {
-                    if let Err(err) = resp_channel.recv_timeout(Duration::from_secs(30)) {
-                        error!("Error awaiting upload response for textures: {:?}", err);
-                    } else { debug!("Received Response"); }
-                }
-                Err(err) => {
-                    error!("Error submitting command for textures: {:?}", err);
-                }
+            host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
+            host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
+
+
+            if let Err(error) = host_buffer.await_done(10) {
+                error!("Error awaiting tx upload response for textures: {:?}", error);
+                return false;
+            } else {
+                host_buffer.reset_buffers(&self.device);
+                debug!("Storage upload latch passed")
             }
-            
+
+
             match image_allocs {
                 Ok(images) => {
                     curr_bytes = 0;
                     next_upload.clear();
-
+                    assert!(!images.is_empty());
                     for image in images {
                         let loaded_tex = VkLoadedTexture {
                             alloc: image.0,
@@ -533,11 +541,28 @@ impl TextureCache {
                 }
             }
         }
-
-        for (id, tex) in texture_ids.into_iter().zip(loaded.into_iter()) {
-            self.cached_textures[id as usize] = tex;
+        
+      
+        assert_eq!(texture_ids.len(), loaded.len());
+        
+        for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
+            match tex {
+                CachedTexture::Unloaded(_) => debug!("Texture Unloaded"),
+                CachedTexture::Loaded(_) => debug!("Texture Loaded"),
+                CachedTexture::_NULL => debug!("Texture Null")
+            }
+            self.cached_textures[*id as usize] = tex;
         }
-        return true;
+        
+        debug!("Loaded Textures: {:?}", texture_ids);
+        texture_ids.iter().for_each(|id| {
+            if !matches!(self.cached_textures.get(*id as usize), Some(CachedTexture::Loaded(_))) {
+                error!("Unloaded texture id: {}", id)
+            }
+        });
+
+        
+        true
     }
 
     unsafe fn allocate_materials(
@@ -546,14 +571,14 @@ impl TextureCache {
         buffer_placement: BufferPlacement,
         rtn_alloc: bool,
     ) -> LoadResult<VkLoadedMaterial> {
-        let mut texture_ids : Vec<u32> = materials.iter().flat_map(|(id, meta)| {
+        let mut texture_ids: Vec<u32> = materials.iter().flat_map(|(id, meta)| {
             (&**meta).texture_ids.to_vec()
         }).collect();
-        
+
         // Dedupe
         texture_ids.sort_unstable();
         texture_ids.dedup();
-        
+
         if !self.allocate_textures(texture_ids) {
             return LoadResult::Failed(None);
         }
@@ -897,10 +922,14 @@ impl MeshCache {
     }
 
     pub fn get_loaded_id_unchecked(&self, id: u32) -> VkMeshBuffers {
+        debug!("Getting loaded mesh unchecked: {}", id);
         unsafe {
             match self.cached_meshes.get_unchecked(id as usize) {
                 CachedMesh::Loaded(buffers) => *buffers,
-                _ => std::hint::unreachable_unchecked(),
+                _ => {
+                    error!("Error getting loaded mesh unchecked: {}", id);
+                    std::hint::unreachable_unchecked()
+                }
             }
         }
     }
@@ -958,8 +987,8 @@ impl MeshCache {
         let mut rtn_buffers = if return_buffers {
             Some(Vec::<VkMeshBuffers>::with_capacity(vertex_allocs.len()))
         } else { None };
-
-
+        
+        
         meshes.iter()
             .map(|(id, meta)| *id)
             .zip(vertex_allocs.into_iter())
@@ -983,7 +1012,8 @@ impl MeshCache {
                     self.cached_meshes[id as usize] = CachedMesh::Loaded(buffer);
                 } else { panic!("Unreachable") }
             });
-
+        
+        debug!("Allocated Meshes: {:?}", meshes);
         LoadResult::Success(rtn_buffers)
     }
 

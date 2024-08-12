@@ -14,6 +14,7 @@ use std::cmp::max;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use vk_mem::Alloc;
 
 
@@ -360,3 +361,122 @@ impl BinarySemaphore {
 }
 
 
+#[derive(Debug)]
+pub struct CountdownLatch {
+    count: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl CountdownLatch {
+    pub fn new() -> Self {
+        CountdownLatch {
+            count: Arc::new((Mutex::new(0), Condvar::new())),
+        }
+    }
+
+    pub fn count_down(&self) {
+        let (lock, cvar) = &*self.count;
+        let mut count = lock.lock().unwrap();
+        if *count > 0 {
+            *count -= 1;
+            if *count == 0 {
+                cvar.notify_all();
+            }
+        }
+    }
+
+    fn increment(&self) {
+        let (lock, _) = &*self.count;
+        let mut count = lock.lock().unwrap();
+        *count += 1;
+    }
+
+    pub fn await_zero(&self, timeout: Duration) -> Result<(), LatchTimeOutError> {
+        let (lock, cvar) = &*self.count;
+        let mut count = lock.lock().unwrap();
+        let start = Instant::now();
+
+        while *count > 0 {
+            if start.elapsed() >= timeout {
+                return Err(LatchTimeOutError);
+            }
+
+            let remaining = timeout.checked_sub(start.elapsed()).unwrap_or(Duration::from_secs(0));
+            let (new_count, timeout_result) = cvar.wait_timeout(count, remaining).unwrap();
+            count = new_count;
+
+            if timeout_result.timed_out() {
+                return Err(LatchTimeOutError);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn await_n(&self, n: usize, timeout: Duration) -> Result<(), LatchTimeOutError> {
+        let (lock, cvar) = &*self.count;
+        let mut count = lock.lock().unwrap();
+        let start = Instant::now();
+
+        while *count > n {
+            if start.elapsed() >= timeout {
+                return Err(LatchTimeOutError);
+            }
+
+            let remaining = timeout.checked_sub(start.elapsed()).unwrap_or(Duration::from_secs(0));
+            let (new_count, timeout_result) = cvar.wait_timeout(count, remaining).unwrap();
+            count = new_count;
+
+            if timeout_result.timed_out() {
+                return Err(LatchTimeOutError);
+            }
+        }
+
+        Ok(())
+    }
+
+
+    pub fn get_count(&self) -> usize {
+        let (lock, _) = &*self.count;
+        *lock.lock().unwrap()
+    }
+
+    pub fn create_guard(&self) -> CountDownDropGuard {
+        self.increment();
+        CountDownDropGuard::new(self.count.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct CountDownDropGuard {
+    latch: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl CountDownDropGuard {
+    pub fn new(latch: Arc<(Mutex<usize>, Condvar)>) -> Self {
+        CountDownDropGuard { latch }
+    }
+}
+
+impl Drop for CountDownDropGuard {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.latch;
+        let mut count = lock.lock().unwrap();
+        if *count > 0 {
+            *count -= 1;
+            if *count == 0 {
+                cvar.notify_all();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LatchTimeOutError;
+
+impl std::fmt::Display for LatchTimeOutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Latch wait operation timed out")
+    }
+}
+
+impl std::error::Error for LatchTimeOutError {}

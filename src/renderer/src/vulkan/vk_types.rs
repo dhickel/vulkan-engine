@@ -12,13 +12,14 @@ use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
 use std::sync::{Arc, mpsc, Mutex};
 use std::{mem, slice};
+use std::time::Duration;
 use log::{debug, error};
 use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
 use crate::data::data_cache::{EnvMaps, VkPipelineType};
-use crate::data::data_util::BinarySemaphore;
+use crate::data::data_util::{BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError};
 use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 
 
@@ -304,12 +305,67 @@ pub struct VkCommandPool {
 }
 
 
-#[derive(Debug, Clone)]
+pub type VkSubmitFn = Box<dyn Fn(&VkCmdSubmitInfo, &vk::Device, &mut VkFenceQueue, &VkDeviceQueues) -> Result<(), String> + Send + Sync>;
+
+
+#[derive(Debug)]
+pub struct VkSubmitParam {
+    pub is_signal: bool,
+    pub stage_mask: vk::PipelineStageFlags2,
+}
+
+
+impl VkSubmitParam {
+    pub fn signaling(flags: vk::PipelineStageFlags2) -> Self {
+        Self {
+            is_signal: true,
+            stage_mask: flags,
+        }
+    }
+
+    pub fn waiting(flags: vk::PipelineStageFlags2) -> Self {
+        Self {
+            is_signal: false,
+            stage_mask: flags,
+        }
+    }
+}
+
+
+#[derive(Debug)]
 pub struct VkCmdSubmitInfo {
     pub cmd_buffer: vk::CommandBuffer,
     pub fence: [vk::Fence; 1],
+    pub semaphore: [vk::Semaphore; 1],
     pub queue_type: VkQueueType,
-    pub resp_channel: mpsc::Sender<()>,
+    pub latch_guard: CountDownDropGuard,
+    pub submit_params: VkSubmitParam,
+}
+
+
+impl VkCmdSubmitInfo {
+    pub fn submit(self, device: &ash::Device, device_queues: &VkDeviceQueues, fence_queue: &mut VkFenceQueue) {
+        let cmd_buffer = [self.cmd_buffer];
+        let cmd_info = [vk_util::command_buffer_submit_info(self.cmd_buffer)];
+        let queue = device_queues.get_queue(self.queue_type);
+
+        debug!("Submitted off-thread cmd buffer: \n {:#?}", self);
+
+        let semaphore_info = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(self.semaphore[0])
+            .value(1)
+            .stage_mask(self.submit_params.stage_mask)];
+
+        let queue_submit = vk::SubmitInfo2::default()
+            .command_buffer_infos(&cmd_info)
+            .signal_semaphore_infos(if self.submit_params.is_signal { &semaphore_info } else { &[] })
+            .wait_semaphore_infos(if !self.submit_params.is_signal { &semaphore_info } else { &[] });
+
+        unsafe {
+            device.queue_submit2(queue, &[queue_submit], self.fence[0]).unwrap();
+        }
+        fence_queue.queue_fence(self.fence, self.latch_guard)
+    }
 }
 
 
@@ -660,26 +716,56 @@ impl VkImmediate {
 pub struct VkHostBuffer {
     pub buffer: VkBuffer,
     pub render_sender: Sender<VkCmdSubmitInfo>,
-    pub cmd_pool: VkCommandPool,
-    pub fence: [vk::Fence; 1],
+    pub transfer_pool: VkCommandPool,
+    pub graphics_pool: VkCommandPool,
+    pub fence: [vk::Fence; 2],
+    pub semaphore: [vk::Semaphore; 1],
     pub transfer_queue_index: u32,
     pub graphics_queue_index: u32,
+    pub countdown_latch: CountdownLatch,
 }
 
 
 impl VkHostBuffer {
-    pub fn submit_commands(&self, queue_type: VkQueueType) -> Result<Receiver<()>, SendError<VkCmdSubmitInfo>> {
-        let (sender, receiver) = mpsc::channel();
+    pub fn submit_transfer_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
-            cmd_buffer: self.cmd_pool.buffers[0],
-            fence: self.fence,
-            queue_type,
-            resp_channel: sender,
+            cmd_buffer: self.transfer_pool.buffers[0],
+            fence: [self.fence[0]],
+            semaphore: self.semaphore,
+            submit_params,
+            queue_type: VkQueueType::Transfer,
+            latch_guard: self.countdown_latch.create_guard(),
         };
 
         if let Err(err) = self.render_sender.send(submit_info) {
             Err(err)
-        } else { Ok(receiver) }
+        } else { Ok(()) }
+    }
+
+    pub fn submit_graphics_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
+        let submit_info = VkCmdSubmitInfo {
+            cmd_buffer: self.graphics_pool.buffers[0],
+            fence: [self.fence[1]],
+            semaphore: self.semaphore,
+            submit_params,
+            queue_type: VkQueueType::Graphics,
+            latch_guard: self.countdown_latch.create_guard(),
+        };
+
+        if let Err(err) = self.render_sender.send(submit_info) {
+            Err(err)
+        } else { Ok(()) }
+    }
+
+    pub fn await_done(&self, timeout_sec: u64) -> Result<(), LatchTimeOutError> {
+        self.countdown_latch.await_zero(Duration::from_secs(timeout_sec))
+    }
+
+    pub fn reset_buffers(&self, device: &ash::Device) {
+        unsafe {
+            device.reset_command_buffer(self.transfer_pool.buffers[0], vk::CommandBufferResetFlags::empty()).unwrap();
+            device.reset_command_buffer(self.graphics_pool.buffers[0], vk::CommandBufferResetFlags::empty()).unwrap();
+        }
     }
 }
 
@@ -1170,7 +1256,7 @@ impl VkSceneDescriptors {
 
 
 pub struct VkFenceQueue {
-    fence_awaits: Vec<(vk::Fence, Sender<()>)>,
+    fence_awaits: Vec<(vk::Fence, CountDownDropGuard)>,
 }
 
 
@@ -1179,8 +1265,9 @@ impl VkFenceQueue {
         Self { fence_awaits: Vec::with_capacity(4) }
     }
 
-    pub fn queue_fence(&mut self, fence: [vk::Fence; 1], signal: Sender<()>) {
-        self.fence_awaits.push((fence[0], signal));
+    pub fn queue_fence(&mut self, fence: [vk::Fence; 1], latch_guard: CountDownDropGuard) {
+        debug!("Queued fence: {:?}", fence);
+        self.fence_awaits.push((fence[0], latch_guard));
     }
 
     pub fn check_fences(&mut self, device: &ash::Device) {
@@ -1188,23 +1275,13 @@ impl VkFenceQueue {
             return;
         }
 
-        let removals: Vec::<usize> = self.fence_awaits
-            .iter().rev().enumerate()
-            .filter_map(|(i, (fence, signal))| {
-                if unsafe { device.get_fence_status(*fence).unwrap() } {
-                    unsafe { device.reset_fences(&[*fence]).unwrap() };
-                    debug!("Signaling fence: {:?} | {:?}",i, fence);
-                    signal.send(())
-                        .map_err(|err| error!("Error sending upload response: {:?}", err))
-                        .ok();
-                    
-                    Some(i)
-                } else { None }
-            }).collect();
-
-        removals.into_iter().for_each(|i| {
-            debug!("removing fence: {:?}", i);
-            drop(self.fence_awaits.swap_remove(i))
+        self.fence_awaits.retain(|(fence, signal)| {
+            let signaled = unsafe { device.get_fence_status(*fence).unwrap() };
+            if signaled {
+                unsafe { device.reset_fences(&[*fence]).unwrap() };
+                debug!("Signaling and removing fence: {:?}", fence);
+                false
+            } else { true }
         });
     }
 }

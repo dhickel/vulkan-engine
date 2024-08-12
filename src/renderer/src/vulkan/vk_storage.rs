@@ -1,5 +1,5 @@
 use crate::data::gpu_data::AsByteSlice;
-use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkDestroyable, VkHostBuffer, VkQueueType, VkSubAlloc};
+use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkDestroyable, VkHostBuffer, VkQueueType, VkSubAlloc, VkSubmitParam};
 use crate::vulkan::vk_util;
 use ash::{Device, vk};
 use ash::vk::DeviceAddress;
@@ -117,8 +117,9 @@ impl VkSubAllocator {
         transfer_buffer: Arc<Mutex<VkHostBuffer>>,
         buffer_size: u64,
         limits: &VkBufferAndDescriptorLimits,
+        flags: vk::BufferUsageFlags 
     ) -> Result<Self, String> {
-        let usage_flags = vk::BufferUsageFlags::STORAGE_BUFFER
+        let usage_flags = flags | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::TRANSFER_DST
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
 
@@ -467,7 +468,6 @@ impl VkStorageBuffer {
             curr_address.sub(self.buffer_start_addr),
             upload_slice,
             self.alignment,
-            self.dst_barrier,
         )
     }
 
@@ -554,25 +554,24 @@ impl VkStorageBuffer {
                     return self.partial_error(error_msg, sub_allocations);
                 }
 
-                debug!("Submitting upload buffer commands");
-                match host_buffer.submit_commands(VkQueueType::Transfer) {
-                    Ok(resp_channel) => {
-                        if let Err(error) = resp_channel.recv_timeout(Duration::from_secs(30)) {
-                            return self.partial_error(format!("Error awaiting upload response: {:?}", error), sub_allocations);
-                        }
-                    }
-                    Err(err) => {
-                        return self.partial_error("Error submitting upload".to_string(), sub_allocations);
-                    }
+                debug!("Submitting VkStorage Commands");
+                host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
+                host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
+
+                if let Err(error) = host_buffer.await_done(30) {
+                    return self.partial_error(format!("Error awaiting upload response: {:?}", error), sub_allocations);
+                } else {
+                    host_buffer.reset_buffers(device);
+                    debug!("Storage upload latch passed")
                 }
-                
+
 
                 self.add_sub_allocations(curr_address, &alloc_sizes[start_range..end_range], &mut sub_allocations);
 
                 start_range = i;
                 bytes_left -= curr_allot;
                 curr_allot = 0;
-                
+
                 curr_address = curr_address.add(curr_allot);
             }
 
@@ -611,23 +610,22 @@ impl VkStorageBuffer {
             let upload_slice = &item_bytes[start_range..end_range];
             let upload_offset = self.get_offset_from(curr_address);
 
-            if let Err(error_msg) =
-                self.allocate_data(device, &host_buffer, curr_address, upload_slice)
-            {
+            if let Err(error_msg) = self.allocate_data(device, &host_buffer, curr_address, upload_slice) {
                 return self.partial_error(error_msg, sub_allocations);
             }
-            
-            debug!("Submitting upload buffer commands");
-            match host_buffer.submit_commands(VkQueueType::Transfer) {
-                Ok(resp_channel) => {
-                    if let Err(error) = resp_channel.recv_timeout(Duration::from_secs(30)) {
-                        return self.partial_error(format!("Error awaiting upload response: {:?}", error), sub_allocations);
-                    }
-                }
-                Err(err) => {
-                    return self.partial_error("Error submitting upload".to_string(), sub_allocations);
-                }
+
+
+            debug!("Submitting VkStorage Commands");
+            host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
+            host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
+
+            if let Err(error) = host_buffer.await_done(30) {
+                return self.partial_error(format!("Error awaiting upload response: {:?}", error), sub_allocations);
+            } else {
+                host_buffer.reset_buffers(device);
+                debug!("Storage upload latch passed")
             }
+
 
             self.add_sub_allocations(curr_address, &alloc_sizes[start_range..end_range], &mut sub_allocations);
             bytes_left -= curr_allot;

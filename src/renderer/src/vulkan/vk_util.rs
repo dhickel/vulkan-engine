@@ -4,9 +4,7 @@ use std::ffi::CStr;
 use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ClearValue, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageType,
-    PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo,
-};
+use ash::vk::{AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -29,6 +27,7 @@ use std::fs;
 use std::fs::metadata;
 use std::ops::{Add, Sub};
 use std::path::{Path, PathBuf};
+use crate::data::data_util::calc_mips_count;
 
 
 pub fn command_pool_create_info<'a>(
@@ -167,6 +166,7 @@ pub fn create_image(
     let mut alloc_info = vk_mem::AllocationCreateInfo::default();
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
 
     let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
@@ -1095,10 +1095,12 @@ pub fn record_host_to_storage_buffer(
     device_offset: u64,
     bytes: &[&[u8]],
     alignment: u64,
-    dst_barrier: vk::BufferMemoryBarrier,
 ) -> Result<(), String> {
-    let cmd_buffer = host_info.cmd_pool.buffers[0];
+    let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
+    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0]; // Assuming you have a graphics command pool
     let host_buffer = &host_info.buffer;
+
+    let alignment = if alignment < 4 { 4 } else { alignment };
 
     let mut total_size = 0;
 
@@ -1107,7 +1109,7 @@ pub fn record_host_to_storage_buffer(
         let size = chunk.len().next_multiple_of(alignment as usize);
         unsafe {
             std::ptr::copy_nonoverlapping(chunk.as_ptr(), host_ptr, size);
-            let host_ptr = host_ptr.add(size);
+            host_ptr = host_ptr.add(size);
             total_size += size;
         }
     }
@@ -1117,13 +1119,12 @@ pub fn record_host_to_storage_buffer(
         .src_offset(0)
         .size(total_size as vk::DeviceSize)];
 
-    let begin_info =
-        vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info = vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
-        device
-            .begin_command_buffer(cmd_buffer, &begin_info)
-            .map_err(|err| format!("Error beginning buffer: {}", err))?;
+        // Record transfer command buffer
+        device.begin_command_buffer(transfer_cmd_buffer, &begin_info)
+            .map_err(|err| format!("Error beginning transfer buffer: {}", err))?;
 
         let src_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::HOST_WRITE)
@@ -1135,7 +1136,7 @@ pub fn record_host_to_storage_buffer(
             .size(vk::WHOLE_SIZE);
 
         device.cmd_pipeline_barrier(
-            cmd_buffer,
+            transfer_cmd_buffer,
             vk::PipelineStageFlags::HOST,
             vk::PipelineStageFlags::TRANSFER,
             vk::DependencyFlags::empty(),
@@ -1145,30 +1146,59 @@ pub fn record_host_to_storage_buffer(
         );
 
         device.cmd_copy_buffer(
-            cmd_buffer,
+            transfer_cmd_buffer,
             host_buffer.buffer,
             device_buffer.buffer,
             &copy_info,
         );
 
-        let dst_barrier = dst_barrier
+        let release_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
+            .src_queue_family_index(host_info.transfer_queue_index)
+            .dst_queue_family_index(host_info.graphics_queue_index)
             .buffer(device_buffer.buffer)
             .offset(device_offset)
             .size(total_size as vk::DeviceSize);
 
         device.cmd_pipeline_barrier(
-            cmd_buffer,
+            transfer_cmd_buffer,
             vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
             vk::DependencyFlags::empty(),
             &[],
-            &[dst_barrier],
+            &[release_barrier],
             &[],
         );
 
-        device
-            .end_command_buffer(cmd_buffer)
-            .map_err(|err| format!("Error ending buffer: {}", err))?;
+        device.end_command_buffer(transfer_cmd_buffer)
+            .map_err(|err| format!("Error ending transfer buffer: {}", err))?;
+
+        // Record graphics command buffer
+        device.begin_command_buffer(graphics_cmd_buffer, &begin_info)
+            .map_err(|err| format!("Error beginning graphics buffer: {}", err))?;
+
+        let acquire_barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
+            .src_queue_family_index(host_info.transfer_queue_index)
+            .dst_queue_family_index(host_info.graphics_queue_index)
+            .buffer(device_buffer.buffer)
+            .offset(device_offset)
+            .size(total_size as vk::DeviceSize);
+
+        device.cmd_pipeline_barrier(
+            graphics_cmd_buffer,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::VERTEX_INPUT,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[acquire_barrier],
+            &[],
+        );
+
+        device.end_command_buffer(graphics_cmd_buffer)
+            .map_err(|err| format!("Error ending graphics buffer: {}", err))?;
     }
 
     Ok(())
@@ -1183,17 +1213,17 @@ pub fn record_host_to_image_buffer(
     image_meta: &[&TextureMeta],
     alignment: u64,
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
-    
     let alignment = if alignment < 4 { 4 } else { alignment };
 
     let host_buffer = &host_info.buffer;
-    let cmd_buffer = host_info.cmd_pool.buffers[0];
+    let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
+    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
 
     let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     let mut offset: DeviceSize = 0;
     let image_offsets: Vec<DeviceSize> = image_meta.iter().map(|meta| {
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
-      
+
         unsafe {
             std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, size);
             let host_ptr = host_ptr.add(size);
@@ -1204,79 +1234,51 @@ pub fn record_host_to_image_buffer(
     }).collect();
 
 
-    let mut image_allocs = Vec::<VkImageAlloc>::with_capacity(image_meta.len());
-    let mut pre_transitions = Vec::<vk::ImageMemoryBarrier>::with_capacity(image_meta.len());
-    for meta in image_meta {
-        let size = Extent3D::default().height(meta.height).width(meta.width).depth(1);
-        let new_image = create_image(
-            device,
-            &allocator,
-            size,
-            meta.format,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-            meta.mips_levels,
-        );
-        let initial_transition = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED) // Change this
-            .image(new_image.image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: meta.mips_levels,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .src_access_mask(vk::AccessFlags::NONE)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+    let mut image_allocs: Vec<VkImageAlloc> = image_meta.iter().map(|meta| {
+        create_image
+            (device,
+                allocator,
+                Extent3D::default().height(meta.height).width(meta.width).depth(1),
+                meta.format,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
+                calc_mips_count(meta.width, meta.height))
+    }).collect();
 
-        image_allocs.push(new_image);
-        pre_transitions.push(initial_transition);
-    }
 
     let begin_info = vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
-        device
-            .begin_command_buffer(cmd_buffer, &begin_info)
-            .map_err(|err| format!("Error beginning buffer: {:?}", err))?
+        device.begin_command_buffer(transfer_cmd_buffer, &begin_info).unwrap();
+        device.begin_command_buffer(graphics_cmd_buffer, &begin_info).unwrap();
     }
 
-    unsafe {
-        device.cmd_pipeline_barrier(
-            cmd_buffer,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &pre_transitions,
+    // Perform buffer to image copies
+    for (image_alloc, offset) in image_allocs.iter().zip(image_offsets.iter()) {
+        vk_util::record_image_barrier(
+            device,
+            transfer_cmd_buffer,
+            image_alloc.image,
+            None,
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
+            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            Some((vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)),
+            None,
         );
-    }
 
-
-    let mut uploaded_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_meta.len());
-    let mut final_transitions = Vec::<vk::ImageMemoryBarrier>::with_capacity(image_meta.len());
-
-
-    for (image_alloc, offset) in image_allocs.into_iter().zip(image_offsets.iter()) {
         let copy_region = [vk::BufferImageCopy::default()
             .buffer_offset(*offset)
             .buffer_row_length(0)
             .buffer_image_height(0)
-            .image_subresource(
-                vk::ImageSubresourceLayers::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .mip_level(0)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            )
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
             .image_extent(image_alloc.image_extent)];
 
         unsafe {
             device.cmd_copy_buffer_to_image(
-                cmd_buffer,
+                transfer_cmd_buffer,
                 host_buffer.buffer,
                 image_alloc.image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -1284,35 +1286,43 @@ pub fn record_host_to_image_buffer(
             );
         }
 
-        if image_alloc.mip_levels > 1 {
-            record_mip_maps_generation(
-                device,
-                cmd_buffer,
-                image_alloc.image,
-                image_alloc.image_extent.width,
-                image_alloc.image_extent.height,
-                image_alloc.mip_levels,
-            );
-        }
+        // Record transfer->graphics barrier
+        vk_util::record_image_barrier(
+            device,
+            transfer_cmd_buffer,
+            image_alloc.image,
+            None,
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
+            Some((host_info.transfer_queue_index, host_info.graphics_queue_index)),
+        );
 
-        let final_transition = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_queue_family_index(host_info.transfer_queue_index)
-            .dst_queue_family_index(host_info.graphics_queue_index)
-            .image(image_alloc.image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: image_alloc.mip_levels,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        vk_util::record_image_barrier(
+            device,
+            graphics_cmd_buffer,
+            image_alloc.image,
+            None,
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
+            Some((host_info.transfer_queue_index, host_info.graphics_queue_index)),
+        );
 
-        final_transitions.push(final_transition);
 
+        record_mip_maps_generation(
+            device,
+            graphics_cmd_buffer,
+            image_alloc.image,
+            image_alloc.image_extent.height,
+            image_alloc.image_extent.width,
+            image_alloc.mip_levels,
+        );
+    }
+    
+    let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
+
+    for image_alloc in image_allocs.into_iter() {
         let sampler_info = VkSamplerInfo {
             mag_filter: vk::Filter::LINEAR,
             min_filter: vk::Filter::LINEAR,
@@ -1332,25 +1342,15 @@ pub fn record_host_to_image_buffer(
         };
 
         let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
-        uploaded_images.push((image_alloc, sampler));
-    }
+        upload_images.push((image_alloc, sampler));
+    };
 
     unsafe {
-        device.cmd_pipeline_barrier(
-            cmd_buffer,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &final_transitions,
-        );
-
-        device.end_command_buffer(cmd_buffer)
-            .map_err(|err| format!("Error ending buffer: {:?}", err))?
+        device.end_command_buffer(transfer_cmd_buffer).unwrap();
+        device.end_command_buffer(graphics_cmd_buffer).unwrap();
     }
 
-    Ok(uploaded_images)
+    Ok(upload_images)
 }
 
 
@@ -1396,6 +1396,24 @@ pub fn record_mip_maps_generation(
                 layer_count: 1,
             });
 
+        let mips_subresource = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(i)
+            .level_count(1)
+            .layer_count(1);
+
+        vk_util::record_image_barrier(
+            device,
+            cmd_buffer,
+            image,
+            Some(mips_subresource),
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
+            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            Some((vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)),
+            None,
+        );
+
+
         unsafe {
             device.cmd_blit_image(
                 cmd_buffer,
@@ -1408,7 +1426,108 @@ pub fn record_mip_maps_generation(
             );
         }
 
+        vk_util::record_image_barrier(
+            device,
+            cmd_buffer,
+            image,
+            Some(mips_subresource),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
+            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
+            None,
+        );
+
         mip_width = if mip_width > 1 { mip_width / 2 } else { 1 };
         mip_height = if mip_height > 1 { mip_height / 2 } else { 1 };
+    }
+    let subresource_range = vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .layer_count(1)
+        .level_count(mip_levels);
+
+    vk_util::record_image_barrier(
+        device,
+        cmd_buffer,
+        image,
+        Some(subresource_range),
+        (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER),
+        Some((vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ)),
+        None,
+    )
+}
+
+
+pub fn record_image_barrier(
+    device: &ash::Device,
+    cmd_buffer: vk::CommandBuffer,
+    image: vk::Image,
+    subresource_range: Option<vk::ImageSubresourceRange>,
+    (old_layout, new_layout): (vk::ImageLayout, vk::ImageLayout),
+    (src_stage_mask, dst_stage_mask): (vk::PipelineStageFlags, vk::PipelineStageFlags),
+    src_dst_access_mask: Option<(vk::AccessFlags, vk::AccessFlags)>,
+    src_dst_queue_index: Option<((u32, u32))>,
+) {
+    let mut barrier = vk::ImageMemoryBarrier::default()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .image(image);
+
+    if let Some(range) = subresource_range {
+        barrier.subresource_range = range;
+    } else {
+        barrier.subresource_range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .layer_count(1)
+            .level_count(1);
+    }
+
+
+    if let Some((src_family, dst_family)) = src_dst_queue_index {
+        barrier.src_queue_family_index = src_family;
+        barrier.dst_queue_family_index = dst_family;
+    }
+
+    if let Some((src, dst)) = src_dst_access_mask {
+        barrier.src_access_mask = src;
+        barrier.dst_access_mask = dst
+    } else {
+        match old_layout {
+            ImageLayout::UNDEFINED => barrier.src_access_mask = vk::AccessFlags::empty(),
+            ImageLayout::PREINITIALIZED => barrier.src_access_mask = vk::AccessFlags::HOST_WRITE,
+            ImageLayout::COLOR_ATTACHMENT_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ImageLayout::TRANSFER_SRC_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::TRANSFER_READ,
+            ImageLayout::TRANSFER_DST_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE,
+            ImageLayout::SHADER_READ_ONLY_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::SHADER_READ,
+            _ => panic!("Not implemented")
+        }
+
+        match new_layout {
+            ImageLayout::TRANSFER_DST_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE,
+            ImageLayout::TRANSFER_SRC_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::TRANSFER_READ,
+            ImageLayout::COLOR_ATTACHMENT_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+                if barrier.src_access_mask != vk::AccessFlags::empty() {
+                    barrier.src_access_mask = vk::AccessFlags::HOST_WRITE | vk::AccessFlags::TRANSFER_WRITE
+                }
+                barrier.dst_access_mask = vk::AccessFlags::SHADER_READ
+            }
+            _ => panic!("Not implemented")
+        }
+    }
+
+    let barrier = [barrier];
+    unsafe {
+        device.cmd_pipeline_barrier(
+            cmd_buffer,
+            src_stage_mask,
+            dst_stage_mask,
+            DependencyFlags::empty(),
+            &[],
+            &[],
+            &barrier,
+        );
     }
 }

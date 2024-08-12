@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
-
+use crate::data::data_util::CountdownLatch;
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
@@ -163,11 +163,11 @@ pub fn init_caches(
     ).unwrap();
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits,
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits, vk::BufferUsageFlags::VERTEX_BUFFER,
     ).unwrap();
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits,
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits, vk::BufferUsageFlags::INDEX_BUFFER,
     ).unwrap();
 
 
@@ -518,6 +518,35 @@ impl VkRender {
 
         let present_pools = init_present_pools(&device, &device_queues);
 
+        let mut host_graphic_pools: Vec<VkCommandPool> = {
+            let pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Graphics),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            ).unwrap();
+
+            let command_buffers = vk_init::create_command_buffers(
+                &device,
+                &pool,
+                vk::CommandBufferLevel::PRIMARY,
+                2).unwrap();
+
+            vec![
+                VkCommandPool {
+                    queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
+                    queue_type: VkQueueType::Graphics,
+                    pool,
+                    buffers: vec![command_buffers[0]],
+                },
+                VkCommandPool {
+                    queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
+                    queue_type: VkQueueType::Graphics,
+                    pool,
+                    buffers: vec![command_buffers[1]],
+                },
+            ]
+        };
+
 
         //////////////////////////////////////////
         // Generate Structures For presentation //
@@ -569,8 +598,7 @@ impl VkRender {
             .unwrap();
 
         // we can just let imgui use one of the graphics pools
-        let imgui_pool = present_pools
-            .get(0).unwrap()
+        let imgui_pool = present_pools.first().unwrap()
             .get(VkQueueType::Graphics)
             .pool;
 
@@ -623,10 +651,14 @@ impl VkRender {
         let transfer = VkTransfer::new(local_transfer_pool);
 
         let fence_info = vk::FenceCreateInfo::default();
-        let (mesh_host_fence, texture_host_fence) = unsafe {
-            (device.create_fence(&fence_info, None).unwrap(), device.create_fence(&fence_info, None).unwrap())
-        };
-        debug!("Mesh Fence: {:?}, Texture Fence: {:?}", mesh_host_fence, texture_host_fence);
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let fences: Vec<vk::Fence> = (0..4).map(|_| {
+            unsafe { device.create_fence(&fence_info, None).unwrap() }
+        }).collect();
+
+        let mut semaphores: Vec<vk::Semaphore> = (0..2).map(|_| {
+            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
+        }).collect();
 
         let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
         let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
@@ -634,8 +666,11 @@ impl VkRender {
         let mesh_host_buffer = VkHostBuffer {
             buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(96)).unwrap(),
             render_sender: transfer.get_sender(),
-            cmd_pool: host_buffer_pools.pop().unwrap(),
-            fence: [mesh_host_fence],
+            transfer_pool: host_buffer_pools.pop().unwrap(),
+            graphics_pool: host_graphic_pools.pop().unwrap(),
+            fence: fences[..2].try_into().unwrap(),
+            semaphore: [semaphores.pop().unwrap()],
+            countdown_latch: CountdownLatch::new(),
             transfer_queue_index,
             graphics_queue_index,
         };
@@ -644,8 +679,11 @@ impl VkRender {
         let texture_host_buffer = VkHostBuffer {
             buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(32)).unwrap(),
             render_sender: transfer.get_sender(),
-            cmd_pool: host_buffer_pools.pop().unwrap(),
-            fence: [texture_host_fence],
+            transfer_pool: host_buffer_pools.pop().unwrap(),
+            graphics_pool: host_graphic_pools.pop().unwrap(),
+            fence: fences[2..4].try_into().unwrap(),
+            semaphore: [semaphores.pop().unwrap()],
+            countdown_latch: CountdownLatch::new(),
             transfer_queue_index,
             graphics_queue_index,
         };
@@ -728,24 +766,22 @@ impl VkRender {
         let data_cache_clone1 = render.data_cache.clone();
         let data_cache_clone2 = render.data_cache.clone();
 
-        println!("Spawning thread");
-        std::thread::spawn(move || {
-            // Inside the new thread
-            data_cache_clone1.mesh_cache.lock().unwrap().allocate_ids(
-                &loaded_scene.mesh_ids.clone(),
+
+        let t1 = std::thread::spawn(move || {
+            data_cache_clone1.mesh_cache.lock().unwrap().allocate_all(
                 BufferPlacement::ContiguousPreferred,
                 false,
             );
         });
-        println!("Spawning thread");
-        std::thread::spawn(move || {
-            // Inside the new thread
-            data_cache_clone2.texture_cache.lock().unwrap().allocate_ids(
-                &loaded_scene.material_ids.clone(),
+        println!("Spawned mesh thread: {:?}", t1.thread().id());
+
+        let t2 = std::thread::spawn(move || {
+            data_cache_clone2.texture_cache.lock().unwrap().allocate_all(
                 BufferPlacement::ContiguousPreferred,
                 false,
             );
         });
+        println!("Spawned Material thread: {:?}", t2.thread().id());
 
 
         // loop to test threaded loading, since the env needs some preloads to be preloaded
@@ -753,27 +789,10 @@ impl VkRender {
         println!("Staring proc loop");
         while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(10) {
             render.fence_await_queue.check_fences(&render.device);
-            
             if let Some(cmd) = render.transfer.query_channel() {
-                let cmd_info = [vk_util::command_buffer_submit_info(cmd.cmd_buffer)];
-                let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
-
                 // Submit the command buffer and signal the fence correctly
-
-                info!("Submitting: {:#?}", submit_info);
-               render.fence_await_queue.queue_fence(cmd.fence, cmd.resp_channel);
-                
-                unsafe {
-                    render.device
-                        .queue_submit2(
-                            render.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
-                            &submit_info,
-                            cmd.fence[0],
-                        )
-                        .unwrap();
-                }
-                
-                
+                info!("Submitting cmds...");
+                cmd.submit(&render.device, &render.vulkan_cache.queues, &mut render.fence_await_queue);
             }
         }
 
