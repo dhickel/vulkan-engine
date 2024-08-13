@@ -144,15 +144,15 @@ pub fn run() {
                         WindowEvent::CursorEntered { .. } => {
                             app.window_state
                                 .window
-                                .set_cursor_grab(CursorGrabMode::Confined)
-                                .unwrap();
+                                .set_cursor_grab(CursorGrabMode::Confined);
+                                //.unwrap(); // TODO the bugs on loss of focus
                             app.window_state.window.set_cursor_visible(false);
                         }
                         WindowEvent::CursorLeft { .. } => {
                             app.window_state
                                 .window
-                                .set_cursor_grab(CursorGrabMode::None)
-                                .unwrap();
+                                .set_cursor_grab(CursorGrabMode::None);
+                              //  .unwrap();
                             app.window_state.window.set_cursor_visible(true);
                         }
                         WindowEvent::MouseWheel { delta, .. } => {

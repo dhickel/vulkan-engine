@@ -116,7 +116,7 @@ impl VkSubAllocator {
         allocator: Arc<Mutex<Allocator>>,
         transfer_buffer: Arc<Mutex<VkHostBuffer>>,
         buffer_size: u64,
-        limits: &VkBufferAndDescriptorLimits,
+        alignment: u64,
         flags: vk::BufferUsageFlags 
     ) -> Result<Self, String> {
         let usage_flags = flags | vk::BufferUsageFlags::STORAGE_BUFFER
@@ -135,8 +135,7 @@ impl VkSubAllocator {
             .dst_access_mask(vk::AccessFlags::MEMORY_READ)
             .src_queue_family_index(transfer_queue_index)
             .dst_queue_family_index(graphics_queue_index);
-
-        let alignment = limits.min_storage_buffer_offset_alignment;
+        
 
         Self::new(
             device,

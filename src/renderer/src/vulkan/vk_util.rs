@@ -1097,7 +1097,7 @@ pub fn record_host_to_storage_buffer(
     alignment: u64,
 ) -> Result<(), String> {
     let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
-    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0]; // Assuming you have a graphics command pool
+    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
     let host_buffer = &host_info.buffer;
 
     let alignment = if alignment < 4 { 4 } else { alignment };
@@ -1108,7 +1108,7 @@ pub fn record_host_to_storage_buffer(
     for chunk in bytes {
         let size = chunk.len().next_multiple_of(alignment as usize);
         unsafe {
-            std::ptr::copy_nonoverlapping(chunk.as_ptr(), host_ptr, size);
+            std::ptr::copy_nonoverlapping(chunk.as_ptr(), host_ptr, chunk.len());
             host_ptr = host_ptr.add(size);
             total_size += size;
         }
@@ -1154,7 +1154,7 @@ pub fn record_host_to_storage_buffer(
 
         let release_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
+            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ | vk::AccessFlags::SHADER_READ)
             .src_queue_family_index(host_info.transfer_queue_index)
             .dst_queue_family_index(host_info.graphics_queue_index)
             .buffer(device_buffer.buffer)
@@ -1180,7 +1180,7 @@ pub fn record_host_to_storage_buffer(
 
         let acquire_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
+            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ| vk::AccessFlags::SHADER_READ)
             .src_queue_family_index(host_info.transfer_queue_index)
             .dst_queue_family_index(host_info.graphics_queue_index)
             .buffer(device_buffer.buffer)
@@ -1225,7 +1225,7 @@ pub fn record_host_to_image_buffer(
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
 
         unsafe {
-            std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, size);
+            std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, meta.bytes.len());
             let host_ptr = host_ptr.add(size);
             let curr_offset = offset;
             offset = offset.add(size as u64);

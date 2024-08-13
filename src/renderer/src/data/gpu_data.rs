@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
+use log::debug;
 //////////////////////////
 //  MESH & TEXTURE DATA //
 //////////////////////////
@@ -548,6 +549,14 @@ pub struct VkMeshBuffers {
 }
 
 
+impl VkMeshBuffers {
+    pub fn get_first_index(&self) -> u32 {
+        // 4 bytes per u32
+        (self.index_buffer.offset / 4) as u32
+    }
+}
+
+
 #[derive(Debug)]
 pub struct VkGpuTextureBuffer {
     pub image_alloc: VkImageAlloc,
@@ -659,10 +668,15 @@ impl Node {
             let material_ptr = unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
             let material = unsafe { *material_ptr };
 
+            // 
+            // debug!("Drawing Mesh: {}", mesh_id);
+            // // debug!("\t Mesh: {:#?}", mesh);
+            // debug!("\t Material: {:#?}", material);
+            // 
             let ro = RenderObject {
-                index_count: mesh.index_count as u32,
+                index_count: mesh.index_count,
                 joint_desc: mesh.joint_desc,
-                first_index: 0,
+                first_index: mesh.get_first_index(),
                 index_buffer: mesh.index_buffer.buffer,
                 material: material_ptr,
                 transform: self.world_transform,

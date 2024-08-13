@@ -510,7 +510,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
                         ai_mesh.mNormals.add(i).read().z,
                     )
                 } else {
-                    Vec3::ZERO
+                    Vec3::new(0.0, 1.0, 0.0) // Up vector as default
                 };
 
                 let (uv0_x, uv0_y) = if !ai_mesh.mTextureCoords[0].is_null() {
@@ -521,7 +521,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
                 };
 
                 let (uv1_x, uv1_y) = if !ai_mesh.mTextureCoords[1].is_null() {
-                    let uv = ai_mesh.mTextureCoords[0].add(i).read();
+                    let uv = ai_mesh.mTextureCoords[1].add(i).read();
                     (uv.x, uv.y)
                 } else {
                     (0.0, 0.0)
@@ -538,7 +538,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
                     let t = ai_mesh.mTangents.add(i).read();
                     Vec4::new(t.x, t.y, t.z, 1.0) // W component is typically 1.0 for tangents
                 } else {
-                    Vec4::ZERO
+                    Vec4::new(1.0, 0.0, 0.0, 1.0) // X-axis aligned tangent as default
                 };
 
                 vertices.push(Vertex {
@@ -564,6 +564,8 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
                     indices.push(*face.mIndices.add(j) as u32);
                 }
             }
+
+            assert!(indices.len() >= vertices.iter().len());
 
             meshes.push(MeshMeta {
                 name,

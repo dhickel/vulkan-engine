@@ -143,9 +143,9 @@ pub struct TextureCache {
 
 
 impl TextureCache {
-    pub const DEFAULT_COLOR_TEX: u32 = 0;
-    pub const DEFAULT_ROUGH_TEX: u32 = 1;
-    pub const DEFAULT_ERROR_TEX: u32 = 2;
+    pub const DEFAULT_ERROR_TEX: u32 = 0;
+    pub const DEFAULT_COLOR_TEX: u32 = 1;
+    pub const DEFAULT_ROUGH_TEX: u32 = 2;
     pub const DEFAULT_NORMAL_TEX: u32 = 3;
     pub const DEFAULT_OCCLUSION_TEX: u32 = 4;
     pub const DEFAULT_EMISSIVE_TEX: u32 = 5;
@@ -198,16 +198,17 @@ impl TextureCache {
             uv_index: 0,
         });
 
+        let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
+
         let def_rough = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![0, 127, 0, 255],
+            bytes: if r8_support { vec![127] } else { vec![127, 127, 127, 255] },
             width: 1,
             height: 1,
-            format: vk::Format::R8G8B8A8_UNORM,
+            format: if r8_support { vk::Format::R8_UNORM } else { vk::Format::R8G8B8A8_UNORM },
             mips_levels: 1,
             uv_index: 0,
         });
-
-        let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
+        
 
         let def_occlusion = CachedTexture::Unloaded(TextureMeta {
             bytes: if r8_support {
@@ -227,7 +228,7 @@ impl TextureCache {
         });
 
         let def_normal = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![128, 128, 128, 255],
+            bytes: vec![128, 128, 255, 255],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
@@ -236,7 +237,7 @@ impl TextureCache {
         });
 
         let def_emissive = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![0, 0, 0, 0],
+            bytes: vec![0, 0, 0, 255],
             width: 1,
             height: 1,
             format: vk::Format::R8G8B8A8_UNORM,
@@ -266,9 +267,9 @@ impl TextureCache {
         });
 
         let mut cached_textures = Vec::with_capacity(100);
+        cached_textures.push(def_error);
         cached_textures.push(def_color);
         cached_textures.push(def_rough);
-        cached_textures.push(def_error);
         cached_textures.push(def_normal);
         cached_textures.push(def_occlusion);
         cached_textures.push(def_emissive);
@@ -290,7 +291,7 @@ impl TextureCache {
             allocator.clone(),
             host_buffer.clone(),
             meta_buffer_size,
-            &limits,
+            limits.min_storage_buffer_offset_alignment,
             vk::BufferUsageFlags::empty(),
         )?;
 

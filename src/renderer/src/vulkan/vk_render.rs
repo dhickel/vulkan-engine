@@ -163,12 +163,12 @@ pub fn init_caches(
     ).unwrap();
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits, vk::BufferUsageFlags::VERTEX_BUFFER,
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64,   vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST |  vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
     ).unwrap();
 
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits, vk::BufferUsageFlags::INDEX_BUFFER,
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER  | vk::BufferUsageFlags::TRANSFER_DST,
     ).unwrap();
 
     let mesh_cache = MeshCache::new(
@@ -757,7 +757,7 @@ impl VkRender {
         };
 
         let loaded_scene = assimp_util::load_model(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/egypt.glb",
+            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
             render.data_cache.clone(),
             false,
         )?;
@@ -1331,7 +1331,7 @@ impl VkRender {
             let scene_desc = self.scene_descriptors.as_mut().unwrap()
                 .update_scene_uniform(&self.device, self.scene_data, frame_index);
 
-            
+
             let mut curr_pipeline = *self.vulkan_cache.pipelines.get_pipeline(VkPipelineType::PbrMetRoughOpaque);
             let mut curr_joint_desc = self.data_cache.mesh_cache.lock().unwrap().get_default_joint_desc();
 
@@ -1479,8 +1479,11 @@ impl VkRender {
         let fovy = 70_f32.to_radians();
         let aspect_ratio = self.window_state.get_aspect_ratio();
 
-  
-        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, 0.1, 10_000.0);
+        // reversed depth
+        let far = 0.1;
+        let near = 10_000.0;
+
+        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = camera_view;
