@@ -1241,7 +1241,7 @@ pub fn record_host_to_image_buffer(
                 Extent3D::default().height(meta.height).width(meta.width).depth(1),
                 meta.format,
                 vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-                calc_mips_count(meta.width, meta.height))
+                1)//calc_mips_count(meta.width, meta.height))
     }).collect();
 
 
@@ -1318,8 +1318,9 @@ pub fn record_host_to_image_buffer(
             image_alloc.image_extent.width,
             image_alloc.mip_levels,
         );
+      
     }
-    
+
     let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
 
     for image_alloc in image_allocs.into_iter() {
@@ -1362,16 +1363,16 @@ pub fn record_mip_maps_generation(
     height: u32,
     mip_levels: u32,
 ) {
-    let mut mip_width = width;
-    let mut mip_height = height;
+    
 
     for i in 1..mip_levels {
+
         let blit = vk::ImageBlit::default()
             .src_offsets([
                 vk::Offset3D { x: 0, y: 0, z: 0 },
                 vk::Offset3D {
-                    x: mip_width as i32,
-                    y: mip_height as i32,
+                    x: (width >> (i -1))as i32,
+                    y: (height >> (i -1))as i32,
                     z: 1,
                 },
             ])
@@ -1384,8 +1385,8 @@ pub fn record_mip_maps_generation(
             .dst_offsets([
                 vk::Offset3D { x: 0, y: 0, z: 0 },
                 vk::Offset3D {
-                    x: if mip_width > 1 { mip_width / 2 } else { 1 } as i32,
-                    y: if mip_height > 1 { mip_height / 2 } else { 1 } as i32,
+                    x: (width >> i) as i32,
+                    y: (height >> i) as i32,
                     z: 1,
                 },
             ])
@@ -1413,7 +1414,6 @@ pub fn record_mip_maps_generation(
             None,
         );
 
-
         unsafe {
             device.cmd_blit_image(
                 cmd_buffer,
@@ -1436,10 +1436,9 @@ pub fn record_mip_maps_generation(
             Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
             None,
         );
-
-        mip_width = if mip_width > 1 { mip_width / 2 } else { 1 };
-        mip_height = if mip_height > 1 { mip_height / 2 } else { 1 };
+        
     }
+
     let subresource_range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .layer_count(1)

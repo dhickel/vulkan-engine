@@ -1078,6 +1078,7 @@ pub struct VkSceneDescriptors {
     scene_descriptors: [vk::DescriptorSet; 2],
     scene_buffer: VkBuffer,
     env_buffer: VkBuffer,
+    alignment: u64,
 }
 
 
@@ -1113,41 +1114,35 @@ impl VkSceneDescriptors {
         ).unwrap();
 
 
-        let scene_descriptors: [vk::DescriptorSet; 2] = (0..2).into_iter().map(|i| {
-            let scene_data = SceneDataUBO::default();
-            let scene_data_size = std::mem::size_of::<SceneDataUBO>() as DeviceSize;
-            let env_data_size = std::mem::size_of::<EnvironmentUBO>() as DeviceSize;
-            unsafe {
-                let data_ptr = device.map_memory(
-                    scene_buffer.alloc_info.device_memory,
-                    i * scene_data_size,
-                    scene_data_size as DeviceSize,
-                    vk::MemoryMapFlags::empty(),
-                ).expect("Failed to map memory for scene uniform");
+        let scene_data = SceneDataUBO::default();
 
+        let scene_data_size = size_of::<SceneDataUBO>()
+            .next_multiple_of(uniform_alignment as usize) as DeviceSize;
+
+        let env_data_size = std::mem::size_of::<EnvironmentUBO>()
+            .next_multiple_of(uniform_alignment as usize) as DeviceSize;
+
+        let mut scene_ptr = scene_buffer.alloc_info.mapped_data as *mut u8;
+        let mut env_ptr = env_buffer.alloc_info.mapped_data as *mut u8;
+
+    
+        let scene_descriptors: [vk::DescriptorSet; 2] = (0..2).into_iter().map(|i| {
+            println!("Writing buffers: {}", i);
+            unsafe {
                 std::ptr::copy_nonoverlapping(
                     &scene_data as *const SceneDataUBO as *const u8,
-                    data_ptr.cast(),
+                    scene_ptr.cast(),
                     scene_data_size as usize,
                 );
 
-                device.unmap_memory(scene_buffer.alloc_info.device_memory);
-
-
-                let data_ptr = device.map_memory(
-                    env_buffer.alloc_info.device_memory,
-                    i * scene_data_size,
-                    env_data_size as DeviceSize,
-                    vk::MemoryMapFlags::empty(),
-                ).expect("Failed to map memory for scene uniform");
-
                 std::ptr::copy_nonoverlapping(
                     &env_maps.environment_ubo as *const EnvironmentUBO as *const u8,
-                    data_ptr.cast(),
+                    env_ptr.cast(),
                     env_data_size as usize,
                 );
 
-                device.unmap_memory(env_buffer.alloc_info.device_memory);
+                scene_ptr = scene_ptr.add(scene_data_size as usize);
+                env_ptr = env_ptr.add((env_data_size) as usize);
             }
 
 
@@ -1195,6 +1190,7 @@ impl VkSceneDescriptors {
             );
 
             writer.update_set(device, desc_set);
+            println!("Wrote buffer");
 
             desc_set
         }).collect::<Vec<_>>().try_into().unwrap();
@@ -1205,6 +1201,7 @@ impl VkSceneDescriptors {
             scene_descriptors,
             scene_buffer,
             env_buffer,
+            alignment: uniform_alignment,
         }
     }
 
@@ -1215,31 +1212,26 @@ impl VkSceneDescriptors {
         scene_data: SceneDataUBO,
         index: u32,
     ) -> vk::DescriptorSet {
-        let data_size = std::mem::size_of::<SceneDataUBO>() as vk::DeviceSize;
-        unsafe {
-            let data_ptr = device.map_memory(
-                self.scene_buffer.alloc_info.device_memory,
-                0,
-                data_size,
-                vk::MemoryMapFlags::empty(),
-            ).expect("Failed to map memory for scene uniform");
+        let data_size = size_of::<SceneDataUBO>()
+            .next_multiple_of(self.alignment as usize);
 
+        unsafe {
+            let mut data_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
+            data_ptr = data_ptr.add((index as usize) * data_size);
+            
             std::ptr::copy_nonoverlapping(
                 &scene_data as *const SceneDataUBO as *const u8,
                 data_ptr.cast(),
-                std::mem::size_of::<SceneDataUBO>(),
+                data_size,
             );
-
-            device.unmap_memory(self.scene_buffer.alloc_info.device_memory);
         }
-
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_buffer(
             0,
             self.scene_buffer.buffer,
-            data_size,
-            0,
+            data_size as u64,
+            (index as usize) * data_size,
             vk::DescriptorType::UNIFORM_BUFFER,
         );
 

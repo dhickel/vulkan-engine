@@ -452,11 +452,11 @@ pub struct EnvironmentUBO {
 impl Default for EnvironmentUBO {
     fn default() -> Self {
         Self {
-            light_dir: Vec4::new(0.0, 1.0, 0.5, 0.0),
+            light_dir: Vec4::new(0.2, 0.7, 0.7, 0.0),
             exposure: 4.5,
             gamma: 2.2,
             prefilter_mips_levels: 5.0,
-            ibl_ambient_scale: 1.0,
+            ibl_ambient_scale: 3.0,
             debug_view_inputs: 0.0,
             debug_view_equation: 0.0,
             _pad: 0,

@@ -4,7 +4,7 @@
  *
  */
 
-struct MaterialMeta {
+layout(buffer_reference, std430) readonly buffer MaterialMeta {
 	vec4 baseColorFactor;
 	vec4 emissiveFactor;
 	int baseColorTextureSet;

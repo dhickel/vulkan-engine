@@ -10,6 +10,7 @@ use ash::vk;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom};
 
+
 pub struct PipelineBuilder<'a> {
     pub shader_stages: Vec<vk::PipelineShaderStageCreateInfo<'a>>,
     pub input_assembly: vk::PipelineInputAssemblyStateCreateInfo<'a>,
@@ -21,6 +22,7 @@ pub struct PipelineBuilder<'a> {
     pub render_info: vk::PipelineRenderingCreateInfo<'a>,
     pub color_attachment_format: [vk::Format; 1],
 }
+
 
 impl<'a> Default for PipelineBuilder<'a> {
     fn default() -> Self {
@@ -37,6 +39,7 @@ impl<'a> Default for PipelineBuilder<'a> {
         }
     }
 }
+
 
 impl<'a> PipelineBuilder<'a> {
     pub fn clear(&mut self) {
@@ -123,7 +126,7 @@ impl<'a> PipelineBuilder<'a> {
             .primitive_restart_enable(false);
         self
     }
-    
+
     pub fn set_polygon_mode(mut self, mode: vk::PolygonMode) -> Self {
         self.rasterizer = self.rasterizer.polygon_mode(mode).line_width(1f32);
         self
@@ -251,6 +254,7 @@ impl<'a> PipelineBuilder<'a> {
     }
 }
 
+
 pub fn init_pipeline_cache(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
@@ -288,7 +292,7 @@ pub fn init_pipeline_cache(
         desc_layout_cache,
         shader_cache,
     );
-    
+
     let env_prefilter_pipeline = init_pre_filter_pipeline(
         device,
         desc_layout_cache,
@@ -301,10 +305,11 @@ pub fn init_pipeline_cache(
         (VkPipelineType::BrdfLut, brd_flut_pipeline),
         (VkPipelineType::Skybox, skybox_pipeline),
         (VkPipelineType::EnvIrradiance, env_irradiance_pipeline),
-        (VkPipelineType::EnvPreFilter, env_prefilter_pipeline)
+        (VkPipelineType::EnvPreFilter, env_prefilter_pipeline),
     ])
-    .unwrap()
+        .unwrap()
 }
+
 
 fn init_met_rough_pipelines(
     device: &ash::Device,
@@ -337,7 +342,7 @@ fn init_met_rough_pipelines(
             .create_pipeline_layout(&mesh_layout_info, None)
             .unwrap()
     };
-
+    
     let entry = CString::new("main").unwrap();
 
     let mut pipeline_builder = PipelineBuilder::default()
@@ -365,7 +370,6 @@ fn init_met_rough_pipelines(
         VkPipeline::new(transparent_pipeline, layout),
     )
 }
-
 
 
 fn init_brd_flut_pipeline(
@@ -408,6 +412,7 @@ fn init_brd_flut_pipeline(
     VkPipeline::new(pipeline, layout)
 }
 
+
 fn init_skybox_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
@@ -431,6 +436,7 @@ fn init_skybox_pipeline(
 
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
 
+
     let entry = CString::new("main").unwrap();
 
     let mut pipeline_builder = PipelineBuilder::default()
@@ -448,6 +454,7 @@ fn init_skybox_pipeline(
 
     VkPipeline::new(pipeline, layout)
 }
+
 
 fn init_irradiance_pipeline(
     device: &ash::Device,
@@ -487,6 +494,7 @@ fn init_irradiance_pipeline(
 
     VkPipeline::new(pipeline, layout)
 }
+
 
 fn init_pre_filter_pipeline(
     device: &ash::Device,

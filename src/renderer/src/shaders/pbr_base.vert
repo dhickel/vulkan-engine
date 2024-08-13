@@ -29,6 +29,9 @@ layout (push_constant) uniform constants {
     VertexBuffer vertexBuffer;
     MaterialMeta mataterialMeta;
     uint jointCount;
+    uint _pad1;
+    uint _pad2;
+    uint _pad3;
 } pc;
 
 layout (location = 0) out vec3 outWorldPos;
@@ -60,7 +63,7 @@ void main()
         outNormal = normalize(transpose(inverse(mat3(pc.modelMatrix))) * v.normal);
     }
 
-    worldPos.y = -worldPos.y;
+    //worldPos.y = -worldPos.y;
     outWorldPos = worldPos.xyz / worldPos.w;
     outUV0 = vec2(v.uv0_x, v.uv0_y);
     outUV1 = vec2(v.uv1_x, v.uv1_y);

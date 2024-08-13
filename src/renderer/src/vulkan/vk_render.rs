@@ -4,7 +4,7 @@ use crate::data::gpu_data::{AsByteSlice, DrawContext, GPUSceneData, MaterialPass
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
 use ash::prelude::VkResult;
-use ash::vk::{AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags, DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags};
+use ash::vk::{AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags, DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, Handle, ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags};
 use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
@@ -166,10 +166,10 @@ pub fn init_caches(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits, vk::BufferUsageFlags::VERTEX_BUFFER,
     ).unwrap();
 
+
     let index_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, &limits, vk::BufferUsageFlags::INDEX_BUFFER,
     ).unwrap();
-
 
     let mesh_cache = MeshCache::new(
         device,
@@ -787,7 +787,7 @@ impl VkRender {
         // loop to test threaded loading, since the env needs some preloads to be preloaded
         let start = std::time::SystemTime::now();
         println!("Staring proc loop");
-        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(10) {
+        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(2) {
             render.fence_await_queue.check_fences(&render.device);
             if let Some(cmd) = render.transfer.query_channel() {
                 // Submit the command buffer and signal the fence correctly
@@ -1328,13 +1328,10 @@ impl VkRender {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
             // Write the new scene view/pos
-            self.scene_descriptors.as_mut().unwrap()
+            let scene_desc = self.scene_descriptors.as_mut().unwrap()
                 .update_scene_uniform(&self.device, self.scene_data, frame_index);
 
-            let scene_desc = self.scene_descriptors.as_ref().unwrap()
-                .get_scene_descriptor(frame_index);
-
-
+            
             let mut curr_pipeline = *self.vulkan_cache.pipelines.get_pipeline(VkPipelineType::PbrMetRoughOpaque);
             let mut curr_joint_desc = self.data_cache.mesh_cache.lock().unwrap().get_default_joint_desc();
 
@@ -1357,7 +1354,6 @@ impl VkRender {
                 &[],
             );
 
-
             let mut draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
 
@@ -1369,7 +1365,6 @@ impl VkRender {
                         .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
                     self.device
                         .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
-
 
                     self.device.cmd_bind_descriptor_sets(
                         cmd_buffer,
@@ -1439,7 +1434,7 @@ impl VkRender {
                 self.device.cmd_push_constants(
                     cmd_buffer,
                     pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     push_consts.as_byte_slice(),
                 );
@@ -1484,11 +1479,8 @@ impl VkRender {
         let fovy = 70_f32.to_radians();
         let aspect_ratio = self.window_state.get_aspect_ratio();
 
-        // reversed depth
-        let far = 0.1;
-        let near = 10_000.0;
-
-        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+  
+        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, 0.1, 10_000.0);
         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = camera_view;

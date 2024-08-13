@@ -433,7 +433,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .unwrap();
 
-    data_cache::VkDescLayoutCache::new(vec![
+    let cache = data_cache::VkDescLayoutCache::new(vec![
         (VkDescType::DrawImage, compute_draw_image),
         (VkDescType::SceneData, scene_data),
         (VkDescType::PbrSamplers, pbr_samplers),
@@ -443,5 +443,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         (VkDescType::EnvIrradiance, frag_combined_image),
         (VkDescType::EnvPreFilter, frag_combined_image),
         (VkDescType::Empty, empty),
-    ])
+    ]);
+    cache.debug();
+    cache
 }

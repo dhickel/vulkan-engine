@@ -67,6 +67,9 @@ layout (push_constant) uniform constants {
     VertexBuffer vertexBuffer;
     MaterialMeta mataterialMeta;
     uint jointCount;
+    uint _pad1;
+    uint _pad2;
+    uint _pad3;
 } pc;
 
 layout (location = 0) out vec4 outColor;

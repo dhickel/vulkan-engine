@@ -291,7 +291,7 @@ impl TextureCache {
             host_buffer.clone(),
             meta_buffer_size,
             &limits,
-            vk::BufferUsageFlags::empty()
+            vk::BufferUsageFlags::empty(),
         )?;
 
         let desc_manager = DescriptorManager {
@@ -398,8 +398,6 @@ impl TextureCache {
     }
 
     pub unsafe fn get_loaded_texture_unchecked(&self, id: u32) -> &VkLoadedTexture {
-        debug!("Getting Unchecked Texture: {:?}", id);
-
         unsafe {
             match self.cached_textures.get_unchecked(id as usize) {
                 CachedTexture::Loaded(loaded) => loaded,
@@ -526,6 +524,7 @@ impl TextureCache {
                 Ok(images) => {
                     curr_bytes = 0;
                     next_upload.clear();
+
                     assert!(!images.is_empty());
                     for image in images {
                         let loaded_tex = VkLoadedTexture {
@@ -541,10 +540,10 @@ impl TextureCache {
                 }
             }
         }
-        
-      
+
+
         assert_eq!(texture_ids.len(), loaded.len());
-        
+
         for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
             match tex {
                 CachedTexture::Unloaded(_) => debug!("Texture Unloaded"),
@@ -553,7 +552,7 @@ impl TextureCache {
             }
             self.cached_textures[*id as usize] = tex;
         }
-        
+
         debug!("Loaded Textures: {:?}", texture_ids);
         texture_ids.iter().for_each(|id| {
             if !matches!(self.cached_textures.get(*id as usize), Some(CachedTexture::Loaded(_))) {
@@ -561,7 +560,7 @@ impl TextureCache {
             }
         });
 
-        
+
         true
     }
 
@@ -864,11 +863,13 @@ impl MeshCache {
         let mut writer = VkDescriptorWriter::default();
         writer.write_buffer(
             0,
-            default_joint_buffer.buffer
-            , 0,
-            std::mem::size_of::<glam::Mat4>() * 128,
-            vk::DescriptorType::UNIFORM_BUFFER)
-        ;
+            default_joint_buffer.buffer,
+            (std::mem::size_of::<glam::Mat4>() * 128)  as u64,
+            0,
+            vk::DescriptorType::UNIFORM_BUFFER,
+        );
+
+        writer.update_set(device, default_joint_desc);
 
 
         Self {
@@ -922,7 +923,6 @@ impl MeshCache {
     }
 
     pub fn get_loaded_id_unchecked(&self, id: u32) -> VkMeshBuffers {
-        debug!("Getting loaded mesh unchecked: {}", id);
         unsafe {
             match self.cached_meshes.get_unchecked(id as usize) {
                 CachedMesh::Loaded(buffers) => *buffers,
@@ -987,8 +987,8 @@ impl MeshCache {
         let mut rtn_buffers = if return_buffers {
             Some(Vec::<VkMeshBuffers>::with_capacity(vertex_allocs.len()))
         } else { None };
-        
-        
+
+
         meshes.iter()
             .map(|(id, meta)| *id)
             .zip(vertex_allocs.into_iter())
@@ -1012,7 +1012,7 @@ impl MeshCache {
                     self.cached_meshes[id as usize] = CachedMesh::Loaded(buffer);
                 } else { panic!("Unreachable") }
             });
-        
+
         debug!("Allocated Meshes: {:?}", meshes);
         LoadResult::Success(rtn_buffers)
     }
@@ -1296,6 +1296,25 @@ impl VkDescLayoutCache {
 
     pub fn get(&self, typ: VkDescType) -> vk::DescriptorSetLayout {
         self.layouts[typ as usize]
+    }
+
+    pub fn debug(&self) {
+        debug!("Descriptor Set Layouts:");
+        for (i, set) in self.layouts.iter().enumerate() {
+            let typ = match i {
+                0 => VkDescType::DrawImage,
+                1 => VkDescType::SceneData,
+                2 => VkDescType::PbrSamplers,
+                3 => VkDescType::PbrProperties,
+                4 => VkDescType::SkinData,
+                5 => VkDescType::Skybox,
+                6 => VkDescType::EnvIrradiance,
+                7 => VkDescType::EnvPreFilter,
+                8 => VkDescType::Empty,
+                _ => panic!()
+            };
+            debug!("\t{:?} : {:?}", typ, *set)
+        }
     }
 }
 
