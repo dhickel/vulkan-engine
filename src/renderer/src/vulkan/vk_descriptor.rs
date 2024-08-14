@@ -412,12 +412,12 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .build(&device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
+        .build(device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
         .unwrap();
     
     let pbr_properties = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_BUFFER)
-        .build(&device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
+        .build(device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
         .unwrap();
     
     let skin_data = DescriptorLayoutBuilder::default()

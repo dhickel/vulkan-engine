@@ -664,7 +664,7 @@ impl VkRender {
         let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
 
         let mesh_host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(96)).unwrap(),
+            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(64)).unwrap(),
             render_sender: transfer.get_sender(),
             transfer_pool: host_buffer_pools.pop().unwrap(),
             graphics_pool: host_graphic_pools.pop().unwrap(),
@@ -677,7 +677,7 @@ impl VkRender {
         let mesh_host_buffer = Arc::new(Mutex::new(mesh_host_buffer));
 
         let texture_host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(32)).unwrap(),
+            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(128)).unwrap(),
             render_sender: transfer.get_sender(),
             transfer_pool: host_buffer_pools.pop().unwrap(),
             graphics_pool: host_graphic_pools.pop().unwrap(),
@@ -787,11 +787,10 @@ impl VkRender {
         // loop to test threaded loading, since the env needs some preloads to be preloaded
         let start = std::time::SystemTime::now();
         println!("Staring proc loop");
-        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(2) {
+        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(10) {
             render.fence_await_queue.check_fences(&render.device);
             if let Some(cmd) = render.transfer.query_channel() {
                 // Submit the command buffer and signal the fence correctly
-                info!("Submitting cmds...");
                 cmd.submit(&render.device, &render.vulkan_cache.queues, &mut render.fence_await_queue);
             }
         }
@@ -1354,6 +1353,8 @@ impl VkRender {
                 &[],
             );
 
+            
+            // Start Func
             let mut draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
 
@@ -1442,6 +1443,9 @@ impl VkRender {
                 self.device
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
+            
+            
+            //End Func
 
             for pipeline in &self.render_context.draw_context.active_pipelines {
                 let mat_pipeline = self.vulkan_cache.pipelines.get_pipeline(*pipeline);

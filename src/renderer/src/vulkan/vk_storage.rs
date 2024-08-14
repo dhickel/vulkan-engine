@@ -750,7 +750,7 @@ impl FreeChunkVec {
         unsafe {
             let chunk = self.chunks.get_unchecked_mut(index);
             chunk.remove_from_chunk(amount);
-            self.total_free - amount;
+            self.total_free -= amount;
 
             if chunk.size == 0 {
                 self.chunks.swap_remove(index);

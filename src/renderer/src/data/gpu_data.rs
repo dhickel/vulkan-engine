@@ -670,8 +670,8 @@ impl Node {
 
             // 
             // debug!("Drawing Mesh: {}", mesh_id);
-            // // debug!("\t Mesh: {:#?}", mesh);
-            // debug!("\t Material: {:#?}", material);
+            // // // debug!("\t Mesh: {:#?}", mesh);
+            //  debug!("\t Material: {:#?}", material);
             // 
             let ro = RenderObject {
                 index_count: mesh.index_count,

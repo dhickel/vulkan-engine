@@ -10,14 +10,14 @@ use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use vk_mem::{Alloc, Allocator};
 
 use crate::data::data_cache::{
     LodBias, VkSamplerCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
     VkSamplerInfo,
 };
-use crate::data::data_util;
+use crate::data::{data_cache, data_util};
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
 use crate::vulkan::vk_render::VkSingleDescriptor;
 use crate::vulkan::{vk_init, vk_util};
@@ -1154,7 +1154,7 @@ pub fn record_host_to_storage_buffer(
 
         let release_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ | vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
             .src_queue_family_index(host_info.transfer_queue_index)
             .dst_queue_family_index(host_info.graphics_queue_index)
             .buffer(device_buffer.buffer)
@@ -1180,7 +1180,7 @@ pub fn record_host_to_storage_buffer(
 
         let acquire_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ| vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
             .src_queue_family_index(host_info.transfer_queue_index)
             .dst_queue_family_index(host_info.graphics_queue_index)
             .buffer(device_buffer.buffer)
@@ -1226,6 +1226,13 @@ pub fn record_host_to_image_buffer(
 
         unsafe {
             std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, meta.bytes.len());
+
+            // data_cache::TextureCache::save_debug_image(
+            //     meta,
+            //     std::slice::from_raw_parts(host_ptr, meta.bytes.len()),
+            //     format!("buffer_debug_{:?} : {:?}.png", SystemTime::now(), offset).to_string(),
+            // );
+
             let host_ptr = host_ptr.add(size);
             let curr_offset = offset;
             offset = offset.add(size as u64);
@@ -1234,14 +1241,14 @@ pub fn record_host_to_image_buffer(
     }).collect();
 
 
-    let mut image_allocs: Vec<VkImageAlloc> = image_meta.iter().map(|meta| {
+    let image_allocs: Vec<VkImageAlloc> = image_meta.iter().map(|meta| {
         create_image
             (device,
                 allocator,
                 Extent3D::default().height(meta.height).width(meta.width).depth(1),
                 meta.format,
                 vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-                1)//calc_mips_count(meta.width, meta.height))
+                1) //calc_mips_count(meta.width, meta.height))
     }).collect();
 
 
@@ -1318,7 +1325,6 @@ pub fn record_host_to_image_buffer(
             image_alloc.image_extent.width,
             image_alloc.mip_levels,
         );
-      
     }
 
     let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
@@ -1363,16 +1369,13 @@ pub fn record_mip_maps_generation(
     height: u32,
     mip_levels: u32,
 ) {
-    
-
     for i in 1..mip_levels {
-
         let blit = vk::ImageBlit::default()
             .src_offsets([
                 vk::Offset3D { x: 0, y: 0, z: 0 },
                 vk::Offset3D {
-                    x: (width >> (i -1))as i32,
-                    y: (height >> (i -1))as i32,
+                    x: (width >> (i - 1)) as i32,
+                    y: (height >> (i - 1)) as i32,
                     z: 1,
                 },
             ])
@@ -1436,7 +1439,6 @@ pub fn record_mip_maps_generation(
             Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
             None,
         );
-        
     }
 
     let subresource_range = vk::ImageSubresourceRange::default()

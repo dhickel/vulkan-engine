@@ -349,7 +349,7 @@ impl VkCmdSubmitInfo {
         let cmd_info = [vk_util::command_buffer_submit_info(self.cmd_buffer)];
         let queue = device_queues.get_queue(self.queue_type);
 
-        debug!("Submitted off-thread cmd buffer: \n {:#?}", self);
+        debug!("Submitted off-thread cmd buffer: {:?} | {:?} ", self.queue_type, self.cmd_buffer);
 
         let semaphore_info = [vk::SemaphoreSubmitInfo::default()
             .semaphore(self.semaphore[0])
@@ -1125,7 +1125,7 @@ impl VkSceneDescriptors {
         let mut scene_ptr = scene_buffer.alloc_info.mapped_data as *mut u8;
         let mut env_ptr = env_buffer.alloc_info.mapped_data as *mut u8;
 
-    
+
         let scene_descriptors: [vk::DescriptorSet; 2] = (0..2).into_iter().map(|i| {
             println!("Writing buffers: {}", i);
             unsafe {
@@ -1218,7 +1218,7 @@ impl VkSceneDescriptors {
         unsafe {
             let mut data_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
             data_ptr = data_ptr.add((index as usize) * data_size);
-            
+
             std::ptr::copy_nonoverlapping(
                 &scene_data as *const SceneDataUBO as *const u8,
                 data_ptr.cast(),

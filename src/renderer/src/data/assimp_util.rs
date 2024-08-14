@@ -38,6 +38,7 @@ use std::os::raw::c_int;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
+use log::debug;
 
 
 pub struct ModelMeta {
@@ -209,7 +210,6 @@ pub fn process_materials(
                 let color = get_color_factor(ai_material);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
-
                 material_meta.add_base_color(tex_id, color, uv_set);
             }
 
@@ -226,7 +226,7 @@ pub fn process_materials(
                 );
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
-
+        
                 material_meta.add_metallic_roughness(
                     tex_id,
                     metallic_factor,
@@ -265,10 +265,11 @@ pub fn process_materials(
                     get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
-
+                
                 material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
             }
 
+            
             materials.push(material_meta);
         }
     }
@@ -348,10 +349,10 @@ unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> AlphaMode {
         match mode_str.as_str() {
             "MASK" => AlphaMode::Mask,
             "BLEND" => AlphaMode::Blend,
-            _ => AlphaMode::Opaque, // Default to Opaque for any other value
+            _ => AlphaMode::Opaque, 
         }
     } else {
-        AlphaMode::Opaque // Default value if not specified
+        AlphaMode::Opaque 
     }
 }
 

@@ -12,7 +12,7 @@ use ash::vk::{Format, PFN_vkFreeDescriptorSets};
 use ash::{vk, Device};
 use glam::{vec3, vec4, Vec3, Vec4};
 use gltf::json::Path;
-use image::{EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba32FImage};
+use image::{EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba, Rgba32FImage};
 use log::{debug, error, info};
 use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -143,12 +143,12 @@ pub struct TextureCache {
 
 
 impl TextureCache {
-    pub const DEFAULT_ERROR_TEX: u32 = 0;
-    pub const DEFAULT_COLOR_TEX: u32 = 1;
-    pub const DEFAULT_ROUGH_TEX: u32 = 2;
-    pub const DEFAULT_NORMAL_TEX: u32 = 3;
-    pub const DEFAULT_OCCLUSION_TEX: u32 = 4;
-    pub const DEFAULT_EMISSIVE_TEX: u32 = 5;
+    pub const DEFAULT_ERROR_TEX: u32 = 5;
+    pub const DEFAULT_COLOR_TEX: u32 = 0;
+    pub const DEFAULT_ROUGH_TEX: u32 = 1;
+    pub const DEFAULT_NORMAL_TEX: u32 = 2;
+    pub const DEFAULT_OCCLUSION_TEX: u32 = 3;
+    pub const DEFAULT_EMISSIVE_TEX: u32 = 4;
     pub const DEFAULT_TEX_ITER_START: usize = 6;
 
     pub const DEFAULT_BASE_COLOR_FACTOR: Vec4 = vec4(1.0, 1.0, 1.0, 1.0);
@@ -200,7 +200,7 @@ impl TextureCache {
 
         let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
 
-        let def_rough = CachedTexture::Unloaded(TextureMeta {
+        let def_metallic_rough = CachedTexture::Unloaded(TextureMeta {
             bytes: if r8_support { vec![127] } else { vec![127, 127, 127, 255] },
             width: 1,
             height: 1,
@@ -208,7 +208,7 @@ impl TextureCache {
             mips_levels: 1,
             uv_index: 0,
         });
-        
+
 
         let def_occlusion = CachedTexture::Unloaded(TextureMeta {
             bytes: if r8_support {
@@ -260,19 +260,19 @@ impl TextureCache {
 
         let err_mat = CachedMaterial::Unloaded(MaterialMeta {
             texture_ids: TextureIds {
-                base_color: 2,
+                base_color: Self::DEFAULT_ERROR_TEX,
                 ..Default::default()
             },
             material_values: Default::default(),
         });
 
         let mut cached_textures = Vec::with_capacity(100);
-        cached_textures.push(def_error);
         cached_textures.push(def_color);
-        cached_textures.push(def_rough);
+        cached_textures.push(def_metallic_rough);
         cached_textures.push(def_normal);
         cached_textures.push(def_occlusion);
         cached_textures.push(def_emissive);
+        cached_textures.push(def_error);
 
         let mut cached_materials = Vec::with_capacity(100);
         cached_materials.push(CachedMaterial::Unloaded(MaterialMeta::default()));
@@ -284,14 +284,14 @@ impl TextureCache {
 
 
         let image_desc_allocator = VkDynamicDescriptorAllocator::new(&device, 5_000, &image_desc_ratios).unwrap();
-        let meta_desc_allocator = VkDynamicDescriptorAllocator::new(&device, 10, &meta_desc_ratios).unwrap();
+        let meta_desc_allocator = VkDynamicDescriptorAllocator::new(&device, 1_000, &meta_desc_ratios).unwrap();
 
         let material_meta_storage = VkSubAllocator::new_storage_buffer(
             &device,
             allocator.clone(),
             host_buffer.clone(),
             meta_buffer_size,
-            limits.min_storage_buffer_offset_alignment,
+            limits.optimal_buffer_copy_offset_alignment,
             vk::BufferUsageFlags::empty(),
         )?;
 
@@ -322,6 +322,7 @@ impl TextureCache {
     pub fn add_texture(&mut self, mut data: TextureMeta) -> u32 {
         let index = self.cached_textures.len();
 
+
         if !self.supported_formats.contains(&data.format) {
             info!(
                 "Unsupported Format: {:?}, converting to R8G8B8A8_UNORM",
@@ -346,6 +347,30 @@ impl TextureCache {
 
         self.cached_textures.push(CachedTexture::Unloaded(data));
         index as u32
+    }
+
+
+    pub(crate) fn save_debug_image(data: &TextureMeta, bytes: &[u8], filename: String) {
+        let path = path::Path::new("debug_textures").join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        match data.format {
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
+                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes.clone()) {
+                    img.save(&path).unwrap();
+                }
+            }
+            vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
+                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes.clone()) {
+                    img.save(&path).unwrap();
+                }
+            }
+            _ => {
+                println!("Unsupported format for debug save: {:?}", data.format);
+            }
+        }
+
+        println!("Saved debug image: {:?}", path);
     }
 
     pub fn add_textures(&mut self, data: Vec<TextureMeta>) -> Vec<u32> {
@@ -546,21 +571,8 @@ impl TextureCache {
         assert_eq!(texture_ids.len(), loaded.len());
 
         for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
-            match tex {
-                CachedTexture::Unloaded(_) => debug!("Texture Unloaded"),
-                CachedTexture::Loaded(_) => debug!("Texture Loaded"),
-                CachedTexture::_NULL => debug!("Texture Null")
-            }
             self.cached_textures[*id as usize] = tex;
         }
-
-        debug!("Loaded Textures: {:?}", texture_ids);
-        texture_ids.iter().for_each(|id| {
-            if !matches!(self.cached_textures.get(*id as usize), Some(CachedTexture::Loaded(_))) {
-                error!("Unloaded texture id: {}", id)
-            }
-        });
-
 
         true
     }
@@ -583,10 +595,9 @@ impl TextureCache {
             return LoadResult::Failed(None);
         }
 
-        let meta_bytes: Vec<&[u8]> =
-            materials.iter().map(|(id, material)| {
-                bytemuck::bytes_of(&(**material).material_values)
-            }).collect();
+        let meta_bytes: Vec<&[u8]> = materials.iter()
+            .map(|(id, material)| bytemuck::bytes_of(&(**material).material_values))
+            .collect();
 
         let meta_allocs = match self.material_meta_storage.allocate_bytes(&meta_bytes, buffer_placement) {
             VkAllocResult::Success(allocs) => allocs,
@@ -605,6 +616,7 @@ impl TextureCache {
             .zip(meta_allocs.into_iter()) {
             let loaded_mat = self.write_material_descriptors(&*meta, alloc);
             self.cached_materials[id as usize] = CachedMaterial::Loaded(loaded_mat);
+            
             if let Some(rtn_vec) = &mut loaded_materials {
                 rtn_vec.push(loaded_mat)
             }
@@ -633,6 +645,11 @@ impl TextureCache {
         let occlusion_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.occlusion_map) };
         let emissive_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.emissive_map) };
 
+        debug!(" color id: {}", meta.texture_ids.base_color);
+        debug!(" metal rough id: {}", meta.texture_ids.metallic_roughness);
+        debug!(" normal id: {}", meta.texture_ids.normal_map);
+        debug!(" occlusion id: {}", meta.texture_ids.occlusion_map);
+        debug!(" emissive id: {}", meta.texture_ids.emissive_map);
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_image(
@@ -865,7 +882,7 @@ impl MeshCache {
         writer.write_buffer(
             0,
             default_joint_buffer.buffer,
-            (std::mem::size_of::<glam::Mat4>() * 128)  as u64,
+            (std::mem::size_of::<glam::Mat4>() * 128) as u64,
             0,
             vk::DescriptorType::UNIFORM_BUFFER,
         );
