@@ -4,7 +4,7 @@ use std::ffi::CStr;
 use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
+use ash::vk::{AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -20,10 +20,10 @@ use crate::data::data_cache::{
 use crate::data::{data_cache, data_util};
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
 use crate::vulkan::vk_render::VkSingleDescriptor;
-use crate::vulkan::{vk_init, vk_util};
+use crate::vulkan::{vk_debug, vk_init, vk_util};
 use ash::prelude::VkResult;
 use shaderc::{CompileOptions, Compiler, ShaderKind};
-use std::fs;
+use std::{fs, path};
 use std::fs::metadata;
 use std::ops::{Add, Sub};
 use std::path::{Path, PathBuf};
@@ -1212,6 +1212,8 @@ pub fn record_host_to_image_buffer(
     host_info: &VkHostBuffer,
     image_meta: &[&TextureMeta],
     alignment: u64,
+    ids: &[u32],
+    queue: vk::Queue,
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
     let alignment = if alignment < 4 { 4 } else { alignment };
 
@@ -1221,7 +1223,7 @@ pub fn record_host_to_image_buffer(
 
     let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     let mut offset: DeviceSize = 0;
-    let image_offsets: Vec<DeviceSize> = image_meta.iter().map(|meta| {
+    let image_offsets: Vec<DeviceSize> = image_meta.iter().zip(ids.iter()).map(|(meta, id)| {
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
 
         unsafe {
@@ -1230,7 +1232,7 @@ pub fn record_host_to_image_buffer(
             // data_cache::TextureCache::save_debug_image(
             //     meta,
             //     std::slice::from_raw_parts(host_ptr, meta.bytes.len()),
-            //     format!("buffer_debug_{:?} : {:?}.png", SystemTime::now(), offset).to_string(),
+            //     format!("_buffer_debug_{:?}.png", id),
             // );
 
             let host_ptr = host_ptr.add(size);
@@ -1329,7 +1331,7 @@ pub fn record_host_to_image_buffer(
 
     let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
 
-    for image_alloc in image_allocs.into_iter() {
+    for (image_alloc, id) in image_allocs.into_iter().zip(ids.iter()) {
         let sampler_info = VkSamplerInfo {
             mag_filter: vk::Filter::LINEAR,
             min_filter: vk::Filter::LINEAR,
@@ -1349,6 +1351,7 @@ pub fn record_host_to_image_buffer(
         };
 
         let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
+        
         upload_images.push((image_alloc, sampler));
     };
 
@@ -1356,7 +1359,7 @@ pub fn record_host_to_image_buffer(
         device.end_command_buffer(transfer_cmd_buffer).unwrap();
         device.end_command_buffer(graphics_cmd_buffer).unwrap();
     }
-
+    
     Ok(upload_images)
 }
 

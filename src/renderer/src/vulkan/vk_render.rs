@@ -17,16 +17,18 @@ use std::error::Error;
 use std::f32::consts::FRAC_PI_2;
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
+use std::path;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
+use gltf::json::serialize::to_string;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 use crate::data::data_util::CountdownLatch;
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
-use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
+use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
 
@@ -160,15 +162,17 @@ pub fn init_caches(
         device, allocator.clone(), sampler_cache, supported_formats.clone(),
         meta_desc_layout, image_desc_layout, texture_host_buffer.clone(),
         texture_meta_buffer_size, &limits,
+        mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
+        device_queues.graphics_queue.1
     ).unwrap();
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64,   vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST |  vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
     ).unwrap();
 
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER  | vk::BufferUsageFlags::TRANSFER_DST,
+        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
     ).unwrap();
 
     let mesh_cache = MeshCache::new(
@@ -787,7 +791,7 @@ impl VkRender {
         // loop to test threaded loading, since the env needs some preloads to be preloaded
         let start = std::time::SystemTime::now();
         println!("Staring proc loop");
-        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(10) {
+        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(120) {
             render.fence_await_queue.check_fences(&render.device);
             if let Some(cmd) = render.transfer.query_channel() {
                 // Submit the command buffer and signal the fence correctly
@@ -1353,11 +1357,11 @@ impl VkRender {
                 &[],
             );
 
-            
+
             // Start Func
             let mut draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
                 let material = &(*obj.material);
-
+                
                 // Rebind on pipeline changes
                 if *pipeline != curr_pipeline {
                     self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
@@ -1443,8 +1447,8 @@ impl VkRender {
                 self.device
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
-            
-            
+
+
             //End Func
 
             for pipeline in &self.render_context.draw_context.active_pipelines {

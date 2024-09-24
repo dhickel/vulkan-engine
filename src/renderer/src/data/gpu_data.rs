@@ -453,7 +453,7 @@ pub struct EnvironmentUBO {
 impl Default for EnvironmentUBO {
     fn default() -> Self {
         Self {
-            light_dir: Vec4::new(0.2, 0.7, 0.7, 0.0),
+            light_dir: Vec4::new(0.1, 0.7, 0.7, 0.0),
             exposure: 4.5,
             gamma: 2.2,
             prefilter_mips_levels: 5.0,
@@ -668,11 +668,11 @@ impl Node {
             let material_ptr = unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
             let material = unsafe { *material_ptr };
 
-            // 
+            //
             // debug!("Drawing Mesh: {}", mesh_id);
             // // // debug!("\t Mesh: {:#?}", mesh);
-            //  debug!("\t Material: {:#?}", material);
-            // 
+             //debug!("\t Material: {:#?}", material);
+            //
             let ro = RenderObject {
                 index_count: mesh.index_count,
                 joint_desc: mesh.joint_desc,

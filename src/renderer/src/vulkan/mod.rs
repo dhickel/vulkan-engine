@@ -5,3 +5,4 @@ pub mod vk_render;
 pub mod vk_util;
 pub mod vk_types;
 pub mod vk_storage;
+pub mod vk_debug;
