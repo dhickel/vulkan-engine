@@ -29,6 +29,7 @@ use crate::data::data_util::CountdownLatch;
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
+use crate::config::RendererConfig;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
 
@@ -132,21 +133,22 @@ pub fn init_caches(
     supported_formats: HashSet<vk::Format>,
     limits: &VkBufferAndDescriptorLimits,
     device_queues: VkDeviceQueues,
+    config: &RendererConfig,
 ) -> (Arc<VkDataCache>, VkCache) {
     let shader_paths = vec![
-        (CoreShaderType::MetRoughVert, "src/renderer/src/shaders/pbr_base.vert.spv"),
-        (CoreShaderType::MetRoughFrag, "src/renderer/src/shaders/material_pbr.frag.spv",),
-        (CoreShaderType::MetRoughFragUnlit, "src/renderer/src/shaders/material_unlit.frag.spv"),
-        (CoreShaderType::BrtFlutFrag, "src/renderer/src/shaders/gen_brd_flut.frag.spv"),
-        (CoreShaderType::BrtFlutVert, "src/renderer/src/shaders/gen_brd_flut.vert.spv"),
-        (CoreShaderType::SkyBoxFrag, "src/renderer/src/shaders/skybox.frag.spv"),
-        (CoreShaderType::SkyBoxVert, "src/renderer/src/shaders/skybox.vert.spv"),
-        (CoreShaderType::CubeFilterVert, "src/renderer/src/shaders/filtered_cube.vert.spv"),
-        (CoreShaderType::EnvIrradianceFrag, "src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
-        (CoreShaderType::EnvPrefilterFrag, "src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
+        (CoreShaderType::MetRoughVert, config.get_shader_path(&config.shader_files.pbr_vert)),
+        (CoreShaderType::MetRoughFrag, config.get_shader_path(&config.shader_files.pbr_frag)),
+        (CoreShaderType::MetRoughFragUnlit, config.get_shader_path(&config.shader_files.pbr_frag_unlit)),
+        (CoreShaderType::BrtFlutFrag, config.get_shader_path(&config.shader_files.brdf_lut_frag)),
+        (CoreShaderType::BrtFlutVert, config.get_shader_path(&config.shader_files.brdf_lut_vert)),
+        (CoreShaderType::SkyBoxFrag, config.get_shader_path(&config.shader_files.skybox_frag)),
+        (CoreShaderType::SkyBoxVert, config.get_shader_path(&config.shader_files.skybox_vert)),
+        (CoreShaderType::CubeFilterVert, config.get_shader_path(&config.shader_files.cube_filter_vert)),
+        (CoreShaderType::EnvIrradianceFrag, config.get_shader_path(&config.shader_files.env_irradiance_frag)),
+        (CoreShaderType::EnvPrefilterFrag, config.get_shader_path(&config.shader_files.env_prefilter_frag)),
     ];
 
-    let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
+    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect()).unwrap();
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
     let pipeline_cache = vk_pipeline::init_pipeline_cache(
         device,
@@ -188,7 +190,7 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
-        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky");
+        .load_cubemap_dir(&config.assets.skybox_dir);
 
     let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
@@ -386,10 +388,11 @@ impl VkRender {
         mut window_state: VkWindowState,
         with_validation: bool,
         compile_shaders: bool,
+        config: &RendererConfig,
     ) -> Result<Self, String> {
         if compile_shaders {
             info!("Compiling Shaders");
-            let shader_dir = "src/renderer/src/shaders";
+            let shader_dir = &config.shader_dir;
             match vk_util::compile_shaders(shader_dir, shader_dir) {
                 Ok(_) => {
                     info!("Successfully Compiled Shaders")
@@ -720,6 +723,7 @@ impl VkRender {
             supported_image_formats.clone(),
             &buffer_and_desc_limits,
             device_queues,
+            config,
         );
 
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
@@ -770,7 +774,7 @@ impl VkRender {
         };
 
         let loaded_scene = assimp_util::load_model(
-            "src/renderer/src/assets/DamagedHelmet.glb",
+            &config.assets.default_model,
             render.data_cache.clone(),
             false,
         )?;
