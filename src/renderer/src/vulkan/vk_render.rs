@@ -875,7 +875,7 @@ impl VkRender {
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
 
         self.swapchain = swapchain;
-        self.presentation.replace_present_images(present_images);
+        self.presentation.replace_present_images(&self.device, present_images);
 
         //self.presentation = presentation;
         self.resize_requested = false;

@@ -570,11 +570,14 @@ impl VkPresent {
         self.frame_data[index as usize].add_deletion(deletion);
     }
 
-    pub fn replace_present_images(&mut self, images: Vec<(vk::Image, vk::ImageView)>) {
+    pub fn replace_present_images(&mut self, device: &Device, images: Vec<(vk::Image, vk::ImageView)>) {
         if images.len() != self.frame_data.len() {
             panic!("Replacement present images, more than existing")
         }
         for x in 0..images.len() {
+            unsafe {
+                device.destroy_image_view(self.frame_data[x].present_image_view, None);
+            }
             self.frame_data[x].present_image = images[x].0;
             self.frame_data[x].present_image_view = images[x].1;
         }
