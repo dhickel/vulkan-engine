@@ -1285,3 +1285,11 @@ pub fn get_basic_device_ext_ptrs() -> Vec<*const c_char> {
         ash::khr::portability_subset::NAME.as_ptr(),
     ]
 }
+
+pub fn get_device_extensions(additional_extensions: &[&CStr]) -> Vec<*const c_char> {
+    let mut extensions = get_basic_device_ext_ptrs();
+    for ext in additional_extensions {
+        extensions.push(ext.as_ptr());
+    }
+    extensions
+}
