@@ -968,6 +968,16 @@ impl Default for ComputeData {
 }
 
 
+pub trait DescriptorKey {
+    fn index(&self) -> usize;
+}
+
+impl DescriptorKey for usize {
+    fn index(&self) -> usize {
+        *self
+    }
+}
+
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
 pub struct VkDescriptors {
@@ -1001,6 +1011,14 @@ impl VkDescriptors {
     pub fn add_descriptor(&mut self, set: vk::DescriptorSet, layout: vk::DescriptorSetLayout) {
         self.descriptor_sets.push(set);
         self.descriptor_layouts.push(layout);
+    }
+
+    pub fn get_set<K: DescriptorKey>(&self, key: K) -> vk::DescriptorSet {
+        self.descriptor_sets[key.index()]
+    }
+
+    pub fn get_layout<K: DescriptorKey>(&self, key: K) -> vk::DescriptorSetLayout {
+        self.descriptor_layouts[key.index()]
     }
 }
 
