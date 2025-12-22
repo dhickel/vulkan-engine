@@ -23,6 +23,7 @@ use crate::data::data_util::{BinarySemaphore, CountDownDropGuard, CountdownLatch
 use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 
 
+/// Trait for objects that own Vulkan resources and need explicit destruction.
 pub trait VkDestroyable {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator);
 }
@@ -33,14 +34,7 @@ pub enum VkError {
     Present(String),
 }
 
-// impl std::fmt::Display for VkError {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             VkError::Present(msg) => write!(f, "Present error: {}", msg),
-//         }
-//     }
-// }
-
+/// Manages the application window state, including size, aspect ratio, and camera controller integration.
 pub struct VkWindowState {
     pub window: winit::window::Window,
     pub resize_requested: bool,
@@ -154,19 +148,20 @@ impl VkWindowState {
 }
 
 
+/// Wrapper for Vulkan debug utilities and callback.
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
     pub debug_callback: vk::DebugUtilsMessengerEXT,
 }
 
-
+/// Details about the physical device's swapchain support.
 pub struct SwapchainSupport {
     pub capabilities: vk::SurfaceCapabilitiesKHR,
     pub formats: Vec<vk::SurfaceFormatKHR>,
     pub present_modes: Vec<vk::PresentModeKHR>,
 }
 
-
+/// Wrapper for the Vulkan Swapchain and its associated images.
 pub struct VkSwapchain {
     pub swapchain_loader: ash::khr::swapchain::Device,
     pub swapchain: vk::SwapchainKHR,
@@ -175,26 +170,26 @@ pub struct VkSwapchain {
     pub extent: vk::Extent2D,
 }
 
-
+/// Wrapper for the Vulkan Surface.
 pub struct VkSurface {
     pub surface: vk::SurfaceKHR,
     pub surface_instance: ash::khr::surface::Instance,
 }
 
-
+/// Simple wrapper for a Physical Device with its properties.
 pub struct PhyDevice {
     pub name: String,
     pub id: u32,
     pub p_device: vk::PhysicalDevice,
 }
 
-
+/// Wrapper for Logical Device and its queues.
 pub struct LogicalDevice {
     pub device: ash::Device,
     pub queues: VkDeviceQueues,
 }
 
-
+/// Limits related to buffers and descriptors, cached from PhysicalDeviceProperties.
 pub struct VkBufferAndDescriptorLimits {
     // Buffer limits
     pub max_storage_buffer_range: vk::DeviceSize,
@@ -230,13 +225,14 @@ pub struct VkBufferAndDescriptorLimits {
 }
 
 
+/// Helper struct to associate a queue family index with supported queue types.
 #[derive(Debug)]
 pub struct QueueIndex {
     pub index: u32,
     pub queue_types: Vec<VkQueueType>,
 }
 
-
+/// Enum representing the different types of queues used in the engine.
 #[repr(C)]
 #[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum VkQueueType {
@@ -261,7 +257,8 @@ impl VkQueueType {
     }
 }
 
-
+/// Maps each `VkQueueType` to a `VkCommandPool`.
+/// This ensures we have a dedicated command pool for each queue type (Graphics, Compute, Transfer, Present).
 #[derive(Debug, Clone)]
 pub struct VkCommandPoolMap {
     pools: [VkCommandPool; 4],
@@ -296,6 +293,7 @@ impl VkCommandPoolMap {
 }
 
 
+/// Wrapper for a Vulkan Command Pool and its allocated buffers.
 #[derive(Debug, Clone)]
 pub struct VkCommandPool {
     pub queue_index: u32,
@@ -307,7 +305,7 @@ pub struct VkCommandPool {
 
 pub type VkSubmitFn = Box<dyn Fn(&VkCmdSubmitInfo, &vk::Device, &mut VkFenceQueue, &VkDeviceQueues) -> Result<(), String> + Send + Sync>;
 
-
+/// Parameters for submitting a command buffer, controlling synchronization.
 #[derive(Debug)]
 pub struct VkSubmitParam {
     pub is_signal: bool,
@@ -332,6 +330,7 @@ impl VkSubmitParam {
 }
 
 
+/// Information required to submit a command buffer to a queue from a host buffer.
 #[derive(Debug)]
 pub struct VkCmdSubmitInfo {
     pub cmd_buffer: vk::CommandBuffer,
@@ -344,6 +343,7 @@ pub struct VkCmdSubmitInfo {
 
 
 impl VkCmdSubmitInfo {
+    /// Submits the command buffer to the specified queue and queues the fence for waiting.
     pub fn submit(self, device: &ash::Device, device_queues: &VkDeviceQueues, fence_queue: &mut VkFenceQueue) {
         let cmd_buffer = [self.cmd_buffer];
         let cmd_info = [vk_util::command_buffer_submit_info(self.cmd_buffer)];
@@ -378,6 +378,7 @@ impl VkDestroyable for VkCommandPool {
 }
 
 
+/// Synchronization primitives for a single frame.
 #[derive(Debug, Copy, Clone)]
 pub struct VkFrameSync {
     pub swap_semaphore: vk::Semaphore,
@@ -396,7 +397,7 @@ impl VkDestroyable for VkFrameSync {
     }
 }
 
-
+/// Wrapper for an allocated Image, its View, and Memory.
 #[derive(Debug)]
 pub struct VkImageAlloc {
     pub image: vk::Image,
@@ -419,6 +420,8 @@ impl VkDestroyable for VkImageAlloc {
 
 
 // TODO we are going to want more control over the descriptor sets
+/// Contains all data required to render a single frame.
+/// This includes synchronization, images, command pools, and per-frame descriptors.
 pub struct VkFrame {
     pub index: u32,
     pub sync: VkFrameSync,
@@ -471,6 +474,8 @@ impl VkFrame {
 }
 
 
+/// Manages the presentation loop and frame data.
+/// Cycles through `VkFrame` data to allow for double/triple buffering.
 pub struct VkPresent {
     pub frame_data: Vec<VkFrame>,
     curr_frame_count: u32,
@@ -596,6 +601,7 @@ impl VkPresent {
 }
 
 
+/// Holds the actual Vulkan Queues and their family indices.
 #[derive(Debug)]
 pub struct VkDeviceQueues {
     pub(crate) graphics_queue: (u32, vk::Queue),
@@ -711,6 +717,8 @@ impl VkImmediate {
 }
 
 
+/// Represents a staging buffer on the host, used for async data upload.
+/// Uses a channel to send submit commands to the main render loop.
 #[derive(Debug)]
 pub struct VkHostBuffer {
     pub buffer: VkBuffer,
@@ -726,6 +734,7 @@ pub struct VkHostBuffer {
 
 
 impl VkHostBuffer {
+    /// Submits the transfer commands to the queue.
     pub fn submit_transfer_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.transfer_pool.buffers[0],
@@ -741,6 +750,7 @@ impl VkHostBuffer {
         } else { Ok(()) }
     }
 
+    /// Submits the graphics commands (e.g. for acquiring ownership) to the queue.
     pub fn submit_graphics_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.graphics_pool.buffers[0],
@@ -756,6 +766,7 @@ impl VkHostBuffer {
         } else { Ok(()) }
     }
 
+    /// Waits for all submitted commands to complete using a countdown latch.
     pub fn await_done(&self, timeout_sec: u64) -> Result<(), LatchTimeOutError> {
         self.countdown_latch.await_zero(Duration::from_secs(timeout_sec))
     }
@@ -777,6 +788,7 @@ impl VkDestroyable for VkHostBuffer {
 }
 
 
+/// Manages asynchronous data transfers via host buffers.
 pub struct VkTransfer {
     host_buffers: Vec<Arc<Mutex<VkHostBuffer>>>,
     sender: Sender<VkCmdSubmitInfo>,
@@ -968,6 +980,7 @@ impl Default for ComputeData {
 
 
 // TODO make this have a lookup method using an enum?
+/// Helper for static descriptor set management.
 #[derive(Clone)]
 pub struct VkDescriptors {
     pub allocator: VkDescriptorAllocator,
@@ -1004,6 +1017,7 @@ impl VkDescriptors {
 }
 
 
+/// Wrapper for an allocated Buffer and its memory.
 #[derive(Debug)]
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
@@ -1012,7 +1026,7 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
-
+/// Represents a sub-allocation within a larger `VkBuffer`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
     pub alloc_address: vk::DeviceAddress,
@@ -1072,6 +1086,8 @@ impl VkDeletable {
 }
 
 
+/// Manages global scene descriptors (Camera, Environment).
+/// Double buffered for frame-in-flight safety.
 pub struct VkSceneDescriptors {
     descriptor_pool: VkDynamicDescriptorAllocator,
     scene_descriptors: [vk::DescriptorSet; 2],
@@ -1246,6 +1262,8 @@ impl VkSceneDescriptors {
 }
 
 
+/// Queues fences to be checked for completion.
+/// Signals a latch when the fence is signaled, useful for async operations.
 pub struct VkFenceQueue {
     fence_awaits: Vec<(vk::Fence, CountDownDropGuard)>,
 }

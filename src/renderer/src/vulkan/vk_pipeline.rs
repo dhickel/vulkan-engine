@@ -11,6 +11,9 @@ use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom};
 
 
+/// A builder struct for creating `vk::Pipeline`s.
+/// It simplifies the complexity of `vk::GraphicsPipelineCreateInfo` by providing methods
+/// to set common pipeline states like shaders, input assembly, blending, and depth testing.
 pub struct PipelineBuilder<'a> {
     pub shader_stages: Vec<vk::PipelineShaderStageCreateInfo<'a>>,
     pub input_assembly: vk::PipelineInputAssemblyStateCreateInfo<'a>,
@@ -54,6 +57,7 @@ impl<'a> PipelineBuilder<'a> {
         self.color_attachment_format = [vk::Format::UNDEFINED];
     }
 
+    /// Builds the Vulkan graphics pipeline using the current state.
     pub fn build_pipeline(&mut self, device: &ash::Device) -> Result<vk::Pipeline, String> {
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
@@ -93,6 +97,7 @@ impl<'a> PipelineBuilder<'a> {
         }
     }
 
+    /// Sets the vertex and fragment shader modules and their entry points.
     pub fn set_shaders(
         mut self,
         vertex_shader: vk::ShaderModule,
@@ -255,6 +260,8 @@ impl<'a> PipelineBuilder<'a> {
 }
 
 
+/// Initializes the global pipeline cache.
+/// Creates all the standard pipelines used by the engine (PBR, Skybox, Post-processing).
 pub fn init_pipeline_cache(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,

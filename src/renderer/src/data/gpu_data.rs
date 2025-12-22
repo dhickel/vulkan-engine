@@ -26,6 +26,8 @@ use log::debug;
 //////////////////////////
 
 // Used In shaders as well
+/// Represents a single vertex in the mesh.
+/// Maps directly to the vertex buffer layout expected by the shader.
 #[repr(C)]
 #[derive(Clone, Default, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
@@ -42,12 +44,15 @@ pub struct Vertex {
     pub _pad: u64,
 }
 
-
+/// Alpha blending mode for a material.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum AlphaMode {
+    /// No transparency.
     Opaque = 0,
+    /// Alpha blending.
     Blend = 1,
+    /// Alpha masking (cutout).
     Mask = 2,
 }
 
@@ -124,13 +129,16 @@ pub struct OcclusionMap {
 // MESH & TEXTURE METADATA //
 /////////////////////////////
 
+/// Metadata for a material, including texture IDs and scalar values.
+/// This is used during asset loading to organize material data before uploading to the GPU.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct MaterialMeta {
     pub texture_ids: TextureIds,
     pub material_values: MaterialValues,
 }
 
-
+/// IDs of textures used by a material.
+/// References textures loaded in the `TextureCache`.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct TextureIds {
     pub base_color: u32,
@@ -222,6 +230,8 @@ impl MaterialMeta {
 }
 
 
+/// Scalar values defining material properties.
+/// Uploaded to the GPU as part of the material buffer.
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug, Pod, Zeroable)]
 pub struct MaterialValues {
@@ -281,6 +291,8 @@ pub enum Sampler {
 }
 
 
+/// Metadata for a single texture image.
+/// Contains the raw bytes (before upload) and image properties.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct TextureMeta {
     pub bytes: Vec<u8>,
@@ -291,7 +303,7 @@ pub struct TextureMeta {
     pub uv_index: u32,
 }
 
-
+/// Represents a Cubemap texture on the GPU.
 pub struct VkCubeMap {
     pub texture_meta: Option<TextureMeta>,
     pub full_extent: vk::Extent3D,
@@ -311,6 +323,7 @@ pub struct SurfaceMeta {
 }
 
 
+/// CPU-side representation of a mesh geometry.
 #[derive(Clone, Default, Debug)]
 pub struct MeshMeta {
     pub name: String,
@@ -319,7 +332,7 @@ pub struct MeshMeta {
     pub material_index: Option<u32>,
 }
 
-
+/// Intermediate representation of a scene node during loading.
 #[derive(Clone, PartialEq)]
 pub struct NodeMeta {
     pub name: String,
@@ -335,6 +348,7 @@ pub struct NodeMeta {
 
 // VERTEX - See top of file
 
+/// Trait to easily convert Pod types to byte slices for Vulkan uploads.
 pub trait AsByteSlice: Pod {
     fn as_byte_slice(&self) -> &[u8] {
         bytemuck::bytes_of(self)
@@ -344,7 +358,7 @@ pub trait AsByteSlice: Pod {
 
 impl<T> AsByteSlice for T where T: Pod + bytemuck::Zeroable {}
 
-
+/// Uniform buffer structure for Metallic-Roughness PBR workflow.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct MetRoughUniform {
@@ -371,6 +385,8 @@ pub struct MetRoughUniformExt {
 // SHADER PUSH CONSTS //
 ////////////////////////
 
+/// Push constants for model rendering.
+/// Provides the model matrix and buffer addresses for vertex and material data.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct VkModelPushConsts {
@@ -426,6 +442,8 @@ pub struct GPUSceneData {
 }
 
 
+/// Global scene data Uniform Buffer Object (UBO).
+/// Contains camera matrices and position.
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct SceneDataUBO {
@@ -435,7 +453,8 @@ pub struct SceneDataUBO {
     pad: f32,
 }
 
-
+/// Environment lighting settings UBO.
+/// Controls exposure, gamma, and IBL settings.
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct EnvironmentUBO {
@@ -537,6 +556,7 @@ impl PushConstPrefilterEnv {
 // VULKAN ALLOCATION DATA //
 ////////////////////////////
 
+/// Holds handles to the allocated buffers for a mesh on the GPU.
 #[derive(Debug, Copy, Clone)]
 pub struct VkMeshBuffers {
     pub cache_id: u32,
@@ -586,6 +606,8 @@ pub struct VkMetRoughUniforms {
 // SCENE GRAPH & RENDERING //
 /////////////////////////////
 
+/// A single object ready to be drawn in the render pass.
+/// Contains all necessary references to buffers, descriptors, and transform data.
 #[derive(Debug, Copy, Clone)]
 pub struct RenderObject {
     pub index_count: u32,
@@ -603,6 +625,8 @@ pub struct RenderObject {
 //     fn refresh_transform(&mut self);
 //     fn get_children(&self) -> &Vec<Rc<RefCell<Node>>>;
 // }
+
+/// Component representing 3D spatial properties.
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct Transform {
     pub position: Vec3,
@@ -626,6 +650,9 @@ impl Transform {
 }
 
 
+/// A node in the scene graph.
+/// Can contain meshes and children nodes.
+/// Handles transform hierarchy and updates.
 #[derive(Debug)]
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
@@ -652,6 +679,7 @@ impl Default for Node {
 
 
 impl Node {
+    /// Traverses the node hierarchy, updating transforms and adding render objects to the draw context.
     pub(crate) fn draw(
         &mut self,
         top_matrix: &Mat4,
@@ -716,6 +744,8 @@ impl Node {
 }
 
 
+/// Context collected during scene traversal.
+/// Buckets render objects by pipeline type for efficient rendering.
 pub struct DrawContext {
     pub active_pipelines: HashSet<VkPipelineType>,
     pub render_objects: [Vec<RenderObject>; 4],

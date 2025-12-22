@@ -14,6 +14,8 @@ use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+/// Initializes the Vulkan Entry.
+/// The entry point to the Vulkan library, allowing querying of instance layers and extensions.
 pub fn init_entry() -> ash::Entry {
     log::info!("Creating entry");
     let entry = ash::Entry::linked();
@@ -21,6 +23,8 @@ pub fn init_entry() -> ash::Entry {
     entry
 }
 
+/// Returns a vector of raw pointers to the names of required debug layers.
+/// Currently only includes "VK_LAYER_KHRONOS_validation".
 pub fn get_debug_layers() -> Vec<*const c_char> {
     let layer_names: [&CStr; 1] = unsafe {
         [CStr::from_bytes_with_nul_unchecked(
@@ -36,6 +40,7 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
     layers_names_raw
 }
 
+/// Gets the required Vulkan instance extensions for drawing to a Winit window.
 pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
     ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
         .unwrap()
@@ -48,6 +53,18 @@ pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char
 //         .to_vec()
 // }
 
+/// Initializes the Vulkan Instance.
+///
+/// # Arguments
+///
+/// * `entry` - The Vulkan entry point.
+/// * `app_name` - The name of the application.
+/// * `extensions` - A list of required instance extensions.
+/// * `is_validate` - Whether to enable validation layers.
+///
+/// # Returns
+///
+/// A tuple containing the `ash::Instance` and an optional `VkDebug` struct if validation is enabled.
 pub fn init_instance(
     entry: &ash::Entry,
     app_name: String,
@@ -126,6 +143,8 @@ pub fn init_instance(
     }
 }
 
+/// Callback function for Vulkan validation layers.
+/// Prints validation messages to stdout.
 unsafe extern "system" fn vulkan_debug_callback(
     message_severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     message_type: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -154,6 +173,7 @@ unsafe extern "system" fn vulkan_debug_callback(
     vk::FALSE
 }
 
+/// Creates a Vulkan Surface for the given Winit window.
 pub fn get_window_surface(
     entry: &ash::Entry,
     instance: &ash::Instance,
@@ -208,6 +228,13 @@ pub fn get_window_surface(
 //     })
 // }
 
+/// Enumerates and selects suitable physical devices (GPUs).
+///
+/// # Arguments
+///
+/// * `instance` - The Vulkan instance.
+/// * `surface_info` - Optional surface info to check presentation support.
+/// * `suitability_check` - A closure that defines the criteria for a suitable device.
 pub fn get_physical_devices(
     instance: &ash::Instance,
     surface_info: Option<&VkSurface>,
@@ -290,6 +317,8 @@ pub fn get_physical_devices(
     }
 }
 
+/// A basic suitability check for physical devices.
+/// Requires: Discrete GPU, Geometry Shader, Vulkan 1.3, and Graphics Queue support.
 pub fn simple_device_suitability(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -326,6 +355,16 @@ pub fn simple_device_suitability(
     return true;
 }
 
+/// Creates a Logical Device from a Physical Device.
+///
+/// # Arguments
+///
+/// * `instance` - The Vulkan instance.
+/// * `physical_device` - The selected physical device.
+/// * `queue_indices` - The queue families to create.
+/// * `core_features` - Core Vulkan 1.0 features to enable.
+/// * `other_features` - Extended features (Vulkan 1.1, 1.2, 1.3) to enable.
+/// * `required_extensions` - Device extensions to enable.
 pub fn create_logical_device(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -404,6 +443,7 @@ pub fn create_logical_device(
     Ok((device, queues))
 }
 
+/// Finds queue families that support both Graphics and Presentation.
 pub fn graphics_only_queue_indices(
     instance: &ash::Instance,
     p_device: &vk::PhysicalDevice,
@@ -440,6 +480,12 @@ pub fn graphics_only_queue_indices(
     Ok(indices)
 }
 
+/// Finds queue families for Graphics, Presentation, Compute, and Transfer.
+///
+/// # Arguments
+///
+/// * `prefer_unique_transfer` - Attempts to find a dedicated transfer queue family.
+/// * `prefer_unique_compute` - Attempts to find a dedicated compute queue family.
 pub fn queue_indices_with_preferences(
     instance: &ash::Instance,
     p_device: &vk::PhysicalDevice,
@@ -535,6 +581,7 @@ pub fn queue_indices_with_preferences(
     Ok(indices)
 }
 
+/// Retrieves supported core Vulkan 1.0 features for the device.
 pub fn get_general_core_features(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -575,6 +622,7 @@ pub fn get_general_core_features(
     device_features
 }
 
+/// Retrieves supported Vulkan 1.1 features (e.g. Multiview, Shader Draw Parameters).
 pub fn get_general_v11_features<'a>(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -599,6 +647,7 @@ pub fn get_general_v11_features<'a>(
     vulkan_11_features
 }
 
+/// Retrieves supported Vulkan 1.2 features (e.g. Buffer Device Address, Descriptor Indexing).
 pub fn get_general_v12_features<'a>(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -640,6 +689,7 @@ pub fn get_general_v12_features<'a>(
     vulkan_12_features
 }
 
+/// Retrieves supported Vulkan 1.3 features (e.g. Dynamic Rendering, Synchronization2).
 pub fn get_general_v13_features<'a>(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -665,6 +715,7 @@ pub fn get_general_v13_features<'a>(
     vulkan_13_features
 }
 
+/// Queries the physical device for swapchain capabilities, formats, and present modes.
 pub fn get_swapchain_support(
     physical_device: &vk::PhysicalDevice,
     surface_info: &VkSurface,
@@ -693,6 +744,15 @@ pub fn get_swapchain_support(
     }
 }
 
+/// Creates the Vulkan Swapchain.
+///
+/// # Arguments
+///
+/// * `requested_extent` - The desired size of the swapchain images.
+/// * `image_count` - The desired number of images (defaults to min + 1).
+/// * `surface_format` - The desired image format and color space.
+/// * `present_mode` - The desired presentation mode (e.g. Mailbox, FIFO).
+/// * `old_swapchain` - Handle to the previous swapchain (for resizing).
 pub fn create_swapchain(
     instance: &ash::Instance,
     physical_device: &PhyDevice,
@@ -829,6 +889,8 @@ pub fn create_swapchain(
     })
 }
 
+/// Allocates offscreen images for drawing (color attachments).
+/// These images are usually R16G16B16A16_SFLOAT format for HDR rendering.
 pub fn allocate_draw_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
     device: &ash::Device,
@@ -903,6 +965,8 @@ pub fn allocate_draw_images(
     Ok(images)
 }
 
+/// Allocates depth images for depth-stencil attachments.
+/// Typically D32_SFLOAT format.
 pub fn allocate_depth_images(
     allocator: &Arc<Mutex<vk_mem::Allocator>>,
     device: &ash::Device,
@@ -974,6 +1038,8 @@ pub fn allocate_depth_images(
     Ok(images)
 }
 
+/// Creates image views for the swapchain images.
+/// These views are used to present the final image to the screen.
 pub fn create_basic_present_views(
     logical_device: &ash::Device,
     swapchain: &VkSwapchain,
@@ -1018,6 +1084,7 @@ pub fn create_basic_present_views(
     Ok(image_views)
 }
 
+/// Helper to select the default swapchain format (B8G8R8A8_UNORM, SRGB).
 pub fn get_default_sc_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
     select_sc_surface_format(
         available_formats,
@@ -1027,6 +1094,7 @@ pub fn get_default_sc_format(available_formats: &[vk::SurfaceFormatKHR]) -> vk::
     .1
 }
 
+/// Helper to select a specific swapchain surface format.
 pub fn select_sc_surface_format(
     available_formats: &[vk::SurfaceFormatKHR],
     format: vk::Format,
@@ -1050,6 +1118,7 @@ pub fn select_sc_surface_format(
     (false, first_format)
 }
 
+/// Helper to select a specific present mode.
 pub fn select_sc_present_mode(
     available_modes: &[vk::PresentModeKHR],
     present_mode: vk::PresentModeKHR,
@@ -1070,6 +1139,7 @@ pub fn select_sc_present_mode(
     (false, vk::PresentModeKHR::FIFO)
 }
 
+/// Helper to select the swapchain extent (resolution), clamping to the surface capabilities.
 pub fn select_sc_extent(
     capabilities: &vk::SurfaceCapabilitiesKHR,
     requested_extent: Extent2D,
@@ -1090,6 +1160,7 @@ pub fn select_sc_extent(
     }
 }
 
+/// Creates a Command Pool for a specific queue family.
 pub fn create_command_pool(
     device: &ash::Device,
     queue_index: u32,
@@ -1148,6 +1219,7 @@ pub fn create_command_pool(
 //     Ok(vk_command_pool)
 // }
 
+/// Allocates command buffers from a pool.
 pub fn create_command_buffers(
     device: &ash::Device,
     pool: &vk::CommandPool,
@@ -1168,6 +1240,7 @@ pub fn create_command_buffers(
     Ok(buffers)
 }
 
+/// Creates synchronization objects (Semaphores, Fences) for a frame.
 pub fn create_frame_sync(device: &ash::Device) -> Result<VkFrameSync, String> {
     let semaphore_create_info = vk::SemaphoreCreateInfo::default();
 
@@ -1196,6 +1269,7 @@ pub fn create_frame_sync(device: &ash::Device) -> Result<VkFrameSync, String> {
     })
 }
 
+/// Checks which image formats are supported for sampled images on the physical device.
 pub fn get_supported_image_formats(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> HashSet<vk::Format> {
     let candidate_formats = [
         vk::Format::R8G8B8A8_UNORM,
@@ -1223,6 +1297,7 @@ pub fn get_supported_image_formats(instance: &ash::Instance, physical_device: vk
     supported
 }
 
+/// Queries and caches buffer and descriptor limits from the physical device properties.
 pub fn get_buffer_and_descriptor_limits(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
@@ -1270,6 +1345,7 @@ pub fn get_buffer_and_descriptor_limits(
 }
 
 
+/// Returns the names of basic device extensions required (Swapchain, Portability).
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
     vec![
         ash::khr::swapchain::NAME,
@@ -1278,6 +1354,7 @@ pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
     ]
 }
 
+/// Returns raw pointers to basic device extensions.
 pub fn get_basic_device_ext_ptrs() -> Vec<*const c_char> {
     vec![
         ash::khr::swapchain::NAME.as_ptr(),
@@ -1286,6 +1363,7 @@ pub fn get_basic_device_ext_ptrs() -> Vec<*const c_char> {
     ]
 }
 
+/// Combines basic extensions with any additional extensions requested.
 pub fn get_device_extensions(use_basic: bool, additional_extensions: &[&CStr]) -> Vec<*const c_char> {
     let mut extensions = if use_basic {
         get_basic_device_ext_ptrs()
