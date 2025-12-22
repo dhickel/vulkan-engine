@@ -19,7 +19,7 @@ This is a Vulkan-based 3D rendering engine written in Rust. It currently support
 ## 2. Current Focal Point
 
 **Goal:** Stabilization and Documentation.
-**Status:** The repository has undergone a significant documentation pass. Dependencies have been updated to recent versions. The codebase compiles with some warnings.
+**Status:** The repository has undergone a significant documentation pass. Dependencies have been updated to recent versions. A configuration system has been implemented to remove hardcoded paths.
 
 **Immediate Next Steps:**
 1.  **Verify Runtime:** Ensure the application runs correctly after dependency updates.
@@ -27,6 +27,11 @@ This is a Vulkan-based 3D rendering engine written in Rust. It currently support
 3.  **Feature Implementation:** The next major feature is likely implementing a proper render graph or expanding the PBR pipeline (IBL integration is partially there).
 
 ---
+
+## 2.1 Configuration
+The engine now supports loading configuration from `config.toml` in the working directory.
+It configures shader paths and default asset paths.
+See `src/renderer/src/config.rs` for the structure.
 
 ## 3. Architecture Deep Dive
 

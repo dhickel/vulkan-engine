@@ -1,0 +1,17 @@
+shader_dir = "src/renderer/src/shaders"
+
+[shader_files]
+pbr_vert = "pbr_base.vert.spv"
+pbr_frag = "material_pbr.frag.spv"
+pbr_frag_unlit = "material_unlit.frag.spv"
+brdf_lut_frag = "gen_brd_flut.frag.spv"
+brdf_lut_vert = "gen_brd_flut.vert.spv"
+skybox_frag = "skybox.frag.spv"
+skybox_vert = "skybox.vert.spv"
+cube_filter_vert = "filtered_cube.vert.spv"
+env_irradiance_frag = "env_irradiance_cube.frag.spv"
+env_prefilter_frag = "env_prefilter_cube.frag.spv"
+
+[assets]
+skybox_dir = "src/renderer/src/assets/sky_maps/sky"
+default_model = "src/renderer/src/assets/DamagedHelmet.glb"
