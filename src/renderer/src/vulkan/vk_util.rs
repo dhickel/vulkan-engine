@@ -30,6 +30,7 @@ use std::path::{Path, PathBuf};
 use crate::data::data_util::calc_mips_count;
 
 
+/// Creates a `vk::CommandPoolCreateInfo` structure.
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
     flags: vk::CommandPoolCreateFlags,
@@ -40,6 +41,7 @@ pub fn command_pool_create_info<'a>(
 }
 
 
+/// Creates a `vk::CommandBufferAllocateInfo` structure.
 pub fn command_buffer_allocate_info<'a>(
     command_pool: vk::CommandPool,
     count: u32,
@@ -52,23 +54,24 @@ pub fn command_buffer_allocate_info<'a>(
 }
 
 
+/// Creates a `vk::FenceCreateInfo` structure.
 pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
     vk::FenceCreateInfo::default().flags(flags)
 }
 
-
+/// Creates a `vk::SemaphoreCreateInfo` structure.
 pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
     vk::SemaphoreCreateInfo::default().flags(flags)
 }
 
-
+/// Creates a `vk::CommandBufferBeginInfo` structure.
 pub fn command_buffer_begin_info<'a>(
     flags: vk::CommandBufferUsageFlags,
 ) -> vk::CommandBufferBeginInfo<'a> {
     vk::CommandBufferBeginInfo::default().flags(flags)
 }
 
-
+/// Creates a `vk::ImageSubresourceRange` structure covering all mips and layers.
 pub fn image_subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(aspect_mask)
@@ -78,7 +81,7 @@ pub fn image_subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSu
         .layer_count(vk::REMAINING_ARRAY_LAYERS)
 }
 
-
+/// Creates a `vk::SemaphoreSubmitInfo` structure.
 pub fn semaphore_submit_info<'a>(
     stage_flags: vk::PipelineStageFlags2,
     semaphore: vk::Semaphore,
@@ -91,13 +94,14 @@ pub fn semaphore_submit_info<'a>(
 }
 
 
+/// Creates a `vk::CommandBufferSubmitInfo` structure.
 pub fn command_buffer_submit_info<'a>(cmd: vk::CommandBuffer) -> vk::CommandBufferSubmitInfo<'a> {
     vk::CommandBufferSubmitInfo::default()
         .command_buffer(cmd)
         .device_mask(0)
 }
 
-
+/// Creates a `vk::SubmitInfo2` structure.
 pub fn submit_info_2<'a>(
     cmd_info: &'a [vk::CommandBufferSubmitInfo],
     signal_semaphore: &'a [vk::SemaphoreSubmitInfo],
@@ -109,7 +113,7 @@ pub fn submit_info_2<'a>(
         .signal_semaphore_infos(signal_semaphore)
 }
 
-
+/// Creates a `vk::RenderPassBeginInfo` structure.
 pub fn render_pass_begin_info<'a>(
     render_pass: vk::RenderPass,
     window_extent: vk::Extent2D,
@@ -126,6 +130,7 @@ pub fn render_pass_begin_info<'a>(
 }
 
 
+/// Creates a `vk::ImageCreateInfo` structure.
 pub fn image_create_info<'a>(
     format: vk::Format,
     usage_flags: vk::ImageUsageFlags,
@@ -146,6 +151,8 @@ pub fn image_create_info<'a>(
 }
 
 
+/// Creates and allocates a Vulkan Image.
+/// This is a high-level utility that combines image creation and memory allocation.
 pub fn create_image(
     device: &ash::Device,
     allocator: &Allocator,
@@ -192,6 +199,7 @@ pub fn create_image(
 }
 
 
+/// Creates a `vk::ImageViewCreateInfo` structure.
 pub fn image_view_create_info<'a>(
     format: vk::Format,
     view_type: vk::ImageViewType,
@@ -213,6 +221,7 @@ pub fn image_view_create_info<'a>(
 }
 
 
+/// Creates a `vk::RenderingAttachmentInfo` structure for dynamic rendering.
 pub fn attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
@@ -235,6 +244,7 @@ pub fn attachment_info<'a>(
 }
 
 
+/// Creates a `vk::RenderingInfo` structure for dynamic rendering.
 pub fn rendering_info<'a>(
     extent: vk::Extent2D,
     color_attachment: &'a [vk::RenderingAttachmentInfo],
@@ -259,6 +269,7 @@ pub fn rendering_info<'a>(
 }
 
 
+/// Creates a `vk::RenderingAttachmentInfo` specifically for depth attachments.
 pub fn depth_attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
@@ -279,6 +290,7 @@ pub fn depth_attachment_info<'a>(
 }
 
 
+/// Creates a `vk::PipelineShaderStageCreateInfo` structure.
 pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
@@ -305,6 +317,8 @@ pub fn find_memory_type(
 }
 
 
+/// Records a blit command to copy from one image to another.
+/// Useful for copying the render target to the swapchain image.
 pub fn blit_copy_image_to_image(
     device: &ash::Device,
     cmd: vk::CommandBuffer,
@@ -359,6 +373,7 @@ pub fn blit_copy_image_to_image(
 }
 
 
+/// Records a pipeline barrier to transition an image layout.
 pub fn transition_image(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -388,6 +403,7 @@ pub fn transition_image(
 }
 
 
+/// Records a pipeline barrier to transition an image layout for specific layers and mips.
 pub fn transition_image_layered(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -425,6 +441,7 @@ pub fn transition_image_layered(
 }
 
 
+/// Loads a SPIR-V shader from a file and creates a `vk::ShaderModule`.
 pub fn load_shader_module(
     device: &ash::Device,
     file_path: &str,
@@ -462,6 +479,7 @@ pub fn load_shader_module(
 }
 
 
+/// Allocates a Vulkan Buffer using VMA.
 pub fn allocate_buffer(
     allocator: &Allocator,
     size: u64,
@@ -494,6 +512,7 @@ pub fn allocate_buffer(
 }
 
 
+/// Allocates a host-visible buffer (staging buffer).
 pub fn allocate_host_buffer(
     allocator: &Allocator,
     size: u64,
@@ -527,6 +546,7 @@ pub fn allocate_host_buffer(
 }
 
 
+/// Allocates a buffer and immediately writes data to it (host-visible).
 pub fn allocate_and_write_buffer(
     allocator: &Allocator,
     data: &[u8],
@@ -560,6 +580,8 @@ pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
 // ENGINE UTIL ///
 //////////////////
 
+/// Generates the BRDF Look-Up Table (LUT) for PBR rendering.
+/// This runs a compute/graphics pass to precalculate the BRDF integration map.
 pub fn generate_brdf_lut(
     device: &ash::Device,
     allocator: &Allocator,
@@ -713,6 +735,8 @@ pub fn generate_brdf_lut(
 }
 
 
+/// Uploads a skybox texture (cubemap) to the GPU.
+/// Handles buffer allocation, copying, and layout transitions.
 pub fn upload_skybox(
     device: &ash::Device,
     allocator: &Allocator,
@@ -934,6 +958,8 @@ fn create_buffer_image_copy(
 }
 
 
+/// Compiles GLSL shaders in the source directory to SPIR-V in the output directory.
+/// Uses `shaderc`.
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Create a shader compiler
     let compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
@@ -996,6 +1022,7 @@ pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn st
 }
 
 
+/// Helper to create a cubemap image and sampler.
 pub(crate) fn create_cubemap(
     device: &ash::Device,
     allocator: &Allocator,
@@ -1088,6 +1115,7 @@ pub(crate) fn create_cubemap(
 // UPLOAD UTIL //
 /////////////////
 
+/// Records commands to upload data from a host staging buffer to a device-local storage buffer.
 pub fn record_host_to_storage_buffer(
     device: &ash::Device,
     host_info: &VkHostBuffer,
@@ -1205,6 +1233,8 @@ pub fn record_host_to_storage_buffer(
 }
 
 
+/// Records commands to upload textures from host memory to device-local images.
+/// Also generates mipmaps.
 pub fn record_host_to_image_buffer(
     device: &ash::Device,
     allocator: &vk_mem::Allocator,
@@ -1364,6 +1394,7 @@ pub fn record_host_to_image_buffer(
 }
 
 
+/// Records commands to generate mipmaps for an image using blitting.
 pub fn record_mip_maps_generation(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -1462,6 +1493,7 @@ pub fn record_mip_maps_generation(
 }
 
 
+/// General purpose helper to record an image memory barrier.
 pub fn record_image_barrier(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,

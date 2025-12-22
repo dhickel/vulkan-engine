@@ -373,14 +373,6 @@ impl Drop for VkRender {
 
 
 impl VkRender {
-    fn destroy(&mut self) {
-        // Explicit drop call to trigger the Drop trait implementation.
-        // NOTE: This uses unsafe because it calls drop on &mut self, effectively invalidating the object
-        // while it still technically exists. This is generally unsafe in Rust but is used here
-        // to force destruction before the scope ends.
-        unsafe { std::ptr::drop_in_place(self) }
-    }
-
     /// Initializes the Vulkan Renderer.
     /// This function sets up the entire Vulkan pipeline, including:
     /// - Instance & Device creation

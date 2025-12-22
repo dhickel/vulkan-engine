@@ -30,12 +30,13 @@ use vk_mem::Allocator;
 // TEXTURE CACHE //
 ///////////////////
 
+/// Result type for asynchronous or batched resource loading.
 pub enum LoadResult<T> {
     Success(Option<Vec<T>>),
     Failed(Option<Vec<T>>),
 }
 
-
+/// Represents a texture that is either waiting to be uploaded or already on the GPU.
 #[derive(Debug)]
 pub enum CachedTexture {
     Unloaded(TextureMeta),
@@ -43,30 +44,34 @@ pub enum CachedTexture {
     _NULL,
 }
 
-
+/// Represents a material that is either waiting to be uploaded or already on the GPU.
 #[derive(Debug)]
 pub enum CachedMaterial {
     Unloaded(MaterialMeta),
     Loaded(VkLoadedMaterial),
 }
 
-
+/// A fully loaded material ready for rendering.
 #[derive(Debug, Clone, Copy)]
 pub struct VkLoadedMaterial {
+    /// References to the textures used by this material.
     pub texture_ids: TextureIds,
+    /// Allocation in the material uniform buffer.
     pub meta_alloc: VkSubAlloc,
+    /// Descriptor set binding the material's textures and uniform buffer.
     pub image_descriptor: vk::DescriptorSet,
+    /// The pipeline required to render this material.
     pub pipeline: VkPipelineType,
 }
 
-
+/// A fully loaded texture ready for rendering.
 #[derive(Debug)]
 pub struct VkLoadedTexture {
     pub alloc: VkImageAlloc,
     pub sampler: vk::Sampler,
 }
 
-
+/// Manages the allocation of descriptors for resources (e.g. materials).
 pub struct DescriptorManager {
     image_desc_allocator: VkDynamicDescriptorAllocator,
     image_desc_layout: vk::DescriptorSetLayout,
@@ -88,6 +93,8 @@ unsafe impl Send for MeshCache {}
 unsafe impl Send for TextureCache {}
 
 
+/// Central hub for all asset caches (Mesh, Texture, Environment).
+/// Thread-safe to allow background loading.
 pub struct VkDataCache {
     pub mesh_cache: Mutex<MeshCache>,
     pub texture_cache: Mutex<TextureCache>,
@@ -102,7 +109,7 @@ impl VkDataCache {
     }
 }
 
-
+/// Central hub for Vulkan-specific resources (Shaders, Pipelines, Layouts).
 pub struct VkCache {
     pub shaders: VkShaderCache,
     pub desc_layouts: VkDescLayoutCache,
@@ -128,6 +135,8 @@ impl VkDataCache {
 }
 
 
+/// Manages the lifecycle of textures and materials.
+/// Handles uploading texture data to the GPU and creating material descriptor sets.
 pub struct TextureCache {
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
@@ -850,6 +859,8 @@ pub enum CachedMesh {
 }
 
 
+/// Manages the lifecycle of mesh data (Vertices, Indices).
+/// Batches uploads and sub-allocates from large GPU buffers.
 pub struct MeshCache {
     vertex_storage: VkSubAllocator,
     index_storage: VkSubAllocator,
@@ -1181,6 +1192,7 @@ impl CoreShaderType {
 }
 
 
+/// Caches loaded shader modules.
 pub struct VkShaderCache {
     pub core_shader_cache: [vk::ShaderModule; CoreShaderType::COUNT],
     pub user_shader_cache: Vec<vk::ShaderModule>,
@@ -1255,7 +1267,7 @@ impl VkPipelineType {
 }
 
 
-//#[derive(Clone, Copy)]
+/// Caches created Graphics Pipelines.
 pub struct VkPipelineCache {
     pipelines: [VkPipeline; VkPipelineType::COUNT],
 }
@@ -1315,6 +1327,7 @@ impl VkDescType {
 }
 
 
+/// Caches Descriptor Set Layouts.
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
 }
