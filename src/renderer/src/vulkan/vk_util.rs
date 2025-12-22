@@ -535,7 +535,7 @@ pub fn allocate_host_buffer(
             .map_err(|err| format!("Failed to allocate buffer, reason: {:?}", err))?
     };
 
-    let alloc_info = unsafe { allocator.get_allocation_info(&allocation) };
+    let alloc_info = allocator.get_allocation_info(&allocation);
 
     Ok(VkBuffer {
         buffer,
@@ -869,7 +869,7 @@ pub fn upload_skybox(
             .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
             .unwrap();
 
-        device.device_wait_idle();
+        let _ = device.device_wait_idle();
 
         let sampler_create_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)

@@ -142,14 +142,14 @@ pub fn run() {
                         WindowEvent::Ime(_) => {}
                         WindowEvent::CursorMoved { position, .. } => {}
                         WindowEvent::CursorEntered { .. } => {
-                            app.window_state
+                            let _ = app.window_state
                                 .window
                                 .set_cursor_grab(CursorGrabMode::Confined);
                                 //.unwrap(); // TODO the bugs on loss of focus
                             app.window_state.window.set_cursor_visible(false);
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            app.window_state
+                            let _ = app.window_state
                                 .window
                                 .set_cursor_grab(CursorGrabMode::None);
                               //  .unwrap();

@@ -134,16 +134,16 @@ pub fn init_caches(
     device_queues: VkDeviceQueues,
 ) -> (Arc<VkDataCache>, VkCache) {
     let shader_paths = vec![
-        (CoreShaderType::MetRoughVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/pbr_base.vert.spv"),
-        (CoreShaderType::MetRoughFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_pbr.frag.spv",),
-        (CoreShaderType::MetRoughFragUnlit, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_unlit.frag.spv"),
-        (CoreShaderType::BrtFlutFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"),
-        (CoreShaderType::BrtFlutVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"),
-        (CoreShaderType::SkyBoxFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"),
-        (CoreShaderType::SkyBoxVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"),
-        (CoreShaderType::CubeFilterVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"),
-        (CoreShaderType::EnvIrradianceFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
-        (CoreShaderType::EnvPrefilterFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
+        (CoreShaderType::MetRoughVert, "src/renderer/src/shaders/pbr_base.vert.spv"),
+        (CoreShaderType::MetRoughFrag, "src/renderer/src/shaders/material_pbr.frag.spv",),
+        (CoreShaderType::MetRoughFragUnlit, "src/renderer/src/shaders/material_unlit.frag.spv"),
+        (CoreShaderType::BrtFlutFrag, "src/renderer/src/shaders/gen_brd_flut.frag.spv"),
+        (CoreShaderType::BrtFlutVert, "src/renderer/src/shaders/gen_brd_flut.vert.spv"),
+        (CoreShaderType::SkyBoxFrag, "src/renderer/src/shaders/skybox.frag.spv"),
+        (CoreShaderType::SkyBoxVert, "src/renderer/src/shaders/skybox.vert.spv"),
+        (CoreShaderType::CubeFilterVert, "src/renderer/src/shaders/filtered_cube.vert.spv"),
+        (CoreShaderType::EnvIrradianceFrag, "src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
+        (CoreShaderType::EnvPrefilterFrag, "src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -188,7 +188,7 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
-        .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
+        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky");
 
     let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
@@ -389,7 +389,7 @@ impl VkRender {
     ) -> Result<Self, String> {
         if compile_shaders {
             info!("Compiling Shaders");
-            let shader_dir = "/home/mindspice/code/rust/engine/src/renderer/src/shaders";
+            let shader_dir = "src/renderer/src/shaders";
             match vk_util::compile_shaders(shader_dir, shader_dir) {
                 Ok(_) => {
                     info!("Successfully Compiled Shaders")
@@ -477,7 +477,7 @@ impl VkRender {
             true,
         )?;
 
-        // FIXME why is this here?
+        // Update window state if swapchain constraints changed the extent
         if swapchain.extent != window_state.get_curr_extent() {
             window_state.update_curr_size(swapchain.extent);
         }
@@ -770,7 +770,7 @@ impl VkRender {
         };
 
         let loaded_scene = assimp_util::load_model(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+            "src/renderer/src/assets/DamagedHelmet.glb",
             render.data_cache.clone(),
             false,
         )?;

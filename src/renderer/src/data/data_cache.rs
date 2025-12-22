@@ -565,7 +565,7 @@ impl TextureCache {
 
             match image_allocs {
                 Ok(images) => {
-                    curr_bytes = 0;
+                    // curr_bytes = 0; // Value assigned is never read
                     next_upload.clear();
 
                     assert!(!images.is_empty());

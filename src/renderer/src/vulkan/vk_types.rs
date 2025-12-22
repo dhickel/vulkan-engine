@@ -437,15 +437,13 @@ pub struct VkFrame {
 
 impl VkDestroyable for VkFrame {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        unsafe {
-            self.sync.destroy(device, allocator);
-            self.draw.destroy(device, allocator);
-            self.depth.destroy(device, allocator);
-            self.cmd_pools.destroy(device, allocator);
-            self.descriptors.destroy(device, allocator);
-            // device.destroy_image_view(self.present_image_view, None);
-            // device.destroy_image(self.present_image, None);
-        }
+        self.sync.destroy(device, allocator);
+        self.draw.destroy(device, allocator);
+        self.depth.destroy(device, allocator);
+        self.cmd_pools.destroy(device, allocator);
+        self.descriptors.destroy(device, allocator);
+        // device.destroy_image_view(self.present_image_view, None);
+        // device.destroy_image(self.present_image, None);
     }
 }
 
@@ -456,12 +454,10 @@ impl VkFrame {
         device: &Device,
         allocator: &Allocator,
     ) -> (VkFrameSync, VkCommandPoolMap) {
-        unsafe {
-            self.draw.destroy(device, allocator);
-            self.depth.destroy(device, allocator);
-            // device.destroy_image_view(self.present_image_view, None);
-            // device.destroy_image(self.present_image, None);
-        }
+        self.draw.destroy(device, allocator);
+        self.depth.destroy(device, allocator);
+        // device.destroy_image_view(self.present_image_view, None);
+        // device.destroy_image(self.present_image, None);
         (self.sync, self.cmd_pools.clone())
     }
 
