@@ -10,6 +10,8 @@ use std::collections::VecDeque;
 use std::vec;
 use vk_mem::Allocator;
 
+/// A builder pattern for creating `vk::DescriptorSetLayout`s.
+/// Simplifies adding bindings and creating the layout.
 pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,
 }
@@ -23,6 +25,12 @@ impl<'a> Default for DescriptorLayoutBuilder<'a> {
 }
 
 impl<'a> DescriptorLayoutBuilder<'a> {
+    /// Adds a single binding to the layout builder.
+    ///
+    /// # Arguments
+    ///
+    /// * `binding` - The binding index in the shader.
+    /// * `typ` - The type of descriptor (e.g. UniformBuffer, CombinedImageSampler).
     pub fn add_binding(
         &mut self,
         binding: u32,
@@ -37,6 +45,13 @@ impl<'a> DescriptorLayoutBuilder<'a> {
         self
     }
 
+    /// Builds the `vk::DescriptorSetLayout` using the added bindings.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The logical device.
+    /// * `stage_flags` - The shader stages that can access these descriptors (e.g. Vertex, Fragment).
+    /// * `layout_flags` - Creation flags for the layout.
     pub fn build(
         &mut self,
         device: &ash::Device,
@@ -63,6 +78,8 @@ impl<'a> DescriptorLayoutBuilder<'a> {
     }
 }
 
+/// Defines the ratio of descriptor types to allocate in a pool.
+/// Used by `VkDescriptorAllocator` and `VkDynamicDescriptorAllocator`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PoolSizeRatio {
     pub typ: vk::DescriptorType,
@@ -75,12 +92,20 @@ impl PoolSizeRatio {
     }
 }
 
+/// A simple descriptor allocator that manages a single `vk::DescriptorPool`.
+/// Suitable for static allocation patterns.
 #[derive(Clone, Copy)]
 pub struct VkDescriptorAllocator {
     pool: vk::DescriptorPool,
 }
 
 impl VkDescriptorAllocator {
+    /// Creates a new `VkDescriptorAllocator`.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_sets` - Maximum number of descriptor sets that can be allocated from this pool.
+    /// * `pool_ratios` - Ratios defining how many descriptors of each type to reserve.
     pub fn new(
         device: &ash::Device,
         max_sets: u32,
@@ -106,6 +131,7 @@ impl VkDescriptorAllocator {
         Ok(Self { pool })
     }
 
+    /// Resets the descriptor pool, freeing all allocated sets.
     pub fn clear(&mut self, device: &LogicalDevice) -> Result<(), String> {
         unsafe {
             device
@@ -121,6 +147,7 @@ impl VkDescriptorAllocator {
         unsafe { device.destroy_descriptor_pool(self.pool, None) }
     }
 
+    /// Allocates a descriptor set from the pool using the provided layout.
     pub fn allocate(
         &self,
         device: &ash::Device,
@@ -142,6 +169,8 @@ pub enum VkDescWriterType {
     Buffer,
 }
 
+/// Helper struct for writing to descriptor sets.
+/// Queues up writes and executes them in a batch.
 pub struct VkDescriptorWriter<'a> {
     image_infos: Vec<[vk::DescriptorImageInfo; 1]>,
     buffer_infos: Vec<[vk::DescriptorBufferInfo; 1]>,
@@ -159,6 +188,7 @@ impl<'a> Default for VkDescriptorWriter<'a> {
 }
 
 impl<'a> VkDescriptorWriter<'a> {
+    /// Queues an image write operation (e.g. for a texture sampler).
     pub fn write_image(
         &mut self,
         binding: u32,
@@ -183,6 +213,7 @@ impl<'a> VkDescriptorWriter<'a> {
         self.writes.push((VkDescWriterType::Image, descriptor_set));
     }
 
+    /// Queues a buffer write operation (e.g. for a UBO or SSBO).
     pub fn write_buffer(
         &mut self,
         binding: u32,
@@ -214,12 +245,13 @@ impl<'a> VkDescriptorWriter<'a> {
         self.writes.clear();
     }
 
+    /// Executes all queued writes to the specified descriptor set.
     pub fn update_set(&mut self, device: &ash::Device, set: vk::DescriptorSet) {
         let mut buffer_infos = self.buffer_infos.iter();
         let mut image_infos = self.image_infos.iter();
 
         for (typ, write_desc) in &self.writes {
-            let mut write = match typ {
+            let write = match typ {
                 VkDescWriterType::Image => write_desc.image_info(image_infos.next().unwrap()),
                 VkDescWriterType::Buffer => write_desc.buffer_info(buffer_infos.next().unwrap()),
             };
@@ -228,6 +260,9 @@ impl<'a> VkDescriptorWriter<'a> {
     }
 }
 
+/// A dynamic descriptor allocator that grows as needed.
+/// Manages a list of descriptor pools, creating new ones when the current one fills up.
+/// Useful for per-frame allocations or when the number of descriptors is unknown.
 #[derive(Debug)]
 pub struct VkDynamicDescriptorAllocator {
     ratios: Vec<PoolSizeRatio>,
@@ -248,6 +283,7 @@ impl Default for VkDynamicDescriptorAllocator {
 }
 
 impl VkDynamicDescriptorAllocator {
+    /// Creates a new `VkDynamicDescriptorAllocator`.
     pub fn new(
         device: &ash::Device,
         max_sets: u32,
@@ -263,6 +299,8 @@ impl VkDynamicDescriptorAllocator {
         Ok(pool)
     }
 
+    /// Resets all underlying descriptor pools.
+    /// Moves all "full" pools back to the "ready" list.
     pub fn clear_pools(&mut self, device: &ash::Device) -> Result<(), String> {
         unsafe {
             for &pool in &self.ready_pools {
@@ -328,6 +366,7 @@ impl VkDynamicDescriptorAllocator {
         }
     }
 
+    /// Allocates a descriptor set. If the current pool is full, a new one is created (or retrieved from ready list).
     pub fn allocate(
         &mut self,
         device: &ash::Device,
@@ -381,6 +420,8 @@ impl VkDestroyable for VkDynamicDescriptorAllocator {
     }
 }
 
+/// Initializes the global descriptor layout cache.
+/// Defines the standard layouts used throughout the engine (e.g. SceneData, PbrSamplers).
 pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCache {
     let compute_draw_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)

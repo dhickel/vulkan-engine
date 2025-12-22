@@ -13,14 +13,18 @@ use log::{debug, info};
 use vk_mem::Allocator;
 
 
+/// Strategy for placing new data into a storage buffer.
 #[derive(Clone, Copy, PartialEq)]
 pub enum BufferPlacement {
+    /// Attempts to place data contiguously, but can fall back to fragmentation.
     ContiguousPreferred,
+    /// Must place all data contiguously; fails if no such block exists.
     ContiguousOnly,
+    /// Places data at the end of the buffer (linear append).
     EndOnly,
 }
 
-
+/// Internal result type for buffer operations.
 #[derive(Clone, PartialEq)]
 enum VkBufferResult<'a> {
     Success(Vec<VkSubAlloc>),
@@ -31,7 +35,7 @@ enum VkBufferResult<'a> {
     },
 }
 
-
+/// Public result type for allocation requests.
 pub enum VkAllocResult {
     Success(Vec<VkSubAlloc>),
     Failure {
@@ -40,7 +44,7 @@ pub enum VkAllocResult {
     },
 }
 
-
+/// Holds partial results of an allocation request when space runs out.
 #[derive(Clone, PartialEq)]
 pub struct PartialAlloc<'a> {
     pub fulfilled: Vec<VkSubAlloc>,
@@ -49,7 +53,7 @@ pub struct PartialAlloc<'a> {
 
 
 impl<'a> PartialAlloc<'a> {
-    pub fn new(successes: Vec<VkSubAlloc>, failures: Vec<&'a [u8]>) -> PartialAlloc {
+    pub fn new(successes: Vec<VkSubAlloc>, failures: Vec<&'a [u8]>) -> PartialAlloc<'a> {
         PartialAlloc {
             fulfilled: successes,
             remaining: failures,
@@ -57,7 +61,8 @@ impl<'a> PartialAlloc<'a> {
     }
 }
 
-
+/// A sub-allocator that manages a large Vulkan buffer and doles out smaller chunks.
+/// Handles dynamic growth by creating extra buffers when the primary one fills.
 pub struct VkSubAllocator {
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
@@ -78,6 +83,13 @@ impl VkDestroyable for VkSubAllocator {
 
 
 impl VkSubAllocator {
+    /// Creates a new `VkSubAllocator`.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer_size` - The initial size of the underlying buffer.
+    /// * `transfer_buffer` - Host buffer used for staging uploads.
+    /// * `dst_barrier` - Barrier to apply after data upload.
     pub fn new(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
@@ -111,6 +123,7 @@ impl VkSubAllocator {
         })
     }
 
+    /// Specialized constructor for Storage Buffers (SSBOs).
     pub fn new_storage_buffer(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
@@ -150,6 +163,7 @@ impl VkSubAllocator {
     }
 
 
+    /// Specialized constructor for Uniform Buffers (UBOs).
     pub fn new_uniform_buffer(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
@@ -230,6 +244,16 @@ impl VkSubAllocator {
         ))
     }
 
+    /// Allocates space for the provided data chunks and uploads them.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - A list of byte slices to upload.
+    /// * `buffer_placement` - Strategy for data placement (e.g. contiguous).
+    ///
+    /// # Returns
+    ///
+    /// A result containing the `VkSubAlloc` handles for the allocated data.
     pub fn allocate_bytes(
         &mut self,
         data: &[&[u8]],
@@ -305,6 +329,7 @@ impl VkSubAllocator {
         }
     }
 
+    /// Frees a sub-allocation, making its space available for reuse.
     pub fn deallocate(&mut self, sub_alloc: VkSubAlloc) {
         if sub_alloc.sub_buffer_index == 0 {
             self.buffer.delete_item(sub_alloc);
@@ -314,7 +339,8 @@ impl VkSubAllocator {
     }
 }
 
-
+/// Internal struct representing a single backing buffer for the allocator.
+/// Tracks free space using a list of `FreeChunk`s.
 struct VkStorageBuffer {
     buffer_index: u32,
     max_size: u64,

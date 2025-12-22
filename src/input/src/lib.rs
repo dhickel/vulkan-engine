@@ -15,6 +15,8 @@ use winit::event::{Modifiers, MouseButton};
 use winit::keyboard::KeyCode;
 use winit::window::Window;
 
+/// Categories for input listeners.
+/// Used for filtering input events.
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub enum ListenerType {
     Window,
@@ -22,6 +24,8 @@ pub enum ListenerType {
     GameInput,
 }
 
+/// A map for binding keys (or other inputs) to specific actions or values.
+/// Wraps an `enum_map::EnumMap`.
 #[derive(Default)]
 pub struct InputMap<K, V>
 where
@@ -31,6 +35,7 @@ where
     map: enum_map::EnumMap<K, V>,
 }
 
+/// Simple state for a key or button.
 #[derive(enum_map::Enum, Debug, Copy, Clone, Default)]
 pub enum PressState {
     #[default]
@@ -85,6 +90,7 @@ where
     }
 }
 
+/// Trait for objects listening to mouse button events.
 pub trait MouseBListener {
     fn listener_type(&self) -> ListenerType;
     fn listener_id(&self) -> u32;
@@ -97,18 +103,21 @@ pub trait MouseBListener {
     );
 }
 
+/// Trait for objects listening to mouse position/movement events.
 pub trait MousePosListener {
     fn listener_type(&self) -> ListenerType;
     fn listener_id(&self) -> u32;
     fn broadcast(&mut self, delta: (f64, f64), modifiers: &HashSet<winit::event::Modifiers>);
 }
 
+/// Trait for objects listening to mouse scroll events.
 pub trait MouseScrollListener {
     fn listener_type(&self) -> ListenerType;
     fn listener_id(&self) -> u32;
     fn broadcast(&mut self, delta: f32);
 }
 
+/// Trait for objects listening to keyboard events.
 pub trait KeyboardListener {
     fn listener_type(&self) -> ListenerType;
     fn listener_id(&self) -> u32;
@@ -121,11 +130,13 @@ pub trait KeyboardListener {
     );
 }
 
+/// Filter for directing input to specific listeners (e.g. only GUI).
 pub enum ListenFilter {
     TypeFilter(ListenerType),
     IdFilter(u32),
 }
 
+/// Manages input state and broadcasts events to registered listeners.
 #[derive(Default)]
 pub struct InputManager {
     mouse_delta: (f64, f64),
