@@ -23,5 +23,6 @@ void main()
 	outUVW = v.position;
 
 	mat4 viewMat = mat4(mat3(pc.model));
-	gl_Position = pc.projection * viewMat * vec4(v.position.xyz, 1.0);
+	vec4 pos = pc.projection * viewMat * vec4(v.position.xyz, 1.0);
+    gl_Position = pos.xyww;
 }

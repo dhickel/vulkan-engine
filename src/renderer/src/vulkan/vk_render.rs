@@ -1003,8 +1003,8 @@ impl VkRender {
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             );
 
-            self.draw_skybox(); // FIXME switch this to draw last with depth
             self.draw_geometry();
+            self.draw_skybox();
 
             // Transition draw image and present image for copy compatability
 
@@ -1191,9 +1191,15 @@ impl VkRender {
             None,
         )];
 
+        let depth_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(curr_frame.depth.image_view)
+            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE);
+
         let extent = self.window_state.get_curr_extent();
 
-        let rendering_info = vk_util::rendering_info(extent, &color_attachment, None);
+        let rendering_info = vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
 
         let skybox_pipeline = self
             .vulkan_cache
@@ -1331,10 +1337,16 @@ impl VkRender {
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
 
+        let clear_value = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+
         let color_attachment = [vk_util::attachment_info(
             curr_frame.draw.image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            None,
+            Some(clear_value),
         )];
 
         let depth_attachment = vk_util::depth_attachment_info(
