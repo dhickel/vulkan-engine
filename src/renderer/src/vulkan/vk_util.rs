@@ -283,7 +283,7 @@ pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
     entry: &CStr,
-) -> vk::PipelineShaderStageCreateInfo {
+) -> vk::PipelineShaderStageCreateInfo<'_> {
     vk::PipelineShaderStageCreateInfo::default()
         .stage(stage)
         .name(entry)
@@ -1221,7 +1221,7 @@ pub fn record_host_to_image_buffer(
     let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
     let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
 
-    let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
+    let host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     let mut offset: DeviceSize = 0;
     let image_offsets: Vec<DeviceSize> = image_meta.iter().zip(ids.iter()).map(|(meta, id)| {
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
@@ -1470,7 +1470,7 @@ pub fn record_image_barrier(
     (old_layout, new_layout): (vk::ImageLayout, vk::ImageLayout),
     (src_stage_mask, dst_stage_mask): (vk::PipelineStageFlags, vk::PipelineStageFlags),
     src_dst_access_mask: Option<(vk::AccessFlags, vk::AccessFlags)>,
-    src_dst_queue_index: Option<((u32, u32))>,
+    src_dst_queue_index: Option<(u32, u32)>,
 ) {
     let mut barrier = vk::ImageMemoryBarrier::default()
         .old_layout(old_layout)

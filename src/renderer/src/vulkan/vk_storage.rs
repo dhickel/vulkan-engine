@@ -49,7 +49,7 @@ pub struct PartialAlloc<'a> {
 
 
 impl<'a> PartialAlloc<'a> {
-    pub fn new(successes: Vec<VkSubAlloc>, failures: Vec<&'a [u8]>) -> PartialAlloc {
+    pub fn new(successes: Vec<VkSubAlloc>, failures: Vec<&'a [u8]>) -> PartialAlloc<'a> {
         PartialAlloc {
             fulfilled: successes,
             remaining: failures,

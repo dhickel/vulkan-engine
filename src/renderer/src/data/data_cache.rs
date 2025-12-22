@@ -358,12 +358,12 @@ impl TextureCache {
 
         match data.format {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
-                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes.clone()) {
+                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes) {
                     img.save(&path).unwrap();
                 }
             }
             vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes.clone()) {
+                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes) {
                     img.save(&path).unwrap();
                 }
             }
@@ -1406,7 +1406,7 @@ impl EnvironmentCache {
     pub fn load_cubemap_file(&mut self, path: &str) -> Result<u32, String> {
         let path = path::Path::new(path);
         match image::open(path) {
-            Ok(mut image) => {
+            Ok(image) => {
                 let index = self.skyboxes.len() as u32;
                 let mut format = assimp_util::to_vk_format(&image);
 
@@ -1599,7 +1599,7 @@ pub struct VkSamplerInfo {
 
 
 impl VkSamplerInfo {
-    pub fn to_create_info(&self) -> vk::SamplerCreateInfo {
+    pub fn to_create_info(&self) -> vk::SamplerCreateInfo<'_> {
         vk::SamplerCreateInfo::default()
             .mag_filter(self.mag_filter)
             .min_filter(self.min_filter)

@@ -91,6 +91,8 @@ impl Default for RenderContext {
 }
 
 
+/// Main Render Loop struct.
+/// Holds the entire state of the Vulkan application.
 pub struct VkRender {
     pub window_state: VkWindowState,
     pub allocator: Arc<Mutex<Allocator>>,
@@ -117,7 +119,7 @@ pub struct VkRender {
     pub resize_requested: bool,
 }
 
-
+/// Initializes the data caches (Textures, Meshes, Pipelines, Shaders).
 pub fn init_caches(
     device: &ash::Device,
     allocator: &Arc<Mutex<Allocator>>,
@@ -347,7 +349,7 @@ impl Drop for VkRender {
 
             self.main_deletion_queue
                 .iter_mut()
-                .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
+                .for_each(|del| del.delete(&self.device, &self.allocator.lock().unwrap()));
 
             self.swapchain
                 .swapchain_loader
@@ -372,9 +374,22 @@ impl Drop for VkRender {
 
 impl VkRender {
     fn destroy(&mut self) {
-        unsafe { std::mem::drop(self) }
+        // Explicit drop call to trigger the Drop trait implementation.
+        // NOTE: This uses unsafe because it calls drop on &mut self, effectively invalidating the object
+        // while it still technically exists. This is generally unsafe in Rust but is used here
+        // to force destruction before the scope ends.
+        unsafe { std::ptr::drop_in_place(self) }
     }
 
+    /// Initializes the Vulkan Renderer.
+    /// This function sets up the entire Vulkan pipeline, including:
+    /// - Instance & Device creation
+    /// - Swapchain setup
+    /// - Command Pools & Buffers
+    /// - Allocators (VMA)
+    /// - Descriptor sets/layouts
+    /// - Data Caches (Textures, Meshes)
+    /// - ImGUI
     pub fn new(
         mut window_state: VkWindowState,
         with_validation: bool,
@@ -436,7 +451,7 @@ impl VkRender {
             Box::new(vk13_features),
         ];
 
-        let mut extension_names: Vec<&CStr> = vec![];
+        let extension_names: Vec<&CStr> = vec![];
 
         // Example of adding an extension:
         // let ext = unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_KHR_swapchain_mutable_format\0") };
@@ -886,11 +901,19 @@ impl VkRender {
 
 
 impl VkRender {
+    /// Main render loop function.
+    /// 1. Updates scene data.
+    /// 2. Acquires next swapchain image.
+    /// 3. Transitions images for rendering.
+    /// 4. Records command buffers (Skybox, Geometry, UI).
+    /// 5. Submits commands to the GPU.
+    /// 6. Presents the image to the screen.
     pub fn render(&mut self, frame_number: u32) {
         let start = SystemTime::now();
 
         self.update_scene();
-        let mut frame_data = self.presentation.get_next_frame();
+        // Get the frame object for the current frame index
+        let frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
         let draw_image = frame_data.draw.image;
         let draw_view = frame_data.draw.image_view;
@@ -1161,7 +1184,7 @@ impl VkRender {
     }
 
     pub fn draw_skybox(&mut self) {
-        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1307,7 +1330,7 @@ impl VkRender {
     }
 
     pub fn draw_geometry(&mut self) {
-        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1480,6 +1503,7 @@ impl VkRender {
 
     // TODO decide if this is only used for transfers
 
+    /// Updates the scene data (Camera view/projection) and traverses the scene tree to populate the draw context.
     pub fn update_scene(&mut self) {
         let (camera_view, camera_pos) = {
             let cont = self.window_state.controller.borrow();
@@ -1493,7 +1517,7 @@ impl VkRender {
         let far = 0.1;
         let near = 10_000.0;
 
-        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+        let proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = camera_view;
@@ -1508,6 +1532,8 @@ impl VkRender {
         )
     }
 
+    /// Generates the environment maps (Irradiance and Prefiltered) from the skybox.
+    /// This is done on the GPU using compute shaders (or offscreen rendering).
     pub fn generate_environment(&self, env_skybox: &VkCubeMap) -> Result<EnvMaps, String> {
         let start = SystemTime::now();
 
