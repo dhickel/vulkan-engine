@@ -132,16 +132,16 @@ pub fn init_caches(
     device_queues: VkDeviceQueues,
 ) -> (Arc<VkDataCache>, VkCache) {
     let shader_paths = vec![
-        (CoreShaderType::MetRoughVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/pbr_base.vert.spv"),
-        (CoreShaderType::MetRoughFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_pbr.frag.spv",),
-        (CoreShaderType::MetRoughFragUnlit, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_unlit.frag.spv"),
-        (CoreShaderType::BrtFlutFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"),
-        (CoreShaderType::BrtFlutVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"),
-        (CoreShaderType::SkyBoxFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"),
-        (CoreShaderType::SkyBoxVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"),
-        (CoreShaderType::CubeFilterVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"),
-        (CoreShaderType::EnvIrradianceFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
-        (CoreShaderType::EnvPrefilterFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
+        (CoreShaderType::MetRoughVert, "src/renderer/src/shaders/pbr_base.vert.spv"),
+        (CoreShaderType::MetRoughFrag, "src/renderer/src/shaders/material_pbr.frag.spv",),
+        (CoreShaderType::MetRoughFragUnlit, "src/renderer/src/shaders/material_unlit.frag.spv"),
+        (CoreShaderType::BrtFlutFrag, "src/renderer/src/shaders/gen_brd_flut.frag.spv"),
+        (CoreShaderType::BrtFlutVert, "src/renderer/src/shaders/gen_brd_flut.vert.spv"),
+        (CoreShaderType::SkyBoxFrag, "src/renderer/src/shaders/skybox.frag.spv"),
+        (CoreShaderType::SkyBoxVert, "src/renderer/src/shaders/skybox.vert.spv"),
+        (CoreShaderType::CubeFilterVert, "src/renderer/src/shaders/filtered_cube.vert.spv"),
+        (CoreShaderType::EnvIrradianceFrag, "src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
+        (CoreShaderType::EnvPrefilterFrag, "src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -186,7 +186,7 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
-        .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
+        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky");
 
     let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
@@ -347,7 +347,7 @@ impl Drop for VkRender {
 
             self.main_deletion_queue
                 .iter_mut()
-                .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
+                .for_each(|del| del.delete(&self.device, &self.allocator.lock().unwrap()));
 
             self.swapchain
                 .swapchain_loader
@@ -371,10 +371,6 @@ impl Drop for VkRender {
 
 
 impl VkRender {
-    fn destroy(&mut self) {
-        unsafe { std::mem::drop(self) }
-    }
-
     pub fn new(
         mut window_state: VkWindowState,
         with_validation: bool,
@@ -382,7 +378,7 @@ impl VkRender {
     ) -> Result<Self, String> {
         if compile_shaders {
             info!("Compiling Shaders");
-            let shader_dir = "/home/mindspice/code/rust/engine/src/renderer/src/shaders";
+            let shader_dir = "src/renderer/src/shaders";
             match vk_util::compile_shaders(shader_dir, shader_dir) {
                 Ok(_) => {
                     info!("Successfully Compiled Shaders")
@@ -436,7 +432,7 @@ impl VkRender {
             Box::new(vk13_features),
         ];
 
-        let mut extension_names: Vec<&CStr> = vec![];
+        let extension_names: Vec<&CStr> = vec![];
 
         // Example of adding an extension:
         // let ext = unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_KHR_swapchain_mutable_format\0") };
@@ -470,7 +466,7 @@ impl VkRender {
             true,
         )?;
 
-        // FIXME why is this here?
+        // Update window state if swapchain constraints changed the extent
         if swapchain.extent != window_state.get_curr_extent() {
             window_state.update_curr_size(swapchain.extent);
         }
@@ -763,7 +759,7 @@ impl VkRender {
         };
 
         let loaded_scene = assimp_util::load_model(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+            "src/renderer/src/assets/DamagedHelmet.glb",
             render.data_cache.clone(),
             false,
         )?;
@@ -890,7 +886,7 @@ impl VkRender {
         let start = SystemTime::now();
 
         self.update_scene();
-        let mut frame_data = self.presentation.get_next_frame();
+        let frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
         let draw_image = frame_data.draw.image;
         let draw_view = frame_data.draw.image_view;
@@ -1161,7 +1157,7 @@ impl VkRender {
     }
 
     pub fn draw_skybox(&mut self) {
-        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1307,7 +1303,7 @@ impl VkRender {
     }
 
     pub fn draw_geometry(&mut self) {
-        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1493,7 +1489,7 @@ impl VkRender {
         let far = 0.1;
         let near = 10_000.0;
 
-        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+        let proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = camera_view;

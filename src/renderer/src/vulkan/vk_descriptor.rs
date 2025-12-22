@@ -219,7 +219,7 @@ impl<'a> VkDescriptorWriter<'a> {
         let mut image_infos = self.image_infos.iter();
 
         for (typ, write_desc) in &self.writes {
-            let mut write = match typ {
+            let write = match typ {
                 VkDescWriterType::Image => write_desc.image_info(image_infos.next().unwrap()),
                 VkDescWriterType::Buffer => write_desc.buffer_info(buffer_infos.next().unwrap()),
             };

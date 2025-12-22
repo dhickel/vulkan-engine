@@ -92,12 +92,12 @@ pub fn load_model(
         if scene_ptr.is_null() {
             Err("Error loading scene file, invalid path?".to_string())
         } else {
-            Ok((&*scene_ptr))
+            Ok(&*scene_ptr)
         }
     }?;
 
     let materials = process_materials(ai_scene, base_path, &data_cache)?;
-    let mat_indices = (0..materials.len());
+    let mat_indices = 0..materials.len();
 
     let mut mapped_materials = HashMap::<u32, u32>::with_capacity(materials.len());
     let material_ids = data_cache.texture_cache.lock().unwrap().add_materials(materials);
@@ -107,7 +107,7 @@ pub fn load_model(
     }
 
     let meshes = process_meshes(ai_scene, mapped_materials);
-    let mesh_indices = (0..meshes.len());
+    let mesh_indices = 0..meshes.len();
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(meshes.len());
     let mesh_ids = data_cache.mesh_cache.lock().unwrap().add_multi(meshes);
