@@ -436,11 +436,13 @@ impl VkRender {
             Box::new(vk13_features),
         ];
 
-        // FIXME better extension init
-        let mut surface_ext = vk_init::get_basic_device_ext_ptrs();
-        // let ext =
-        //     unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_KHR_swapchain_mutable_format\0") };
-        // surface_ext.push(ext.as_ptr());
+        let mut extension_names: Vec<&CStr> = vec![];
+
+        // Example of adding an extension:
+        // let ext = unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_KHR_swapchain_mutable_format\0") };
+        // extension_names.push(ext);
+
+        let surface_ext = vk_init::get_device_extensions(true, &extension_names);
 
         let (device, device_queues) = vk_init::create_logical_device(
             &instance,
