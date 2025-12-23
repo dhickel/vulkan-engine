@@ -18,9 +18,9 @@ use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
-use crate::data::data_cache::{EnvMaps, VkPipelineType};
+use crate::data::data_cache::{EnvMaps, VkPipelineType, MeshCache};
 use crate::data::data_util::{BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError};
-use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
+use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap, PushConstSkyBox, DrawContext, Node};
 
 
 /// Trait for objects that own Vulkan resources and need explicit destruction.
@@ -1295,3 +1295,55 @@ impl VkFenceQueue {
     }
 }
 
+
+pub struct VkSingleDescriptor {
+    pub desc_alloc: VkDescriptorAllocator,
+    pub descriptor: [vk::DescriptorSet; 1],
+}
+
+impl VkSingleDescriptor {
+    pub fn new(desc_alloc: VkDescriptorAllocator, descriptor: vk::DescriptorSet) -> Self {
+        Self {
+            desc_alloc,
+            descriptor: [descriptor],
+        }
+    }
+
+    pub fn get_raw_descriptor(&self) -> vk::DescriptorSet {
+        unsafe { *self.descriptor.get_unchecked(0) }
+    }
+}
+
+pub struct SkyBox {
+    pub skybox_consts: PushConstSkyBox,
+    pub descriptor: Option<VkSingleDescriptor>,
+    pub env_id: u32,
+    pub mesh_id: u32,
+}
+
+impl Default for SkyBox {
+    fn default() -> Self {
+        Self {
+            skybox_consts: Default::default(),
+            descriptor: None,
+            env_id: 0,
+            mesh_id: MeshCache::SKYBOX_MESH,
+        }
+    }
+}
+
+pub struct RenderContext {
+    pub draw_context: DrawContext,
+    pub scene_tree: Rc<RefCell<Node>>,
+    pub sky_box: SkyBox,
+}
+
+impl Default for RenderContext {
+    fn default() -> Self {
+        Self {
+            draw_context: Default::default(),
+            scene_tree: Rc::new(RefCell::new(Default::default())),
+            sky_box: Default::default(),
+        }
+    }
+}

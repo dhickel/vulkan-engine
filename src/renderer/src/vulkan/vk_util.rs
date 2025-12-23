@@ -19,7 +19,7 @@ use crate::data::data_cache::{
 };
 use crate::data::{data_cache, data_util};
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
-use crate::vulkan::vk_render::VkSingleDescriptor;
+use crate::vulkan::vk_types::VkSingleDescriptor;
 use crate::vulkan::{vk_debug, vk_init, vk_util};
 use ash::prelude::VkResult;
 use shaderc::{CompileOptions, Compiler, ShaderKind};
