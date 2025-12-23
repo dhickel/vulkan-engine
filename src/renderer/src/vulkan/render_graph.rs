@@ -92,6 +92,7 @@ impl RenderGraph {
 
         for pass in &mut self.passes {
             let requirements = pass.required_resources();
+            let mut barriers = Vec::new();
 
             for (resource, required_state) in requirements {
                 let current_state = self.resource_states.entry(resource).or_insert(ResourceState::new(
@@ -128,7 +129,7 @@ impl RenderGraph {
                         vk::ImageAspectFlags::COLOR
                     };
 
-                    let image_barrier = [vk::ImageMemoryBarrier2::default()
+                    let image_barrier = vk::ImageMemoryBarrier2::default()
                         .src_stage_mask(current_state.stage)
                         .src_access_mask(current_state.access)
                         .dst_stage_mask(required_state.stage)
@@ -136,15 +137,18 @@ impl RenderGraph {
                         .old_layout(current_state.layout)
                         .new_layout(required_state.layout)
                         .subresource_range(vk_util::image_subresource_range(aspect_mask))
-                        .image(image)];
+                        .image(image);
 
-                    let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barrier);
-
-                    unsafe { context.device.cmd_pipeline_barrier2(cmd, &dep_info) };
+                    barriers.push(image_barrier);
                 }
 
                 // Update state
                 *current_state = required_state;
+            }
+
+            if !barriers.is_empty() {
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+                unsafe { context.device.cmd_pipeline_barrier2(cmd, &dep_info) };
             }
 
             pass.draw(cmd, context);
