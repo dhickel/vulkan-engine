@@ -1,4 +1,5 @@
 use ash::vk;
+use log::warn;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::render_graph::{RenderPass, RenderPassContext, GraphResource, ResourceState};
 use crate::vulkan::vk_util;
@@ -64,13 +65,13 @@ impl RenderPass for GeometryPass {
             context.device.cmd_begin_rendering(cmd, &rendering_info);
 
             // Write the new scene view/pos
-            let scene_desc = context.scene_descriptors.as_mut().unwrap()
+            let scene_desc = context.scene_descriptors.as_mut().expect("Scene descriptors not initialized")
                 .update_scene_uniform(context.device, *context.scene_data, frame_index);
 
             // Initial setup - though loop handles bindings, we might need initial state if loop is empty?
             // Loop handles everything.
 
-            let mut curr_joint_desc = context.data_cache.mesh_cache.lock().unwrap().get_default_joint_desc();
+            let mut curr_joint_desc = context.data_cache.mesh_cache.lock().expect("Failed to lock mesh cache").get_default_joint_desc();
 
             context.device
                 .cmd_set_viewport(cmd, 0, context.window_state.get_viewport());
@@ -212,7 +213,8 @@ impl RenderPass for SkyboxPass {
         let skybox_desc = if let Some(desc) = &context.render_context.sky_box.descriptor {
             desc.descriptor
         } else {
-            panic!("No skybox descriptor")
+            warn!("Skybox descriptor missing, skipping skybox pass");
+            return;
         };
 
         context.render_context.sky_box.skybox_consts.projection = context.scene_data.projection;
@@ -349,7 +351,7 @@ impl RenderPass for UiPass {
 
         let draw_data = context.imgui.context.render();
 
-        context.imgui.renderer.cmd_draw(cmd, draw_data).unwrap();
+        context.imgui.renderer.cmd_draw(cmd, draw_data).expect("Failed to draw ImGui");
 
         unsafe {
             context.device.cmd_end_rendering(cmd);
