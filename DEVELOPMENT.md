@@ -18,13 +18,13 @@ This is a Vulkan-based 3D rendering engine written in Rust. It currently support
 
 ## 2. Current Focal Point
 
-**Goal:** Stabilization and Documentation.
-**Status:** The repository has undergone a significant documentation pass. Dependencies have been updated to recent versions. A configuration system has been implemented to remove hardcoded paths.
+**Goal:** Refactoring Render Loop into Render Graph.
+**Status:** Runtime and build verification passed. Skybox rendering has been optimized (draws last with depth test). Initial `RenderGraph` scaffolding created.
 
 **Immediate Next Steps:**
-1.  **Verify Runtime:** Ensure the application runs correctly after dependency updates.
-2.  **Warning Cleanup:** Address remaining compiler warnings (unused variables, dead code).
-3.  **Feature Implementation:** The next major feature is likely implementing a proper render graph or expanding the PBR pipeline (IBL integration is partially there).
+1.  **Refactor Render Loop:** Move hardcoded rendering logic (Geometry, Skybox, UI) from `VkRender::render` into `RenderPass` implementations managed by `RenderGraph`.
+2.  **Resource Management:** Implement resource tracking in `RenderGraph` to handle synchronization (barriers) automatically.
+3.  **Expand PBR:** IBL Integration is complete (Irradiance/Prefilter/BRDF), but can be improved by loading pre-computed maps from disk instead of generating them at runtime.
 
 ---
 
@@ -77,6 +77,9 @@ This is the heart of the engine. It is further divided into `vulkan` (API abstra
     *   **Key Component:** `VkSubAllocator`.
     *   **Strategy:** Allocates massive GPU buffers (e.g., 256MB) and sub-allocates small chunks (vertices, indices) from them. This reduces the number of `vkAllocateMemory` calls, which is a performance best practice.
     *   **Fragmentation:** Uses a `FreeChunk` list to track available space.
+*   **`render_graph.rs`**:
+    *   **Purpose:** High-level rendering abstraction.
+    *   **Status:** Initial scaffolding. Goal is to manage render passes and dependencies.
 
 #### 3.1.2. Data Management (`src/renderer/src/data`)
 

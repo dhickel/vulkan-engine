@@ -6,3 +6,4 @@ pub mod vk_util;
 pub mod vk_types;
 pub mod vk_storage;
 pub mod vk_debug;
+pub mod render_graph;

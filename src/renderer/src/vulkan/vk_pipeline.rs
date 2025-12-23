@@ -454,7 +454,8 @@ fn init_skybox_pipeline(
         .set_multisample_none()
         .disable_blending()
         .set_color_attachment_format(color_format)
-        .disable_depth_test()
+        .set_depth_format(depth_format)
+        .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
     let pipeline = pipeline_builder.build_pipeline(device).unwrap();
