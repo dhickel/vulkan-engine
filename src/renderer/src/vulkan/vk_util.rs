@@ -6,7 +6,7 @@ use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
 use log::{error, info};
-use std::io::{Bytes, Read, Seek, SeekFrom};
+use std::io::{Bytes, Read, Seek, SeekFrom, Write};
 use std::mem::align_of;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -574,6 +574,17 @@ pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
 
 pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
     unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
+}
+
+pub fn get_format_size(format: vk::Format) -> u32 {
+    match format {
+        vk::Format::R32G32B32A32_SFLOAT => 16,
+        vk::Format::R16G16B16A16_SFLOAT => 8,
+        vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
+        vk::Format::R8_UNORM => 1,
+        // Add others as needed
+        _ => panic!("Unsupported format size query: {:?}", format),
+    }
 }
 
 //////////////////
@@ -1565,5 +1576,298 @@ pub fn record_image_barrier(
             &[],
             &barrier,
         );
+    }
+}
+
+pub fn download_cubemap_to_host(
+    device: &ash::Device,
+    allocator: &Allocator,
+    image: vk::Image,
+    extent: vk::Extent3D,
+    format: vk::Format,
+    mip_levels: u32,
+    command_pool: &VkCommandPool,
+    queue: vk::Queue,
+) -> Result<TextureMeta, String> {
+    let format_size = get_format_size(format);
+    let mut total_size = 0;
+    let mut mip_sizes = Vec::new();
+
+    // Calculate total size and offsets
+    for i in 0..mip_levels {
+        let mip_width = max(extent.width >> i, 1);
+        let mip_height = max(extent.height >> i, 1);
+        let mip_size = (mip_width * mip_height * format_size) as u64;
+        mip_sizes.push(mip_size);
+        total_size += mip_size * 6;
+    }
+
+    let host_buffer = allocate_host_buffer(allocator, total_size)?;
+
+    let cmd_buffer = command_pool.buffers[0];
+    unsafe {
+        let begin_info = command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        device.begin_command_buffer(cmd_buffer, &begin_info).unwrap();
+
+        // Transition to TRANSFER_SRC
+        transition_image_layered(
+            device,
+            cmd_buffer,
+            image,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            6,
+            mip_levels,
+        );
+
+        let mut buffer_offset = 0;
+        for i in 0..mip_levels {
+            let mip_width = max(extent.width >> i, 1);
+            let mip_height = max(extent.height >> i, 1);
+
+            for face in 0..6 {
+                let region = vk::BufferImageCopy::default()
+                    .buffer_offset(buffer_offset)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: i,
+                        base_array_layer: face,
+                        layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D {
+                        width: mip_width,
+                        height: mip_height,
+                        depth: 1,
+                    });
+
+                device.cmd_copy_image_to_buffer(
+                    cmd_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    host_buffer.buffer,
+                    &[region],
+                );
+
+                buffer_offset += mip_sizes[i as usize];
+            }
+        }
+
+        // Transition back to READ_ONLY
+        transition_image_layered(
+            device,
+            cmd_buffer,
+            image,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            6,
+            mip_levels,
+        );
+
+        device.end_command_buffer(cmd_buffer).unwrap();
+
+        let cmd_info = [command_buffer_submit_info(cmd_buffer)];
+        let submit_info = [submit_info_2(&cmd_info, &[], &[])];
+        device
+            .queue_submit2(queue, &submit_info, vk::Fence::null())
+            .unwrap();
+        device.queue_wait_idle(queue).unwrap();
+    }
+
+    let mut bytes = vec![0u8; total_size as usize];
+    unsafe {
+        let data_ptr = host_buffer.alloc_info.mapped_data as *const u8;
+        std::ptr::copy_nonoverlapping(data_ptr, bytes.as_mut_ptr(), total_size as usize);
+    }
+
+    destroy_buffer(allocator, host_buffer);
+
+    Ok(TextureMeta {
+        bytes,
+        width: extent.width,
+        height: extent.height,
+        format: format,
+        mips_levels: mip_levels,
+        uv_index: 0,
+    })
+}
+
+pub fn save_texture_meta(path: &Path, meta: &TextureMeta) -> Result<(), String> {
+    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+
+    // Header: Magic, Width, Height, Format, Mips
+    file.write_all(&0x5445584D_u32.to_le_bytes()).unwrap(); // "TEXM"
+    file.write_all(&meta.width.to_le_bytes()).unwrap();
+    file.write_all(&meta.height.to_le_bytes()).unwrap();
+    file.write_all(&(meta.format.as_raw() as u32).to_le_bytes()).unwrap();
+    file.write_all(&meta.mips_levels.to_le_bytes()).unwrap();
+
+    // Bytes length and data
+    file.write_all(&(meta.bytes.len() as u64).to_le_bytes()).unwrap();
+    file.write_all(&meta.bytes).unwrap();
+
+    Ok(())
+}
+
+pub fn load_texture_meta(path: &Path) -> Result<TextureMeta, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+
+    let mut u32_buf = [0u8; 4];
+    let mut u64_buf = [0u8; 8];
+
+    // Magic
+    file.read_exact(&mut u32_buf).map_err(|e| e.to_string())?;
+    let magic = u32::from_le_bytes(u32_buf);
+    if magic != 0x5445584D_u32 { // "TEXM"
+        return Err("Invalid texture meta file magic".to_string());
+    }
+
+    // Width
+    file.read_exact(&mut u32_buf).map_err(|e| e.to_string())?;
+    let width = u32::from_le_bytes(u32_buf);
+
+    // Height
+    file.read_exact(&mut u32_buf).map_err(|e| e.to_string())?;
+    let height = u32::from_le_bytes(u32_buf);
+
+    // Format
+    file.read_exact(&mut u32_buf).map_err(|e| e.to_string())?;
+    let format = vk::Format::from_raw(i32::from_le_bytes([u32_buf[0], u32_buf[1], u32_buf[2], u32_buf[3]]));
+
+    // Mips
+    file.read_exact(&mut u32_buf).map_err(|e| e.to_string())?;
+    let mips_levels = u32::from_le_bytes(u32_buf);
+
+    // Bytes len
+    file.read_exact(&mut u64_buf).map_err(|e| e.to_string())?;
+    let bytes_len = u64::from_le_bytes(u64_buf);
+
+    let mut bytes = vec![0u8; bytes_len as usize];
+    file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+
+    Ok(TextureMeta {
+        bytes,
+        width,
+        height,
+        format,
+        mips_levels,
+        uv_index: 0,
+    })
+}
+
+pub fn upload_cubemap_layered(
+    device: &ash::Device,
+    allocator: &Allocator,
+    tex_meta: TextureMeta,
+    transfer_pool: &VkCommandPool,
+    transfer_queue: vk::Queue,
+) -> VkCubeMap {
+    let staging_buffer = allocate_and_write_buffer(
+        allocator,
+        &tex_meta.bytes,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+    )
+    .unwrap();
+
+    let (image_alloc, sampler) = create_cubemap(
+        device,
+        allocator,
+        tex_meta.format,
+        tex_meta.width,
+        tex_meta.mips_levels,
+    )
+    .unwrap();
+
+    let cmd_buffer = transfer_pool.buffers[0];
+    unsafe {
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .unwrap();
+
+        transition_image_layered(
+            device,
+            cmd_buffer,
+            image_alloc.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            6,
+            tex_meta.mips_levels,
+        );
+
+        let format_size = get_format_size(tex_meta.format);
+        let mut buffer_offset = 0;
+
+        for i in 0..tex_meta.mips_levels {
+            let mip_width = max(tex_meta.width >> i, 1);
+            let mip_height = max(tex_meta.height >> i, 1);
+            let mip_size = (mip_width * mip_height * format_size) as u64;
+
+            for face in 0..6 {
+                let region = vk::BufferImageCopy::default()
+                    .buffer_offset(buffer_offset)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: i,
+                        base_array_layer: face,
+                        layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D {
+                        width: mip_width,
+                        height: mip_height,
+                        depth: 1,
+                    });
+
+                device.cmd_copy_buffer_to_image(
+                    cmd_buffer,
+                    staging_buffer.buffer,
+                    image_alloc.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[region],
+                );
+
+                buffer_offset += mip_size;
+            }
+        }
+
+        transition_image_layered(
+            device,
+            cmd_buffer,
+            image_alloc.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            6,
+            tex_meta.mips_levels,
+        );
+
+        device.end_command_buffer(cmd_buffer).unwrap();
+
+        let cmd_info = [command_buffer_submit_info(cmd_buffer)];
+        let submit_info = [submit_info_2(&cmd_info, &[], &[])];
+
+        device
+            .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
+            .unwrap();
+
+        device.device_wait_idle().unwrap();
+    }
+
+    destroy_buffer(allocator, staging_buffer);
+
+    VkCubeMap {
+        texture_meta: Some(tex_meta.clone()),
+        full_extent: image_alloc.image_extent,
+        face_extent: image_alloc.image_extent,
+        allocation: image_alloc.allocation,
+        image: image_alloc.image,
+        image_view: image_alloc.image_view,
+        sampler,
     }
 }
