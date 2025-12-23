@@ -1,6 +1,6 @@
 use ash::vk;
 use crate::vulkan::vk_types::*;
-use crate::vulkan::render_graph::{RenderPass, RenderPassContext};
+use crate::vulkan::render_graph::{RenderPass, RenderPassContext, GraphResource, ResourceState};
 use crate::vulkan::vk_util;
 use crate::data::data_cache::{MeshCache, VkPipelineType};
 use crate::data::gpu_data::{VkModelPushConsts, AsByteSlice};
@@ -12,34 +12,31 @@ impl RenderPass for GeometryPass {
         "Geometry Pass"
     }
 
+    fn required_resources(&self) -> Vec<(GraphResource, ResourceState)> {
+        vec![
+            (
+                GraphResource::DrawImage,
+                ResourceState::new(
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                ),
+            ),
+            (
+                GraphResource::DepthImage,
+                ResourceState::new(
+                    vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                ),
+            ),
+        ]
+    }
+
     fn draw(&mut self, cmd: vk::CommandBuffer, context: &mut RenderPassContext) {
         let curr_frame = context.frame;
         let frame_index = curr_frame.index;
-
-        // Transition images
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            curr_frame.draw.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::GENERAL,
-        );
-
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            curr_frame.depth.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-        );
-
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            curr_frame.draw.image,
-            vk::ImageLayout::GENERAL,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        );
 
         let clear_value = vk::ClearValue {
             color: vk::ClearColorValue {
@@ -171,6 +168,27 @@ pub struct SkyboxPass;
 impl RenderPass for SkyboxPass {
     fn name(&self) -> &str { "Skybox Pass" }
 
+    fn required_resources(&self) -> Vec<(GraphResource, ResourceState)> {
+        vec![
+            (
+                GraphResource::DrawImage,
+                ResourceState::new(
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                ),
+            ),
+            (
+                GraphResource::DepthImage,
+                ResourceState::new(
+                    vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
+                ),
+            ),
+        ]
+    }
+
     fn draw(&mut self, cmd: vk::CommandBuffer, context: &mut RenderPassContext) {
         let curr_frame = context.frame;
 
@@ -253,26 +271,31 @@ pub struct CopyPass;
 impl RenderPass for CopyPass {
     fn name(&self) -> &str { "Copy Pass" }
 
+    fn required_resources(&self) -> Vec<(GraphResource, ResourceState)> {
+        vec![
+            (
+                GraphResource::DrawImage,
+                ResourceState::new(
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::AccessFlags2::TRANSFER_READ,
+                    vk::PipelineStageFlags2::TRANSFER,
+                ),
+            ),
+            (
+                GraphResource::PresentImage,
+                ResourceState::new(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::TRANSFER,
+                ),
+            ),
+        ]
+    }
+
     fn draw(&mut self, cmd: vk::CommandBuffer, context: &mut RenderPassContext) {
         let extent = context.window_state.get_curr_extent();
         let draw_image = context.frame.draw.image;
         let present_image = context.frame.present_image;
-
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            draw_image,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-        );
-
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            present_image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        );
 
         vk_util::blit_copy_image_to_image(
             context.device,
@@ -282,14 +305,6 @@ impl RenderPass for CopyPass {
             present_image,
             extent,
         );
-
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            present_image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        );
     }
 }
 
@@ -297,6 +312,19 @@ pub struct UiPass;
 
 impl RenderPass for UiPass {
     fn name(&self) -> &str { "UI Pass" }
+
+    fn required_resources(&self) -> Vec<(GraphResource, ResourceState)> {
+        vec![
+            (
+                GraphResource::PresentImage,
+                ResourceState::new(
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                ),
+            )
+        ]
+    }
 
     fn draw(&mut self, cmd: vk::CommandBuffer, context: &mut RenderPassContext) {
         let image_view = context.frame.present_image_view;
