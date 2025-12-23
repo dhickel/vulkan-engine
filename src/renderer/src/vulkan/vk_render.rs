@@ -771,25 +771,120 @@ impl VkRender {
         render.allocate_skymap();
         render.init_skybox();
 
-        // FIXME properly implement this in the setup (or pre-sample and save)
-        let env_maps = if let CachedEnvironment::Loaded(env)
-            = render.data_cache.environment_cache.lock().unwrap().get_skybox(0) {
-            let env_maps = render.generate_environment(env)?;
+        let env_maps = {
+            let env_cache = render.data_cache.environment_cache.lock().unwrap();
+            if let CachedEnvironment::Loaded(env) = env_cache.get_skybox(0) {
+                // Check cache files
+                let cache_dir = std::path::Path::new("assets/cache/env_maps");
+                if !cache_dir.exists() {
+                    std::fs::create_dir_all(cache_dir).unwrap();
+                }
 
-            let scene_descriptors = VkSceneDescriptors::new(
-                &render.device,
-                &render.allocator.lock().unwrap(),
-                render.buffer_and_desc_limits.min_uniform_buffer_offset_alignment,
-                render.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
-                &env_maps,
-                &render.brdf_lut,
-            );
+                let irr_path = cache_dir.join("irradiance.bin");
+                let pref_path = cache_dir.join("prefilter.bin");
 
-            render.scene_descriptors = Some(scene_descriptors);
-            env_maps
-        } else {
-            panic!("No env for generation")
+                let mut loaded_maps = None;
+
+                if irr_path.exists() && pref_path.exists() {
+                    info!("Loading cached environment maps from {:?}", cache_dir);
+                    if let (Ok(irr_meta), Ok(pref_meta)) =
+                        (vk_util::load_texture_meta(&irr_path), vk_util::load_texture_meta(&pref_path))
+                    {
+                        // Upload
+                        let transfer_pool = render.transfer.get_local_transfer_pool();
+                        let transfer_queue = render.vulkan_cache.queues.get_queue(VkQueueType::Transfer);
+
+                        let irr_map = vk_util::upload_cubemap_layered(
+                            &render.device,
+                            &render.allocator.lock().unwrap(),
+                            irr_meta,
+                            transfer_pool,
+                            transfer_queue,
+                        );
+
+                        let pref_map = vk_util::upload_cubemap_layered(
+                            &render.device,
+                            &render.allocator.lock().unwrap(),
+                            pref_meta.clone(),
+                            transfer_pool,
+                            transfer_queue,
+                        );
+
+                        let mut environment_ubo = EnvironmentUBO::default();
+                        environment_ubo.prefilter_mips_levels = pref_meta.mips_levels as f32;
+
+                        loaded_maps = Some(EnvMaps {
+                            environment_ubo,
+                            irradiance: irr_map,
+                            pre_filter: pref_map,
+                        });
+                    } else {
+                        log::warn!("Failed to load environment maps from cache, regenerating.");
+                    }
+                }
+
+                if let Some(maps) = loaded_maps {
+                    maps
+                } else {
+                    info!("Generating environment maps");
+                    let env_maps = render.generate_environment(env)?;
+
+                    // Download and save
+                    info!("Saving environment maps to cache");
+                    let transfer_pool = render.transfer.get_local_transfer_pool();
+                    let transfer_queue = render.vulkan_cache.queues.get_queue(VkQueueType::Transfer);
+
+                    let irr_mips = data_util::calc_mips_count(
+                        env_maps.irradiance.full_extent.width,
+                        env_maps.irradiance.full_extent.height,
+                    );
+                    let irr_meta = vk_util::download_cubemap_to_host(
+                        &render.device,
+                        &render.allocator.lock().unwrap(),
+                        env_maps.irradiance.image,
+                        env_maps.irradiance.full_extent,
+                        vk::Format::R32G32B32A32_SFLOAT,
+                        irr_mips,
+                        transfer_pool,
+                        transfer_queue,
+                    )
+                    .unwrap();
+
+                    let pref_mips = data_util::calc_mips_count(
+                        env_maps.pre_filter.full_extent.width,
+                        env_maps.pre_filter.full_extent.height,
+                    );
+                    let pref_meta = vk_util::download_cubemap_to_host(
+                        &render.device,
+                        &render.allocator.lock().unwrap(),
+                        env_maps.pre_filter.image,
+                        env_maps.pre_filter.full_extent,
+                        vk::Format::R16G16B16A16_SFLOAT,
+                        pref_mips,
+                        transfer_pool,
+                        transfer_queue,
+                    )
+                    .unwrap();
+
+                    vk_util::save_texture_meta(&irr_path, &irr_meta).unwrap();
+                    vk_util::save_texture_meta(&pref_path, &pref_meta).unwrap();
+
+                    env_maps
+                }
+            } else {
+                panic!("No env for generation")
+            }
         };
+
+        let scene_descriptors = VkSceneDescriptors::new(
+            &render.device,
+            &render.allocator.lock().unwrap(),
+            render.buffer_and_desc_limits.min_uniform_buffer_offset_alignment,
+            render.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
+            &env_maps,
+            &render.brdf_lut,
+        );
+        render.scene_descriptors = Some(scene_descriptors);
 
         render
             .data_cache

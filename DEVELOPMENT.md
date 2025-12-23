@@ -18,13 +18,13 @@ This is a Vulkan-based 3D rendering engine written in Rust. It currently support
 
 ## 2. Current Focal Point
 
-**Goal:** Refactoring Render Loop into Render Graph.
-**Status:** Render logic moved to `GeometryPass`, `SkyboxPass`, `UiPass`, `CopyPass`. `RenderGraph` executes these passes.
-Resource tracking is implemented in `RenderGraph`. Passes declare their required resources (layout, access, stage), and the graph automatically inserts barriers (now batched per pass) to handle transitions.
+**Goal:** Expand PBR & Optimization.
+**Status:** IBL Integration complete. Environment maps (Irradiance/Prefilter) are now cached to disk (`assets/cache/env_maps`) to avoid runtime generation cost on subsequent runs.
+Render logic moved to `RenderGraph` with passes (`GeometryPass`, `SkyboxPass`, `UiPass`, `CopyPass`).
 
 **Immediate Next Steps:**
-1.  **Expand PBR:** IBL Integration is complete (Irradiance/Prefilter/BRDF), but can be improved by loading pre-computed maps from disk instead of generating them at runtime.
-2.  **Further Cleanup:** Continue replacing `unwrap()` with proper error handling and fixing hardcoded paths.
+1.  **Further Cleanup:** Continue replacing `unwrap()` with proper error handling and fixing hardcoded paths.
+2.  **ImGui Integration:** Improve UI layer abstraction.
 
 **Recent Changes:**
 -   **GLTF Loader Refactor:** GLTF files are now parsed into a single vertex/index buffer (MegaMesh) per file, reducing memory fragmentation and draw call overhead. `Node` structure updated to refer to `MeshPrimitive`s (sub-ranges) within a mesh buffer.
