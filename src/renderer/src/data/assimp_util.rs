@@ -1,7 +1,7 @@
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
-    AlphaMode, EmissiveMap, MaterialMeta, MeshMeta, Node, NormalMap, OcclusionMap, Sampler,
+    AlphaMode, EmissiveMap, MaterialMeta, MeshMeta, MeshPrimitive, Node, NormalMap, OcclusionMap, Sampler,
     SurfaceMeta, TextureMeta, Transform, Vertex,
 };
 use ash::vk;
@@ -107,6 +107,9 @@ pub fn load_model(
     }
 
     let meshes = process_meshes(ai_scene, mapped_materials);
+
+    let mesh_meta_info: Vec<(u32, u32)> = meshes.iter().map(|m| (m.indices.len() as u32, m.material_index.unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT))).collect();
+
     let mesh_indices = 0..meshes.len();
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(meshes.len());
@@ -116,12 +119,15 @@ pub fn load_model(
         mapped_meshes.insert(og_idx as u32, *id);
     }
 
+    let mesh_lookup: HashMap<u32, (u32, u32)> = mesh_ids.iter().zip(mesh_meta_info.iter()).map(|(id, info)| (*id, *info)).collect();
+
+
     let root_ai_node = (*ai_scene).mRootNode;
 
     if root_ai_node.is_null() {
         Err("Failed to find root node in model".to_string())
     } else {
-        let node = process_node(root_ai_node, &mapped_meshes, None);
+        let node = process_node(root_ai_node, &mapped_meshes, &mesh_lookup, None);
         Ok(
             ModelMeta {
                 node,
@@ -583,6 +589,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
 fn process_node(
     ai_node: *const aiNode,
     mapped_meshes: &HashMap<u32, u32>,
+    mesh_lookup: &HashMap<u32, (u32, u32)>,
     parent: Option<Rc<RefCell<Node>>>,
 ) -> Rc<RefCell<Node>> {
     unsafe {
@@ -617,12 +624,21 @@ fn process_node(
         };
 
         let mesh_count = (*ai_node).mNumMeshes as usize;
-        let meshes: Vec<u32> = (0..mesh_count)
+        let primitives: Vec<MeshPrimitive> = (0..mesh_count)
             .map(|i| {
                 let mesh_index = *(*ai_node).mMeshes.add(i) as u32;
-                *mapped_meshes
+                let mesh_id = *mapped_meshes
                     .get(&mesh_index)
-                    .expect("Fatal: Mesh index not found")
+                    .expect("Fatal: Mesh index not found");
+
+                let (count, mat_id) = *mesh_lookup.get(&mesh_id).unwrap();
+
+                MeshPrimitive {
+                    mesh_id,
+                    first_index: 0,
+                    index_count: count,
+                    material_id: mat_id,
+                }
             })
             .collect();
 
@@ -633,7 +649,7 @@ fn process_node(
                 None
             },
             children: Vec::new(),
-            meshes,
+            primitives,
             world_transform: if let Some(parent) = parent {
                 parent.borrow().world_transform.mul_mat4(&local_transform)
             } else {
@@ -646,7 +662,7 @@ fn process_node(
         // Process children
         for i in 0..(*ai_node).mNumChildren {
             let child_ai_node = *(*ai_node).mChildren.add(i as usize);
-            let child_node = process_node(child_ai_node, mapped_meshes, Some(node.clone()));
+            let child_node = process_node(child_ai_node, mapped_meshes, mesh_lookup, Some(node.clone()));
             node.borrow_mut().children.push(child_node);
         }
         node

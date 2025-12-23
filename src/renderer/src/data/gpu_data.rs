@@ -323,6 +323,14 @@ pub struct SurfaceMeta {
 }
 
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshPrimitive {
+    pub mesh_id: u32,
+    pub first_index: u32,
+    pub index_count: u32,
+    pub material_id: u32,
+}
+
 /// CPU-side representation of a mesh geometry.
 #[derive(Clone, Default, Debug)]
 pub struct MeshMeta {
@@ -336,7 +344,7 @@ pub struct MeshMeta {
 #[derive(Clone, PartialEq)]
 pub struct NodeMeta {
     pub name: String,
-    pub mesh_indices: Vec<u32>,
+    pub primitives: Vec<MeshPrimitive>,
     pub local_transform: Transform,
     pub og_matrix: Mat4,
     pub children: Vec<u32>,
@@ -636,7 +644,7 @@ pub struct Transform {
 
 
 impl Transform {
-    pub fn compose(&mut self) -> Mat4 {
+    pub fn compose(&self) -> Mat4 {
         glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
     }
 
@@ -657,7 +665,7 @@ impl Transform {
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
-    pub meshes: Vec<u32>,
+    pub primitives: Vec<MeshPrimitive>,
     pub world_transform: Mat4,
     pub local_transform: Mat4,
     pub dirty: bool,
@@ -669,7 +677,7 @@ impl Default for Node {
         Self {
             parent: None,
             children: vec![],
-            meshes: vec![],
+            primitives: vec![],
             world_transform: Mat4::IDENTITY,
             local_transform: Mat4::IDENTITY,
             dirty: true,
@@ -691,20 +699,21 @@ impl Node {
             self.refresh_transform(*top_matrix);
         }
 
-        for mesh_id in &self.meshes {
-            let mesh = mesh_cache.get_loaded_id_unchecked(*mesh_id);
-            let material_ptr = unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
+        for primitive in &self.primitives {
+            let mesh = mesh_cache.get_loaded_id_unchecked(primitive.mesh_id);
+            let material_ptr =
+                unsafe { tex_cache.get_loaded_material_unchecked_ptr(primitive.material_id) };
             let material = unsafe { *material_ptr };
 
             //
             // debug!("Drawing Mesh: {}", mesh_id);
             // // // debug!("\t Mesh: {:#?}", mesh);
-             //debug!("\t Material: {:#?}", material);
+            //debug!("\t Material: {:#?}", material);
             //
             let ro = RenderObject {
-                index_count: mesh.index_count,
+                index_count: primitive.index_count,
                 joint_desc: mesh.joint_desc,
-                first_index: mesh.get_first_index(),
+                first_index: mesh.get_first_index() + primitive.first_index,
                 index_buffer: mesh.index_buffer.buffer,
                 material: material_ptr,
                 transform: self.world_transform,

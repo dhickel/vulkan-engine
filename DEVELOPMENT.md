@@ -26,6 +26,9 @@ Resource tracking is implemented in `RenderGraph`. Passes declare their required
 1.  **Expand PBR:** IBL Integration is complete (Irradiance/Prefilter/BRDF), but can be improved by loading pre-computed maps from disk instead of generating them at runtime.
 2.  **Further Cleanup:** Continue replacing `unwrap()` with proper error handling and fixing hardcoded paths.
 
+**Recent Changes:**
+-   **GLTF Loader Refactor:** GLTF files are now parsed into a single vertex/index buffer (MegaMesh) per file, reducing memory fragmentation and draw call overhead. `Node` structure updated to refer to `MeshPrimitive`s (sub-ranges) within a mesh buffer.
+
 ---
 
 ## 2.1 Configuration
