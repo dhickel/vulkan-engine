@@ -1,7 +1,20 @@
 use ash::vk;
-use crate::vulkan::vk_types::VkFrame;
+use crate::vulkan::vk_types::*;
+use crate::data::data_cache::{VkPipelineCache, VkDataCache};
+use crate::data::gpu_data::SceneDataUBO;
 
-/// Trait defining a single pass in the render graph.
+pub struct RenderPassContext<'a> {
+    pub device: &'a ash::Device,
+    pub pipelines: &'a VkPipelineCache,
+    pub frame: &'a VkFrame,
+    pub window_state: &'a VkWindowState,
+    pub scene_descriptors: Option<&'a mut VkSceneDescriptors>,
+    pub scene_data: &'a SceneDataUBO,
+    pub data_cache: &'a VkDataCache,
+    pub render_context: &'a mut RenderContext,
+    pub imgui: &'a mut VkImgui,
+}
+
 pub trait RenderPass {
     fn name(&self) -> &str;
 
@@ -10,12 +23,11 @@ pub trait RenderPass {
     /// # Arguments
     ///
     /// * `cmd` - The command buffer to record into.
-    /// * `frame` - The current frame data (sync primitives, descriptors, etc).
-    fn draw(&mut self, cmd: vk::CommandBuffer, frame: &VkFrame);
+    /// * `context` - The render context containing all global resources.
+    fn draw(&mut self, cmd: vk::CommandBuffer, context: &mut RenderPassContext);
 }
 
 /// Manages a sequence of render passes.
-/// Future improvements: Handle resource dependencies and automatic barriers.
 pub struct RenderGraph {
     passes: Vec<Box<dyn RenderPass>>,
 }
@@ -29,9 +41,9 @@ impl RenderGraph {
         self.passes.push(pass);
     }
 
-    pub fn execute(&mut self, cmd: vk::CommandBuffer, frame: &VkFrame) {
+    pub fn execute(&mut self, cmd: vk::CommandBuffer, context: &mut RenderPassContext) {
         for pass in &mut self.passes {
-            pass.draw(cmd, frame);
+            pass.draw(cmd, context);
         }
     }
 }

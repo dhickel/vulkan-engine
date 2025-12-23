@@ -32,64 +32,10 @@ use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_
 use crate::config::RendererConfig;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
+use crate::vulkan::render_graph::{RenderGraph, RenderPassContext};
+use crate::vulkan::render_passes::{GeometryPass, SkyboxPass, CopyPass, UiPass};
 
 
-pub struct SkyBox {
-    pub skybox_consts: PushConstSkyBox,
-    pub descriptor: Option<VkSingleDescriptor>,
-    pub env_id: u32,
-    pub mesh_id: u32,
-}
-
-
-impl Default for SkyBox {
-    fn default() -> Self {
-        Self {
-            skybox_consts: Default::default(),
-            descriptor: None,
-            env_id: 0,
-            mesh_id: MeshCache::SKYBOX_MESH,
-        }
-    }
-}
-
-
-pub struct VkSingleDescriptor {
-    pub desc_alloc: VkDescriptorAllocator,
-    pub descriptor: [vk::DescriptorSet; 1],
-}
-
-
-impl VkSingleDescriptor {
-    pub fn new(desc_alloc: VkDescriptorAllocator, descriptor: vk::DescriptorSet) -> Self {
-        Self {
-            desc_alloc,
-            descriptor: [descriptor],
-        }
-    }
-
-    pub fn get_raw_descriptor(&self) -> vk::DescriptorSet {
-        unsafe { *self.descriptor.get_unchecked(0) }
-    }
-}
-
-
-pub struct RenderContext {
-    pub draw_context: DrawContext,
-    pub scene_tree: Rc<RefCell<gpu_data::Node>>,
-    pub sky_box: SkyBox,
-}
-
-
-impl Default for RenderContext {
-    fn default() -> Self {
-        Self {
-            draw_context: Default::default(),
-            scene_tree: Rc::new(RefCell::new(Default::default())),
-            sky_box: Default::default(),
-        }
-    }
-}
 
 
 /// Main Render Loop struct.
@@ -118,6 +64,7 @@ pub struct VkRender {
     pub main_deletion_queue: Vec<VkDeletable>,
     pub fence_await_queue: VkFenceQueue,
     pub resize_requested: bool,
+    pub render_graph: RenderGraph,
 }
 
 /// Initializes the data caches (Textures, Meshes, Pipelines, Shaders).
@@ -747,6 +694,12 @@ impl VkRender {
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         );
 
+        let mut render_graph = RenderGraph::new();
+        render_graph.add_pass(Box::new(GeometryPass));
+        render_graph.add_pass(Box::new(SkyboxPass));
+        render_graph.add_pass(Box::new(CopyPass));
+        render_graph.add_pass(Box::new(UiPass));
+
         let mut render = VkRender {
             window_state,
             allocator,
@@ -771,6 +724,7 @@ impl VkRender {
             data_cache,
             brdf_lut: brd_flut,
             resize_requested: false,
+            render_graph,
         };
 
         let loaded_scene = assimp_util::load_model(
@@ -975,85 +929,19 @@ impl VkRender {
             // println!("render Image: {:?}", draw_image);
             // println!("render View: {:?}", draw_view);
 
-            let extent = self.window_state.get_curr_extent();
+            let mut context = RenderPassContext {
+                device: &self.device,
+                pipelines: &self.vulkan_cache.pipelines,
+                frame: curr_frame,
+                window_state: &self.window_state,
+                scene_descriptors: self.scene_descriptors.as_mut(),
+                scene_data: &self.scene_data,
+                data_cache: &self.data_cache,
+                render_context: &mut self.render_context,
+                imgui: &mut self.imgui,
+            };
 
-            // Transition Depth/Draw Images for use
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                draw_image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::GENERAL,
-            );
-
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                depth_image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-            );
-
-            //image from general for background draw, and read for color draw
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                draw_image,
-                vk::ImageLayout::GENERAL,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            );
-
-            self.draw_geometry();
-            self.draw_skybox();
-
-            // Transition draw image and present image for copy compatability
-
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                draw_image,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            );
-
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                present_image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            );
-
-            //copy render image onto present image
-            vk_util::blit_copy_image_to_image(
-                &self.device,
-                cmd_buffer,
-                draw_image,
-                extent,
-                present_image,
-                extent,
-            );
-
-            //re transition present to draw gui on
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                present_image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            );
-
-            // draw gpu upon present image
-            self.draw_imgui(cmd_buffer, present_view);
-
-            // transition draw again for presentation
-            vk_util::transition_image(
-                &self.device,
-                cmd_buffer,
-                present_image,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-            );
+            self.render_graph.execute(cmd_buffer, &mut context);
 
             self.device.end_command_buffer(cmd_buffer).unwrap();
 
@@ -1179,335 +1067,6 @@ impl VkRender {
             skybox_mesh_data.vertex_buffer.alloc_address;
     }
 
-    pub fn draw_skybox(&mut self) {
-        let curr_frame = self.presentation.get_curr_frame_mut();
-        let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffers[0];
-
-        let color_attachment = [vk_util::attachment_info(
-            curr_frame.draw.image_view,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            None,
-        )];
-
-        let depth_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(curr_frame.depth.image_view)
-            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::LOAD)
-            .store_op(vk::AttachmentStoreOp::STORE);
-
-        let extent = self.window_state.get_curr_extent();
-
-        let rendering_info = vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
-
-        let skybox_pipeline = self
-            .vulkan_cache
-            .pipelines
-            .get_pipeline(VkPipelineType::Skybox);
-
-        let skybox_desc = if let Some(desc) = &self.render_context.sky_box.descriptor {
-            desc.descriptor
-        } else {
-            panic!("No skybox descriptor")
-        };
-
-        self.render_context.sky_box.skybox_consts.projection = self.scene_data.projection;
-        self.render_context.sky_box.skybox_consts.model = self.scene_data.view;
-
-        let mesh = self
-            .data_cache
-            .mesh_cache
-            .lock()
-            .unwrap()
-            .get_loaded_id_unchecked(MeshCache::SKYBOX_MESH);
-
-        unsafe {
-            self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
-
-            self.device
-                .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-            self.device
-                .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
-
-            self.device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                skybox_pipeline.pipeline,
-            );
-
-            self.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                skybox_pipeline.layout,
-                0,
-                &skybox_desc,
-                &[],
-            );
-
-            self.device.cmd_bind_index_buffer(
-                cmd_buffer,
-                mesh.index_buffer.buffer,
-                0,
-                vk::IndexType::UINT32,
-            );
-
-            self.device.cmd_push_constants(
-                cmd_buffer,
-                skybox_pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                self.render_context.sky_box.skybox_consts.as_byte_slice(),
-            );
-
-            self.device
-                .cmd_draw_indexed(cmd_buffer, mesh.index_count, 1, 0, 0, 0);
-
-            // End dynamic rendering
-            self.device.cmd_end_rendering(cmd_buffer);
-        }
-    }
-
-    pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
-        let attachment_info = [vk_util::attachment_info(
-            image_view,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            None,
-        )];
-
-        let render_info =
-            vk_util::rendering_info(self.window_state.get_curr_extent(), &attachment_info, None);
-
-        unsafe {
-            self.device.cmd_begin_rendering(cmd_buffer, &render_info);
-        }
-
-        //  let mut selected = self.compute_data.get_current_effect();
-
-        // let frame = self.imgui.context.new_frame();
-        // frame.text(&selected.name);
-
-        // let data_1_arr = &mut selected.data.data_1.to_array();
-        // let mut data_1 = frame
-        //     .input_float4("data1", data_1_arr);
-        //
-        // if data_1.build() {
-        //     selected.data.data_1 = Vec4::from_array(*data_1_arr);
-        // }
-        //
-        //
-        //
-        // let data_2 = frame
-        //     .input_float4("data2", &mut selected.data.data_2.to_array())
-        //     .build();
-        // let data_3 = frame
-        //     .input_float4("data3", &mut selected.data.data_3.to_array())
-        //     .build();
-        // let data_4 = frame
-        //     .input_float4("data4", &mut selected.data.data_4.to_array())
-        //     .build();
-
-        //
-        // frame.slider(
-        //     "Effect Index".to_string(),
-        //     0,
-        //     (self.scene_data.effects.len() - 1) as u32,
-        //     &mut self.scene_data.current,
-        // );
-        //
-        // self.imgui.platform.prepare_render(frame, &self.window);
-
-        self.imgui
-            .context
-            .new_frame()
-            .show_demo_window(&mut self.imgui.opened);
-
-        let draw_data = self.imgui.context.render();
-
-        self.imgui.renderer.cmd_draw(cmd_buffer, draw_data).unwrap();
-
-        unsafe {
-            self.device.cmd_end_rendering(cmd_buffer);
-        }
-    }
-
-    pub fn draw_geometry(&mut self) {
-        let curr_frame = self.presentation.get_curr_frame_mut();
-        let frame_index = curr_frame.index;
-        let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffers[0];
-
-        let clear_value = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
-            },
-        };
-
-        let color_attachment = [vk_util::attachment_info(
-            curr_frame.draw.image_view,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            Some(clear_value),
-        )];
-
-        let depth_attachment = vk_util::depth_attachment_info(
-            curr_frame.depth.image_view,
-            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-        );
-
-        let extent = self.window_state.get_curr_extent();
-
-        let rendering_info =
-            vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
-
-
-        unsafe {
-            self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
-
-            // Write the new scene view/pos
-            let scene_desc = self.scene_descriptors.as_mut().unwrap()
-                .update_scene_uniform(&self.device, self.scene_data, frame_index);
-
-
-            let mut curr_pipeline = *self.vulkan_cache.pipelines.get_pipeline(VkPipelineType::PbrMetRoughOpaque);
-            let mut curr_joint_desc = self.data_cache.mesh_cache.lock().unwrap().get_default_joint_desc();
-
-            self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
-
-
-            // Bind set 0 (SceneData) to the first pipeline and set viewport/scissor
-            self.device
-                .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-            self.device
-                .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
-
-
-            self.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                curr_pipeline.layout,
-                0,
-                &[scene_desc, curr_joint_desc],
-                &[],
-            );
-
-
-            // Start Func
-            let mut draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
-                let material = &(*obj.material);
-                
-                // Rebind on pipeline changes
-                if *pipeline != curr_pipeline {
-                    self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
-
-                    self.device
-                        .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-                    self.device
-                        .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
-
-                    self.device.cmd_bind_descriptor_sets(
-                        cmd_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        curr_pipeline.layout,
-                        0,
-                        &[scene_desc],
-                        &[],
-                    );
-
-                    // check if current joints needs updated, before binding again
-                    if obj.joint_desc != curr_joint_desc {
-                        curr_joint_desc = obj.joint_desc
-                    }
-
-                    self.device.cmd_bind_descriptor_sets(
-                        cmd_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        curr_pipeline.layout,
-                        1,
-                        &[curr_joint_desc],
-                        &[],
-                    );
-
-                    curr_pipeline = *pipeline;
-                }
-
-                // Bind joints if changed (set 1)
-                if obj.joint_desc != curr_joint_desc {
-                    self.device.cmd_bind_descriptor_sets(
-                        cmd_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        curr_pipeline.layout,
-                        1,
-                        &[curr_joint_desc],
-                        &[],
-                    );
-
-                    curr_joint_desc = obj.joint_desc
-                }
-
-                // Bind material image descriptor (set 2)
-                self.device.cmd_bind_descriptor_sets(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    pipeline.layout,
-                    2,
-                    &[material.image_descriptor],
-                    &[],
-                );
-
-
-                self.device.cmd_bind_index_buffer(
-                    cmd_buffer,
-                    obj.index_buffer,
-                    0,
-                    vk::IndexType::UINT32,
-                );
-
-
-                let push_consts = VkModelPushConsts::new(
-                    obj.transform,
-                    obj.vertex_buffer_addr,
-                    material.meta_alloc.alloc_address,
-                );
-
-                self.device.cmd_push_constants(
-                    cmd_buffer,
-                    pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    push_consts.as_byte_slice(),
-                );
-
-                self.device
-                    .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
-            };
-
-
-            //End Func
-
-            for pipeline in &self.render_context.draw_context.active_pipelines {
-                let mat_pipeline = self.vulkan_cache.pipelines.get_pipeline(*pipeline);
-
-                self.device.cmd_bind_pipeline(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    mat_pipeline.pipeline,
-                );
-
-                for ro in self
-                    .render_context
-                    .draw_context
-                    .render_objects
-                    .get_unchecked(*pipeline as usize)
-                {
-                    draw_fn(ro, mat_pipeline);
-                }
-            }
-
-            self.render_context.draw_context.clear();
-
-            self.device.cmd_end_rendering(cmd_buffer);
-        }
-    }
 
     // TODO decide if this is only used for transfers
 

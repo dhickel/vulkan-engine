@@ -19,12 +19,11 @@ This is a Vulkan-based 3D rendering engine written in Rust. It currently support
 ## 2. Current Focal Point
 
 **Goal:** Refactoring Render Loop into Render Graph.
-**Status:** Runtime and build verification passed. Skybox rendering has been optimized (draws last with depth test). Initial `RenderGraph` scaffolding created.
+**Status:** Render logic moved to `GeometryPass`, `SkyboxPass`, `UiPass`, `CopyPass`. `RenderGraph` executes these passes. Hardcoded transitions still exist in passes.
 
 **Immediate Next Steps:**
-1.  **Refactor Render Loop:** Move hardcoded rendering logic (Geometry, Skybox, UI) from `VkRender::render` into `RenderPass` implementations managed by `RenderGraph`.
-2.  **Resource Management:** Implement resource tracking in `RenderGraph` to handle synchronization (barriers) automatically.
-3.  **Expand PBR:** IBL Integration is complete (Irradiance/Prefilter/BRDF), but can be improved by loading pre-computed maps from disk instead of generating them at runtime.
+1.  **Resource Management:** Implement resource tracking in `RenderGraph` to handle synchronization (barriers) automatically.
+2.  **Expand PBR:** IBL Integration is complete (Irradiance/Prefilter/BRDF), but can be improved by loading pre-computed maps from disk instead of generating them at runtime.
 
 ---
 
