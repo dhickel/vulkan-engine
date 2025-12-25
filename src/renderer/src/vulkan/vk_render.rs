@@ -201,47 +201,47 @@ pub fn init_present_pools(
     device: &ash::Device,
     device_queues:
     &VkDeviceQueues,
-) -> Vec<VkCommandPoolMap> {
+) -> Result<Vec<VkCommandPoolMap>, String> {
     // Graphics/Present share the same queue and pool
     (0..2).map(|_| {
         let graphics_pool = vk_init::create_command_pool(
             &device,
             device_queues.get_queue_index(VkQueueType::Graphics),
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        ).unwrap();
+        )?;
 
         let graphics_buffers = vk_init::create_command_buffers(
             &device,
             &graphics_pool,
             CommandBufferLevel::PRIMARY,
             1,
-        ).unwrap();
+        )?;
 
         let transfer_pool = vk_init::create_command_pool(
             &device,
             device_queues.get_queue_index(VkQueueType::Transfer),
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        ).unwrap();
+        )?;
 
         let transfer_buffers = vk_init::create_command_buffers(
             &device,
             &transfer_pool,
             CommandBufferLevel::PRIMARY,
             1,
-        ).unwrap();
+        )?;
 
         let compute_pool = vk_init::create_command_pool(
             &device,
             device_queues.get_queue_index(VkQueueType::Compute),
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        ).unwrap();
+        )?;
 
         let compute_buffers = vk_init::create_command_buffers(
             &device,
             &compute_pool,
             CommandBufferLevel::PRIMARY,
             1,
-        ).unwrap();
+        )?;
 
         let graphics_pool = VkCommandPool {
             queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
@@ -273,7 +273,7 @@ pub fn init_present_pools(
                 (VkQueueType::Transfer, transfer_pool),
                 (VkQueueType::Compute, compute_pool),
             ]
-        ).unwrap()
+        ).map_err(|e| format!("Failed to create command pool map: {:?}", e))
     }).collect()
 }
 
@@ -356,7 +356,7 @@ impl VkRender {
         ////////////////////////////
 
         let entry = vk_init::init_entry();
-        let mut instance_ext = vk_init::get_winit_extensions(&window_state.window);
+        let mut instance_ext = vk_init::get_winit_extensions(&window_state.window)?;
         let (instance, debug) = vk_init::init_instance(
             &entry,
             "test".to_string(),
@@ -479,20 +479,20 @@ impl VkRender {
             }
         };
 
-        let present_pools = init_present_pools(&device, &device_queues);
+        let present_pools = init_present_pools(&device, &device_queues)?;
 
         let mut host_graphic_pools: Vec<VkCommandPool> = {
             let pool = vk_init::create_command_pool(
                 &device,
                 device_queues.get_queue_index(VkQueueType::Graphics),
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            ).unwrap();
+            )?;
 
             let command_buffers = vk_init::create_command_buffers(
                 &device,
                 &pool,
                 vk::CommandBufferLevel::PRIMARY,
-                2).unwrap();
+                2)?;
 
             vec![
                 VkCommandPool {
@@ -934,7 +934,9 @@ impl VkRender {
             .unwrap();
 
         // FIXME, I think we will need to destory the old images view when we reassign
-        let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
+        let present_images = vk_init::create_basic_present_views(&self.device, &swapchain)
+            .map_err(|e| format!("Failed to create present views on resize: {:?}", e))
+            .unwrap(); // TODO: Remove this unwrap when rebuild_swapchain returns Result
 
         self.swapchain = swapchain;
         self.presentation.replace_present_images(&self.device, present_images);
