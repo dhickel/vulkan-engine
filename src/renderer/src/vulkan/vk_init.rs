@@ -41,10 +41,17 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
 }
 
 /// Gets the required Vulkan instance extensions for drawing to a Winit window.
-pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
-    ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
-        .unwrap()
-        .to_vec()
+pub fn get_winit_extensions(window: &winit::window::Window) -> Result<Vec<*const c_char>, String> {
+    let display_handle = window
+        .display_handle()
+        .map_err(|e| format!("Failed to get display handle: {:?}", e))?
+        .as_raw();
+
+    let extensions = ash_window::enumerate_required_extensions(display_handle)
+        .map_err(|e| format!("Failed to enumerate required extensions: {:?}", e))?
+        .to_vec();
+
+    Ok(extensions)
 }
 
 // pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
@@ -73,7 +80,7 @@ pub fn init_instance(
 ) -> Result<(ash::Instance, Option<VkDebug>), String> {
     log::info!("Creating Vulkan Instance");
 
-    let app_name = CString::new(app_name).unwrap();
+    let app_name = CString::new(app_name).map_err(|e| format!("Invalid app name: {:?}", e))?;
     let engine_name = CString::new("Unnamed Engine: Alpha").unwrap();
 
     let app_info = vk::ApplicationInfo::default()
@@ -128,7 +135,7 @@ pub fn init_instance(
         let debug_call_back: vk::DebugUtilsMessengerEXT = unsafe {
             debug_utils_loader
                 .create_debug_utils_messenger(&debug_info, None)
-                .unwrap()
+                .map_err(|e| format!("Failed to create debug messenger: {:?}", e))?
         };
         log::info!("Vulkan Instance Created");
 
@@ -181,12 +188,21 @@ pub fn get_window_surface(
 ) -> Result<VkSurface, String> {
     log::info!("Creating surface");
 
+    let display_handle = window
+        .display_handle()
+        .map_err(|e| format!("Failed to get display handle: {:?}", e))?
+        .as_raw();
+    let window_handle = window
+        .window_handle()
+        .map_err(|e| format!("Failed to get window handle: {:?}", e))?
+        .as_raw();
+
     let surface = unsafe {
         ash_window::create_surface(
             &entry,
             &instance,
-            window.display_handle().unwrap().as_raw(),
-            window.window_handle().unwrap().as_raw(),
+            display_handle,
+            window_handle,
             None,
         )
         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
@@ -255,7 +271,7 @@ pub fn get_physical_devices(
 
         let device_name = unsafe { CStr::from_ptr(device_properties.device_name.as_ptr()) }
             .to_str()
-            .unwrap();
+            .unwrap_or("Unknown Device");
 
         let device_id = device_properties.device_id;
 
@@ -273,7 +289,7 @@ pub fn get_physical_devices(
 
             let available_ext_cstr: Vec<&CStr> = available_ext
                 .iter()
-                .map(|e| e.extension_name_as_c_str().unwrap())
+                .filter_map(|e| e.extension_name_as_c_str().ok())
                 .collect();
 
             if let false = get_basic_device_ext_names()
@@ -1108,14 +1124,18 @@ pub fn select_sc_surface_format(
         }
     }
 
-    let first_format = *available_formats.first().unwrap();
-    log::info!(
-        "No expected format, returning: {:?}|{:?}",
-        first_format.format,
-        first_format.color_space
-    );
-
-    (false, first_format)
+    if let Some(first_format) = available_formats.first() {
+        log::info!(
+            "No expected format, returning: {:?}|{:?}",
+            first_format.format,
+            first_format.color_space
+        );
+        (false, *first_format)
+    } else {
+         log::error!("No available surface formats found");
+         // Return a default or handle as error in caller if checking bool
+         (false, vk::SurfaceFormatKHR::default())
+    }
 }
 
 /// Helper to select a specific present mode.
