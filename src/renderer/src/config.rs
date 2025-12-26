@@ -27,6 +27,7 @@ pub struct ShaderFiles {
 pub struct AssetPaths {
     pub skybox_dir: String,
     pub default_model: String,
+    pub cache_dir: String,
 }
 
 impl Default for RendererConfig {
@@ -48,6 +49,7 @@ impl Default for RendererConfig {
             assets: AssetPaths {
                 skybox_dir: "src/renderer/src/assets/sky_maps/sky".to_string(),
                 default_model: "src/renderer/src/assets/DamagedHelmet.glb".to_string(),
+                cache_dir: "assets/cache".to_string(),
             },
         }
     }
