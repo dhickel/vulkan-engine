@@ -28,7 +28,7 @@ use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 use crate::data::data_util::CountdownLatch;
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
-use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
+use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util, vk_init_helpers};
 use crate::config::RendererConfig;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
@@ -199,81 +199,45 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
 
 pub fn init_present_pools(
     device: &ash::Device,
-    device_queues:
-    &VkDeviceQueues,
+    device_queues: &VkDeviceQueues,
 ) -> Result<Vec<VkCommandPoolMap>, String> {
     // Graphics/Present share the same queue and pool
     (0..2).map(|_| {
-        let graphics_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Graphics),
+        let graphics_pool = vk_init_helpers::create_command_pool_and_buffers(
+            device,
+            device_queues,
+            VkQueueType::Graphics,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
-
-        let graphics_buffers = vk_init::create_command_buffers(
-            &device,
-            &graphics_pool,
             CommandBufferLevel::PRIMARY,
             1,
         )?;
 
-        let transfer_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Transfer),
+        let transfer_pool = vk_init_helpers::create_command_pool_and_buffers(
+            device,
+            device_queues,
+            VkQueueType::Transfer,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
-
-        let transfer_buffers = vk_init::create_command_buffers(
-            &device,
-            &transfer_pool,
             CommandBufferLevel::PRIMARY,
             1,
         )?;
 
-        let compute_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Compute),
+        let compute_pool = vk_init_helpers::create_command_pool_and_buffers(
+            device,
+            device_queues,
+            VkQueueType::Compute,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
-
-        let compute_buffers = vk_init::create_command_buffers(
-            &device,
-            &compute_pool,
             CommandBufferLevel::PRIMARY,
             1,
         )?;
-
-        let graphics_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
-            queue_type: VkQueueType::Graphics,
-            pool: graphics_pool,
-            buffers: graphics_buffers,
-        };
 
         let present_pool = graphics_pool.clone();
 
-        let transfer_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-            queue_type: VkQueueType::Transfer,
-            pool: transfer_pool,
-            buffers: transfer_buffers,
-        };
-
-        let compute_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Compute),
-            queue_type: VkQueueType::Compute,
-            pool: compute_pool,
-            buffers: compute_buffers,
-        };
-
-        VkCommandPoolMap::new(
-            vec![
-                (VkQueueType::Graphics, graphics_pool),
-                (VkQueueType::Present, present_pool),
-                (VkQueueType::Transfer, transfer_pool),
-                (VkQueueType::Compute, compute_pool),
-            ]
-        ).map_err(|e| format!("Failed to create command pool map: {:?}", e))
+        VkCommandPoolMap::new(vec![
+            (VkQueueType::Graphics, graphics_pool),
+            (VkQueueType::Present, present_pool),
+            (VkQueueType::Transfer, transfer_pool),
+            (VkQueueType::Compute, compute_pool),
+        ]).map_err(|e| format!("Failed to create command pool map: {:?}", e))
     }).collect()
 }
 
@@ -438,74 +402,54 @@ impl VkRender {
 
         let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(2);
 
-        for i in 0..2 {
-            let cmd_pool = vk_init::create_command_pool(
+        for _ in 0..2 {
+            let pool = vk_init_helpers::create_command_pool_and_buffers(
                 &device,
-                device_queues.get_queue_index(VkQueueType::Transfer),
+                &device_queues,
+                VkQueueType::Transfer,
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )?;
-            let buffers = vk_init::create_command_buffers(
-                &device,
-                &cmd_pool,
                 CommandBufferLevel::PRIMARY,
                 1,
             )?;
-            host_buffer_pools.push(VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-                queue_type: VkQueueType::Transfer,
-                pool: cmd_pool,
-                buffers: buffers,
-            });
+            host_buffer_pools.push(pool);
         }
 
-        let local_transfer_pool = {
-            let cmd_pool = vk_init::create_command_pool(
-                &device,
-                device_queues.get_queue_index(VkQueueType::Transfer),
-                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )?;
-
-            let buffers = vk_init::create_command_buffers(
-                &device,
-                &cmd_pool,
-                CommandBufferLevel::PRIMARY,
-                1,
-            )?;
-            VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-                queue_type: VkQueueType::Transfer,
-                pool: cmd_pool,
-                buffers: buffers,
-            }
-        };
+        let local_transfer_pool = vk_init_helpers::create_command_pool_and_buffers(
+            &device,
+            &device_queues,
+            VkQueueType::Transfer,
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            CommandBufferLevel::PRIMARY,
+            1,
+        )?;
 
         let present_pools = init_present_pools(&device, &device_queues)?;
 
         let mut host_graphic_pools: Vec<VkCommandPool> = {
-            let pool = vk_init::create_command_pool(
+            let pool_struct = vk_init_helpers::create_command_pool_and_buffers(
                 &device,
-                device_queues.get_queue_index(VkQueueType::Graphics),
+                &device_queues,
+                VkQueueType::Graphics,
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                CommandBufferLevel::PRIMARY,
+                2,
             )?;
 
-            let command_buffers = vk_init::create_command_buffers(
-                &device,
-                &pool,
-                vk::CommandBufferLevel::PRIMARY,
-                2)?;
+            let pool = pool_struct.pool;
+            let buffers = pool_struct.buffers;
 
             vec![
                 VkCommandPool {
                     queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
                     queue_type: VkQueueType::Graphics,
                     pool,
-                    buffers: vec![command_buffers[0]],
+                    buffers: vec![buffers[0]],
                 },
                 VkCommandPool {
                     queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
                     queue_type: VkQueueType::Graphics,
                     pool,
-                    buffers: vec![command_buffers[1]],
+                    buffers: vec![buffers[1]],
                 },
             ]
         };

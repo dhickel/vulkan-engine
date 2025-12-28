@@ -8,3 +8,4 @@ pub mod vk_storage;
 pub mod vk_debug;
 pub mod render_graph;
 pub mod render_passes;
+pub mod vk_init_helpers;
