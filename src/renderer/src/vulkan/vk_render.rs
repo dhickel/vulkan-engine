@@ -33,7 +33,7 @@ use crate::config::RendererConfig;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
 use crate::vulkan::render_graph::{RenderGraph, RenderPassContext};
-use crate::vulkan::render_passes::{GeometryPass, SkyboxPass, CopyPass, UiPass};
+use crate::vulkan::render_passes::{GeometryPass, SkyboxPass, CopyPass, UiPass, PresentPass};
 
 
 
@@ -81,7 +81,7 @@ pub fn init_caches(
     limits: &VkBufferAndDescriptorLimits,
     device_queues: VkDeviceQueues,
     config: &RendererConfig,
-) -> (Arc<VkDataCache>, VkCache) {
+) -> Result<(Arc<VkDataCache>, VkCache), String> {
     let shader_paths = vec![
         (CoreShaderType::MetRoughVert, config.get_shader_path(&config.shader_files.pbr_vert)),
         (CoreShaderType::MetRoughFrag, config.get_shader_path(&config.shader_files.pbr_frag)),
@@ -95,7 +95,7 @@ pub fn init_caches(
         (CoreShaderType::EnvPrefilterFrag, config.get_shader_path(&config.shader_files.env_prefilter_frag)),
     ];
 
-    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect()).unwrap();
+    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect())?;
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
     let pipeline_cache = vk_pipeline::init_pipeline_cache(
         device,
@@ -115,16 +115,16 @@ pub fn init_caches(
         texture_meta_buffer_size, &limits,
         mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
         device_queues.graphics_queue.1
-    ).unwrap();
+    )?;
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    ).unwrap();
+    )?;
 
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-    ).unwrap();
+    )?;
 
     let mesh_cache = MeshCache::new(
         device,
@@ -153,7 +153,7 @@ pub fn init_caches(
         queues: device_queues,
     };
 
-    (Arc::new(data_cache), vulkan_cache)
+    Ok((Arc::new(data_cache), vulkan_cache))
 }
 
 
@@ -671,7 +671,7 @@ impl VkRender {
             &buffer_and_desc_limits,
             device_queues,
             config,
-        );
+        )?;
 
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
@@ -699,6 +699,7 @@ impl VkRender {
         render_graph.add_pass(Box::new(SkyboxPass));
         render_graph.add_pass(Box::new(CopyPass));
         render_graph.add_pass(Box::new(UiPass));
+        render_graph.add_pass(Box::new(PresentPass));
 
         let mut render = VkRender {
             window_state,
@@ -769,15 +770,15 @@ impl VkRender {
 
         render.render_context.scene_tree = loaded_scene.node;
         render.allocate_skymap();
-        render.init_skybox();
+        render.init_skybox()?;
 
         let env_maps = {
             let env_cache = render.data_cache.environment_cache.lock().unwrap();
             if let CachedEnvironment::Loaded(env) = env_cache.get_skybox(0) {
                 // Check cache files
-                let cache_dir = std::path::Path::new("assets/cache/env_maps");
+                let cache_dir = std::path::Path::new(&config.assets.cache_dir).join("env_maps");
                 if !cache_dir.exists() {
-                    std::fs::create_dir_all(cache_dir).unwrap();
+                    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create cache dir: {:?}", e))?;
                 }
 
                 let irr_path = cache_dir.join("irradiance.bin");
@@ -1045,8 +1046,11 @@ impl VkRender {
             // Wait for semaphores and submit
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
 
+            // We wait for the swapchain image to be available before we start writing to it.
+            // Since we write to it in CopyPass (Transfer) and UiPass (Color Attachment),
+            // we should wait at TRANSFER stage or earlier.
             let wait_info = [vk_util::semaphore_submit_info(
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT_KHR,
+                vk::PipelineStageFlags2::TRANSFER,
                 frame_sync.swap_semaphore,
             )];
 
@@ -1084,7 +1088,7 @@ impl VkRender {
         // )
     }
 
-    pub fn init_skybox(&mut self) {
+    pub fn init_skybox(&mut self) -> Result<(), String> {
         let pipeline = self
             .vulkan_cache
             .pipelines
@@ -1114,7 +1118,7 @@ impl VkRender {
         let skybox_image_data = if let CachedEnvironment::Loaded(map) = env_cache.get_skybox(0) {
             map
         } else {
-            panic!("Env map not loaded")
+             return Err("Env map not loaded".to_string());
         };
 
         let skybox_desc_alloc = VkDescriptorAllocator::new(
@@ -1124,15 +1128,13 @@ impl VkRender {
                 DescriptorType::COMBINED_IMAGE_SAMPLER,
                 1.0,
             )],
-        )
-            .unwrap();
+        )?;
 
         let skybox_desc = skybox_desc_alloc
             .allocate(
                 &self.device,
                 &[self.vulkan_cache.desc_layouts.get(VkDescType::Skybox)],
-            )
-            .unwrap();
+            )?;
 
         let mut sb_desc_writer = VkDescriptorWriter::default();
         let cmd_buffer = self.presentation.frame_data[0]
@@ -1162,6 +1164,8 @@ impl VkRender {
 
         self.render_context.sky_box.skybox_consts.vertex_buffer_addr =
             skybox_mesh_data.vertex_buffer.alloc_address;
+
+        Ok(())
     }
 
 
@@ -1271,7 +1275,7 @@ impl VkRender {
                 format,
                 vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
                 1,
-            );
+            )?;
 
             let mut viewport = [vk::Viewport {
                 x: 0.0,

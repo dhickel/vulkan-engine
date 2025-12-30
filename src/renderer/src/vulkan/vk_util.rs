@@ -160,7 +160,7 @@ pub fn create_image(
     format: vk::Format,
     usage_flags: vk::ImageUsageFlags,
     mips_levels: u32,
-) -> VkImageAlloc {
+) -> Result<VkImageAlloc, String> {
     let image_info = image_create_info(
         format,
         usage_flags,
@@ -175,7 +175,11 @@ pub fn create_image(
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
 
-    let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
+    let (image, allocation) = unsafe {
+        allocator
+            .create_image(&image_info, &alloc_info)
+            .map_err(|e| format!("Failed to create image: {:?}", e))?
+    };
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
         vk::ImageAspectFlags::DEPTH
     } else {
@@ -186,16 +190,20 @@ pub fn create_image(
         image_view_create_info(format, vk::ImageViewType::TYPE_2D, image, aspect_flag);
     view_info.subresource_range.level_count = mips_levels;
 
-    let image_view = unsafe { device.create_image_view(&view_info, None).unwrap() };
+    let image_view = unsafe {
+        device
+            .create_image_view(&view_info, None)
+            .map_err(|e| format!("Failed to create image view: {:?}", e))?
+    };
 
-    VkImageAlloc {
+    Ok(VkImageAlloc {
         image,
         image_view,
         allocation,
         image_extent: size,
         image_format: format,
         mip_levels: mips_levels,
-    }
+    })
 }
 
 
@@ -616,7 +624,8 @@ pub fn generate_brdf_lut(
         format,
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         1,
-    );
+    )
+    .unwrap();
 
     let brd_sampler = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::LINEAR)
@@ -1291,7 +1300,7 @@ pub fn record_host_to_image_buffer(
                 Extent3D::default().height(meta.height).width(meta.width).depth(1),
                 meta.format,
                 vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-                1) //calc_mips_count(meta.width, meta.height))
+                1).unwrap() //calc_mips_count(meta.width, meta.height))
     }).collect();
 
 
