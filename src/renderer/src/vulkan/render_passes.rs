@@ -356,14 +356,28 @@ impl RenderPass for UiPass {
         unsafe {
             context.device.cmd_end_rendering(cmd);
         }
+    }
+}
 
-        // Transition for presentation
-        vk_util::transition_image(
-            context.device,
-            cmd,
-            context.frame.present_image,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::PRESENT_SRC_KHR,
-        );
+pub struct PresentPass;
+
+impl RenderPass for PresentPass {
+    fn name(&self) -> &str { "Present Pass" }
+
+    fn required_resources(&self) -> Vec<(GraphResource, ResourceState)> {
+        vec![
+            (
+                GraphResource::PresentImage,
+                ResourceState::new(
+                    vk::ImageLayout::PRESENT_SRC_KHR,
+                    vk::AccessFlags2::empty(),
+                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                ),
+            )
+        ]
+    }
+
+    fn draw(&mut self, _cmd: vk::CommandBuffer, _context: &mut RenderPassContext) {
+        // No-op, just here to trigger the transition
     }
 }
