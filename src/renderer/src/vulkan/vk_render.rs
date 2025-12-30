@@ -81,7 +81,7 @@ pub fn init_caches(
     limits: &VkBufferAndDescriptorLimits,
     device_queues: VkDeviceQueues,
     config: &RendererConfig,
-) -> (Arc<VkDataCache>, VkCache) {
+) -> Result<(Arc<VkDataCache>, VkCache), String> {
     let shader_paths = vec![
         (CoreShaderType::MetRoughVert, config.get_shader_path(&config.shader_files.pbr_vert)),
         (CoreShaderType::MetRoughFrag, config.get_shader_path(&config.shader_files.pbr_frag)),
@@ -95,7 +95,9 @@ pub fn init_caches(
         (CoreShaderType::EnvPrefilterFrag, config.get_shader_path(&config.shader_files.env_prefilter_frag)),
     ];
 
-    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect()).unwrap();
+    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect())
+        .map_err(|e| format!("Failed to create shader cache: {:?}", e))?;
+
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
     let pipeline_cache = vk_pipeline::init_pipeline_cache(
         device,
@@ -109,22 +111,25 @@ pub fn init_caches(
     let image_desc_layout = desc_layout_cache.get(VkDescType::PbrSamplers);
 
     let sampler_cache = VkSamplerCache::default();
+
+    let graphics_pool = mesh_host_buffer.lock().unwrap().graphics_pool.clone();
+
     let texture_cache = TextureCache::new(
         device, allocator.clone(), sampler_cache, supported_formats.clone(),
         meta_desc_layout, image_desc_layout, texture_host_buffer.clone(),
         texture_meta_buffer_size, &limits,
-        mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
+        graphics_pool,
         device_queues.graphics_queue.1
-    ).unwrap();
+    ).map_err(|e| format!("Failed to create texture cache: {:?}", e))?;
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    ).unwrap();
+    ).map_err(|e| format!("Failed to create vertex allocator: {:?}", e))?;
 
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-    ).unwrap();
+    ).map_err(|e| format!("Failed to create index allocator: {:?}", e))?;
 
     let mesh_cache = MeshCache::new(
         device,
@@ -136,7 +141,7 @@ pub fn init_caches(
 
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
-    let id = environment_cache
+    let _id = environment_cache
         .load_cubemap_dir(&config.assets.skybox_dir);
 
     let data_cache = VkDataCache {
@@ -153,7 +158,7 @@ pub fn init_caches(
         queues: device_queues,
     };
 
-    (Arc::new(data_cache), vulkan_cache)
+    Ok((Arc::new(data_cache), vulkan_cache))
 }
 
 
@@ -671,7 +676,7 @@ impl VkRender {
             &buffer_and_desc_limits,
             device_queues,
             config,
-        );
+        )?;
 
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
@@ -775,9 +780,11 @@ impl VkRender {
             let env_cache = render.data_cache.environment_cache.lock().unwrap();
             if let CachedEnvironment::Loaded(env) = env_cache.get_skybox(0) {
                 // Check cache files
-                let cache_dir = std::path::Path::new("assets/cache/env_maps");
+                let cache_root = std::path::Path::new(&config.assets.cache_dir);
+                let cache_dir = cache_root.join("env_maps");
+
                 if !cache_dir.exists() {
-                    std::fs::create_dir_all(cache_dir).unwrap();
+                    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create cache dir: {:?}", e))?;
                 }
 
                 let irr_path = cache_dir.join("irradiance.bin");
@@ -848,7 +855,7 @@ impl VkRender {
                         transfer_pool,
                         transfer_queue,
                     )
-                    .unwrap();
+                    .map_err(|e| format!("Failed to download irradiance map: {:?}", e))?;
 
                     let pref_mips = data_util::calc_mips_count(
                         env_maps.pre_filter.full_extent.width,
@@ -864,15 +871,15 @@ impl VkRender {
                         transfer_pool,
                         transfer_queue,
                     )
-                    .unwrap();
+                    .map_err(|e| format!("Failed to download prefilter map: {:?}", e))?;
 
-                    vk_util::save_texture_meta(&irr_path, &irr_meta).unwrap();
-                    vk_util::save_texture_meta(&pref_path, &pref_meta).unwrap();
+                    vk_util::save_texture_meta(&irr_path, &irr_meta).map_err(|e| format!("Failed to save irradiance map: {:?}", e))?;
+                    vk_util::save_texture_meta(&pref_path, &pref_meta).map_err(|e| format!("Failed to save prefilter map: {:?}", e))?;
 
                     env_maps
                 }
             } else {
-                panic!("No env for generation")
+                return Err("No env for generation".to_string());
             }
         };
 
