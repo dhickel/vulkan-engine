@@ -28,7 +28,7 @@ use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 use crate::data::data_util::CountdownLatch;
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_types::*;
-use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
+use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util, vk_init_helpers};
 use crate::config::RendererConfig;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_util::allocate_buffer;
@@ -95,7 +95,9 @@ pub fn init_caches(
         (CoreShaderType::EnvPrefilterFrag, config.get_shader_path(&config.shader_files.env_prefilter_frag)),
     ];
 
-    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect())?;
+    let shader_cache = VkShaderCache::new(device, shader_paths.iter().map(|(t, p)| (*t, p.as_str())).collect())
+        .map_err(|e| format!("Failed to create shader cache: {:?}", e))?;
+
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
     let pipeline_cache = vk_pipeline::init_pipeline_cache(
         device,
@@ -109,22 +111,25 @@ pub fn init_caches(
     let image_desc_layout = desc_layout_cache.get(VkDescType::PbrSamplers);
 
     let sampler_cache = VkSamplerCache::default();
+
+    let graphics_pool = mesh_host_buffer.lock().unwrap().graphics_pool.clone();
+
     let texture_cache = TextureCache::new(
         device, allocator.clone(), sampler_cache, supported_formats.clone(),
         meta_desc_layout, image_desc_layout, texture_host_buffer.clone(),
         texture_meta_buffer_size, &limits,
-        mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
+        graphics_pool,
         device_queues.graphics_queue.1
-    )?;
+    ).map_err(|e| format!("Failed to create texture cache: {:?}", e))?;
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    )?;
+    ).map_err(|e| format!("Failed to create vertex allocator: {:?}", e))?;
 
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
         device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-    )?;
+    ).map_err(|e| format!("Failed to create index allocator: {:?}", e))?;
 
     let mesh_cache = MeshCache::new(
         device,
@@ -136,7 +141,7 @@ pub fn init_caches(
 
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
-    let id = environment_cache
+    let _id = environment_cache
         .load_cubemap_dir(&config.assets.skybox_dir);
 
     let data_cache = VkDataCache {
@@ -199,81 +204,45 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
 
 pub fn init_present_pools(
     device: &ash::Device,
-    device_queues:
-    &VkDeviceQueues,
+    device_queues: &VkDeviceQueues,
 ) -> Result<Vec<VkCommandPoolMap>, String> {
     // Graphics/Present share the same queue and pool
     (0..2).map(|_| {
-        let graphics_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Graphics),
+        let graphics_pool = vk_init_helpers::create_command_pool_and_buffers(
+            device,
+            device_queues,
+            VkQueueType::Graphics,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
-
-        let graphics_buffers = vk_init::create_command_buffers(
-            &device,
-            &graphics_pool,
             CommandBufferLevel::PRIMARY,
             1,
         )?;
 
-        let transfer_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Transfer),
+        let transfer_pool = vk_init_helpers::create_command_pool_and_buffers(
+            device,
+            device_queues,
+            VkQueueType::Transfer,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
-
-        let transfer_buffers = vk_init::create_command_buffers(
-            &device,
-            &transfer_pool,
             CommandBufferLevel::PRIMARY,
             1,
         )?;
 
-        let compute_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Compute),
+        let compute_pool = vk_init_helpers::create_command_pool_and_buffers(
+            device,
+            device_queues,
+            VkQueueType::Compute,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        )?;
-
-        let compute_buffers = vk_init::create_command_buffers(
-            &device,
-            &compute_pool,
             CommandBufferLevel::PRIMARY,
             1,
         )?;
-
-        let graphics_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
-            queue_type: VkQueueType::Graphics,
-            pool: graphics_pool,
-            buffers: graphics_buffers,
-        };
 
         let present_pool = graphics_pool.clone();
 
-        let transfer_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-            queue_type: VkQueueType::Transfer,
-            pool: transfer_pool,
-            buffers: transfer_buffers,
-        };
-
-        let compute_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Compute),
-            queue_type: VkQueueType::Compute,
-            pool: compute_pool,
-            buffers: compute_buffers,
-        };
-
-        VkCommandPoolMap::new(
-            vec![
-                (VkQueueType::Graphics, graphics_pool),
-                (VkQueueType::Present, present_pool),
-                (VkQueueType::Transfer, transfer_pool),
-                (VkQueueType::Compute, compute_pool),
-            ]
-        ).map_err(|e| format!("Failed to create command pool map: {:?}", e))
+        VkCommandPoolMap::new(vec![
+            (VkQueueType::Graphics, graphics_pool),
+            (VkQueueType::Present, present_pool),
+            (VkQueueType::Transfer, transfer_pool),
+            (VkQueueType::Compute, compute_pool),
+        ]).map_err(|e| format!("Failed to create command pool map: {:?}", e))
     }).collect()
 }
 
@@ -438,74 +407,54 @@ impl VkRender {
 
         let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(2);
 
-        for i in 0..2 {
-            let cmd_pool = vk_init::create_command_pool(
+        for _ in 0..2 {
+            let pool = vk_init_helpers::create_command_pool_and_buffers(
                 &device,
-                device_queues.get_queue_index(VkQueueType::Transfer),
+                &device_queues,
+                VkQueueType::Transfer,
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )?;
-            let buffers = vk_init::create_command_buffers(
-                &device,
-                &cmd_pool,
                 CommandBufferLevel::PRIMARY,
                 1,
             )?;
-            host_buffer_pools.push(VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-                queue_type: VkQueueType::Transfer,
-                pool: cmd_pool,
-                buffers: buffers,
-            });
+            host_buffer_pools.push(pool);
         }
 
-        let local_transfer_pool = {
-            let cmd_pool = vk_init::create_command_pool(
-                &device,
-                device_queues.get_queue_index(VkQueueType::Transfer),
-                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )?;
-
-            let buffers = vk_init::create_command_buffers(
-                &device,
-                &cmd_pool,
-                CommandBufferLevel::PRIMARY,
-                1,
-            )?;
-            VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-                queue_type: VkQueueType::Transfer,
-                pool: cmd_pool,
-                buffers: buffers,
-            }
-        };
+        let local_transfer_pool = vk_init_helpers::create_command_pool_and_buffers(
+            &device,
+            &device_queues,
+            VkQueueType::Transfer,
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            CommandBufferLevel::PRIMARY,
+            1,
+        )?;
 
         let present_pools = init_present_pools(&device, &device_queues)?;
 
         let mut host_graphic_pools: Vec<VkCommandPool> = {
-            let pool = vk_init::create_command_pool(
+            let pool_struct = vk_init_helpers::create_command_pool_and_buffers(
                 &device,
-                device_queues.get_queue_index(VkQueueType::Graphics),
+                &device_queues,
+                VkQueueType::Graphics,
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                CommandBufferLevel::PRIMARY,
+                2,
             )?;
 
-            let command_buffers = vk_init::create_command_buffers(
-                &device,
-                &pool,
-                vk::CommandBufferLevel::PRIMARY,
-                2)?;
+            let pool = pool_struct.pool;
+            let buffers = pool_struct.buffers;
 
             vec![
                 VkCommandPool {
                     queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
                     queue_type: VkQueueType::Graphics,
                     pool,
-                    buffers: vec![command_buffers[0]],
+                    buffers: vec![buffers[0]],
                 },
                 VkCommandPool {
                     queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
                     queue_type: VkQueueType::Graphics,
                     pool,
-                    buffers: vec![command_buffers[1]],
+                    buffers: vec![buffers[1]],
                 },
             ]
         };
@@ -776,7 +725,9 @@ impl VkRender {
             let env_cache = render.data_cache.environment_cache.lock().unwrap();
             if let CachedEnvironment::Loaded(env) = env_cache.get_skybox(0) {
                 // Check cache files
-                let cache_dir = std::path::Path::new(&config.assets.cache_dir).join("env_maps");
+                let cache_root = std::path::Path::new(&config.assets.cache_dir);
+                let cache_dir = cache_root.join("env_maps");
+
                 if !cache_dir.exists() {
                     std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create cache dir: {:?}", e))?;
                 }
@@ -849,7 +800,7 @@ impl VkRender {
                         transfer_pool,
                         transfer_queue,
                     )
-                    .unwrap();
+                    .map_err(|e| format!("Failed to download irradiance map: {:?}", e))?;
 
                     let pref_mips = data_util::calc_mips_count(
                         env_maps.pre_filter.full_extent.width,
@@ -865,15 +816,15 @@ impl VkRender {
                         transfer_pool,
                         transfer_queue,
                     )
-                    .unwrap();
+                    .map_err(|e| format!("Failed to download prefilter map: {:?}", e))?;
 
-                    vk_util::save_texture_meta(&irr_path, &irr_meta).unwrap();
-                    vk_util::save_texture_meta(&pref_path, &pref_meta).unwrap();
+                    vk_util::save_texture_meta(&irr_path, &irr_meta).map_err(|e| format!("Failed to save irradiance map: {:?}", e))?;
+                    vk_util::save_texture_meta(&pref_path, &pref_meta).map_err(|e| format!("Failed to save prefilter map: {:?}", e))?;
 
                     env_maps
                 }
             } else {
-                panic!("No env for generation")
+                return Err("No env for generation".to_string());
             }
         };
 
