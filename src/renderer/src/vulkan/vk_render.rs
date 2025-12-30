@@ -111,11 +111,14 @@ pub fn init_caches(
     let image_desc_layout = desc_layout_cache.get(VkDescType::PbrSamplers);
 
     let sampler_cache = VkSamplerCache::default();
+
+    let graphics_pool = mesh_host_buffer.lock().unwrap().graphics_pool.clone();
+
     let texture_cache = TextureCache::new(
         device, allocator.clone(), sampler_cache, supported_formats.clone(),
         meta_desc_layout, image_desc_layout, texture_host_buffer.clone(),
         texture_meta_buffer_size, &limits,
-        mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
+        graphics_pool,
         device_queues.graphics_queue.1
     ).map_err(|e| format!("Failed to create texture cache: {:?}", e))?;
 
@@ -780,7 +783,9 @@ impl VkRender {
                 let cache_root = std::path::Path::new(&config.assets.cache_dir);
                 let cache_dir = cache_root.join("env_maps");
 
-                std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create env map cache directory: {:?}", e))?;
+                if !cache_dir.exists() {
+                    std::fs::create_dir_all(&cache_dir).map_err(|e| format!("Failed to create cache dir: {:?}", e))?;
+                }
 
                 let irr_path = cache_dir.join("irradiance.bin");
                 let pref_path = cache_dir.join("prefilter.bin");
@@ -850,7 +855,7 @@ impl VkRender {
                         transfer_pool,
                         transfer_queue,
                     )
-                    .unwrap();
+                    .map_err(|e| format!("Failed to download irradiance map: {:?}", e))?;
 
                     let pref_mips = data_util::calc_mips_count(
                         env_maps.pre_filter.full_extent.width,
@@ -866,15 +871,15 @@ impl VkRender {
                         transfer_pool,
                         transfer_queue,
                     )
-                    .unwrap();
+                    .map_err(|e| format!("Failed to download prefilter map: {:?}", e))?;
 
-                    vk_util::save_texture_meta(&irr_path, &irr_meta).unwrap();
-                    vk_util::save_texture_meta(&pref_path, &pref_meta).unwrap();
+                    vk_util::save_texture_meta(&irr_path, &irr_meta).map_err(|e| format!("Failed to save irradiance map: {:?}", e))?;
+                    vk_util::save_texture_meta(&pref_path, &pref_meta).map_err(|e| format!("Failed to save prefilter map: {:?}", e))?;
 
                     env_maps
                 }
             } else {
-                panic!("No env for generation")
+                return Err("No env for generation".to_string());
             }
         };
 
