@@ -1,4 +1,11 @@
 use ash::vk;
+use crate::vulkan::vk_types::{VkCommandPool, VkQueueType, VkCommandPoolMap, VkHostBuffer, VkImgui, VkDeviceQueues, VkTransfer, VkWindowState};
+use crate::vulkan::vk_init;
+use std::sync::{Arc, Mutex};
+use vk_mem::Allocator;
+use crate::data::data_util::{mb_to_bytes, CountdownLatch};
+use crate::vulkan::vk_util;
+use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use crate::vulkan::vk_types::{VkCommandPool, VkQueueType, VkCommandPoolMap, VkImgui, VkDeviceQueues, VkHostBuffer};
 use crate::vulkan::{vk_init, vk_util};
 use ash::Device;
@@ -77,43 +84,83 @@ pub fn create_sync_objects(
 
     let fences: Vec<vk::Fence> = (0..4).map(|_| {
         unsafe { device.create_fence(&fence_info, None) }
-    }).collect::<Result<Vec<_>, _>>().map_err(|e| format!("Failed to create fence: {:?}", e))?;
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())?;
 
     let semaphores: Vec<vk::Semaphore> = (0..2).map(|_| {
         unsafe { device.create_semaphore(&semaphore_info, None) }
-    }).collect::<Result<Vec<_>, _>>().map_err(|e| format!("Failed to create semaphore: {:?}", e))?;
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| e.to_string())?;
 
     Ok((fences, semaphores))
 }
 
 pub fn create_host_buffer(
-    device: &Device,
     allocator: &Arc<Mutex<Allocator>>,
-    transfer_sender: std::sync::mpsc::Sender<crate::vulkan::vk_types::VkCmdSubmitInfo>,
+    size_mb: u64,
+    transfer: &VkTransfer,
     transfer_pool: VkCommandPool,
     graphics_pool: VkCommandPool,
-    device_queues: &VkDeviceQueues,
-    fences: Vec<vk::Fence>,
-    semaphores: Vec<vk::Semaphore>,
-    size_mb: u64,
+    fences: [vk::Fence; 2],
+    semaphore: [vk::Semaphore; 1],
+    transfer_queue_index: u32,
+    graphics_queue_index: u32,
 ) -> Result<Arc<Mutex<VkHostBuffer>>, String> {
-    let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
-    let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
-
-    let buffer = vk_util::allocate_host_buffer(&allocator.lock().unwrap(), mb_to_bytes(size_mb))
+     let buffer = vk_util::allocate_host_buffer(&allocator.lock().unwrap(), mb_to_bytes(size_mb))
         .map_err(|e| format!("Failed to allocate host buffer: {:?}", e))?;
 
-    let host_buffer = VkHostBuffer {
+     let host_buffer = VkHostBuffer {
         buffer,
-        render_sender: transfer_sender,
+        render_sender: transfer.get_sender(),
         transfer_pool,
         graphics_pool,
-        fence: fences.try_into().map_err(|_| "Invalid number of fences".to_string())?,
-        semaphore: semaphores.try_into().map_err(|_| "Invalid number of semaphores".to_string())?,
+        fence: fences,
+        semaphore,
         countdown_latch: CountdownLatch::new(),
         transfer_queue_index,
         graphics_queue_index,
     };
-
     Ok(Arc::new(Mutex::new(host_buffer)))
+}
+
+pub fn init_imgui(
+    allocator: Arc<Mutex<Allocator>>,
+    device: ash::Device,
+    device_queues: &VkDeviceQueues,
+    imgui_pool: vk::CommandPool,
+    surface_format: vk::Format,
+    window_state: &VkWindowState,
+    frames_in_flight: usize,
+) -> Result<VkImgui, String> {
+    let mut imgui_context = imgui::Context::create();
+    let mut platform = WinitPlatform::init(&mut imgui_context);
+    platform.attach_window(
+        imgui_context.io_mut(),
+        &window_state.window,
+        HiDpiMode::Default,
+    );
+
+    let imgui_opts = imgui_rs_vulkan_renderer::Options {
+        in_flight_frames: frames_in_flight,
+        ..Default::default()
+    };
+
+    let imgui_dynamic = imgui_rs_vulkan_renderer::DynamicRendering {
+        color_attachment_format: surface_format,
+        depth_attachment_format: None,
+    };
+
+    let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
+        allocator.clone(),
+        device.clone(),
+        device_queues.get_queue(VkQueueType::Graphics),
+        imgui_pool,
+        imgui_dynamic,
+        &mut imgui_context,
+        Some(imgui_opts),
+    ).map_err(|e| format!("Failed to create imgui renderer: {:?}", e))?;
+
+    Ok(VkImgui::new(imgui_context, platform, imgui_render))
 }
