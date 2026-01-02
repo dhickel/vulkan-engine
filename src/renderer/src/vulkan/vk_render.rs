@@ -525,35 +525,14 @@ impl VkRender {
 
 
         // ImGUI
-        let mut imgui_context = imgui::Context::create();
-        let mut platform = WinitPlatform::init(&mut imgui_context);
-        platform.attach_window(
-            imgui_context.io_mut(),
-            &window_state.window,
-            HiDpiMode::Default,
-        );
-
-        let imgui_opts = imgui_rs_vulkan_renderer::Options {
-            in_flight_frames: 2,
-            ..Default::default()
-        };
-
-        let imgui_dynamic = imgui_rs_vulkan_renderer::DynamicRendering {
-            color_attachment_format: swapchain.surface_format.format,
-            depth_attachment_format: None,
-        };
-
-        let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
+        let imgui = vk_init_helpers::init_imgui(
+            &device,
             allocator.clone(),
-            device.clone(),
-            device_queues.get_queue(VkQueueType::Graphics),
+            &device_queues,
             imgui_pool,
-            imgui_dynamic,
-            &mut imgui_context,
-            Some(imgui_opts),
-        ).unwrap();
-
-        let imgui = VkImgui::new(imgui_context, platform, imgui_render);
+            swapchain.surface_format.format,
+            &window_state,
+        )?;
 
 
         //////////////////////////////////////////
@@ -562,15 +541,7 @@ impl VkRender {
 
         let transfer = VkTransfer::new(local_transfer_pool);
 
-        let fence_info = vk::FenceCreateInfo::default();
-        let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let fences: Vec<vk::Fence> = (0..4).map(|_| {
-            unsafe { device.create_fence(&fence_info, None).unwrap() }
-        }).collect();
-
-        let mut semaphores: Vec<vk::Semaphore> = (0..2).map(|_| {
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
-        }).collect();
+        let (fences, mut semaphores) = vk_init_helpers::create_sync_objects(&device)?;
 
         let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
         let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
