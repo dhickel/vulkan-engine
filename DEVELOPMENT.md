@@ -7,7 +7,8 @@
 -   **Next Steps:** Continue extracting logical blocks from `VkRender::new` (e.g., descriptor allocators, ImGui init) into helper functions.
 
 ## Recent Changes
--   **Refactor:** Introduced `src/renderer/src/vulkan/vk_init_helpers.rs` to consolidate command pool and buffer creation logic.
+-   **Refactor:** Updated `VkRender::new` to use `vk_init_helpers::create_sync_objects`, `vk_init_helpers::create_host_buffer`, and `vk_init_helpers::init_imgui`.
+-   **Refactor:** Introduced `create_sync_objects`, `create_host_buffer`, and `init_imgui` in `src/renderer/src/vulkan/vk_init_helpers.rs`.
 -   **Refactor:** Updated `VkRender::new` and `init_present_pools` in `src/renderer/src/vulkan/vk_render.rs` to use the new helper, significantly reducing boilerplate.
 -   **Refactor:** Added `create_sync_objects` and `create_host_buffer` to `vk_init_helpers.rs` and integrated them into `VkRender::new`.
 

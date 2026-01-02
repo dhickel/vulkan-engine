@@ -6,6 +6,15 @@ use vk_mem::Allocator;
 use crate::data::data_util::{mb_to_bytes, CountdownLatch};
 use crate::vulkan::vk_util;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
+use crate::vulkan::vk_types::{VkCommandPool, VkQueueType, VkCommandPoolMap, VkImgui, VkDeviceQueues, VkHostBuffer};
+use crate::vulkan::{vk_init, vk_util};
+use ash::Device;
+use vk_mem::Allocator;
+use std::sync::{Arc, Mutex};
+use imgui_winit_support::{HiDpiMode, WinitPlatform};
+use imgui_rs_vulkan_renderer::{DynamicRendering, Options, Renderer};
+use winit::window::Window;
+use crate::data::data_util::{mb_to_bytes, CountdownLatch};
 
 pub fn create_command_pool_and_buffers(
     device: &ash::Device,
@@ -27,7 +36,49 @@ pub fn create_command_pool_and_buffers(
     })
 }
 
-pub fn create_sync_objects(device: &ash::Device) -> Result<(Vec<vk::Fence>, Vec<vk::Semaphore>), String> {
+pub fn init_imgui(
+    window: &Window,
+    device: &Device,
+    allocator: &Arc<Mutex<Allocator>>,
+    device_queues: &VkDeviceQueues,
+    command_pool: vk::CommandPool,
+    surface_format: vk::Format,
+) -> Result<VkImgui, String> {
+    // ImGUI
+    let mut imgui_context = imgui::Context::create();
+    let mut platform = WinitPlatform::init(&mut imgui_context);
+    platform.attach_window(
+        imgui_context.io_mut(),
+        window,
+        HiDpiMode::Default,
+    );
+
+    let imgui_opts = Options {
+        in_flight_frames: 2,
+        ..Default::default()
+    };
+
+    let imgui_dynamic = DynamicRendering {
+        color_attachment_format: surface_format,
+        depth_attachment_format: None,
+    };
+
+    let imgui_render = Renderer::with_vk_mem_allocator(
+        allocator.clone(),
+        device.clone(),
+        device_queues.get_queue(VkQueueType::Graphics),
+        command_pool,
+        imgui_dynamic,
+        &mut imgui_context,
+        Some(imgui_opts),
+    ).map_err(|e| format!("Failed to create ImGui renderer: {:?}", e))?;
+
+    Ok(VkImgui::new(imgui_context, platform, imgui_render))
+}
+
+pub fn create_sync_objects(
+    device: &Device,
+) -> Result<(Vec<vk::Fence>, Vec<vk::Semaphore>), String> {
     let fence_info = vk::FenceCreateInfo::default();
     let semaphore_info = vk::SemaphoreCreateInfo::default();
 
