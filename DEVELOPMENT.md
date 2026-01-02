@@ -3,10 +3,12 @@
 ## Current Focal Point
 **Refactoring `VkRender` Initialization**: The `VkRender::new` function is excessively large and complex. We are in the process of breaking it down into smaller, reusable helper functions to improve readability and maintainability.
 -   **Completed:** Created `vk_init_helpers` and refactored command pool/buffer creation.
--   **Next Steps:** Continue extracting logical blocks from `VkRender::new` (e.g., synchronisation objects, descriptor allocators, ImGui init) into helper functions.
+-   **Completed:** Extracted synchronization object creation, host buffer creation, and ImGUI initialization into `vk_init_helpers.rs`.
+-   **Next Steps:** Continue extracting logical blocks from `VkRender::new` (e.g., descriptor allocators, data cache init) into helper functions.
 
 ## Recent Changes
--   **Refactor:** Introduced `src/renderer/src/vulkan/vk_init_helpers.rs` to consolidate command pool and buffer creation logic.
+-   **Refactor:** Updated `VkRender::new` to use `vk_init_helpers::create_sync_objects`, `vk_init_helpers::create_host_buffer`, and `vk_init_helpers::init_imgui`.
+-   **Refactor:** Introduced `create_sync_objects`, `create_host_buffer`, and `init_imgui` in `src/renderer/src/vulkan/vk_init_helpers.rs`.
 -   **Refactor:** Updated `VkRender::new` and `init_present_pools` in `src/renderer/src/vulkan/vk_render.rs` to use the new helper, significantly reducing boilerplate.
 
 ## Architecture Overview

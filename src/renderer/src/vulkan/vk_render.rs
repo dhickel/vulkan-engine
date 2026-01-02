@@ -562,44 +562,31 @@ impl VkRender {
 
         let transfer = VkTransfer::new(local_transfer_pool);
 
-        let fence_info = vk::FenceCreateInfo::default();
-        let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let fences: Vec<vk::Fence> = (0..4).map(|_| {
-            unsafe { device.create_fence(&fence_info, None).unwrap() }
-        }).collect();
+        let (mut fences, mut semaphores) = vk_init_helpers::create_sync_objects(&device)?;
 
-        let mut semaphores: Vec<vk::Semaphore> = (0..2).map(|_| {
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
-        }).collect();
+        let mesh_host_buffer = vk_init_helpers::create_host_buffer(
+            &device,
+            &allocator,
+            transfer.get_sender(),
+            host_buffer_pools.pop().unwrap(),
+            host_graphic_pools.pop().unwrap(),
+            &device_queues,
+            fences.drain(0..2).collect(),
+            vec![semaphores.pop().unwrap()],
+            64,
+        )?;
 
-        let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
-        let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
-
-        let mesh_host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(64)).unwrap(),
-            render_sender: transfer.get_sender(),
-            transfer_pool: host_buffer_pools.pop().unwrap(),
-            graphics_pool: host_graphic_pools.pop().unwrap(),
-            fence: fences[..2].try_into().unwrap(),
-            semaphore: [semaphores.pop().unwrap()],
-            countdown_latch: CountdownLatch::new(),
-            transfer_queue_index,
-            graphics_queue_index,
-        };
-        let mesh_host_buffer = Arc::new(Mutex::new(mesh_host_buffer));
-
-        let texture_host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(128)).unwrap(),
-            render_sender: transfer.get_sender(),
-            transfer_pool: host_buffer_pools.pop().unwrap(),
-            graphics_pool: host_graphic_pools.pop().unwrap(),
-            fence: fences[2..4].try_into().unwrap(),
-            semaphore: [semaphores.pop().unwrap()],
-            countdown_latch: CountdownLatch::new(),
-            transfer_queue_index,
-            graphics_queue_index,
-        };
-        let texture_host_buffer = Arc::new(Mutex::new(texture_host_buffer));
+        let texture_host_buffer = vk_init_helpers::create_host_buffer(
+            &device,
+            &allocator,
+            transfer.get_sender(),
+            host_buffer_pools.pop().unwrap(),
+            host_graphic_pools.pop().unwrap(),
+            &device_queues,
+            fences.drain(0..2).collect(),
+            vec![semaphores.pop().unwrap()],
+            128,
+        )?;
 
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
