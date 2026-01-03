@@ -504,10 +504,11 @@ impl VkRender {
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
-        let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..2)
-            .map(|_| VkDynamicDescriptorAllocator::new(&device, 1000, &pool_ratios))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+        let descriptor_allocators = vk_init_helpers::create_descriptor_allocators(
+            &device,
+            2,
+            &pool_ratios
+        )?;
 
         // we can just let imgui use one of the graphics pools
         let imgui_pool = present_pools.first().unwrap()
@@ -525,35 +526,15 @@ impl VkRender {
 
 
         // ImGUI
-        let mut imgui_context = imgui::Context::create();
-        let mut platform = WinitPlatform::init(&mut imgui_context);
-        platform.attach_window(
-            imgui_context.io_mut(),
-            &window_state.window,
-            HiDpiMode::Default,
-        );
-
-        let imgui_opts = imgui_rs_vulkan_renderer::Options {
-            in_flight_frames: 2,
-            ..Default::default()
-        };
-
-        let imgui_dynamic = imgui_rs_vulkan_renderer::DynamicRendering {
-            color_attachment_format: swapchain.surface_format.format,
-            depth_attachment_format: None,
-        };
-
-        let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
-            allocator.clone(),
-            device.clone(),
-            device_queues.get_queue(VkQueueType::Graphics),
+        let imgui = vk_init_helpers::init_imgui(
+            &device,
+            &allocator,
+            &device_queues,
             imgui_pool,
-            imgui_dynamic,
-            &mut imgui_context,
-            Some(imgui_opts),
-        ).unwrap();
-
-        let imgui = VkImgui::new(imgui_context, platform, imgui_render);
+            swapchain.surface_format.format,
+            &window_state.window,
+            2,
+        )?;
 
 
         //////////////////////////////////////////
