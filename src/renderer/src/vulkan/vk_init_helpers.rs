@@ -1,24 +1,17 @@
-use ash::vk;
-use crate::vulkan::vk_types::{VkCommandPool, VkQueueType, VkCommandPoolMap, VkHostBuffer, VkImgui, VkDeviceQueues, VkTransfer, VkWindowState};
-use crate::vulkan::vk_init;
+use ash::{vk, Device};
+use crate::vulkan::vk_types::{VkCommandPool, VkQueueType, VkCommandPoolMap, VkHostBuffer, VkImgui, VkDeviceQueues, VkTransfer};
+use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDynamicDescriptorAllocator};
+use crate::vulkan::{vk_init, vk_util};
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
 use crate::data::data_util::{mb_to_bytes, CountdownLatch};
-use crate::vulkan::vk_util;
-use imgui_winit_support::{HiDpiMode, WinitPlatform};
-use crate::vulkan::vk_types::{VkCommandPool, VkQueueType, VkCommandPoolMap, VkImgui, VkDeviceQueues, VkHostBuffer};
-use crate::vulkan::{vk_init, vk_util};
-use ash::Device;
-use vk_mem::Allocator;
-use std::sync::{Arc, Mutex};
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use imgui_rs_vulkan_renderer::{DynamicRendering, Options, Renderer};
 use winit::window::Window;
-use crate::data::data_util::{mb_to_bytes, CountdownLatch};
 
 pub fn create_command_pool_and_buffers(
     device: &ash::Device,
-    device_queues: &crate::vulkan::vk_types::VkDeviceQueues,
+    device_queues: &VkDeviceQueues,
     queue_type: VkQueueType,
     pool_flags: vk::CommandPoolCreateFlags,
     level: vk::CommandBufferLevel,
@@ -34,46 +27,6 @@ pub fn create_command_pool_and_buffers(
         pool,
         buffers,
     })
-}
-
-pub fn init_imgui(
-    window: &Window,
-    device: &Device,
-    allocator: &Arc<Mutex<Allocator>>,
-    device_queues: &VkDeviceQueues,
-    command_pool: vk::CommandPool,
-    surface_format: vk::Format,
-) -> Result<VkImgui, String> {
-    // ImGUI
-    let mut imgui_context = imgui::Context::create();
-    let mut platform = WinitPlatform::init(&mut imgui_context);
-    platform.attach_window(
-        imgui_context.io_mut(),
-        window,
-        HiDpiMode::Default,
-    );
-
-    let imgui_opts = Options {
-        in_flight_frames: 2,
-        ..Default::default()
-    };
-
-    let imgui_dynamic = DynamicRendering {
-        color_attachment_format: surface_format,
-        depth_attachment_format: None,
-    };
-
-    let imgui_render = Renderer::with_vk_mem_allocator(
-        allocator.clone(),
-        device.clone(),
-        device_queues.get_queue(VkQueueType::Graphics),
-        command_pool,
-        imgui_dynamic,
-        &mut imgui_context,
-        Some(imgui_opts),
-    ).map_err(|e| format!("Failed to create ImGui renderer: {:?}", e))?;
-
-    Ok(VkImgui::new(imgui_context, platform, imgui_render))
 }
 
 pub fn create_sync_objects(
@@ -125,42 +78,61 @@ pub fn create_host_buffer(
     Ok(Arc::new(Mutex::new(host_buffer)))
 }
 
+pub fn create_descriptor_allocators(
+    device: &Device,
+    max_sets: u32,
+    count: usize,
+) -> Result<Vec<VkDynamicDescriptorAllocator>, String> {
+    let pool_ratios = [
+        PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 3.0),
+        PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 3.0),
+        PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 3.0),
+        PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
+    ];
+
+    (0..count)
+        .map(|_| VkDynamicDescriptorAllocator::new(device, max_sets, &pool_ratios))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to create descriptor allocator: {:?}", e))
+}
+
 pub fn init_imgui(
-    allocator: Arc<Mutex<Allocator>>,
-    device: ash::Device,
+    window: &Window,
+    device: &Device,
+    allocator: &Arc<Mutex<Allocator>>,
     device_queues: &VkDeviceQueues,
-    imgui_pool: vk::CommandPool,
+    command_pool: vk::CommandPool,
     surface_format: vk::Format,
-    window_state: &VkWindowState,
     frames_in_flight: usize,
 ) -> Result<VkImgui, String> {
+    // ImGUI
     let mut imgui_context = imgui::Context::create();
     let mut platform = WinitPlatform::init(&mut imgui_context);
     platform.attach_window(
         imgui_context.io_mut(),
-        &window_state.window,
+        window,
         HiDpiMode::Default,
     );
 
-    let imgui_opts = imgui_rs_vulkan_renderer::Options {
+    let imgui_opts = Options {
         in_flight_frames: frames_in_flight,
         ..Default::default()
     };
 
-    let imgui_dynamic = imgui_rs_vulkan_renderer::DynamicRendering {
+    let imgui_dynamic = DynamicRendering {
         color_attachment_format: surface_format,
         depth_attachment_format: None,
     };
 
-    let imgui_render = imgui_rs_vulkan_renderer::Renderer::with_vk_mem_allocator(
+    let imgui_render = Renderer::with_vk_mem_allocator(
         allocator.clone(),
         device.clone(),
         device_queues.get_queue(VkQueueType::Graphics),
-        imgui_pool,
+        command_pool,
         imgui_dynamic,
         &mut imgui_context,
         Some(imgui_opts),
-    ).map_err(|e| format!("Failed to create imgui renderer: {:?}", e))?;
+    ).map_err(|e| format!("Failed to create ImGui renderer: {:?}", e))?;
 
     Ok(VkImgui::new(imgui_context, platform, imgui_render))
 }
