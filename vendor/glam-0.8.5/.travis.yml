@@ -1,0 +1,47 @@
+language: rust
+sudo: required
+dist: trusty
+addons:
+  apt:
+    packages:
+      - libssl-dev
+
+rust:
+  - nightly
+  - beta
+  - stable
+
+# cache: cargo
+
+env:
+  - CARGO_FEATURES="mint rand serde debug-glam-assert transform-types"
+  - CARGO_FEATURES="mint rand serde scalar-math debug-glam-assert transform-types"
+
+matrix:
+  allow_failures:
+    - rust: nightly
+  fast_finish: true
+
+before_cache: |
+  if [[ "$TRAVIS_RUST_VERSION" == nightly ]]; then
+    RUSTFLAGS="--cfg procmacro2_semver_exempt" cargo install cargo-tarpaulin -f
+  fi
+
+script:
+  - cargo clean
+  - cargo build --features "$CARGO_FEATURES"
+  - cargo test --features "$CARGO_FEATURES"
+  - cargo bench --features "$CARGO_FEATURES" --no-run
+
+after_success: |
+  if [[ "$TRAVIS_RUST_VERSION" == nightly ]]; then
+    if [[ "$CARGO_FEATURES" == "scalar-math" ]]; then
+      cargo tarpaulin --features scalar-math --exclude-files src/f32/transform.rs --exclude-files src/f32/vec3_sse2.rs --exclude-files src/f32/vec4_sse2.rs --ciserver travis-ci --coveralls $TRAVIS_JOB_ID
+    else
+      cargo tarpaulin --exclude-files src/f32/transform.rs --exclude-files src/f32/vec3_f32.rs --exclude-files src/f32/vec4_f32.rs --ciserver travis-ci --coveralls $TRAVIS_JOB_ID
+    fi
+
+    # Uncomment the following two lines create and upload a report for codecov.io
+    # cargo tarpaulin --out Xml
+    # bash <(curl -s https://codecov.io/bash)
+  fi

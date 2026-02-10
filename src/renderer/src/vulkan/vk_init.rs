@@ -302,7 +302,7 @@ pub fn simple_device_suitability(
 
     if !matches!(
         device_properties.device_type,
-        vk::PhysicalDeviceType::DISCRETE_GPU
+        vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU
     ) {
         return false;
     }

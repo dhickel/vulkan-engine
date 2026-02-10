@@ -283,7 +283,7 @@ pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
     entry: &CStr,
-) -> vk::PipelineShaderStageCreateInfo {
+) -> vk::PipelineShaderStageCreateInfo<'_> {
     vk::PipelineShaderStageCreateInfo::default()
         .stage(stage)
         .name(entry)
@@ -516,7 +516,7 @@ pub fn allocate_host_buffer(
             .map_err(|err| format!("Failed to allocate buffer, reason: {:?}", err))?
     };
 
-    let alloc_info = unsafe { allocator.get_allocation_info(&allocation) };
+    let alloc_info = allocator.get_allocation_info(&allocation);
 
     Ok(VkBuffer {
         buffer,
@@ -784,7 +784,8 @@ pub fn upload_skybox(
         // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
             .map(|i| {
-                let buffer_offset = i * (tex_meta.bytes.len() / 6) as u64;
+                let face_size = (face_width * tex_meta.height * 4) as u64; 
+                let buffer_offset = i as u64 * face_size;
                 vk::BufferImageCopy::default()
                     .buffer_offset(buffer_offset)
                     .buffer_row_length(face_width)
@@ -845,7 +846,7 @@ pub fn upload_skybox(
             .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
             .unwrap();
 
-        device.device_wait_idle();
+        let _ = device.device_wait_idle();
 
         let sampler_create_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -936,8 +937,8 @@ fn create_buffer_image_copy(
 
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Create a shader compiler
-    let compiler = Compiler::new().ok_or("Failed to create shader compiler")?;
-    let mut options = CompileOptions::new().ok_or("Failed to create compile options")?;
+    let compiler = Compiler::new().unwrap();
+    let mut options = CompileOptions::new().unwrap();
     options.add_macro_definition("GL_EXT_buffer_reference", Some("1"));
     options.add_macro_definition("GL_GOOGLE_include_directive", Some("1"));
 
@@ -1221,7 +1222,7 @@ pub fn record_host_to_image_buffer(
     let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
     let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
 
-    let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
+    let host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     let mut offset: DeviceSize = 0;
     let image_offsets: Vec<DeviceSize> = image_meta.iter().zip(ids.iter()).map(|(meta, id)| {
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
@@ -1470,7 +1471,7 @@ pub fn record_image_barrier(
     (old_layout, new_layout): (vk::ImageLayout, vk::ImageLayout),
     (src_stage_mask, dst_stage_mask): (vk::PipelineStageFlags, vk::PipelineStageFlags),
     src_dst_access_mask: Option<(vk::AccessFlags, vk::AccessFlags)>,
-    src_dst_queue_index: Option<((u32, u32))>,
+    src_dst_queue_index: Option<(u32, u32) >,
 ) {
     let mut barrier = vk::ImageMemoryBarrier::default()
         .old_layout(old_layout)

@@ -1,0 +1,26 @@
+[package]
+name = "shaderc-sys"
+version = "0.8.3"
+authors = ["Lei Zhang <antiagainst@gmail.com>", "Mr. Knapp <knappador@gmail.com>"]
+build = "build/build.rs"
+description = "Shaderc system library FFI, building, and linking"
+repository = "https://github.com/google/shaderc-rs"
+documentation = "https://docs.rs/shaderc"
+readme = "../README.md"
+license = "Apache-2.0"
+keywords = ["shader", "compiler", "spirv", "glsl", "hlsl"]
+links = "shaderc"
+
+[lib]
+name = "shaderc_sys"
+
+[features]
+build-from-source = []
+prefer-static-linking = []
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cmake = "^0.1.37"
+roxmltree = "0.14.1"

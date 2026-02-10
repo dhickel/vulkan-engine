@@ -20,7 +20,7 @@ use std::mem::align_of;
 use std::path;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use gltf::json::serialize::to_string;
@@ -132,16 +132,16 @@ pub fn init_caches(
     device_queues: VkDeviceQueues,
 ) -> (Arc<VkDataCache>, VkCache) {
     let shader_paths = vec![
-        (CoreShaderType::MetRoughVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/pbr_base.vert.spv"),
-        (CoreShaderType::MetRoughFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_pbr.frag.spv",),
-        (CoreShaderType::MetRoughFragUnlit, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/material_unlit.frag.spv"),
-        (CoreShaderType::BrtFlutFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.frag.spv"),
-        (CoreShaderType::BrtFlutVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/gen_brd_flut.vert.spv"),
-        (CoreShaderType::SkyBoxFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.frag.spv"),
-        (CoreShaderType::SkyBoxVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/skybox.vert.spv"),
-        (CoreShaderType::CubeFilterVert, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/filtered_cube.vert.spv"),
-        (CoreShaderType::EnvIrradianceFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
-        (CoreShaderType::EnvPrefilterFrag, "/home/mindspice/code/rust/engine/src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
+        (CoreShaderType::MetRoughVert, "src/renderer/src/shaders/pbr_base.vert.spv"),
+        (CoreShaderType::MetRoughFrag, "src/renderer/src/shaders/material_pbr.frag.spv",),
+        (CoreShaderType::MetRoughFragUnlit, "src/renderer/src/shaders/material_unlit.frag.spv"),
+        (CoreShaderType::BrtFlutFrag, "src/renderer/src/shaders/gen_brd_flut.frag.spv"),
+        (CoreShaderType::BrtFlutVert, "src/renderer/src/shaders/gen_brd_flut.vert.spv"),
+        (CoreShaderType::SkyBoxFrag, "src/renderer/src/shaders/skybox.frag.spv"),
+        (CoreShaderType::SkyBoxVert, "src/renderer/src/shaders/skybox.vert.spv"),
+        (CoreShaderType::CubeFilterVert, "src/renderer/src/shaders/filtered_cube.vert.spv"),
+        (CoreShaderType::EnvIrradianceFrag, "src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
+        (CoreShaderType::EnvPrefilterFrag, "src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -186,7 +186,7 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
-        .load_cubemap_dir("/home/mindspice/code/rust/engine/src/renderer/src/assets/sky_maps/sky");
+        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky").unwrap();
 
     let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
@@ -248,11 +248,11 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
 
 pub fn init_present_pools(
     device: &ash::Device,
-    device_queues:
-    &VkDeviceQueues,
+    device_queues: &VkDeviceQueues,
+    count: u32,
 ) -> Vec<VkCommandPoolMap> {
     // Graphics/Present share the same queue and pool
-    (0..2).map(|_| {
+    (0..count).map(|_| {
         let graphics_pool = vk_init::create_command_pool(
             &device,
             device_queues.get_queue_index(VkQueueType::Graphics),
@@ -347,7 +347,7 @@ impl Drop for VkRender {
 
             self.main_deletion_queue
                 .iter_mut()
-                .for_each(|mut del| del.delete(&self.device, &self.allocator.lock().unwrap()));
+                .for_each(|del| del.delete(&self.device, &self.allocator.lock().unwrap()));
 
             self.swapchain
                 .swapchain_loader
@@ -372,7 +372,6 @@ impl Drop for VkRender {
 
 impl VkRender {
     fn destroy(&mut self) {
-        unsafe { std::mem::drop(self) }
     }
 
     pub fn new(
@@ -382,7 +381,7 @@ impl VkRender {
     ) -> Result<Self, String> {
         if compile_shaders {
             info!("Compiling Shaders");
-            let shader_dir = "/home/mindspice/code/rust/engine/src/renderer/src/shaders";
+            let shader_dir = "src/renderer/src/shaders";
             match vk_util::compile_shaders(shader_dir, shader_dir) {
                 Ok(_) => {
                     info!("Successfully Compiled Shaders")
@@ -437,7 +436,7 @@ impl VkRender {
         ];
 
         // FIXME better extension init
-        let mut surface_ext = vk_init::get_basic_device_ext_ptrs();
+        let surface_ext = vk_init::get_basic_device_ext_ptrs();
         // let ext =
         //     unsafe { CStr::from_bytes_with_nul_unchecked(b"VK_KHR_swapchain_mutable_format\0") };
         // surface_ext.push(ext.as_ptr());
@@ -473,13 +472,15 @@ impl VkRender {
             window_state.update_curr_size(swapchain.extent);
         }
 
+        let swapchain_image_count = swapchain.swapchain_images.len() as u32;
+
         ////////////////////////////////////
         // Create Command Pools & Buffers //
         ////////////////////////////////////
 
-        let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(2);
+        let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(swapchain_image_count as usize);
 
-        for i in 0..2 {
+        for i in 0..swapchain_image_count {
             let cmd_pool = vk_init::create_command_pool(
                 &device,
                 device_queues.get_queue_index(VkQueueType::Transfer),
@@ -520,7 +521,7 @@ impl VkRender {
             }
         };
 
-        let present_pools = init_present_pools(&device, &device_queues);
+        let present_pools = init_present_pools(&device, &device_queues, swapchain_image_count);
 
         let mut host_graphic_pools: Vec<VkCommandPool> = {
             let pool = vk_init::create_command_pool(
@@ -533,29 +534,23 @@ impl VkRender {
                 &device,
                 &pool,
                 vk::CommandBufferLevel::PRIMARY,
-                2).unwrap();
+                swapchain_image_count).unwrap();
 
-            vec![
+            command_buffers.into_iter().map(|buf| {
                 VkCommandPool {
                     queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
                     queue_type: VkQueueType::Graphics,
                     pool,
-                    buffers: vec![command_buffers[0]],
-                },
-                VkCommandPool {
-                    queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
-                    queue_type: VkQueueType::Graphics,
-                    pool,
-                    buffers: vec![command_buffers[1]],
-                },
-            ]
+                    buffers: vec![buf],
+                }
+            }).collect()
         };
 
 
         //////////////////////////////////////////
         // Generate Structures For presentation //
         //////////////////////////////////////////
-        let frame_buffers: Vec<VkFrameSync> = (0..2)
+        let frame_buffers: Vec<VkFrameSync> = (0..swapchain_image_count)
             .map(|_| vk_init::create_frame_sync(&device))
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -574,7 +569,7 @@ impl VkRender {
         // Set images to max extent, so they can be reused on window resizing
 
         let draw_images =
-            vk_init::allocate_draw_images(&allocator, &device, window_state.get_max_extent(), 2)?;
+            vk_init::allocate_draw_images(&allocator, &device, window_state.get_max_extent(), swapchain_image_count)?;
         let draw_format = draw_images[0].image_format;
 
         let draw_views: Vec<vk::ImageView> =
@@ -586,7 +581,7 @@ impl VkRender {
         let layout = [descriptors.descriptor_layouts[0]];
 
         let depth_images =
-            vk_init::allocate_depth_images(&allocator, &device, window_state.get_max_extent(), 2)?;
+            vk_init::allocate_depth_images(&allocator, &device, window_state.get_max_extent(), swapchain_image_count)?;
         let depth_format = depth_images[0].image_format;
 
         let pool_ratios = [
@@ -596,7 +591,7 @@ impl VkRender {
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
-        let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..2)
+        let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..swapchain_image_count)
             .map(|_| VkDynamicDescriptorAllocator::new(&device, 1000, &pool_ratios))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -626,7 +621,7 @@ impl VkRender {
         );
 
         let imgui_opts = imgui_rs_vulkan_renderer::Options {
-            in_flight_frames: 2,
+            in_flight_frames: swapchain_image_count as usize,
             ..Default::default()
         };
 
@@ -761,7 +756,7 @@ impl VkRender {
         };
 
         let loaded_scene = assimp_util::load_model(
-            "/home/mindspice/code/rust/engine/src/renderer/src/assets/DamagedHelmet.glb",
+            "src/renderer/src/assets/DamagedHelmet.glb",
             render.data_cache.clone(),
             false,
         )?;
@@ -771,11 +766,16 @@ impl VkRender {
         let data_cache_clone2 = render.data_cache.clone();
 
 
+        let loading_count = Arc::new(AtomicUsize::new(2));
+        let count_clone1 = loading_count.clone();
+        let count_clone2 = loading_count.clone();
+
         let t1 = std::thread::spawn(move || {
             data_cache_clone1.mesh_cache.lock().unwrap().allocate_all(
                 BufferPlacement::ContiguousPreferred,
                 false,
             );
+            count_clone1.fetch_sub(1, Ordering::SeqCst);
         });
         println!("Spawned mesh thread: {:?}", t1.thread().id());
 
@@ -784,6 +784,7 @@ impl VkRender {
                 BufferPlacement::ContiguousPreferred,
                 false,
             );
+            count_clone2.fetch_sub(1, Ordering::SeqCst);
         });
         println!("Spawned Material thread: {:?}", t2.thread().id());
 
@@ -791,12 +792,18 @@ impl VkRender {
         // loop to test threaded loading, since the env needs some preloads to be preloaded
         let start = std::time::SystemTime::now();
         println!("Staring proc loop");
-        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(120) {
+        // Wait up to 30s for initial load, but break early if done.
+        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(30) {
+            if loading_count.load(Ordering::SeqCst) == 0 {
+                println!("Loading finished early.");
+                break;
+            }
             render.fence_await_queue.check_fences(&render.device);
             if let Some(cmd) = render.transfer.query_channel() {
                 // Submit the command buffer and signal the fence correctly
                 cmd.submit(&render.device, &render.vulkan_cache.queues, &mut render.fence_await_queue);
             }
+            std::thread::sleep(Duration::from_millis(1));
         }
 
 
@@ -816,6 +823,7 @@ impl VkRender {
                 render.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
                 &env_maps,
                 &render.brdf_lut,
+                render.swapchain.swapchain_images.len() as u32,
             );
 
             render.scene_descriptors = Some(scene_descriptors);
@@ -885,10 +893,15 @@ impl VkRender {
 
 impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
+        self.fence_await_queue.check_fences(&self.device);
+        if let Some(cmd) = self.transfer.query_channel() {
+            cmd.submit(&self.device, &self.vulkan_cache.queues, &mut self.fence_await_queue);
+        }
+
         let start = SystemTime::now();
 
         self.update_scene();
-        let mut frame_data = self.presentation.get_next_frame();
+        let frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
         let draw_image = frame_data.draw.image;
         let draw_view = frame_data.draw.image_view;
@@ -1040,7 +1053,7 @@ impl VkRender {
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
 
             let wait_info = [vk_util::semaphore_submit_info(
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT_KHR,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT_KHR | vk::PipelineStageFlags2::TRANSFER,
                 frame_sync.swap_semaphore,
             )];
 
@@ -1159,7 +1172,7 @@ impl VkRender {
     }
 
     pub fn draw_skybox(&mut self) {
-        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1305,7 +1318,7 @@ impl VkRender {
     }
 
     pub fn draw_geometry(&mut self) {
-        let mut curr_frame = self.presentation.get_curr_frame_mut();
+        let curr_frame = self.presentation.get_curr_frame_mut();
         let frame_index = curr_frame.index;
         let cmd_pool = curr_frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1491,7 +1504,7 @@ impl VkRender {
         let far = 0.1;
         let near = 10_000.0;
 
-        let mut proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+        let proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
         //proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = camera_view;

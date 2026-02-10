@@ -272,7 +272,7 @@ impl VkDestroyable for VkCommandPoolMap {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.pools
             .iter_mut()
-            .for_each(|mut pool| pool.destroy(device, allocator));
+            .for_each(|pool| pool.destroy(device, allocator));
     }
 }
 
@@ -434,15 +434,13 @@ pub struct VkFrame {
 
 impl VkDestroyable for VkFrame {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        unsafe {
-            self.sync.destroy(device, allocator);
-            self.draw.destroy(device, allocator);
-            self.depth.destroy(device, allocator);
-            self.cmd_pools.destroy(device, allocator);
-            self.descriptors.destroy(device, allocator);
-            // device.destroy_image_view(self.present_image_view, None);
-            // device.destroy_image(self.present_image, None);
-        }
+        self.sync.destroy(device, allocator);
+        self.draw.destroy(device, allocator);
+        self.depth.destroy(device, allocator);
+        self.cmd_pools.destroy(device, allocator);
+        self.descriptors.destroy(device, allocator);
+        // device.destroy_image_view(self.present_image_view, None);
+        // device.destroy_image(self.present_image, None);
     }
 }
 
@@ -453,12 +451,10 @@ impl VkFrame {
         device: &Device,
         allocator: &Allocator,
     ) -> (VkFrameSync, VkCommandPoolMap) {
-        unsafe {
-            self.draw.destroy(device, allocator);
-            self.depth.destroy(device, allocator);
-            // device.destroy_image_view(self.present_image_view, None);
-            // device.destroy_image(self.present_image, None);
-        }
+        self.draw.destroy(device, allocator);
+        self.depth.destroy(device, allocator);
+        // device.destroy_image_view(self.present_image_view, None);
+        // device.destroy_image(self.present_image, None);
         (self.sync, self.cmd_pools.clone())
     }
 
@@ -1075,7 +1071,7 @@ impl VkDeletable {
 
 pub struct VkSceneDescriptors {
     descriptor_pool: VkDynamicDescriptorAllocator,
-    scene_descriptors: [vk::DescriptorSet; 2],
+    scene_descriptors: Vec<vk::DescriptorSet>,
     scene_buffer: VkBuffer,
     env_buffer: VkBuffer,
     alignment: u64,
@@ -1090,17 +1086,18 @@ impl VkSceneDescriptors {
         scene_desc_layout: vk::DescriptorSetLayout,
         env_maps: &EnvMaps,
         brdf_lut: &VkBrdfLut,
+        count: u32,
     ) -> Self {
         let pool_ratios = vec![
             PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 3.0),
         ];
-        let mut descriptor_pool = VkDynamicDescriptorAllocator::new(device, 2, &pool_ratios).unwrap();
+        let mut descriptor_pool = VkDynamicDescriptorAllocator::new(device, count, &pool_ratios).unwrap();
 
         let scene_buffer = vk_util::allocate_buffer(
             allocator,
             (std::mem::size_of::<SceneDataUBO>()
-                .next_multiple_of(uniform_alignment as usize) * 2) as DeviceSize,
+                .next_multiple_of(uniform_alignment as usize) * count as usize) as DeviceSize,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
         ).unwrap();
@@ -1108,7 +1105,7 @@ impl VkSceneDescriptors {
         let env_buffer = vk_util::allocate_buffer(
             allocator,
             (std::mem::size_of::<EnvironmentUBO>()
-                .next_multiple_of(uniform_alignment as usize) * 2) as DeviceSize,
+                .next_multiple_of(uniform_alignment as usize) * count as usize) as DeviceSize,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
         ).unwrap();
@@ -1126,7 +1123,7 @@ impl VkSceneDescriptors {
         let mut env_ptr = env_buffer.alloc_info.mapped_data as *mut u8;
 
 
-        let scene_descriptors: [vk::DescriptorSet; 2] = (0..2).into_iter().map(|i| {
+        let scene_descriptors: Vec<vk::DescriptorSet> = (0..count).into_iter().map(|i| {
             println!("Writing buffers: {}", i);
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -1153,7 +1150,7 @@ impl VkSceneDescriptors {
                 0,
                 scene_buffer.buffer,
                 scene_data_size,
-                (scene_data_size * i) as usize,
+                (scene_data_size * i as u64) as usize,
                 vk::DescriptorType::UNIFORM_BUFFER,
             );
 
@@ -1161,7 +1158,7 @@ impl VkSceneDescriptors {
                 1,
                 env_buffer.buffer,
                 env_data_size,
-                (env_data_size * i) as usize,
+                (env_data_size * i as u64) as usize,
                 vk::DescriptorType::UNIFORM_BUFFER,
             );
 
@@ -1190,11 +1187,8 @@ impl VkSceneDescriptors {
             );
 
             writer.update_set(device, desc_set);
-            println!("Wrote buffer");
-
             desc_set
-        }).collect::<Vec<_>>().try_into().unwrap();
-
+        }).collect();
 
         Self {
             descriptor_pool,

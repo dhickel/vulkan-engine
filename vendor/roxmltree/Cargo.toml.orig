@@ -1,0 +1,29 @@
+[package]
+name = "roxmltree"
+version = "0.14.1"
+authors = ["Evgeniy Reizner <razrfalcon@gmail.com>"]
+keywords = ["xml", "parser", "tree", "dom"]
+categories = ["parser-implementations"]
+license = "MIT/Apache-2.0"
+description = "Represent an XML as a read-only tree."
+repository = "https://github.com/RazrFalcon/roxmltree"
+documentation = "https://docs.rs/roxmltree/"
+readme = "README.md"
+edition = "2018"
+
+[workspace]
+members = ["benches"]
+exclude = ["test-apps", "testing-tools"]
+
+[badges]
+travis-ci = { repository = "RazrFalcon/roxmltree" }
+
+[dependencies]
+xmlparser = "0.13.3"
+
+[dev-dependencies]
+pretty_assertions = "0.5"
+
+[features]
+default = ["std"]
+std = []

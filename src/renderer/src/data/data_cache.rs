@@ -358,12 +358,12 @@ impl TextureCache {
 
         match data.format {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
-                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes.clone()) {
+                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes) {
                     img.save(&path).unwrap();
                 }
             }
             vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes.clone()) {
+                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes) {
                     img.save(&path).unwrap();
                 }
             }
@@ -483,8 +483,8 @@ impl TextureCache {
                         host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
                         host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
 
-                        if let Err(error) = host_buffer.await_done(1000) {
-                            error!("Error awaiting tx upload response for textures: {:?}", error);
+                        if let Err(error) = host_buffer.await_done(10000) {
+                            error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
                             return false;
                         } else {
                             host_buffer.reset_buffers(&self.device);
@@ -544,8 +544,8 @@ impl TextureCache {
             host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
 
 
-            if let Err(error) = host_buffer.await_done(1000) {
-                error!("Error awaiting tx upload response for textures: {:?}", error);
+            if let Err(error) = host_buffer.await_done(10000) {
+                error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
                 return false;
             } else {
                 host_buffer.reset_buffers(&self.device);
@@ -556,7 +556,6 @@ impl TextureCache {
 
             match image_allocs {
                 Ok(images) => {
-                    curr_bytes = 0;
                     next_upload.clear();
 
                     assert!(!images.is_empty());
@@ -579,13 +578,6 @@ impl TextureCache {
         assert_eq!(texture_ids.len(), loaded.len());
         println!("Texitre Ids len :{}, loaded_len: {}", texture_ids.len(), loaded.len());
         for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
-            println!("Writing Texture Id: {:?}", id);
-            if let CachedTexture::Loaded(tex) = &tex {
-                vk_debug::capture_and_save_image_view(&self.device, &self.allocator.lock().unwrap(), self.gfx_pool.pool, self.gfx_queue,
-                    tex.alloc.image, tex.alloc.image_format, tex.alloc.image_extent,
-                    path::Path::new("debug_textures/").join(format!("_buffer_out_{}.png", id)).to_str().unwrap());
-                println!("Wrote Texture Id: {:?}", id);
-            }
             self.cached_textures[*id as usize] = tex;
         }
 
@@ -666,10 +658,7 @@ impl TextureCache {
         debug!(" occlusion id: {}", meta.texture_ids.occlusion_map);
         debug!(" emissive id: {}", meta.texture_ids.emissive_map);
 
-        // vk_debug::capture_and_save_image_view(&self.device, &self.allocator.lock().unwrap(),
-        //     self.gfx_pool.pool, self.gfx_queue, color_tex.alloc.image, color_tex.alloc.image_format,
-        //     color_tex.alloc.image_extent,
-        //     path::Path::new("debug_textures/").join(format!("color_tex_desc_{:?}.png", SystemTime::now())).to_str().unwrap());
+
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_image(
@@ -1406,7 +1395,7 @@ impl EnvironmentCache {
     pub fn load_cubemap_file(&mut self, path: &str) -> Result<u32, String> {
         let path = path::Path::new(path);
         match image::open(path) {
-            Ok(mut image) => {
+            Ok(image) => {
                 let index = self.skyboxes.len() as u32;
                 let mut format = assimp_util::to_vk_format(&image);
 
@@ -1599,7 +1588,7 @@ pub struct VkSamplerInfo {
 
 
 impl VkSamplerInfo {
-    pub fn to_create_info(&self) -> vk::SamplerCreateInfo {
+    pub fn to_create_info(&self) -> vk::SamplerCreateInfo<'_> {
         vk::SamplerCreateInfo::default()
             .mag_filter(self.mag_filter)
             .min_filter(self.min_filter)
