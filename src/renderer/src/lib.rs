@@ -28,7 +28,7 @@ use std::process::exit;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
-use log::{info, log};
+use log::{error, info, log};
 use winit::dpi::Position;
 use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, DeviceEvents, EventLoop};
@@ -90,7 +90,29 @@ pub fn run() {
     let mut frame: u32 = 0;
     let mut fps_timer = SystemTime::now();
 
-    let mut app = vk_render::VkRender::new(window_state, false, false).unwrap();
+    let rebuild_from_env = env::var("ENGINE_REBUILD_SHADERS")
+        .map(|v| {
+            let lowered = v.trim().to_ascii_lowercase();
+            matches!(lowered.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
+    let rebuild_from_args = env::args().any(|arg| arg == "--rebuild-shaders");
+    let compile_shaders = rebuild_from_env || rebuild_from_args;
+
+    if compile_shaders {
+        info!("Shader rebuild requested (--rebuild-shaders or ENGINE_REBUILD_SHADERS=1).");
+    }
+
+    let mut app = match vk_render::VkRender::new(window_state, false, compile_shaders) {
+        Ok(app) => app,
+        Err(err) => {
+            error!("Renderer initialization failed: {err}");
+            if compile_shaders {
+                error!("Shader rebuild requires 'glslc' or 'glslangValidator' in PATH. Install Vulkan shader tools (e.g. package 'shaderc' or LunarG Vulkan SDK), then retry.");
+            }
+            return;
+        }
+    };
     
     event_loop
         .run(move |event, control_flow| {

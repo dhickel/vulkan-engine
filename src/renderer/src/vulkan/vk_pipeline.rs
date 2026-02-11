@@ -72,7 +72,6 @@ pub struct PipelineBuilder<'a> {
     pub color_attachment_format: [vk::Format; 1],
 }
 
-
 impl<'a> Default for PipelineBuilder<'a> {
     fn default() -> Self {
         Self {
@@ -88,7 +87,6 @@ impl<'a> Default for PipelineBuilder<'a> {
         }
     }
 }
-
 
 impl<'a> PipelineBuilder<'a> {
     pub fn clear(&mut self) {
@@ -321,7 +319,6 @@ impl<'a> PipelineBuilder<'a> {
     }
 }
 
-
 pub fn init_pipeline_cache(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
@@ -336,7 +333,6 @@ pub fn init_pipeline_cache(
         draw_color_format,
         draw_depth_format,
     );
-
 
     let brd_flut_pipeline = init_brd_flut_pipeline(
         device,
@@ -354,17 +350,9 @@ pub fn init_pipeline_cache(
         draw_depth_format,
     );
 
-    let env_irradiance_pipeline = init_irradiance_pipeline(
-        device,
-        desc_layout_cache,
-        shader_cache,
-    );
+    let env_irradiance_pipeline = init_irradiance_pipeline(device, desc_layout_cache, shader_cache);
 
-    let env_prefilter_pipeline = init_pre_filter_pipeline(
-        device,
-        desc_layout_cache,
-        shader_cache,
-    );
+    let env_prefilter_pipeline = init_pre_filter_pipeline(device, desc_layout_cache, shader_cache);
 
     VkPipelineCache::new(vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
@@ -374,9 +362,8 @@ pub fn init_pipeline_cache(
         (VkPipelineType::EnvIrradiance, env_irradiance_pipeline),
         (VkPipelineType::EnvPreFilter, env_prefilter_pipeline),
     ])
-        .unwrap()
+    .unwrap()
 }
-
 
 fn init_met_rough_pipelines(
     device: &ash::Device,
@@ -409,7 +396,7 @@ fn init_met_rough_pipelines(
             .create_pipeline_layout(&mesh_layout_info, None)
             .unwrap()
     };
-    
+
     let entry = CString::new("main").unwrap();
 
     let mut pipeline_builder = PipelineBuilder::default()
@@ -427,7 +414,7 @@ fn init_met_rough_pipelines(
     let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
 
     let mut pipeline_builder = pipeline_builder
-        .enable_blending_additive()
+        .enable_blending_alpha_blend()
         .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
 
     let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
@@ -437,7 +424,6 @@ fn init_met_rough_pipelines(
         VkPipeline::new(transparent_pipeline, layout),
     )
 }
-
 
 fn init_brd_flut_pipeline(
     device: &ash::Device,
@@ -479,7 +465,6 @@ fn init_brd_flut_pipeline(
     VkPipeline::new(pipeline, layout)
 }
 
-
 fn init_skybox_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
@@ -503,7 +488,6 @@ fn init_skybox_pipeline(
 
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
 
-
     let entry = CString::new("main").unwrap();
 
     let mut pipeline_builder = PipelineBuilder::default()
@@ -521,7 +505,6 @@ fn init_skybox_pipeline(
 
     VkPipeline::new(pipeline, layout)
 }
-
 
 fn init_irradiance_pipeline(
     device: &ash::Device,
@@ -561,7 +544,6 @@ fn init_irradiance_pipeline(
 
     VkPipeline::new(pipeline, layout)
 }
-
 
 fn init_pre_filter_pipeline(
     device: &ash::Device,

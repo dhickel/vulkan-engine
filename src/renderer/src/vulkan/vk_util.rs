@@ -45,6 +45,7 @@ use ash::vk::{AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSi
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -63,7 +64,7 @@ use ash::prelude::VkResult;
 use std::{fs, path};
 use std::fs::metadata;
 use std::ops::{Add, Sub};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use crate::data::data_util::calc_mips_count;
 
 
@@ -983,68 +984,73 @@ fn create_buffer_image_copy(
 }
 
 
-/*
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Create a shader compiler
-    let compiler = Compiler::new().unwrap();
-    let mut options = CompileOptions::new().unwrap();
-    options.add_macro_definition("GL_EXT_buffer_reference", Some("1"));
-    options.add_macro_definition("GL_GOOGLE_include_directive", Some("1"));
+    let shader_dir = Path::new(shader_dir);
+    let out_dir = Path::new(out_dir);
 
-    let shader_dir_path = Path::new(shader_dir);
-    options.set_include_callback(move |name, _include_type, _source_file, _depth| {
-        let path = shader_dir_path.join(name);
-        if path.exists() {
-            Ok(shaderc::ResolvedInclude {
-                resolved_name: path.to_str().unwrap().to_string(),
-                content: fs::read_to_string(&path)
-                    .map_err(|err| " Failed to read shader includes".to_string())?,
-            })
-        } else {
-            Err(format!("Failed to find include file: {}", name))
-        }
-    });
+    #[derive(Copy, Clone)]
+    enum ShaderCompiler {
+        Glslc,
+        GlslangValidator,
+    }
 
-    // Iterate over the shader files in the shader directory
+    // Prefer glslc, but allow glslangValidator as a fallback.
+    let compiler = match Command::new("glslc").arg("--version").output() {
+        Ok(output) if output.status.success() => ShaderCompiler::Glslc,
+        Ok(_) | Err(_) => match Command::new("glslangValidator").arg("--version").output() {
+            Ok(output) if output.status.success() => ShaderCompiler::GlslangValidator,
+            Ok(_) | Err(_) => {
+                return Err(
+                    "No shader compiler found in PATH (need 'glslc' or 'glslangValidator'). Install Vulkan shader tools to rebuild shaders."
+                        .into(),
+                );
+            }
+        },
+    };
+
     for entry in fs::read_dir(shader_dir)? {
         let entry = entry?;
         let path = entry.path();
 
         if let Some(extension) = path.extension() {
-            if ["vert", "frag", "comp"].contains(&extension.to_str().unwrap()) {
-                // Read the shader source code
-                let shader_source = fs::read_to_string(&path)?;
+            let ext = extension.to_string_lossy();
+            if ["vert", "frag", "comp"].contains(&ext.as_ref()) {
+                let file_name = path
+                    .file_name()
+                    .ok_or("Invalid shader path: missing filename")?
+                    .to_string_lossy()
+                    .to_string();
+                let output_path = out_dir.join(format!("{file_name}.spv"));
 
-                // Compile the shader
-                let shader_kind = match extension.to_str().unwrap() {
-                    "vert" => ShaderKind::Vertex,
-                    "frag" => ShaderKind::Fragment,
-                    "comp" => ShaderKind::Compute,
-                    _ => continue, // Skip unsupported shader types
+                let output = match compiler {
+                    ShaderCompiler::Glslc => Command::new("glslc")
+                        .arg(&path)
+                        .arg("-o")
+                        .arg(&output_path)
+                        .arg("-I")
+                        .arg(shader_dir)
+                        .output()?,
+                    ShaderCompiler::GlslangValidator => Command::new("glslangValidator")
+                        .arg("-V")
+                        .arg(&path)
+                        .arg("-o")
+                        .arg(&output_path)
+                        .arg(format!("-I{}", shader_dir.display()))
+                        .output()?,
                 };
 
-                let binary_result = compiler.compile_into_spirv(
-                    &shader_source,
-                    shader_kind,
-                    path.file_name().unwrap().to_str().unwrap(),
-                    "main",
-                    Some(&options),
-                )?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("Failed to compile shader {:?}: {}", path, stderr).into());
+                }
 
-                // Write the compiled SPIR-V to the output directory
-                let output_path = PathBuf::from(out_dir).join(format!(
-                    "{}.spv",
-                    path.file_name().unwrap().to_str().unwrap()
-                ));
-                fs::write(&output_path, binary_result.as_binary_u8())?;
-                println!("Compiled shader: {:?}", output_path);
+                info!("Compiled shader: {:?}", output_path);
             }
         }
     }
 
     Ok(())
 }
-*/
 
 
 pub(crate) fn create_cubemap(

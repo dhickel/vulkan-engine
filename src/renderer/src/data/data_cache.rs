@@ -57,20 +57,31 @@
 //! - Batch transfers: Multiple textures uploaded in single frame
 
 use crate::data::data_util::PackUnorm;
-use crate::data::gpu_data::{AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers};
+use crate::data::gpu_data::{
+    AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialValues, MeshMeta,
+    MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta, TextureIds,
+    TextureMeta, TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers,
+};
 use crate::data::{assimp_util, data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
-use crate::vulkan::vk_types::{VkDeviceQueues, VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkSubAlloc, VkQueueType, VkCmdSubmitInfo, VkFenceQueue, VkSubmitParam};
+use crate::vulkan::vk_types::{
+    VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkCommandPool, VkDestroyable,
+    VkDeviceQueues, VkFenceQueue, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkQueueType,
+    VkSubAlloc, VkSubmitParam,
+};
 
 use crate::vulkan::{vk_debug, vk_util};
+use ash::prelude::VkResult;
 use ash::vk::{Format, PFN_vkFreeDescriptorSets};
 use ash::{vk, Device};
 use glam::{vec3, vec4, Vec3, Vec4};
 use gltf::json::Path;
-use image::{EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba, Rgba32FImage};
+use image::{
+    EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba, Rgba32FImage,
+};
 use log::{debug, error, info};
 use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -78,10 +89,9 @@ use std::hash::{DefaultHasher, Hasher};
 use std::marker::PhantomData;
 use std::path;
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock, Mutex};
 use std::sync::mpsc::{Receiver, SendError};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
-use ash::prelude::VkResult;
 use vk_mem::Allocator;
 
 ///////////////////
@@ -127,15 +137,14 @@ pub enum CachedMaterial {
     Loaded(VkLoadedMaterial),
 }
 
-
 #[derive(Debug, Clone, Copy)]
 pub struct VkLoadedMaterial {
     pub texture_ids: TextureIds,
     pub meta_alloc: VkSubAlloc,
     pub image_descriptor: vk::DescriptorSet,
     pub pipeline: VkPipelineType,
+    pub alpha_mode: AlphaMode,
 }
-
 
 #[derive(Debug)]
 pub struct VkLoadedTexture {
@@ -143,12 +152,10 @@ pub struct VkLoadedTexture {
     pub sampler: vk::Sampler,
 }
 
-
 pub struct DescriptorManager {
     image_desc_allocator: VkDynamicDescriptorAllocator,
     image_desc_layout: vk::DescriptorSetLayout,
 }
-
 
 impl DescriptorManager {
     pub fn alloc_image_desc(&mut self, device: &ash::Device) -> vk::DescriptorSet {
@@ -158,12 +165,9 @@ impl DescriptorManager {
     }
 }
 
-
 unsafe impl Send for MeshCache {}
 
-
 unsafe impl Send for TextureCache {}
-
 
 pub struct VkDataCache {
     pub mesh_cache: Mutex<MeshCache>,
@@ -172,13 +176,11 @@ pub struct VkDataCache {
     pub supported_image_formats: HashSet<vk::Format>,
 }
 
-
 impl VkDataCache {
     pub fn is_supported_image_format(&self, format: vk::Format) -> bool {
         self.supported_image_formats.contains(&format)
     }
 }
-
 
 pub struct VkCache {
     pub shaders: VkShaderCache,
@@ -186,7 +188,6 @@ pub struct VkCache {
     pub pipelines: VkPipelineCache,
     pub queues: VkDeviceQueues,
 }
-
 
 impl VkDestroyable for VkCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -196,14 +197,15 @@ impl VkDestroyable for VkCache {
     }
 }
 
-
 impl VkDataCache {
     pub fn destroy(&self, device: &Device, allocator: &Allocator) {
         self.mesh_cache.lock().unwrap().destroy(device, allocator);
-        self.texture_cache.lock().unwrap().destroy(device, allocator);
+        self.texture_cache
+            .lock()
+            .unwrap()
+            .destroy(device, allocator);
     }
 }
-
 
 pub struct TextureCache {
     device: ash::Device,
@@ -219,7 +221,6 @@ pub struct TextureCache {
     gfx_pool: VkCommandPool,
     gfx_queue: vk::Queue,
 }
-
 
 impl TextureCache {
     pub const DEFAULT_ERROR_TEX: u32 = 5;
@@ -292,7 +293,6 @@ impl TextureCache {
 
         let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
 
-
         let def_occlusion = CachedTexture::Unloaded(TextureMeta {
             bytes: if r8_support {
                 vec![255]
@@ -328,7 +328,6 @@ impl TextureCache {
             uv_index: 0,
         });
 
-
         let def_error = CachedTexture::Unloaded(TextureMeta {
             bytes: vec![255, 20, 147, 255],
             width: 2,
@@ -343,6 +342,7 @@ impl TextureCache {
                 base_color: Self::DEFAULT_ERROR_TEX,
                 ..Default::default()
             },
+            alpha_mode: AlphaMode::Opaque,
             material_values: Default::default(),
         });
 
@@ -358,13 +358,16 @@ impl TextureCache {
         cached_materials.push(CachedMaterial::Unloaded(MaterialMeta::default()));
         cached_materials.push(err_mat);
 
-
-        let image_desc_ratios = [PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 5.0)];
+        let image_desc_ratios = [PoolSizeRatio::new(
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            5.0,
+        )];
         let meta_desc_ratios = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 1.0)];
 
-
-        let image_desc_allocator = VkDynamicDescriptorAllocator::new(&device, 5_000, &image_desc_ratios).unwrap();
-        let meta_desc_allocator = VkDynamicDescriptorAllocator::new(&device, 1_000, &meta_desc_ratios).unwrap();
+        let image_desc_allocator =
+            VkDynamicDescriptorAllocator::new(&device, 5_000, &image_desc_ratios).unwrap();
+        let meta_desc_allocator =
+            VkDynamicDescriptorAllocator::new(&device, 1_000, &meta_desc_ratios).unwrap();
 
         let material_meta_storage = VkSubAllocator::new_storage_buffer(
             &device,
@@ -379,7 +382,6 @@ impl TextureCache {
             image_desc_allocator,
             image_desc_layout,
         };
-
 
         Ok(Self {
             device: device.clone(),
@@ -430,19 +432,22 @@ impl TextureCache {
         index as u32
     }
 
-
     pub(crate) fn save_debug_image(data: &TextureMeta, bytes: &[u8], filename: String) {
         let path = path::Path::new("debug_textures").join(filename);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         match data.format {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
-                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes) {
+                if let Some(img) =
+                    ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes)
+                {
                     img.save(&path).unwrap();
                 }
             }
             vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes) {
+                if let Some(img) =
+                    ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes)
+                {
                     img.save(&path).unwrap();
                 }
             }
@@ -455,7 +460,9 @@ impl TextureCache {
     }
 
     pub fn add_textures(&mut self, data: Vec<TextureMeta>) -> Vec<u32> {
-        data.into_iter().map(|meta| self.add_texture(meta)).collect()
+        data.into_iter()
+            .map(|meta| self.add_texture(meta))
+            .collect()
     }
 
     pub fn add_material(&mut self, data: MaterialMeta) -> u32 {
@@ -465,18 +472,18 @@ impl TextureCache {
     }
 
     pub fn add_materials(&mut self, data: Vec<MaterialMeta>) -> Vec<u32> {
-        data.into_iter().map(|meta| self.add_material(meta)).collect()
+        data.into_iter()
+            .map(|meta| self.add_material(meta))
+            .collect()
     }
 
     pub fn get_material(&self, id: u32) -> Option<&CachedMaterial> {
         self.cached_materials.get(id as usize)
     }
 
-
     pub unsafe fn get_material_unchecked(&self, id: u32) -> &CachedMaterial {
         unsafe { self.cached_materials.get_unchecked(id as usize) }
     }
-
 
     pub unsafe fn get_loaded_material_unchecked(&self, id: u32) -> VkLoadedMaterial {
         unsafe {
@@ -500,7 +507,6 @@ impl TextureCache {
         self.cached_textures.get(id as usize)
     }
 
-
     pub unsafe fn get_loaded_texture_unchecked(&self, id: u32) -> &VkLoadedTexture {
         unsafe {
             match self.cached_textures.get_unchecked(id as usize) {
@@ -513,7 +519,6 @@ impl TextureCache {
         }
     }
 
-
     pub fn is_texture_loaded(&self, id: u32) -> bool {
         if let Some(found) = self.cached_textures.get(id as usize) {
             matches!(found, CachedTexture::Loaded(_))
@@ -522,10 +527,7 @@ impl TextureCache {
         }
     }
 
-    pub fn allocate_textures(
-        &mut self,
-        mut texture_ids: Vec<u32>,
-    ) -> bool {
+    pub fn allocate_textures(&mut self, mut texture_ids: Vec<u32>) -> bool {
         let host_buffer = self.host_buffer.lock().unwrap();
         let max_upload_bytes = host_buffer.buffer.size;
 
@@ -535,15 +537,19 @@ impl TextureCache {
 
         texture_ids.retain(|id| {
             let tex = self.cached_textures.get(*id as usize);
-            matches!( tex, Some(CachedTexture::Unloaded(_)))
+            matches!(tex, Some(CachedTexture::Unloaded(_)))
         });
 
         let mut ids = Vec::<u32>::new();
         for id in texture_ids.iter().copied() {
             match self.cached_textures.get(id as usize) {
                 Some(CachedTexture::Unloaded(meta)) => {
-                    if curr_bytes + meta.bytes.len()
-                        .next_multiple_of(self.host_alignment as usize) > max_upload_bytes as usize
+                    if curr_bytes
+                        + meta
+                            .bytes
+                            .len()
+                            .next_multiple_of(self.host_alignment as usize)
+                        > max_upload_bytes as usize
                     {
                         let image_allocs = vk_util::record_host_to_image_buffer(
                             &self.device,
@@ -559,8 +565,16 @@ impl TextureCache {
                         // Submit texture uploads, requires graphics queue for mips
 
                         debug!("Submitting Material Commands");
-                        host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
-                        host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
+                        host_buffer
+                            .submit_transfer_commands(VkSubmitParam::signaling(
+                                vk::PipelineStageFlags2::ALL_TRANSFER,
+                            ))
+                            .unwrap();
+                        host_buffer
+                            .submit_graphics_commands(VkSubmitParam::waiting(
+                                vk::PipelineStageFlags2::VERTEX_SHADER,
+                            ))
+                            .unwrap();
 
                         if let Err(error) = host_buffer.await_done(10000) {
                             error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
@@ -570,12 +584,11 @@ impl TextureCache {
                             debug!("Storage upload latch passed")
                         }
 
-
                         match image_allocs {
                             Ok(images) => {
                                 curr_bytes = 0;
                                 next_upload.clear();
-                                
+
                                 assert!(!images.is_empty());
 
                                 for image in images {
@@ -592,7 +605,10 @@ impl TextureCache {
                             }
                         }
                     }
-                    curr_bytes += meta.bytes.len().next_multiple_of(self.host_alignment as usize);
+                    curr_bytes += meta
+                        .bytes
+                        .len()
+                        .next_multiple_of(self.host_alignment as usize);
                     next_upload.push(meta);
                     ids.push(id);
                 }
@@ -602,7 +618,6 @@ impl TextureCache {
                 }
             }
         }
-
 
         // Upload any remaining data
         if curr_bytes > 0 {
@@ -619,9 +634,16 @@ impl TextureCache {
 
             debug!("Submitting Material Commands");
             // Submit texture uploads, requires graphics queue for mips
-            host_buffer.submit_transfer_commands(VkSubmitParam::signaling(vk::PipelineStageFlags2::ALL_TRANSFER)).unwrap();
-            host_buffer.submit_graphics_commands(VkSubmitParam::waiting(vk::PipelineStageFlags2::VERTEX_SHADER)).unwrap();
-
+            host_buffer
+                .submit_transfer_commands(VkSubmitParam::signaling(
+                    vk::PipelineStageFlags2::ALL_TRANSFER,
+                ))
+                .unwrap();
+            host_buffer
+                .submit_graphics_commands(VkSubmitParam::waiting(
+                    vk::PipelineStageFlags2::VERTEX_SHADER,
+                ))
+                .unwrap();
 
             if let Err(error) = host_buffer.await_done(10000) {
                 error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
@@ -630,8 +652,6 @@ impl TextureCache {
                 host_buffer.reset_buffers(&self.device);
                 debug!("Storage upload latch passed")
             }
-
-            
 
             match image_allocs {
                 Ok(images) => {
@@ -653,9 +673,12 @@ impl TextureCache {
             }
         }
 
-
         assert_eq!(texture_ids.len(), loaded.len());
-        println!("Texitre Ids len :{}, loaded_len: {}", texture_ids.len(), loaded.len());
+        println!(
+            "Texitre Ids len :{}, loaded_len: {}",
+            texture_ids.len(),
+            loaded.len()
+        );
         for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
             self.cached_textures[*id as usize] = tex;
         }
@@ -669,9 +692,10 @@ impl TextureCache {
         buffer_placement: BufferPlacement,
         rtn_alloc: bool,
     ) -> LoadResult<VkLoadedMaterial> {
-        let mut texture_ids: Vec<u32> = materials.iter().flat_map(|(id, meta)| {
-            (&**meta).texture_ids.to_vec()
-        }).collect();
+        let mut texture_ids: Vec<u32> = materials
+            .iter()
+            .flat_map(|(id, meta)| (&**meta).texture_ids.to_vec())
+            .collect();
 
         // Dedupe
         texture_ids.sort_unstable();
@@ -681,25 +705,35 @@ impl TextureCache {
             return LoadResult::Failed(None);
         }
 
-        let meta_bytes: Vec<&[u8]> = materials.iter()
+        let meta_bytes: Vec<&[u8]> = materials
+            .iter()
             .map(|(id, material)| bytemuck::bytes_of(&(**material).material_values))
             .collect();
 
-        let meta_allocs = match self.material_meta_storage.allocate_bytes(&meta_bytes, buffer_placement) {
+        let meta_allocs = match self
+            .material_meta_storage
+            .allocate_bytes(&meta_bytes, buffer_placement)
+        {
             VkAllocResult::Success(allocs) => allocs,
-            VkAllocResult::Failure { error_msg, successful_allocs } => {
+            VkAllocResult::Failure {
+                error_msg,
+                successful_allocs,
+            } => {
                 error!("Error allocating material meta: {:?}", error_msg);
-                successful_allocs.into_iter().for_each(|alloc| self.material_meta_storage.deallocate(alloc));
+                successful_allocs
+                    .into_iter()
+                    .for_each(|alloc| self.material_meta_storage.deallocate(alloc));
                 return LoadResult::Failed(None);
             }
         };
 
         let mut loaded_materials = if rtn_alloc {
             Some(Vec::<VkLoadedMaterial>::with_capacity(materials.len()))
-        } else { None };
+        } else {
+            None
+        };
 
-        for ((id, meta), alloc) in materials.into_iter()
-            .zip(meta_allocs.into_iter()) {
+        for ((id, meta), alloc) in materials.into_iter().zip(meta_allocs.into_iter()) {
             let loaded_mat = self.write_material_descriptors(&*meta, alloc);
             self.cached_materials[id as usize] = CachedMaterial::Loaded(loaded_mat);
 
@@ -715,38 +749,50 @@ impl TextureCache {
         meta: &MaterialMeta,
         meta_alloc: VkSubAlloc,
     ) -> VkLoadedMaterial {
-        let pipeline = match meta.material_values.alpha_mask {
-            0.0 => VkPipelineType::PbrMetRoughOpaque,
-            1.0.. => VkPipelineType::PbrMetRoughAlpha, // TODO make sure both can use same pipeline
-            _ => panic!(
-                "Invalid alpha mask (Valid values: 0.0..=2.0, found: {:?}",
-                meta.material_values.alpha_mask
-            ),
+        // Mask uses opaque state + shader discard. Blend uses transparent blending pipeline.
+        let pipeline = match meta.alpha_mode {
+            AlphaMode::Blend => VkPipelineType::PbrMetRoughAlpha,
+            AlphaMode::Opaque | AlphaMode::Mask => VkPipelineType::PbrMetRoughOpaque,
         };
 
-
         let color_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.base_color) };
-        let metallic_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.metallic_roughness) };
+        let metallic_tex =
+            unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.metallic_roughness) };
         let normal_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.normal_map) };
-        let occlusion_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.occlusion_map) };
-        let emissive_tex = unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.emissive_map) };
+        let occlusion_tex =
+            unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.occlusion_map) };
+        let emissive_tex =
+            unsafe { self.get_loaded_texture_unchecked(meta.texture_ids.emissive_map) };
 
         debug!(" color id: {}", meta.texture_ids.base_color);
         debug!(" metal rough id: {}", meta.texture_ids.metallic_roughness);
         debug!(" normal id: {}", meta.texture_ids.normal_map);
         debug!(" occlusion id: {}", meta.texture_ids.occlusion_map);
         debug!(" emissive id: {}", meta.texture_ids.emissive_map);
-        debug!(" base color uv set: {}", meta.material_values.base_color_uv_set);
-        debug!(" metal rough uv set: {}", meta.material_values.met_rough_uv_set);
+        debug!(
+            " base color uv set: {}",
+            meta.material_values.base_color_uv_set
+        );
+        debug!(
+            " metal rough uv set: {}",
+            meta.material_values.met_rough_uv_set
+        );
         debug!(" normal uv set: {}", meta.material_values.normal_uv_set);
-        debug!(" occlusion uv set: {}", meta.material_values.occlusion_uv_set);
+        debug!(
+            " occlusion uv set: {}",
+            meta.material_values.occlusion_uv_set
+        );
         debug!(" emissive uv set: {}", meta.material_values.emissive_uv_set);
         debug!(" metallic factor: {}", meta.material_values.metallic_factor);
-        debug!(" roughness factor: {}", meta.material_values.roughness_factor);
+        debug!(
+            " roughness factor: {}",
+            meta.material_values.roughness_factor
+        );
         debug!(" normal scale: {}", meta.material_values.normal_scale);
-        debug!(" occlusion strength: {}", meta.material_values.occlusion_strength);
-
-
+        debug!(
+            " occlusion strength: {}",
+            meta.material_values.occlusion_strength
+        );
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_image(
@@ -793,29 +839,34 @@ impl TextureCache {
 
         writer.update_set(&self.device, image_descriptor);
 
-
         let mat = VkLoadedMaterial {
             texture_ids: meta.texture_ids,
             meta_alloc,
             image_descriptor,
             pipeline,
+            alpha_mode: meta.alpha_mode,
         };
         debug!("Bound material to descriptorset: {:#?}", mat);
         mat
     }
-
 
     pub fn allocate_all(
         &mut self,
         buffer_placement: BufferPlacement,
         rtn_alloc: bool,
     ) -> LoadResult<VkLoadedMaterial> {
-        let id_mats: Vec<(u32, *const MaterialMeta)> = self.cached_materials.iter().enumerate()
+        let id_mats: Vec<(u32, *const MaterialMeta)> = self
+            .cached_materials
+            .iter()
+            .enumerate()
             .filter_map(|(id, mat)| {
                 if let CachedMaterial::Unloaded(meta) = mat {
                     Some((id as u32, meta as *const MaterialMeta))
-                } else { None }
-            }).collect();
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         unsafe { self.allocate_materials(id_mats, buffer_placement, rtn_alloc) }
     }
@@ -830,17 +881,19 @@ impl TextureCache {
         let mut id_mats = Vec::<(u32, *const MaterialMeta)>::with_capacity(material_ids.len());
         for id in material_ids.iter() {
             match self.cached_materials.get(*id as usize) {
-                Some(CachedMaterial::Unloaded(meta)) => id_mats.push((*id, meta as *const MaterialMeta)),
+                Some(CachedMaterial::Unloaded(meta)) => {
+                    id_mats.push((*id, meta as *const MaterialMeta))
+                }
                 Some(CachedMaterial::Loaded(loaded)) if rtn_alloc => existing_loads.push(*loaded),
                 _ => {
                     error!("Failed to located material id: {:?}", id);
                     return LoadResult::Failed(None);
                 }
             }
-        };
+        }
 
-
-        let mut alloc_result = unsafe { self.allocate_materials(id_mats, buffer_placement, rtn_alloc) };
+        let mut alloc_result =
+            unsafe { self.allocate_materials(id_mats, buffer_placement, rtn_alloc) };
         if !existing_loads.is_empty() {
             match alloc_result {
                 LoadResult::Success(Some(allocs)) => {
@@ -851,14 +904,15 @@ impl TextureCache {
                     existing_loads.extend(allocs);
                     alloc_result = LoadResult::Failed(Some(existing_loads));
                 }
-                LoadResult::Success(None) => alloc_result = LoadResult::Success(Some(existing_loads)),
+                LoadResult::Success(None) => {
+                    alloc_result = LoadResult::Success(Some(existing_loads))
+                }
                 LoadResult::Failed(None) => alloc_result = LoadResult::Failed(Some(existing_loads)),
             }
         }
 
         alloc_result
     }
-
 
     pub fn allocate_id(
         &mut self,
@@ -870,14 +924,18 @@ impl TextureCache {
             Some(CachedMaterial::Loaded(loaded)) => {
                 if rtn_alloc {
                     LoadResult::Success(Some(vec![*loaded]))
-                } else { LoadResult::Success(None) }
-            }
-            Some(CachedMaterial::Unloaded(meta)) => {
-                unsafe {
-                    self.allocate_materials(vec![(id, meta as *const MaterialMeta)], buffer_placement, rtn_alloc)
+                } else {
+                    LoadResult::Success(None)
                 }
             }
-            _ => LoadResult::Failed(None)
+            Some(CachedMaterial::Unloaded(meta)) => unsafe {
+                self.allocate_materials(
+                    vec![(id, meta as *const MaterialMeta)],
+                    buffer_placement,
+                    rtn_alloc,
+                )
+            },
+            _ => LoadResult::Failed(None),
         }
     }
 
@@ -908,7 +966,6 @@ impl TextureCache {
     }
 }
 
-
 impl VkDestroyable for TextureCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         todo!()
@@ -926,7 +983,6 @@ pub enum CachedMesh {
     _NULL,
 }
 
-
 pub struct MeshCache {
     vertex_storage: VkSubAllocator,
     index_storage: VkSubAllocator,
@@ -935,7 +991,6 @@ pub struct MeshCache {
     default_joint_desc: vk::DescriptorSet,
     default_joint_buffer: VkBuffer,
 }
-
 
 impl MeshCache {
     const DEFAULT_JOINTS: [glam::Mat4; 128] = [glam::Mat4::IDENTITY; 128];
@@ -967,17 +1022,19 @@ impl MeshCache {
             allocator,
             Self::DEFAULT_JOINTS.as_byte_slice(),
             vk::BufferUsageFlags::UNIFORM_BUFFER,
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut joint_desc_pool = VkDynamicDescriptorAllocator::new(
             device,
             1,
-            &[PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER,
-                1.0)],
-        ).unwrap();
+            &[PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 1.0)],
+        )
+        .unwrap();
 
-        let default_joint_desc = joint_desc_pool.allocate(device, &[joint_desc_layout]).unwrap();
-
+        let default_joint_desc = joint_desc_pool
+            .allocate(device, &[joint_desc_layout])
+            .unwrap();
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_buffer(
@@ -989,7 +1046,6 @@ impl MeshCache {
         );
 
         writer.update_set(device, default_joint_desc);
-
 
         Self {
             cached_meshes,
@@ -1004,7 +1060,6 @@ impl MeshCache {
     pub fn get_default_joint_desc(&self) -> vk::DescriptorSet {
         self.default_joint_desc
     }
-
 
     pub fn add(&mut self, data: MeshMeta) -> u32 {
         let index = self.cached_meshes.len();
@@ -1025,7 +1080,6 @@ impl MeshCache {
         let id = self.add(data);
         self.allocate_id(id, buffer_placement, return_buffers)
     }
-
 
     pub fn add_and_allocate_multi(
         &mut self,
@@ -1082,39 +1136,58 @@ impl MeshCache {
             }
         }
 
-
-        let vertex_allocs = match self.vertex_storage.allocate_bytes(&mut vertex_data, buffer_placement) {
+        let vertex_allocs = match self
+            .vertex_storage
+            .allocate_bytes(&mut vertex_data, buffer_placement)
+        {
             VkAllocResult::Success(allocs) => allocs,
-            VkAllocResult::Failure { error_msg, successful_allocs } => {
-                successful_allocs.into_iter().for_each(|alloc| self.vertex_storage.deallocate(alloc));
+            VkAllocResult::Failure {
+                error_msg,
+                successful_allocs,
+            } => {
+                successful_allocs
+                    .into_iter()
+                    .for_each(|alloc| self.vertex_storage.deallocate(alloc));
                 error!("Failed to allocate vertices: {:?}", error_msg);
                 return LoadResult::Failed(None);
             }
         };
 
-
-        let index_allocs = match self.index_storage.allocate_bytes(&mut index_data, buffer_placement) {
+        let index_allocs = match self
+            .index_storage
+            .allocate_bytes(&mut index_data, buffer_placement)
+        {
             VkAllocResult::Success(allocs) => allocs,
-            VkAllocResult::Failure { error_msg, successful_allocs } => {
-                successful_allocs.into_iter().for_each(|alloc| self.vertex_storage.deallocate(alloc));
+            VkAllocResult::Failure {
+                error_msg,
+                successful_allocs,
+            } => {
+                successful_allocs
+                    .into_iter()
+                    .for_each(|alloc| self.vertex_storage.deallocate(alloc));
                 error!("Failed to allocate vertices: {:?}", error_msg);
                 return LoadResult::Failed(None);
             }
         };
-
 
         let mut rtn_buffers = if return_buffers {
             Some(Vec::<VkMeshBuffers>::with_capacity(vertex_allocs.len()))
-        } else { None };
+        } else {
+            None
+        };
 
-
-        meshes.iter()
+        meshes
+            .iter()
             .map(|(id, meta)| *id)
             .zip(vertex_allocs.into_iter())
             .zip(index_allocs.into_iter())
             .for_each(|((id, vert_alloc), index_alloc)| {
-                if let CachedMesh::Unloaded(meta) = unsafe { self.cached_meshes.get_unchecked(id as usize) } {
-                    let material_id = meta.material_index.unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT);
+                if let CachedMesh::Unloaded(meta) =
+                    unsafe { self.cached_meshes.get_unchecked(id as usize) }
+                {
+                    let material_id = meta
+                        .material_index
+                        .unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT);
                     let buffer = VkMeshBuffers {
                         cache_id: id,
                         index_count: meta.indices.len() as u32,
@@ -1127,9 +1200,7 @@ impl MeshCache {
 
                     debug!(
                         "Loaded mesh '{}' (cache id {}) uses material id {}",
-                        meta.name,
-                        id,
-                        material_id
+                        meta.name, id, material_id
                     );
 
                     if let Some(rtn_meshes) = &mut rtn_buffers {
@@ -1137,7 +1208,9 @@ impl MeshCache {
                     }
 
                     self.cached_meshes[id as usize] = CachedMesh::Loaded(buffer);
-                } else { panic!("Unreachable") }
+                } else {
+                    panic!("Unreachable")
+                }
             });
 
         debug!("Allocated Meshes: {:?}", meshes);
@@ -1149,13 +1222,18 @@ impl MeshCache {
         buffer_placement: BufferPlacement,
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
-        let id_meshes: Vec<(u32, *const MeshMeta)> = self.cached_meshes.iter()
+        let id_meshes: Vec<(u32, *const MeshMeta)> = self
+            .cached_meshes
+            .iter()
             .enumerate()
             .filter_map(|(i, mesh)| {
                 if let CachedMesh::Unloaded(meta) = mesh {
                     Some((i as u32, meta as *const MeshMeta))
-                } else { None }
-            }).collect();
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         unsafe { self.allocate(id_meshes, buffer_placement, return_buffers) }
     }
@@ -1177,7 +1255,7 @@ impl MeshCache {
                     return LoadResult::Failed(None);
                 }
             }
-        };
+        }
 
         let mut alloc_result = unsafe { self.allocate(id_meshes, buffer_placement, rtn_buffers) };
         if !existing_loads.is_empty() {
@@ -1190,8 +1268,10 @@ impl MeshCache {
                     existing_loads.extend(allocs);
                     alloc_result = LoadResult::Failed(Some(existing_loads));
                 }
-                LoadResult::Success(None) => alloc_result = LoadResult::Success(Some(existing_loads)),
-                LoadResult::Failed(None) => alloc_result = LoadResult::Failed(Some(existing_loads))
+                LoadResult::Success(None) => {
+                    alloc_result = LoadResult::Success(Some(existing_loads))
+                }
+                LoadResult::Failed(None) => alloc_result = LoadResult::Failed(Some(existing_loads)),
             }
         }
 
@@ -1205,12 +1285,17 @@ impl MeshCache {
         return_buffers: bool,
     ) -> LoadResult<VkMeshBuffers> {
         if let Some(CachedMesh::Unloaded(meta)) = self.cached_meshes.get(mesh_id as usize) {
-            unsafe { self.allocate(vec![(mesh_id, meta as *const MeshMeta)], buffer_placement, return_buffers) }
+            unsafe {
+                self.allocate(
+                    vec![(mesh_id, meta as *const MeshMeta)],
+                    buffer_placement,
+                    return_buffers,
+                )
+            }
         } else {
             LoadResult::Failed(None)
         }
     }
-
 
     pub fn deallocate_id(&mut self, mesh_id: u32) {
         if (mesh_id as usize) < self.cached_meshes.len() {
@@ -1221,17 +1306,15 @@ impl MeshCache {
         }
     }
 
-
     pub fn deallocate_ids(&mut self, mesh_ids: &[u32]) {
         mesh_ids.iter().for_each(|&id| self.deallocate_id(id))
     }
 
-
     pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator) {
-        (Self::DEFAULT_MESH_ITER_START..self.cached_meshes.len()).for_each(|i| self.deallocate_id(i as u32))
+        (Self::DEFAULT_MESH_ITER_START..self.cached_meshes.len())
+            .for_each(|i| self.deallocate_id(i as u32))
     }
 }
-
 
 impl VkDestroyable for MeshCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1260,17 +1343,14 @@ pub enum CoreShaderType {
     EnvPrefilterFrag,
 }
 
-
 impl CoreShaderType {
     const COUNT: usize = 10;
 }
-
 
 pub struct VkShaderCache {
     pub core_shader_cache: [vk::ShaderModule; CoreShaderType::COUNT],
     pub user_shader_cache: Vec<vk::ShaderModule>,
 }
-
 
 impl VkShaderCache {
     pub fn new(
@@ -1306,7 +1386,6 @@ impl VkShaderCache {
     pub fn destory_all(&mut self, device: &ash::Device) {}
 }
 
-
 impl VkDestroyable for VkShaderCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.core_shader_cache
@@ -1334,17 +1413,14 @@ pub enum VkPipelineType {
     EnvIrradiance,
 }
 
-
 impl VkPipelineType {
-    const COUNT: usize = 6;
+    pub const COUNT: usize = 6;
 }
-
 
 //#[derive(Clone, Copy)]
 pub struct VkPipelineCache {
     pipelines: [VkPipeline; VkPipelineType::COUNT],
 }
-
 
 impl VkPipelineCache {
     pub fn new(mut pipelines: Vec<(VkPipelineType, VkPipeline)>) -> Result<Self, String> {
@@ -1366,7 +1442,6 @@ impl VkPipelineCache {
         unsafe { self.pipelines.get_unchecked(typ as usize) }
     }
 }
-
 
 impl VkDestroyable for VkPipelineCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1394,16 +1469,13 @@ pub enum VkDescType {
     Empty,
 }
 
-
 impl VkDescType {
     const COUNT: usize = 9;
 }
 
-
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
 }
-
 
 impl VkDescLayoutCache {
     pub fn new(mut layouts: Vec<(VkDescType, vk::DescriptorSetLayout)>) -> Self {
@@ -1438,13 +1510,12 @@ impl VkDescLayoutCache {
                 6 => VkDescType::EnvIrradiance,
                 7 => VkDescType::EnvPreFilter,
                 8 => VkDescType::Empty,
-                _ => panic!()
+                _ => panic!(),
             };
             debug!("\t{:?} : {:?}", typ, *set)
         }
     }
 }
-
 
 impl VkDestroyable for VkDescLayoutCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1454,12 +1525,10 @@ impl VkDestroyable for VkDescLayoutCache {
     }
 }
 
-
 pub enum CachedEnvironment {
     Unloaded(TextureMeta),
     Loaded(VkCubeMap),
 }
-
 
 pub struct EnvMaps {
     pub environment_ubo: EnvironmentUBO,
@@ -1467,13 +1536,11 @@ pub struct EnvMaps {
     pub pre_filter: VkCubeMap,
 }
 
-
 pub struct EnvironmentCache {
     skyboxes: Vec<CachedEnvironment>,
     env_maps: Vec<Option<EnvMaps>>,
     supported_formats: HashSet<vk::Format>,
 }
-
 
 impl EnvironmentCache {
     pub fn new(supported_formats: HashSet<vk::Format>) -> Self {
@@ -1631,7 +1698,8 @@ impl EnvironmentCache {
         );
 
         if let CachedEnvironment::Unloaded(meta) = texture {
-            let cube_map = vk_util::upload_skybox(device, allocator, meta, transfer_pool, transfer_queue);
+            let cube_map =
+                vk_util::upload_skybox(device, allocator, meta, transfer_pool, transfer_queue);
             self.skyboxes[env_id] = CachedEnvironment::Loaded(cube_map);
         } else {
             self.skyboxes[env_id] = texture;
@@ -1643,14 +1711,12 @@ impl EnvironmentCache {
     }
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LodBias {
     Sharp,
     Normal,
     Soft,
 }
-
 
 impl LodBias {
     fn to_float(&self) -> f32 {
@@ -1661,7 +1727,6 @@ impl LodBias {
         }
     }
 }
-
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct VkSamplerInfo {
@@ -1681,7 +1746,6 @@ pub struct VkSamplerInfo {
     pub border_color: vk::BorderColor,
     pub unnormalized_coordinates: bool,
 }
-
 
 impl VkSamplerInfo {
     pub fn to_create_info(&self) -> vk::SamplerCreateInfo<'_> {
@@ -1704,11 +1768,9 @@ impl VkSamplerInfo {
     }
 }
 
-
 pub struct VkSamplerCache {
     pub samplers: HashMap<VkSamplerInfo, vk::Sampler>,
 }
-
 
 impl Default for VkSamplerCache {
     fn default() -> Self {
@@ -1717,7 +1779,6 @@ impl Default for VkSamplerCache {
         }
     }
 }
-
 
 impl VkSamplerCache {
     pub fn get_or_create_sampler(

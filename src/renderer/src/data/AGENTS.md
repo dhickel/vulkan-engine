@@ -38,7 +38,7 @@ This is the deep guide for scene data, caches, asset loading, and camera/input c
 
 - `DrawContext`
 - `active_pipelines: HashSet<VkPipelineType>`
-- `render_objects: [Vec<RenderObject>; 4]`
+- `render_objects: [Vec<RenderObject>; VkPipelineType::COUNT]`
 
 - `RenderObject`
 - index metadata
@@ -92,10 +92,9 @@ Many systems assume these IDs. Preserve this contract unless performing a delibe
 - `RenderObject.material` is a raw pointer into `TextureCache` storage.
 - Safe only if no cache mutation/reallocation occurs during draw consumption.
 
-4. DrawContext pipeline array width mismatch risk.
-- `DrawContext.render_objects` is fixed length 4.
-- `VkPipelineType` currently contains 6 variants.
-- Current scene path only uses PBR pipelines during geometry draw, but enum expansion/use changes can cause indexing faults.
+4. DrawContext-to-pipeline coupling still requires attention.
+- `DrawContext.render_objects` now derives from `VkPipelineType::COUNT`.
+- This prevents OOB on enum growth, but geometry pass logic should still avoid assuming all pipeline variants are draw-path compatible.
 
 5. Legacy glTF path is non-operational.
 - `gltf_util.rs` is effectively commented-out code and should not be treated as live.
@@ -122,7 +121,7 @@ When changing this module:
 
 1. Replace ID-shifting `Vec::remove` cache semantics with tombstone/slot reuse.
 2. Implement `TextureCache::destroy` and complete resource cleanup path.
-3. Add debug assertions around `VkPipelineType` to `DrawContext` indexing.
+3. Keep geometry pass ordering explicit (opaque/mask/blend) and avoid relying on `HashSet` iteration order.
 4. Restore or delete `gltf_util.rs` legacy code path to reduce ambiguity.
 
 ## Related Files

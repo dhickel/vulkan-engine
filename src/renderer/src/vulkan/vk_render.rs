@@ -58,17 +58,36 @@
 //! - Recreates swapchain with new extent
 //! - Updates viewport/scissor
 
-use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo, VkShaderCache, VkDataCache, VkCache};
+use crate::data::data_cache::{
+    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache,
+    VkCache, VkDataCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+    VkSamplerCache, VkSamplerInfo, VkShaderCache,
+};
 
-use crate::data::gpu_data::{AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap, VkMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts, EnvironmentUBO};
+use crate::data::data_util::CountdownLatch;
+use crate::data::gpu_data::{
+    AsByteSlice, DrawContext, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, Node,
+    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO,
+    Vertex, VkCubeMap, VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
+};
 use crate::data::{assimp_util, data_cache, data_util, gltf_util, gpu_data};
 use crate::vulkan;
+use crate::vulkan::vk_descriptor::*;
+use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
+use crate::vulkan::vk_types::*;
+use crate::vulkan::vk_util::allocate_buffer;
+use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
 use ash::prelude::VkResult;
-use ash::vk::{AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags, DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, Handle, ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags};
+use ash::vk::{
+    AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags,
+    DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, Handle,
+    ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags,
+};
 use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
+use gltf::json::serialize::to_string;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use log::{debug, error, info, log};
 use std::cell::{Ref, RefCell};
@@ -80,18 +99,13 @@ use std::mem::align_of;
 use std::path;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
-use gltf::json::serialize::to_string;
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
-use crate::data::data_util::CountdownLatch;
-use crate::vulkan::vk_descriptor::*;
-use crate::vulkan::vk_types::*;
-use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
-use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
-use crate::vulkan::vk_util::allocate_buffer;
-
 
 pub struct SkyBox {
     pub skybox_consts: PushConstSkyBox,
@@ -99,7 +113,6 @@ pub struct SkyBox {
     pub env_id: u32,
     pub mesh_id: u32,
 }
-
 
 impl Default for SkyBox {
     fn default() -> Self {
@@ -112,12 +125,10 @@ impl Default for SkyBox {
     }
 }
 
-
 pub struct VkSingleDescriptor {
     pub desc_alloc: VkDescriptorAllocator,
     pub descriptor: [vk::DescriptorSet; 1],
 }
-
 
 impl VkSingleDescriptor {
     pub fn new(desc_alloc: VkDescriptorAllocator, descriptor: vk::DescriptorSet) -> Self {
@@ -132,13 +143,11 @@ impl VkSingleDescriptor {
     }
 }
 
-
 pub struct RenderContext {
     pub draw_context: DrawContext,
     pub scene_tree: Rc<RefCell<gpu_data::Node>>,
     pub sky_box: SkyBox,
 }
-
 
 impl Default for RenderContext {
     fn default() -> Self {
@@ -149,7 +158,6 @@ impl Default for RenderContext {
         }
     }
 }
-
 
 pub struct VkRender {
     pub window_state: VkWindowState,
@@ -177,7 +185,6 @@ pub struct VkRender {
     pub resize_requested: bool,
 }
 
-
 pub fn init_caches(
     device: &ash::Device,
     allocator: &Arc<Mutex<Allocator>>,
@@ -192,16 +199,46 @@ pub fn init_caches(
     device_queues: VkDeviceQueues,
 ) -> (Arc<VkDataCache>, VkCache) {
     let shader_paths = vec![
-        (CoreShaderType::MetRoughVert, "src/renderer/src/shaders/pbr_base.vert.spv"),
-        (CoreShaderType::MetRoughFrag, "src/renderer/src/shaders/material_pbr.frag.spv",),
-        (CoreShaderType::MetRoughFragUnlit, "src/renderer/src/shaders/material_unlit.frag.spv"),
-        (CoreShaderType::BrtFlutFrag, "src/renderer/src/shaders/gen_brd_flut.frag.spv"),
-        (CoreShaderType::BrtFlutVert, "src/renderer/src/shaders/gen_brd_flut.vert.spv"),
-        (CoreShaderType::SkyBoxFrag, "src/renderer/src/shaders/skybox.frag.spv"),
-        (CoreShaderType::SkyBoxVert, "src/renderer/src/shaders/skybox.vert.spv"),
-        (CoreShaderType::CubeFilterVert, "src/renderer/src/shaders/filtered_cube.vert.spv"),
-        (CoreShaderType::EnvIrradianceFrag, "src/renderer/src/shaders/env_irradiance_cube.frag.spv"),
-        (CoreShaderType::EnvPrefilterFrag, "src/renderer/src/shaders/env_prefilter_cube.frag.spv"),
+        (
+            CoreShaderType::MetRoughVert,
+            "src/renderer/src/shaders/pbr_base.vert.spv",
+        ),
+        (
+            CoreShaderType::MetRoughFrag,
+            "src/renderer/src/shaders/material_pbr.frag.spv",
+        ),
+        (
+            CoreShaderType::MetRoughFragUnlit,
+            "src/renderer/src/shaders/material_unlit.frag.spv",
+        ),
+        (
+            CoreShaderType::BrtFlutFrag,
+            "src/renderer/src/shaders/gen_brd_flut.frag.spv",
+        ),
+        (
+            CoreShaderType::BrtFlutVert,
+            "src/renderer/src/shaders/gen_brd_flut.vert.spv",
+        ),
+        (
+            CoreShaderType::SkyBoxFrag,
+            "src/renderer/src/shaders/skybox.frag.spv",
+        ),
+        (
+            CoreShaderType::SkyBoxVert,
+            "src/renderer/src/shaders/skybox.vert.spv",
+        ),
+        (
+            CoreShaderType::CubeFilterVert,
+            "src/renderer/src/shaders/filtered_cube.vert.spv",
+        ),
+        (
+            CoreShaderType::EnvIrradianceFrag,
+            "src/renderer/src/shaders/env_irradiance_cube.frag.spv",
+        ),
+        (
+            CoreShaderType::EnvPrefilterFrag,
+            "src/renderer/src/shaders/env_prefilter_cube.frag.spv",
+        ),
     ];
 
     let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
@@ -219,21 +256,41 @@ pub fn init_caches(
 
     let sampler_cache = VkSamplerCache::default();
     let texture_cache = TextureCache::new(
-        device, allocator.clone(), sampler_cache, supported_formats.clone(),
-        meta_desc_layout, image_desc_layout, texture_host_buffer.clone(),
-        texture_meta_buffer_size, &limits,
+        device,
+        allocator.clone(),
+        sampler_cache,
+        supported_formats.clone(),
+        meta_desc_layout,
+        image_desc_layout,
+        texture_host_buffer.clone(),
+        texture_meta_buffer_size,
+        &limits,
         mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
-        device_queues.graphics_queue.1
-    ).unwrap();
+        device_queues.graphics_queue.1,
+    )
+    .unwrap();
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<Vertex>() as u64, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-    ).unwrap();
-
+        device,
+        allocator.clone(),
+        mesh_host_buffer.clone(),
+        mesh_buffer_size,
+        size_of::<Vertex>() as u64,
+        vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_DST
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+    )
+    .unwrap();
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
-        device, allocator.clone(), mesh_host_buffer.clone(), mesh_buffer_size, size_of::<u32>() as u64, vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-    ).unwrap();
+        device,
+        allocator.clone(),
+        mesh_host_buffer.clone(),
+        mesh_buffer_size,
+        size_of::<u32>() as u64,
+        vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+    )
+    .unwrap();
 
     let mesh_cache = MeshCache::new(
         device,
@@ -246,7 +303,8 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let id = environment_cache
-        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky").unwrap();
+        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky")
+        .unwrap();
 
     let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
@@ -264,7 +322,6 @@ pub fn init_caches(
 
     (Arc::new(data_cache), vulkan_cache)
 }
-
 
 pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
     let sizes = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 1.0)];
@@ -305,87 +362,92 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
     descriptors
 }
 
-
 pub fn init_present_pools(
     device: &ash::Device,
     device_queues: &VkDeviceQueues,
     count: u32,
 ) -> Vec<VkCommandPoolMap> {
     // Graphics/Present share the same queue and pool
-    (0..count).map(|_| {
-        let graphics_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Graphics),
-            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        ).unwrap();
+    (0..count)
+        .map(|_| {
+            let graphics_pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Graphics),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )
+            .unwrap();
 
-        let graphics_buffers = vk_init::create_command_buffers(
-            &device,
-            &graphics_pool,
-            CommandBufferLevel::PRIMARY,
-            1,
-        ).unwrap();
+            let graphics_buffers = vk_init::create_command_buffers(
+                &device,
+                &graphics_pool,
+                CommandBufferLevel::PRIMARY,
+                1,
+            )
+            .unwrap();
 
-        let transfer_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Transfer),
-            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        ).unwrap();
+            let transfer_pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Transfer),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )
+            .unwrap();
 
-        let transfer_buffers = vk_init::create_command_buffers(
-            &device,
-            &transfer_pool,
-            CommandBufferLevel::PRIMARY,
-            1,
-        ).unwrap();
+            let transfer_buffers = vk_init::create_command_buffers(
+                &device,
+                &transfer_pool,
+                CommandBufferLevel::PRIMARY,
+                1,
+            )
+            .unwrap();
 
-        let compute_pool = vk_init::create_command_pool(
-            &device,
-            device_queues.get_queue_index(VkQueueType::Compute),
-            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-        ).unwrap();
+            let compute_pool = vk_init::create_command_pool(
+                &device,
+                device_queues.get_queue_index(VkQueueType::Compute),
+                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+            )
+            .unwrap();
 
-        let compute_buffers = vk_init::create_command_buffers(
-            &device,
-            &compute_pool,
-            CommandBufferLevel::PRIMARY,
-            1,
-        ).unwrap();
+            let compute_buffers = vk_init::create_command_buffers(
+                &device,
+                &compute_pool,
+                CommandBufferLevel::PRIMARY,
+                1,
+            )
+            .unwrap();
 
-        let graphics_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
-            queue_type: VkQueueType::Graphics,
-            pool: graphics_pool,
-            buffers: graphics_buffers,
-        };
+            let graphics_pool = VkCommandPool {
+                queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
+                queue_type: VkQueueType::Graphics,
+                pool: graphics_pool,
+                buffers: graphics_buffers,
+            };
 
-        let present_pool = graphics_pool.clone();
+            let present_pool = graphics_pool.clone();
 
-        let transfer_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-            queue_type: VkQueueType::Transfer,
-            pool: transfer_pool,
-            buffers: transfer_buffers,
-        };
+            let transfer_pool = VkCommandPool {
+                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
+                queue_type: VkQueueType::Transfer,
+                pool: transfer_pool,
+                buffers: transfer_buffers,
+            };
 
-        let compute_pool = VkCommandPool {
-            queue_index: device_queues.get_queue_index(VkQueueType::Compute),
-            queue_type: VkQueueType::Compute,
-            pool: compute_pool,
-            buffers: compute_buffers,
-        };
+            let compute_pool = VkCommandPool {
+                queue_index: device_queues.get_queue_index(VkQueueType::Compute),
+                queue_type: VkQueueType::Compute,
+                pool: compute_pool,
+                buffers: compute_buffers,
+            };
 
-        VkCommandPoolMap::new(
-            vec![
+            VkCommandPoolMap::new(vec![
                 (VkQueueType::Graphics, graphics_pool),
                 (VkQueueType::Present, present_pool),
                 (VkQueueType::Transfer, transfer_pool),
                 (VkQueueType::Compute, compute_pool),
-            ]
-        ).unwrap()
-    }).collect()
+            ])
+            .unwrap()
+        })
+        .collect()
 }
-
 
 impl Drop for VkRender {
     fn drop(&mut self) {
@@ -429,10 +491,8 @@ impl Drop for VkRender {
     }
 }
 
-
 impl VkRender {
-    fn destroy(&mut self) {
-    }
+    fn destroy(&mut self) {}
 
     pub fn new(
         mut window_state: VkWindowState,
@@ -440,8 +500,6 @@ impl VkRender {
         compile_shaders: bool,
     ) -> Result<Self, String> {
         if compile_shaders {
-            info!("Compiling Shaders is disabled as shaderc is removed from build.");
-            /*
             info!("Compiling Shaders");
             let shader_dir = "src/renderer/src/shaders";
             match vk_util::compile_shaders(shader_dir, shader_dir) {
@@ -449,11 +507,11 @@ impl VkRender {
                     info!("Successfully Compiled Shaders")
                 }
                 Err(err) => {
-                    error!("Error Compiling Shaders: {:?}", err);
-                    panic!("Error Compiling Shaders: {:?}", err)
+                    let msg = format!("Error compiling shaders: {err}");
+                    error!("{msg}");
+                    return Err(msg);
                 }
             }
-            */
         }
 
         ////////////////////////////
@@ -476,7 +534,7 @@ impl VkRender {
             Some(&surface),
             &vk_init::simple_device_suitability,
         )?
-            .remove(0);
+        .remove(0);
 
         let queue_indices = vk_init::queue_indices_with_preferences(
             &instance,
@@ -541,7 +599,8 @@ impl VkRender {
         // Create Command Pools & Buffers //
         ////////////////////////////////////
 
-        let mut host_buffer_pools = Vec::<VkCommandPool>::with_capacity(swapchain_image_count as usize);
+        let mut host_buffer_pools =
+            Vec::<VkCommandPool>::with_capacity(swapchain_image_count as usize);
 
         for i in 0..swapchain_image_count {
             let cmd_pool = vk_init::create_command_pool(
@@ -591,24 +650,27 @@ impl VkRender {
                 &device,
                 device_queues.get_queue_index(VkQueueType::Graphics),
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            ).unwrap();
+            )
+            .unwrap();
 
             let command_buffers = vk_init::create_command_buffers(
                 &device,
                 &pool,
                 vk::CommandBufferLevel::PRIMARY,
-                swapchain_image_count).unwrap();
+                swapchain_image_count,
+            )
+            .unwrap();
 
-            command_buffers.into_iter().map(|buf| {
-                VkCommandPool {
+            command_buffers
+                .into_iter()
+                .map(|buf| VkCommandPool {
                     queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
                     queue_type: VkQueueType::Graphics,
                     pool,
                     buffers: vec![buf],
-                }
-            }).collect()
+                })
+                .collect()
         };
-
 
         //////////////////////////////////////////
         // Generate Structures For presentation //
@@ -631,8 +693,12 @@ impl VkRender {
 
         // Set images to max extent, so they can be reused on window resizing
 
-        let draw_images =
-            vk_init::allocate_draw_images(&allocator, &device, window_state.get_max_extent(), swapchain_image_count)?;
+        let draw_images = vk_init::allocate_draw_images(
+            &allocator,
+            &device,
+            window_state.get_max_extent(),
+            swapchain_image_count,
+        )?;
         let draw_format = draw_images[0].image_format;
 
         let draw_views: Vec<vk::ImageView> =
@@ -643,8 +709,12 @@ impl VkRender {
         let descriptors = init_descriptors(&device, &draw_views);
         let layout = [descriptors.descriptor_layouts[0]];
 
-        let depth_images =
-            vk_init::allocate_depth_images(&allocator, &device, window_state.get_max_extent(), swapchain_image_count)?;
+        let depth_images = vk_init::allocate_depth_images(
+            &allocator,
+            &device,
+            window_state.get_max_extent(),
+            swapchain_image_count,
+        )?;
         let depth_format = depth_images[0].image_format;
 
         let pool_ratios = [
@@ -660,7 +730,9 @@ impl VkRender {
             .unwrap();
 
         // we can just let imgui use one of the graphics pools
-        let imgui_pool = present_pools.first().unwrap()
+        let imgui_pool = present_pools
+            .first()
+            .unwrap()
             .get(VkQueueType::Graphics)
             .pool;
 
@@ -671,8 +743,8 @@ impl VkRender {
             present_images,
             present_pools,
             descriptor_allocators,
-        ).unwrap();
-
+        )
+        .unwrap();
 
         // ImGUI
         let mut imgui_context = imgui::Context::create();
@@ -701,10 +773,10 @@ impl VkRender {
             imgui_dynamic,
             &mut imgui_context,
             Some(imgui_opts),
-        ).unwrap();
+        )
+        .unwrap();
 
         let imgui = VkImgui::new(imgui_context, platform, imgui_render);
-
 
         //////////////////////////////////////////
         // Create Transfer Buffers & DataCaches //
@@ -714,19 +786,23 @@ impl VkRender {
 
         let fence_info = vk::FenceCreateInfo::default();
         let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let fences: Vec<vk::Fence> = (0..4).map(|_| {
-            unsafe { device.create_fence(&fence_info, None).unwrap() }
-        }).collect();
+        let fences: Vec<vk::Fence> = (0..4)
+            .map(|_| unsafe { device.create_fence(&fence_info, None).unwrap() })
+            .collect();
 
-        let mut semaphores: Vec<vk::Semaphore> = (0..2).map(|_| {
-            unsafe { device.create_semaphore(&semaphore_info, None).unwrap() }
-        }).collect();
+        let mut semaphores: Vec<vk::Semaphore> = (0..2)
+            .map(|_| unsafe { device.create_semaphore(&semaphore_info, None).unwrap() })
+            .collect();
 
         let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
         let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
 
         let mesh_host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(64)).unwrap(),
+            buffer: vk_util::allocate_host_buffer(
+                &allocator.lock().unwrap(),
+                data_util::mb_to_bytes(64),
+            )
+            .unwrap(),
             render_sender: transfer.get_sender(),
             transfer_pool: host_buffer_pools.pop().unwrap(),
             graphics_pool: host_graphic_pools.pop().unwrap(),
@@ -739,7 +815,11 @@ impl VkRender {
         let mesh_host_buffer = Arc::new(Mutex::new(mesh_host_buffer));
 
         let texture_host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().unwrap(), data_util::mb_to_bytes(128)).unwrap(),
+            buffer: vk_util::allocate_host_buffer(
+                &allocator.lock().unwrap(),
+                data_util::mb_to_bytes(128),
+            )
+            .unwrap(),
             render_sender: transfer.get_sender(),
             transfer_pool: host_buffer_pools.pop().unwrap(),
             graphics_pool: host_graphic_pools.pop().unwrap(),
@@ -773,7 +853,6 @@ impl VkRender {
 
         let scene_tree = Rc::new(RefCell::new(gpu_data::Node::default()));
 
-
         ///////////////////
         // GENERATE BRDF //
         ///////////////////
@@ -782,13 +861,15 @@ impl VkRender {
             .get_pipeline(VkPipelineType::BrdfLut)
             .pipeline;
 
-
         // Use one of the frame cmd buffers for this one-off generation
         let brd_flut = vk_util::generate_brdf_lut(
             &device,
             &allocator.lock().unwrap(),
             brdf_pipeline,
-            presentation.frame_data[0].cmd_pools.get(VkQueueType::Graphics).buffers[0],
+            presentation.frame_data[0]
+                .cmd_pools
+                .get(VkQueueType::Graphics)
+                .buffers[0],
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         );
 
@@ -824,33 +905,32 @@ impl VkRender {
             false,
         )?;
 
-
         let data_cache_clone1 = render.data_cache.clone();
         let data_cache_clone2 = render.data_cache.clone();
-
 
         let loading_count = Arc::new(AtomicUsize::new(2));
         let count_clone1 = loading_count.clone();
         let count_clone2 = loading_count.clone();
 
         let t1 = std::thread::spawn(move || {
-            data_cache_clone1.mesh_cache.lock().unwrap().allocate_all(
-                BufferPlacement::ContiguousPreferred,
-                false,
-            );
+            data_cache_clone1
+                .mesh_cache
+                .lock()
+                .unwrap()
+                .allocate_all(BufferPlacement::ContiguousPreferred, false);
             count_clone1.fetch_sub(1, Ordering::SeqCst);
         });
         println!("Spawned mesh thread: {:?}", t1.thread().id());
 
         let t2 = std::thread::spawn(move || {
-            data_cache_clone2.texture_cache.lock().unwrap().allocate_all(
-                BufferPlacement::ContiguousPreferred,
-                false,
-            );
+            data_cache_clone2
+                .texture_cache
+                .lock()
+                .unwrap()
+                .allocate_all(BufferPlacement::ContiguousPreferred, false);
             count_clone2.fetch_sub(1, Ordering::SeqCst);
         });
         println!("Spawned Material thread: {:?}", t2.thread().id());
-
 
         // loop to test threaded loading, since the env needs some preloads to be preloaded
         let start = std::time::SystemTime::now();
@@ -864,25 +944,35 @@ impl VkRender {
             render.fence_await_queue.check_fences(&render.device);
             if let Some(cmd) = render.transfer.query_channel() {
                 // Submit the command buffer and signal the fence correctly
-                cmd.submit(&render.device, &render.vulkan_cache.queues, &mut render.fence_await_queue);
+                cmd.submit(
+                    &render.device,
+                    &render.vulkan_cache.queues,
+                    &mut render.fence_await_queue,
+                );
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-
 
         render.render_context.scene_tree = loaded_scene.node;
         render.allocate_skymap();
         render.init_skybox();
 
         // FIXME properly implement this in the setup (or pre-sample and save)
-        let env_maps = if let CachedEnvironment::Loaded(env)
-            = render.data_cache.environment_cache.lock().unwrap().get_skybox(0) {
+        let env_maps = if let CachedEnvironment::Loaded(env) = render
+            .data_cache
+            .environment_cache
+            .lock()
+            .unwrap()
+            .get_skybox(0)
+        {
             let env_maps = render.generate_environment(env)?;
 
             let scene_descriptors = VkSceneDescriptors::new(
                 &render.device,
                 &render.allocator.lock().unwrap(),
-                render.buffer_and_desc_limits.min_uniform_buffer_offset_alignment,
+                render
+                    .buffer_and_desc_limits
+                    .min_uniform_buffer_offset_alignment,
                 render.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
                 &env_maps,
                 &render.brdf_lut,
@@ -906,11 +996,10 @@ impl VkRender {
     }
 
     pub fn allocate_skymap(&mut self) {
-        let cmd_pool = self
-            .transfer
-            .get_local_transfer_pool();
+        let cmd_pool = self.transfer.get_local_transfer_pool();
 
-        self.data_cache.environment_cache
+        self.data_cache
+            .environment_cache
             .lock()
             .unwrap()
             .allocate_cube_map(
@@ -940,7 +1029,7 @@ impl VkRender {
             Some(self.swapchain.swapchain),
             true,
         )
-            .unwrap();
+        .unwrap();
 
         // FIXME, I think we will need to destory the old images view when we reassign
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
@@ -953,12 +1042,15 @@ impl VkRender {
     }
 }
 
-
 impl VkRender {
     pub fn render(&mut self, frame_number: u32) {
         self.fence_await_queue.check_fences(&self.device);
         if let Some(cmd) = self.transfer.query_channel() {
-            cmd.submit(&self.device, &self.vulkan_cache.queues, &mut self.fence_await_queue);
+            cmd.submit(
+                &self.device,
+                &self.vulkan_cache.queues,
+                &mut self.fence_await_queue,
+            );
         }
 
         let start = SystemTime::now();
@@ -1168,7 +1260,8 @@ impl VkRender {
             .cmd_pools
             .get(VkQueueType::Graphics);
 
-        self.data_cache.environment_cache
+        self.data_cache
+            .environment_cache
             .lock()
             .unwrap()
             .allocate_cube_map(
@@ -1195,7 +1288,7 @@ impl VkRender {
                 1.0,
             )],
         )
-            .unwrap();
+        .unwrap();
 
         let skybox_desc = skybox_desc_alloc
             .allocate(
@@ -1402,75 +1495,91 @@ impl VkRender {
         let rendering_info =
             vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
 
+        // Build explicit pass buckets: opaque -> mask -> blend (blend sorted far-to-near).
+        let opaque_bucket = &self.render_context.draw_context.render_objects
+            [VkPipelineType::PbrMetRoughOpaque as usize];
+        let blend_bucket = &self.render_context.draw_context.render_objects
+            [VkPipelineType::PbrMetRoughAlpha as usize];
+
+        let mut opaque_objects = Vec::with_capacity(opaque_bucket.len());
+        let mut mask_objects = Vec::new();
+        let mut blend_objects = blend_bucket.clone();
+
+        for obj in opaque_bucket.iter().copied() {
+            let alpha_mode = unsafe { (*obj.material).alpha_mode };
+            if matches!(alpha_mode, gpu_data::AlphaMode::Mask) {
+                mask_objects.push(obj);
+            } else {
+                opaque_objects.push(obj);
+            }
+        }
+
+        let cam_pos = self.scene_data.cam_pos;
+        blend_objects.sort_by(|a, b| {
+            let a_dist = a.transform.w_axis.truncate().distance_squared(cam_pos);
+            let b_dist = b.transform.w_axis.truncate().distance_squared(cam_pos);
+            b_dist
+                .partial_cmp(&a_dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let default_joint_desc = self
+            .data_cache
+            .mesh_cache
+            .lock()
+            .unwrap()
+            .get_default_joint_desc();
 
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
             // Write the new scene view/pos
-            let scene_desc = self.scene_descriptors.as_mut().unwrap()
+            let scene_desc = self
+                .scene_descriptors
+                .as_mut()
+                .unwrap()
                 .update_scene_uniform(&self.device, self.scene_data, frame_index);
 
-
-            let mut curr_pipeline = *self.vulkan_cache.pipelines.get_pipeline(VkPipelineType::PbrMetRoughOpaque);
-            let mut curr_joint_desc = self.data_cache.mesh_cache.lock().unwrap().get_default_joint_desc();
-
-            self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
-
-
-            // Bind set 0 (SceneData) to the first pipeline and set viewport/scissor
             self.device
                 .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
             self.device
                 .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
 
+            let mut curr_pipeline_type: Option<VkPipelineType> = None;
+            let mut curr_pipeline_layout = vk::PipelineLayout::null();
+            let mut curr_joint_desc = default_joint_desc;
 
-            self.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                curr_pipeline.layout,
-                0,
-                &[scene_desc, curr_joint_desc],
-                &[],
-            );
-
-
-            // Start Func
-            let mut draw_fn = |obj: &RenderObject, pipeline: &VkPipeline| {
+            let mut draw_fn = |obj: &RenderObject, pipeline_type: VkPipelineType| {
                 let material = &(*obj.material);
-                
-                // Rebind on pipeline changes
-                if *pipeline != curr_pipeline {
-                    self.device.cmd_bind_pipeline(cmd_buffer, PipelineBindPoint::GRAPHICS, curr_pipeline.pipeline);
 
-                    self.device
-                        .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
-                    self.device
-                        .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
+                // Rebind pipeline + set 0 whenever the pass changes.
+                if curr_pipeline_type != Some(pipeline_type) {
+                    let next_pipeline = *self.vulkan_cache.pipelines.get_pipeline(pipeline_type);
+                    curr_pipeline_type = Some(pipeline_type);
+                    curr_pipeline_layout = next_pipeline.layout;
+                    curr_joint_desc = default_joint_desc;
 
+                    self.device.cmd_bind_pipeline(
+                        cmd_buffer,
+                        PipelineBindPoint::GRAPHICS,
+                        next_pipeline.pipeline,
+                    );
                     self.device.cmd_bind_descriptor_sets(
                         cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
-                        curr_pipeline.layout,
+                        curr_pipeline_layout,
                         0,
                         &[scene_desc],
                         &[],
                     );
-
-                    // check if current joints needs updated, before binding again
-                    if obj.joint_desc != curr_joint_desc {
-                        curr_joint_desc = obj.joint_desc
-                    }
-
                     self.device.cmd_bind_descriptor_sets(
                         cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
-                        curr_pipeline.layout,
+                        curr_pipeline_layout,
                         1,
                         &[curr_joint_desc],
                         &[],
                     );
-
-                    curr_pipeline = *pipeline;
                 }
 
                 // Bind joints if changed (set 1)
@@ -1478,25 +1587,24 @@ impl VkRender {
                     self.device.cmd_bind_descriptor_sets(
                         cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
-                        curr_pipeline.layout,
+                        curr_pipeline_layout,
                         1,
-                        &[curr_joint_desc],
+                        &[obj.joint_desc],
                         &[],
                     );
 
-                    curr_joint_desc = obj.joint_desc
+                    curr_joint_desc = obj.joint_desc;
                 }
 
                 // Bind material image descriptor (set 2)
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    pipeline.layout,
+                    curr_pipeline_layout,
                     2,
                     &[material.image_descriptor],
                     &[],
                 );
-
 
                 self.device.cmd_bind_index_buffer(
                     cmd_buffer,
@@ -1504,7 +1612,6 @@ impl VkRender {
                     0,
                     vk::IndexType::UINT32,
                 );
-
 
                 let push_consts = VkModelPushConsts::new(
                     obj.transform,
@@ -1514,7 +1621,7 @@ impl VkRender {
 
                 self.device.cmd_push_constants(
                     cmd_buffer,
-                    pipeline.layout,
+                    curr_pipeline_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     push_consts.as_byte_slice(),
@@ -1524,26 +1631,14 @@ impl VkRender {
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
 
-
-            //End Func
-
-            for pipeline in &self.render_context.draw_context.active_pipelines {
-                let mat_pipeline = self.vulkan_cache.pipelines.get_pipeline(*pipeline);
-
-                self.device.cmd_bind_pipeline(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    mat_pipeline.pipeline,
-                );
-
-                for ro in self
-                    .render_context
-                    .draw_context
-                    .render_objects
-                    .get_unchecked(*pipeline as usize)
-                {
-                    draw_fn(ro, mat_pipeline);
-                }
+            for obj in &opaque_objects {
+                draw_fn(obj, VkPipelineType::PbrMetRoughOpaque);
+            }
+            for obj in &mask_objects {
+                draw_fn(obj, VkPipelineType::PbrMetRoughOpaque);
+            }
+            for obj in &blend_objects {
+                draw_fn(obj, VkPipelineType::PbrMetRoughAlpha);
             }
 
             self.render_context.draw_context.clear();
@@ -1557,7 +1652,10 @@ impl VkRender {
     pub fn update_scene(&mut self) {
         let (camera_view, camera_pos) = {
             let cont = self.window_state.controller.borrow();
-            (cont.get_camera().get_view_matrix(), cont.get_camera().get_position())
+            (
+                cont.get_camera().get_view_matrix(),
+                cont.get_camera().get_position(),
+            )
         };
 
         let fovy = 70_f32.to_radians();
@@ -1598,10 +1696,8 @@ impl VkRender {
         let descriptor_cache = &self.vulkan_cache.desc_layouts;
         let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
         let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
-        let transfer_pool = cmd_pool.get(VkQueueType::Transfer);
         let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
-        let skybox_image = env_skybox.image;
         let skybox_view = env_skybox.image_view;
         let skybox_sampler = env_skybox.sampler;
 
@@ -1700,49 +1796,13 @@ impl VkRender {
                 prefilter_mips_count = mips_count as f32;
             }
 
-            // Create the cubemap for writing render output too
-
-            let (cubemap_image, cubemap_sampler) = unsafe {
-                let begin_info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-                device
-                    .begin_command_buffer(render_buffer, &begin_info)
-                    .unwrap();
-
-                let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
-                    device,
-                    &self.allocator.lock().unwrap(),
-                    format,
-                    dim,
-                    mips_count,
-                )?;
-
-                // Transition cubemap to writable
-                vk_util::transition_image_layered(
-                    device,
-                    render_buffer,
-                    cubemap_image.image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    6,
-                    mips_count,
-                );
-                device.end_command_buffer(render_buffer).unwrap();
-
-                let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
-                let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
-
-                // Submit the command buffer and await queue
-
-                device
-                    .queue_submit2(render_queue, &submit_info, vk::Fence::null())
-                    .unwrap();
-
-                device.queue_wait_idle(render_queue).unwrap();
-
-                (cubemap_image, cubemap_sampler)
-            };
+            let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
+                device,
+                &self.allocator.lock().unwrap(),
+                format,
+                dim,
+                mips_count,
+            )?;
 
             let matrices: Vec<glam::Mat4> = vec![
                 glam::Mat4::from_rotation_y(90.0f32.to_radians())
@@ -1755,31 +1815,46 @@ impl VkRender {
                 glam::Mat4::from_rotation_z(180.0f32.to_radians()),
             ];
 
-            for mip in 0..mips_count {
-                for face in 0..6 {
-                    info!(
-                        "Generating face: {}, mip: {}, for {:?} Map",
-                        mip, face, target
-                    );
+            unsafe {
+                device
+                    .reset_command_buffer(render_buffer, vk::CommandBufferResetFlags::empty())
+                    .unwrap();
 
-                    //Set view to mips level
-                    viewport[0].width = (dim as f32) * 0.5f32.powi(mip as i32);
-                    viewport[0].height = (dim as f32) * 0.5f32.powi(mip as i32);
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-                    let begin_info = vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                device
+                    .begin_command_buffer(render_buffer, &begin_info)
+                    .unwrap();
 
-                    unsafe {
-                        device
-                            .begin_command_buffer(render_buffer, &begin_info)
-                            .unwrap();
+                vk_util::transition_image_layered(
+                    device,
+                    render_buffer,
+                    cubemap_image.image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    6,
+                    mips_count,
+                );
 
-                        // Transition draw image for color attachment
+                let mut offscreen_layout = vk::ImageLayout::UNDEFINED;
+
+                for mip in 0..mips_count {
+                    for face in 0..6 {
+                        info!(
+                            "Generating face: {}, mip: {}, for {:?} Map",
+                            face, mip, target
+                        );
+
+                        let mip_dim = std::cmp::max(dim >> mip, 1);
+                        viewport[0].width = mip_dim as f32;
+                        viewport[0].height = mip_dim as f32;
+
                         vk_util::transition_image(
                             device,
                             render_buffer,
                             offscreen_image.image,
-                            vk::ImageLayout::UNDEFINED,
+                            offscreen_layout,
                             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                         );
 
@@ -1822,7 +1897,6 @@ impl VkRender {
                         let perspective = glam::Mat4::perspective_rh(FRAC_PI_2, 1.0, 0.1, 512.0);
                         let mvp = perspective * matrices[face];
 
-                        // Push constant to gpu, depending on target type
                         match target {
                             Target::Irradiance => {
                                 let pc = PushConstIrradiance::new(mvp, skybox_v_buff_addr);
@@ -1853,7 +1927,7 @@ impl VkRender {
                         device.cmd_bind_index_buffer(
                             render_buffer,
                             skybox_index_buff,
-                            0, // offset
+                            0,
                             vk::IndexType::UINT32,
                         );
 
@@ -1861,7 +1935,15 @@ impl VkRender {
 
                         device.cmd_end_rendering(render_buffer);
 
-                        // Setup copy region onto cube map
+                        vk_util::transition_image(
+                            device,
+                            render_buffer,
+                            offscreen_image.image,
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        );
+                        offscreen_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+
                         let copy_region = vk::ImageCopy::default()
                             .src_subresource(vk::ImageSubresourceLayers {
                                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1878,21 +1960,11 @@ impl VkRender {
                             })
                             .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                             .extent(vk::Extent3D {
-                                width: viewport[0].width as u32,
-                                height: viewport[0].height as u32,
+                                width: mip_dim,
+                                height: mip_dim,
                                 depth: 1,
                             });
 
-                        // Transition offscreen image to transfer source
-                        vk_util::transition_image(
-                            device,
-                            render_buffer,
-                            offscreen_image.image,
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        );
-
-                        // Copy image
                         device.cmd_copy_image(
                             render_buffer,
                             offscreen_image.image,
@@ -1901,30 +1973,9 @@ impl VkRender {
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                             &[copy_region],
                         );
-
-                        device.end_command_buffer(render_buffer).unwrap();
-
-                        // Submit and await queue
-                        let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
-                        let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
-                        device
-                            .queue_submit2(render_queue, &submit_info, vk::Fence::null())
-                            .unwrap();
-
-                        device.queue_wait_idle(render_queue).unwrap();
                     }
                 }
-            }
 
-            unsafe {
-                let begin_info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-                device
-                    .begin_command_buffer(render_buffer, &begin_info)
-                    .unwrap();
-
-                // Transition cubemap to writable
                 vk_util::transition_image_layered(
                     device,
                     render_buffer,
@@ -1939,12 +1990,16 @@ impl VkRender {
 
                 let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
                 let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
+                let fence = device
+                    .create_fence(&vk::FenceCreateInfo::default(), None)
+                    .unwrap();
+                let fences = [fence];
 
                 device
-                    .queue_submit2(render_queue, &submit_info, vk::Fence::null())
+                    .queue_submit2(render_queue, &submit_info, fence)
                     .unwrap();
-
-                device.queue_wait_idle(render_queue).unwrap();
+                device.wait_for_fences(&fences, true, u64::MAX).unwrap();
+                device.destroy_fence(fence, None);
             }
             // TODO add mips level and we may want to change this tbh to a differ struct for skybox and env
             let final_cubemap = VkCubeMap {

@@ -102,6 +102,8 @@ vec3 getNormal(MaterialMeta material)
 {
     // Perturb normal, see http://www.thetenthplanet.de/archives/1180
     vec3 tangentNormal = texture(normalMap, material.normalTextureSet == 0 ? inUV0 : inUV1).xyz * 2.0 - 1.0;
+    tangentNormal.xy *= material.normalScale;
+    tangentNormal = normalize(tangentNormal);
 
     vec3 q1 = dFdx(inWorldPos);
     vec3 q2 = dFdy(inWorldPos);
@@ -303,11 +305,10 @@ void main()
     // Calculate lighting contribution from image based lighting source (IBL)
     color += getIBLContribution(pbrInputs, n, reflection);
 
-    const float u_OcclusionStrength = 1.0f;
     // Apply optional PBR terms for additional (optional) shading
     if (material.occlusionTextureSet > -1) {
         float ao = texture(aoMap, (material.occlusionTextureSet == 0 ? inUV0 : inUV1)).r;
-        color = mix(color, color * ao, u_OcclusionStrength);
+        color = mix(color, color * ao, material.occlusionStrength);
     }
 
     vec3 emissive = material.emissiveFactor.rgb * material.emissiveStrength;

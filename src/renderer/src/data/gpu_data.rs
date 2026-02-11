@@ -21,7 +21,7 @@
 //!   └─ draw() -> RenderObjects     // Traverse and accumulate draw commands
 //!
 //! DrawContext
-//!   ├─ render_objects: [Vec<RenderObject>; 4]  // Indexed by VkPipelineType
+//!   ├─ render_objects: [Vec<RenderObject>; VkPipelineType::COUNT]  // Indexed by VkPipelineType
 //!   └─ active_pipelines: HashSet<VkPipelineType>
 //! ```
 //!
@@ -40,20 +40,22 @@ use crate::vulkan::vk_descriptor::{
 };
 use crate::vulkan::vk_pipeline::PipelineBuilder;
 use crate::vulkan::vk_render::VkRender;
-use crate::vulkan::vk_types::{LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline, VkSubAlloc};
+use crate::vulkan::vk_types::{
+    LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline, VkSubAlloc,
+};
 use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
 use glam::{vec4, Mat4, Quat, UVec4, Vec2, Vec3, Vec4};
 use imgui::sys::igSetClipboardText;
+use log::debug;
 use std::cell::{Ref, RefCell};
 use std::cmp::PartialEq;
 use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
 use std::rc::{Rc, Weak};
-use log::debug;
 //////////////////////////
 //  MESH & TEXTURE DATA //
 //////////////////////////
@@ -95,7 +97,6 @@ pub struct Vertex {
     pub _pad: u64,
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum AlphaMode {
@@ -104,13 +105,11 @@ pub enum AlphaMode {
     Mask = 2,
 }
 
-
 impl AlphaMode {
     pub fn to_float_value(&self) -> f32 {
         match self {
-            AlphaMode::Opaque => 0.0,
-            AlphaMode::Blend => 1.0,
-            AlphaMode::Mask => 2.0,
+            AlphaMode::Mask => 1.0,
+            AlphaMode::Opaque | AlphaMode::Blend => 0.0,
         }
     }
 }
@@ -159,13 +158,11 @@ pub struct EmissiveMap {
     pub texture_id: u32,
 }
 
-
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct NormalMap {
     pub scale: f32,
     pub texture_id: u32,
 }
-
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct OcclusionMap {
@@ -180,9 +177,9 @@ pub struct OcclusionMap {
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct MaterialMeta {
     pub texture_ids: TextureIds,
+    pub alpha_mode: AlphaMode,
     pub material_values: MaterialValues,
 }
-
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct TextureIds {
@@ -193,17 +190,17 @@ pub struct TextureIds {
     pub emissive_map: u32,
 }
 
-
 impl TextureIds {
     pub fn to_vec(self) -> Vec<u32> {
-        vec![self.base_color,
+        vec![
+            self.base_color,
             self.metallic_roughness,
             self.normal_map,
             self.occlusion_map,
-            self.emissive_map]
+            self.emissive_map,
+        ]
     }
 }
-
 
 impl Default for TextureIds {
     fn default() -> Self {
@@ -217,18 +214,23 @@ impl Default for TextureIds {
     }
 }
 
-
 impl Default for MaterialMeta {
     fn default() -> Self {
         Self {
             texture_ids: TextureIds::default(),
+            alpha_mode: AlphaMode::Opaque,
             material_values: MaterialValues::default(),
         }
     }
 }
 
-
 impl MaterialMeta {
+    pub fn set_alpha_mode(&mut self, alpha_mode: AlphaMode, alpha_cutoff: f32) {
+        self.alpha_mode = alpha_mode;
+        self.material_values.alpha_mask = alpha_mode.to_float_value();
+        self.material_values.alpha_mask_cutoff = alpha_cutoff;
+    }
+
     pub fn add_base_color(&mut self, tex_id: u32, factor: Vec4, uv_set: u32) {
         self.texture_ids.base_color = tex_id;
         self.material_values.base_color_factor = factor;
@@ -274,7 +276,6 @@ impl MaterialMeta {
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Debug, Pod, Zeroable)]
 pub struct MaterialValues {
@@ -293,7 +294,6 @@ pub struct MaterialValues {
     pub alpha_mask: f32,
     pub alpha_mask_cutoff: f32,
 }
-
 
 impl Default for MaterialValues {
     fn default() -> Self {
@@ -318,7 +318,6 @@ impl Default for MaterialValues {
     }
 }
 
-
 #[derive(Copy, Clone, Default, PartialEq, Debug)]
 pub struct TextureSamplers {
     base_color: vk::Sampler,
@@ -328,13 +327,11 @@ pub struct TextureSamplers {
     emissive: vk::Sampler,
 }
 
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sampler {
     Linear,
     Nearest,
 }
-
 
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct TextureMeta {
@@ -346,7 +343,6 @@ pub struct TextureMeta {
     pub uv_index: u32,
 }
 
-
 pub struct VkCubeMap {
     pub texture_meta: Option<TextureMeta>,
     pub full_extent: vk::Extent3D,
@@ -357,14 +353,12 @@ pub struct VkCubeMap {
     pub sampler: vk::Sampler,
 }
 
-
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct SurfaceMeta {
     pub start_index: u32,
     pub count: u32,
     pub material_index: Option<u32>,
 }
-
 
 #[derive(Clone, Default, Debug)]
 pub struct MeshMeta {
@@ -373,7 +367,6 @@ pub struct MeshMeta {
     pub vertices: Vec<Vertex>,
     pub material_index: Option<u32>,
 }
-
 
 #[derive(Clone, PartialEq)]
 pub struct NodeMeta {
@@ -396,9 +389,7 @@ pub trait AsByteSlice: Pod {
     }
 }
 
-
 impl<T> AsByteSlice for T where T: Pod + bytemuck::Zeroable {}
-
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -408,7 +399,6 @@ pub struct MetRoughUniform {
     //padding
     pub extra: [Vec4; 14],
 }
-
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -463,13 +453,12 @@ pub struct VkModelPushConsts {
     _pad: [u32; 3],
 }
 
-
 impl VkModelPushConsts {
     pub fn new(
         model_matrix: Mat4,
         vertex_buffer_addr: vk::DeviceAddress,
-        mat_meta_buffer_addr:
-        vk::DeviceAddress) -> Self {
+        mat_meta_buffer_addr: vk::DeviceAddress,
+    ) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
@@ -495,7 +484,6 @@ impl VkModelPushConsts {
     }
 }
 
-
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct GPUSceneData {
@@ -507,7 +495,6 @@ pub struct GPUSceneData {
     pub sunlight_color: Vec4,
 }
 
-
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct SceneDataUBO {
@@ -516,7 +503,6 @@ pub struct SceneDataUBO {
     pub cam_pos: Vec3,
     pad: f32,
 }
-
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -530,7 +516,6 @@ pub struct EnvironmentUBO {
     pub debug_view_equation: f32,
     _pad: u64,
 }
-
 
 impl Default for EnvironmentUBO {
     fn default() -> Self {
@@ -547,7 +532,6 @@ impl Default for EnvironmentUBO {
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstSkyBox {
@@ -557,7 +541,6 @@ pub struct PushConstSkyBox {
     pub exposure: f32,
     pub gamma: f32,
 }
-
 
 impl Default for PushConstSkyBox {
     fn default() -> Self {
@@ -571,7 +554,6 @@ impl Default for PushConstSkyBox {
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstIrradiance {
@@ -580,7 +562,6 @@ pub struct PushConstIrradiance {
     delta_phi: f32,
     delta_theta: f32,
 }
-
 
 impl PushConstIrradiance {
     pub fn new(mvp: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
@@ -593,7 +574,6 @@ impl PushConstIrradiance {
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstPrefilterEnv {
@@ -602,7 +582,6 @@ pub struct PushConstPrefilterEnv {
     pub roughness: f32,
     pub num_samples: u32,
 }
-
 
 impl PushConstPrefilterEnv {
     pub fn new(mvp: Mat4, roughness: f32, vertex_buffer_addr: vk::DeviceAddress) -> Self {
@@ -630,14 +609,12 @@ pub struct VkMeshBuffers {
     pub joint_desc: vk::DescriptorSet,
 }
 
-
 impl VkMeshBuffers {
     pub fn get_first_index(&self) -> u32 {
         // 4 bytes per u32
         (self.index_buffer.offset / 4) as u32
     }
 }
-
 
 #[derive(Debug)]
 pub struct VkGpuTextureBuffer {
@@ -646,7 +623,6 @@ pub struct VkGpuTextureBuffer {
     pub data_buffer_offset: u32,
 }
 
-
 #[derive(Debug)]
 pub struct VkGpuMetRoughBuffer {
     pub color_image: VkImageAlloc,
@@ -654,7 +630,6 @@ pub struct VkGpuMetRoughBuffer {
     pub data_buffer: vk::Buffer,
     pub data_buffer_offset: u32,
 }
-
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -702,7 +677,6 @@ pub struct RenderObject {
     pub vertex_buffer_addr: vk::DeviceAddress,
 }
 
-
 /// Transform decomposed into translation/rotation/scale (TRS).
 ///
 /// ## Purpose
@@ -718,7 +692,6 @@ pub struct Transform {
     pub scale: Vec3,
     pub rotation: Quat,
 }
-
 
 impl Transform {
     pub fn compose(&mut self) -> Mat4 {
@@ -766,12 +739,11 @@ impl Transform {
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
-    pub meshes: Vec<u32>,          // Mesh IDs in MeshCache
+    pub meshes: Vec<u32>, // Mesh IDs in MeshCache
     pub world_transform: Mat4,
     pub local_transform: Mat4,
     pub dirty: bool,
 }
-
 
 impl Default for Node {
     fn default() -> Self {
@@ -785,7 +757,6 @@ impl Default for Node {
         }
     }
 }
-
 
 impl Node {
     /// Recursively traverse scene graph and accumulate RenderObjects.
@@ -821,13 +792,14 @@ impl Node {
 
         for mesh_id in &self.meshes {
             let mesh = mesh_cache.get_loaded_id_unchecked(*mesh_id);
-            let material_ptr = unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
+            let material_ptr =
+                unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
             let material = unsafe { *material_ptr };
 
             //
             // debug!("Drawing Mesh: {}", mesh_id);
             // // // debug!("\t Mesh: {:#?}", mesh);
-             //debug!("\t Material: {:#?}", material);
+            //debug!("\t Material: {:#?}", material);
             //
             let ro = RenderObject {
                 index_count: mesh.index_count,
@@ -892,11 +864,8 @@ impl Node {
 /// efficient rendering. Minimizes pipeline binding and state changes.
 ///
 /// ## Structure
-/// - **render_objects**: Fixed array [Vec<RenderObject>; 4] indexed by VkPipelineType enum
-///   - [0] = Opaque
-///   - [1] = Transparent
-///   - [2] = Other
-///   - [3] = Reserved/unused
+/// - **render_objects**: Fixed array [Vec<RenderObject>; VkPipelineType::COUNT] indexed by VkPipelineType enum
+///   - geometry path currently populates `PbrMetRoughOpaque` / `PbrMetRoughAlpha`
 /// - **active_pipelines**: HashSet of pipeline types with >0 objects (avoids iterating empty Vecs)
 ///
 /// ## Rendering Pattern
@@ -912,7 +881,7 @@ impl Node {
 /// ```
 ///
 /// ## Why Array Over HashMap
-/// Fixed pipeline types (4 max), array indexing faster than hash lookup.
+/// Fixed pipeline types, array indexing faster than hash lookup.
 ///
 /// ## Lifecycle
 /// 1. Node::draw() populates render_objects
@@ -920,21 +889,24 @@ impl Node {
 /// 3. clear() resets for next frame
 pub struct DrawContext {
     pub active_pipelines: HashSet<VkPipelineType>,
-    pub render_objects: [Vec<RenderObject>; 4],
+    pub render_objects: [Vec<RenderObject>; VkPipelineType::COUNT],
 }
-
 
 impl DrawContext {
     pub fn new(vector_capacity: usize) -> Self {
         DrawContext {
-            active_pipelines: HashSet::with_capacity(4),
+            active_pipelines: HashSet::with_capacity(VkPipelineType::COUNT),
             render_objects: Self::create_render_object_array(vector_capacity),
         }
     }
 
-    fn create_render_object_array(capacity: usize) -> [Vec<RenderObject>; 4] {
+    fn create_render_object_array(capacity: usize) -> [Vec<RenderObject>; VkPipelineType::COUNT] {
         let vec_iter = std::iter::repeat_with(|| Vec::with_capacity(capacity));
-        vec_iter.take(4).collect::<Vec<_>>().try_into().unwrap()
+        vec_iter
+            .take(VkPipelineType::COUNT)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
     }
 
     pub fn clear(&mut self) {
@@ -946,13 +918,11 @@ impl DrawContext {
     }
 }
 
-
 impl Default for DrawContext {
     fn default() -> Self {
         Self::new(400)
     }
 }
-
 
 #[repr(C)]
 #[derive(PartialEq, Debug, Copy, Clone)]

@@ -151,6 +151,9 @@ pub fn process_materials(
 
             let ai_material = &*ai_material_ptr;
             let mut material_meta = MaterialMeta::default();
+            let alpha_mode = get_alpha_mode(ai_material);
+            let alpha_cutoff = get_alpha_cutoff(ai_material);
+            material_meta.set_alpha_mode(alpha_mode, alpha_cutoff);
 
             let load_first_texture_type = |label: &str, types: &[(aiTextureType, &'static str)]| {
                 for (typ, type_name) in types {
