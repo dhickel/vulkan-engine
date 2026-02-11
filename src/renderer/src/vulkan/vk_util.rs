@@ -713,6 +713,16 @@ pub fn generate_brdf_lut(
 }
 
 
+pub fn get_format_size(format: vk::Format) -> u32 {
+    match format {
+        vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
+        vk::Format::R32G32B32A32_SFLOAT => 16,
+        vk::Format::R16G16B16A16_SFLOAT => 8,
+        vk::Format::R8_UNORM => 1,
+        _ => panic!("Unsupported format size: {:?}", format),
+    }
+}
+
 pub fn upload_skybox(
     device: &ash::Device,
     allocator: &Allocator,
@@ -721,6 +731,7 @@ pub fn upload_skybox(
     transfer_queue: vk::Queue,
 ) -> VkCubeMap {
     let face_width = tex_meta.width / 6;
+    let format_size = get_format_size(tex_meta.format);
 
     let staging_buffer = allocate_and_write_buffer(
         allocator,
@@ -784,7 +795,7 @@ pub fn upload_skybox(
         // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
             .map(|i| {
-                let face_size = (face_width * tex_meta.height * 4) as u64; 
+                let face_size = (face_width * tex_meta.height * format_size) as u64;
                 let buffer_offset = i as u64 * face_size;
                 vk::BufferImageCopy::default()
                     .buffer_offset(buffer_offset)

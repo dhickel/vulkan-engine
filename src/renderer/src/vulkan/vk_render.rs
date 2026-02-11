@@ -1056,7 +1056,7 @@ impl VkRender {
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
 
             let wait_info = [vk_util::semaphore_submit_info(
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT_KHR | vk::PipelineStageFlags2::TRANSFER,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
                 frame_sync.swap_semaphore,
             )];
 
