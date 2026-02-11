@@ -1,0 +1,118 @@
+    Checking winit v0.29.15
+error[E0463]: can't find crate for `wayland_protocols_plasma`
+ --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/wayland/types/kwin_blur.rs:7:5
+  |
+7 | use wayland_protocols_plasma::blur::client::{
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^ can't find crate
+
+error[E0463]: can't find crate for `x11rb`
+ --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/monitor.rs:6:5
+  |
+6 | use x11rb::{
+  |     ^^^^^ can't find crate
+
+error[E0432]: unresolved import `super::atoms::Atoms`
+  --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/xdisplay.rs:13:13
+   |
+13 | use super::{atoms::Atoms, ffi, monitor::MonitorHandle};
+   |             ^^^^^^^^^^^^ no `Atoms` in `platform_impl::platform::x11::atoms`
+
+error[E0425]: cannot find type `Atoms` in this scope
+   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/atoms.rs:24:25
+    |
+ 24 |                   atoms: &Atoms
+    |                           ^^^^^ not found in this scope
+...
+ 34 | / atom_manager! {
+ 35 | |     // General Use Atoms
+ 36 | |     CARD32,
+ 37 | |     UTF8_STRING,
+...   |
+104 | |     _XSETTINGS_SETTINGS
+105 | | }
+    | |_- in this macro invocation
+    |
+    = note: this error originates in the macro `atom_manager` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0425]: cannot find type `Atoms` in this scope
+   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/atoms.rs:107:26
+    |
+107 | impl Index<AtomName> for Atoms {
+    |                          ^^^^^ not found in this scope
+
+error[E0425]: cannot find type `GetCrtcInfoReply` in module `randr`
+  --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:59:23
+   |
+59 |         crtc: &randr::GetCrtcInfoReply,
+   |                       ^^^^^^^^^^^^^^^^ not found in `randr`
+
+error[E0425]: cannot find type `Crtc` in module `randr`
+   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:158:25
+    |
+158 |         crtc_id: randr::Crtc,
+    |                         ^^^^ not found in `randr`
+
+error[E0425]: cannot find type `Mode` in module `randr`
+   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:159:25
+    |
+159 |         mode_id: randr::Mode,
+    |                         ^^^^ not found in `randr`
+    |
+help: consider importing one of these items
+    |
+  1 + use calloop::Mode;
+    |
+  1 + use rustix::shm::Mode;
+    |
+  1 + use sctk::output::Mode;
+    |
+  1 + use wayland_client::protocol::wl_output::Mode;
+    |
+    = and 1 other candidate
+help: if you import `Mode`, refer to it directly
+    |
+159 -         mode_id: randr::Mode,
+159 +         mode_id: Mode,
+    |
+
+error[E0425]: cannot find type `Crtc` in module `randr`
+   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:182:49
+    |
+182 |     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<randr::Mode, X11Error> {
+    |                                                 ^^^^ not found in `randr`
+
+error[E0425]: cannot find type `Mode` in module `randr`
+   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:182:72
+    |
+182 |     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<randr::Mode, X11Error> {
+    |                                                                        ^^^^ not found in `randr`
+    |
+help: consider importing one of these items
+    |
+  1 + use calloop::Mode;
+    |
+  1 + use rustix::shm::Mode;
+    |
+  1 + use sctk::output::Mode;
+    |
+  1 + use wayland_client::protocol::wl_output::Mode;
+    |
+    = and 1 other candidate
+help: if you import `Mode`, refer to it directly
+    |
+182 -     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<randr::Mode, X11Error> {
+182 +     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<Mode, X11Error> {
+    |
+
+error[E0119]: conflicting implementations of trait `From<window_property::GetPropertyError>` for type `window_property::GetPropertyError`
+  --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/window_property.rs:33:1
+   |
+33 | impl<T: Into<ReplyError>> From<T> for GetPropertyError {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `core`:
+           - impl<T> From<T> for T;
+
+Some errors have detailed explanations: E0119, E0425, E0432, E0463.
+For more information about an error, try `rustc --explain E0119`.
+error: could not compile `winit` (lib) due to 11 previous errors
