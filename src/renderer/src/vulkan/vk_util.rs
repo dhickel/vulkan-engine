@@ -1235,7 +1235,7 @@ pub fn record_host_to_image_buffer(
     let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
     let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
 
-    let host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
+    let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     let mut offset: DeviceSize = 0;
     let image_offsets: Vec<DeviceSize> = image_meta.iter().zip(ids.iter()).map(|(meta, id)| {
         let size = meta.bytes.len().next_multiple_of(alignment as usize);
