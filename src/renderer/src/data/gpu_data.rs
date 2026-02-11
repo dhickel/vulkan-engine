@@ -179,7 +179,7 @@ impl MaterialMeta {
     pub fn add_base_color(&mut self, tex_id: u32, factor: Vec4, uv_set: u32) {
         self.texture_ids.base_color = tex_id;
         self.material_values.base_color_factor = factor;
-        self.material_values.base_color_uv_set = uv_set;
+        self.material_values.base_color_uv_set = uv_set as i32;
     }
 
     pub fn add_metallic_roughness(
@@ -192,19 +192,19 @@ impl MaterialMeta {
         self.texture_ids.metallic_roughness = tex_id;
         self.material_values.metallic_factor = metallic_factor;
         self.material_values.roughness_factor = roughness_factor;
-        self.material_values.met_rough_uv_set = uv_set;
+        self.material_values.met_rough_uv_set = uv_set as i32;
     }
 
     pub fn add_normal(&mut self, tex_id: u32, normal_scale: f32, uv_set: u32) {
         self.texture_ids.normal_map = tex_id;
         self.material_values.normal_scale = normal_scale;
-        self.material_values.normal_uv_set = uv_set;
+        self.material_values.normal_uv_set = uv_set as i32;
     }
 
     pub fn add_occlusion(&mut self, tex_id: u32, occlusion_strength: f32, uv_set: u32) {
         self.texture_ids.occlusion_map = tex_id;
         self.material_values.occlusion_strength = occlusion_strength;
-        self.material_values.occlusion_uv_set = uv_set;
+        self.material_values.occlusion_uv_set = uv_set as i32;
     }
 
     pub fn add_emissive(
@@ -217,7 +217,7 @@ impl MaterialMeta {
         self.texture_ids.emissive_map = tex_id;
         self.material_values.emissive_factor = emissive_factor.extend(0.0);
         self.material_values.emissive_strength = emissive_strength;
-        self.material_values.emissive_uv_set = uv_set;
+        self.material_values.emissive_uv_set = uv_set as i32;
     }
 }
 
@@ -227,11 +227,11 @@ impl MaterialMeta {
 pub struct MaterialValues {
     pub base_color_factor: Vec4,
     pub emissive_factor: Vec4,
-    pub base_color_uv_set: u32,
-    pub met_rough_uv_set: u32,
-    pub normal_uv_set: u32,
-    pub occlusion_uv_set: u32,
-    pub emissive_uv_set: u32,
+    pub base_color_uv_set: i32,
+    pub met_rough_uv_set: i32,
+    pub normal_uv_set: i32,
+    pub occlusion_uv_set: i32,
+    pub emissive_uv_set: i32,
     pub metallic_factor: f32,
     pub roughness_factor: f32,
     pub emissive_strength: f32,
@@ -247,11 +247,11 @@ impl Default for MaterialValues {
         Self {
             base_color_factor: TextureCache::DEFAULT_BASE_COLOR_FACTOR,
             emissive_factor: TextureCache::DEFAULT_EMISSIVE_FACTOR.extend(0.0),
-            base_color_uv_set: 0,
-            met_rough_uv_set: 0,
-            normal_uv_set: 0,
-            occlusion_uv_set: 0,
-            emissive_uv_set: 0,
+            base_color_uv_set: -1,
+            met_rough_uv_set: -1,
+            normal_uv_set: -1,
+            occlusion_uv_set: -1,
+            emissive_uv_set: -1,
             metallic_factor: TextureCache::DEFAULT_METALLIC_FACTOR,
             roughness_factor: TextureCache::DEFAULT_ROUGHNESS_FACTOR,
             emissive_strength: TextureCache::DEFAULT_EMISSIVE_STRENGTH,

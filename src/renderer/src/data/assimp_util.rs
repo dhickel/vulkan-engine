@@ -56,7 +56,6 @@ pub fn load_model(
     let mut flags = aiPostProcessSteps_aiProcess_GenSmoothNormals
         | aiPostProcessSteps_aiProcess_JoinIdenticalVertices
         | aiPostProcessSteps_aiProcess_Triangulate
-        | aiPostProcessSteps_aiProcess_FlipUVs
         //   | aiPostProcessSteps_aiProcess_PreTransformVertices
         | aiPostProcessSteps_aiProcess_FixInfacingNormals
         | aiPostProcessSteps_aiProcess_CalcTangentSpace;
@@ -161,13 +160,23 @@ pub fn process_materials(
                 data_cache,
             );
 
-            let met_rough = get_texture_meta(
+            let mut met_rough = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_UNKNOWN,
                 base_path,
                 data_cache,
             );
+
+            if met_rough.is_none() {
+                met_rough = get_texture_meta(
+                    ai_material,
+                    ai_scene,
+                    aiTextureType_aiTextureType_METALNESS,
+                    base_path,
+                    data_cache,
+                );
+            }
 
             let normal = get_texture_meta(
                 ai_material,
@@ -177,13 +186,23 @@ pub fn process_materials(
                 data_cache,
             );
 
-            let occlusion = get_texture_meta(
+            let mut occlusion = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_LIGHTMAP,
                 base_path,
                 data_cache,
             );
+
+            if occlusion.is_none() {
+                occlusion = get_texture_meta(
+                    ai_material,
+                    ai_scene,
+                    aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
+                    base_path,
+                    data_cache,
+                );
+            }
 
             let emissive = get_texture_meta(
                 ai_material,
