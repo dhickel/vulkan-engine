@@ -1,3 +1,36 @@
+//! # Graphics Pipeline Builder & Initialization
+//!
+//! ## Purpose
+//! Provides builder pattern for creating Vulkan graphics pipelines with dynamic rendering
+//! (Vulkan 1.3). No VkRenderPass objects - uses VkPipelineRenderingCreateInfo instead.
+//!
+//! ## Key Concepts
+//! - **PipelineBuilder**: Fluent interface for pipeline creation
+//! - **Dynamic rendering**: VK_KHR_dynamic_rendering (core in Vulkan 1.3)
+//! - **Dynamic state**: Viewport/scissor set via vkCmdSetViewport/Scissor (not baked into pipeline)
+//! - **Vertex pulling**: No vertex input state (shaders fetch vertices via buffer device address)
+//!
+//! ## Why Dynamic Rendering
+//! - Simpler API: No VkRenderPass/VkFramebuffer objects to manage
+//! - More flexible: Can change attachments without recreating pipeline
+//! - Vulkan 1.3 core: No extension required
+//! - Matches modern rendering patterns (forward+ rendering, dynamic resolution)
+//!
+//! ## Pipeline Types
+//! - **PbrMetRoughOpaque**: Opaque PBR materials (depth write enabled)
+//! - **PbrMetRoughAlpha**: Transparent PBR (additive blending, depth write disabled)
+//! - **Skybox**: Environment skybox (no depth test, rendered first)
+//! - **EnvIrradiance/PreFilter**: IBL cubemap generation (offline, not used per-frame)
+//!
+//! ## Vertex Pulling Pattern
+//! No vertex input state defined. Shaders fetch vertices manually:
+//! ```glsl
+//! layout(push_constant) uniform PushConsts { uint64_t vertex_buffer_addr; };
+//! layout(buffer_reference, std430) readonly buffer VertexBuffer { Vertex vertices[]; };
+//! Vertex v = VertexBuffer(vertex_buffer_addr).vertices[gl_VertexIndex];
+//! ```
+//! Why: Simpler pipeline creation, flexible vertex formats, better for GPU-driven rendering.
+
 use crate::data::data_cache::{
     CoreShaderType, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
 };
@@ -10,7 +43,23 @@ use ash::vk;
 use std::ffi::{CStr, CString};
 use std::io::{Read, Seek, SeekFrom};
 
-
+/// Builder for Vulkan graphics pipelines with dynamic rendering.
+///
+/// ## Purpose
+/// Fluent interface for configuring graphics pipeline state. Accumulates state,
+/// then creates VkPipeline via build_pipeline().
+///
+/// ## Dynamic Rendering
+/// Uses VkPipelineRenderingCreateInfo (Vulkan 1.3) instead of VkRenderPass.
+/// Attachments specified at pipeline creation, can vary at render time.
+///
+/// ## Vertex Input State
+/// Empty (no vertex bindings/attributes). Shaders use vertex pulling via
+/// buffer device address from push constants.
+///
+/// ## Dynamic State
+/// Viewport and scissor are dynamic (set via vkCmdSetViewport/Scissor).
+/// Allows same pipeline for different resolutions without recreation.
 pub struct PipelineBuilder<'a> {
     pub shader_stages: Vec<vk::PipelineShaderStageCreateInfo<'a>>,
     pub input_assembly: vk::PipelineInputAssemblyStateCreateInfo<'a>,
@@ -54,6 +103,23 @@ impl<'a> PipelineBuilder<'a> {
         self.color_attachment_format = [vk::Format::UNDEFINED];
     }
 
+    /// Create VkPipeline from accumulated state.
+    ///
+    /// ## Logic Flow
+    /// 1. Configure viewport state (dynamic, so just counts)
+    /// 2. Configure color blending from color_blend_attachment
+    /// 3. Empty vertex input (vertex pulling pattern)
+    /// 4. Set dynamic states (VIEWPORT, SCISSOR)
+    /// 5. Assemble VkGraphicsPipelineCreateInfo with push_next for dynamic rendering
+    /// 6. Call vkCreateGraphicsPipelines
+    ///
+    /// ## Dynamic Rendering Integration
+    /// render_info (VkPipelineRenderingCreateInfo) linked via push_next.
+    /// Specifies color/depth attachment formats without VkRenderPass.
+    ///
+    /// ## Why Empty Vertex Input
+    /// Vertex pulling: shaders fetch from buffer via device address. No need to
+    /// declare vertex attributes in pipeline.
     pub fn build_pipeline(&mut self, device: &ash::Device) -> Result<vk::Pipeline, String> {
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
@@ -64,6 +130,7 @@ impl<'a> PipelineBuilder<'a> {
             .logic_op(vk::LogicOp::COPY)
             .attachments(&self.color_blend_attachment);
 
+        // Empty vertex input state (vertex pulling via buffer device address)
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
 
         let state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];

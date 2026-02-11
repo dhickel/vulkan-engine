@@ -1,3 +1,40 @@
+//! # Vulkan Utility Functions
+//!
+//! ## Purpose
+//! Collection of helper functions for creating Vulkan structures, recording common
+//! command patterns, and handling images/buffers. Reduces boilerplate throughout codebase.
+//!
+//! ## Categories
+//! - **Info Creators**: Functions returning VkXxxCreateInfo structs with sensible defaults
+//! - **Image Utilities**: create_image(), image_view_create_info(), transition_image()
+//! - **Buffer Utilities**: allocate_buffer(), record_host_to_xxx_buffer()
+//! - **Command Recording**: Barriers, copies, blits, mipmap generation
+//! - **Synchronization**: semaphore_submit_info(), submit_info_2()
+//!
+//! ## Design Pattern
+//! Most functions return Vk...CreateInfo structs with .default() fields, allowing
+//! caller to override specific fields via builder pattern. Example:
+//! ```rust
+//! let info = vk_util::image_create_info(format, usage, extent, type, samples, mips)
+//!     .sharing_mode(vk::SharingMode::CONCURRENT)  // Override default EXCLUSIVE
+//!     .queue_family_indices(&indices);
+//! ```
+//!
+//! ## Image Transitions
+//! transition_image() records pipeline barriers for layout transitions. Handles
+//! access masks and stage flags automatically based on old/new layouts.
+//!
+//! ## Buffer-to-Image Copies
+//! record_host_to_image_buffer() implements async upload pattern:
+//! 1. Copy CPU data to host-visible staging buffer
+//! 2. Record vkCmdCopyBufferToImage
+//! 3. Submit to transfer queue
+//! 4. Barrier to graphics queue (queue family ownership transfer)
+//!
+//! ## Why This File
+//! Vulkan's verbose API requires many CreateInfo structs. Centralizing creation
+//! reduces code duplication and ensures consistency (e.g., always using REMAINING_MIP_LEVELS).
+
 use std::cmp::{max, PartialEq};
 use std::ffi::CStr;
 

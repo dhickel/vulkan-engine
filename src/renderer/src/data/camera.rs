@@ -1,3 +1,24 @@
+//! # Camera & FPS Controller
+//!
+//! ## Purpose
+//! Implements first-person camera with Quake-style movement (WASD + mouse look).
+//! Integrates with input system via listener pattern.
+//!
+//! ## Components
+//! - **Camera**: Core camera with position/orientation, generates view matrix
+//! - **FPSController**: Input handling + movement logic, owns Camera
+//!
+//! ## Movement Style
+//! Quake-style FPS controls:
+//! - Mouse: Yaw (Y-axis) and pitch (X-axis) rotation
+//! - WASD: Forward/backward/strafe
+//! - Space/Shift: Up/down (noclip)
+//! - Pitch clamped to ±89° to prevent gimbal lock
+//!
+//! ## Input Integration
+//! FPSController implements KeyboardListener and MousePosListener traits.
+//! Registered with input system broadcaster (see input/lib.rs).
+
 use glam::{vec3, Mat4, Quat, Vec3, Vec4};
 use input::{KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
@@ -5,7 +26,13 @@ use std::collections::HashSet;
 use winit::event::Modifiers;
 use winit::keyboard::KeyCode;
 
-
+/// Camera with position and quaternion orientation.
+///
+/// ## View Matrix
+/// Computed as inverse of translation * rotation. Standard FPS camera.
+///
+/// ## Rotation Storage
+/// Stores pitch/yaw as floats for clamping, but orientation as Quat for smooth interpolation.
 pub struct Camera {
     position: Vec3,
     orientation: Quat,

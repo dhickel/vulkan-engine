@@ -1,3 +1,40 @@
+//! # Vulkan Initialization Sequence
+//!
+//! ## Purpose
+//! Orchestrates the full Vulkan initialization: Entry → Instance → Surface → Physical Device
+//! → Logical Device → Queues → Swapchain → Allocators → Command Pools → Sync Primitives.
+//!
+//! ## Initialization Order (Critical!)
+//! 1. **Entry**: Load Vulkan function pointers (ash::Entry::linked)
+//! 2. **Instance**: Create VkInstance with extensions (surface, debug utils)
+//! 3. **Debug**: Optional validation layers (VK_LAYER_KHRONOS_validation)
+//! 4. **Surface**: Window surface for presentation (winit/ash_window)
+//! 5. **Physical Device**: Select GPU based on queue families and features
+//! 6. **Queue Families**: Find indices for Graphics/Compute/Transfer/Present
+//! 7. **Logical Device**: Create VkDevice with required extensions/features
+//! 8. **Queues**: Retrieve queue handles for each family
+//! 9. **Swapchain**: Create presentation swapchain with double/triple buffering
+//! 10. **Allocators**: vk_mem for general allocation, VkSubAllocator for buffers
+//! 11. **Command Pools**: Per-frame, per-queue-family pools
+//! 12. **Sync Primitives**: Fences/semaphores for frame overlap
+//!
+//! ## Key Decisions
+//! - **Vulkan 1.3**: Uses dynamic rendering (no VkRenderPass)
+//! - **Validation**: Enabled in debug, disabled in release
+//! - **Queue Selection**: Prefers dedicated queues (separate transfer queue for async)
+//! - **Swapchain**: Mailbox/FIFO mode, 2-3 images for frame overlap
+//!
+//! ## Extensions Required
+//! - VK_KHR_swapchain (presentation)
+//! - VK_KHR_dynamic_rendering (Vulkan 1.3 core, but explicit for compatibility)
+//! - VK_EXT_debug_utils (if validation enabled)
+//! - Platform-specific surface extensions (VK_KHR_win32_surface, etc.)
+//!
+//! ## Device Features Required
+//! - bufferDeviceAddress (for vertex pulling)
+//! - dynamicRendering (Vulkan 1.3)
+//! - synchronization2 (Vulkan 1.3)
+
 use ash::vk;
 
 use ash::vk::{CommandBuffer, Extent2D};
@@ -14,6 +51,14 @@ use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+/// Create Vulkan entry point (loads function pointers).
+///
+/// ## Purpose
+/// First step in Vulkan initialization. Entry provides access to global Vulkan functions
+/// (vkCreateInstance, vkEnumerateInstanceExtensionProperties).
+///
+/// ## ash::Entry::linked
+/// Statically links Vulkan loader. Alternative: Entry::load() for runtime loading.
 pub fn init_entry() -> ash::Entry {
     log::info!("Creating entry");
     let entry = ash::Entry::linked();
@@ -48,6 +93,23 @@ pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char
 //         .to_vec()
 // }
 
+/// Create Vulkan instance with optional validation layers.
+///
+/// ## Logic Flow
+/// 1. Configure VkApplicationInfo (name, version, API version 1.3)
+/// 2. Add debug utils extension if validation enabled
+/// 3. Create VkInstance with extensions and layers
+/// 4. If validation: Create debug messenger for validation callbacks
+///
+/// ## Validation Layers
+/// When enabled, adds VK_LAYER_KHRONOS_validation for:
+/// - API usage errors
+/// - Memory leaks
+/// - Synchronization issues
+/// - Best practices warnings
+///
+/// ## macOS Portability
+/// Sets ENUMERATE_PORTABILITY_KHR flag for MoltenVK compatibility.
 pub fn init_instance(
     entry: &ash::Entry,
     app_name: String,

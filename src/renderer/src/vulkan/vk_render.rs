@@ -1,3 +1,63 @@
+//! # Main Rendering Orchestrator & Frame Loop
+//!
+//! ## Purpose
+//! VkRender is the central rendering struct that owns all Vulkan resources and implements
+//! the main frame rendering loop. Ties together all subsystems: initialization, caching,
+//! scene graph, command recording, and presentation.
+//!
+//! ## Key Components
+//! - **VkRender struct**: Owns all Vulkan state (device, swapchain, allocators, caches)
+//! - **Frame loop**: draw() method implements acquire→record→submit→present cycle
+//! - **RenderContext**: Scene graph root and DrawContext accumulator
+//! - **Caches**: VkDataCache (textures/meshes), VkCache (shaders/pipelines/descriptors)
+//!
+//! ## Frame Rendering Flow
+//! 1. **Acquire**: vkAcquireNextImageKHR gets next swapchain image
+//! 2. **Wait fence**: Ensure GPU finished with this frame's resources
+//! 3. **Reset pools**: Command pool and descriptor pool reset
+//! 4. **Update**: Update camera, scene UBO, traverse scene graph → DrawContext
+//! 5. **Record commands**:
+//!    a. Begin rendering (vkCmdBeginRendering, dynamic rendering)
+//!    b. Bind pipeline, set viewport/scissor
+//!    c. For each RenderObject: bind material descriptors, push constants, draw
+//!    d. End rendering
+//!    e. Transition swapchain image to PRESENT layout
+//! 6. **Submit**: vkQueueSubmit2 with fence/semaphores
+//! 7. **Present**: vkQueuePresentKHR
+//! 8. **Process deletions**: Clean up deferred resources
+//! 9. **Check async transfers**: Poll VkFenceQueue for completed uploads
+//!
+//! ## Synchronization Pattern (Frame Overlap)
+//! - **2-3 frames in flight**: CPU works on frame N+1 while GPU executes frame N
+//! - **Per-frame fence**: Ensures frame resources not overwritten
+//! - **Semaphores**: GPU-GPU synchronization (acquire→render→present)
+//! - **Command pool reset**: Safe because fence ensures GPU done
+//! - **Descriptor pool reset**: Safe because descriptors consumed during vkQueueSubmit
+//!
+//! ## Dynamic Rendering
+//! Uses VK_KHR_dynamic_rendering (Vulkan 1.3 core):
+//! - vkCmdBeginRendering instead of vkCmdBeginRenderPass
+//! - No VkRenderPass/VkFramebuffer objects
+//! - Attachments specified at record time
+//!
+//! ## Scene Graph Integration
+//! 1. RenderContext holds scene tree root (Node hierarchy)
+//! 2. draw() calls Node::draw() with identity transform
+//! 3. Node recursively traverses, accumulates RenderObjects in DrawContext
+//! 4. DrawContext groups by pipeline type (Opaque, Transparent)
+//! 5. Render loop iterates active pipelines, binds once, draws all objects
+//!
+//! ## Async Transfer Handling
+//! - VkTransfer channel polled each frame (transfer.query_channel())
+//! - Submitted commands from background threads executed
+//! - VkFenceQueue tracks completion, signals latches when done
+//!
+//! ## Resize Handling
+//! - resize_requested flag triggers swapchain recreation
+//! - Destroys swapchain images, reuses sync/pools (destroy_for_rebuild)
+//! - Recreates swapchain with new extent
+//! - Updates viewport/scissor
+
 use crate::data::data_cache::{CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, VkSamplerCache, TextureCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerInfo, VkShaderCache, VkDataCache, VkCache};
 
 use crate::data::gpu_data::{AsByteSlice, DrawContext, GPUSceneData, MaterialPass, MetRoughUniform, Node, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap, VkMeshBuffers, VkGpuTextureBuffer, VkModelPushConsts, EnvironmentUBO};

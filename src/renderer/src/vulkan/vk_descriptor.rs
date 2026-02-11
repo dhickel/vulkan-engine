@@ -1,3 +1,32 @@
+//! # Traditional Descriptor Set Management
+//!
+//! ## Purpose
+//! Implements traditional Vulkan descriptor sets with dynamic pool allocation. NOT using
+//! bindless/descriptor indexing - this is the classic Vulkan 1.0 approach.
+//!
+//! ## Key Concepts
+//! - **DescriptorLayoutBuilder**: Builder pattern for creating descriptor set layouts
+//! - **VkDynamicDescriptorAllocator**: Auto-growing pool allocator (ready/full pool strategy)
+//! - **VkDescriptorWriter**: Batched descriptor updates (image/buffer writes)
+//! - **Pool growth**: 1.5x growth factor when exhausted, caps at 4092 sets
+//!
+//! ## Why Traditional Descriptors Over Bindless
+//! - Simpler mental model (explicit bindings)
+//! - Better hardware compatibility (bindless requires VK 1.2+)
+//! - Sufficient for this engine's needs (~100s of descriptor sets, not 1000s)
+//! - Per-frame dynamic allocation works well with frame-based resource management
+//!
+//! ## Allocation Strategy
+//! Each VkFrame has VkDynamicDescriptorAllocator:
+//! 1. Allocate from ready_pools (available pools with space)
+//! 2. If ERROR_OUT_OF_POOL_MEMORY: move pool to full_pools, get/create new pool
+//! 3. At frame start: reset all pools, move full_pools back to ready_pools
+//!
+//! ## Descriptor Lifetime
+//! Descriptors only need to live until vkQueueSubmit (not until GPU completes).
+//! Frame-based reset works because descriptors consumed during command recording,
+//! not execution.
+
 use crate::data::data_cache;
 use crate::data::data_cache::VkDescType;
 use crate::vulkan::vk_descriptor;
@@ -10,6 +39,22 @@ use std::collections::VecDeque;
 use std::vec;
 use vk_mem::Allocator;
 
+/// Builder for creating descriptor set layouts.
+///
+/// ## Purpose
+/// Fluent interface for building descriptor set layouts. Accumulates bindings,
+/// then creates VkDescriptorSetLayout.
+///
+/// ## Usage Pattern
+/// ```rust
+/// let layout = DescriptorLayoutBuilder::default()
+///     .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+///     .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+///     .build(device, vk::ShaderStageFlags::FRAGMENT, flags)?;
+/// ```
+///
+/// ## Why Builder Pattern
+/// Cleaner than manually constructing VkDescriptorSetLayoutBinding arrays.
 pub struct DescriptorLayoutBuilder<'a> {
     bindings: Vec<vk::DescriptorSetLayoutBinding<'a>>,
 }
@@ -63,6 +108,20 @@ impl<'a> DescriptorLayoutBuilder<'a> {
     }
 }
 
+/// Descriptor type ratio for pool sizing.
+///
+/// ## Purpose
+/// Specifies how many descriptors of each type a pool should hold, as a ratio of max_sets.
+///
+/// ## Example
+/// ```rust
+/// PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0)
+/// // For max_sets=10: pool will have 10*2.0 = 20 uniform buffer descriptors
+/// ```
+///
+/// ## Why Ratios
+/// Allows flexible pool sizing based on usage patterns. Different pipelines use different
+/// descriptor types. Ratios let pools grow proportionally.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PoolSizeRatio {
     pub typ: vk::DescriptorType,
@@ -75,6 +134,19 @@ impl PoolSizeRatio {
     }
 }
 
+/// Single fixed-size descriptor pool.
+///
+/// ## Purpose
+/// Wrapper around VkDescriptorPool for allocating descriptor sets. Fixed capacity
+/// (max_sets), exhausts and errors if over-allocated.
+///
+/// ## When Used
+/// Less common than VkDynamicDescriptorAllocator. Used for static pre-allocated
+/// descriptor sets (like scene descriptors in VkSceneDescriptors).
+///
+/// ## Reset Pattern
+/// clear() resets pool, freeing all allocated sets. Cheaper than destroying and
+/// recreating pool.
 #[derive(Clone, Copy)]
 pub struct VkDescriptorAllocator {
     pool: vk::DescriptorPool,
@@ -142,6 +214,27 @@ pub enum VkDescWriterType {
     Buffer,
 }
 
+/// Batched descriptor set updates.
+///
+/// ## Purpose
+/// Accumulates image/buffer descriptor writes, then applies them all at once via
+/// vkUpdateDescriptorSets. More efficient than individual updates.
+///
+/// ## Usage Pattern
+/// ```rust
+/// let mut writer = VkDescriptorWriter::default();
+/// writer.write_buffer(0, buffer, size, offset, vk::DescriptorType::UNIFORM_BUFFER);
+/// writer.write_image(1, image_view, sampler, layout, vk::DescriptorType::COMBINED_IMAGE_SAMPLER);
+/// writer.update_set(device, descriptor_set);  // Single vkUpdateDescriptorSets call
+/// ```
+///
+/// ## Why Batching
+/// Vulkan spec encourages batching descriptor updates. vkUpdateDescriptorSets takes
+/// array of writes, potentially more efficient driver-side.
+///
+/// ## Lifetime Management
+/// Stores DescriptorImageInfo/DescriptorBufferInfo in separate Vecs (stable addresses).
+/// WriteDescriptorSet references these via pointers, all submitted in update_set().
 pub struct VkDescriptorWriter<'a> {
     image_infos: Vec<[vk::DescriptorImageInfo; 1]>,
     buffer_infos: Vec<[vk::DescriptorBufferInfo; 1]>,
@@ -228,6 +321,38 @@ impl<'a> VkDescriptorWriter<'a> {
     }
 }
 
+/// Dynamic descriptor pool allocator with auto-growth.
+///
+/// ## Purpose
+/// Manages multiple descriptor pools, automatically creating new pools when existing ones
+/// exhaust. Tracks ready (available) and full (exhausted) pools.
+///
+/// ## Allocation Strategy
+/// 1. Try allocating from last ready_pools element (pop from Vec)
+/// 2. If ERROR_OUT_OF_POOL_MEMORY or ERROR_FRAGMENTED_POOL:
+///    a. Move exhausted pool to full_pools
+///    b. Get new pool from ready_pools or create larger one
+///    c. Retry allocation
+/// 3. Return pool to ready_pools (even if partially used)
+///
+/// ## Growth Strategy
+/// - Initial pool: sets_per_pool sets
+/// - Each new pool: sets_per_pool * 1.5 (50% growth)
+/// - Cap at 4092 sets (Vulkan limits typically 4096)
+///
+/// ## Why Ready/Full Separation
+/// - ready_pools: Have space, try these first
+/// - full_pools: Exhausted, skip during allocation
+/// - At frame start: reset all pools, merge full_pools → ready_pools
+///
+/// ## Per-Frame Reset
+/// clear_pools() resets all pools and consolidates. Descriptor lifetime ends at frame
+/// submission (not GPU completion), so safe to reset when frame returns.
+///
+/// ## Why This Pattern
+/// - Avoids pre-allocating huge pools (waste if unused)
+/// - Handles variable frame descriptor needs (simple frame: few descriptors, complex: many)
+/// - Pool creation expensive, so amortize with growth
 #[derive(Debug)]
 pub struct VkDynamicDescriptorAllocator {
     ratios: Vec<PoolSizeRatio>,

@@ -1,3 +1,35 @@
+//! # Custom Vulkan Buffer Sub-Allocator
+//!
+//! ## Purpose
+//! Implements a custom sub-allocator on top of vk_mem to pack multiple small buffers
+//! (vertex/index/uniform) into larger VkBuffer objects. Reduces vkAllocateMemory calls
+//! (typically limited to ~4096 per device) and improves memory locality.
+//!
+//! ## Key Concepts
+//! - **Bump allocator with free list**: Allocates from tail, tracks freed chunks in sorted list
+//! - **Coalescing**: Adjacent free chunks merged to reduce fragmentation
+//! - **Multiple buffer growth**: Automatically allocates extra buffers when primary fills
+//! - **Synchronous upload**: Uses VkHostBuffer for immediate staging-to-device transfer
+//!
+//! ## Architecture
+//! ```
+//! VkSubAllocator
+//!   ├─ VkStorageBuffer (primary)        // Initial large buffer
+//!   │    ├─ buffer_tail: FreeChunk      // Unallocated space at end
+//!   │    └─ free_chunks: FreeChunkVec   // Freed allocations (sorted, coalesced)
+//!   └─ extra_buffers: Vec<VkStorageBuffer>  // Overflow buffers
+//! ```
+//!
+//! ## Critical Gotcha: Fragmentation
+//! Free space exists but is fragmented → allocation can fail even with sufficient total free bytes.
+//! Example: 1MB free in 100 chunks, but request needs 500KB contiguous → OutOfSpace.
+//!
+//! ## Why Beyond vk_mem
+//! - vk_mem doesn't provide sub-allocation for buffers (only for large blocks)
+//! - Need alignment control (min_uniform_buffer_offset_alignment)
+//! - Want device address tracking for SSBO/bindless usage
+//! - Buffer usage flags differ (STORAGE_BUFFER vs UNIFORM_BUFFER)
+
 use crate::data::gpu_data::AsByteSlice;
 use crate::vulkan::vk_types::{VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkDestroyable, VkHostBuffer, VkQueueType, VkSubAlloc, VkSubmitParam};
 use crate::vulkan::vk_util;
@@ -12,7 +44,20 @@ use std::time::Duration;
 use log::{debug, info};
 use vk_mem::Allocator;
 
-
+/// Allocation placement strategy for sub-allocations.
+///
+/// ## Purpose
+/// Controls how allocations are placed within the buffer, affecting fragmentation patterns.
+///
+/// ## Strategies
+/// - **ContiguousPreferred**: Try to allocate contiguously, fall back to disjoint if needed
+/// - **ContiguousOnly**: Fail if can't allocate all items contiguously (strict requirement)
+/// - **EndOnly**: Only allocate from tail (no free list reuse), simplest but most wasteful
+///
+/// ## Use Cases
+/// - **EndOnly**: Temporary/short-lived allocations (will be freed together)
+/// - **ContiguousOnly**: Arrays requiring contiguous GPU memory (large vertex buffers)
+/// - **ContiguousPreferred**: General case (balance between compactness and flexibility)
 #[derive(Clone, Copy, PartialEq)]
 pub enum BufferPlacement {
     ContiguousPreferred,
@@ -58,6 +103,31 @@ impl<'a> PartialAlloc<'a> {
 }
 
 
+/// Top-level sub-allocator managing one or more large buffers.
+///
+/// ## Purpose
+/// Provides VkSubAlloc handles from a pool of large VkBuffer objects. Automatically
+/// grows by allocating extra buffers when primary fills.
+///
+/// ## Growth Strategy
+/// 1. Allocate from primary `buffer` (VkStorageBuffer)
+/// 2. If OutOfSpace, allocate new buffer of same size
+/// 3. Add to `extra_buffers` Vec
+/// 4. Retry allocation on new buffer
+/// 5. Each VkSubAlloc tracks `sub_buffer_index` to identify parent buffer
+///
+/// ## Deallocation
+/// Uses `sub_buffer_index` to route frees to correct VkStorageBuffer.
+/// Freed chunks added to that buffer's free list.
+///
+/// ## Thread Safety
+/// - `allocator`: Arc<Mutex<>> for vk_mem (shared across allocators)
+/// - `transfer_buffer`: Arc<Mutex<>> for staging buffer (may be shared)
+/// - Allocator itself NOT thread-safe (caller must serialize allocate_bytes calls)
+///
+/// ## Factory Methods
+/// - `new_storage_buffer`: STORAGE_BUFFER usage (SSBOs, device address)
+/// - `new_uniform_buffer`: UNIFORM_BUFFER usage (UBOs, smaller max size)
 pub struct VkSubAllocator {
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
@@ -230,12 +300,30 @@ impl VkSubAllocator {
         ))
     }
 
+    /// Allocate space for byte slices and upload data to device.
+    ///
+    /// ## Logic Flow
+    /// 1. Lock transfer_buffer (staging buffer for upload)
+    /// 2. Try allocating from primary buffer
+    /// 3. If OutOfSpace: allocate new VkStorageBuffer, retry
+    /// 4. Return Vec<VkSubAlloc> (one per input slice)
+    ///
+    /// ## Synchronous Upload
+    /// add_items() records transfer commands and blocks until GPU completes.
+    /// Uses VkHostBuffer's semaphore+fence for transfer→graphics synchronization.
+    ///
+    /// ## Partial Success
+    /// If allocation fails mid-batch, returns successful_allocs (caller must handle partial state).
+    ///
+    /// ## buffer_placement
+    /// See BufferPlacement docs. ContiguousOnly may fail even with sufficient free space
+    /// if fragmentation prevents contiguous allocation.
     pub fn allocate_bytes(
         &mut self,
         data: &[&[u8]],
         buffer_placement: BufferPlacement,
     ) -> VkAllocResult {
-        // Acquire the host buffer lock, as some host buffers may he shared
+        // Acquire the host buffer lock, as some host buffers may be shared
         let host_buffer = match self.transfer_buffer.lock() {
             Ok(buffer) => buffer,
             Err(error_msg) => {
@@ -315,6 +403,34 @@ impl VkSubAllocator {
 }
 
 
+/// Single large buffer with bump allocator + free list.
+///
+/// ## Purpose
+/// Manages sub-allocations within one VkBuffer. Tracks unallocated tail and freed chunks.
+///
+/// ## Allocation Strategy
+/// 1. **Primary**: Allocate from `buffer_tail` (bump pointer at end)
+/// 2. **Secondary**: Reuse freed chunks from `free_chunks` (best-fit or largest)
+/// 3. **Fallback**: Disjoint allocation across multiple chunks if needed
+///
+/// ## Memory Layout
+/// ```
+/// [allocated][free chunk][allocated][free chunk][buffer_tail (unallocated)]
+///  ^                                                ^                    ^
+///  buffer_start_addr                                tail start          buffer_end_addr
+/// ```
+///
+/// ## Key Fields
+/// - **buffer_tail**: Unallocated space at end (grows downward as allocations made)
+/// - **free_chunks**: Sorted list of freed allocations (coalesced when adjacent)
+/// - **max_upload_bytes**: Max bytes per transfer (VkHostBuffer staging buffer size)
+/// - **alignment**: min_uniform_buffer_offset_alignment from device limits
+/// - **dst_barrier**: Pre-configured barrier for transfer→graphics queue hand-off
+///
+/// ## Why Tail + Free List
+/// - Tail: Fast O(1) allocation, no fragmentation
+/// - Free list: Reuse deallocated space, reduce waste
+/// - Coalescing: Merge adjacent frees to combat fragmentation
 struct VkStorageBuffer {
     buffer_index: u32,
     max_size: u64,
@@ -478,6 +594,38 @@ impl VkStorageBuffer {
         self.free_chunks.insert(free_chunk)
     }
 
+    /// Core allocation method: find space, upload data, return VkSubAlloc handles.
+    ///
+    /// ## Logic Flow (Complex!)
+    /// 1. **Calculate sizes**: Align each item to self.alignment, sum total_bytes
+    /// 2. **Early abort**: Check if placement strategy can be satisfied (ContiguousOnly/EndOnly)
+    /// 3. **Select initial chunk**: Based on placement strategy (tail vs best-fit free chunk)
+    /// 4. **Loop through items**: For each byte slice:
+    ///    a. Check if item fits in current chunk + doesn't exceed max_upload_bytes
+    ///    b. If limit reached: upload batch to GPU, wait for completion, reset
+    ///    c. If chunk exhausted: select next chunk or return OutOfSpace
+    ///    d. Accumulate item into current batch
+    /// 5. **Final upload**: Upload any remaining batch
+    /// 6. **Update free list**: Remove used portions from tail/free chunks
+    ///
+    /// ## Why Batching
+    /// max_upload_bytes limits single transfer size (VkHostBuffer staging buffer size).
+    /// Large allocations split across multiple transfers.
+    ///
+    /// ## Synchronization
+    /// Each upload:
+    /// - Transfer queue: Copy staging→device, signal semaphore
+    /// - Graphics queue: Wait on semaphore, apply barrier (TRANSFER_WRITE→VERTEX_SHADER_READ)
+    /// - Latch: Block until both fences signal
+    ///
+    /// ## Fragmentation Handling
+    /// - ContiguousPreferred: Falls back to disjoint if no single chunk fits
+    /// - ContiguousOnly: Fails if fragmented (may have enough total free space)
+    /// - EndOnly: Ignores free list entirely
+    ///
+    /// ## Failure Modes
+    /// - OutOfSpace: Insufficient contiguous or total space (returns PartialAlloc)
+    /// - Error: Transfer failure, lock error (returns partial successes)
     pub fn add_items<'a>(
         &mut self,
         item_bytes: &[&'a [u8]],
@@ -489,7 +637,7 @@ impl VkStorageBuffer {
         let mut alloc_sizes = Vec::with_capacity(item_bytes.len());
         let mut sub_allocations = Vec::<VkSubAlloc>::with_capacity(item_bytes.len());
 
-        // Pad if needed and calc each item's final size, make sure no obj exceeds max
+        // Calculate aligned sizes for all items, reject if any exceeds max upload limit
         for (index, item) in item_bytes.iter().enumerate() {
             let size = if item.len() & (self.alignment as usize - 1) == 0 {
                 item.len().next_multiple_of(self.alignment as usize)
@@ -648,6 +796,13 @@ impl VkStorageBuffer {
 }
 
 
+/// Single contiguous free region in a buffer.
+///
+/// ## Purpose
+/// Represents deallocated space available for reuse. Ordered by size for best-fit allocation.
+///
+/// ## Coalescing
+/// Adjacent chunks merged when inserted (see FreeChunkVec::insert). Reduces fragmentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FreeChunk {
     pub start_addr: vk::DeviceAddress,
@@ -661,7 +816,7 @@ impl PartialOrd for FreeChunk {
     }
 }
 
-
+/// Sort by size for best-fit allocation strategy.
 impl Ord for FreeChunk {
     fn cmp(&self, other: &Self) -> Ordering {
         self.size.cmp(&other.size)
@@ -681,6 +836,20 @@ impl FreeChunk {
 }
 
 
+/// Collection of free chunks with coalescing support.
+///
+/// ## Purpose
+/// Maintains sorted list of freed regions. Coalesces adjacent chunks on insertion
+/// to reduce fragmentation.
+///
+/// ## Allocation Strategies
+/// - **find_best_fit**: First chunk >= requested size (best-fit)
+/// - **get_largest_chunk**: Largest chunk (for disjoint allocations)
+/// - **max_free**: Size of largest single chunk (for contiguous checks)
+///
+/// ## Why Not Sorted Vec
+/// Small number of chunks (typically < 20), linear search is fast enough.
+/// Could optimize with binary tree if fragmentation becomes extreme.
 struct FreeChunkVec {
     chunks: Vec<FreeChunk>,
     total_free: u64,
@@ -698,35 +867,52 @@ impl Default for FreeChunkVec {
 
 
 impl FreeChunkVec {
+    /// Insert freed chunk, coalescing with adjacent chunks if possible.
+    ///
+    /// ## Coalescing Logic
+    /// 1. Scan for adjacent chunks:
+    ///    - front_adj: chunk where chunk.end == new_chunk.start
+    ///    - back_adj: chunk where new_chunk.end == chunk.start
+    /// 2. Merge new_chunk with front_adj (extend new_chunk backward)
+    /// 3. Merge new_chunk with back_adj (extend new_chunk forward)
+    /// 4. Remove consumed chunks (swap_remove for O(1))
+    /// 5. Insert coalesced chunk
+    ///
+    /// ## Why Coalescing Matters
+    /// Without coalescing: 1000 small frees → 1000 small chunks → can't satisfy large allocation.
+    /// With coalescing: Adjacent frees merge → larger contiguous chunks → fewer failures.
+    ///
+    /// ## Ordering Note
+    /// back_adj removed before front_adj to avoid index invalidation from swap_remove.
     pub fn insert(&mut self, mut new_chunk: FreeChunk) {
         self.total_free += new_chunk.size;
         let mut front_adj: Option<usize> = None;
         let mut back_adj: Option<usize> = None;
 
+        // Find adjacent chunks by checking address boundaries
         for (i, iter_chunk) in self.chunks.iter_mut().enumerate() {
             if (iter_chunk.start_addr + iter_chunk.size) == new_chunk.start_addr {
-                front_adj = Some(i)
+                front_adj = Some(i)  // Existing chunk ends where new chunk starts
             }
             if (new_chunk.start_addr + new_chunk.size) == iter_chunk.start_addr {
-                back_adj = Some(i)
+                back_adj = Some(i)   // New chunk ends where existing chunk starts
             }
         }
 
-        // if front_adj, set new chunks start addr to it and increase size
+        // Coalesce with front chunk (extend new chunk's start backward)
         if let Some(index) = front_adj {
             let front_chunk = unsafe { self.chunks.get_unchecked(index) };
             new_chunk.start_addr = front_chunk.start_addr;
             new_chunk.size += front_chunk.size;
         }
 
-        // if back_adj, increase new chunks size
+        // Coalesce with back chunk (extend new chunk's size forward)
         if let Some(index) = back_adj {
             let back_chunk_size = unsafe { self.chunks.get_unchecked(index).size };
             new_chunk.size += back_chunk_size;
         }
 
-        // Now new chunk has "consumed" any adjacent chunks
-        // Swap remove is done on back_adj first to avoid invalidating indices
+        // Remove consumed chunks (back first to avoid index invalidation)
         if let Some(index) = back_adj {
             self.chunks.swap_remove(index);
         }

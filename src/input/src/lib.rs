@@ -1,3 +1,31 @@
+//! # Input System - Broadcaster/Listener Pattern
+//!
+//! ## Purpose
+//! Decouples input handling from event loop. InputManager broadcasts input events to
+//! registered listeners (camera, UI, game logic).
+//!
+//! ## Architecture
+//! - **InputManager**: Central broadcaster, holds registered listeners
+//! - **Listener traits**: KeyboardListener, MousePosListener, MouseButtonListener, MouseScrollListener
+//! - **Filtering**: ListenerType (Window/Gui/GameInput) for priority-based filtering
+//!
+//! ## Listener Pattern
+//! 1. Components implement listener traits (e.g., FPSController implements KeyboardListener)
+//! 2. Register with InputManager: `input_mgr.register_key_listener(Rc::new(RefCell::new(controller)))`
+//! 3. Event loop calls InputManager::process_xxx
+//! 4. InputManager broadcasts to all matching listeners
+//!
+//! ## Why Rc<RefCell<>>
+//! - Rc: Multiple owners (InputManager + potentially game logic)
+//! - RefCell: Interior mutability (listeners modify state in broadcast())
+//!
+//! ## Filtering
+//! ListenFilter allows disabling listeners by type or ID (e.g., disable game input when UI active).
+//!
+//! ## Integration
+//! - winit event loop → InputManager → Listeners
+//! - FPSController is primary KeyboardListener + MousePosListener
+
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]

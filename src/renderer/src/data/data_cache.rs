@@ -1,3 +1,61 @@
+//! # Asset Caching System (Textures, Materials, Meshes)
+//!
+//! ## Purpose
+//! Manages loading, GPU upload, and lifetime of textures, materials, and meshes. Implements
+//! lazy loading with Unloaded/Loaded state machines. Provides default resources (white texture,
+//! error pink texture, default materials).
+//!
+//! ## Key Concepts
+//! - **TextureCache**: Texture and material storage with lazy loading
+//! - **MeshCache**: Mesh geometry storage (vertices, indices, sub-allocated from VkSubAllocator)
+//! - **Loading States**: Unloaded (CPU data) → Loaded (GPU resources)
+//! - **Default Resources**: Pre-loaded fallback textures/materials (indices 0-5)
+//! - **Descriptor Management**: Dynamic allocation for material descriptors
+//!
+//! ## Architecture
+//! ```
+//! TextureCache
+//!   ├─ cached_textures: Vec<CachedTexture>     // Indexed by texture ID
+//!   │    └─ Unloaded(TextureMeta) | Loaded(VkLoadedTexture)
+//!   ├─ cached_materials: Vec<CachedMaterial>   // Indexed by material ID
+//!   │    └─ Unloaded(MaterialMeta) | Loaded(VkLoadedMaterial)
+//!   ├─ material_meta_storage: VkSubAllocator   // SSBO for material parameters
+//!   └─ desc_manager: DescriptorManager         // Allocates texture samplers descriptors
+//!
+//! MeshCache
+//!   ├─ cached_meshes: Vec<CachedMesh>
+//!   │    └─ Unloaded(MeshMeta) | Loaded(VkMeshBuffers)
+//!   ├─ index_storage: VkSubAllocator           // Shared index buffer
+//!   └─ vertex_storage: VkSubAllocator          // Shared vertex buffer
+//! ```
+//!
+//! ## Default Resources (TextureCache)
+//! - **Index 0**: 1x1 white (default base color)
+//! - **Index 1**: 1x1 50% gray (default metallic/roughness)
+//! - **Index 2**: 1x1 [128,128,255] (default normal map, points up)
+//! - **Index 3**: 1x1 white (default occlusion)
+//! - **Index 4**: 1x1 black (default emissive)
+//! - **Index 5**: 2x2 pink (error texture)
+//!
+//! ## Loading Flow
+//! 1. Add unloaded resource: cache.add_texture(TextureMeta) → returns ID
+//! 2. Background thread or lazy load: cache.load_texture(ID)
+//!    a. Allocate GPU image (vk_util::create_image_from_data)
+//!    b. Upload via VkHostBuffer async transfer
+//!    c. Transition CachedTexture::Unloaded → Loaded
+//! 3. Rendering: cache.get_loaded_texture(ID) → VkLoadedTexture
+//!
+//! ## Material Metadata Storage
+//! Materials store parameters (base_color_factor, metallic_factor, etc.) in GPU SSBO.
+//! VkSubAllocator packs multiple materials into large buffer. Material descriptor set
+//! points to slice via offset+range.
+//!
+//! ## Why Caches
+//! - De-duplication: Same texture used by multiple materials → loaded once
+//! - Stable IDs: u32 indices survive cache resize (Vec never shrinks)
+//! - Lazy loading: Only upload textures for visible objects
+//! - Batch transfers: Multiple textures uploaded in single frame
+
 use crate::data::data_util::PackUnorm;
 use crate::data::gpu_data::{AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap, Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::data::{assimp_util, data_util, gpu_data};
@@ -35,7 +93,16 @@ pub enum LoadResult<T> {
     Failed(Option<Vec<T>>),
 }
 
-
+/// Texture loading state: CPU data or GPU resource.
+///
+/// ## Purpose
+/// Lazy loading pattern. Textures start as Unloaded (TextureMeta with CPU bytes),
+/// transition to Loaded (VkLoadedTexture with GPU image) when needed.
+///
+/// ## State Transitions
+/// - Unloaded → Loaded: load_texture() uploads to GPU
+/// - Loaded → Unloaded: Never (resources stay loaded until cache destroyed)
+/// - _NULL: Placeholder (unused, legacy)
 #[derive(Debug)]
 pub enum CachedTexture {
     Unloaded(TextureMeta),
@@ -43,7 +110,17 @@ pub enum CachedTexture {
     _NULL,
 }
 
-
+/// Material loading state: CPU metadata or GPU resources.
+///
+/// ## Purpose
+/// Materials reference textures (by ID) and store parameters (base_color_factor, etc.).
+/// Unloaded state holds CPU data, Loaded state has GPU descriptor set + SSBO allocation.
+///
+/// ## VkLoadedMaterial
+/// - texture_ids: Indices into TextureCache
+/// - meta_alloc: VkSubAlloc into material_meta_storage SSBO
+/// - image_descriptor: Descriptor set binding 5 texture samplers
+/// - pipeline: Which pipeline to use (Opaque/Transparent)
 #[derive(Debug)]
 pub enum CachedMaterial {
     Unloaded(MaterialMeta),

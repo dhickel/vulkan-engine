@@ -1,3 +1,36 @@
+//! # GPU Data Structures & Scene Graph
+//!
+//! ## Purpose
+//! Defines all GPU-visible data structures (vertices, uniforms, push constants) and the scene
+//! graph hierarchy. This file bridges CPU-side asset data and GPU rendering.
+//!
+//! ## Key Concepts
+//! - **NOT ECS**: Uses traditional scene graph with Node hierarchy (not Entity-Component-System)
+//! - **Vertex layout**: Comprehensive layout with all glTF attributes (position, normal, tangent, UVs, skinning)
+//! - **Push constants**: Per-draw data (model matrix, buffer addresses) avoiding descriptor updates
+//! - **Scene graph**: Node hierarchy with local/world transforms, dirty flagging for efficiency
+//! - **DrawContext**: Accumulates RenderObjects sorted by pipeline type for optimal batching
+//!
+//! ## Architecture
+//! ```
+//! Node (scene graph)
+//!   ├─ local_transform: Mat4       // TRS relative to parent
+//!   ├─ world_transform: Mat4       // Cached global transform
+//!   ├─ meshes: Vec<u32>            // Mesh IDs from MeshCache
+//!   ├─ children: Vec<Rc<RefCell<Node>>>  // Hierarchy
+//!   └─ draw() -> RenderObjects     // Traverse and accumulate draw commands
+//!
+//! DrawContext
+//!   ├─ render_objects: [Vec<RenderObject>; 4]  // Indexed by VkPipelineType
+//!   └─ active_pipelines: HashSet<VkPipelineType>
+//! ```
+//!
+//! ## Why Scene Graph Over ECS
+//! - Simpler for hierarchical transforms (parent-child relationships natural)
+//! - glTF uses scene graph model (direct mapping)
+//! - Rc<RefCell<>> allows shared ownership and interior mutability
+//! - Transform propagation via recursive traversal
+
 use crate::data::data_cache::{
     CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkPipelineType, VkShaderCache,
 };
@@ -25,7 +58,27 @@ use log::debug;
 //  MESH & TEXTURE DATA //
 //////////////////////////
 
-// Used In shaders as well
+/// GPU vertex layout matching shader input.
+///
+/// ## Purpose
+/// Comprehensive vertex format supporting all glTF 2.0 attributes. Matches shader vertex input
+/// declarations (see shaders/).
+///
+/// ## Layout Details (80 bytes total)
+/// - **position/normal/tangent**: Standard geometry attributes
+/// - **uv0/uv1**: Two UV sets for multi-texturing (split into x/y for alignment)
+/// - **joints/weights**: GPU skinning (4 joints per vertex, UVec4 indices + Vec4 weights)
+/// - **color**: Vertex colors (rarely used, but glTF supports it)
+///
+/// ## Alignment Note
+/// UV coordinates split (uv0_x, uv0_y) instead of Vec2 to maintain 16-byte alignment for
+/// Vec3/Vec4 fields. Padding (_pad) ensures 80-byte total size aligns to 16 bytes.
+///
+/// ## Why This Layout
+/// - Supports full glTF 2.0 spec (PBR materials, skinning, multiple UVs)
+/// - Alignment optimized for GPU cache lines
+/// - Single vertex buffer (interleaved) simpler than multiple streams
+// Used in shaders as well
 #[repr(C)]
 #[derive(Clone, Default, Copy, Debug, Pod, Zeroable)]
 pub struct Vertex {
@@ -371,6 +424,33 @@ pub struct MetRoughUniformExt {
 // SHADER PUSH CONSTS //
 ////////////////////////
 
+/// Push constants for mesh rendering (per-draw data).
+///
+/// ## Purpose
+/// Provides per-draw data without descriptor set updates. Push constants are faster than
+/// descriptors for frequently-changing data.
+///
+/// ## Fields
+/// - **model_matrix**: World transform for this mesh instance
+/// - **vertex_buffer_addr**: Device address for vertex buffer (buffer device address feature)
+/// - **mat_meta_buffer_addr**: Device address for material metadata SSBO
+/// - **joint_count**: Number of joints for skinned mesh (0 if not skinned)
+///
+/// ## Why Push Constants
+/// - No descriptor update overhead (vkCmdPushConstants writes directly to command buffer)
+/// - 128-byte max typical limit (this struct is exactly 96 bytes)
+/// - Model matrix changes per draw call (can't batch)
+/// - Buffer addresses enable bindless-style access without descriptor arrays
+///
+/// ## Buffer Device Address
+/// Vulkan 1.2+ feature allows shaders to access buffers via 64-bit pointers instead of
+/// descriptors. vertex_buffer_addr used in shader like:
+/// ```glsl
+/// layout(buffer_reference, std430) readonly buffer VertexBuffer { Vertex vertices[]; };
+/// layout(push_constant) uniform PushConsts { uint64_t vertex_buffer_addr; ... };
+/// VertexBuffer vb = VertexBuffer(vertex_buffer_addr);
+/// Vertex v = vb.vertices[gl_VertexIndex];
+/// ```
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct VkModelPushConsts {
@@ -586,6 +666,29 @@ pub struct VkMetRoughUniforms {
 // SCENE GRAPH & RENDERING //
 /////////////////////////////
 
+/// Compact draw command data for a single mesh instance.
+///
+/// ## Purpose
+/// Represents one vkCmdDrawIndexed call. Accumulated during scene graph traversal (Node::draw),
+/// then sorted and submitted in bulk by pipeline type.
+///
+/// ## Fields
+/// - **index_count/first_index**: Draw parameters for vkCmdDrawIndexed
+/// - **index_buffer**: Buffer handle to bind
+/// - **joint_desc**: Descriptor set for joint matrices (skinning), vk::DescriptorSet::null() if not skinned
+/// - **material**: Raw pointer to VkLoadedMaterial (stable address in TextureCache, valid for frame)
+/// - **transform**: World transform (copied from Node::world_transform)
+/// - **vertex_buffer_addr**: Device address passed via push constants
+///
+/// ## Why Raw Pointer for Material
+/// Materials stored in TextureCache Vec with stable indices. Pointer cheaper than Arc<>,
+/// and lifetime guaranteed (TextureCache outlives DrawContext). Raw pointer allows Copy trait.
+///
+/// ## Lifecycle
+/// 1. Created during Node::draw() scene traversal
+/// 2. Pushed to DrawContext::render_objects[pipeline_type]
+/// 3. Consumed during vk_render.rs command recording
+/// 4. DrawContext::clear() resets for next frame
 #[derive(Debug, Copy, Clone)]
 pub struct RenderObject {
     pub index_count: u32,
@@ -598,11 +701,15 @@ pub struct RenderObject {
 }
 
 
-// pub trait Renderable {
-//     fn draw(&self, top_matrix: &Mat4, context: &mut DrawContext);
-//     fn refresh_transform(&mut self);
-//     fn get_children(&self) -> &Vec<Rc<RefCell<Node>>>;
-// }
+/// Transform decomposed into translation/rotation/scale (TRS).
+///
+/// ## Purpose
+/// Convenient TRS representation for animation and scene loading. Composes into Mat4 for rendering.
+///
+/// ## Why TRS Over Matrix
+/// - Interpolates better for animation (lerp/slerp)
+/// - Clearer semantics than raw matrix
+/// - glTF stores transforms as TRS
 #[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub struct Transform {
     pub position: Vec3,
@@ -625,12 +732,39 @@ impl Transform {
     }
 }
 
-
+/// Scene graph node with transform hierarchy.
+///
+/// ## Purpose
+/// Represents a node in the scene graph tree. Maintains local/world transforms, owns mesh
+/// references, and manages parent/child relationships.
+///
+/// ## Transform System
+/// - **local_transform**: Relative to parent (from glTF or set manually)
+/// - **world_transform**: Cached global transform (local * parent_world)
+/// - **dirty**: Flag for lazy transform updates (only recompute if moved or parent moved)
+///
+/// ## Hierarchy Pattern
+/// - **parent**: Weak<> to avoid cycles (child doesn't own parent)
+/// - **children**: Rc<RefCell<>> for shared ownership with interior mutability
+/// - Allows multiple references to same node (rare, but glTF supports instancing)
+///
+/// ## Rendering Flow
+/// 1. draw() called on root with identity matrix
+/// 2. If dirty: refresh_transform() recomputes world_transform from parent
+/// 3. For each mesh: create RenderObject, add to DrawContext
+/// 4. Recursively call draw() on children
+///
+/// ## Why RefCell
+/// Interior mutability required: parent traversal needs &self but must mutate world_transform
+/// and dirty flags. RefCell provides runtime borrow checking.
+///
+/// ## Performance Note
+/// Dirty flagging avoids recalculating static subtrees. Only animated nodes propagate updates.
 #[derive(Debug)]
 pub struct Node {
     pub parent: Option<Weak<RefCell<Node>>>,
     pub children: Vec<Rc<RefCell<Node>>>,
-    pub meshes: Vec<u32>,
+    pub meshes: Vec<u32>,          // Mesh IDs in MeshCache
     pub world_transform: Mat4,
     pub local_transform: Mat4,
     pub dirty: bool,
@@ -652,6 +786,26 @@ impl Default for Node {
 
 
 impl Node {
+    /// Recursively traverse scene graph and accumulate RenderObjects.
+    ///
+    /// ## Logic Flow
+    /// 1. If dirty: recompute world_transform from parent
+    /// 2. For each mesh attached to this node:
+    ///    a. Fetch mesh data (VkMeshBuffers) from MeshCache
+    ///    b. Fetch material (VkLoadedMaterial) from TextureCache
+    ///    c. Create RenderObject with world_transform
+    ///    d. Add to DrawContext, indexed by material's pipeline type
+    /// 3. Recursively call draw() on all children
+    ///
+    /// ## Material Pointer Safety
+    /// material_ptr is raw pointer into TextureCache's Vec. Safe because:
+    /// - TextureCache outlives DrawContext (frame scope)
+    /// - Materials never removed mid-frame
+    /// - Stable Vec indices (materials only added, never moved)
+    ///
+    /// ## Pipeline Batching
+    /// RenderObjects sorted by pipeline type (Opaque=0, Transparent=1, etc.).
+    /// Render loop binds pipeline once, draws all objects of that type.
     pub(crate) fn draw(
         &mut self,
         top_matrix: &Mat4,
@@ -700,6 +854,20 @@ impl Node {
         }
     }
 
+    /// Recursively update world transforms for this node and descendants.
+    ///
+    /// ## Logic Flow
+    /// 1. Compute world_transform = parent_transform * local_transform
+    /// 2. Clear dirty flag
+    /// 3. Recursively update all children with this node's world_transform
+    ///
+    /// ## When Called
+    /// - Automatically during draw() if dirty flag set
+    /// - Manually after modifying local_transform
+    /// - Propagates through entire subtree (children become dirty when parent moves)
+    ///
+    /// ## Performance
+    /// O(n) where n = nodes in subtree. Dirty flagging amortizes cost across static scenes.
     pub fn refresh_transform(&mut self, parent_transform: Mat4) {
         self.world_transform = parent_transform.mul_mat4(&self.local_transform);
         self.dirty = false;
@@ -715,7 +883,39 @@ impl Node {
     }
 }
 
-
+/// Accumulated render commands sorted by pipeline type.
+///
+/// ## Purpose
+/// Collects RenderObjects during scene graph traversal, grouped by VkPipelineType for
+/// efficient rendering. Minimizes pipeline binding and state changes.
+///
+/// ## Structure
+/// - **render_objects**: Fixed array [Vec<RenderObject>; 4] indexed by VkPipelineType enum
+///   - [0] = Opaque
+///   - [1] = Transparent
+///   - [2] = Other
+///   - [3] = Reserved/unused
+/// - **active_pipelines**: HashSet of pipeline types with >0 objects (avoids iterating empty Vecs)
+///
+/// ## Rendering Pattern
+/// ```rust
+/// for pipeline_type in ctx.active_pipelines {
+///     bind_pipeline(pipelines[pipeline_type]);
+///     for ro in ctx.render_objects[pipeline_type] {
+///         vkCmdPushConstants(ro.transform, ro.vertex_buffer_addr, ...);
+///         vkCmdBindIndexBuffer(ro.index_buffer);
+///         vkCmdDrawIndexed(ro.index_count, ro.first_index);
+///     }
+/// }
+/// ```
+///
+/// ## Why Array Over HashMap
+/// Fixed pipeline types (4 max), array indexing faster than hash lookup.
+///
+/// ## Lifecycle
+/// 1. Node::draw() populates render_objects
+/// 2. vk_render.rs consumes and submits commands
+/// 3. clear() resets for next frame
 pub struct DrawContext {
     pub active_pipelines: HashSet<VkPipelineType>,
     pub render_objects: [Vec<RenderObject>; 4],

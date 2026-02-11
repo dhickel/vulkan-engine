@@ -1,3 +1,30 @@
+//! # Vulkan Type Definitions
+//!
+//! ## Purpose
+//! Core type definitions and abstractions for the entire rendering system. Every other module
+//! depends on these types. This file establishes the fundamental patterns used throughout the
+//! engine: RAII cleanup via VkDestroyable, frame-based resource management, and traditional
+//! Vulkan descriptor set allocation.
+//!
+//! ## Key Concepts
+//! - **VkDestroyable trait**: RAII pattern for deterministic Vulkan resource cleanup
+//! - **Frame-based synchronization**: VkFrame/VkPresent manage per-frame resources (2-3 frames in flight)
+//! - **Traditional descriptors**: NOT using bindless - allocates from pools per-frame
+//! - **Scene graph integration**: Not ECS - uses Node hierarchy (see gpu_data.rs)
+//! - **Async transfer**: VkHostBuffer/VkTransfer enable background asset loading
+//!
+//! ## Vulkan Integration
+//! Uses Vulkan 1.3 with:
+//! - Dynamic rendering (no VkRenderPass objects)
+//! - Traditional descriptor sets with dynamic allocation
+//! - Binary semaphores (not timeline semaphores)
+//! - vk_mem for main allocation, custom sub-allocator for buffers (see vk_storage.rs)
+//!
+//! ## Critical Gotchas
+//! - **Y-flip viewport**: Lines 67, 105 use negative height for Vulkan coordinate system
+//! - **Command pools are NOT thread-safe**: Each pool is tied to a single queue family
+//! - **Frame resource lifecycle**: Resources deleted via VkDeletable deferred to frame completion
+
 use crate::data::camera::FPSController;
 
 use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator};
@@ -22,7 +49,17 @@ use crate::data::data_cache::{EnvMaps, VkPipelineType};
 use crate::data::data_util::{BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError};
 use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 
-
+/// Core RAII trait for all Vulkan resources requiring cleanup.
+///
+/// ## Purpose
+/// Provides deterministic cleanup for Vulkan handles and vk_mem allocations. All types holding
+/// Vulkan resources should implement this trait. Called when frames are retired or during shutdown.
+///
+/// ## Why This Pattern
+/// - Vulkan requires explicit destruction of all resources
+/// - Rust's Drop trait doesn't work well with Vulkan's two-handle pattern (device + allocator)
+/// - Allows deferred deletion (see VkDeletable) when resources outlive their original scope
+/// - Ensures cleanup order: child resources before parents
 pub trait VkDestroyable {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator);
 }
@@ -33,14 +70,22 @@ pub enum VkError {
     Present(String),
 }
 
-// impl std::fmt::Display for VkError {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             VkError::Present(msg) => write!(f, "Present error: {}", msg),
-//         }
-//     }
-// }
-
+/// Window state management with Vulkan viewport/scissor caching.
+///
+/// ## Purpose
+/// Manages window surface, current extent, and pre-configured viewport/scissor for rendering.
+/// Caches viewport configuration to avoid recalculation every frame.
+///
+/// ## Critical: Y-Flip Viewport Pattern
+/// Vulkan's coordinate system has Y-down at the top, but we want Y-up. The viewport uses
+/// negative height to flip the Y-axis (see lines 67, 105). This is the standard Vulkan
+/// Y-flip technique and affects how projection matrices are configured.
+///
+/// **Why negative height**: Flips clip-space Y without modifying all shaders and projection math.
+///
+/// ## Integration
+/// - Holds FPSController (Rc<RefCell<>> for shared mutable access from event loop)
+/// - Viewport/scissor updated on resize and cached for command buffer recording
 pub struct VkWindowState {
     pub window: winit::window::Window,
     pub resize_requested: bool,
@@ -48,6 +93,7 @@ pub struct VkWindowState {
     curr_extent: vk::Extent2D,
     curr_aspect_ratio: f32,
     pub render_scale: f32,
+    /// Cached viewport and scissor to avoid recreation every frame
     viewport_scissor: ([vk::Viewport; 1], [vk::Rect2D; 1]),
     pub controller: Rc<RefCell<FPSController>>,
 }
@@ -60,11 +106,14 @@ impl VkWindowState {
         max_extent: vk::Extent2D,
         controller: FPSController,
     ) -> Self {
+        // Viewport with Y-flip: negative height flips Vulkan's Y-down to Y-up
+        // Y starts at bottom (curr_extent.height) and goes negative (-height)
+        // This is the standard Vulkan technique to match OpenGL-style coordinates
         let viewport = [vk::Viewport::default()
             .x(0.0)
             .y(curr_extent.height as f32)
             .width(curr_extent.width as f32)
-            .height(-(curr_extent.height as f32))
+            .height(-(curr_extent.height as f32))  // Negative height = Y-flip
             .min_depth(0.0)
             .max_depth(1.0)];
 
@@ -95,14 +144,18 @@ impl VkWindowState {
         self.curr_extent.width = (self.curr_extent.width as f32 * self.render_scale) as u32;
     }
 
+    /// Update window extent and rebuild viewport/scissor on resize.
+    ///
+    /// Called when swapchain is recreated. Reapplies Y-flip viewport pattern.
     pub fn update_curr_size(&mut self, extent: Extent2D) {
         self.curr_extent = extent;
 
+        // Recreate Y-flipped viewport with new extent
         let viewport = [vk::Viewport::default()
             .x(0.0)
             .y(self.curr_extent.height as f32)
             .width(self.curr_extent.width as f32)
-            .height(-(self.curr_extent.height as f32))
+            .height(-(self.curr_extent.height as f32))  // Maintain Y-flip
             .min_depth(0.0)
             .max_depth(1.0)];
 
@@ -194,7 +247,22 @@ pub struct LogicalDevice {
     pub queues: VkDeviceQueues,
 }
 
-
+/// Hardware limits queried from physical device.
+///
+/// ## Purpose
+/// Caches critical limits from VkPhysicalDeviceProperties/Limits for buffer sizing and
+/// descriptor allocation. Used throughout the codebase to ensure allocations respect
+/// hardware constraints.
+///
+/// ## Key Limits
+/// - **Alignment limits**: Uniform/storage buffer offset alignment (critical for sub-allocation)
+/// - **Buffer limits**: Max uniform buffer range (often 64KB, limits UBO sizes)
+/// - **Descriptor limits**: Per-stage and per-set descriptor counts (affects pipeline design)
+///
+/// ## Why This Matters
+/// - buffer_image_granularity affects sub-allocator strategy (see vk_storage.rs)
+/// - min_uniform_buffer_offset_alignment enforces sub-allocation alignment (often 256 bytes)
+/// - Violating these limits causes validation errors or undefined behavior
 pub struct VkBufferAndDescriptorLimits {
     // Buffer limits
     pub max_storage_buffer_range: vk::DeviceSize,
@@ -236,7 +304,24 @@ pub struct QueueIndex {
     pub queue_types: Vec<VkQueueType>,
 }
 
-
+/// Queue family types for work submission.
+///
+/// ## Purpose
+/// Identifies queue types for command submission. Vulkan devices have queue families with
+/// different capabilities (graphics, compute, transfer, present). This enum categorizes them.
+///
+/// ## Design Decision
+/// Explicit enum values (0-3) used as array indices in VkCommandPoolMap and VkDeviceQueues.
+/// This allows O(1) lookup: `pools[VkQueueType::Graphics as usize]`.
+///
+/// ## Why Separate Queues
+/// - **Transfer**: Dedicated DMA queue for async asset loading (see VkHostBuffer)
+/// - **Graphics**: Main rendering queue
+/// - **Compute**: Compute shaders (effects, post-processing)
+/// - **Present**: Swapchain presentation (may alias graphics queue on some hardware)
+///
+/// ## Thread Safety Note
+/// Queue handles are thread-safe, but command pools are NOT. Each thread needs its own pool.
 #[repr(C)]
 #[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum VkQueueType {
@@ -262,6 +347,20 @@ impl VkQueueType {
 }
 
 
+/// Map of command pools indexed by queue type.
+///
+/// ## Purpose
+/// Provides O(1) access to command pools by queue type. Each VkFrame owns one of these,
+/// containing pools for all 4 queue types.
+///
+/// ## Design Pattern
+/// Fixed-size array [VkCommandPool; 4] indexed by VkQueueType enum values (0-3).
+/// Pools are sorted by queue type during construction to ensure correct indexing.
+///
+/// ## Why Per-Frame Pools
+/// - Command pools are NOT thread-safe
+/// - Pools are reset as a unit each frame (more efficient than individual buffer resets)
+/// - Avoids synchronization between frames in flight
 #[derive(Debug, Clone)]
 pub struct VkCommandPoolMap {
     pools: [VkCommandPool; 4],
@@ -278,6 +377,12 @@ impl VkDestroyable for VkCommandPoolMap {
 
 
 impl VkCommandPoolMap {
+    /// Create pool map from Vec, ensuring all 4 queue types are present.
+    ///
+    /// ## Logic Flow
+    /// 1. Sort pools by queue type (ensures enum values 0-3 map to array indices)
+    /// 2. Convert to fixed-size [VkCommandPool; 4] array
+    /// 3. Fail if not exactly 4 pools provided
     pub fn new(mut pools: Vec<(VkQueueType, VkCommandPool)>) -> Result<Self, String> {
         pools.sort_by_key(|(typ, _)| *typ);
 
@@ -290,12 +395,25 @@ impl VkCommandPoolMap {
         Ok(Self { pools: sorted_pools })
     }
 
+    /// Get pool for a specific queue type using enum value as array index.
     pub fn get(&self, typ: VkQueueType) -> &VkCommandPool {
         &self.pools[typ as usize]
     }
 }
 
-
+/// Single command pool with pre-allocated command buffers.
+///
+/// ## Purpose
+/// Owns a Vulkan command pool and its allocated command buffers. Tied to a specific queue
+/// family (queue_index). Pools are reset as a unit each frame.
+///
+/// ## Vulkan Specification
+/// Command pools are NOT thread-safe (Vulkan spec externally synchronized). Each frame
+/// has its own pools to avoid cross-frame synchronization.
+///
+/// ## Reset Strategy
+/// Pools are reset with RESET_COMMAND_BUFFER flag, allowing individual buffer resets.
+/// See vk_render.rs frame loop for reset pattern.
 #[derive(Debug, Clone)]
 pub struct VkCommandPool {
     pub queue_index: u32,
@@ -378,6 +496,19 @@ impl VkDestroyable for VkCommandPool {
 }
 
 
+/// Synchronization primitives for a single frame in flight.
+///
+/// ## Purpose
+/// Bundles semaphores and fence for frame pacing. Used in the render loop for acquire/submit/present
+/// synchronization.
+///
+/// ## Vulkan Synchronization Pattern
+/// - **swap_semaphore**: Signaled by vkAcquireNextImageKHR, waited on by render submit
+/// - **render_semaphore**: Signaled by render submit, waited on by vkQueuePresentKHR
+/// - **render_fence**: Ensures CPU doesn't overwrite frame resources before GPU finishes
+///
+/// ## Why Binary Semaphores
+/// Not using timeline semaphores (simpler, works on more hardware, sufficient for this use case)
 #[derive(Debug, Copy, Clone)]
 pub struct VkFrameSync {
     pub swap_semaphore: vk::Semaphore,
@@ -396,7 +527,15 @@ impl VkDestroyable for VkFrameSync {
     }
 }
 
-
+/// Vulkan image with view and vk_mem allocation.
+///
+/// ## Purpose
+/// Bundles VkImage, VkImageView, and vk_mem::Allocation for RAII cleanup.
+/// Used for draw images, depth buffers, textures.
+///
+/// ## Memory Management
+/// Allocated via vk_mem (not custom sub-allocator). Images can't use sub-allocation
+/// due to alignment requirements and format constraints.
 #[derive(Debug)]
 pub struct VkImageAlloc {
     pub image: vk::Image,
@@ -417,15 +556,36 @@ impl VkDestroyable for VkImageAlloc {
     }
 }
 
-
-// TODO we are going to want more control over the descriptor sets
+/// All resources for a single frame in flight.
+///
+/// ## Purpose
+/// Bundles all per-frame resources: synchronization, render targets, command pools, descriptors,
+/// and deferred deletions. The engine keeps 2-3 frames in flight for GPU parallelism.
+///
+/// ## Frame-Based Resource Management
+/// Each frame owns:
+/// - **Sync primitives**: Semaphores/fence for this frame's render work
+/// - **Render targets**: Draw and depth images (swapchain image is referenced, not owned)
+/// - **Command pools**: One pool per queue type (Graphics/Compute/Transfer/Present)
+/// - **Descriptors**: Dynamic allocator for this frame's descriptor sets
+/// - **Deletions**: Resources queued for cleanup when frame completes (see VkDeletable)
+///
+/// ## Why Per-Frame Resources
+/// - Avoids GPU stalls: CPU can work on frame N+1 while GPU executes frame N
+/// - Simpler synchronization: No cross-frame resource sharing
+/// - Descriptor lifetime: Descriptors only need to live until frame completes
+/// - Command pool reset: Reset entire pool at frame start (more efficient)
+///
+/// ## Deferred Deletion Pattern
+/// Resources can outlive their creation scope by adding them to the deletions queue.
+/// Processed when frame fence signals (see process_deletions).
 pub struct VkFrame {
     pub index: u32,
     pub sync: VkFrameSync,
     pub draw: VkImageAlloc,
     pub depth: VkImageAlloc,
-    pub present_image: vk::Image,
-    pub present_image_view: vk::ImageView,
+    pub present_image: vk::Image,          // Not owned (swapchain owns this)
+    pub present_image_view: vk::ImageView, // Not owned
     pub cmd_pools: VkCommandPoolMap,
     pub descriptors: VkDynamicDescriptorAllocator,
     deletions: Vec<VkDeletable>,
@@ -462,6 +622,14 @@ impl VkFrame {
         self.deletions.push(deletion);
     }
 
+    /// Process deferred deletions for this frame.
+    ///
+    /// ## When Called
+    /// After fence signals (GPU finished with this frame). Safe to destroy resources.
+    ///
+    /// ## Why Deferred
+    /// Resources may be referenced by command buffers in flight. Can't destroy until
+    /// GPU completes execution.
     pub fn process_deletions(&mut self, device: &ash::Device, allocator: &Allocator) {
         self.deletions
             .iter_mut()
@@ -470,7 +638,27 @@ impl VkFrame {
     }
 }
 
-
+/// Manages multiple frames in flight with ring-buffer access.
+///
+/// ## Purpose
+/// Holds all VkFrame instances (typically 2-3 for double/triple buffering) and provides
+/// ring-buffer access for the render loop. Tracks current frame index.
+///
+/// ## Frame Overlap Pattern
+/// With 3 frames in flight:
+/// - Frame 0: GPU rendering, CPU can't touch
+/// - Frame 1: GPU queued, CPU can't touch
+/// - Frame 2: CPU recording commands
+///
+/// Ring-buffer (curr_frame_count % max_frames_active) cycles through frames.
+///
+/// ## Synchronization
+/// - `get_next_frame`: Advances counter, returns next frame (fence must be waited on first!)
+/// - `get_curr_frame`: Returns active frame being recorded
+/// - Frame fence ensures we don't overwrite resources GPU is using
+///
+/// ## Swapchain Rebuild
+/// On resize, draw/depth images destroyed but sync/pools reused (see destroy_for_rebuild).
 pub struct VkPresent {
     pub frame_data: Vec<VkFrame>,
     curr_frame_count: u32,
@@ -707,14 +895,38 @@ impl VkImmediate {
     }
 }
 
-
+/// Host-visible staging buffer for async asset loading.
+///
+/// ## Purpose
+/// Enables background threads to upload assets (textures/meshes) without blocking the render thread.
+/// Owns a host-visible buffer, command pools for transfer/graphics queues, and synchronization.
+///
+/// ## Async Transfer Pattern
+/// 1. Background thread writes data to host-visible buffer
+/// 2. Records transfer command (buffer-to-image copy) on transfer queue
+/// 3. Submits to transfer queue, sends VkCmdSubmitInfo via channel to render thread
+/// 4. Optionally records barrier/transition on graphics queue
+/// 5. Render thread polls channel and processes submissions
+///
+/// ## Why Two Command Pools
+/// - **transfer_pool**: DMA copy operations on dedicated transfer queue (async)
+/// - **graphics_pool**: Image layout transitions (some GPUs require graphics queue for barriers)
+///
+/// ## Synchronization
+/// - **Semaphore**: Synchronizes transfer→graphics queue hand-off
+/// - **Fences**: Signal render thread when GPU completes transfer
+/// - **CountdownLatch**: Allows background thread to wait for transfer completion
+///
+/// ## MPSC Channel
+/// Background thread sends VkCmdSubmitInfo to render thread via render_sender.
+/// Render thread owns the receiver (see VkTransfer).
 #[derive(Debug)]
 pub struct VkHostBuffer {
     pub buffer: VkBuffer,
     pub render_sender: Sender<VkCmdSubmitInfo>,
     pub transfer_pool: VkCommandPool,
     pub graphics_pool: VkCommandPool,
-    pub fence: [vk::Fence; 2],
+    pub fence: [vk::Fence; 2],  // [0] = transfer, [1] = graphics
     pub semaphore: [vk::Semaphore; 1],
     pub transfer_queue_index: u32,
     pub graphics_queue_index: u32,
@@ -723,6 +935,18 @@ pub struct VkHostBuffer {
 
 
 impl VkHostBuffer {
+    /// Submit transfer queue command buffer to render thread.
+    ///
+    /// ## Logic Flow
+    /// 1. Package command buffer with fence/semaphore into VkCmdSubmitInfo
+    /// 2. Create latch guard (decrements latch on drop when fence signals)
+    /// 3. Send via MPSC channel to render thread
+    ///
+    /// ## submit_params
+    /// - **Signaling**: Transfer queue signals semaphore, graphics queue waits on it
+    /// - **Waiting**: Less common, waits on semaphore from previous operation
+    ///
+    /// Called from background asset loading threads.
     pub fn submit_transfer_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.transfer_pool.buffers[0],
@@ -738,6 +962,11 @@ impl VkHostBuffer {
         } else { Ok(()) }
     }
 
+    /// Submit graphics queue command buffer to render thread.
+    ///
+    /// ## Use Case
+    /// Image layout transitions after transfer completion. Some hardware requires
+    /// barriers on graphics queue even if transfer queue did the copy.
     pub fn submit_graphics_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.graphics_pool.buffers[0],
@@ -753,6 +982,11 @@ impl VkHostBuffer {
         } else { Ok(()) }
     }
 
+    /// Block background thread until GPU completes transfer.
+    ///
+    /// ## Why Needed
+    /// Allows background thread to reuse staging buffer after transfer finishes.
+    /// Latch counts down when fences signal (via CountDownDropGuard).
     pub fn await_done(&self, timeout_sec: u64) -> Result<(), LatchTimeOutError> {
         self.countdown_latch.await_zero(Duration::from_secs(timeout_sec))
     }
@@ -773,7 +1007,28 @@ impl VkDestroyable for VkHostBuffer {
     }
 }
 
-
+/// Async transfer system for background asset loading.
+///
+/// ## Purpose
+/// Owns the MPSC channel receiver for processing async transfer submissions from background
+/// threads. Render thread polls this every frame.
+///
+/// ## Architecture
+/// - **host_buffers**: Shared staging buffers for background threads (Arc<Mutex<>>)
+/// - **sender/receiver**: MPSC channel for command submissions
+/// - **transfer_pool**: Render thread's local transfer pool (for immediate transfers)
+///
+/// ## Async Transfer Flow
+/// 1. Background thread acquires VkHostBuffer from pool
+/// 2. Writes asset data to staging buffer
+/// 3. Records transfer commands, submits via VkHostBuffer::submit_transfer_commands
+/// 4. Render thread calls query_channel() each frame
+/// 5. If Some(VkCmdSubmitInfo), render thread submits to GPU
+/// 6. Fence signals, background thread's latch counts down
+///
+/// ## Why MPSC Channel
+/// Decouples background asset loading from render thread. Background threads can't
+/// call vkQueueSubmit directly (Vulkan queues aren't thread-safe in our usage pattern).
 pub struct VkTransfer {
     host_buffers: Vec<Arc<Mutex<VkHostBuffer>>>,
     sender: Sender<VkCmdSubmitInfo>,
@@ -1001,6 +1256,17 @@ impl VkDescriptors {
 }
 
 
+/// Vulkan buffer with vk_mem allocation.
+///
+/// ## Purpose
+/// Bundles VkBuffer handle with its vk_mem allocation for RAII cleanup. Used for large
+/// buffers allocated directly via vk_mem (staging buffers, large uniform buffers).
+///
+/// ## Memory Management
+/// Allocated via vk_mem::Allocator. For sub-allocated buffers, see VkSubAlloc and vk_storage.rs.
+///
+/// ## alloc_info
+/// Contains mapped_data pointer (if HOST_VISIBLE), offset, size. Used for CPU writes.
 #[derive(Debug)]
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
@@ -1009,7 +1275,25 @@ pub struct VkBuffer {
     pub alloc_info: vk_mem::AllocationInfo,
 }
 
-
+/// Sub-allocation from a larger VkBuffer.
+///
+/// ## Purpose
+/// Represents a slice of a larger buffer managed by VkSubAllocator (see vk_storage.rs).
+/// Used for vertex/index buffers, small uniform buffers.
+///
+/// ## Why Sub-Allocation
+/// - Reduces vkAllocateMemory calls (Vulkan limit: typically 4096 allocations)
+/// - Better memory locality
+/// - Amortizes allocation overhead
+///
+/// ## Key Fields
+/// - **alloc_address**: Device address for bindless or SSBO access
+/// - **offset**: Byte offset into parent buffer
+/// - **buffer**: Handle to parent VkBuffer
+/// - **sub_buffer_index**: Index in sub-allocator's tracking array
+///
+/// ## Alignment
+/// Sub-allocator ensures offsets respect min_uniform_buffer_offset_alignment from device limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
     pub alloc_address: vk::DeviceAddress,
@@ -1052,7 +1336,27 @@ impl VkDestroyable for VkBuffer {
     }
 }
 
-
+/// Deferred deletion queue for frame resources.
+///
+/// ## Purpose
+/// Wraps resources that outlive their creation scope but must be deleted after GPU finishes.
+/// Stored in VkFrame::deletions and processed when frame fence signals.
+///
+/// ## Why Deferred Deletion
+/// Example: Resize creates new buffers, but old buffers are still referenced by in-flight
+/// command buffers. Can't destroy immediately. Add to current frame's deletion queue,
+/// destroy when frame completes.
+///
+/// ## Usage Pattern
+/// ```rust
+/// let deletion = VkDeletable::AllocatedBuffer(old_buffer);
+/// vk_present.add_deletion_to_curr_frame(deletion);
+/// // old_buffer destroyed when frame fence signals
+/// ```
+///
+/// ## Extensible Design
+/// Enum allows adding more resource types (images, pipelines, etc.) without changing
+/// VkFrame interface.
 pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),
 }
@@ -1069,6 +1373,30 @@ impl VkDeletable {
 }
 
 
+/// Pre-allocated scene descriptor sets with backing uniform buffers.
+///
+/// ## Purpose
+/// Manages descriptor sets for scene data (view/projection matrices, lighting) and environment
+/// maps (irradiance, pre-filter, BRDF LUT). One descriptor set per frame in flight.
+///
+/// ## Memory Layout
+/// - **scene_buffer**: Large uniform buffer with per-frame SceneDataUBO (aligned)
+/// - **env_buffer**: Large uniform buffer with per-frame EnvironmentUBO (aligned)
+/// - Both buffers sub-divided using min_uniform_buffer_offset_alignment
+///
+/// ## Why Pre-Allocated
+/// Scene descriptors are used every frame, so pre-allocate instead of dynamic allocation.
+/// Each frame has its own descriptor set to avoid synchronization.
+///
+/// ## Descriptor Bindings (from shader)
+/// - Binding 0: SceneDataUBO (camera, view, projection)
+/// - Binding 1: EnvironmentUBO (lighting parameters)
+/// - Binding 2: Irradiance cubemap (image sampler)
+/// - Binding 3: Pre-filter cubemap (image sampler)
+/// - Binding 4: BRDF LUT (image sampler)
+///
+/// ## Update Pattern
+/// update_scene_uniform() writes new SceneDataUBO each frame (camera movement).
 pub struct VkSceneDescriptors {
     descriptor_pool: VkDynamicDescriptorAllocator,
     scene_descriptors: Vec<vk::DescriptorSet>,
@@ -1241,6 +1569,25 @@ impl VkSceneDescriptors {
 }
 
 
+/// Queue for polling async transfer fences.
+///
+/// ## Purpose
+/// Tracks fences from async transfer operations (VkHostBuffer submissions). Render thread
+/// polls these each frame to detect transfer completion and signal background threads.
+///
+/// ## Logic Flow
+/// 1. Background thread submits VkCmdSubmitInfo with fence and CountDownDropGuard
+/// 2. Render thread adds fence+guard to this queue
+/// 3. check_fences() polls all queued fences each frame
+/// 4. When fence signals, reset fence and drop guard (decrements latch)
+/// 5. Background thread's await_done() unblocks
+///
+/// ## Why CountDownDropGuard
+/// RAII pattern: guard decrements latch on drop. Ensures latch counts down even if
+/// fence check code panics or early-returns.
+///
+/// ## Performance Note
+/// Vec::retain() is fine for small queue sizes (typically 0-4 transfers per frame).
 pub struct VkFenceQueue {
     fence_awaits: Vec<(vk::Fence, CountDownDropGuard)>,
 }
@@ -1256,6 +1603,14 @@ impl VkFenceQueue {
         self.fence_awaits.push((fence[0], latch_guard));
     }
 
+    /// Poll all queued fences and signal completed transfers.
+    ///
+    /// ## Logic
+    /// - Query fence status (non-blocking)
+    /// - If signaled: reset fence, drop guard (signals background thread), remove from queue
+    /// - If unsignaled: keep in queue
+    ///
+    /// Called every frame in render loop.
     pub fn check_fences(&mut self, device: &ash::Device) {
         if self.fence_awaits.is_empty() {
             return;
@@ -1266,8 +1621,8 @@ impl VkFenceQueue {
             if signaled {
                 unsafe { device.reset_fences(&[*fence]).unwrap() };
                 debug!("Signaling and removing fence: {:?}", fence);
-                false
-            } else { true }
+                false  // Remove from queue
+            } else { true }  // Keep in queue
         });
     }
 }
