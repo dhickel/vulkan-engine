@@ -261,7 +261,6 @@ void main()
     vec3 specularEnvironmentR90 = vec3(1.0, 1.0, 1.0) * reflectance90;
 
     vec3 n = (material.normalTextureSet > -1) ? getNormal(material) : normalize(inNormal);
-    n.y *= -1.0f;
     vec3 v = normalize(ubo.camPos - inWorldPos);    // Vector from surface point to camera
     vec3 l = normalize(uboParams.lightDir.xyz);     // Vector from surface point to light
     vec3 h = normalize(l + v);                        // Half vector between both l and v
