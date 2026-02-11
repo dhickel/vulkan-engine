@@ -80,7 +80,7 @@ pub fn run() {
 
 
     let camera = camera::Camera::default();
-    let fps_controller = FPSController::new(1, camera, 0.01, 2.0);
+    let fps_controller = FPSController::new(1, camera, 0.002, 1.0);
 
     let window_state = VkWindowState::new(window, size, max_extent, fps_controller);
     input_manager.register_key_listener(window_state.controller.clone());
@@ -112,9 +112,7 @@ pub fn run() {
                         //input_manager.add_mouse_button(*button)
                     }
                     DeviceEvent::Key(key_event) => {
-                        if let PhysicalKey::Code(key) = key_event.physical_key {
-                            input_manager.add_keycode(key, key_event.state.is_pressed())
-                        }
+                        // Keyboard input moved to WindowEvent for better reliability
                     }
                     _ => {}
                 },
@@ -137,6 +135,10 @@ pub fn run() {
                         WindowEvent::KeyboardInput {
                             event: key_event, ..
                         } => {
+                            if let PhysicalKey::Code(key) = key_event.physical_key {
+                                input_manager.add_keycode(key, key_event.state.is_pressed());
+                            }
+
                             // Hardwired hack to close the renderer on Escape key press
                             if key_event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Escape) {
                                 control_flow.exit();
@@ -189,7 +191,7 @@ pub fn run() {
                             app.window_state
                                 .controller
                                 .borrow_mut()
-                                .update(delta.as_millis());
+                                .update(delta.as_secs_f32());
 
                           
 

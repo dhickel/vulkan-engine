@@ -60,11 +60,10 @@ impl Camera {
     }
 
     pub fn update_position(&mut self, direction: Vec3, amount: f32) {
-        let camera_rotation = Mat4::from_quat(self.orientation);
-        let velocity = Vec4::new(direction.x, 0.0, direction.z, 0.0) * amount; // Assuming no vertical movement
-        let transformed_velocity = camera_rotation * velocity;
+        let yaw_rotation = Quat::from_rotation_y(self.yaw);
+        let velocity = yaw_rotation * direction * amount;
 
-        self.position += Vec3::new(transformed_velocity.x, transformed_velocity.y, transformed_velocity.z);
+        self.position += velocity;
     }
 }
 
@@ -77,7 +76,7 @@ pub struct FPSController {
     m_sensitivity: f64,
     in_window: bool,
     camera: Camera,
-    input_actions: [bool; 4],
+    input_actions: [bool; 6],
     move_speed: f32,
     move_vec: glam::Vec3,
 }
@@ -85,10 +84,12 @@ pub struct FPSController {
 
 #[repr(C)]
 pub enum InputAction {
-    MoveUp = 0,
-    MoveDown = 1,
-    MoveLeft = 2,
-    MoveRight = 3,
+    Forward = 0,
+    Backward = 1,
+    Left = 2,
+    Right = 3,
+    Up = 4,
+    Down = 5,
 }
 
 
@@ -101,7 +102,7 @@ impl FPSController {
             view_vec: Default::default(),
             move_vec: Default::default(),
             in_window: true,
-            input_actions: [false; 4],
+            input_actions: [false; 6],
             m_sensitivity,
             camera,
             move_speed,
@@ -113,7 +114,7 @@ impl FPSController {
     }
 
 
-    pub fn update(&mut self, delta: u128) {
+    pub fn update(&mut self, delta_seconds: f32) {
         let rot_x = self.m_delta.0 * self.m_sensitivity;
         let rot_y = self.m_delta.1 * self.m_sensitivity;
 
@@ -121,20 +122,26 @@ impl FPSController {
         self.camera.update_rotation(-rot_x as f32, -rot_y as f32);
 
         // Calculate movement direction and amount
-        let amount = (delta as f64 * self.move_speed as f64 / 1000.0) as f32; // Assuming delta is in milliseconds
+        let amount = delta_seconds * self.move_speed;
         self.move_vec = Vec3::ZERO;
 
-        if self.input_actions[InputAction::MoveUp as usize] {
+        if self.input_actions[InputAction::Forward as usize] {
             self.move_vec.z -= 1.0;
         }
-        if self.input_actions[InputAction::MoveDown as usize] {
+        if self.input_actions[InputAction::Backward as usize] {
             self.move_vec.z += 1.0;
         }
-        if self.input_actions[InputAction::MoveLeft as usize] {
+        if self.input_actions[InputAction::Left as usize] {
             self.move_vec.x -= 1.0;
         }
-        if self.input_actions[InputAction::MoveRight as usize] {
+        if self.input_actions[InputAction::Right as usize] {
             self.move_vec.x += 1.0;
+        }
+        if self.input_actions[InputAction::Up as usize] {
+            self.move_vec.y += 1.0;
+        }
+        if self.input_actions[InputAction::Down as usize] {
+            self.move_vec.y -= 1.0;
         }
 
         if self.move_vec.length_squared() > 0.0 {
@@ -174,16 +181,18 @@ impl KeyboardListener for FPSController {
     fn listener_for(&self, key: KeyCode) -> bool {
         matches!(
             key,
-            KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD
+            KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD | KeyCode::Space | KeyCode::ShiftLeft
         )
     }
 
     fn broadcast(&mut self, key: KeyCode, pressed: bool, modifiers: &HashSet<Modifiers>) {
         match key {
-            KeyCode::KeyW => self.input_actions[InputAction::MoveUp as usize] = pressed,
-            KeyCode::KeyA => self.input_actions[InputAction::MoveLeft as usize] = pressed,
-            KeyCode::KeyS => self.input_actions[InputAction::MoveDown as usize] = pressed,
-            KeyCode::KeyD => self.input_actions[InputAction::MoveRight as usize] = pressed,
+            KeyCode::KeyW => self.input_actions[InputAction::Forward as usize] = pressed,
+            KeyCode::KeyA => self.input_actions[InputAction::Left as usize] = pressed,
+            KeyCode::KeyS => self.input_actions[InputAction::Backward as usize] = pressed,
+            KeyCode::KeyD => self.input_actions[InputAction::Right as usize] = pressed,
+            KeyCode::Space => self.input_actions[InputAction::Up as usize] = pressed,
+            KeyCode::ShiftLeft => self.input_actions[InputAction::Down as usize] = pressed,
             _ => {}
         }
     }
