@@ -1249,7 +1249,7 @@ pub fn record_host_to_image_buffer(
             //     format!("_buffer_debug_{:?}.png", id),
             // );
 
-            let host_ptr = host_ptr.add(size);
+            host_ptr = host_ptr.add(size);
             let curr_offset = offset;
             offset = offset.add(size as u64);
             curr_offset as DeviceSize
