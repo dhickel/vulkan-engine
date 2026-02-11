@@ -137,6 +137,10 @@ pub fn run() {
                         WindowEvent::KeyboardInput {
                             event: key_event, ..
                         } => {
+                            // Hardwired hack to close the renderer on Escape key press
+                            if key_event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::Escape) {
+                                control_flow.exit();
+                            }
                         }
                         WindowEvent::ModifiersChanged(modd, ..) => {}
                         WindowEvent::Ime(_) => {}
