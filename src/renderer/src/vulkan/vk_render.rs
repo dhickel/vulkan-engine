@@ -1508,7 +1508,7 @@ impl VkRender {
         let near = 10_000.0;
 
         let proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
-        //proj.y_axis.y *= -1.0; // Flip the Y-axis
+        proj.y_axis.y *= -1.0; // Flip the Y-axis
 
         self.scene_data.view = camera_view;
         self.scene_data.projection = proj;
