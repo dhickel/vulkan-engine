@@ -380,6 +380,8 @@ impl VkRender {
         compile_shaders: bool,
     ) -> Result<Self, String> {
         if compile_shaders {
+            info!("Compiling Shaders is disabled as shaderc is removed from build.");
+            /*
             info!("Compiling Shaders");
             let shader_dir = "src/renderer/src/shaders";
             match vk_util::compile_shaders(shader_dir, shader_dir) {
@@ -391,6 +393,7 @@ impl VkRender {
                     panic!("Error Compiling Shaders: {:?}", err)
                 }
             }
+            */
         }
 
         ////////////////////////////

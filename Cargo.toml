@@ -16,7 +16,6 @@ pollster = "0.3"
 vk-mem = "0.4.0"
 
 [patch.crates-io]
-russimp-sys = { path = "vendor/russimp-sys" }
 #raw-window-handle = "0.6.2"
 #ash = "0.38.0"
 

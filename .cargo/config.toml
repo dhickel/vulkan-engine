@@ -1,7 +1,6 @@
 [build]
-rustflags = ["-L", "native=.gemini/libclang"]
+rustflags = ["-L", "native=.gemini/libs"]
 
 [env]
-LIBCLANG_PATH = { value = ".gemini/libclang", relative = true }
-BINDGEN_EXTRA_CLANG_ARGS = "-I/var/lib/flatpak/runtime/org.fedoraproject.Platform.CL.default/x86_64/f43/2289b126fe50cafde0de174f24fa438a26e0f7b1c9e29eecc162d894b8635569/files/lib/clang/21/include"
-
+# LIBCLANG_PATH = { value = ".gemini/libclang", relative = true }
+# BINDGEN_EXTRA_CLANG_ARGS = "-I/var/lib/flatpak/runtime/org.fedoraproject.Platform.CL.default/x86_64/f43/2289b126fe50cafde0de174f24fa438a26e0f7b1c9e29eecc162d894b8635569/files/lib/clang/21/include"

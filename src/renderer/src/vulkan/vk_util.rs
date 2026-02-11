@@ -22,7 +22,7 @@ use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
 use crate::vulkan::vk_render::VkSingleDescriptor;
 use crate::vulkan::{vk_debug, vk_init, vk_util};
 use ash::prelude::VkResult;
-use shaderc::{CompileOptions, Compiler, ShaderKind};
+// use shaderc::{CompileOptions, Compiler, ShaderKind};
 use std::{fs, path};
 use std::fs::metadata;
 use std::ops::{Add, Sub};
@@ -935,6 +935,7 @@ fn create_buffer_image_copy(
 }
 
 
+/*
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Create a shader compiler
     let compiler = Compiler::new().unwrap();
@@ -995,6 +996,7 @@ pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn st
 
     Ok(())
 }
+*/
 
 
 pub(crate) fn create_cubemap(
