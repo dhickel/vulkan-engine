@@ -31,7 +31,7 @@
 //!
 //! ## Default Resources (TextureCache)
 //! - **Index 0**: 1x1 white (default base color)
-//! - **Index 1**: 1x1 50% gray (default metallic/roughness)
+//! - **Index 1**: 1x1 white (neutral metallic/roughness sample)
 //! - **Index 2**: 1x1 [128,128,255] (default normal map, points up)
 //! - **Index 3**: 1x1 white (default occlusion)
 //! - **Index 4**: 1x1 black (default emissive)
@@ -279,16 +279,18 @@ impl TextureCache {
             uv_index: 0,
         });
 
-        let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
-
         let def_metallic_rough = CachedTexture::Unloaded(TextureMeta {
-            bytes: if r8_support { vec![127] } else { vec![127, 127, 127, 255] },
+            // Sampled as .g (roughness) and .b (metallic) in the shader.
+            // Keep these channels valid even in fallback texture.
+            bytes: vec![255, 255, 255, 255],
             width: 1,
             height: 1,
-            format: if r8_support { vk::Format::R8_UNORM } else { vk::Format::R8G8B8A8_UNORM },
+            format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             uv_index: 0,
         });
+
+        let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
 
 
         let def_occlusion = CachedTexture::Unloaded(TextureMeta {
@@ -420,7 +422,7 @@ impl TextureCache {
                     "Error converting material of type: {:?} to RGBA. Using error texture.",
                     data.format
                 );
-                return Self::DEFAULT_ERROR_MAT;
+                return Self::DEFAULT_ERROR_TEX;
             }
         }
 
@@ -734,6 +736,15 @@ impl TextureCache {
         debug!(" normal id: {}", meta.texture_ids.normal_map);
         debug!(" occlusion id: {}", meta.texture_ids.occlusion_map);
         debug!(" emissive id: {}", meta.texture_ids.emissive_map);
+        debug!(" base color uv set: {}", meta.material_values.base_color_uv_set);
+        debug!(" metal rough uv set: {}", meta.material_values.met_rough_uv_set);
+        debug!(" normal uv set: {}", meta.material_values.normal_uv_set);
+        debug!(" occlusion uv set: {}", meta.material_values.occlusion_uv_set);
+        debug!(" emissive uv set: {}", meta.material_values.emissive_uv_set);
+        debug!(" metallic factor: {}", meta.material_values.metallic_factor);
+        debug!(" roughness factor: {}", meta.material_values.roughness_factor);
+        debug!(" normal scale: {}", meta.material_values.normal_scale);
+        debug!(" occlusion strength: {}", meta.material_values.occlusion_strength);
 
 
 
@@ -1103,6 +1114,7 @@ impl MeshCache {
             .zip(index_allocs.into_iter())
             .for_each(|((id, vert_alloc), index_alloc)| {
                 if let CachedMesh::Unloaded(meta) = unsafe { self.cached_meshes.get_unchecked(id as usize) } {
+                    let material_id = meta.material_index.unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT);
                     let buffer = VkMeshBuffers {
                         cache_id: id,
                         index_count: meta.indices.len() as u32,
@@ -1110,8 +1122,15 @@ impl MeshCache {
                         index_buffer: index_alloc.clone(),
                         vertex_buffer: vert_alloc.clone(),
                         joint_desc: self.default_joint_desc,
-                        material_id: meta.material_index.unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT),
+                        material_id,
                     };
+
+                    debug!(
+                        "Loaded mesh '{}' (cache id {}) uses material id {}",
+                        meta.name,
+                        id,
+                        material_id
+                    );
 
                     if let Some(rtn_meshes) = &mut rtn_buffers {
                         rtn_meshes.push(buffer)

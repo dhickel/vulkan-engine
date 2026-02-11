@@ -300,11 +300,13 @@ impl Default for MaterialValues {
         Self {
             base_color_factor: TextureCache::DEFAULT_BASE_COLOR_FACTOR,
             emissive_factor: TextureCache::DEFAULT_EMISSIVE_FACTOR.extend(0.0),
-            base_color_uv_set: 0,
-            met_rough_uv_set: 0,
-            normal_uv_set: 0,
-            occlusion_uv_set: 0,
-            emissive_uv_set: 0,
+            // Shader expects -1 to indicate "texture not present" for each map.
+            // These are u32 on CPU but read as signed ints in GLSL.
+            base_color_uv_set: u32::MAX,
+            met_rough_uv_set: u32::MAX,
+            normal_uv_set: u32::MAX,
+            occlusion_uv_set: u32::MAX,
+            emissive_uv_set: u32::MAX,
             metallic_factor: TextureCache::DEFAULT_METALLIC_FACTOR,
             roughness_factor: TextureCache::DEFAULT_ROUGHNESS_FACTOR,
             emissive_strength: TextureCache::DEFAULT_EMISSIVE_STRENGTH,

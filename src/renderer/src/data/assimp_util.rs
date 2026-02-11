@@ -8,6 +8,7 @@ use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
 use log::__private_api::loc;
+use log::debug;
 use russimp_sys::{
     aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray,
     aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile,
@@ -21,9 +22,10 @@ use russimp_sys::{
     aiShadingMode_aiShadingMode_PBR_BRDF, aiString, aiTexture, aiTextureType,
     aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
     aiTextureType_aiTextureType_BASE_COLOR, aiTextureType_aiTextureType_DIFFUSE,
-    aiTextureType_aiTextureType_EMISSIVE, aiTextureType_aiTextureType_HEIGHT,
-    aiTextureType_aiTextureType_LIGHTMAP, aiTextureType_aiTextureType_METALNESS,
-    aiTextureType_aiTextureType_NORMALS, aiTextureType_aiTextureType_SPECULAR,
+    aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_aiTextureType_EMISSIVE,
+    aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP,
+    aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS,
+    aiTextureType_aiTextureType_NORMAL_CAMERA, aiTextureType_aiTextureType_SPECULAR,
     aiTextureType_aiTextureType_UNKNOWN, ai_real, AI_DEFAULT_MATERIAL_NAME,
 };
 use std::cell::RefCell;
@@ -38,15 +40,12 @@ use std::os::raw::c_int;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
-use log::debug;
-
 
 pub struct ModelMeta {
     pub node: Rc<RefCell<gpu_data::Node>>,
     pub material_ids: Vec<u32>,
     pub mesh_ids: Vec<u32>,
 }
-
 
 pub fn load_model(
     path: &str,
@@ -92,22 +91,26 @@ pub fn load_model(
         if scene_ptr.is_null() {
             Err("Error loading scene file, invalid path?".to_string())
         } else {
-            Ok(&*scene_ptr )
+            Ok(&*scene_ptr)
         }
     }?;
 
     let materials = process_materials(ai_scene, base_path, &data_cache)?;
-    let mat_indices = 0..materials.len() ;
+    let mat_indices = 0..materials.len();
 
     let mut mapped_materials = HashMap::<u32, u32>::with_capacity(materials.len());
-    let material_ids = data_cache.texture_cache.lock().unwrap().add_materials(materials);
+    let material_ids = data_cache
+        .texture_cache
+        .lock()
+        .unwrap()
+        .add_materials(materials);
 
     for (og_idx, id) in mat_indices.into_iter().zip(material_ids.iter()) {
         mapped_materials.insert(og_idx as u32, *id);
     }
 
     let meshes = process_meshes(ai_scene, mapped_materials);
-    let mesh_indices = 0..meshes.len() ;
+    let mesh_indices = 0..meshes.len();
 
     let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(meshes.len());
     let mesh_ids = data_cache.mesh_cache.lock().unwrap().add_multi(meshes);
@@ -122,16 +125,13 @@ pub fn load_model(
         Err("Failed to find root node in model".to_string())
     } else {
         let node = process_node(root_ai_node, &mapped_meshes, None);
-        Ok(
-            ModelMeta {
-                node,
-                material_ids,
-                mesh_ids,
-            }
-        )
+        Ok(ModelMeta {
+            node,
+            material_ids,
+            mesh_ids,
+        })
     }
 }
-
 
 pub fn process_materials(
     ai_scene: &aiScene,
@@ -140,7 +140,6 @@ pub fn process_materials(
 ) -> Result<Vec<MaterialMeta>, String> {
     let mat_count = ai_scene.mNumMaterials as usize;
     let mut materials = Vec::<MaterialMeta>::with_capacity(mat_count);
-
 
     unsafe {
         for i in 0..mat_count {
@@ -153,72 +152,94 @@ pub fn process_materials(
             let ai_material = &*ai_material_ptr;
             let mut material_meta = MaterialMeta::default();
 
-            let base_color = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_DIFFUSE,
-                base_path,
-                data_cache,
+            let load_first_texture_type = |label: &str, types: &[(aiTextureType, &'static str)]| {
+                for (typ, type_name) in types {
+                    if let Some(meta) =
+                        get_texture_meta(ai_material, ai_scene, *typ, base_path, data_cache)
+                    {
+                        debug!(
+                            "Material {} {} texture resolved from Assimp type {}",
+                            i, label, type_name
+                        );
+                        return Some((meta, *type_name));
+                    }
+                }
+                None
+            };
+
+            let base_color = load_first_texture_type(
+                "base_color",
+                &[
+                    (aiTextureType_aiTextureType_BASE_COLOR, "BASE_COLOR"),
+                    (aiTextureType_aiTextureType_DIFFUSE, "DIFFUSE"),
+                ],
             );
 
-            let met_rough = get_texture_meta(
+            // Assimp may expose metallic/roughness as either:
+            // - one combined texture (UNKNOWN), or
+            // - two split sources (METALNESS + DIFFUSE_ROUGHNESS).
+            let met_rough_combined = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_UNKNOWN,
                 base_path,
                 data_cache,
             );
-
-            let normal = get_texture_meta(
+            let met_rough_metalness = get_texture_meta(
                 ai_material,
                 ai_scene,
-                aiTextureType_aiTextureType_NORMALS,
+                aiTextureType_aiTextureType_METALNESS,
+                base_path,
+                data_cache,
+            );
+            let met_rough_roughness = get_texture_meta(
+                ai_material,
+                ai_scene,
+                aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS,
                 base_path,
                 data_cache,
             );
 
-            let occlusion = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_LIGHTMAP,
-                base_path,
-                data_cache,
+            let normal = load_first_texture_type(
+                "normal",
+                &[
+                    (aiTextureType_aiTextureType_NORMAL_CAMERA, "NORMAL_CAMERA"),
+                    (aiTextureType_aiTextureType_NORMALS, "NORMALS"),
+                ],
             );
 
-            let emissive = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_EMISSIVE,
-                base_path,
-                data_cache,
+            let occlusion = load_first_texture_type(
+                "occlusion",
+                &[
+                    (
+                        aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
+                        "AMBIENT_OCCLUSION",
+                    ),
+                    (aiTextureType_aiTextureType_LIGHTMAP, "LIGHTMAP"),
+                ],
+            );
+
+            let emissive = load_first_texture_type(
+                "emissive",
+                &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
             );
 
             let mut tex_cache = data_cache.texture_cache.lock().unwrap();
 
-            if let Some(meta) = base_color {
-                let color = get_color_factor(ai_material);
-                let uv_set = meta.uv_index;
-                let tex_id = tex_cache.add_texture(meta);
-                material_meta.add_base_color(tex_id, color, uv_set);
-            } else if let Some(meta) = get_texture_meta(
-                ai_material,
-                ai_scene,
-                aiTextureType_aiTextureType_BASE_COLOR,
-                base_path,
-                data_cache,
-            ) {
+            if let Some((meta, _source)) = base_color {
                 let color = get_color_factor(ai_material);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
                 material_meta.add_base_color(tex_id, color, uv_set);
             }
 
-            if let Some(meta) = met_rough {
-                let metallic_factor = get_float_factor(
-                    ai_material,
-                    AI_MATKEY_METALLIC_FACTOR,
-                    TextureCache::DEFAULT_METALLIC_FACTOR,
-                );
+            if let Some(meta) = resolve_metallic_roughness_meta(
+                met_rough_combined,
+                met_rough_metalness,
+                met_rough_roughness,
+                i,
+            ) {
+                let metallic_factor = get_float_factor(ai_material, AI_MATKEY_METALLIC_FACTOR, 1.0);
                 let roughness_factor = get_float_factor(
                     ai_material,
                     AI_MATKEY_ROUGHNESS_FACTOR,
@@ -226,7 +247,7 @@ pub fn process_materials(
                 );
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
-        
+
                 material_meta.add_metallic_roughness(
                     tex_id,
                     metallic_factor,
@@ -235,11 +256,11 @@ pub fn process_materials(
                 );
             }
 
-            if let Some(meta) = normal {
+            if let Some((meta, _source)) = normal {
                 let normal_scale = get_float_factor(
                     ai_material,
                     AI_MATKEY_BUMPSCALING,
-                    TextureCache::DEFAULT_ROUGHNESS_FACTOR,
+                    TextureCache::DEFAULT_NORMAL_SCALE,
                 );
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
@@ -247,11 +268,11 @@ pub fn process_materials(
                 material_meta.add_normal(tex_id, normal_scale, uv_set);
             }
 
-            if let Some(meta) = occlusion {
+            if let Some((meta, _source)) = occlusion {
                 let occlusion_strength = get_float_factor(
                     ai_material,
                     AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION,
-                    TextureCache::DEFAULT_ROUGHNESS_FACTOR,
+                    TextureCache::DEFAULT_OCCLUSION_STRENGTH,
                 );
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
@@ -259,23 +280,21 @@ pub fn process_materials(
                 material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
             }
 
-            if let Some(meta) = emissive {
+            if let Some((meta, _source)) = emissive {
                 let emissive_factor = get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE);
                 let emissive_strength =
                     get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
-                
+
                 material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
             }
 
-            
             materials.push(material_meta);
         }
     }
     Ok(materials)
 }
-
 
 unsafe fn get_color_factor(ai_material: &aiMaterial) -> glam::Vec4 {
     let mut color = aiColor4D {
@@ -298,7 +317,6 @@ unsafe fn get_color_factor(ai_material: &aiMaterial) -> glam::Vec4 {
     }
 }
 
-
 unsafe fn get_float_factor(ai_material: &aiMaterial, key: *const i8, default: f32) -> f32 {
     let mut value = 0.0;
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, &mut value, &mut 1)
@@ -309,7 +327,6 @@ unsafe fn get_float_factor(ai_material: &aiMaterial, key: *const i8, default: f3
         default
     }
 }
-
 
 unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam::Vec3 {
     let mut factor = [0.0; 3];
@@ -322,7 +339,6 @@ unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam:
     }
 }
 
-
 unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32 {
     let mut strength = [0.0; 1];
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, strength.as_mut_ptr(), &mut 1)
@@ -333,7 +349,6 @@ unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32
         TextureCache::DEFAULT_EMISSIVE_STRENGTH
     }
 }
-
 
 unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> AlphaMode {
     let mut alpha_mode = aiString {
@@ -349,13 +364,12 @@ unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> AlphaMode {
         match mode_str.as_str() {
             "MASK" => AlphaMode::Mask,
             "BLEND" => AlphaMode::Blend,
-            _ => AlphaMode::Opaque, 
+            _ => AlphaMode::Opaque,
         }
     } else {
-        AlphaMode::Opaque 
+        AlphaMode::Opaque
     }
 }
-
 
 unsafe fn get_alpha_cutoff(ai_material: &aiMaterial) -> f32 {
     let mut alpha_cutoff = 0.5; // Default value
@@ -369,7 +383,6 @@ unsafe fn get_alpha_cutoff(ai_material: &aiMaterial) -> f32 {
     );
     alpha_cutoff
 }
-
 
 unsafe fn get_texture_meta(
     ai_material: &aiMaterial,
@@ -413,7 +426,7 @@ unsafe fn get_texture_meta(
                                     texture.pcData as *const u8,
                                     texture.mWidth as usize,
                                 )
-                                    .to_vec(),
+                                .to_vec(),
                             )
                         } else {
                             None
@@ -444,13 +457,23 @@ unsafe fn get_texture_meta(
                         img.to_rgba8().into_raw()
                     };
 
+                    let uv_index = if uv_index > 1 {
+                        debug!(
+                            "Texture type {:?} reported unsupported UV set {}. Clamping to UV0.",
+                            texture_type, uv_index
+                        );
+                        0
+                    } else {
+                        uv_index as u32
+                    };
+
                     return Some(TextureMeta {
                         bytes,
                         width,
                         height,
                         format,
                         mips_levels: 1,
-                        uv_index: uv_index as u32,
+                        uv_index,
                     });
                 }
             }
@@ -459,8 +482,259 @@ unsafe fn get_texture_meta(
     None
 }
 
+fn normalize_metal_roughness_texture(meta: TextureMeta) -> TextureMeta {
+    let pixel_count = (meta.width as usize) * (meta.height as usize);
 
-pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> Vec<MeshMeta> {
+    match meta.format {
+        // Single channel METALNESS map: place metal in B and default roughness to 1.0 in G.
+        vk::Format::R8_UNORM => {
+            if meta.bytes.len() != pixel_count {
+                debug!(
+                    "Unexpected R8 metallic/roughness byte length (got {}, expected {}). Keeping original.",
+                    meta.bytes.len(),
+                    pixel_count
+                );
+                return meta;
+            }
+
+            let mut out = Vec::with_capacity(pixel_count * 4);
+            for &m in &meta.bytes {
+                out.extend_from_slice(&[255, 255, m, 255]);
+            }
+
+            TextureMeta {
+                bytes: out,
+                format: vk::Format::R8G8B8A8_UNORM,
+                ..meta
+            }
+        }
+        // Two channel map: interpret R as roughness, G as metalness.
+        vk::Format::R8G8_UNORM => {
+            if meta.bytes.len() != pixel_count * 2 {
+                debug!(
+                    "Unexpected R8G8 metallic/roughness byte length (got {}, expected {}). Keeping original.",
+                    meta.bytes.len(),
+                    pixel_count * 2
+                );
+                return meta;
+            }
+
+            let mut out = Vec::with_capacity(pixel_count * 4);
+            for px in meta.bytes.chunks_exact(2) {
+                let roughness = px[0];
+                let metal = px[1];
+                out.extend_from_slice(&[255, roughness, metal, 255]);
+            }
+
+            TextureMeta {
+                bytes: out,
+                format: vk::Format::R8G8B8A8_UNORM,
+                ..meta
+            }
+        }
+        _ => meta,
+    }
+}
+
+fn resolve_metallic_roughness_meta(
+    combined: Option<TextureMeta>,
+    metalness: Option<TextureMeta>,
+    roughness: Option<TextureMeta>,
+    material_index: usize,
+) -> Option<TextureMeta> {
+    if let Some(meta) = combined {
+        debug!(
+            "Material {} metallic_roughness resolved from Assimp UNKNOWN source (format {:?}).",
+            material_index, meta.format
+        );
+        return Some(normalize_metal_roughness_texture(meta));
+    }
+
+    match (metalness, roughness) {
+        (Some(metalness), Some(roughness)) => {
+            debug!(
+                "Material {} metallic_roughness resolved from split METALNESS + DIFFUSE_ROUGHNESS sources (formats {:?} + {:?}).",
+                material_index, metalness.format, roughness.format
+            );
+            Some(combine_metal_roughness_sources(
+                metalness,
+                roughness,
+                material_index,
+            ))
+        }
+        (Some(meta), None) => {
+            debug!(
+                "Material {} metallic_roughness resolved from METALNESS-only source (format {:?}).",
+                material_index, meta.format
+            );
+            Some(normalize_metalness_source_texture(meta))
+        }
+        (None, Some(meta)) => {
+            debug!(
+                "Material {} metallic_roughness resolved from DIFFUSE_ROUGHNESS-only source (format {:?}).",
+                material_index, meta.format
+            );
+            Some(normalize_roughness_source_texture(meta))
+        }
+        (None, None) => None,
+    }
+}
+
+fn combine_metal_roughness_sources(
+    metalness: TextureMeta,
+    roughness: TextureMeta,
+    material_index: usize,
+) -> TextureMeta {
+    if metalness.width != roughness.width || metalness.height != roughness.height {
+        debug!(
+            "Material {} split METALNESS/DIFFUSE_ROUGHNESS dimensions mismatch ({}x{} vs {}x{}). Falling back to METALNESS-only normalization.",
+            material_index,
+            metalness.width,
+            metalness.height,
+            roughness.width,
+            roughness.height
+        );
+        return normalize_metalness_source_texture(metalness);
+    }
+
+    let pixel_count = (metalness.width as usize) * (metalness.height as usize);
+    let metal_values =
+        extract_pbr_scalar_channel_u8(&metalness, 1, 2).unwrap_or_else(|| vec![255; pixel_count]);
+    let rough_values =
+        extract_pbr_scalar_channel_u8(&roughness, 0, 1).unwrap_or_else(|| vec![255; pixel_count]);
+
+    if metal_values.len() != pixel_count || rough_values.len() != pixel_count {
+        debug!(
+            "Material {} split METALNESS/DIFFUSE_ROUGHNESS extraction length mismatch (metal {}, rough {}, expected {}). Falling back to METALNESS-only normalization.",
+            material_index,
+            metal_values.len(),
+            rough_values.len(),
+            pixel_count
+        );
+        return normalize_metalness_source_texture(metalness);
+    }
+
+    let mut out = Vec::with_capacity(pixel_count * 4);
+    for (&rough, &metal) in rough_values.iter().zip(metal_values.iter()) {
+        // R reserved, G=roughness, B=metalness, A=1.0
+        out.extend_from_slice(&[255, rough, metal, 255]);
+    }
+
+    TextureMeta {
+        bytes: out,
+        width: roughness.width,
+        height: roughness.height,
+        format: vk::Format::R8G8B8A8_UNORM,
+        mips_levels: roughness.mips_levels,
+        uv_index: roughness.uv_index,
+    }
+}
+
+fn normalize_metalness_source_texture(meta: TextureMeta) -> TextureMeta {
+    match meta.format {
+        // METALNESS is often authored as a single-channel map.
+        vk::Format::R8_UNORM | vk::Format::R8G8_UNORM => normalize_metalness_only_texture(meta),
+        // If source already has full channels, prefer combined handling (g=roughness, b=metalness).
+        _ => normalize_metal_roughness_texture(meta),
+    }
+}
+
+fn normalize_roughness_source_texture(meta: TextureMeta) -> TextureMeta {
+    match meta.format {
+        // DIFFUSE_ROUGHNESS is often authored as a single-channel map.
+        vk::Format::R8_UNORM | vk::Format::R8G8_UNORM => normalize_roughness_only_texture(meta),
+        // If source already has full channels, prefer combined handling.
+        _ => normalize_metal_roughness_texture(meta),
+    }
+}
+
+fn normalize_metalness_only_texture(meta: TextureMeta) -> TextureMeta {
+    let Some(metalness) = extract_pbr_scalar_channel_u8(&meta, 1, 2) else {
+        debug!(
+            "Could not normalize METALNESS texture with format {:?}. Keeping original.",
+            meta.format
+        );
+        return meta;
+    };
+
+    let mut out = Vec::with_capacity(metalness.len() * 4);
+    for m in metalness {
+        // R unused, G=roughness (default 1.0), B=metalness, A=1.0
+        out.extend_from_slice(&[255, 255, m, 255]);
+    }
+
+    TextureMeta {
+        bytes: out,
+        format: vk::Format::R8G8B8A8_UNORM,
+        ..meta
+    }
+}
+
+fn normalize_roughness_only_texture(meta: TextureMeta) -> TextureMeta {
+    let Some(roughness) = extract_pbr_scalar_channel_u8(&meta, 0, 1) else {
+        debug!(
+            "Could not normalize DIFFUSE_ROUGHNESS texture with format {:?}. Keeping original.",
+            meta.format
+        );
+        return meta;
+    };
+
+    let mut out = Vec::with_capacity(roughness.len() * 4);
+    for r in roughness {
+        // R unused, G=roughness, B=metalness (default 1.0), A=1.0
+        out.extend_from_slice(&[255, r, 255, 255]);
+    }
+
+    TextureMeta {
+        bytes: out,
+        format: vk::Format::R8G8B8A8_UNORM,
+        ..meta
+    }
+}
+
+fn extract_pbr_scalar_channel_u8(
+    meta: &TextureMeta,
+    preferred_rg: usize,
+    preferred_rgb: usize,
+) -> Option<Vec<u8>> {
+    let pixel_count = (meta.width as usize) * (meta.height as usize);
+    match meta.format {
+        vk::Format::R8_UNORM => {
+            if meta.bytes.len() == pixel_count {
+                Some(meta.bytes.clone())
+            } else {
+                None
+            }
+        }
+        vk::Format::R8G8_UNORM => {
+            if meta.bytes.len() == pixel_count * 2 {
+                let channel = preferred_rg.min(1);
+                Some(meta.bytes.chunks_exact(2).map(|px| px[channel]).collect())
+            } else {
+                None
+            }
+        }
+        vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
+            if meta.bytes.len() == pixel_count * 3 {
+                let channel = preferred_rgb.min(2);
+                Some(meta.bytes.chunks_exact(3).map(|px| px[channel]).collect())
+            } else {
+                None
+            }
+        }
+        vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
+            if meta.bytes.len() == pixel_count * 4 {
+                let channel = preferred_rgb.min(2);
+                Some(meta.bytes.chunks_exact(4).map(|px| px[channel]).collect())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn process_meshes(ai_scene: &aiScene, mapped_materials: HashMap<u32, u32>) -> Vec<MeshMeta> {
     let mesh_count = ai_scene.mNumMeshes as usize;
     let mut meshes = Vec::with_capacity(mesh_count);
 
@@ -486,7 +760,7 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
 
             let material_index = if ai_mesh.mMaterialIndex != u32::MAX {
                 Some(
-                    *mapped_meshes
+                    *mapped_materials
                         .get(&(ai_mesh.mMaterialIndex as u32))
                         .unwrap_or(&TextureCache::DEFAULT_ERROR_MAT),
                 )
@@ -579,7 +853,6 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_meshes: HashMap<u32, u32>) -> V
     meshes
 }
 
-
 fn process_node(
     ai_node: *const aiNode,
     mapped_meshes: &HashMap<u32, u32>,
@@ -653,7 +926,6 @@ fn process_node(
     }
 }
 
-
 pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
     match format {
         DynamicImage::ImageLuma8(_) => vk::Format::R8_UNORM,
@@ -670,12 +942,10 @@ pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
     }
 }
 
-
 struct MeshTemp {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
 }
-
 
 const AI_MATKEY_BASE_COLOR: *const c_char = b"$clr.base\0".as_ptr() as *const c_char;
 const AI_MATKEY_COLOR_DIFFUSE: *const c_char = b"$clr.diffuse\0".as_ptr() as *const c_char;

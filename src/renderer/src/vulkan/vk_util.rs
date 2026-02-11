@@ -1387,9 +1387,10 @@ pub fn record_host_to_image_buffer(
             mag_filter: vk::Filter::LINEAR,
             min_filter: vk::Filter::LINEAR,
             mipmap_mode: vk::SamplerMipmapMode::LINEAR,
-            address_mode_u: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-            address_mode_v: vk::SamplerAddressMode::CLAMP_TO_EDGE,
-            address_mode_w: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            // glTF default sampler wrap is REPEAT for UV-mapped materials.
+            address_mode_u: vk::SamplerAddressMode::REPEAT,
+            address_mode_v: vk::SamplerAddressMode::REPEAT,
+            address_mode_w: vk::SamplerAddressMode::REPEAT,
             mip_lod_bias: LodBias::Sharp,
             anisotropy_enable: false, // FIXME, we need to implement this in engine
             max_anisotropy: 0,
