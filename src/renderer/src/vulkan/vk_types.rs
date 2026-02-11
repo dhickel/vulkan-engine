@@ -1166,7 +1166,7 @@ impl VkSceneDescriptors {
                 2,
                 env_maps.irradiance.image_view,
                 env_maps.irradiance.sampler,
-                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
 
@@ -1174,7 +1174,7 @@ impl VkSceneDescriptors {
                 3,
                 env_maps.pre_filter.image_view,
                 env_maps.pre_filter.sampler,
-                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
 
@@ -1182,7 +1182,7 @@ impl VkSceneDescriptors {
                 4,
                 brdf_lut.image_alloc.image_view,
                 brdf_lut.sampler,
-                vk::ImageLayout::READ_ONLY_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             );
 
