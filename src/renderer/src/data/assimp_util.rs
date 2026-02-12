@@ -1,9 +1,11 @@
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
-    AlphaMode, EmissiveMap, MaterialMeta, MeshMeta, Node, NormalMap, OcclusionMap, Sampler,
-    SurfaceMeta, TextureMeta, Transform, Vertex,
+    AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap,
+    OcclusionMap, Sampler, SurfaceMeta, TextureMeta, Vertex,
 };
+use crate::data::handles::{MaterialHandle, MeshHandle};
+use crate::scene::scene_world::SceneWorld;
 use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
@@ -28,7 +30,6 @@ use russimp_sys::{
     aiTextureType_aiTextureType_NORMAL_CAMERA, aiTextureType_aiTextureType_SPECULAR,
     aiTextureType_aiTextureType_UNKNOWN, ai_real, AI_DEFAULT_MATERIAL_NAME,
 };
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::ffi::{c_char, c_uint, CStr, CString};
@@ -38,13 +39,12 @@ use std::io::Read;
 use std::os::raw;
 use std::os::raw::c_int;
 use std::path::Path;
-use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct ModelMeta {
-    pub node: Rc<RefCell<gpu_data::Node>>,
-    pub material_ids: Vec<u32>,
-    pub mesh_ids: Vec<u32>,
+    pub scene_world: SceneWorld,
+    pub material_ids: Vec<MaterialHandle>,
+    pub mesh_ids: Vec<MeshHandle>,
 }
 
 pub fn load_model(
@@ -98,7 +98,7 @@ pub fn load_model(
     let materials = process_materials(ai_scene, base_path, &data_cache)?;
     let mat_indices = 0..materials.len();
 
-    let mut mapped_materials = HashMap::<u32, u32>::with_capacity(materials.len());
+    let mut mapped_materials = HashMap::<u32, MaterialHandle>::with_capacity(materials.len());
     let material_ids = data_cache
         .texture_cache
         .lock()
@@ -112,7 +112,7 @@ pub fn load_model(
     let meshes = process_meshes(ai_scene, mapped_materials);
     let mesh_indices = 0..meshes.len();
 
-    let mut mapped_meshes = HashMap::<u32, u32>::with_capacity(meshes.len());
+    let mut mapped_meshes = HashMap::<u32, MeshHandle>::with_capacity(meshes.len());
     let mesh_ids = data_cache.mesh_cache.lock().unwrap().add_multi(meshes);
 
     for (og_idx, id) in mesh_indices.into_iter().zip(mesh_ids.iter()) {
@@ -124,9 +124,11 @@ pub fn load_model(
     if root_ai_node.is_null() {
         Err("Failed to find root node in model".to_string())
     } else {
-        let node = process_node(root_ai_node, &mapped_meshes, None);
+        let mut scene_world = SceneWorld::new();
+        let root_id = process_node(root_ai_node, &mapped_meshes, &mut scene_world, None);
+        scene_world.set_root(root_id);
         Ok(ModelMeta {
-            node,
+            scene_world,
             material_ids,
             mesh_ids,
         })
@@ -151,6 +153,8 @@ pub fn process_materials(
 
             let ai_material = &*ai_material_ptr;
             let mut material_meta = MaterialMeta::default();
+            // Assimp import defaults to PBR until explicit unlit extension metadata is wired.
+            material_meta.shading_model = MaterialShadingModel::PbrMetalRough;
             let alpha_mode = get_alpha_mode(ai_material);
             let alpha_cutoff = get_alpha_cutoff(ai_material);
             material_meta.set_alpha_mode(alpha_mode, alpha_cutoff);
@@ -737,7 +741,10 @@ fn extract_pbr_scalar_channel_u8(
     }
 }
 
-pub fn process_meshes(ai_scene: &aiScene, mapped_materials: HashMap<u32, u32>) -> Vec<MeshMeta> {
+pub fn process_meshes(
+    ai_scene: &aiScene,
+    mapped_materials: HashMap<u32, MaterialHandle>,
+) -> Vec<MeshMeta> {
     let mesh_count = ai_scene.mNumMeshes as usize;
     let mut meshes = Vec::with_capacity(mesh_count);
 
@@ -858,9 +865,10 @@ pub fn process_meshes(ai_scene: &aiScene, mapped_materials: HashMap<u32, u32>) -
 
 fn process_node(
     ai_node: *const aiNode,
-    mapped_meshes: &HashMap<u32, u32>,
-    parent: Option<Rc<RefCell<Node>>>,
-) -> Rc<RefCell<Node>> {
+    mapped_meshes: &HashMap<u32, MeshHandle>,
+    scene_world: &mut SceneWorld,
+    parent: Option<u32>,
+) -> u32 {
     unsafe {
         let ai_matrix = (*ai_node).mTransformation;
 
@@ -883,17 +891,8 @@ fn process_node(
             ai_matrix.d4,
         ]);
 
-        let name = {
-            let ai_string = &(*ai_node).mName;
-            let c_str = CStr::from_bytes_with_nul_unchecked(std::slice::from_raw_parts(
-                ai_string.data.as_ptr() as *const u8,
-                ai_string.length as usize + 1,
-            ));
-            c_str.to_string_lossy().into_owned()
-        };
-
         let mesh_count = (*ai_node).mNumMeshes as usize;
-        let meshes: Vec<u32> = (0..mesh_count)
+        let meshes: Vec<MeshHandle> = (0..mesh_count)
             .map(|i| {
                 let mesh_index = *(*ai_node).mMeshes.add(i) as u32;
                 *mapped_meshes
@@ -902,30 +901,14 @@ fn process_node(
             })
             .collect();
 
-        let node = Rc::new(RefCell::new(Node {
-            parent: if parent.is_some() {
-                Some(Rc::downgrade(&parent.clone().unwrap()))
-            } else {
-                None
-            },
-            children: Vec::new(),
-            meshes,
-            world_transform: if let Some(parent) = parent {
-                parent.borrow().world_transform.mul_mat4(&local_transform)
-            } else {
-                local_transform
-            },
-            local_transform,
-            dirty: true,
-        }));
+        let node_id = scene_world.add_node_with_parts(parent, local_transform, meshes);
 
         // Process children
         for i in 0..(*ai_node).mNumChildren {
             let child_ai_node = *(*ai_node).mChildren.add(i as usize);
-            let child_node = process_node(child_ai_node, mapped_meshes, Some(node.clone()));
-            node.borrow_mut().children.push(child_node);
+            process_node(child_ai_node, mapped_meshes, scene_world, Some(node_id));
         }
-        node
+        node_id
     }
 }
 

@@ -1,40 +1,17 @@
-//! # GPU Data Structures & Scene Graph
+//! # GPU Data Structures
 //!
 //! ## Purpose
-//! Defines all GPU-visible data structures (vertices, uniforms, push constants) and the scene
-//! graph hierarchy. This file bridges CPU-side asset data and GPU rendering.
+//! Defines GPU-visible data structures (vertices, uniforms, push constants) and draw-submission
+//! payloads consumed by the rendergraph. This file bridges CPU-side asset/cache data and Vulkan
+//! command recording.
 //!
 //! ## Key Concepts
-//! - **NOT ECS**: Uses traditional scene graph with Node hierarchy (not Entity-Component-System)
 //! - **Vertex layout**: Comprehensive layout with all glTF attributes (position, normal, tangent, UVs, skinning)
 //! - **Push constants**: Per-draw data (model matrix, buffer addresses) avoiding descriptor updates
-//! - **Scene graph**: Node hierarchy with local/world transforms, dirty flagging for efficiency
-//! - **DrawContext**: Accumulates RenderObjects sorted by pipeline type for optimal batching
-//!
-//! ## Architecture
-//! ```
-//! Node (scene graph)
-//!   ├─ local_transform: Mat4       // TRS relative to parent
-//!   ├─ world_transform: Mat4       // Cached global transform
-//!   ├─ meshes: Vec<u32>            // Mesh IDs from MeshCache
-//!   ├─ children: Vec<Rc<RefCell<Node>>>  // Hierarchy
-//!   └─ draw() -> RenderObjects     // Traverse and accumulate draw commands
-//!
-//! DrawContext
-//!   ├─ render_objects: [Vec<RenderObject>; VkPipelineType::COUNT]  // Indexed by VkPipelineType
-//!   └─ active_pipelines: HashSet<VkPipelineType>
-//! ```
-//!
-//! ## Why Scene Graph Over ECS
-//! - Simpler for hierarchical transforms (parent-child relationships natural)
-//! - glTF uses scene graph model (direct mapping)
-//! - Rc<RefCell<>> allows shared ownership and interior mutability
-//! - Transform propagation via recursive traversal
-
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkPipelineType, VkShaderCache,
+    CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkShaderCache,
 };
-use crate::data::gltf_util;
+use crate::data::handles::{MaterialHandle, MeshHandle, TextureHandle};
 use crate::vulkan::vk_descriptor::{
     DescriptorLayoutBuilder, VkDescWriterType, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
@@ -47,15 +24,10 @@ use crate::vulkan::vk_util;
 use ash::vk;
 use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
-use glam::{vec4, Mat4, Quat, UVec4, Vec2, Vec3, Vec4};
-use imgui::sys::igSetClipboardText;
-use log::debug;
-use std::cell::{Ref, RefCell};
+use glam::{vec4, Mat4, UVec4, Vec2, Vec3, Vec4};
 use std::cmp::PartialEq;
-use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
-use std::rc::{Rc, Weak};
 //////////////////////////
 //  MESH & TEXTURE DATA //
 //////////////////////////
@@ -103,6 +75,13 @@ pub enum AlphaMode {
     Opaque = 0,
     Blend = 1,
     Mask = 2,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum MaterialShadingModel {
+    PbrMetalRough = 0,
+    Unlit = 1,
 }
 
 impl AlphaMode {
@@ -155,19 +134,19 @@ impl AlphaMode {
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct EmissiveMap {
     pub factor: Vec3,
-    pub texture_id: u32,
+    pub texture_id: TextureHandle,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct NormalMap {
     pub scale: f32,
-    pub texture_id: u32,
+    pub texture_id: TextureHandle,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct OcclusionMap {
     pub strength: f32,
-    pub texture_id: u32,
+    pub texture_id: TextureHandle,
 }
 
 /////////////////////////////
@@ -178,20 +157,21 @@ pub struct OcclusionMap {
 pub struct MaterialMeta {
     pub texture_ids: TextureIds,
     pub alpha_mode: AlphaMode,
+    pub shading_model: MaterialShadingModel,
     pub material_values: MaterialValues,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct TextureIds {
-    pub base_color: u32,
-    pub metallic_roughness: u32,
-    pub normal_map: u32,
-    pub occlusion_map: u32,
-    pub emissive_map: u32,
+    pub base_color: TextureHandle,
+    pub metallic_roughness: TextureHandle,
+    pub normal_map: TextureHandle,
+    pub occlusion_map: TextureHandle,
+    pub emissive_map: TextureHandle,
 }
 
 impl TextureIds {
-    pub fn to_vec(self) -> Vec<u32> {
+    pub fn to_vec(self) -> Vec<TextureHandle> {
         vec![
             self.base_color,
             self.metallic_roughness,
@@ -219,19 +199,43 @@ impl Default for MaterialMeta {
         Self {
             texture_ids: TextureIds::default(),
             alpha_mode: AlphaMode::Opaque,
+            shading_model: MaterialShadingModel::PbrMetalRough,
             material_values: MaterialValues::default(),
         }
     }
 }
 
 impl MaterialMeta {
+    pub fn unlit(base_color: Vec4, texture: Option<TextureHandle>) -> Self {
+        let mut meta = Self {
+            shading_model: MaterialShadingModel::Unlit,
+            ..Default::default()
+        };
+        meta.material_values.base_color_factor = base_color;
+
+        if let Some(texture_id) = texture {
+            meta.texture_ids.base_color = texture_id;
+            meta.material_values.base_color_uv_set = 0;
+        }
+
+        meta
+    }
+
+    pub fn pbr_simple(base_color: Vec4, metallic: f32, roughness: f32) -> Self {
+        let mut meta = Self::default();
+        meta.material_values.base_color_factor = base_color;
+        meta.material_values.metallic_factor = metallic.clamp(0.0, 1.0);
+        meta.material_values.roughness_factor = roughness.clamp(0.0, 1.0);
+        meta
+    }
+
     pub fn set_alpha_mode(&mut self, alpha_mode: AlphaMode, alpha_cutoff: f32) {
         self.alpha_mode = alpha_mode;
         self.material_values.alpha_mask = alpha_mode.to_float_value();
         self.material_values.alpha_mask_cutoff = alpha_cutoff;
     }
 
-    pub fn add_base_color(&mut self, tex_id: u32, factor: Vec4, uv_set: u32) {
+    pub fn add_base_color(&mut self, tex_id: TextureHandle, factor: Vec4, uv_set: u32) {
         self.texture_ids.base_color = tex_id;
         self.material_values.base_color_factor = factor;
         self.material_values.base_color_uv_set = uv_set;
@@ -239,7 +243,7 @@ impl MaterialMeta {
 
     pub fn add_metallic_roughness(
         &mut self,
-        tex_id: u32,
+        tex_id: TextureHandle,
         metallic_factor: f32,
         roughness_factor: f32,
         uv_set: u32,
@@ -250,13 +254,13 @@ impl MaterialMeta {
         self.material_values.met_rough_uv_set = uv_set;
     }
 
-    pub fn add_normal(&mut self, tex_id: u32, normal_scale: f32, uv_set: u32) {
+    pub fn add_normal(&mut self, tex_id: TextureHandle, normal_scale: f32, uv_set: u32) {
         self.texture_ids.normal_map = tex_id;
         self.material_values.normal_scale = normal_scale;
         self.material_values.normal_uv_set = uv_set;
     }
 
-    pub fn add_occlusion(&mut self, tex_id: u32, occlusion_strength: f32, uv_set: u32) {
+    pub fn add_occlusion(&mut self, tex_id: TextureHandle, occlusion_strength: f32, uv_set: u32) {
         self.texture_ids.occlusion_map = tex_id;
         self.material_values.occlusion_strength = occlusion_strength;
         self.material_values.occlusion_uv_set = uv_set;
@@ -264,7 +268,7 @@ impl MaterialMeta {
 
     pub fn add_emissive(
         &mut self,
-        tex_id: u32,
+        tex_id: TextureHandle,
         emissive_factor: Vec3,
         emissive_strength: f32,
         uv_set: u32,
@@ -357,7 +361,7 @@ pub struct VkCubeMap {
 pub struct SurfaceMeta {
     pub start_index: u32,
     pub count: u32,
-    pub material_index: Option<u32>,
+    pub material_index: Option<MaterialHandle>,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -365,16 +369,7 @@ pub struct MeshMeta {
     pub name: String,
     pub indices: Vec<u32>,
     pub vertices: Vec<Vertex>,
-    pub material_index: Option<u32>,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct NodeMeta {
-    pub name: String,
-    pub mesh_indices: Vec<u32>,
-    pub local_transform: Transform,
-    pub og_matrix: Mat4,
-    pub children: Vec<u32>,
+    pub material_index: Option<MaterialHandle>,
 }
 
 /////////////////////
@@ -600,10 +595,10 @@ impl PushConstPrefilterEnv {
 
 #[derive(Debug, Copy, Clone)]
 pub struct VkMeshBuffers {
-    pub cache_id: u32,
+    pub cache_id: MeshHandle,
     pub index_count: u32,
     pub vertex_count: u32,
-    pub material_id: u32,
+    pub material_id: MaterialHandle,
     pub index_buffer: VkSubAlloc,
     pub vertex_buffer: VkSubAlloc,
     pub joint_desc: vk::DescriptorSet,
@@ -643,29 +638,19 @@ pub struct VkMetRoughUniforms {
 // SCENE GRAPH & RENDERING //
 /////////////////////////////
 
-/// Compact draw command data for a single mesh instance.
-///
-/// ## Purpose
-/// Represents one vkCmdDrawIndexed call. Accumulated during scene graph traversal (Node::draw),
-/// then sorted and submitted in bulk by pipeline type.
+/// Compact draw command data for a single mesh instance consumed by the Vulkan draw path.
 ///
 /// ## Fields
 /// - **index_count/first_index**: Draw parameters for vkCmdDrawIndexed
 /// - **index_buffer**: Buffer handle to bind
 /// - **joint_desc**: Descriptor set for joint matrices (skinning), vk::DescriptorSet::null() if not skinned
 /// - **material**: Raw pointer to VkLoadedMaterial (stable address in TextureCache, valid for frame)
-/// - **transform**: World transform (copied from Node::world_transform)
+/// - **transform**: World transform from `SceneWorld`
 /// - **vertex_buffer_addr**: Device address passed via push constants
 ///
 /// ## Why Raw Pointer for Material
 /// Materials stored in TextureCache Vec with stable indices. Pointer cheaper than Arc<>,
-/// and lifetime guaranteed (TextureCache outlives DrawContext). Raw pointer allows Copy trait.
-///
-/// ## Lifecycle
-/// 1. Created during Node::draw() scene traversal
-/// 2. Pushed to DrawContext::render_objects[pipeline_type]
-/// 3. Consumed during vk_render.rs command recording
-/// 4. DrawContext::clear() resets for next frame
+/// and lifetime guaranteed for the current frame's draw recording path.
 #[derive(Debug, Copy, Clone)]
 pub struct RenderObject {
     pub index_count: u32,
@@ -675,253 +660,6 @@ pub struct RenderObject {
     pub material: *const VkLoadedMaterial,
     pub transform: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
-}
-
-/// Transform decomposed into translation/rotation/scale (TRS).
-///
-/// ## Purpose
-/// Convenient TRS representation for animation and scene loading. Composes into Mat4 for rendering.
-///
-/// ## Why TRS Over Matrix
-/// - Interpolates better for animation (lerp/slerp)
-/// - Clearer semantics than raw matrix
-/// - glTF stores transforms as TRS
-#[derive(Debug, Copy, Clone, Default, PartialEq)]
-pub struct Transform {
-    pub position: Vec3,
-    pub scale: Vec3,
-    pub rotation: Quat,
-}
-
-impl Transform {
-    pub fn compose(&mut self) -> Mat4 {
-        glam::Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
-    }
-
-    pub fn new_vulkan_adjusted(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Self {
-        Transform {
-            position: glam::Vec3::from_array(translation),
-            scale: glam::Vec3::from_array(scale),
-            rotation: glam::Quat::from_array(rotation),
-        }
-    }
-}
-
-/// Scene graph node with transform hierarchy.
-///
-/// ## Purpose
-/// Represents a node in the scene graph tree. Maintains local/world transforms, owns mesh
-/// references, and manages parent/child relationships.
-///
-/// ## Transform System
-/// - **local_transform**: Relative to parent (from glTF or set manually)
-/// - **world_transform**: Cached global transform (local * parent_world)
-/// - **dirty**: Flag for lazy transform updates (only recompute if moved or parent moved)
-///
-/// ## Hierarchy Pattern
-/// - **parent**: Weak<> to avoid cycles (child doesn't own parent)
-/// - **children**: Rc<RefCell<>> for shared ownership with interior mutability
-/// - Allows multiple references to same node (rare, but glTF supports instancing)
-///
-/// ## Rendering Flow
-/// 1. draw() called on root with identity matrix
-/// 2. If dirty: refresh_transform() recomputes world_transform from parent
-/// 3. For each mesh: create RenderObject, add to DrawContext
-/// 4. Recursively call draw() on children
-///
-/// ## Why RefCell
-/// Interior mutability required: parent traversal needs &self but must mutate world_transform
-/// and dirty flags. RefCell provides runtime borrow checking.
-///
-/// ## Performance Note
-/// Dirty flagging avoids recalculating static subtrees. Only animated nodes propagate updates.
-#[derive(Debug)]
-pub struct Node {
-    pub parent: Option<Weak<RefCell<Node>>>,
-    pub children: Vec<Rc<RefCell<Node>>>,
-    pub meshes: Vec<u32>, // Mesh IDs in MeshCache
-    pub world_transform: Mat4,
-    pub local_transform: Mat4,
-    pub dirty: bool,
-}
-
-impl Default for Node {
-    fn default() -> Self {
-        Self {
-            parent: None,
-            children: vec![],
-            meshes: vec![],
-            world_transform: Mat4::IDENTITY,
-            local_transform: Mat4::IDENTITY,
-            dirty: true,
-        }
-    }
-}
-
-impl Node {
-    /// Recursively traverse scene graph and accumulate RenderObjects.
-    ///
-    /// ## Logic Flow
-    /// 1. If dirty: recompute world_transform from parent
-    /// 2. For each mesh attached to this node:
-    ///    a. Fetch mesh data (VkMeshBuffers) from MeshCache
-    ///    b. Fetch material (VkLoadedMaterial) from TextureCache
-    ///    c. Create RenderObject with world_transform
-    ///    d. Add to DrawContext, indexed by material's pipeline type
-    /// 3. Recursively call draw() on all children
-    ///
-    /// ## Material Pointer Safety
-    /// material_ptr is raw pointer into TextureCache's Vec. Safe because:
-    /// - TextureCache outlives DrawContext (frame scope)
-    /// - Materials never removed mid-frame
-    /// - Stable Vec indices (materials only added, never moved)
-    ///
-    /// ## Pipeline Batching
-    /// RenderObjects sorted by pipeline type (Opaque=0, Transparent=1, etc.).
-    /// Render loop binds pipeline once, draws all objects of that type.
-    pub(crate) fn draw(
-        &mut self,
-        top_matrix: &Mat4,
-        ctx: &mut DrawContext,
-        mesh_cache: &MeshCache,
-        tex_cache: &TextureCache,
-    ) {
-        if self.dirty {
-            self.refresh_transform(*top_matrix);
-        }
-
-        for mesh_id in &self.meshes {
-            let mesh = mesh_cache.get_loaded_id_unchecked(*mesh_id);
-            let material_ptr =
-                unsafe { tex_cache.get_loaded_material_unchecked_ptr(mesh.material_id) };
-            let material = unsafe { *material_ptr };
-
-            //
-            // debug!("Drawing Mesh: {}", mesh_id);
-            // // // debug!("\t Mesh: {:#?}", mesh);
-            //debug!("\t Material: {:#?}", material);
-            //
-            let ro = RenderObject {
-                index_count: mesh.index_count,
-                joint_desc: mesh.joint_desc,
-                first_index: mesh.get_first_index(),
-                index_buffer: mesh.index_buffer.buffer,
-                material: material_ptr,
-                transform: self.world_transform,
-                vertex_buffer_addr: mesh.vertex_buffer.alloc_address,
-            };
-
-            // FIXME, should use something more performant than a hash set since all types are known
-            ctx.active_pipelines.insert(material.pipeline);
-
-            unsafe {
-                ctx.render_objects
-                    .get_unchecked_mut(material.pipeline as usize)
-                    .push(ro);
-            }
-        }
-
-        for child in &self.children {
-            child
-                .borrow_mut()
-                .draw(top_matrix, ctx, mesh_cache, tex_cache);
-        }
-    }
-
-    /// Recursively update world transforms for this node and descendants.
-    ///
-    /// ## Logic Flow
-    /// 1. Compute world_transform = parent_transform * local_transform
-    /// 2. Clear dirty flag
-    /// 3. Recursively update all children with this node's world_transform
-    ///
-    /// ## When Called
-    /// - Automatically during draw() if dirty flag set
-    /// - Manually after modifying local_transform
-    /// - Propagates through entire subtree (children become dirty when parent moves)
-    ///
-    /// ## Performance
-    /// O(n) where n = nodes in subtree. Dirty flagging amortizes cost across static scenes.
-    pub fn refresh_transform(&mut self, parent_transform: Mat4) {
-        self.world_transform = parent_transform.mul_mat4(&self.local_transform);
-        self.dirty = false;
-
-        for child in &self.children {
-            let mut child = child.borrow_mut();
-            child.refresh_transform(self.world_transform);
-        }
-    }
-
-    fn get_children(&self) -> &Vec<Rc<RefCell<Node>>> {
-        &self.children
-    }
-}
-
-/// Accumulated render commands sorted by pipeline type.
-///
-/// ## Purpose
-/// Collects RenderObjects during scene graph traversal, grouped by VkPipelineType for
-/// efficient rendering. Minimizes pipeline binding and state changes.
-///
-/// ## Structure
-/// - **render_objects**: Fixed array [Vec<RenderObject>; VkPipelineType::COUNT] indexed by VkPipelineType enum
-///   - geometry path currently populates `PbrMetRoughOpaque` / `PbrMetRoughAlpha`
-/// - **active_pipelines**: HashSet of pipeline types with >0 objects (avoids iterating empty Vecs)
-///
-/// ## Rendering Pattern
-/// ```rust
-/// for pipeline_type in ctx.active_pipelines {
-///     bind_pipeline(pipelines[pipeline_type]);
-///     for ro in ctx.render_objects[pipeline_type] {
-///         vkCmdPushConstants(ro.transform, ro.vertex_buffer_addr, ...);
-///         vkCmdBindIndexBuffer(ro.index_buffer);
-///         vkCmdDrawIndexed(ro.index_count, ro.first_index);
-///     }
-/// }
-/// ```
-///
-/// ## Why Array Over HashMap
-/// Fixed pipeline types, array indexing faster than hash lookup.
-///
-/// ## Lifecycle
-/// 1. Node::draw() populates render_objects
-/// 2. vk_render.rs consumes and submits commands
-/// 3. clear() resets for next frame
-pub struct DrawContext {
-    pub active_pipelines: HashSet<VkPipelineType>,
-    pub render_objects: [Vec<RenderObject>; VkPipelineType::COUNT],
-}
-
-impl DrawContext {
-    pub fn new(vector_capacity: usize) -> Self {
-        DrawContext {
-            active_pipelines: HashSet::with_capacity(VkPipelineType::COUNT),
-            render_objects: Self::create_render_object_array(vector_capacity),
-        }
-    }
-
-    fn create_render_object_array(capacity: usize) -> [Vec<RenderObject>; VkPipelineType::COUNT] {
-        let vec_iter = std::iter::repeat_with(|| Vec::with_capacity(capacity));
-        vec_iter
-            .take(VkPipelineType::COUNT)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    pub fn clear(&mut self) {
-        self.active_pipelines
-            .iter()
-            .for_each(|pl| self.render_objects[*pl as usize].clear());
-
-        self.active_pipelines.clear();
-    }
-}
-
-impl Default for DrawContext {
-    fn default() -> Self {
-        Self::new(400)
-    }
 }
 
 #[repr(C)]

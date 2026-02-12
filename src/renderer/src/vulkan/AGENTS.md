@@ -24,7 +24,7 @@ This is the deep guide for Vulkan lifecycle, synchronization, resource ownership
 4. swapchain and per-frame resource construction
 5. allocator + caches + pipelines + descriptor layouts
 6. transfer subsystem + host staging buffers
-7. scene/model preload and initial allocations
+7. scene/model preload and initial allocations (returned to runtime as `SceneWorld`)
 
 ### Frame Model
 
@@ -41,12 +41,12 @@ Each `VkFrame` contains:
 
 `VkRender::render(...)` performs:
 1. async transfer fence polling and queued submit handling
-2. scene update and draw context accumulation
+2. consumes immutable `RenderSubmission` from runtime
 3. wait/reset frame fence
 4. acquire swapchain image
 5. reset and begin command buffer
-6. transition draw/depth/present images
-7. draw skybox, draw geometry, draw imgui
+6. execute rendergraph pass list over command buffer
+7. transition to present and submit
 8. submit and present
 
 ## PBR and IBL Entry Points
@@ -55,8 +55,12 @@ If working specifically on radiance/PBR behavior, start here:
 
 - `src/renderer/src/vulkan/vk_render.rs`
   - `generate_environment(...)`
-  - `draw_skybox(...)`
-  - `draw_geometry(...)`
+  - `draw_skybox_from_submission(...)`
+  - `draw_geometry_from_submission(...)`
+  - `copy_draw_to_present(...)`
+  - `draw_imgui_to_present(...)`
+- `src/renderer/src/rendergraph/*`
+  - pass execution order and pass node wiring
 - `src/renderer/src/vulkan/vk_pipeline.rs`
   - `init_met_rough_pipelines(...)`
   - `init_irradiance_pipeline(...)`
@@ -99,9 +103,9 @@ External lineage reference:
 1. Incomplete destroy coverage.
 - `impl VkDestroyable for VkSubAllocator` currently `todo!()`.
 
-2. Pipeline switching correctness risk in geometry draw.
-- In `draw_geometry` closure, pipeline-change branch binds `curr_pipeline.pipeline` before updating `curr_pipeline`.
-- This can bind the old pipeline during a changeover.
+2. Geometry pass ordering and descriptor binding correctness risk.
+- `draw_geometry_from_submission` resolves handle-based submission draws into internal pipeline buckets.
+- Small changes to bucket ordering can break alpha behavior.
 
 3. Swapchain rebuild cleanup concern.
 - `rebuild_swapchain` has FIXME about old present image views and lifecycle.

@@ -67,6 +67,7 @@ Use module-level docs for exact files/lines and safe editing strategy.
 - Add changelog entries to `.internal-dev/changelogs/` when requested.
 - Keep top-level guide concise and architectural.
 - Keep nested guides implementation-focused and opinionated about gotchas.
+- `.internal-dev/` is intentionally gitignored in this repository; it is acceptable for planning/review docs there to remain local and untracked unless explicitly force-added for sharing.
 
 ## Where to Start for a Task
 
@@ -81,5 +82,17 @@ Use module-level docs for exact files/lines and safe editing strategy.
 - Check compile: `cargo check`
 - Check renderer crate: `cargo check -p renderer`
 - Check input crate: `cargo check -p input`
+- Runtime debug selector (startup material/pipeline testing):
+  - `cargo run -- debug_runtime testpbr`
+  - `cargo run -- debug_runtime testunlit`
+  - `cargo run -- --debug-runtime=testunlit`
+
+## Runtime Debug Scenarios
+
+- `debug_runtime` is the runtime test selector entrypoint for controlled render-path validation.
+- Current scenarios:
+  - `testpbr`: keep startup scene on PBR material/pipeline path.
+  - `testunlit`: force startup scene materials to Unlit pipeline path.
+- This selector is intentionally extensible for future test scenarios; when adding new modes, keep this file and `src/renderer/AGENTS.md` in sync.
 
 Note: runtime validation of rendering features requires a Vulkan-capable environment.

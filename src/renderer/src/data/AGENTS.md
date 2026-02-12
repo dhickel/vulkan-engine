@@ -5,7 +5,7 @@ This is the deep guide for scene data, caches, asset loading, and camera/input c
 ## Module Map
 
 - `camera.rs`: FPS camera and controller.
-- `gpu_data.rs`: GPU-facing structs, scene graph (`Node`), draw context.
+- `gpu_data.rs`: GPU-facing structs and draw-context payloads.
 - `data_cache.rs`: texture/material/mesh/environment caches and shader/pipeline/descriptor caches.
 - `assimp_util.rs`: active model loader path.
 - `gltf_util.rs`: currently commented-out legacy code.
@@ -16,29 +16,28 @@ This is the deep guide for scene data, caches, asset loading, and camera/input c
 ### Model Ingest (Current Active Path)
 
 1. `assimp_util::load_model(...)` parses model file.
-2. Produces `MaterialMeta`, `MeshMeta`, and root `Node` hierarchy.
+2. Produces `MaterialMeta`, `MeshMeta`, and `SceneWorld` node hierarchy.
 3. Materials and meshes are added into caches (`TextureCache`, `MeshCache`) as unloaded entries.
 4. Allocation phase uploads/allocates GPU resources and transitions entries to loaded state.
 
 ### Frame Render Prep
 
-1. `VkRender::update_scene()` reads camera transforms.
-2. Root `Node::draw(...)` traverses scene graph.
-3. Traversal emits `RenderObject`s into `DrawContext`, grouped by `VkPipelineType`.
+1. `renderer::run()` updates camera transforms and writes them into `SceneWorld`.
+2. `SceneWorld::build_submission(...)` traverses nodes and emits draw items.
+3. `VkRender` resolves submission mesh handles into internal Vulkan draw buckets per frame.
 
 ## Important Types
 
 ### Scene and Draw
 
-- `Node`
-- parent: `Option<Weak<RefCell<Node>>>`
-- children: `Vec<Rc<RefCell<Node>>>`
-- meshes: cache IDs
+- `SceneWorld`/`SceneNode` (`src/renderer/src/scene/scene_world.rs`)
+- indexed parent/children links (`SceneNodeId`)
+- meshes: `MeshHandle` stable handles (slot + generation)
 - local/world transforms + dirty flag
 
-- `DrawContext`
-- `active_pipelines: HashSet<VkPipelineType>`
-- `render_objects: [Vec<RenderObject>; VkPipelineType::COUNT]`
+- `RenderSubmission::draw_items`
+- scene-facing per-frame payload of mesh handles + transforms
+- no Vulkan handles or raw pointers in scene boundary types
 
 - `RenderObject`
 - index metadata
@@ -68,39 +67,38 @@ This is the deep guide for scene data, caches, asset loading, and camera/input c
 - `EnvironmentCache`
 - stores cubemap skybox state and generated env maps
 
-## Defaults and Reserved IDs (Critical)
+## Defaults and Reserved Handles (Critical)
 
 `TextureCache` reserves:
-- textures `0..=5` for default/fallback resources
-- materials `0..=1` for default/error materials
+- texture slots `0..=5` (generation `0`) for default/fallback resources
+- material slots `0..=1` (generation `0`) for default/error materials
 
 `MeshCache` reserves:
-- mesh `0` for skybox geometry (`SKYBOX_MESH`)
+- mesh slot `0` (generation `0`) for skybox geometry (`SKYBOX_MESH`)
 
-Many systems assume these IDs. Preserve this contract unless performing a deliberate migration.
+`EnvironmentCache` uses `EnvironmentHandle` with the same slot+generation validation model.
+
+Many systems assume these reserved handles. Preserve this contract unless performing a deliberate migration.
 
 ## Current Gotchas and Risks
 
-1. Cache ID invalidation risk on deallocation.
-- `deallocate_materials`, `deallocate_textures`, and mesh deallocation paths use `Vec::remove`.
-- This shifts later indices and can break external IDs still in use.
+1. Tombstone semantics are now the stable-handle contract.
+- `TextureCache` and `MeshCache` deallocation paths tombstone and bump generation instead of shifting slots.
+- Safe deallocation APIs preserve reserved default slots; bypassing this contract requires explicit `unsafe` unchecked methods.
 
-2. Incomplete cleanup implementation.
-- `impl VkDestroyable for TextureCache` currently `todo!()`.
-
-3. Raw material pointer lifetime assumptions.
+2. Raw material pointer lifetime assumptions.
 - `RenderObject.material` is a raw pointer into `TextureCache` storage.
 - Safe only if no cache mutation/reallocation occurs during draw consumption.
 
-4. DrawContext-to-pipeline coupling still requires attention.
-- `DrawContext.render_objects` now derives from `VkPipelineType::COUNT`.
-- This prevents OOB on enum growth, but geometry pass logic should still avoid assuming all pipeline variants are draw-path compatible.
+3. Submission-to-renderer bucketing still requires attention.
+- Renderer-side handle resolution currently creates pipeline buckets every frame.
+- Geometry pass logic should still avoid assuming all pipeline variants are draw-path compatible.
 
-5. Legacy glTF path is non-operational.
+4. Legacy glTF path is non-operational.
 - `gltf_util.rs` is effectively commented-out code and should not be treated as live.
 
-6. Format conversion fallback bug hazard.
-- `TextureCache::add_texture` fallback path returns `DEFAULT_ERROR_MAT` on conversion failure; this is a material ID constant used in a texture-ID context.
+5. Handle validation is now the API boundary.
+- Public cache getters now validate generation and return `CacheError` (`InvalidHandle`, `StaleHandle`, `NotLoaded`, `OutOfBounds`).
 
 ## Camera/Input Integration Notes
 
@@ -112,17 +110,18 @@ Many systems assume these IDs. Preserve this contract unless performing a delibe
 ## Editing Strategy
 
 When changing this module:
-- Preserve cache ID invariants unless you also migrate all ID consumers.
+- Preserve stable handle invariants unless you also migrate all handle consumers.
 - Avoid mutating texture/material vectors during frame consumption.
 - Be explicit about loaded/unloaded transitions and ownership.
 - If you replace raw pointers with safer handles, update render hot paths accordingly.
 
 ## Suggested Next Hardening Tasks
 
-1. Replace ID-shifting `Vec::remove` cache semantics with tombstone/slot reuse.
-2. Implement `TextureCache::destroy` and complete resource cleanup path.
+1. Add optional tombstone slot-reuse/compaction strategy (without changing stable-ID behavior).
+2. Add targeted tests for unchecked deallocation APIs and default-slot invariants.
 3. Keep geometry pass ordering explicit (opaque/mask/blend) and avoid relying on `HashSet` iteration order.
-4. Restore or delete `gltf_util.rs` legacy code path to reduce ambiguity.
+4. Fix `TextureCache::add_texture` fallback return constant to texture-ID domain.
+5. Restore or delete `gltf_util.rs` legacy code path to reduce ambiguity.
 
 ## Related Files
 

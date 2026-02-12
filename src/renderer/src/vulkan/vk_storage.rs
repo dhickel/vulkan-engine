@@ -142,7 +142,11 @@ pub struct VkSubAllocator {
 
 impl VkDestroyable for VkSubAllocator {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        todo!()
+        self.buffer.buffer.destroy(device, allocator);
+        self.extra_buffers
+            .iter_mut()
+            .for_each(|extra| extra.buffer.destroy(device, allocator));
+        self.extra_buffers.clear();
     }
 }
 

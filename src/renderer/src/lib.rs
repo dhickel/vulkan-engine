@@ -3,6 +3,8 @@
 #![allow(unused_variables)]
 
 mod data;
+mod rendergraph;
+mod scene;
 mod texture;
 mod vulkan;
 
@@ -17,7 +19,7 @@ use input;
 use input::{InputManager, KeyboardListener, ListenerType, MousePosListener};
 use std::collections::HashSet;
 
-use crate::data::{camera, gltf_util};
+use crate::data::camera;
 use crate::data::camera::FPSController;
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
@@ -28,7 +30,7 @@ use std::process::exit;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, ptr, time};
-use log::{error, info, log};
+use log::{error, info, log, warn};
 use winit::dpi::Position;
 use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, DeviceEvents, EventLoop};
@@ -49,6 +51,53 @@ pub fn gltf(str : String) {
     // let mut texture_cache = TextureCache::new();
     // // let mut mesh_cache = MeshCache::default();
     // // gltf_util::parse_gltf_to_raw(str.as_str(), &mut texture_cache, &mut mesh_cache).unwrap();
+}
+
+fn parse_debug_runtime_mode(args: &[String]) -> vk_render::DebugRuntimeMode {
+    let parse_value = |value: &str| -> Option<vk_render::DebugRuntimeMode> {
+        vk_render::DebugRuntimeMode::from_label(value)
+    };
+
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+
+        if arg == "debug_runtime" || arg == "--debug-runtime" {
+            let Some(value) = args.get(i + 1) else {
+                warn!(
+                    "Missing debug runtime mode after '{}'. Valid values: testpbr, testunlit",
+                    arg
+                );
+                return vk_render::DebugRuntimeMode::Default;
+            };
+
+            if let Some(mode) = parse_value(value) {
+                return mode;
+            }
+
+            warn!(
+                "Unsupported debug runtime mode '{}'. Valid values: testpbr, testunlit",
+                value
+            );
+            return vk_render::DebugRuntimeMode::Default;
+        }
+
+        if let Some(value) = arg.strip_prefix("--debug-runtime=") {
+            if let Some(mode) = parse_value(value) {
+                return mode;
+            }
+
+            warn!(
+                "Unsupported debug runtime mode '{}'. Valid values: testpbr, testunlit",
+                value
+            );
+            return vk_render::DebugRuntimeMode::Default;
+        }
+
+        i += 1;
+    }
+
+    vk_render::DebugRuntimeMode::Default
 }
 
 pub fn run() {
@@ -90,21 +139,36 @@ pub fn run() {
     let mut frame: u32 = 0;
     let mut fps_timer = SystemTime::now();
 
+    let args: Vec<String> = env::args().collect();
+
     let rebuild_from_env = env::var("ENGINE_REBUILD_SHADERS")
         .map(|v| {
             let lowered = v.trim().to_ascii_lowercase();
             matches!(lowered.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false);
-    let rebuild_from_args = env::args().any(|arg| arg == "--rebuild-shaders");
+    let rebuild_from_args = args.iter().any(|arg| arg == "--rebuild-shaders");
+    let debug_runtime_mode = parse_debug_runtime_mode(&args);
     let compile_shaders = rebuild_from_env || rebuild_from_args;
 
     if compile_shaders {
         info!("Shader rebuild requested (--rebuild-shaders or ENGINE_REBUILD_SHADERS=1).");
     }
 
-    let mut app = match vk_render::VkRender::new(window_state, false, compile_shaders) {
-        Ok(app) => app,
+    if debug_runtime_mode != vk_render::DebugRuntimeMode::Default {
+        info!(
+            "Debug runtime mode selected: {}",
+            debug_runtime_mode.as_label()
+        );
+    }
+
+    let (mut app, mut scene_world) = match vk_render::VkRender::new(
+        window_state,
+        false,
+        compile_shaders,
+        debug_runtime_mode,
+    ) {
+        Ok(runtime) => runtime,
         Err(err) => {
             error!("Renderer initialization failed: {err}");
             if compile_shaders {
@@ -116,12 +180,12 @@ pub fn run() {
     
     event_loop
         .run(move |event, control_flow| {
-            app.imgui.handle_event(&app.window_state.window, &event);
+            app.core.imgui.handle_event(&app.core.window_state.window, &event);
             let delta = SystemTime::now().duration_since(last_time).unwrap();
 
             match event {
                 Event::NewEvents(..) => {
-                    app.imgui.context.io_mut().update_delta_time(delta);
+                    app.core.imgui.context.io_mut().update_delta_time(delta);
                 }
                 Event::DeviceEvent { device_id, event } => match event {
                     DeviceEvent::MouseMotion { delta } => {
@@ -170,18 +234,18 @@ pub fn run() {
                         WindowEvent::Ime(_) => {}
                         WindowEvent::CursorMoved { position, .. } => {}
                         WindowEvent::CursorEntered { .. } => {
-                            let _ = app.window_state
+                            let _ = app.core.window_state
                                 .window
                                 .set_cursor_grab(CursorGrabMode::Confined);
                                 //.unwrap(); // TODO the bugs on loss of focus
-                            app.window_state.window.set_cursor_visible(false);
+                            app.core.window_state.window.set_cursor_visible(false);
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            let _ = app.window_state
+                            let _ = app.core.window_state
                                 .window
                                 .set_cursor_grab(CursorGrabMode::None);
                               //  .unwrap();
-                            app.window_state.window.set_cursor_visible(true);
+                            app.core.window_state.window.set_cursor_visible(true);
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
                           
@@ -201,7 +265,7 @@ pub fn run() {
                         WindowEvent::Resized(new_size) => {
                             info!("Resize requested");
                             
-                            app.resize_requested = true;
+                            app.core.resize_requested = true;
                             let new_extent = Extent2D::default()
                                 .height(new_size.height)
                                 .width(new_size.width);
@@ -210,30 +274,48 @@ pub fn run() {
                         }
                         WindowEvent::RedrawRequested => {
                             input_manager.update();
-                            app.window_state
+                            app.core.window_state
                                 .controller
                                 .borrow_mut()
                                 .update(delta.as_secs_f32());
 
                           
 
-                            if !app.resize_requested {
+                            if !app.core.resize_requested {
                                 let now = SystemTime::now();
-                                app.imgui.context.io_mut().update_delta_time(delta);
-                                app.imgui
+                                app.core.imgui.context.io_mut().update_delta_time(delta);
+                                app.core.imgui
                                     .platform
                                     .prepare_frame(
-                                        app.imgui.context.io_mut(),
-                                        &app.window_state.window,
+                                        app.core.imgui.context.io_mut(),
+                                        &app.core.window_state.window,
                                     )
                                     .unwrap();
                                 let frame_ms = delta.as_millis();
                                 last_time = now;
 
-                                app.render(frame);
-                                app.window_state.window.request_redraw();
+                                let (camera_view, camera_pos) = {
+                                    let cont = app.core.window_state.controller.borrow();
+                                    (
+                                        cont.get_camera().get_view_matrix(),
+                                        cont.get_camera().get_position(),
+                                    )
+                                };
+
+                                let fovy = 70_f32.to_radians();
+                                let aspect_ratio = app.core.window_state.get_aspect_ratio();
+                                // reversed depth
+                                let far = 0.1;
+                                let near = 10_000.0;
+                                let proj = glam::Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+
+                                scene_world.update_camera(camera_view, proj, camera_pos);
+                                let submission = scene_world.build_submission();
+
+                                app.render(frame, &submission);
+                                app.core.window_state.window.request_redraw();
                                 if now.duration_since(fps_timer).unwrap() > Duration::from_secs(1) {
-                                    app.window_state
+                                    app.core.window_state
                                         .window
                                         .set_title(format!("Frame-Rate: {}", frame).as_str());
                                     frame = 0;

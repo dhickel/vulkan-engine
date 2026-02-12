@@ -10,7 +10,7 @@
 //! - **VkDestroyable trait**: RAII pattern for deterministic Vulkan resource cleanup
 //! - **Frame-based synchronization**: VkFrame/VkPresent manage per-frame resources (2-3 frames in flight)
 //! - **Traditional descriptors**: NOT using bindless - allocates from pools per-frame
-//! - **Scene graph integration**: Not ECS - uses Node hierarchy (see gpu_data.rs)
+//! - **Scene integration**: Not ECS - uses `SceneWorld` submission feeding rendergraph passes
 //! - **Async transfer**: VkHostBuffer/VkTransfer enable background asset loading
 //!
 //! ## Vulkan Integration
@@ -1626,4 +1626,3 @@ impl VkFenceQueue {
         });
     }
 }
-

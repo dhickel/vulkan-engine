@@ -8,7 +8,8 @@ Use this for architecture and maintenance strategy across `data/` and `vulkan/`.
 `renderer` owns:
 - window + event loop integration (`winit`)
 - Vulkan lifecycle and frame rendering
-- scene graph traversal and draw command accumulation
+- scene ownership (`SceneWorld`) and per-frame submission build
+- rendergraph pass orchestration over Vulkan core
 - model/material/texture/mesh caching and upload
 - ImGui rendering integration
 
@@ -30,22 +31,22 @@ Deep dives:
 ## End-to-End Runtime Flow
 
 1. `renderer::run()` creates event loop, window, FPS controller, and `InputManager`.
-2. `VkRender::new(...)` initializes Vulkan and all caches.
+2. `VkRender::new(...)` initializes Vulkan core and all caches.
 3. Startup scene load path currently uses Assimp:
 - `assimp_util::load_model("src/renderer/src/assets/DamagedHelmet.glb", ...)`
 - Then concurrent mesh/material allocation threads run.
-4. Each frame (`VkRender::render`):
+4. Each frame (`renderer::run` + `VkRender::render`):
 - poll async transfer completions
-- update scene camera + draw context
+- update camera and build `RenderSubmission` from `SceneWorld`
 - acquire swapchain image
-- record skybox + geometry + imgui
+- execute rendergraph passes (skybox, geometry, present copy, imgui)
 - submit and present
 
 ## Architectural Style
 
 - Explicit Vulkan wrappers over `ash`.
 - Traditional descriptor sets (not bindless indexing architecture).
-- Scene graph (`Rc<RefCell<Node>>`), not ECS.
+- Scene ownership via `SceneWorld` node indices (not ECS).
 - Mixed memory management:
 - `vk_mem` for images/buffers
 - custom sub-allocator for packed geometry/material data
@@ -56,6 +57,10 @@ Deep dives:
 - Graphics and present queues are currently treated as effectively shared in render path submission.
 - Shader compile-at-runtime path is disabled by default (uses precompiled `.spv` artifacts).
 - Startup loads a hardcoded asset and skybox resources.
+- Runtime debug selector for startup material path testing:
+  - `cargo run -- debug_runtime testpbr`
+  - `cargo run -- debug_runtime testunlit`
+  - `cargo run -- --debug-runtime=testunlit`
 
 ## PBR and Radiance Reference Map
 
@@ -64,8 +69,9 @@ Use these files first for rendering feature work:
 - Frame orchestration and IBL generation:
   - `src/renderer/src/vulkan/vk_render.rs`
   - `generate_environment(...)` handles irradiance + prefilter cubemap generation.
-  - `draw_geometry(...)` is the main PBR draw path.
-  - `draw_skybox(...)` renders environment background.
+  - `draw_geometry_from_submission(...)` is the main PBR draw path.
+  - `draw_skybox_from_submission(...)` renders environment background.
+  - rendergraph pass wiring is in `src/renderer/src/rendergraph/`.
 - Pipeline creation:
   - `src/renderer/src/vulkan/vk_pipeline.rs`
   - `init_met_rough_pipelines(...)` for core PBR pipelines.
@@ -91,7 +97,7 @@ External lineage reference:
 ## High-Value Maintenance Hotspots
 
 - `src/renderer/src/vulkan/vk_render.rs` (~2k LOC): central orchestration and risk concentration.
-- `src/renderer/src/data/data_cache.rs` (~1.7k LOC): cache IDs, allocation lifecycles, pointer stability.
+- `src/renderer/src/data/data_cache.rs` (~1.7k LOC): typed stable handles, allocation lifecycles, pointer stability.
 - `src/renderer/src/vulkan/vk_types.rs` + `vk_storage.rs`: frame ownership and allocator semantics.
 
 ## Known Risks You Should Internalize
@@ -99,8 +105,8 @@ External lineage reference:
 1. Partial cleanup coverage.
 - Some destroy paths are unimplemented (`todo!()` in dependent subsystems).
 
-2. ID stability assumptions can break.
-- Some cache deallocation code uses vector removal patterns that can shift IDs.
+2. Handle validity assumptions can break.
+- Handle users must treat `slot + generation` as the API contract and handle `CacheError` outcomes.
 
 3. Render path is sensitive to descriptor/pipeline binding order.
 - Small refactors can silently break draw correctness.
@@ -116,7 +122,7 @@ External lineage reference:
 - Prefer scoped, testable edits in one subsystem at a time.
 - When touching render frame logic, verify pipeline/descriptor bindings with validation layers.
 - Keep docs updated when changing data ownership, sync, or cache semantics.
-- Treat ID-indexed caches as API contracts; avoid changing ID semantics casually.
+- Treat typed handle caches as API contracts; avoid changing slot/generation semantics casually.
 
 ## Build and Verification
 

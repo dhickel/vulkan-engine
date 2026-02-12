@@ -16,7 +16,7 @@ Key point:
 
 - Vertex: `src/renderer/src/shaders/pbr_base.vert`
 - Fragment: `src/renderer/src/shaders/material_pbr.frag`
-- Optional unlit variant: `src/renderer/src/shaders/material_unlit.frag.spv` (source in `ignored/`)
+- Unlit variant: `src/renderer/src/shaders/material_unlit.frag`
 
 ### Environment / IBL
 

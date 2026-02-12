@@ -4,3 +4,4 @@ pub mod data_util;
 pub mod camera;
 pub mod data_cache;
 pub mod assimp_util;
+pub mod handles;
