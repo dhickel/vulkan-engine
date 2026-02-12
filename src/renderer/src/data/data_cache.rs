@@ -1978,39 +1978,67 @@ impl EnvironmentCache {
         Ok(self.env_handle_for_slot(index))
     }
 
-    pub fn allocate_cube_map(
+    fn empty_texture_meta() -> TextureMeta {
+        TextureMeta {
+            bytes: vec![],
+            width: 0,
+            height: 0,
+            format: vk::Format::UNDEFINED,
+            mips_levels: 0,
+            uv_index: 0,
+        }
+    }
+
+    pub fn take_unloaded_cube_map_meta(
         &mut self,
         env_id: EnvironmentHandle,
-        device: &ash::Device,
-        allocator: &Allocator,
-        transfer_pool: &VkCommandPool,
-        transfer_queue: vk::Queue,
-    ) -> Result<(), CacheError> {
-        let env_id = self.validate_env_slot(env_id)?;
-        let texture = std::mem::replace(
-            &mut self.skyboxes[env_id],
-            CachedEnvironment::Unloaded(TextureMeta {
-                bytes: vec![],
-                width: 0,
-                height: 0,
-                format: vk::Format::UNDEFINED,
-                mips_levels: 0,
-                ..Default::default()
-            }),
-        );
+    ) -> Result<Option<TextureMeta>, CacheError> {
+        let slot = self.validate_env_slot(env_id)?;
+        match self.skyboxes.get(slot) {
+            Some(CachedEnvironment::Loaded(_)) => Ok(None),
+            Some(CachedEnvironment::Unloaded(_)) => {
+                let old = std::mem::replace(
+                    &mut self.skyboxes[slot],
+                    CachedEnvironment::Unloaded(Self::empty_texture_meta()),
+                );
+                match old {
+                    CachedEnvironment::Unloaded(meta) => Ok(Some(meta)),
+                    CachedEnvironment::Loaded(_) => unreachable!(),
+                }
+            }
+            None => Err(CacheError::OutOfBounds),
+        }
+    }
 
-        if let CachedEnvironment::Unloaded(meta) = texture {
-            let cube_map =
-                vk_util::upload_skybox(device, allocator, meta, transfer_pool, transfer_queue);
-            self.skyboxes[env_id] = CachedEnvironment::Loaded(cube_map);
-            Ok(())
-        } else {
-            self.skyboxes[env_id] = texture;
-            log::info!(
-                "Attempted to allocate, already allocated cubemap: {}",
-                env_id
-            );
-            Ok(())
+    pub fn restore_unloaded_cube_map_meta(
+        &mut self,
+        env_id: EnvironmentHandle,
+        meta: TextureMeta,
+    ) -> Result<(), CacheError> {
+        let slot = self.validate_env_slot(env_id)?;
+        self.skyboxes[slot] = CachedEnvironment::Unloaded(meta);
+        Ok(())
+    }
+
+    pub fn store_loaded_cube_map(
+        &mut self,
+        env_id: EnvironmentHandle,
+        cube_map: VkCubeMap,
+    ) -> Result<(), CacheError> {
+        let slot = self.validate_env_slot(env_id)?;
+        self.skyboxes[slot] = CachedEnvironment::Loaded(cube_map);
+        Ok(())
+    }
+
+    pub fn get_loaded_cube_map_handles(
+        &self,
+        env_id: EnvironmentHandle,
+    ) -> Result<Option<(vk::ImageView, vk::Sampler)>, CacheError> {
+        let slot = self.validate_env_slot(env_id)?;
+        match self.skyboxes.get(slot) {
+            Some(CachedEnvironment::Loaded(map)) => Ok(Some((map.image_view, map.sampler))),
+            Some(CachedEnvironment::Unloaded(_)) => Ok(None),
+            None => Err(CacheError::OutOfBounds),
         }
     }
 }

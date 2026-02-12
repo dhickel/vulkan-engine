@@ -57,7 +57,7 @@
 //! - Updates viewport/scissor
 
 use crate::data::data_cache::{
-    CachedEnvironment, CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache,
+    CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache,
     VkCache, VkDataCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
     VkSamplerCache, VkSamplerInfo, VkShaderCache,
 };
@@ -100,12 +100,9 @@ use std::f32::consts::FRAC_PI_2;
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::path;
-use std::sync::mpsc::Sender;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
-use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
@@ -507,6 +504,81 @@ impl Drop for VkRenderCore {
 }
 
 impl VkRenderCore {
+    fn run_startup_load_worker(
+        data_cache: Arc<VkDataCache>,
+    ) -> std::thread::JoinHandle<Result<(), String>> {
+        std::thread::spawn(move || {
+            match data_cache
+                .mesh_cache
+                .lock()
+                .unwrap()
+                .allocate_all(BufferPlacement::ContiguousPreferred, false)
+            {
+                data_cache::LoadResult::Success(_) => {}
+                data_cache::LoadResult::Failed(_) => {
+                    return Err("Startup mesh allocation failed".to_string());
+                }
+            }
+
+            match data_cache
+                .texture_cache
+                .lock()
+                .unwrap()
+                .allocate_all(BufferPlacement::ContiguousPreferred, false)
+            {
+                data_cache::LoadResult::Success(_) => Ok(()),
+                data_cache::LoadResult::Failed(_) => {
+                    Err("Startup texture/material allocation failed".to_string())
+                }
+            }
+        })
+    }
+
+    fn drain_transfer_submissions(&mut self) {
+        while let Some(cmd) = self.transfer.query_channel() {
+            cmd.submit(
+                &self.device,
+                &self.vulkan_cache.queues,
+                &mut self.fence_await_queue,
+            );
+        }
+    }
+
+    fn service_async_transfers(&mut self) {
+        self.fence_await_queue.check_fences(&self.device);
+        self.drain_transfer_submissions();
+    }
+
+    fn pump_transfer_until_startup_done(
+        &mut self,
+        startup_loader: &std::thread::JoinHandle<Result<(), String>>,
+        warning_timeout: Duration,
+    ) {
+        let start = SystemTime::now();
+        let mut timeout_logged = false;
+
+        while !startup_loader.is_finished() {
+            self.service_async_transfers();
+
+            if !timeout_logged
+                && SystemTime::now()
+                    .duration_since(start)
+                    .unwrap_or_default()
+                    >= warning_timeout
+            {
+                timeout_logged = true;
+                error!(
+                    "Startup asset loading exceeded {:?}; continuing to wait while pumping transfer submissions",
+                    warning_timeout
+                );
+            }
+
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        self.service_async_transfers();
+    }
+
     fn destroy(&mut self) {}
 
     pub fn new(
@@ -932,53 +1004,13 @@ impl VkRenderCore {
             );
         }
 
-        let data_cache_clone1 = render.data_cache.clone();
-        let data_cache_clone2 = render.data_cache.clone();
+        let startup_loader = Self::run_startup_load_worker(render.data_cache.clone());
+        render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
 
-        let loading_count = Arc::new(AtomicUsize::new(2));
-        let count_clone1 = loading_count.clone();
-        let count_clone2 = loading_count.clone();
-
-        let t1 = std::thread::spawn(move || {
-            data_cache_clone1
-                .mesh_cache
-                .lock()
-                .unwrap()
-                .allocate_all(BufferPlacement::ContiguousPreferred, false);
-            count_clone1.fetch_sub(1, Ordering::SeqCst);
-        });
-        println!("Spawned mesh thread: {:?}", t1.thread().id());
-
-        let t2 = std::thread::spawn(move || {
-            data_cache_clone2
-                .texture_cache
-                .lock()
-                .unwrap()
-                .allocate_all(BufferPlacement::ContiguousPreferred, false);
-            count_clone2.fetch_sub(1, Ordering::SeqCst);
-        });
-        println!("Spawned Material thread: {:?}", t2.thread().id());
-
-        // loop to test threaded loading, since the env needs some preloads to be preloaded
-        let start = std::time::SystemTime::now();
-        println!("Staring proc loop");
-        // Wait up to 30s for initial load, but break early if done.
-        while SystemTime::now().duration_since(start).unwrap() < Duration::from_secs(30) {
-            if loading_count.load(Ordering::SeqCst) == 0 {
-                println!("Loading finished early.");
-                break;
-            }
-            render.fence_await_queue.check_fences(&render.device);
-            if let Some(cmd) = render.transfer.query_channel() {
-                // Submit the command buffer and signal the fence correctly
-                cmd.submit(
-                    &render.device,
-                    &render.vulkan_cache.queues,
-                    &mut render.fence_await_queue,
-                );
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        let startup_result = startup_loader
+            .join()
+            .map_err(|_| "Startup loader thread panicked".to_string())?;
+        startup_result?;
 
         render.ensure_environment_ready(default_env_id)?;
         loaded_scene.scene_world.set_skybox_env_id(default_env_id);
@@ -1060,14 +1092,7 @@ impl VkRenderCore {
         submission: &RenderSubmission,
         rendergraph: &RenderGraph,
     ) {
-        self.fence_await_queue.check_fences(&self.device);
-        if let Some(cmd) = self.transfer.query_channel() {
-            cmd.submit(
-                &self.device,
-                &self.vulkan_cache.queues,
-                &mut self.fence_await_queue,
-            );
-        }
+        self.service_async_transfers();
 
         let start = SystemTime::now();
 
@@ -1181,19 +1206,35 @@ impl VkRenderCore {
     }
 
     pub fn ensure_environment_ready(&mut self, env_id: EnvironmentHandle) -> Result<(), String> {
-        {
+        let pending_skybox_meta = {
             let mut env_cache = self.data_cache.environment_cache.lock().unwrap();
             env_cache
-                .allocate_cube_map(
-                    env_id,
-                    &self.device,
-                    &self.allocator.lock().unwrap(),
-                    self.transfer.get_local_transfer_pool(),
-                    self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
-                )
+                .take_unloaded_cube_map_meta(env_id)
                 .map_err(|err| {
                     format!(
-                        "Failed to allocate skybox cubemap for env {:?}: {:?}",
+                        "Failed to query skybox cubemap state for env {:?}: {:?}",
+                        env_id, err
+                    )
+                })?
+        };
+
+        if let Some(skybox_meta) = pending_skybox_meta {
+            let cube_map = vk_util::upload_skybox(
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                skybox_meta,
+                self.transfer.get_local_transfer_pool(),
+                self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+            );
+
+            self.data_cache
+                .environment_cache
+                .lock()
+                .unwrap()
+                .store_loaded_cube_map(env_id, cube_map)
+                .map_err(|err| {
+                    format!(
+                        "Failed to store allocated skybox cubemap for env {:?}: {:?}",
                         env_id, err
                     )
                 })?;
@@ -1208,19 +1249,15 @@ impl VkRenderCore {
         };
 
         if env_maps_missing {
-            let generated_maps = {
+            let (skybox_view, skybox_sampler) = {
                 let env_cache = self.data_cache.environment_cache.lock().unwrap();
-                let skybox = match env_cache.get_skybox(env_id).map_err(|err| {
-                    format!("Failed to query skybox env {:?}: {:?}", env_id, err)
-                })? {
-                    CachedEnvironment::Loaded(map) => map,
-                    CachedEnvironment::Unloaded(_) => {
-                        return Err(format!("Skybox env {:?} is not loaded on GPU", env_id));
-                    }
-                };
-
-                self.generate_environment(skybox)?
+                env_cache
+                    .get_loaded_cube_map_handles(env_id)
+                    .map_err(|err| format!("Failed to query skybox env {:?}: {:?}", env_id, err))?
+                    .ok_or_else(|| format!("Skybox env {:?} is not loaded on GPU", env_id))?
             };
+
+            let generated_maps = self.generate_environment(skybox_view, skybox_sampler)?;
 
             self.data_cache
                 .environment_cache
@@ -1233,15 +1270,10 @@ impl VkRenderCore {
         if !self.sky_box.descriptors.contains_key(&env_id) {
             let (image_view, sampler) = {
                 let env_cache = self.data_cache.environment_cache.lock().unwrap();
-                let skybox = match env_cache.get_skybox(env_id).map_err(|err| {
-                    format!("Failed to fetch skybox env {:?}: {:?}", env_id, err)
-                })? {
-                    CachedEnvironment::Loaded(map) => map,
-                    CachedEnvironment::Unloaded(_) => {
-                        return Err(format!("Skybox env {:?} is not loaded on GPU", env_id));
-                    }
-                };
-                (skybox.image_view, skybox.sampler)
+                env_cache
+                    .get_loaded_cube_map_handles(env_id)
+                    .map_err(|err| format!("Failed to fetch skybox env {:?}: {:?}", env_id, err))?
+                    .ok_or_else(|| format!("Skybox env {:?} is not loaded on GPU", env_id))?
             };
 
             let skybox_desc_alloc = VkDescriptorAllocator::new(
@@ -1314,6 +1346,16 @@ impl VkRenderCore {
     fn prepare_submission_environment(&mut self, submission: &RenderSubmission) {
         self.requested_env_id = submission.skybox_env_id;
 
+        if self.requested_env_id == self.active_env_id {
+            return;
+        }
+
+        let switch_start = SystemTime::now();
+        info!(
+            "Switching active environment from {:?} to {:?}",
+            self.active_env_id, self.requested_env_id
+        );
+
         if let Err(err) = self.ensure_environment_ready(self.requested_env_id) {
             error!(
                 "Failed to prepare requested environment {:?}: {}. Falling back to active env {:?}",
@@ -1323,6 +1365,14 @@ impl VkRenderCore {
         }
 
         self.active_env_id = self.requested_env_id;
+        let switch_ms = SystemTime::now()
+            .duration_since(switch_start)
+            .unwrap_or_default()
+            .as_millis();
+        info!(
+            "Environment {:?} ready and active (switch took {} ms)",
+            self.active_env_id, switch_ms
+        );
     }
 
     pub fn prepare_draw_targets(&mut self, frame: &VkFrame) {
@@ -1841,7 +1891,11 @@ impl VkRenderCore {
         }
     }
 
-    pub fn generate_environment(&self, env_skybox: &VkCubeMap) -> Result<EnvMaps, String> {
+    pub fn generate_environment(
+        &self,
+        skybox_view: vk::ImageView,
+        skybox_sampler: vk::Sampler,
+    ) -> Result<EnvMaps, String> {
         let start = SystemTime::now();
 
         #[repr(C)]
@@ -1858,9 +1912,6 @@ impl VkRenderCore {
         let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
         let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
         let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
-
-        let skybox_view = env_skybox.image_view;
-        let skybox_sampler = env_skybox.sampler;
 
         let mut irradiance_cubemap: Option<VkCubeMap> = None;
         let mut prefiltered_cubemap: Option<VkCubeMap> = None;
