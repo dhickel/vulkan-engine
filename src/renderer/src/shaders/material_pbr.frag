@@ -33,6 +33,11 @@ layout (set = 0, binding = 0) uniform UBO {
     vec3 camPos;
 } ubo;
 
+struct PointLightData {
+    vec4 positionRange;
+    vec4 colorIntensity;
+};
+
 layout (set = 0, binding = 1) uniform UBOParams {
     vec4 lightDir;
     float exposure;
@@ -41,6 +46,14 @@ layout (set = 0, binding = 1) uniform UBOParams {
     float scaleIBLAmbient;
     float debugViewInputs;
     float debugViewEquation;
+    uint _pad0;
+    uint _pad1;
+    uint pointLightCount;
+    uint _pad2;
+    uint _pad3;
+    uint _pad4;
+    uint _pad5;
+    PointLightData pointLights[16];
 } uboParams;
 
 layout (set = 0, binding = 2) uniform samplerCube samplerIrradiance;
@@ -195,6 +208,23 @@ float convertMetallic(vec3 diffuse, vec3 specular, float maxSpecular) {
     return clamp((-b + sqrt(D)) / (2.0 * a), 0.0, 1.0);
 }
 
+// Windowed inverse-square point light attenuation
+float pointLightAttenuation(vec3 fragPos, vec3 lightPos, float range)
+{
+    vec3 toLight = lightPos - fragPos;
+    float distSq = dot(toLight, toLight);
+    float dist = sqrt(max(distSq, 1e-6));
+
+    // Inverse square with epsilon to prevent division by zero
+    float invSqAttenuation = 1.0 / max(distSq, 1e-4);
+
+    // Smooth window function to fade to zero at range
+    float distOverRange = dist / max(range, 1e-3);
+    float window = pow(max(1.0 - pow(distOverRange, 4.0), 0.0), 2.0);
+
+    return invSqAttenuation * window;
+}
+
 void main()
 {
     MaterialMeta material = pc.mataterialMeta;
@@ -301,6 +331,55 @@ void main()
     vec3 specContrib = F * G * D / (4.0 * NdotL * NdotV);
     // Obtain final intensity as reflectance (BRDF) scaled by the energy of the light (cosine law)
     vec3 color = NdotL * u_LightColor * (diffuseContrib + specContrib);
+
+    // Add point light contributions
+    for (uint i = 0; i < uboParams.pointLightCount; ++i) {
+        PointLightData light = uboParams.pointLights[i];
+        vec3 lightPos = light.positionRange.xyz;
+        float lightRange = light.positionRange.w;
+        vec3 lightColor = light.colorIntensity.xyz;
+        float lightIntensity = light.colorIntensity.w;
+
+        // Light direction and half vector
+        vec3 L = normalize(lightPos - inWorldPos);
+        vec3 H = normalize(L + v);
+
+        // Attenuation
+        float attenuation = pointLightAttenuation(inWorldPos, lightPos, lightRange);
+        if (attenuation < 1e-5) continue; // Early out for negligible contribution
+
+        // BRDF terms
+        float NdotL_point = clamp(dot(n, L), 0.001, 1.0);
+        float NdotH_point = clamp(dot(n, H), 0.0, 1.0);
+        float LdotH_point = clamp(dot(L, H), 0.0, 1.0);
+
+        PBRInfo pointPbrInputs = PBRInfo(
+            NdotL_point,
+            pbrInputs.NdotV,
+            NdotH_point,
+            LdotH_point,
+            pbrInputs.VdotH,
+            pbrInputs.perceptualRoughness,
+            pbrInputs.metalness,
+            pbrInputs.reflectance0,
+            pbrInputs.reflectance90,
+            pbrInputs.alphaRoughness,
+            pbrInputs.diffuseColor,
+            pbrInputs.specularColor
+        );
+
+        // Calculate BRDF
+        vec3 F_point = specularReflection(pointPbrInputs);
+        float G_point = geometricOcclusion(pointPbrInputs);
+        float D_point = microfacetDistribution(pointPbrInputs);
+
+        vec3 diffusePoint = (1.0 - F_point) * diffuse(pointPbrInputs);
+        vec3 specPoint = F_point * G_point * D_point / (4.0 * NdotL_point * pbrInputs.NdotV);
+
+        // Radiance
+        vec3 radiance = lightColor * lightIntensity * attenuation;
+        color += NdotL_point * radiance * (diffusePoint + specPoint);
+    }
 
     // Calculate lighting contribution from image based lighting source (IBL)
     color += getIBLContribution(pbrInputs, n, reflection);

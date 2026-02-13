@@ -6,7 +6,10 @@
 use crate::data::data_cache::MeshCache;
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
+
+/// Maximum number of point lights that can be uploaded to GPU per frame.
+pub const MAX_POINT_LIGHTS_GPU: usize = 16;
 
 #[derive(Debug, Copy, Clone)]
 pub struct SubmissionFlags {
@@ -31,12 +34,21 @@ pub struct FrameDrawItem {
     pub transform: Mat4,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct FramePointLight {
+    pub position: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub range: f32,
+}
+
 pub struct RenderSubmission {
     pub camera: SceneDataUBO,
     pub draw_items: Vec<FrameDrawItem>,
     pub flags: SubmissionFlags,
     pub skybox_mesh_id: MeshHandle,
     pub skybox_env_id: EnvironmentHandle,
+    pub point_lights: Vec<FramePointLight>,
 }
 
 impl RenderSubmission {
@@ -47,6 +59,7 @@ impl RenderSubmission {
             flags: SubmissionFlags::default(),
             skybox_mesh_id: MeshCache::SKYBOX_MESH,
             skybox_env_id: EnvironmentHandle::new(0, 0),
+            point_lights: Vec::with_capacity(MAX_POINT_LIGHTS_GPU),
         }
     }
 

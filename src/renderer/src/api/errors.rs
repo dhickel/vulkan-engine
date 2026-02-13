@@ -110,6 +110,8 @@ pub enum SceneError {
     CycleDetected,
     InvalidParent(SceneNodeId),
     MergeFailed(String),
+    InvalidPointLight(String),
+    StalePointLight(crate::api::scene::PointLightId),
 }
 
 impl Display for SceneError {
@@ -132,6 +134,12 @@ impl Display for SceneError {
                 node.slot, node.generation
             ),
             Self::MergeFailed(msg) => write!(f, "{msg}"),
+            Self::InvalidPointLight(msg) => write!(f, "invalid point light: {msg}"),
+            Self::StalePointLight(id) => write!(
+                f,
+                "stale point light handle (slot={}, generation={})",
+                id.slot, id.generation
+            ),
         }
     }
 }

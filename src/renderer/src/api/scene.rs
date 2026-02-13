@@ -4,10 +4,53 @@ use glam::{Mat4, Vec3};
 
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::scene::render_submission::RenderSubmission;
-use crate::scene::scene_world::{SceneNodeRefError, SceneWorld};
+use crate::scene::scene_world::{PointLightRefError, SceneNodeRefError, SceneWorld};
 use crate::scene::SceneNodeId;
 
 use super::errors::SceneError;
+
+/// Point light ID with slot+generation semantics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PointLightId {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+/// Point light definition.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct PointLight {
+    pub position: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub range: f32,
+}
+
+impl PointLight {
+    /// Validate point light parameters.
+    fn validate(&self) -> Result<(), SceneError> {
+        if !self.range.is_finite() || self.range <= 0.0 {
+            return Err(SceneError::InvalidPointLight(
+                "range must be finite and > 0.0".to_string(),
+            ));
+        }
+        if !self.intensity.is_finite() || self.intensity < 0.0 {
+            return Err(SceneError::InvalidPointLight(
+                "intensity must be finite and >= 0.0".to_string(),
+            ));
+        }
+        if !self.color.is_finite() {
+            return Err(SceneError::InvalidPointLight(
+                "color must be finite".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Clamp color to valid range.
+    fn sanitize_color(&self) -> Vec3 {
+        self.color.max(Vec3::ZERO)
+    }
+}
 
 /// Fragment-local node identifier used during scene merge.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -289,6 +332,57 @@ impl Scene {
 
     /// Thread: Any
     /// May Stall: No
+    pub fn create_point_light(&mut self, light: PointLight) -> Result<PointLightId, SceneError> {
+        light.validate()?;
+        let sanitized = PointLight {
+            color: light.sanitize_color(),
+            ..light
+        };
+        Ok(self.world.add_point_light(sanitized))
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn update_point_light(
+        &mut self,
+        id: PointLightId,
+        light: PointLight,
+    ) -> Result<(), SceneError> {
+        light.validate()?;
+        self.validate_point_light(id)?;
+
+        let sanitized = PointLight {
+            color: light.sanitize_color(),
+            ..light
+        };
+
+        if self.world.update_point_light(id, sanitized) {
+            return Ok(());
+        }
+
+        Err(SceneError::InvalidPointLight(format!(
+            "failed to update point light (slot={}, generation={})",
+            id.slot, id.generation
+        )))
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn remove_point_light(&mut self, id: PointLightId) -> Result<(), SceneError> {
+        self.validate_point_light(id)?;
+
+        if self.world.remove_point_light(id) {
+            return Ok(());
+        }
+
+        Err(SceneError::InvalidPointLight(format!(
+            "failed to remove point light (slot={}, generation={})",
+            id.slot, id.generation
+        )))
+    }
+
+    /// Thread: Any
+    /// May Stall: No
     pub fn merge_fragment(
         &mut self,
         parent: Option<SceneNodeId>,
@@ -376,6 +470,12 @@ impl Scene {
             .validate_node_ref(parent)
             .map_err(|err| map_parent_ref_error(parent, err))
     }
+
+    fn validate_point_light(&self, id: PointLightId) -> Result<(), SceneError> {
+        self.world
+            .validate_point_light_ref(id)
+            .map_err(|err| map_point_light_ref_error(id, err))
+    }
 }
 
 fn map_node_ref_error(node: SceneNodeId, err: SceneNodeRefError) -> SceneError {
@@ -390,6 +490,18 @@ fn map_parent_ref_error(parent: SceneNodeId, err: SceneNodeRefError) -> SceneErr
         SceneNodeRefError::GenerationMismatch => SceneError::StaleNode(parent),
         SceneNodeRefError::OutOfBounds | SceneNodeRefError::Vacant => {
             SceneError::InvalidParent(parent)
+        }
+    }
+}
+
+fn map_point_light_ref_error(id: PointLightId, err: PointLightRefError) -> SceneError {
+    match err {
+        PointLightRefError::GenerationMismatch => SceneError::StalePointLight(id),
+        PointLightRefError::OutOfBounds | PointLightRefError::Vacant => {
+            SceneError::InvalidPointLight(format!(
+                "point light out of bounds or vacant (slot={}, generation={})",
+                id.slot, id.generation
+            ))
         }
     }
 }
@@ -530,7 +642,7 @@ fn build_fragment_merge_plan_recursive(
 
 #[cfg(test)]
 mod tests {
-    use super::{Scene, SceneFragment, SceneFragmentNode, SceneFragmentNodeId};
+    use super::{PointLight, Scene, SceneFragment, SceneFragmentNode, SceneFragmentNodeId};
     use crate::api::errors::SceneError;
     use crate::data::handles::MeshHandle;
     use glam::{Mat4, Vec3};
@@ -613,5 +725,84 @@ mod tests {
 
         let result = scene.merge_fragment(None, fragment);
         assert!(matches!(result, Err(SceneError::MergeFailed(_))));
+    }
+
+    #[test]
+    fn point_light_create_update_remove() {
+        let mut scene = Scene::new();
+
+        let light = PointLight {
+            position: Vec3::new(0.0, 10.0, 0.0),
+            color: Vec3::new(1.0, 0.8, 0.6),
+            intensity: 50.0,
+            range: 10.0,
+        };
+
+        // Create light
+        let id = scene.create_point_light(light).expect("create should succeed");
+
+        // Update light
+        let updated = PointLight {
+            position: Vec3::new(5.0, 10.0, 5.0),
+            color: Vec3::new(0.5, 0.5, 1.0),
+            intensity: 100.0,
+            range: 15.0,
+        };
+        scene
+            .update_point_light(id, updated)
+            .expect("update should succeed");
+
+        // Remove light
+        scene.remove_point_light(id).expect("remove should succeed");
+
+        // Stale handle should be rejected
+        let result = scene.update_point_light(id, light);
+        assert!(matches!(result, Err(SceneError::StalePointLight(_))));
+    }
+
+    #[test]
+    fn point_light_validation_rejects_invalid_range() {
+        let mut scene = Scene::new();
+
+        let light = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::ONE,
+            intensity: 50.0,
+            range: 0.0, // Invalid: must be > 0
+        };
+
+        let result = scene.create_point_light(light);
+        assert!(matches!(result, Err(SceneError::InvalidPointLight(_))));
+    }
+
+    #[test]
+    fn point_light_validation_rejects_negative_intensity() {
+        let mut scene = Scene::new();
+
+        let light = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::ONE,
+            intensity: -10.0, // Invalid: must be >= 0
+            range: 5.0,
+        };
+
+        let result = scene.create_point_light(light);
+        assert!(matches!(result, Err(SceneError::InvalidPointLight(_))));
+    }
+
+    #[test]
+    fn point_light_validation_clamps_negative_color() {
+        let mut scene = Scene::new();
+
+        let light = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::new(-1.0, 0.5, 1.0), // Negative component should be clamped
+            intensity: 50.0,
+            range: 5.0,
+        };
+
+        // Should succeed - negative colors are clamped to zero
+        let id = scene.create_point_light(light).expect("should clamp and succeed");
+        scene.remove_point_light(id).unwrap();
     }
 }

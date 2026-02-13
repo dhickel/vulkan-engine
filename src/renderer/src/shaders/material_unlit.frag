@@ -25,6 +25,11 @@ layout (set = 0, binding = 0) uniform UBO {
     vec3 camPos;
 } ubo;
 
+struct PointLightData {
+    vec4 positionRange;
+    vec4 colorIntensity;
+};
+
 layout (set = 0, binding = 1) uniform UBOParams {
     vec4 lightDir;
     float exposure;
@@ -33,6 +38,14 @@ layout (set = 0, binding = 1) uniform UBOParams {
     float scaleIBLAmbient;
     float debugViewInputs;
     float debugViewEquation;
+    uint _pad0;
+    uint _pad1;
+    uint pointLightCount;
+    uint _pad2;
+    uint _pad3;
+    uint _pad4;
+    uint _pad5;
+    PointLightData pointLights[16];
 } uboParams;
 
 layout (set = 2, binding = 0) uniform sampler2D colorMap;

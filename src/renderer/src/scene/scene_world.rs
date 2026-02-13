@@ -10,10 +10,13 @@
 //! This allows deletion without invalidating all outstanding references to the old slot.
 //! Stale handles fail validation and are ignored during traversal.
 
+use crate::api::scene::{PointLight, PointLightId};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
-use crate::scene::render_submission::{FrameDrawItem, RenderSubmission};
+use crate::scene::render_submission::{
+    FrameDrawItem, FramePointLight, RenderSubmission, MAX_POINT_LIGHTS_GPU,
+};
 use glam::{Mat4, Vec3};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -68,12 +71,27 @@ pub(crate) enum SceneNodeRefError {
     GenerationMismatch,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PointLightRefError {
+    OutOfBounds,
+    Vacant,
+    GenerationMismatch,
+}
+
+#[derive(Clone, Debug)]
+struct PointLightEntry {
+    generation: u32,
+    light: Option<PointLight>,
+}
+
 pub struct SceneWorld {
     nodes: Vec<SceneNodeEntry>,
     free_slots: Vec<u32>,
     root: Option<SceneNodeId>,
     camera: SceneDataUBO,
     skybox_env_id: EnvironmentHandle,
+    point_lights: Vec<PointLightEntry>,
+    free_point_light_slots: Vec<u32>,
 }
 
 impl Default for SceneWorld {
@@ -90,6 +108,8 @@ impl SceneWorld {
             root: None,
             camera: SceneDataUBO::default(),
             skybox_env_id: EnvironmentHandle::new(0, 0),
+            point_lights: Vec::with_capacity(16),
+            free_point_light_slots: Vec::new(),
         }
     }
 
@@ -192,6 +212,18 @@ impl SceneWorld {
     pub(crate) fn build_submission(&mut self) -> RenderSubmission {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
+
+        // Collect active point lights, clamped to GPU max
+        for entry in self.point_lights.iter().take(MAX_POINT_LIGHTS_GPU) {
+            if let Some(light) = entry.light {
+                submission.point_lights.push(FramePointLight {
+                    position: light.position,
+                    color: light.color,
+                    intensity: light.intensity,
+                    range: light.range,
+                });
+            }
+        }
 
         let Some(root_id) = self.root else {
             return submission;
@@ -310,11 +342,85 @@ impl SceneWorld {
             }
         }
     }
+
+    // Point light handle validation and lifecycle
+
+    pub(crate) fn validate_point_light_ref(
+        &self,
+        id: PointLightId,
+    ) -> Result<(), PointLightRefError> {
+        let Some(entry) = self.point_lights.get(id.slot as usize) else {
+            return Err(PointLightRefError::OutOfBounds);
+        };
+        if entry.generation != id.generation {
+            return Err(PointLightRefError::GenerationMismatch);
+        };
+        if entry.light.is_none() {
+            return Err(PointLightRefError::Vacant);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_point_light(&mut self, light: PointLight) -> PointLightId {
+        if let Some(slot) = self.free_point_light_slots.pop() {
+            let entry = &mut self.point_lights[slot as usize];
+            debug_assert!(
+                entry.light.is_none(),
+                "free slot list contained a live point light"
+            );
+            entry.light = Some(light);
+            return PointLightId {
+                slot,
+                generation: entry.generation,
+            };
+        }
+
+        let slot = self.point_lights.len() as u32;
+        self.point_lights.push(PointLightEntry {
+            generation: 0,
+            light: Some(light),
+        });
+        PointLightId {
+            slot,
+            generation: 0,
+        }
+    }
+
+    pub(crate) fn update_point_light(&mut self, id: PointLightId, light: PointLight) -> bool {
+        let Some(entry) = self.point_lights.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.light.is_none() {
+            return false;
+        }
+        entry.light = Some(light);
+        true
+    }
+
+    pub(crate) fn remove_point_light(&mut self, id: PointLightId) -> bool {
+        let Some(entry) = self.point_lights.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.light.is_none() {
+            return false;
+        }
+        entry.light = None;
+        entry.generation = entry.generation.wrapping_add(1);
+        self.free_point_light_slots.push(id.slot);
+        true
+    }
+
+    pub(crate) fn get_active_point_lights(&self) -> Vec<PointLight> {
+        self.point_lights
+            .iter()
+            .filter_map(|entry| entry.light)
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SceneNode, SceneNodeId, SceneWorld};
+    use super::{PointLightRefError, SceneNode, SceneNodeId, SceneWorld};
     use crate::data::handles::MeshHandle;
     use glam::{Mat4, Vec3};
 
@@ -446,5 +552,118 @@ mod tests {
             moved_submission.draw_items[0].transform,
             Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0))
         );
+    }
+
+    #[test]
+    fn point_light_handle_lifecycle() {
+        use crate::api::scene::PointLight;
+
+        let mut scene = SceneWorld::new();
+
+        // Create a point light
+        let light = PointLight {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            color: Vec3::new(1.0, 0.8, 0.6),
+            intensity: 50.0,
+            range: 10.0,
+        };
+        let id = scene.add_point_light(light);
+        assert_eq!(id.slot, 0);
+        assert_eq!(id.generation, 0);
+
+        // Validate it exists
+        assert!(scene.validate_point_light_ref(id).is_ok());
+
+        // Update the light
+        let updated_light = PointLight {
+            position: Vec3::new(5.0, 6.0, 7.0),
+            color: Vec3::new(0.5, 0.5, 1.0),
+            intensity: 100.0,
+            range: 15.0,
+        };
+        assert!(scene.update_point_light(id, updated_light));
+
+        // Remove the light
+        assert!(scene.remove_point_light(id));
+
+        // Validate it's now stale
+        assert!(matches!(
+            scene.validate_point_light_ref(id),
+            Err(PointLightRefError::GenerationMismatch)
+        ));
+
+        // Create a new light (should reuse slot 0 but with generation 1)
+        let new_id = scene.add_point_light(light);
+        assert_eq!(new_id.slot, 0);
+        assert_eq!(new_id.generation, 1);
+
+        // Old handle should still be rejected
+        assert!(matches!(
+            scene.validate_point_light_ref(id),
+            Err(PointLightRefError::GenerationMismatch)
+        ));
+
+        // New handle should be valid
+        assert!(scene.validate_point_light_ref(new_id).is_ok());
+    }
+
+    #[test]
+    fn submission_clamps_point_light_count() {
+        use crate::api::scene::PointLight;
+        use crate::scene::render_submission::MAX_POINT_LIGHTS_GPU;
+
+        let mut scene = SceneWorld::new();
+
+        // Create more than MAX_POINT_LIGHTS_GPU lights
+        let light = PointLight {
+            position: Vec3::new(0.0, 5.0, 0.0),
+            color: Vec3::new(1.0, 1.0, 1.0),
+            intensity: 30.0,
+            range: 8.0,
+        };
+
+        for i in 0..20 {
+            let mut light_instance = light;
+            light_instance.position.x = i as f32;
+            scene.add_point_light(light_instance);
+        }
+
+        // Build submission and verify clamping
+        let submission = scene.build_submission();
+        assert_eq!(submission.point_lights.len(), MAX_POINT_LIGHTS_GPU);
+
+        // Verify lights are correct (should be first MAX_POINT_LIGHTS_GPU)
+        for (i, frame_light) in submission.point_lights.iter().enumerate() {
+            assert_eq!(frame_light.position.x, i as f32);
+        }
+    }
+
+    #[test]
+    fn zero_light_submission_has_empty_list() {
+        let mut scene = SceneWorld::new();
+
+        // Build submission with no lights
+        let submission = scene.build_submission();
+        assert_eq!(submission.point_lights.len(), 0);
+    }
+
+    #[test]
+    fn stale_point_light_update_rejected() {
+        use crate::api::scene::PointLight;
+
+        let mut scene = SceneWorld::new();
+
+        let light = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::ONE,
+            intensity: 10.0,
+            range: 5.0,
+        };
+
+        let id = scene.add_point_light(light);
+        scene.remove_point_light(id);
+
+        // Try to update after removal should fail
+        assert!(!scene.update_point_light(id, light));
     }
 }

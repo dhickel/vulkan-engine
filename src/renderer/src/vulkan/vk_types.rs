@@ -1606,6 +1606,59 @@ impl VkSceneDescriptors {
         desc
     }
 
+    /// Update both scene and environment uniforms for a frame.
+    /// Used for dynamic per-frame data like point lights.
+    pub fn update_scene_uniforms(
+        &mut self,
+        device: &ash::Device,
+        scene_data: SceneDataUBO,
+        env_data: EnvironmentUBO,
+        index: u32,
+    ) -> vk::DescriptorSet {
+        let scene_data_size = size_of::<SceneDataUBO>().next_multiple_of(self.alignment as usize);
+        let env_data_size = size_of::<EnvironmentUBO>().next_multiple_of(self.alignment as usize);
+
+        unsafe {
+            // Update scene buffer
+            let mut scene_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
+            scene_ptr = scene_ptr.add((index as usize) * scene_data_size);
+            std::ptr::copy_nonoverlapping(
+                &scene_data as *const SceneDataUBO as *const u8,
+                scene_ptr.cast(),
+                scene_data_size,
+            );
+
+            // Update env buffer
+            let mut env_ptr = self.env_buffer.alloc_info.mapped_data as *mut u8;
+            env_ptr = env_ptr.add((index as usize) * env_data_size);
+            std::ptr::copy_nonoverlapping(
+                &env_data as *const EnvironmentUBO as *const u8,
+                env_ptr.cast(),
+                env_data_size,
+            );
+        }
+
+        let mut writer = VkDescriptorWriter::default();
+        writer.write_buffer(
+            0,
+            self.scene_buffer.buffer,
+            scene_data_size as u64,
+            (index as usize) * scene_data_size,
+            vk::DescriptorType::UNIFORM_BUFFER,
+        );
+        writer.write_buffer(
+            1,
+            self.env_buffer.buffer,
+            env_data_size as u64,
+            (index as usize) * env_data_size,
+            vk::DescriptorType::UNIFORM_BUFFER,
+        );
+
+        let desc = self.scene_descriptors[index as usize];
+        writer.update_set(device, desc);
+        desc
+    }
+
     pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
         self.scene_descriptors[index as usize]
     }

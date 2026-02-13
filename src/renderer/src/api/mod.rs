@@ -4,7 +4,7 @@ mod errors;
 mod hooks;
 mod loading;
 mod renderer;
-mod scene;
+pub(crate) mod scene;
 
 #[cfg(feature = "advanced-interop")]
 pub mod advanced;
@@ -22,4 +22,7 @@ pub use errors::{
 pub use hooks::{RenderHook, RenderHookContext};
 pub use loading::{LoadStatus, LoadTicket};
 pub use renderer::{EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer};
-pub use scene::{Scene, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId};
+pub use scene::{
+    PointLight, PointLightId, Scene, SceneFragment, SceneFragmentMount, SceneFragmentNode,
+    SceneFragmentNodeId,
+};

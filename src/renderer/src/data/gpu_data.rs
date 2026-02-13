@@ -28,6 +28,10 @@ use glam::{vec4, Mat4, UVec4, Vec2, Vec3, Vec4};
 use std::cmp::PartialEq;
 use std::f32::consts::PI;
 use std::ffi::{CStr, CString};
+
+/// Maximum number of point lights that can be uploaded to GPU per frame.
+pub const MAX_POINT_LIGHTS_GPU: usize = 16;
+
 //////////////////////////
 //  MESH & TEXTURE DATA //
 //////////////////////////
@@ -499,6 +503,15 @@ pub struct SceneDataUBO {
     pad: f32,
 }
 
+/// GPU point light struct matching GLSL std140 layout.
+/// Uses vec4 pairs for safe alignment.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct GpuPointLight {
+    pub position_range: Vec4, // xyz = position, w = range
+    pub color_intensity: Vec4, // rgb = color, w = intensity
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct EnvironmentUBO {
@@ -509,7 +522,10 @@ pub struct EnvironmentUBO {
     pub ibl_ambient_scale: f32,
     pub debug_view_inputs: f32,
     pub debug_view_equation: f32,
-    _pad: u64,
+    pub _pad0: [u32; 2],
+    pub point_light_count: u32,
+    pub _pad1: [u32; 3],
+    pub point_lights: [GpuPointLight; MAX_POINT_LIGHTS_GPU],
 }
 
 impl Default for EnvironmentUBO {
@@ -522,7 +538,13 @@ impl Default for EnvironmentUBO {
             ibl_ambient_scale: 3.0,
             debug_view_inputs: 0.0,
             debug_view_equation: 0.0,
-            _pad: 0,
+            _pad0: [0, 0],
+            point_light_count: 0,
+            _pad1: [0, 0, 0],
+            point_lights: [GpuPointLight {
+                position_range: Vec4::ZERO,
+                color_intensity: Vec4::ZERO,
+            }; MAX_POINT_LIGHTS_GPU],
         }
     }
 }
@@ -670,3 +692,15 @@ pub enum MaterialPass {
     Other,
     NULL,
 }
+
+// Compile-time layout assertions for UBO std140 alignment
+const _: () = {
+    assert!(
+        std::mem::size_of::<GpuPointLight>() == 32,
+        "GpuPointLight must be exactly 32 bytes"
+    );
+    assert!(
+        std::mem::size_of::<EnvironmentUBO>() % 16 == 0,
+        "EnvironmentUBO must be 16-byte aligned"
+    );
+};

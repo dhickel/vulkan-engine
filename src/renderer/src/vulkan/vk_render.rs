@@ -2103,6 +2103,32 @@ impl VkRenderCore {
         draw_lists.unlit_blend.sort_by(blend_sort);
     }
 
+    /// Build per-frame environment UBO with merged point lights from submission.
+    fn build_frame_environment_ubo(
+        base: &EnvironmentUBO,
+        submission: &RenderSubmission,
+    ) -> EnvironmentUBO {
+        use crate::data::gpu_data::{GpuPointLight, MAX_POINT_LIGHTS_GPU};
+        use crate::scene::render_submission::MAX_POINT_LIGHTS_GPU as SUBMISSION_MAX;
+
+        let mut env = *base;
+        let light_count = submission.point_lights.len().min(MAX_POINT_LIGHTS_GPU);
+        env.point_light_count = light_count as u32;
+        env.point_lights = [GpuPointLight {
+            position_range: glam::Vec4::ZERO,
+            color_intensity: glam::Vec4::ZERO,
+        }; MAX_POINT_LIGHTS_GPU];
+
+        for (i, light) in submission.point_lights.iter().take(MAX_POINT_LIGHTS_GPU).enumerate() {
+            env.point_lights[i] = GpuPointLight {
+                position_range: light.position.extend(light.range.max(0.001)),
+                color_intensity: light.color.max(glam::Vec3::ZERO).extend(light.intensity.max(0.0)),
+            };
+        }
+
+        env
+    }
+
     /// Record full geometry draw sequence including scene descriptor update and pipeline state changes.
     unsafe fn record_geometry_draw_sequence(
         &mut self,
@@ -2111,6 +2137,7 @@ impl VkRenderCore {
         rendering_info: &vk::RenderingInfo<'_>,
         draw_lists: &GeometryDrawLists,
         default_joint_desc: vk::DescriptorSet,
+        env_ubo: EnvironmentUBO,
     ) {
         self.device.cmd_begin_rendering(cmd_buffer, rendering_info);
 
@@ -2123,8 +2150,12 @@ impl VkRenderCore {
             return;
         };
 
-        let scene_desc =
-            scene_descriptors.update_scene_uniform(&self.device, self.scene_data, frame_index);
+        let scene_desc = scene_descriptors.update_scene_uniforms(
+            &self.device,
+            self.scene_data,
+            env_ubo,
+            frame_index,
+        );
 
         self.device
             .cmd_set_viewport(cmd_buffer, 0, self.window_state.get_viewport());
@@ -2280,6 +2311,21 @@ impl VkRenderCore {
             .unwrap()
             .get_default_joint_desc();
 
+        // Build per-frame environment UBO with point lights from submission
+        let base_env_ubo = self
+            .data_cache
+            .environment_cache
+            .lock()
+            .unwrap()
+            .get_env_map(self.active_env_id)
+            .ok()
+            .and_then(|opt| opt.as_ref())
+            .map(|env_maps| &env_maps.environment_ubo)
+            .copied()
+            .unwrap_or_default();
+
+        let frame_env_ubo = Self::build_frame_environment_ubo(&base_env_ubo, submission);
+
         unsafe {
             self.record_geometry_draw_sequence(
                 cmd_buffer,
@@ -2287,6 +2333,7 @@ impl VkRenderCore {
                 &rendering_info,
                 &draw_lists,
                 default_joint_desc,
+                frame_env_ubo,
             );
         }
     }
