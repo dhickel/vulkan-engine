@@ -57,10 +57,16 @@ Deep dives:
 - Graphics and present queues are currently treated as effectively shared in render path submission.
 - Shader compile-at-runtime path is disabled by default (uses precompiled `.spv` artifacts).
 - Startup loads a hardcoded asset and skybox resources.
-- Runtime debug selector for startup material path testing:
+- Runtime debug selector for parity + facade dogfooding:
   - `cargo run -- debug_runtime testpbr`
   - `cargo run -- debug_runtime testunlit`
   - `cargo run -- --debug-runtime=testunlit`
+  - `cargo run -- debug_runtime facade_pbr`
+  - `cargo run -- debug_runtime facade_unlit`
+  - `cargo run -- debug_runtime facade_model_load`
+  - `cargo run -p renderer --example demo_pbr`
+  - `cargo run -p renderer --example demo_unlit`
+  - `cargo run -p renderer --example demo_model_load`
 
 ## PBR and Radiance Reference Map
 

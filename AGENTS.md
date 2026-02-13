@@ -87,13 +87,22 @@ Use module-level docs for exact files/lines and safe editing strategy.
   - `cargo run -- debug_runtime testpbr`
   - `cargo run -- debug_runtime testunlit`
   - `cargo run -- --debug-runtime=testunlit`
+  - `cargo run -- debug_runtime facade_pbr`
+  - `cargo run -- debug_runtime facade_unlit`
+  - `cargo run -- debug_runtime facade_model_load`
+  - `cargo run -p renderer --example demo_pbr`
+  - `cargo run -p renderer --example demo_unlit`
+  - `cargo run -p renderer --example demo_model_load`
 
 ## Runtime Debug Scenarios
 
 - `debug_runtime` is the runtime test selector entrypoint for controlled render-path validation.
 - Current scenarios:
-  - `testpbr`: keep startup scene on PBR material/pipeline path.
-  - `testunlit`: force startup scene materials to Unlit pipeline path.
+  - `testpbr`: legacy parity baseline for startup PBR path.
+  - `testunlit`: legacy parity baseline for startup Unlit path.
+  - `facade_pbr`: facade-driven pbr demo path in `renderer::run()`.
+  - `facade_unlit`: facade runtime path with unlit startup parity behavior.
+  - `facade_model_load`: facade model load + scene fragment merge path.
 - This selector is intentionally extensible for future test scenarios; when adding new modes, keep this file and `src/renderer/AGENTS.md` in sync.
 
 Note: runtime validation of rendering features requires a Vulkan-capable environment.

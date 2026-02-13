@@ -17,6 +17,7 @@ pub use api::{
     SceneFragmentNodeId, SceneNodeId, TextureHandle,
 };
 
+use glam::{Mat4, Vec3};
 use log::{error, info, warn};
 use std::env;
 use std::time::{Duration, Instant};
@@ -26,10 +27,54 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
 
+const FACADE_DEMO_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHelmet.glb";
+const VALID_DEBUG_RUNTIME_LABELS: &str =
+    "default, testpbr, testunlit, facade_pbr, facade_unlit, facade_model_load";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum RuntimeScenario {
+    Legacy(DebugRuntimeMode),
+    FacadePbr,
+    FacadeUnlit,
+    FacadeModelLoad,
+}
+
+impl RuntimeScenario {
+    fn from_label(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Legacy(DebugRuntimeMode::Default)),
+            "testpbr" => Some(Self::Legacy(DebugRuntimeMode::TestPbr)),
+            "testunlit" => Some(Self::Legacy(DebugRuntimeMode::TestUnlit)),
+            "facade_pbr" => Some(Self::FacadePbr),
+            "facade_unlit" => Some(Self::FacadeUnlit),
+            "facade_model_load" => Some(Self::FacadeModelLoad),
+            _ => None,
+        }
+    }
+
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Legacy(mode) => mode.as_label(),
+            Self::FacadePbr => "facade_pbr",
+            Self::FacadeUnlit => "facade_unlit",
+            Self::FacadeModelLoad => "facade_model_load",
+        }
+    }
+
+    fn startup_debug_mode(self) -> DebugRuntimeMode {
+        match self {
+            Self::Legacy(mode) => mode,
+            // Keep unlit startup behavior for parity until explicit material-override API exists.
+            Self::FacadeUnlit => DebugRuntimeMode::TestUnlit,
+            Self::FacadePbr | Self::FacadeModelLoad => DebugRuntimeMode::Default,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 struct RuntimeFlags {
     compile_shaders: bool,
-    debug_runtime_mode: DebugRuntimeMode,
+    runtime_scenario: RuntimeScenario,
 }
 
 /// Initialize logger output once at startup for all runtime subsystems.
@@ -40,7 +85,7 @@ fn init_runtime_logging() {
         .init();
 }
 
-fn parse_debug_runtime_mode(args: &[String]) -> DebugRuntimeMode {
+fn parse_runtime_scenario(args: &[String]) -> RuntimeScenario {
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];
@@ -48,39 +93,39 @@ fn parse_debug_runtime_mode(args: &[String]) -> DebugRuntimeMode {
         if arg == "debug_runtime" || arg == "--debug-runtime" {
             let Some(value) = args.get(i + 1) else {
                 warn!(
-                    "Missing debug runtime mode after '{}'. Valid values: testpbr, testunlit",
-                    arg
+                    "Missing debug runtime mode after '{}'. Valid values: {}",
+                    arg, VALID_DEBUG_RUNTIME_LABELS
                 );
-                return DebugRuntimeMode::Default;
+                return RuntimeScenario::Legacy(DebugRuntimeMode::Default);
             };
 
-            if let Some(mode) = DebugRuntimeMode::from_label(value) {
+            if let Some(mode) = RuntimeScenario::from_label(value) {
                 return mode;
             }
 
             warn!(
-                "Unsupported debug runtime mode '{}'. Valid values: testpbr, testunlit",
-                value
+                "Unsupported debug runtime mode '{}'. Valid values: {}",
+                value, VALID_DEBUG_RUNTIME_LABELS
             );
-            return DebugRuntimeMode::Default;
+            return RuntimeScenario::Legacy(DebugRuntimeMode::Default);
         }
 
         if let Some(value) = arg.strip_prefix("--debug-runtime=") {
-            if let Some(mode) = DebugRuntimeMode::from_label(value) {
+            if let Some(mode) = RuntimeScenario::from_label(value) {
                 return mode;
             }
 
             warn!(
-                "Unsupported debug runtime mode '{}'. Valid values: testpbr, testunlit",
-                value
+                "Unsupported debug runtime mode '{}'. Valid values: {}",
+                value, VALID_DEBUG_RUNTIME_LABELS
             );
-            return DebugRuntimeMode::Default;
+            return RuntimeScenario::Legacy(DebugRuntimeMode::Default);
         }
 
         i += 1;
     }
 
-    DebugRuntimeMode::Default
+    RuntimeScenario::Legacy(DebugRuntimeMode::Default)
 }
 
 /// Parse runtime flags that alter renderer startup behavior.
@@ -92,23 +137,70 @@ fn parse_runtime_flags(args: &[String]) -> RuntimeFlags {
         })
         .unwrap_or(false);
     let rebuild_from_args = args.iter().any(|arg| arg == "--rebuild-shaders");
-    let debug_runtime_mode = parse_debug_runtime_mode(args);
+    let runtime_scenario = parse_runtime_scenario(args);
     let compile_shaders = rebuild_from_env || rebuild_from_args;
 
     if compile_shaders {
         info!("Shader rebuild requested (--rebuild-shaders or ENGINE_REBUILD_SHADERS=1).");
     }
 
-    if debug_runtime_mode != DebugRuntimeMode::Default {
+    if runtime_scenario != RuntimeScenario::Legacy(DebugRuntimeMode::Default) {
         info!(
             "Debug runtime mode selected: {}",
-            debug_runtime_mode.as_label()
+            runtime_scenario.as_label()
         );
     }
 
     RuntimeFlags {
         compile_shaders,
-        debug_runtime_mode,
+        runtime_scenario,
+    }
+}
+
+fn build_facade_model_scene(
+    renderer: &mut Renderer,
+    duplicate_instance: bool,
+) -> Result<Scene, RendererError> {
+    // Discard internal startup scene and rebuild through facade-only APIs for dogfooding.
+    let _ = renderer.take_startup_scene();
+    let mut scene = Scene::new();
+
+    let first_fragment = {
+        let mut assets = renderer.assets();
+        assets.load_model(FACADE_DEMO_MODEL_PATH)?
+    };
+    let first_mount = scene.merge_fragment(None, first_fragment)?;
+
+    if duplicate_instance {
+        let second_fragment = {
+            let mut assets = renderer.assets();
+            assets.load_model(FACADE_DEMO_MODEL_PATH)?
+        };
+        let second_mount = scene.merge_fragment(None, second_fragment)?;
+        scene.set_transform(
+            first_mount.mounted_root,
+            Mat4::from_translation(Vec3::new(-2.5, 0.0, 0.0)),
+        )?;
+        scene.set_transform(
+            second_mount.mounted_root,
+            Mat4::from_translation(Vec3::new(2.5, 0.0, 0.0)),
+        )?;
+    }
+
+    Ok(scene)
+}
+
+fn initialize_scene_for_runtime(
+    renderer: &mut Renderer,
+    runtime_scenario: RuntimeScenario,
+) -> Result<Scene, RendererError> {
+    match runtime_scenario {
+        RuntimeScenario::Legacy(_) => Ok(renderer.take_startup_scene().unwrap_or_else(Scene::new)),
+        RuntimeScenario::FacadePbr => Ok(renderer.take_startup_scene().unwrap_or_else(Scene::new)),
+        RuntimeScenario::FacadeUnlit => {
+            Ok(renderer.take_startup_scene().unwrap_or_else(Scene::new))
+        }
+        RuntimeScenario::FacadeModelLoad => build_facade_model_scene(renderer, true),
     }
 }
 
@@ -129,7 +221,7 @@ pub fn run() {
 
     let mut config = RendererConfig::default();
     config.compile_shaders = runtime_flags.compile_shaders;
-    config.shader_debug_mode = runtime_flags.debug_runtime_mode;
+    config.shader_debug_mode = runtime_flags.runtime_scenario.startup_debug_mode();
 
     let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()
@@ -155,7 +247,17 @@ pub fn run() {
         }
     };
 
-    let mut scene = renderer.take_startup_scene().unwrap_or_else(Scene::new);
+    let mut scene =
+        match initialize_scene_for_runtime(&mut renderer, runtime_flags.runtime_scenario) {
+            Ok(scene) => scene,
+            Err(err) => {
+                error!(
+                    "Failed to initialize runtime scene for '{}': {err}",
+                    runtime_flags.runtime_scenario.as_label()
+                );
+                return;
+            }
+        };
     let mut fps_timer = Instant::now();
     let mut frame_counter: u32 = 0;
 
