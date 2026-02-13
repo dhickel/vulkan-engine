@@ -12,7 +12,7 @@ use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
-use crate::data::gpu_data::TextureMeta;
+use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
@@ -723,6 +723,186 @@ impl<'a> AssetManager<'a> {
         Ok(())
     }
 
+    /// Create a PBR material from runtime-generated parameters.
+    ///
+    /// Thread: Main
+    /// May Stall: No
+    ///
+    /// Validates material parameters and creates a GPU-resident material. Material parameter
+    /// values are clamped to safe ranges (metallic [0,1], roughness [0.02,1], etc).
+    ///
+    /// Returns a stable MaterialHandle that can be used with mesh creation and scene nodes.
+    pub fn create_material_pbr(
+        &mut self,
+        desc: PbrMaterialDesc,
+    ) -> Result<MaterialHandle, AssetError> {
+        // Validate descriptor
+        validate_material_desc(&desc)?;
+
+        // Convert to internal MaterialMeta
+        let material_meta = material_desc_to_meta(&desc);
+
+        // Validate texture handles if provided
+        {
+            let texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+            for tex_handle in material_meta.texture_ids.to_vec() {
+                if tex_handle.slot >= TextureCache::DEFAULT_TEX_ITER_START as u32 {
+                    texture_cache
+                        .get_texture(tex_handle)
+                        .map_err(|err| map_cache_err("texture", tex_handle.slot, tex_handle.generation, err))?;
+                }
+            }
+        }
+
+        // Add material to cache
+        let material_id = {
+            let mut texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+            texture_cache.add_material(material_meta)
+        };
+
+        // Allocate GPU resources
+        let allocation_result = {
+            let mut texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+            texture_cache.allocate_id(material_id, BufferPlacement::ContiguousPreferred, false)
+        };
+
+        // Handle allocation failure
+        match allocation_result {
+            LoadResult::Success(_) => Ok(material_id),
+            LoadResult::Failed(_) => {
+                // Rollback: deallocate the material
+                let mut texture_cache = self
+                    .core
+                    .data_cache
+                    .texture_cache
+                    .lock()
+                    .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+                texture_cache.deallocate_materials(vec![material_id]);
+
+                Err(AssetError::Internal(
+                    "material GPU allocation failed".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Upload a procedural mesh to the GPU.
+    ///
+    /// Thread: Main
+    /// May Stall: No
+    ///
+    /// Validates mesh data (non-empty, valid indices, finite values) and uploads to GPU.
+    /// If a material handle is provided, it must be valid and loaded.
+    ///
+    /// Returns a stable MeshHandle that can be attached to scene nodes.
+    pub fn upload_procedural_mesh(
+        &mut self,
+        mesh: ProceduralMeshData,
+    ) -> Result<MeshHandle, AssetError> {
+        // Validate mesh data
+        validate_procedural_mesh(&mesh)?;
+
+        // Validate material handle if provided
+        if let Some(material_handle) = mesh.material {
+            let texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+            // Verify material exists
+            texture_cache
+                .get_material(material_handle)
+                .map_err(|err| {
+                    map_cache_err("material", material_handle.slot, material_handle.generation, err)
+                })?;
+
+            // Verify material is loaded (not just cached)
+            texture_cache
+                .get_loaded_material(material_handle)
+                .map_err(|err| {
+                    map_cache_err("material", material_handle.slot, material_handle.generation, err)
+                })?;
+        }
+
+        // Convert vertices to internal format
+        let vertices: Vec<Vertex> = mesh
+            .vertices
+            .iter()
+            .map(procedural_vertex_to_gpu)
+            .collect();
+
+        // Create internal MeshMeta
+        let mesh_meta = MeshMeta {
+            name: mesh.name,
+            indices: mesh.indices,
+            vertices,
+            material_index: mesh.material,
+        };
+
+        // Add mesh to cache
+        let mesh_id = {
+            let mut mesh_cache = self
+                .core
+                .data_cache
+                .mesh_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+
+            mesh_cache.add(mesh_meta)
+        };
+
+        // Allocate GPU resources
+        let allocation_result = {
+            let mut mesh_cache = self
+                .core
+                .data_cache
+                .mesh_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+
+            mesh_cache.allocate_id(mesh_id, BufferPlacement::ContiguousPreferred, false)
+        };
+
+        // Handle allocation failure
+        match allocation_result {
+            LoadResult::Success(_) => Ok(mesh_id),
+            LoadResult::Failed(_) => {
+                // Rollback: deallocate the mesh
+                let mut mesh_cache = self
+                    .core
+                    .data_cache
+                    .mesh_cache
+                    .lock()
+                    .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+
+                mesh_cache.deallocate_id(mesh_id);
+
+                Err(AssetError::Internal("mesh GPU allocation failed".to_string()))
+            }
+        }
+    }
+
     fn run_sync_upload_task<T, F>(&mut self, task: F) -> Result<T, AssetError>
     where
         T: Send + 'static,
@@ -1000,4 +1180,437 @@ fn map_cache_err(
 
 fn poisoned_lock_err(lock_name: &str) -> AssetError {
     AssetError::Sync(format!("{lock_name} lock poisoned"))
+}
+
+//////////////////////////////////
+// PROCEDURAL ASSET PUBLIC API //
+//////////////////////////////////
+
+/// Public vertex format for procedural mesh creation.
+///
+/// This is the facade type exposed to library consumers. It converts to the internal
+/// `Vertex` type which has additional fields for advanced features like skinning.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProceduralVertex {
+    pub position: glam::Vec3,
+    pub normal: glam::Vec3,
+    pub tangent: glam::Vec4,
+    pub uv0: glam::Vec2,
+    pub color: glam::Vec4,
+}
+
+/// PBR material descriptor for runtime material creation.
+///
+/// All texture handles are optional. When `None`, the renderer will use default textures.
+/// Factor values will be clamped to safe ranges during material creation.
+#[derive(Clone, Debug)]
+pub struct PbrMaterialDesc {
+    pub base_color: glam::Vec4,
+    pub metallic: f32,
+    pub roughness: f32,
+    pub base_color_tex: Option<TextureHandle>,
+    pub normal_tex: Option<TextureHandle>,
+    pub metallic_roughness_tex: Option<TextureHandle>,
+    pub ao_tex: Option<TextureHandle>,
+    pub emissive_tex: Option<TextureHandle>,
+    pub emissive_factor: glam::Vec3,
+    pub emissive_strength: f32,
+}
+
+impl Default for PbrMaterialDesc {
+    fn default() -> Self {
+        Self {
+            base_color: glam::Vec4::ONE,
+            metallic: 0.0,
+            roughness: 0.5,
+            base_color_tex: None,
+            normal_tex: None,
+            metallic_roughness_tex: None,
+            ao_tex: None,
+            emissive_tex: None,
+            emissive_factor: glam::Vec3::ZERO,
+            emissive_strength: 0.0,
+        }
+    }
+}
+
+/// Procedural mesh data container for runtime mesh creation.
+///
+/// Vertices and indices must form valid triangles. The renderer will validate:
+/// - Non-empty vertices and indices
+/// - Index count divisible by 3 (complete triangles)
+/// - All indices within bounds
+/// - All vertex components are finite (no NaN/Inf)
+/// - Tangent.w is either +1.0 or -1.0
+#[derive(Clone, Debug, Default)]
+pub struct ProceduralMeshData {
+    pub name: String,
+    pub vertices: Vec<ProceduralVertex>,
+    pub indices: Vec<u32>,
+    pub material: Option<MaterialHandle>,
+}
+
+/// Validate a PBR material descriptor.
+fn validate_material_desc(desc: &PbrMaterialDesc) -> Result<(), AssetError> {
+    // Check for non-finite values
+    if !desc.metallic.is_finite() {
+        return Err(AssetError::Internal(
+            "material metallic factor is not finite".to_string(),
+        ));
+    }
+    if !desc.roughness.is_finite() {
+        return Err(AssetError::Internal(
+            "material roughness factor is not finite".to_string(),
+        ));
+    }
+    if !desc.emissive_strength.is_finite() || desc.emissive_strength < 0.0 {
+        return Err(AssetError::Internal(
+            "material emissive strength is not finite or negative".to_string(),
+        ));
+    }
+
+    // Check color vector for NaN/Inf
+    if !desc.base_color.is_finite() {
+        return Err(AssetError::Internal(
+            "material base color contains non-finite values".to_string(),
+        ));
+    }
+    if !desc.emissive_factor.is_finite() {
+        return Err(AssetError::Internal(
+            "material emissive factor contains non-finite values".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate procedural mesh data.
+fn validate_procedural_mesh(mesh: &ProceduralMeshData) -> Result<(), AssetError> {
+    let name = if mesh.name.is_empty() {
+        "unnamed mesh"
+    } else {
+        mesh.name.as_str()
+    };
+
+    // Check for empty buffers
+    if mesh.vertices.is_empty() {
+        return Err(AssetError::Internal(format!(
+            "procedural mesh '{}' has empty vertex buffer",
+            name
+        )));
+    }
+
+    if mesh.indices.is_empty() {
+        return Err(AssetError::Internal(format!(
+            "procedural mesh '{}' has empty index buffer",
+            name
+        )));
+    }
+
+    // Check index count divisible by 3
+    if mesh.indices.len() % 3 != 0 {
+        return Err(AssetError::Internal(format!(
+            "procedural mesh '{}' index count ({}) is not divisible by 3 (incomplete triangles)",
+            name,
+            mesh.indices.len()
+        )));
+    }
+
+    // Check for out-of-bounds indices
+    let vertex_count = mesh.vertices.len();
+    for (i, &index) in mesh.indices.iter().enumerate() {
+        if (index as usize) >= vertex_count {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' has out-of-bounds index at position {}: index {} exceeds vertex count {}",
+                name, i, index, vertex_count
+            )));
+        }
+    }
+
+    // Validate vertex data
+    for (i, vertex) in mesh.vertices.iter().enumerate() {
+        if !vertex.position.is_finite() {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has non-finite position",
+                name, i
+            )));
+        }
+        if !vertex.normal.is_finite() {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has non-finite normal",
+                name, i
+            )));
+        }
+        if !vertex.tangent.is_finite() {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has non-finite tangent",
+                name, i
+            )));
+        }
+        if !vertex.uv0.is_finite() {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has non-finite UV coordinates",
+                name, i
+            )));
+        }
+        if !vertex.color.is_finite() {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has non-finite color",
+                name, i
+            )));
+        }
+
+        // Validate tangent handedness (w component must be +1.0 or -1.0)
+        let tangent_w = vertex.tangent.w;
+        if (tangent_w - 1.0).abs() > 0.01 && (tangent_w + 1.0).abs() > 0.01 {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has invalid tangent.w ({}), must be +1.0 or -1.0",
+                name, i, tangent_w
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert PbrMaterialDesc to internal MaterialMeta with clamping.
+fn material_desc_to_meta(desc: &PbrMaterialDesc) -> MaterialMeta {
+    let mut meta = MaterialMeta::default();
+
+    // Clamp base color channels to [0.0, 1.0]
+    meta.material_values.base_color_factor = desc.base_color.clamp(
+        glam::Vec4::ZERO,
+        glam::Vec4::ONE,
+    );
+
+    // Clamp metallic to [0.0, 1.0]
+    meta.material_values.metallic_factor = desc.metallic.clamp(0.0, 1.0);
+
+    // Clamp roughness to [0.02, 1.0] (practical minimum to avoid specular aliasing)
+    meta.material_values.roughness_factor = desc.roughness.clamp(0.02, 1.0);
+
+    // Emissive factor (no upper clamp, but ensure non-negative)
+    meta.material_values.emissive_factor = desc.emissive_factor.max(glam::Vec3::ZERO).extend(0.0);
+    meta.material_values.emissive_strength = desc.emissive_strength.max(0.0);
+
+    // Set texture handles if provided
+    if let Some(tex) = desc.base_color_tex {
+        meta.texture_ids.base_color = tex;
+        meta.material_values.base_color_uv_set = 0;
+    }
+
+    if let Some(tex) = desc.metallic_roughness_tex {
+        meta.texture_ids.metallic_roughness = tex;
+        meta.material_values.met_rough_uv_set = 0;
+    }
+
+    if let Some(tex) = desc.normal_tex {
+        meta.texture_ids.normal_map = tex;
+        meta.material_values.normal_uv_set = 0;
+    }
+
+    if let Some(tex) = desc.ao_tex {
+        meta.texture_ids.occlusion_map = tex;
+        meta.material_values.occlusion_uv_set = 0;
+    }
+
+    if let Some(tex) = desc.emissive_tex {
+        meta.texture_ids.emissive_map = tex;
+        meta.material_values.emissive_uv_set = 0;
+    }
+
+    meta
+}
+
+/// Convert ProceduralVertex to internal Vertex format.
+fn procedural_vertex_to_gpu(v: &ProceduralVertex) -> Vertex {
+    Vertex {
+        position: v.position,
+        uv0_x: v.uv0.x,
+        normal: v.normal,
+        uv0_y: v.uv0.y,
+        color: v.color,
+        tangent: v.tangent,
+        joints: glam::UVec4::ZERO,
+        weights: glam::Vec4::ZERO,
+        uv1_x: 0.0,
+        uv1_y: 0.0,
+        _pad: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_desc_clamps_metallic_and_roughness() {
+        let desc = PbrMaterialDesc {
+            metallic: 1.5,      // Should clamp to 1.0
+            roughness: -0.5,    // Should clamp to 0.02
+            ..Default::default()
+        };
+
+        let meta = material_desc_to_meta(&desc);
+        assert_eq!(meta.material_values.metallic_factor, 1.0);
+        assert_eq!(meta.material_values.roughness_factor, 0.02);
+    }
+
+    #[test]
+    fn material_desc_rejects_non_finite() {
+        let desc_nan_metallic = PbrMaterialDesc {
+            metallic: f32::NAN,
+            ..Default::default()
+        };
+        assert!(validate_material_desc(&desc_nan_metallic).is_err());
+
+        let desc_inf_roughness = PbrMaterialDesc {
+            roughness: f32::INFINITY,
+            ..Default::default()
+        };
+        assert!(validate_material_desc(&desc_inf_roughness).is_err());
+
+        let desc_neg_emissive = PbrMaterialDesc {
+            emissive_strength: -1.0,
+            ..Default::default()
+        };
+        assert!(validate_material_desc(&desc_neg_emissive).is_err());
+
+        let desc_nan_color = PbrMaterialDesc {
+            base_color: glam::Vec4::new(f32::NAN, 1.0, 1.0, 1.0),
+            ..Default::default()
+        };
+        assert!(validate_material_desc(&desc_nan_color).is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_rejects_empty_buffers() {
+        let empty_vertices = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![],
+            indices: vec![0, 1, 2],
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&empty_vertices).is_err());
+
+        let empty_indices = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![ProceduralVertex::default()],
+            indices: vec![],
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&empty_indices).is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_rejects_non_triangle_index_count() {
+        let mesh = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![
+                ProceduralVertex::default(),
+                ProceduralVertex::default(),
+            ],
+            indices: vec![0, 1], // Only 2 indices, not divisible by 3
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&mesh).is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_rejects_out_of_bounds_index() {
+        let mesh = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![
+                ProceduralVertex::default(),
+                ProceduralVertex::default(),
+            ],
+            indices: vec![0, 1, 5], // Index 5 is out of bounds (only 2 vertices)
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&mesh).is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_rejects_non_finite_vertex() {
+        let mut mesh = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![ProceduralVertex {
+                position: glam::Vec3::new(f32::NAN, 0.0, 0.0),
+                normal: glam::Vec3::Y,
+                tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                uv0: glam::Vec2::ZERO,
+                color: glam::Vec4::ONE,
+            }],
+            indices: vec![0, 0, 0],
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&mesh).is_err());
+
+        mesh.vertices[0].position = glam::Vec3::ZERO;
+        mesh.vertices[0].normal = glam::Vec3::new(f32::INFINITY, 0.0, 0.0);
+        assert!(validate_procedural_mesh(&mesh).is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_rejects_invalid_tangent_w() {
+        let mesh = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![ProceduralVertex {
+                position: glam::Vec3::ZERO,
+                normal: glam::Vec3::Y,
+                tangent: glam::Vec4::new(1.0, 0.0, 0.0, 0.5), // Invalid w component
+                uv0: glam::Vec2::ZERO,
+                color: glam::Vec4::ONE,
+            }],
+            indices: vec![0, 0, 0],
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&mesh).is_err());
+    }
+
+    #[test]
+    fn procedural_mesh_accepts_valid_data() {
+        let mesh = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![
+                ProceduralVertex {
+                    position: glam::Vec3::new(0.0, 0.0, 0.0),
+                    normal: glam::Vec3::Y,
+                    tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                    uv0: glam::Vec2::ZERO,
+                    color: glam::Vec4::ONE,
+                },
+                ProceduralVertex {
+                    position: glam::Vec3::new(1.0, 0.0, 0.0),
+                    normal: glam::Vec3::Y,
+                    tangent: glam::Vec4::new(1.0, 0.0, 0.0, -1.0),
+                    uv0: glam::Vec2::ZERO,
+                    color: glam::Vec4::ONE,
+                },
+                ProceduralVertex {
+                    position: glam::Vec3::new(0.0, 0.0, 1.0),
+                    normal: glam::Vec3::Y,
+                    tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+                    uv0: glam::Vec2::ZERO,
+                    color: glam::Vec4::ONE,
+                },
+            ],
+            indices: vec![0, 1, 2],
+            material: None,
+        };
+        assert!(validate_procedural_mesh(&mesh).is_ok());
+    }
+
+    #[test]
+    fn material_desc_accepts_valid_data() {
+        let desc = PbrMaterialDesc {
+            base_color: glam::Vec4::ONE,
+            metallic: 0.5,
+            roughness: 0.5,
+            emissive_factor: glam::Vec3::new(1.0, 0.5, 0.0),
+            emissive_strength: 2.0,
+            ..Default::default()
+        };
+        assert!(validate_material_desc(&desc).is_ok());
+    }
 }

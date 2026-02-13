@@ -11,7 +11,10 @@ pub mod advanced;
 
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
 pub use crate::scene::SceneNodeId;
-pub use assets::{AssetManager, EnvironmentSource, EnvironmentState};
+pub use assets::{
+    AssetManager, EnvironmentSource, EnvironmentState, PbrMaterialDesc, ProceduralMeshData,
+    ProceduralVertex,
+};
 pub use config::{DebugRuntimeMode, RendererConfig};
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
