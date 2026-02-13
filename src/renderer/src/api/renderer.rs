@@ -13,6 +13,7 @@ use crate::data::camera::{Camera, FPSController};
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
+use super::assets::AssetManager;
 use super::config::RendererConfig;
 use super::errors::{
     map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, HookError,
@@ -225,6 +226,12 @@ impl Renderer {
     /// May Stall: No
     pub fn take_startup_scene(&mut self) -> Option<Scene> {
         self.startup_scene.take()
+    }
+
+    /// Thread: Main
+    /// May Stall: No
+    pub fn assets(&mut self) -> AssetManager<'_> {
+        AssetManager::new(&mut self.runtime.core)
     }
 
     /// Thread: Main

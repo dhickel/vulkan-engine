@@ -12,9 +12,9 @@ mod vulkan;
 
 pub use api::{
     AssetError, AssetManager, DebugRuntimeMode, EnvironmentHandle, FrameContext, HookError,
-    MeshHandle, Renderer, RendererConfig, RendererError, RendererFrameError, RendererInitError,
-    Scene, SceneError, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId,
-    SceneNodeId,
+    MaterialHandle, MeshHandle, Renderer, RendererConfig, RendererError, RendererFrameError,
+    RendererInitError, Scene, SceneError, SceneFragment, SceneFragmentMount, SceneFragmentNode,
+    SceneFragmentNodeId, SceneNodeId, TextureHandle,
 };
 
 use log::{error, info, warn};

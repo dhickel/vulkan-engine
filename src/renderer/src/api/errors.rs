@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
 
 use crate::scene::scene_world::SceneNodeId;
 
@@ -139,7 +140,45 @@ impl Error for SceneError {}
 
 #[derive(Debug)]
 pub enum AssetError {
-    Load(String),
+    Load {
+        path: Option<PathBuf>,
+        message: String,
+    },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
+    Decode {
+        path: PathBuf,
+        message: String,
+    },
+    InvalidHandle {
+        resource: &'static str,
+        slot: u32,
+        generation: u32,
+    },
+    StaleHandle {
+        resource: &'static str,
+        slot: u32,
+        generation: u32,
+    },
+    NotLoaded {
+        resource: &'static str,
+        slot: u32,
+        generation: u32,
+    },
+    OutOfBounds {
+        resource: &'static str,
+        slot: u32,
+        generation: u32,
+    },
+    ReservedHandle {
+        resource: &'static str,
+        slot: u32,
+        generation: u32,
+    },
+    Cache(String),
+    Sync(String),
     Unsupported(String),
     Internal(String),
 }
@@ -147,7 +186,61 @@ pub enum AssetError {
 impl Display for AssetError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Load(msg) => write!(f, "{msg}"),
+            Self::Load { path, message } => {
+                if let Some(path) = path {
+                    write!(f, "asset load failed for '{}': {message}", path.display())
+                } else {
+                    write!(f, "asset load failed: {message}")
+                }
+            }
+            Self::Io { path, message } => {
+                write!(f, "asset io failed for '{}': {message}", path.display())
+            }
+            Self::Decode { path, message } => {
+                write!(f, "asset decode failed for '{}': {message}", path.display())
+            }
+            Self::InvalidHandle {
+                resource,
+                slot,
+                generation,
+            } => write!(
+                f,
+                "invalid {resource} handle (slot={slot}, generation={generation})"
+            ),
+            Self::StaleHandle {
+                resource,
+                slot,
+                generation,
+            } => write!(
+                f,
+                "stale {resource} handle (slot={slot}, generation={generation})"
+            ),
+            Self::NotLoaded {
+                resource,
+                slot,
+                generation,
+            } => write!(
+                f,
+                "{resource} handle is not loaded (slot={slot}, generation={generation})"
+            ),
+            Self::OutOfBounds {
+                resource,
+                slot,
+                generation,
+            } => write!(
+                f,
+                "{resource} handle is out of bounds (slot={slot}, generation={generation})"
+            ),
+            Self::ReservedHandle {
+                resource,
+                slot,
+                generation,
+            } => write!(
+                f,
+                "cannot unload reserved {resource} handle (slot={slot}, generation={generation})"
+            ),
+            Self::Cache(msg) => write!(f, "cache operation failed: {msg}"),
+            Self::Sync(msg) => write!(f, "asset synchronization failed: {msg}"),
             Self::Unsupported(msg) => write!(f, "{msg}"),
             Self::Internal(msg) => write!(f, "{msg}"),
         }

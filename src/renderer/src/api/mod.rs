@@ -7,7 +7,7 @@ mod scene;
 #[cfg(feature = "advanced-interop")]
 pub mod advanced;
 
-pub use crate::data::handles::{EnvironmentHandle, MeshHandle};
+pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
 pub use crate::scene::SceneNodeId;
 pub use assets::AssetManager;
 pub use config::{DebugRuntimeMode, RendererConfig};

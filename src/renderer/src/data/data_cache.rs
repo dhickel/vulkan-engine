@@ -1135,6 +1135,14 @@ impl TextureCache {
         self.deallocate_textures_with_policy(texture_ids, true);
     }
 
+    pub fn deallocate_texture(&mut self, texture_id: TextureHandle) {
+        self.deallocate_textures(vec![texture_id]);
+    }
+
+    pub fn deallocate_textures_safe(&mut self, texture_ids: Vec<TextureHandle>) {
+        self.deallocate_textures(texture_ids);
+    }
+
     /// Unsafe because this can destroy reserved/default texture slots relied on by engine code.
     pub unsafe fn deallocate_textures_unchecked(&mut self, texture_ids: Vec<TextureHandle>) {
         self.deallocate_textures_with_policy(texture_ids, false);
