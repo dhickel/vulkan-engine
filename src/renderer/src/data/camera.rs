@@ -69,6 +69,10 @@ impl Camera {
         self.position
     }
 
+    pub fn set_position(&mut self, position: Vec3) {
+        self.position = position;
+    }
+
     pub fn update_rotation(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw += delta_x;
         self.pitch += delta_y;
@@ -133,6 +137,10 @@ impl FPSController {
 
     pub fn get_camera(&self) -> &Camera {
         &self.camera
+    }
+
+    pub fn get_camera_mut(&mut self) -> &mut Camera {
+        &mut self.camera
     }
 
     pub fn update(&mut self, delta_seconds: f32) {

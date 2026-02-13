@@ -456,6 +456,24 @@ impl Renderer {
     fn clear_resize_skip_state(&mut self) {
         self.resize_skip_state_logged = false;
     }
+
+    /// Get current camera position in world space
+    ///
+    /// Thread: Main
+    /// May Stall: No
+    pub fn camera_position(&self) -> glam::Vec3 {
+        let controller = self.runtime.core.window_state.controller.borrow();
+        controller.get_camera().get_position()
+    }
+
+    /// Set camera position in world space
+    ///
+    /// Thread: Main
+    /// May Stall: No
+    pub fn set_camera_position(&mut self, position: glam::Vec3) {
+        let mut controller = self.runtime.core.window_state.controller.borrow_mut();
+        controller.get_camera_mut().set_position(position);
+    }
 }
 
 fn create_window_state(window: &Window, config: &RendererConfig) -> (VkWindowState, InputManager) {
