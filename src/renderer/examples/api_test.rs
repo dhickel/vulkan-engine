@@ -1,5 +1,5 @@
 use log::{error, info};
-use renderer::{Renderer, RendererConfig, RendererError, Scene};
+use renderer::{FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene};
 use std::env;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
@@ -81,19 +81,28 @@ fn main() {
                             }
                         }
                         WindowEvent::RedrawRequested => {
-                            if let Err(err) = render_frame(&mut renderer, &window, &mut scene) {
-                                error!("Render failed: {err}");
-                                control_flow.exit();
-                                return;
+                            let outcome = match render_frame(&mut renderer, &window, &mut scene) {
+                                Ok(outcome) => outcome,
+                                Err(err) => {
+                                    error!("Render failed: {err}");
+                                    control_flow.exit();
+                                    return;
+                                }
+                            };
+
+                            if outcome == FrameRenderOutcome::Rendered {
+                                frame_counter = frame_counter.wrapping_add(1);
+                                if fps_timer.elapsed() >= Duration::from_secs(1) {
+                                    window.set_title(
+                                        format!("{} - FPS: {}", app_name, frame_counter).as_str(),
+                                    );
+                                    fps_timer = Instant::now();
+                                    frame_counter = 0;
+                                }
                             }
 
-                            frame_counter = frame_counter.wrapping_add(1);
-                            if fps_timer.elapsed() >= Duration::from_secs(1) {
-                                window.set_title(
-                                    format!("{} - FPS: {}", app_name, frame_counter).as_str(),
-                                );
-                                fps_timer = Instant::now();
-                                frame_counter = 0;
+                            if outcome == FrameRenderOutcome::SkippedResizePending {
+                                window.set_title(format!("{} - resizing...", app_name).as_str());
                             }
 
                             window.request_redraw();
@@ -111,11 +120,11 @@ fn render_frame(
     renderer: &mut Renderer,
     window: &Window,
     scene: &mut Scene,
-) -> Result<(), RendererError> {
+) -> Result<FrameRenderOutcome, RendererError> {
     let mut frame = renderer.begin_frame(window)?;
-    renderer.render_scene_in_frame(&mut frame, scene)?;
+    let outcome = renderer.render_scene_in_frame(&mut frame, scene)?;
     renderer.end_frame(frame)?;
-    Ok(())
+    Ok(outcome)
 }
 
 fn init_logging() {

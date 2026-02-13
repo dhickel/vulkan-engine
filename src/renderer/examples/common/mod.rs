@@ -2,7 +2,9 @@
 
 use glam::{Mat4, Vec3};
 use log::{error, info};
-use renderer::{DebugRuntimeMode, Renderer, RendererConfig, RendererError, Scene};
+use renderer::{
+    DebugRuntimeMode, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
+};
 use std::env;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
@@ -118,19 +120,28 @@ pub fn run_demo(scenario: DemoScenario) {
                             }
                         }
                         WindowEvent::RedrawRequested => {
-                            if let Err(err) = renderer.render_scene(&window, &mut scene) {
-                                error!("Render failed: {err}");
-                                control_flow.exit();
-                                return;
+                            let outcome = match renderer.render_scene(&window, &mut scene) {
+                                Ok(outcome) => outcome,
+                                Err(err) => {
+                                    error!("Render failed: {err}");
+                                    control_flow.exit();
+                                    return;
+                                }
+                            };
+
+                            if outcome == FrameRenderOutcome::Rendered {
+                                frame_counter = frame_counter.wrapping_add(1);
+                                if fps_timer.elapsed() >= Duration::from_secs(1) {
+                                    window.set_title(
+                                        format!("{} - FPS: {}", app_name, frame_counter).as_str(),
+                                    );
+                                    fps_timer = Instant::now();
+                                    frame_counter = 0;
+                                }
                             }
 
-                            frame_counter = frame_counter.wrapping_add(1);
-                            if fps_timer.elapsed() >= Duration::from_secs(1) {
-                                window.set_title(
-                                    format!("{} - FPS: {}", app_name, frame_counter).as_str(),
-                                );
-                                fps_timer = Instant::now();
-                                frame_counter = 0;
+                            if outcome == FrameRenderOutcome::SkippedResizePending {
+                                window.set_title(format!("{} - resizing...", app_name).as_str());
                             }
 
                             window.request_redraw();

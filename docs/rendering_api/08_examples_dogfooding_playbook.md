@@ -23,6 +23,7 @@ cargo run -p renderer --example demo_async_loading
 
 - `api_test`
   - Explicit frame lifecycle (`begin_frame`, `render_scene_in_frame`, `end_frame`)
+  - Handles `FrameRenderOutcome` (`Rendered` vs `SkippedResizePending`) in redraw loop
   - Input + resize integration shape
 - `demo_pbr`
   - Startup scene PBR path

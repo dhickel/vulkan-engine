@@ -203,7 +203,7 @@ impl SceneWorld {
 
         // Parent world transform must be resolved before recursing into children.
         // Children multiply against this exact value, so order is critical.
-        self.refresh_world_recursive(root_id, Mat4::IDENTITY);
+        self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
         self.collect_draw_items_recursive(root_id, &mut submission);
 
         submission
@@ -261,23 +261,29 @@ impl SceneWorld {
         true
     }
 
-    fn refresh_world_recursive(&mut self, node_id: SceneNodeId, parent_world: Mat4) {
-        let Some((world, children)) = ({
+    fn refresh_world_recursive(
+        &mut self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        parent_dirty: bool,
+    ) {
+        let Some((world, children, propagate_dirty)) = ({
             let Some(node) = self.get_node_mut(node_id) else {
                 return;
             };
-            if node.dirty {
+            let effective_dirty = node.dirty || parent_dirty;
+            if effective_dirty {
                 node.world_transform = parent_world.mul_mat4(&node.local_transform);
                 node.dirty = false;
             }
-            Some((node.world_transform, node.children.clone()))
+            Some((node.world_transform, node.children.clone(), effective_dirty))
         }) else {
             return;
         };
 
         for child in children {
             if self.is_valid_node_id(child) {
-                self.refresh_world_recursive(child, world);
+                self.refresh_world_recursive(child, world, propagate_dirty);
             }
         }
     }
@@ -309,6 +315,8 @@ impl SceneWorld {
 #[cfg(test)]
 mod tests {
     use super::{SceneNode, SceneNodeId, SceneWorld};
+    use crate::data::handles::MeshHandle;
+    use glam::{Mat4, Vec3};
 
     #[test]
     fn remove_marks_old_handle_stale_after_slot_reuse() {
@@ -350,5 +358,93 @@ mod tests {
         // Should not panic even when a stale child handle is present.
         let submission = scene.build_submission();
         assert!(submission.draw_items.is_empty());
+    }
+
+    #[test]
+    fn parent_transform_update_recomputes_child_world_transform() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            SceneNode {
+                local_transform: Mat4::IDENTITY,
+                ..SceneNode::default()
+            },
+        );
+        let child = scene.add_node(
+            Some(root),
+            SceneNode {
+                local_transform: Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                meshes: vec![MeshHandle::new(1, 0)],
+                ..SceneNode::default()
+            },
+        );
+        scene.set_root(root);
+
+        let initial_submission = scene.build_submission();
+        assert_eq!(initial_submission.draw_items.len(), 1);
+        assert_eq!(
+            initial_submission.draw_items[0].transform,
+            Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0))
+        );
+
+        {
+            let root_node = scene.get_node_mut(root).expect("root should exist");
+            root_node.local_transform = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0));
+            root_node.dirty = true;
+        }
+        assert!(!scene.get_node(child).expect("child should exist").dirty);
+
+        let moved_submission = scene.build_submission();
+        assert_eq!(moved_submission.draw_items.len(), 1);
+        assert_eq!(
+            moved_submission.draw_items[0].transform,
+            Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn parent_dirty_propagates_through_grandchild_chain() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            SceneNode {
+                local_transform: Mat4::IDENTITY,
+                ..SceneNode::default()
+            },
+        );
+        let child = scene.add_node(
+            Some(root),
+            SceneNode {
+                local_transform: Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                ..SceneNode::default()
+            },
+        );
+        scene.add_node(
+            Some(child),
+            SceneNode {
+                local_transform: Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+                meshes: vec![MeshHandle::new(2, 0)],
+                ..SceneNode::default()
+            },
+        );
+        scene.set_root(root);
+
+        let initial_submission = scene.build_submission();
+        assert_eq!(initial_submission.draw_items.len(), 1);
+        assert_eq!(
+            initial_submission.draw_items[0].transform,
+            Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0))
+        );
+
+        let root_node = scene.get_node_mut(root).expect("root should exist");
+        root_node.local_transform = Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0));
+        root_node.dirty = true;
+
+        let moved_submission = scene.build_submission();
+        assert_eq!(moved_submission.draw_items.len(), 1);
+        assert_eq!(
+            moved_submission.draw_items[0].transform,
+            Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0))
+        );
     }
 }

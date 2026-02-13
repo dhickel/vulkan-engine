@@ -8,8 +8,9 @@ mod vulkan;
 
 pub use api::{
     AssetError, AssetManager, DebugRuntimeMode, EnvironmentHandle, EnvironmentRuntimeStatus,
-    EnvironmentSource, EnvironmentState, FrameContext, HookError, LoadStatus, LoadTicket,
-    MaterialHandle, MeshHandle, RenderHook, RenderHookContext, Renderer, RendererConfig,
-    RendererError, RendererFrameError, RendererInitError, Scene, SceneError, SceneFragment,
-    SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeId, TextureHandle,
+    EnvironmentSource, EnvironmentState, FrameContext, FrameRenderOutcome, HookError, LoadStatus,
+    LoadTicket, MaterialHandle, MeshHandle, RenderHook, RenderHookContext, Renderer,
+    RendererConfig, RendererError, RendererFrameError, RendererInitError, Scene, SceneError,
+    SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeId,
+    TextureHandle,
 };

@@ -1,5 +1,7 @@
 use log::{error, info, warn};
-use renderer::{LoadStatus, LoadTicket, Renderer, RendererConfig, RendererError, Scene};
+use renderer::{
+    FrameRenderOutcome, LoadStatus, LoadTicket, Renderer, RendererConfig, RendererError, Scene,
+};
 use std::env;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
@@ -110,28 +112,37 @@ fn main() {
                                 return;
                             }
 
-                            if let Err(err) = renderer.render_scene(&window, &mut scene) {
-                                error!("Render failed: {err}");
-                                control_flow.exit();
-                                return;
+                            let outcome = match renderer.render_scene(&window, &mut scene) {
+                                Ok(outcome) => outcome,
+                                Err(err) => {
+                                    error!("Render failed: {err}");
+                                    control_flow.exit();
+                                    return;
+                                }
+                            };
+
+                            if outcome == FrameRenderOutcome::Rendered {
+                                frame_counter = frame_counter.wrapping_add(1);
+                                if fps_timer.elapsed() >= Duration::from_secs(1) {
+                                    let state_label = if load_state.model_mounted {
+                                        "ready"
+                                    } else {
+                                        "loading"
+                                    };
+                                    window.set_title(
+                                        format!(
+                                            "{} - {} - FPS: {}",
+                                            app_name, state_label, frame_counter
+                                        )
+                                        .as_str(),
+                                    );
+                                    fps_timer = Instant::now();
+                                    frame_counter = 0;
+                                }
                             }
 
-                            frame_counter = frame_counter.wrapping_add(1);
-                            if fps_timer.elapsed() >= Duration::from_secs(1) {
-                                let state_label = if load_state.model_mounted {
-                                    "ready"
-                                } else {
-                                    "loading"
-                                };
-                                window.set_title(
-                                    format!(
-                                        "{} - {} - FPS: {}",
-                                        app_name, state_label, frame_counter
-                                    )
-                                    .as_str(),
-                                );
-                                fps_timer = Instant::now();
-                                frame_counter = 0;
+                            if outcome == FrameRenderOutcome::SkippedResizePending {
+                                window.set_title(format!("{} - resizing...", app_name).as_str());
                             }
 
                             window.request_redraw();

@@ -18,5 +18,5 @@ pub use errors::{
 };
 pub use hooks::{RenderHook, RenderHookContext};
 pub use loading::{LoadStatus, LoadTicket};
-pub use renderer::{EnvironmentRuntimeStatus, FrameContext, Renderer};
+pub use renderer::{EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer};
 pub use scene::{Scene, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId};

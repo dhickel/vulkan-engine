@@ -5,7 +5,7 @@ use std::time::Instant;
 use ash::vk::Extent2D;
 use glam::Mat4;
 use input::InputManager;
-use log::error;
+use log::{error, warn};
 use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::keyboard::PhysicalKey;
 use winit::window::Window;
@@ -33,9 +33,21 @@ pub struct EnvironmentRuntimeStatus {
     pub transitioning: bool,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FrameRenderOutcome {
+    Rendered,
+    SkippedResizePending,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum FramePrepareOutcome {
+    Ready,
+    SkippedResizePending,
+}
+
 pub struct FrameContext {
     frame_number: u32,
-    rendered: bool,
+    render_attempted: bool,
 }
 
 pub struct Renderer {
@@ -48,6 +60,7 @@ pub struct Renderer {
     asset_loads: AssetLoadTracker,
     pre_render_hook: Option<RenderHook>,
     post_render_hook: Option<RenderHook>,
+    resize_skip_state_logged: bool,
 }
 
 impl Renderer {
@@ -80,6 +93,7 @@ impl Renderer {
             asset_loads: AssetLoadTracker::new(),
             pre_render_hook: None,
             post_render_hook: None,
+            resize_skip_state_logged: false,
         })
     }
 
@@ -166,7 +180,7 @@ impl Renderer {
         &mut self,
         window: &Window,
         scene: &mut Scene,
-    ) -> Result<(), RendererError> {
+    ) -> Result<FrameRenderOutcome, RendererError> {
         if self.open_frame.is_some() {
             return Err(RendererError::InvalidState(
                 "render_scene cannot run while an explicit frame is open",
@@ -174,10 +188,15 @@ impl Renderer {
         }
 
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
-        self.prepare_frame(window)?;
-        self.render_scene_internal(scene, self.frame_number)?;
+        let prepare_outcome = self.prepare_frame(window)?;
+        if prepare_outcome == FramePrepareOutcome::SkippedResizePending {
+            self.frame_number = self.frame_number.wrapping_add(1);
+            return Ok(FrameRenderOutcome::SkippedResizePending);
+        }
+
+        let outcome = self.render_scene_internal(scene, self.frame_number)?;
         self.frame_number = self.frame_number.wrapping_add(1);
-        Ok(())
+        Ok(outcome)
     }
 
     /// Thread: Main
@@ -190,13 +209,13 @@ impl Renderer {
         }
 
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
-        self.prepare_frame(window)?;
+        let _ = self.prepare_frame(window)?;
         let frame_number = self.frame_number;
         self.open_frame = Some(frame_number);
 
         Ok(FrameContext {
             frame_number,
-            rendered: false,
+            render_attempted: false,
         })
     }
 
@@ -206,7 +225,7 @@ impl Renderer {
         &mut self,
         frame: &mut FrameContext,
         scene: &mut Scene,
-    ) -> Result<(), RendererError> {
+    ) -> Result<FrameRenderOutcome, RendererError> {
         if self.open_frame != Some(frame.frame_number) {
             return Err(RendererError::Frame(
                 super::errors::RendererFrameError::FrameContext(
@@ -215,15 +234,15 @@ impl Renderer {
             ));
         }
 
-        if frame.rendered {
+        if frame.render_attempted {
             return Err(RendererError::InvalidState(
                 "render_scene_in_frame was already called for this frame",
             ));
         }
 
-        self.render_scene_internal(scene, frame.frame_number)?;
-        frame.rendered = true;
-        Ok(())
+        let outcome = self.render_scene_internal(scene, frame.frame_number)?;
+        frame.render_attempted = true;
+        Ok(outcome)
     }
 
     /// Thread: Main
@@ -289,7 +308,7 @@ impl Renderer {
         }
     }
 
-    fn prepare_frame(&mut self, window: &Window) -> Result<(), RendererError> {
+    fn prepare_frame(&mut self, window: &Window) -> Result<FramePrepareOutcome, RendererError> {
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_time);
         self.last_frame_time = now;
@@ -303,9 +322,11 @@ impl Renderer {
             .update(delta.as_secs_f32());
 
         if self.runtime.resize_requested() {
-            return Ok(());
+            self.enter_resize_skip_state();
+            return Ok(FramePrepareOutcome::SkippedResizePending);
         }
 
+        self.clear_resize_skip_state();
         self.runtime
             .core
             .imgui
@@ -319,18 +340,20 @@ impl Renderer {
             .prepare_frame(self.runtime.core.imgui.context.io_mut(), window)
             .map_err(|err| map_frame_input_err(format!("imgui prepare_frame failed: {err}")))?;
 
-        Ok(())
+        Ok(FramePrepareOutcome::Ready)
     }
 
     fn render_scene_internal(
         &mut self,
         scene: &mut Scene,
         frame_number: u32,
-    ) -> Result<(), RendererError> {
+    ) -> Result<FrameRenderOutcome, RendererError> {
         if self.runtime.resize_requested() {
-            return Ok(());
+            self.enter_resize_skip_state();
+            return Ok(FrameRenderOutcome::SkippedResizePending);
         }
 
+        self.clear_resize_skip_state();
         let (camera_view, camera_pos) = {
             let controller = self.runtime.core.window_state.controller.borrow();
             (
@@ -392,7 +415,7 @@ impl Renderer {
             ))
         })?;
 
-        Ok(())
+        Ok(FrameRenderOutcome::Rendered)
     }
 
     fn viewport_size(&self) -> (u32, u32) {
@@ -421,6 +444,17 @@ impl Renderer {
 
     pub(crate) fn raw_core_mut(&mut self) -> &mut vk_render::VkRenderCore {
         &mut self.runtime.core
+    }
+
+    fn enter_resize_skip_state(&mut self) {
+        if !self.resize_skip_state_logged {
+            warn!("frame rendering skipped while resize_requested is pending");
+            self.resize_skip_state_logged = true;
+        }
+    }
+
+    fn clear_resize_skip_state(&mut self) {
+        self.resize_skip_state_logged = false;
     }
 }
 

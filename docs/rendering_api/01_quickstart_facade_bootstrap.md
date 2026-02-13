@@ -8,16 +8,17 @@ Public crates/types to import:
 - `RendererConfig`
 - `Renderer`
 - `Scene`
+- `FrameRenderOutcome`
 
 Minimal flow:
 1. Create your `winit` `Window`.
 2. Create `Renderer::new(config, &window)`.
 3. Pull startup scene via `take_startup_scene()` or create `Scene::new()`.
-4. In redraw path, call `renderer.render_scene(&window, &mut scene)`.
+4. In redraw path, call `renderer.render_scene(&window, &mut scene)` and handle `FrameRenderOutcome`.
 
 Example:
 ```rust
-use renderer::{Renderer, RendererConfig, Scene};
+use renderer::{FrameRenderOutcome, Renderer, RendererConfig, Scene};
 
 let mut config = RendererConfig::default();
 config.app_name = "my game".to_string();
@@ -26,7 +27,10 @@ config.validation_layer = true; // recommended during development
 let mut renderer = Renderer::new(config, &window)?;
 let mut scene = renderer.take_startup_scene().unwrap_or_else(Scene::new);
 
-renderer.render_scene(&window, &mut scene)?;
+match renderer.render_scene(&window, &mut scene)? {
+    FrameRenderOutcome::Rendered => {}
+    FrameRenderOutcome::SkippedResizePending => {}
+}
 ```
 
 ## Recommended Config Defaults (Alpha)
@@ -45,7 +49,12 @@ renderer.update_input(&window, &event)?;
 
 match event {
     WindowEvent::Resized(size) => renderer.resize(size.width, size.height)?,
-    WindowEvent::RedrawRequested => renderer.render_scene(&window, &mut scene)?,
+    WindowEvent::RedrawRequested => {
+        match renderer.render_scene(&window, &mut scene)? {
+            FrameRenderOutcome::Rendered => {}
+            FrameRenderOutcome::SkippedResizePending => {}
+        }
+    }
     _ => {}
 }
 ```
