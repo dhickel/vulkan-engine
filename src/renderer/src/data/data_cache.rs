@@ -60,7 +60,8 @@ use crate::data::data_util::PackUnorm;
 use crate::data::gpu_data::{
     AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialShadingModel,
     MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap,
-    Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap, VkMeshBuffers,
+    Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap,
+    VkMeshBuffers,
 };
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
@@ -471,7 +472,6 @@ impl TextureCache {
     }
 
     pub fn add_texture(&mut self, mut data: TextureMeta) -> TextureHandle {
-
         if !self.supported_formats.contains(&data.format) {
             info!(
                 "Unsupported Format: {:?}, converting to R8G8B8A8_UNORM",
@@ -546,9 +546,12 @@ impl TextureCache {
         shading_model: MaterialShadingModel,
     ) -> Result<(), String> {
         for id in material_ids.iter().copied() {
-            let slot_idx = self
-                .validate_material_slot(id)
-                .map_err(|err| format!("Invalid material handle in debug override {:?}: {:?}", id, err))?;
+            let slot_idx = self.validate_material_slot(id).map_err(|err| {
+                format!(
+                    "Invalid material handle in debug override {:?}: {:?}",
+                    id, err
+                )
+            })?;
 
             match self.cached_materials.get_mut(slot_idx) {
                 Some(CachedMaterial::Unloaded(meta)) => {
@@ -604,7 +607,9 @@ impl TextureCache {
 
     pub fn get_texture(&self, id: TextureHandle) -> Result<&CachedTexture, CacheError> {
         let slot = self.validate_texture_slot(id)?;
-        self.cached_textures.get(slot).ok_or(CacheError::OutOfBounds)
+        self.cached_textures
+            .get(slot)
+            .ok_or(CacheError::OutOfBounds)
     }
 
     pub fn get_loaded_texture(&self, id: TextureHandle) -> Result<&VkLoadedTexture, CacheError> {
@@ -694,7 +699,7 @@ impl TextureCache {
 
                         // 5. Synchronous Wait (The Hitch)
                         // We wait for the GPU to finish the copy before we can reuse the staging buffer.
-                        // WARNING: A 10s timeout is a safety net. If this triggers, it usually means the 
+                        // WARNING: A 10s timeout is a safety net. If this triggers, it usually means the
                         // transfer queue is stalled or the fence was never signaled.
                         if let Err(error) = host_buffer.await_done(10000) {
                             error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
@@ -815,7 +820,8 @@ impl TextureCache {
         buffer_placement: BufferPlacement,
         rtn_alloc: bool,
     ) -> LoadResult<VkLoadedMaterial> {
-        let mut materials = Vec::<(MaterialHandle, MaterialMeta)>::with_capacity(material_ids.len());
+        let mut materials =
+            Vec::<(MaterialHandle, MaterialMeta)>::with_capacity(material_ids.len());
         for id in material_ids {
             let Ok(slot) = self.validate_material_slot(id) else {
                 error!("Failed to locate unloaded material id: {:?}", id);
@@ -874,7 +880,10 @@ impl TextureCache {
             let loaded_mat = match self.write_material_descriptors(&meta, alloc) {
                 Ok(mat) => mat,
                 Err(err) => {
-                    error!("Failed to write material descriptors for {:?}: {:?}", id, err);
+                    error!(
+                        "Failed to write material descriptors for {:?}: {:?}",
+                        id, err
+                    );
                     return LoadResult::Failed(None);
                 }
             };
@@ -1189,7 +1198,9 @@ impl VkDestroyable for TextureCache {
         }
 
         self.material_meta_storage.destroy(device, allocator);
-        self.desc_manager.image_desc_allocator.destroy(device, allocator);
+        self.desc_manager
+            .image_desc_allocator
+            .destroy(device, allocator);
         self.sampler_cache.destroy(device);
     }
 }
@@ -1644,7 +1655,8 @@ impl CoreShaderType {
 const CORE_SHADER_MANIFEST: &str = include_str!("../shaders/core_shader_manifest.txt");
 
 pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>, String> {
-    let mut shader_paths = Vec::<(CoreShaderType, &'static str)>::with_capacity(CoreShaderType::COUNT);
+    let mut shader_paths =
+        Vec::<(CoreShaderType, &'static str)>::with_capacity(CoreShaderType::COUNT);
     let mut seen = std::collections::HashSet::with_capacity(CoreShaderType::COUNT);
 
     for (line_index, line) in CORE_SHADER_MANIFEST.lines().enumerate() {

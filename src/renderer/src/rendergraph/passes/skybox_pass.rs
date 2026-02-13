@@ -14,7 +14,8 @@ impl RenderPassNode for SkyboxPass {
             return Ok(());
         }
 
-        ctx.renderer.draw_skybox_from_submission(ctx.frame, ctx.submission);
+        ctx.renderer
+            .draw_skybox_from_submission(ctx.frame, ctx.submission);
         Ok(())
     }
 }

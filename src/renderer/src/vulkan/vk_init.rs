@@ -38,13 +38,13 @@
 use ash::vk;
 
 use ash::vk::{CommandBuffer, Extent2D};
+use log::info;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 use std::{ffi, iter, ptr};
-use std::collections::HashSet;
-use log::info;
 use vk_mem::Alloc;
 
 use crate::vulkan::vk_types::*;
@@ -530,9 +530,9 @@ pub fn queue_indices_with_preferences(
             break;
         }
     }
-    
+
     if graphics_present_index == None {
-        return Err("Failed to find shared graphics and present pool".to_string())
+        return Err("Failed to find shared graphics and present pool".to_string());
     }
 
     // Second pass: find compute and transfer queues
@@ -593,7 +593,7 @@ pub fn queue_indices_with_preferences(
             queue_types: vec![VkQueueType::Transfer],
         });
     }
-    
+
     Ok(indices)
 }
 
@@ -681,8 +681,7 @@ pub fn get_general_v12_features<'a>(
     if query_vulkan_12_features.buffer_device_address == vk::TRUE {
         vulkan_12_features.buffer_device_address = vk::TRUE;
     }
-    
-    
+
     if query_vulkan_12_features.descriptor_indexing == vk::TRUE {
         vulkan_12_features.descriptor_indexing = vk::TRUE;
     }
@@ -905,7 +904,7 @@ pub fn allocate_draw_images(
 
     let mut usage_flags = vk::ImageUsageFlags::empty();
     usage_flags |= vk::ImageUsageFlags::TRANSFER_SRC;
-   // usage_flags |= vk::ImageUsageFlags::TRANSFER_DST;
+    // usage_flags |= vk::ImageUsageFlags::TRANSFER_DST;
     usage_flags |= vk::ImageUsageFlags::STORAGE;
     usage_flags |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
 
@@ -925,7 +924,7 @@ pub fn allocate_draw_images(
         image_extent,
         image_type,
         sample_flags,
-        1
+        1,
     );
 
     let images: Vec<VkImageAlloc> = (0..count)
@@ -974,7 +973,7 @@ pub fn allocate_depth_images(
     let image_extent = vk::Extent3D {
         width: size.width,
         height: size.height,
-        depth: 1, 
+        depth: 1,
     };
 
     let mut usage_flags = vk::ImageUsageFlags::empty();
@@ -996,7 +995,7 @@ pub fn allocate_depth_images(
         image_extent,
         image_type,
         sample_flags,
-        1
+        1,
     );
 
     let images: Vec<VkImageAlloc> = (0..count)
@@ -1028,7 +1027,7 @@ pub fn allocate_depth_images(
                 allocation,
                 image_extent,
                 image_format,
-                mip_levels: 1
+                mip_levels: 1,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -1178,35 +1177,35 @@ pub fn create_command_pool(
 //     index_queue: (u32, vk::Queue),
 // ) -> Result<VkCmdBufferContext, String> {
 //     let (queue_index, queue) = index_queue;
-// 
+//
 //     let command_pool_info = vk::CommandPoolCreateInfo::default()
 //         .queue_family_index(queue_index)
 //         .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-// 
+//
 //     let command_pool = unsafe {
 //         device
 //             .create_command_pool(&command_pool_info, None)
 //             .map_err(|err| format!("Error creating command pool: {:?}", err))?
 //     };
-// 
+//
 //     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
 //         .command_pool(command_pool)
 //         .level(vk::CommandBufferLevel::PRIMARY)
 //         .command_buffer_count(1);
-// 
+//
 //     let command_buffer = unsafe {
 //         device
 //             .allocate_command_buffers(&command_buffer_allocate_info)
 //             .map_err(|err| format!("Error allocating command buffer: {:?}", err))?[0]
 //     };
-// 
+//
 //     let vk_command_pool = VkCmdBufferContext {
 //         queue_index,
 //         queue,
 //         pool: command_pool,
 //         buffer: command_buffer,
 //     };
-// 
+//
 //     Ok(vk_command_pool)
 // }
 
@@ -1258,7 +1257,10 @@ pub fn create_frame_sync(device: &ash::Device) -> Result<VkFrameSync, String> {
     })
 }
 
-pub fn get_supported_image_formats(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> HashSet<vk::Format> {
+pub fn get_supported_image_formats(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> HashSet<vk::Format> {
     let candidate_formats = [
         vk::Format::R8G8B8A8_UNORM,
         vk::Format::R8G8B8A8_SRGB,
@@ -1272,15 +1274,18 @@ pub fn get_supported_image_formats(instance: &ash::Instance, physical_device: vk
         // Add any other formats you're interested in here
     ];
 
-    let supported : HashSet<vk::Format> = candidate_formats
+    let supported: HashSet<vk::Format> = candidate_formats
         .iter()
         .filter(|&&format| {
-            let props = unsafe { instance.get_physical_device_format_properties(physical_device, format) };
-            props.optimal_tiling_features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE)
+            let props =
+                unsafe { instance.get_physical_device_format_properties(physical_device, format) };
+            props
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE)
         })
         .copied()
         .collect();
-    
+
     info!("Supported Texture Formats: {:?}", supported);
     supported
 }
@@ -1300,7 +1305,6 @@ pub fn get_buffer_and_descriptor_limits(
         let limits = properties.limits;
 
         VkBufferAndDescriptorLimits {
-
             max_storage_buffer_range: limits.max_storage_buffer_range as vk::DeviceSize,
             max_uniform_buffer_range: limits.max_uniform_buffer_range as vk::DeviceSize,
             max_push_constants_size: limits.max_push_constants_size,
@@ -1313,24 +1317,34 @@ pub fn get_buffer_and_descriptor_limits(
             non_coherent_atom_size: limits.non_coherent_atom_size,
 
             max_bound_descriptor_sets: limits.max_bound_descriptor_sets,
-            max_per_stage_descriptor_storage_buffers: limits.max_per_stage_descriptor_storage_buffers,
-            max_per_stage_descriptor_uniform_buffers: limits.max_per_stage_descriptor_uniform_buffers,
+            max_per_stage_descriptor_storage_buffers: limits
+                .max_per_stage_descriptor_storage_buffers,
+            max_per_stage_descriptor_uniform_buffers: limits
+                .max_per_stage_descriptor_uniform_buffers,
             max_descriptor_set_storage_buffers: limits.max_descriptor_set_storage_buffers,
             max_descriptor_set_uniform_buffers: limits.max_descriptor_set_uniform_buffers,
-            max_descriptor_set_storage_buffers_dynamic: limits.max_descriptor_set_storage_buffers_dynamic,
-            max_descriptor_set_uniform_buffers_dynamic: limits.max_descriptor_set_uniform_buffers_dynamic,
+            max_descriptor_set_storage_buffers_dynamic: limits
+                .max_descriptor_set_storage_buffers_dynamic,
+            max_descriptor_set_uniform_buffers_dynamic: limits
+                .max_descriptor_set_uniform_buffers_dynamic,
 
-            max_update_after_bind_descriptors_in_all_pools: vulkan12_properties.max_update_after_bind_descriptors_in_all_pools,
-            max_per_stage_descriptor_update_after_bind_storage_buffers: vulkan12_properties.max_per_stage_descriptor_update_after_bind_storage_buffers,
-            max_per_stage_descriptor_update_after_bind_uniform_buffers: vulkan12_properties.max_per_stage_descriptor_update_after_bind_uniform_buffers,
-            max_descriptor_set_update_after_bind_storage_buffers: vulkan12_properties.max_descriptor_set_update_after_bind_storage_buffers,
-            max_descriptor_set_update_after_bind_uniform_buffers: vulkan12_properties.max_descriptor_set_update_after_bind_uniform_buffers,
-            max_descriptor_set_update_after_bind_storage_buffers_dynamic: vulkan12_properties.max_descriptor_set_update_after_bind_storage_buffers_dynamic,
-            max_descriptor_set_update_after_bind_uniform_buffers_dynamic: vulkan12_properties.max_descriptor_set_update_after_bind_uniform_buffers_dynamic,
+            max_update_after_bind_descriptors_in_all_pools: vulkan12_properties
+                .max_update_after_bind_descriptors_in_all_pools,
+            max_per_stage_descriptor_update_after_bind_storage_buffers: vulkan12_properties
+                .max_per_stage_descriptor_update_after_bind_storage_buffers,
+            max_per_stage_descriptor_update_after_bind_uniform_buffers: vulkan12_properties
+                .max_per_stage_descriptor_update_after_bind_uniform_buffers,
+            max_descriptor_set_update_after_bind_storage_buffers: vulkan12_properties
+                .max_descriptor_set_update_after_bind_storage_buffers,
+            max_descriptor_set_update_after_bind_uniform_buffers: vulkan12_properties
+                .max_descriptor_set_update_after_bind_uniform_buffers,
+            max_descriptor_set_update_after_bind_storage_buffers_dynamic: vulkan12_properties
+                .max_descriptor_set_update_after_bind_storage_buffers_dynamic,
+            max_descriptor_set_update_after_bind_uniform_buffers_dynamic: vulkan12_properties
+                .max_descriptor_set_update_after_bind_uniform_buffers_dynamic,
         }
     }
 }
-
 
 pub fn get_basic_device_ext_names() -> Vec<&'static CStr> {
     vec![

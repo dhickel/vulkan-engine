@@ -1,11 +1,7 @@
-
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 
 fn main() {
-   renderer::run()
+    renderer::run()
 }
-
-
-

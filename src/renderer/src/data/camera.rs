@@ -40,7 +40,6 @@ pub struct Camera {
     yaw: f32,
 }
 
-
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -51,7 +50,6 @@ impl Default for Camera {
         }
     }
 }
-
 
 impl Camera {
     pub fn new(position: Vec3) -> Self {
@@ -94,7 +92,6 @@ impl Camera {
     }
 }
 
-
 pub struct FPSController {
     id: u32,
     prev_m_pos: glam::Vec2,
@@ -108,7 +105,6 @@ pub struct FPSController {
     move_vec: glam::Vec3,
 }
 
-
 #[repr(C)]
 pub enum InputAction {
     Forward = 0,
@@ -118,7 +114,6 @@ pub enum InputAction {
     Up = 4,
     Down = 5,
 }
-
 
 impl FPSController {
     pub fn new(id: u32, camera: Camera, m_sensitivity: f64, move_speed: f32) -> Self {
@@ -139,7 +134,6 @@ impl FPSController {
     pub fn get_camera(&self) -> &Camera {
         &self.camera
     }
-
 
     pub fn update(&mut self, delta_seconds: f32) {
         let rot_x = self.m_delta.0 * self.m_sensitivity;
@@ -180,7 +174,6 @@ impl FPSController {
     }
 }
 
-
 impl MousePosListener for FPSController {
     fn listener_type(&self) -> ListenerType {
         ListenerType::GameInput
@@ -195,7 +188,6 @@ impl MousePosListener for FPSController {
     }
 }
 
-
 impl KeyboardListener for FPSController {
     fn listener_type(&self) -> ListenerType {
         ListenerType::GameInput
@@ -208,7 +200,12 @@ impl KeyboardListener for FPSController {
     fn listener_for(&self, key: KeyCode) -> bool {
         matches!(
             key,
-            KeyCode::KeyW | KeyCode::KeyA | KeyCode::KeyS | KeyCode::KeyD | KeyCode::Space | KeyCode::ShiftLeft
+            KeyCode::KeyW
+                | KeyCode::KeyA
+                | KeyCode::KeyS
+                | KeyCode::KeyD
+                | KeyCode::Space
+                | KeyCode::ShiftLeft
         )
     }
 

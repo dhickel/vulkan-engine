@@ -61,6 +61,13 @@ struct SceneNodeEntry {
     node: Option<SceneNode>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SceneNodeRefError {
+    OutOfBounds,
+    Vacant,
+    GenerationMismatch,
+}
+
 pub struct SceneWorld {
     nodes: Vec<SceneNodeEntry>,
     free_slots: Vec<u32>,
@@ -76,7 +83,7 @@ impl Default for SceneWorld {
 }
 
 impl SceneWorld {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             nodes: Vec::with_capacity(256),
             free_slots: Vec::new(),
@@ -86,28 +93,38 @@ impl SceneWorld {
         }
     }
 
-    pub fn root_id(&self) -> Option<SceneNodeId> {
+    pub(crate) fn root_id(&self) -> Option<SceneNodeId> {
         self.root.filter(|id| self.is_valid_node_id(*id))
     }
 
-    pub fn set_root(&mut self, id: SceneNodeId) {
+    pub(crate) fn set_root(&mut self, id: SceneNodeId) {
         if self.is_valid_node_id(id) {
             self.root = Some(id);
         }
     }
 
-    pub fn set_skybox_env_id(&mut self, env_id: EnvironmentHandle) {
+    pub(crate) fn set_skybox_env_id(&mut self, env_id: EnvironmentHandle) {
         self.skybox_env_id = env_id;
     }
 
-    pub fn is_valid_node_id(&self, id: SceneNodeId) -> bool {
+    pub(crate) fn validate_node_ref(&self, id: SceneNodeId) -> Result<(), SceneNodeRefError> {
         let Some(entry) = self.nodes.get(id.slot as usize) else {
-            return false;
+            return Err(SceneNodeRefError::OutOfBounds);
         };
-        entry.generation == id.generation && entry.node.is_some()
+        if entry.generation != id.generation {
+            return Err(SceneNodeRefError::GenerationMismatch);
+        }
+        if entry.node.is_none() {
+            return Err(SceneNodeRefError::Vacant);
+        }
+        Ok(())
     }
 
-    pub fn get_node(&self, id: SceneNodeId) -> Option<&SceneNode> {
+    pub(crate) fn is_valid_node_id(&self, id: SceneNodeId) -> bool {
+        self.validate_node_ref(id).is_ok()
+    }
+
+    pub(crate) fn get_node(&self, id: SceneNodeId) -> Option<&SceneNode> {
         let entry = self.nodes.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -115,7 +132,7 @@ impl SceneWorld {
         entry.node.as_ref()
     }
 
-    pub fn get_node_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
+    pub(crate) fn get_node_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
         let entry = self.nodes.get_mut(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -123,7 +140,11 @@ impl SceneWorld {
         entry.node.as_mut()
     }
 
-    pub fn add_node(&mut self, parent: Option<SceneNodeId>, mut node: SceneNode) -> SceneNodeId {
+    pub(crate) fn add_node(
+        &mut self,
+        parent: Option<SceneNodeId>,
+        mut node: SceneNode,
+    ) -> SceneNodeId {
         let resolved_parent = parent.filter(|id| self.is_valid_node_id(*id));
         node.parent = resolved_parent;
         let id = self.allocate_node_slot(node);
@@ -139,7 +160,7 @@ impl SceneWorld {
         id
     }
 
-    pub fn add_node_with_parts(
+    pub(crate) fn add_node_with_parts(
         &mut self,
         parent: Option<SceneNodeId>,
         local_transform: Mat4,
@@ -158,17 +179,17 @@ impl SceneWorld {
         self.add_node(parent, node)
     }
 
-    pub fn remove_node(&mut self, node_id: SceneNodeId) -> bool {
+    pub(crate) fn remove_node(&mut self, node_id: SceneNodeId) -> bool {
         self.remove_node_recursive(node_id)
     }
 
-    pub fn update_camera(&mut self, view: Mat4, projection: Mat4, cam_pos: Vec3) {
+    pub(crate) fn update_camera(&mut self, view: Mat4, projection: Mat4, cam_pos: Vec3) {
         self.camera.view = view;
         self.camera.projection = projection;
         self.camera.cam_pos = cam_pos;
     }
 
-    pub fn build_submission(&mut self) -> RenderSubmission {
+    pub(crate) fn build_submission(&mut self) -> RenderSubmission {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
 

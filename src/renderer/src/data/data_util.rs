@@ -6,7 +6,7 @@
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex,
-    VkMeshBuffers, VkGpuTextureBuffer,
+    VkGpuTextureBuffer, VkMeshBuffers,
 };
 use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
 use crate::vulkan::vk_util;
@@ -22,18 +22,15 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use vk_mem::Alloc;
 
-
 pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
     width: 1,
     height: 1,
     depth: 1,
 };
 
-
 pub trait PackUnorm {
     fn pack_unorm_4x8(&self) -> u32;
 }
-
 
 impl PackUnorm for Vec4 {
     fn pack_unorm_4x8(&self) -> u32 {
@@ -46,11 +43,9 @@ impl PackUnorm for Vec4 {
     }
 }
 
-
 pub fn mb_to_bytes(mb: u64) -> u64 {
     mb * 1_048_576
 }
-
 
 pub fn convert_rgb32f_to_rgba32f(
     img: ImageBuffer<Rgb<f32>, Vec<f32>>,
@@ -63,12 +58,10 @@ pub fn convert_rgb32f_to_rgba32f(
     })
 }
 
-
 pub fn calc_mips_count(width: u32, height: u32) -> u32 {
     let max_dimension = max(width, height) as f64;
     (max_dimension.log2().floor() as u32) + 1
 }
-
 
 pub fn bytes_per_pixel(format: vk::Format) -> u32 {
     match format {
@@ -87,7 +80,6 @@ pub fn bytes_per_pixel(format: vk::Format) -> u32 {
         _ => panic!("Cannot calculate bytes per pixel: Unsupported format"),
     }
 }
-
 
 pub fn get_skybox_mesh() -> (Vec<Vertex>, Vec<u32>) {
     let vertices = vec![
@@ -327,13 +319,11 @@ pub fn get_skybox_mesh() -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-
 pub struct BinarySemaphore {
     state: AtomicBool,
     lock: Mutex<()>,
     condvar: Condvar,
 }
-
 
 impl BinarySemaphore {
     pub fn new() -> Arc<Self> {
@@ -364,7 +354,6 @@ impl BinarySemaphore {
         self.state.load(Ordering::Acquire)
     }
 }
-
 
 #[derive(Debug)]
 pub struct CountdownLatch {
@@ -405,7 +394,9 @@ impl CountdownLatch {
                 return Err(LatchTimeOutError);
             }
 
-            let remaining = timeout.checked_sub(start.elapsed()).unwrap_or(Duration::from_secs(0));
+            let remaining = timeout
+                .checked_sub(start.elapsed())
+                .unwrap_or(Duration::from_secs(0));
             let (new_count, timeout_result) = cvar.wait_timeout(count, remaining).unwrap();
             count = new_count;
 
@@ -427,7 +418,9 @@ impl CountdownLatch {
                 return Err(LatchTimeOutError);
             }
 
-            let remaining = timeout.checked_sub(start.elapsed()).unwrap_or(Duration::from_secs(0));
+            let remaining = timeout
+                .checked_sub(start.elapsed())
+                .unwrap_or(Duration::from_secs(0));
             let (new_count, timeout_result) = cvar.wait_timeout(count, remaining).unwrap();
             count = new_count;
 
@@ -438,7 +431,6 @@ impl CountdownLatch {
 
         Ok(())
     }
-
 
     pub fn get_count(&self) -> usize {
         let (lock, _) = &*self.count;

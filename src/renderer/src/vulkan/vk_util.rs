@@ -41,7 +41,11 @@ use std::ffi::CStr;
 use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
 use crate::vulkan::vk_types::*;
 use ash::vk;
-use ash::vk::{AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D, ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo, PipelineStageFlags2, Rect2D, RenderingInfo};
+use ash::vk::{
+    AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D,
+    ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo,
+    PipelineStageFlags2, Rect2D, RenderingInfo,
+};
 use log::{error, info};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
@@ -52,7 +56,7 @@ use std::time::{Duration, SystemTime};
 use vk_mem::{Alloc, Allocator};
 
 use crate::data::data_cache::{
-    LodBias, VkSamplerCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
+    LodBias, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerCache,
     VkSamplerInfo,
 };
 use crate::data::{data_cache, data_util};
@@ -61,12 +65,11 @@ use crate::vulkan::vk_render::VkSingleDescriptor;
 use crate::vulkan::{vk_debug, vk_init, vk_util};
 use ash::prelude::VkResult;
 // use shaderc::{CompileOptions, Compiler, ShaderKind};
-use std::{fs, path};
+use crate::data::data_util::calc_mips_count;
 use std::fs::metadata;
 use std::ops::{Add, Sub};
 use std::path::Path;
-use crate::data::data_util::calc_mips_count;
-
+use std::{fs, path};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -76,7 +79,6 @@ pub fn command_pool_create_info<'a>(
         .queue_family_index(queue_family_index)
         .flags(flags)
 }
-
 
 pub fn command_buffer_allocate_info<'a>(
     command_pool: vk::CommandPool,
@@ -89,23 +91,19 @@ pub fn command_buffer_allocate_info<'a>(
         .level(level)
 }
 
-
 pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
     vk::FenceCreateInfo::default().flags(flags)
 }
 
-
 pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
     vk::SemaphoreCreateInfo::default().flags(flags)
 }
-
 
 pub fn command_buffer_begin_info<'a>(
     flags: vk::CommandBufferUsageFlags,
 ) -> vk::CommandBufferBeginInfo<'a> {
     vk::CommandBufferBeginInfo::default().flags(flags)
 }
-
 
 pub fn image_subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
@@ -115,7 +113,6 @@ pub fn image_subresource_range(aspect_mask: vk::ImageAspectFlags) -> vk::ImageSu
         .base_array_layer(0)
         .layer_count(vk::REMAINING_ARRAY_LAYERS)
 }
-
 
 pub fn semaphore_submit_info<'a>(
     stage_flags: vk::PipelineStageFlags2,
@@ -128,13 +125,11 @@ pub fn semaphore_submit_info<'a>(
         .value(0)
 }
 
-
 pub fn command_buffer_submit_info<'a>(cmd: vk::CommandBuffer) -> vk::CommandBufferSubmitInfo<'a> {
     vk::CommandBufferSubmitInfo::default()
         .command_buffer(cmd)
         .device_mask(0)
 }
-
 
 pub fn submit_info_2<'a>(
     cmd_info: &'a [vk::CommandBufferSubmitInfo],
@@ -146,7 +141,6 @@ pub fn submit_info_2<'a>(
         .wait_semaphore_infos(wait_semaphore)
         .signal_semaphore_infos(signal_semaphore)
 }
-
 
 pub fn render_pass_begin_info<'a>(
     render_pass: vk::RenderPass,
@@ -162,7 +156,6 @@ pub fn render_pass_begin_info<'a>(
         )
         .framebuffer(frame_buffer)
 }
-
 
 pub fn image_create_info<'a>(
     format: vk::Format,
@@ -182,7 +175,6 @@ pub fn image_create_info<'a>(
         .samples(sample_flags)
         .usage(usage_flags)
 }
-
 
 pub fn create_image(
     device: &ash::Device,
@@ -204,7 +196,6 @@ pub fn create_image(
     let mut alloc_info = vk_mem::AllocationCreateInfo::default();
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
 
     let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
@@ -229,7 +220,6 @@ pub fn create_image(
     }
 }
 
-
 pub fn image_view_create_info<'a>(
     format: vk::Format,
     view_type: vk::ImageViewType,
@@ -249,7 +239,6 @@ pub fn image_view_create_info<'a>(
                 .aspect_mask(aspect_flags),
         )
 }
-
 
 pub fn attachment_info<'a>(
     view: vk::ImageView,
@@ -271,7 +260,6 @@ pub fn attachment_info<'a>(
     };
     info
 }
-
 
 pub fn rendering_info<'a>(
     extent: vk::Extent2D,
@@ -296,7 +284,6 @@ pub fn rendering_info<'a>(
     render_info
 }
 
-
 pub fn depth_attachment_info<'a>(
     view: vk::ImageView,
     layout: vk::ImageLayout,
@@ -316,7 +303,6 @@ pub fn depth_attachment_info<'a>(
         .clear_value(clear_value)
 }
 
-
 pub fn pipeline_shader_stage_create_info(
     stage: vk::ShaderStageFlags,
     module: vk::ShaderModule,
@@ -328,11 +314,9 @@ pub fn pipeline_shader_stage_create_info(
         .module(module)
 }
 
-
 pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
     vk::PipelineLayoutCreateInfo::default()
 }
-
 
 pub fn find_memory_type(
     physical_device: vk::PhysicalDevice,
@@ -341,7 +325,6 @@ pub fn find_memory_type(
 ) -> u32 {
     todo!()
 }
-
 
 pub fn blit_copy_image_to_image(
     device: &ash::Device,
@@ -396,7 +379,6 @@ pub fn blit_copy_image_to_image(
     unsafe { device.cmd_blit_image2(cmd, &blit_info) }
 }
 
-
 pub fn transition_image(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -424,7 +406,6 @@ pub fn transition_image(
 
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
-
 
 pub fn transition_image_layered(
     device: &ash::Device,
@@ -462,7 +443,6 @@ pub fn transition_image_layered(
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
 
-
 pub fn load_shader_module(
     device: &ash::Device,
     file_path: &str,
@@ -499,7 +479,6 @@ pub fn load_shader_module(
     Ok(shader_module)
 }
 
-
 pub fn allocate_buffer(
     allocator: &Allocator,
     size: u64,
@@ -531,11 +510,7 @@ pub fn allocate_buffer(
     })
 }
 
-
-pub fn allocate_host_buffer(
-    allocator: &Allocator,
-    size: u64,
-) -> Result<VkBuffer, String> {
+pub fn allocate_host_buffer(allocator: &Allocator, size: u64) -> Result<VkBuffer, String> {
     let buffer_info = vk::BufferCreateInfo::default()
         .size(size)
         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
@@ -564,7 +539,6 @@ pub fn allocate_host_buffer(
     })
 }
 
-
 pub fn allocate_and_write_buffer(
     allocator: &Allocator,
     data: &[u8],
@@ -584,11 +558,9 @@ pub fn allocate_and_write_buffer(
     Ok(buffer)
 }
 
-
 pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
     unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
 }
-
 
 pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
     unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
@@ -607,7 +579,6 @@ pub fn generate_brdf_lut(
 ) -> VkBrdfLut {
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
-
 
     let format = vk::Format::R16G16B16A16_SFLOAT;
     let size = Extent3D::default().width(512).height(512).depth(1);
@@ -692,7 +663,11 @@ pub fn generate_brdf_lut(
 
         device.cmd_set_viewport(graphics_cmd_buffer, 0, &[viewport]);
         device.cmd_set_scissor(graphics_cmd_buffer, 0, &[scissor]);
-        device.cmd_bind_pipeline(graphics_cmd_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        device.cmd_bind_pipeline(
+            graphics_cmd_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline,
+        );
 
         device.cmd_draw(graphics_cmd_buffer, 3, 1, 0, 0);
 
@@ -705,7 +680,6 @@ pub fn generate_brdf_lut(
             .level_count(1)
             .base_array_layer(0)
             .layer_count(1);
-
 
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -750,7 +724,6 @@ pub fn generate_brdf_lut(
     }
 }
 
-
 pub fn get_format_size(format: vk::Format) -> u32 {
     match format {
         vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => 4,
@@ -776,7 +749,7 @@ pub fn upload_skybox(
         &tex_meta.bytes,
         vk::BufferUsageFlags::TRANSFER_SRC,
     )
-        .unwrap();
+    .unwrap();
 
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
@@ -956,7 +929,6 @@ pub fn upload_skybox(
     }
 }
 
-
 fn create_buffer_image_copy(
     face_index: u32, // 0-based index of the face in the horizontal strip
     face_width: u32,
@@ -982,7 +954,6 @@ fn create_buffer_image_copy(
             depth: 1,
         })
 }
-
 
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     let shader_dir = Path::new(shader_dir);
@@ -1051,7 +1022,6 @@ pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn st
 
     Ok(())
 }
-
 
 pub(crate) fn create_cubemap(
     device: &ash::Device,
@@ -1176,11 +1146,13 @@ pub fn record_host_to_storage_buffer(
         .src_offset(0)
         .size(total_size as vk::DeviceSize)];
 
-    let begin_info = vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         // Record transfer command buffer
-        device.begin_command_buffer(transfer_cmd_buffer, &begin_info)
+        device
+            .begin_command_buffer(transfer_cmd_buffer, &begin_info)
             .map_err(|err| format!("Error beginning transfer buffer: {}", err))?;
 
         let src_barrier = vk::BufferMemoryBarrier::default()
@@ -1228,11 +1200,13 @@ pub fn record_host_to_storage_buffer(
             &[],
         );
 
-        device.end_command_buffer(transfer_cmd_buffer)
+        device
+            .end_command_buffer(transfer_cmd_buffer)
             .map_err(|err| format!("Error ending transfer buffer: {}", err))?;
 
         // Record graphics command buffer
-        device.begin_command_buffer(graphics_cmd_buffer, &begin_info)
+        device
+            .begin_command_buffer(graphics_cmd_buffer, &begin_info)
             .map_err(|err| format!("Error beginning graphics buffer: {}", err))?;
 
         let acquire_barrier = vk::BufferMemoryBarrier::default()
@@ -1254,13 +1228,13 @@ pub fn record_host_to_storage_buffer(
             &[],
         );
 
-        device.end_command_buffer(graphics_cmd_buffer)
+        device
+            .end_command_buffer(graphics_cmd_buffer)
             .map_err(|err| format!("Error ending graphics buffer: {}", err))?;
     }
 
     Ok(())
 }
-
 
 pub fn record_host_to_image_buffer(
     device: &ash::Device,
@@ -1280,41 +1254,57 @@ pub fn record_host_to_image_buffer(
 
     let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     let mut offset: DeviceSize = 0;
-    let image_offsets: Vec<DeviceSize> = image_meta.iter().zip(ids.iter()).map(|(meta, id)| {
-        let size = meta.bytes.len().next_multiple_of(alignment as usize);
+    let image_offsets: Vec<DeviceSize> = image_meta
+        .iter()
+        .zip(ids.iter())
+        .map(|(meta, id)| {
+            let size = meta.bytes.len().next_multiple_of(alignment as usize);
 
-        unsafe {
-            std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, meta.bytes.len());
+            unsafe {
+                std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, meta.bytes.len());
 
-            // data_cache::TextureCache::save_debug_image(
-            //     meta,
-            //     std::slice::from_raw_parts(host_ptr, meta.bytes.len()),
-            //     format!("_buffer_debug_{:?}.png", id),
-            // );
+                // data_cache::TextureCache::save_debug_image(
+                //     meta,
+                //     std::slice::from_raw_parts(host_ptr, meta.bytes.len()),
+                //     format!("_buffer_debug_{:?}.png", id),
+                // );
 
-            host_ptr = host_ptr.add(size);
-            let curr_offset = offset;
-            offset = offset.add(size as u64);
-            curr_offset as DeviceSize
-        }
-    }).collect();
+                host_ptr = host_ptr.add(size);
+                let curr_offset = offset;
+                offset = offset.add(size as u64);
+                curr_offset as DeviceSize
+            }
+        })
+        .collect();
 
-
-    let image_allocs: Vec<VkImageAlloc> = image_meta.iter().map(|meta| {
-        create_image
-            (device,
+    let image_allocs: Vec<VkImageAlloc> = image_meta
+        .iter()
+        .map(|meta| {
+            create_image(
+                device,
                 allocator,
-                Extent3D::default().height(meta.height).width(meta.width).depth(1),
+                Extent3D::default()
+                    .height(meta.height)
+                    .width(meta.width)
+                    .depth(1),
                 meta.format,
-                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC,
-                1) //calc_mips_count(meta.width, meta.height))
-    }).collect();
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+                1,
+            ) //calc_mips_count(meta.width, meta.height))
+        })
+        .collect();
 
-
-    let begin_info = vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
-        device.begin_command_buffer(transfer_cmd_buffer, &begin_info).unwrap();
-        device.begin_command_buffer(graphics_cmd_buffer, &begin_info).unwrap();
+        device
+            .begin_command_buffer(transfer_cmd_buffer, &begin_info)
+            .unwrap();
+        device
+            .begin_command_buffer(graphics_cmd_buffer, &begin_info)
+            .unwrap();
     }
 
     // Perform buffer to image copies
@@ -1324,8 +1314,14 @@ pub fn record_host_to_image_buffer(
             transfer_cmd_buffer,
             image_alloc.image,
             None,
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
-            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
             Some((vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)),
             None,
         );
@@ -1358,10 +1354,22 @@ pub fn record_host_to_image_buffer(
             transfer_cmd_buffer,
             image_alloc.image,
             None,
-            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
-            Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
-            Some((host_info.transfer_queue_index, host_info.graphics_queue_index)),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            Some((
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::TRANSFER_READ,
+            )),
+            Some((
+                host_info.transfer_queue_index,
+                host_info.graphics_queue_index,
+            )),
         );
 
         vk_util::record_image_barrier(
@@ -1369,12 +1377,23 @@ pub fn record_host_to_image_buffer(
             graphics_cmd_buffer,
             image_alloc.image,
             None,
-            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
-            Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
-            Some((host_info.transfer_queue_index, host_info.graphics_queue_index)),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            Some((
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::TRANSFER_READ,
+            )),
+            Some((
+                host_info.transfer_queue_index,
+                host_info.graphics_queue_index,
+            )),
         );
-
 
         record_mip_maps_generation(
             device,
@@ -1409,18 +1428,17 @@ pub fn record_host_to_image_buffer(
         };
 
         let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
-        
+
         upload_images.push((image_alloc, sampler));
-    };
+    }
 
     unsafe {
         device.end_command_buffer(transfer_cmd_buffer).unwrap();
         device.end_command_buffer(graphics_cmd_buffer).unwrap();
     }
-    
+
     Ok(upload_images)
 }
-
 
 pub fn record_mip_maps_generation(
     device: &ash::Device,
@@ -1472,8 +1490,14 @@ pub fn record_mip_maps_generation(
             cmd_buffer,
             image,
             Some(mips_subresource),
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL),
-            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
             Some((vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE)),
             None,
         );
@@ -1495,9 +1519,18 @@ pub fn record_mip_maps_generation(
             cmd_buffer,
             image,
             Some(mips_subresource),
-            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL),
-            (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::TRANSFER),
-            Some((vk::AccessFlags::TRANSFER_WRITE, vk::AccessFlags::TRANSFER_READ)),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            Some((
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::TRANSFER_READ,
+            )),
             None,
         );
     }
@@ -1512,13 +1545,18 @@ pub fn record_mip_maps_generation(
         cmd_buffer,
         image,
         Some(subresource_range),
-        (vk::ImageLayout::TRANSFER_SRC_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
-        (vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::FRAGMENT_SHADER),
+        (
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        ),
+        (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
         Some((vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ)),
         None,
     )
 }
-
 
 pub fn record_image_barrier(
     device: &ash::Device,
@@ -1528,7 +1566,7 @@ pub fn record_image_barrier(
     (old_layout, new_layout): (vk::ImageLayout, vk::ImageLayout),
     (src_stage_mask, dst_stage_mask): (vk::PipelineStageFlags, vk::PipelineStageFlags),
     src_dst_access_mask: Option<(vk::AccessFlags, vk::AccessFlags)>,
-    src_dst_queue_index: Option<(u32, u32) >,
+    src_dst_queue_index: Option<(u32, u32)>,
 ) {
     let mut barrier = vk::ImageMemoryBarrier::default()
         .old_layout(old_layout)
@@ -1544,7 +1582,6 @@ pub fn record_image_barrier(
             .level_count(1);
     }
 
-
     if let Some((src_family, dst_family)) = src_dst_queue_index {
         barrier.src_queue_family_index = src_family;
         barrier.dst_queue_family_index = dst_family;
@@ -1557,26 +1594,45 @@ pub fn record_image_barrier(
         match old_layout {
             ImageLayout::UNDEFINED => barrier.src_access_mask = vk::AccessFlags::empty(),
             ImageLayout::PREINITIALIZED => barrier.src_access_mask = vk::AccessFlags::HOST_WRITE,
-            ImageLayout::COLOR_ATTACHMENT_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            ImageLayout::TRANSFER_SRC_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::TRANSFER_READ,
-            ImageLayout::TRANSFER_DST_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE,
-            ImageLayout::SHADER_READ_ONLY_OPTIMAL => barrier.src_access_mask = vk::AccessFlags::SHADER_READ,
-            _ => panic!("Not implemented")
+            ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
+                barrier.src_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            }
+            ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+                barrier.src_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+            }
+            ImageLayout::TRANSFER_SRC_OPTIMAL => {
+                barrier.src_access_mask = vk::AccessFlags::TRANSFER_READ
+            }
+            ImageLayout::TRANSFER_DST_OPTIMAL => {
+                barrier.src_access_mask = vk::AccessFlags::TRANSFER_WRITE
+            }
+            ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+                barrier.src_access_mask = vk::AccessFlags::SHADER_READ
+            }
+            _ => panic!("Not implemented"),
         }
 
         match new_layout {
-            ImageLayout::TRANSFER_DST_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE,
-            ImageLayout::TRANSFER_SRC_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::TRANSFER_READ,
-            ImageLayout::COLOR_ATTACHMENT_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => barrier.dst_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ImageLayout::TRANSFER_DST_OPTIMAL => {
+                barrier.dst_access_mask = vk::AccessFlags::TRANSFER_WRITE
+            }
+            ImageLayout::TRANSFER_SRC_OPTIMAL => {
+                barrier.dst_access_mask = vk::AccessFlags::TRANSFER_READ
+            }
+            ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
+                barrier.dst_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+            }
+            ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => {
+                barrier.dst_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+            }
             ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
                 if barrier.src_access_mask != vk::AccessFlags::empty() {
-                    barrier.src_access_mask = vk::AccessFlags::HOST_WRITE | vk::AccessFlags::TRANSFER_WRITE
+                    barrier.src_access_mask =
+                        vk::AccessFlags::HOST_WRITE | vk::AccessFlags::TRANSFER_WRITE
                 }
                 barrier.dst_access_mask = vk::AccessFlags::SHADER_READ
             }
-            _ => panic!("Not implemented")
+            _ => panic!("Not implemented"),
         }
     }
 

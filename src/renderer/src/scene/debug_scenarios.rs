@@ -13,7 +13,8 @@ pub fn load_startup_scene(
     data_cache: Arc<VkDataCache>,
     force_unlit_materials: bool,
 ) -> Result<ModelMeta, String> {
-    let loaded_scene = assimp_util::load_model(DEFAULT_STARTUP_MODEL_PATH, data_cache.clone(), false)?;
+    let loaded_scene =
+        assimp_util::load_model(DEFAULT_STARTUP_MODEL_PATH, data_cache.clone(), false)?;
 
     if force_unlit_materials {
         data_cache

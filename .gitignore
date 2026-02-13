@@ -2,3 +2,4 @@ target/
 src/renderer/src/assets/
 debug_textures/
 .internal-dev/*
+CLAUDE.md

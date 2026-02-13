@@ -284,7 +284,6 @@ impl<'a> VkDescriptorWriter<'a> {
         offset: usize,
         typ: vk::DescriptorType,
     ) {
-        
         let info = vk::DescriptorBufferInfo::default()
             .buffer(buffer)
             .offset(offset as vk::DeviceSize)
@@ -509,27 +508,34 @@ impl VkDestroyable for VkDynamicDescriptorAllocator {
 pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCache {
     let compute_draw_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
-        .build(device, vk::ShaderStageFlags::COMPUTE, DescriptorSetLayoutCreateFlags::empty()).unwrap();
-
+        .build(
+            device,
+            vk::ShaderStageFlags::COMPUTE,
+            DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
 
     let frag_combined_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .build(device, vk::ShaderStageFlags::FRAGMENT , vk::DescriptorSetLayoutCreateFlags::empty())
-        .unwrap();
-    
-    
-    let scene_data =  DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)          
-        .add_binding(1, vk::DescriptorType::UNIFORM_BUFFER)        
-        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)  
-        .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)  
-        .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER) 
         .build(
             device,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 
-            vk::DescriptorSetLayoutCreateFlags::empty()
-        ).unwrap();
-    
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
+
+    let scene_data = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .add_binding(1, vk::DescriptorType::UNIFORM_BUFFER)
+        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .build(
+            device,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .unwrap();
 
     let pbr_samplers = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -537,17 +543,29 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-        .build(device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
+        .build(
+            device,
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
         .unwrap();
-    
+
     let pbr_properties = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_BUFFER)
-        .build(device, vk::ShaderStageFlags::FRAGMENT, vk::DescriptorSetLayoutCreateFlags::empty())
+        .build(
+            device,
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
         .unwrap();
-    
+
     let skin_data = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)         
-        .build(device, vk::ShaderStageFlags::VERTEX, vk::DescriptorSetLayoutCreateFlags::empty())
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .build(
+            device,
+            vk::ShaderStageFlags::VERTEX,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
         .unwrap();
 
     let empty = DescriptorLayoutBuilder::default()

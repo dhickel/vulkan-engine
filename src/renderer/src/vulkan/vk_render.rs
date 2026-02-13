@@ -57,16 +57,16 @@
 //! - Updates viewport/scissor
 
 use crate::data::data_cache::{
-    EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache,
-    VkCache, VkDataCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
-    VkSamplerCache, VkSamplerInfo, VkShaderCache,
+    EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache, VkCache, VkDataCache,
+    VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerCache, VkSamplerInfo,
+    VkShaderCache,
 };
 
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
-    AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform,
-    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex,
-    VkCubeMap, VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
+    AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
+    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap,
+    VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
 };
 use crate::data::handles::EnvironmentHandle;
 use crate::data::{data_cache, data_util, gpu_data};
@@ -100,9 +100,7 @@ use std::f32::consts::FRAC_PI_2;
 use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::path;
-use std::sync::{
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
@@ -348,7 +346,8 @@ pub fn init_present_pools(
             queue_index,
             vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
         )?;
-        let buffers = vk_init::create_command_buffers(device, &pool, CommandBufferLevel::PRIMARY, 1)?;
+        let buffers =
+            vk_init::create_command_buffers(device, &pool, CommandBufferLevel::PRIMARY, 1)?;
 
         Ok(VkCommandPool {
             queue_index,
@@ -361,8 +360,10 @@ pub fn init_present_pools(
     // Graphics/Present intentionally share the same command pool for each frame.
     (0..count)
         .map(|_| {
-            let graphics_pool = create_pool_for_queue(device, device_queues, VkQueueType::Graphics)?;
-            let transfer_pool = create_pool_for_queue(device, device_queues, VkQueueType::Transfer)?;
+            let graphics_pool =
+                create_pool_for_queue(device, device_queues, VkQueueType::Graphics)?;
+            let transfer_pool =
+                create_pool_for_queue(device, device_queues, VkQueueType::Transfer)?;
             let compute_pool = create_pool_for_queue(device, device_queues, VkQueueType::Compute)?;
 
             VkCommandPoolMap::new(vec![
@@ -476,10 +477,7 @@ impl VkRenderCore {
             self.service_async_transfers();
 
             if !timeout_logged
-                && SystemTime::now()
-                    .duration_since(start)
-                    .unwrap_or_default()
-                    >= warning_timeout
+                && SystemTime::now().duration_since(start).unwrap_or_default() >= warning_timeout
             {
                 timeout_logged = true;
                 error!(
@@ -520,18 +518,20 @@ impl VkRenderCore {
     /// Build Vulkan entry/instance/device/surface/swapchain for the main renderer.
     fn init_vulkan_core(
         window_state: &mut VkWindowState,
+        window: &winit::window::Window,
+        app_name: &str,
         with_validation: bool,
     ) -> Result<VulkanCoreInit, String> {
         let entry = vk_init::init_entry();
-        let mut instance_ext = vk_init::get_winit_extensions(&window_state.window);
+        let mut instance_ext = vk_init::get_winit_extensions(window);
         let (instance, debug) = vk_init::init_instance(
             &entry,
-            "test".to_string(),
+            app_name.to_string(),
             &mut instance_ext,
             with_validation,
         )?;
 
-        let surface = vk_init::get_window_surface(&entry, &instance, &window_state.window)?;
+        let surface = vk_init::get_window_surface(&entry, &instance, window)?;
 
         let physical_device = vk_init::get_physical_devices(
             &instance,
@@ -695,7 +695,8 @@ impl VkRenderCore {
             .map(|_| vk_init::create_frame_sync(device))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut allocator_info = AllocatorCreateInfo::new(instance, device, physical_device.p_device);
+        let mut allocator_info =
+            AllocatorCreateInfo::new(instance, device, physical_device.p_device);
         allocator_info.vulkan_api_version = vk::API_VERSION_1_3;
         allocator_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
 
@@ -714,7 +715,8 @@ impl VkRenderCore {
             swapchain_image_count,
         )?;
         let draw_format = draw_images[0].image_format;
-        let draw_views: Vec<vk::ImageView> = draw_images.iter().map(|data| data.image_view).collect();
+        let draw_views: Vec<vk::ImageView> =
+            draw_images.iter().map(|data| data.image_view).collect();
 
         let present_images = vk_init::create_basic_present_views(device, swapchain)?;
         let _descriptors = init_descriptors(device, &draw_views);
@@ -836,7 +838,11 @@ impl VkRenderCore {
         local_transfer_pool: VkCommandPool,
         mut host_buffer_pools: Vec<VkCommandPool>,
         mut host_graphic_pools: Vec<VkCommandPool>,
-    ) -> (VkTransfer, Arc<Mutex<VkHostBuffer>>, Arc<Mutex<VkHostBuffer>>) {
+    ) -> (
+        VkTransfer,
+        Arc<Mutex<VkHostBuffer>>,
+        Arc<Mutex<VkHostBuffer>>,
+    ) {
         let transfer = VkTransfer::new(local_transfer_pool);
 
         let fence_info = vk::FenceCreateInfo::default();
@@ -916,6 +922,8 @@ impl VkRenderCore {
 
     pub fn new(
         mut window_state: VkWindowState,
+        window: &winit::window::Window,
+        app_name: &str,
         with_validation: bool,
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
@@ -931,7 +939,7 @@ impl VkRenderCore {
             device,
             device_queues,
             swapchain,
-        } = Self::init_vulkan_core(&mut window_state, with_validation)?;
+        } = Self::init_vulkan_core(&mut window_state, window, app_name, with_validation)?;
 
         let swapchain_image_count = swapchain.swapchain_images.len() as u32;
         let CommandPoolInit {
@@ -964,17 +972,18 @@ impl VkRenderCore {
             imgui_pool,
             swapchain.surface_format.format,
             swapchain_image_count,
-            &window_state.window,
+            window,
         );
 
-        let (transfer, mesh_host_buffer, texture_host_buffer) = Self::init_transfer_and_host_buffers(
-            &device,
-            &allocator,
-            &device_queues,
-            local_transfer_pool,
-            host_buffer_pools,
-            host_graphic_pools,
-        );
+        let (transfer, mesh_host_buffer, texture_host_buffer) =
+            Self::init_transfer_and_host_buffers(
+                &device,
+                &allocator,
+                &device_queues,
+                local_transfer_pool,
+                host_buffer_pools,
+                host_graphic_pools,
+            );
 
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
@@ -1039,7 +1048,8 @@ impl VkRenderCore {
             resize_requested: false,
         };
 
-        let scene_world = Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?;
+        let scene_world =
+            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?;
         Ok((render, scene_world))
     }
 
@@ -1077,12 +1087,16 @@ impl VkRenderCore {
 impl VkRender {
     pub fn new(
         window_state: VkWindowState,
+        window: &winit::window::Window,
+        app_name: &str,
         with_validation: bool,
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
     ) -> Result<(Self, SceneWorld), String> {
         let (core, scene_world) = VkRenderCore::new(
             window_state,
+            window,
+            app_name,
             with_validation,
             compile_shaders,
             debug_runtime_mode,
@@ -1260,7 +1274,10 @@ impl VkRenderCore {
         };
 
         if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
-            error!("Failed to bind acquired present target {}: {:?}", image_index, err);
+            error!(
+                "Failed to bind acquired present target {}: {:?}",
+                image_index, err
+            );
             self.resize_requested = true;
             return None;
         }
@@ -1477,7 +1494,10 @@ impl VkRenderCore {
         let skybox_desc_alloc = VkDescriptorAllocator::new(
             &self.device,
             1,
-            &[PoolSizeRatio::new(DescriptorType::COMBINED_IMAGE_SAMPLER, 1.0)],
+            &[PoolSizeRatio::new(
+                DescriptorType::COMBINED_IMAGE_SAMPLER,
+                1.0,
+            )],
         )
         .map_err(|err| format!("Failed to create skybox descriptor allocator: {err}"))?;
 
@@ -1498,9 +1518,10 @@ impl VkRenderCore {
         );
         sb_desc_writer.update_set(&self.device, skybox_desc);
 
-        self.sky_box
-            .descriptors
-            .insert(env_id, VkSingleDescriptor::new(skybox_desc_alloc, skybox_desc));
+        self.sky_box.descriptors.insert(
+            env_id,
+            VkSingleDescriptor::new(skybox_desc_alloc, skybox_desc),
+        );
         Ok(())
     }
 
@@ -1521,7 +1542,8 @@ impl VkRenderCore {
             VkSceneDescriptors::new(
                 &self.device,
                 &self.allocator.lock().unwrap(),
-                self.buffer_and_desc_limits.min_uniform_buffer_offset_alignment,
+                self.buffer_and_desc_limits
+                    .min_uniform_buffer_offset_alignment,
                 self.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
                 env_maps,
                 &self.brdf_lut,
@@ -1546,7 +1568,8 @@ impl VkRenderCore {
             .unwrap()
             .get_loaded_id(MeshCache::SKYBOX_MESH)
             .map_err(|err| format!("Failed to fetch skybox mesh: {:?}", err))?;
-        self.sky_box.skybox_consts.vertex_buffer_addr = skybox_mesh_data.vertex_buffer.alloc_address;
+        self.sky_box.skybox_consts.vertex_buffer_addr =
+            skybox_mesh_data.vertex_buffer.alloc_address;
         Ok(())
     }
 
@@ -1680,11 +1703,7 @@ impl VkRenderCore {
     }
 
     /// Record one indexed skybox draw using pre-resolved descriptor and mesh handles.
-    unsafe fn record_skybox_draw(
-        &self,
-        cmd_buffer: vk::CommandBuffer,
-        skybox: SkyboxDrawInputs,
-    ) {
+    unsafe fn record_skybox_draw(&self, cmd_buffer: vk::CommandBuffer, skybox: SkyboxDrawInputs) {
         self.device.cmd_bind_pipeline(
             cmd_buffer,
             vk::PipelineBindPoint::GRAPHICS,
@@ -1700,8 +1719,12 @@ impl VkRenderCore {
             &[],
         );
 
-        self.device
-            .cmd_bind_index_buffer(cmd_buffer, skybox.index_buffer, 0, vk::IndexType::UINT32);
+        self.device.cmd_bind_index_buffer(
+            cmd_buffer,
+            skybox.index_buffer,
+            0,
+            vk::IndexType::UINT32,
+        );
 
         self.device.cmd_push_constants(
             cmd_buffer,
@@ -2089,8 +2112,12 @@ impl VkRenderCore {
                 &[],
             );
 
-            self.device
-                .cmd_bind_index_buffer(cmd_buffer, obj.index_buffer, 0, vk::IndexType::UINT32);
+            self.device.cmd_bind_index_buffer(
+                cmd_buffer,
+                obj.index_buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
 
             let push_consts = VkModelPushConsts::new(
                 obj.transform,
@@ -2195,7 +2222,12 @@ impl VkRenderCore {
             .lock()
             .unwrap()
             .get_loaded_id(MeshCache::SKYBOX_MESH)
-            .map_err(|err| format!("Failed to load skybox mesh for environment generation: {:?}", err))?;
+            .map_err(|err| {
+                format!(
+                    "Failed to load skybox mesh for environment generation: {:?}",
+                    err
+                )
+            })?;
 
         Ok(SkyboxMeshDrawInfo {
             vertex_buffer_addr: skybox_mesh.vertex_buffer.alloc_address,
@@ -2293,7 +2325,9 @@ impl VkRenderCore {
         self.device
             .queue_submit2(render_queue, &submit_info, fence)
             .unwrap();
-        self.device.wait_for_fences(&fences, true, u64::MAX).unwrap();
+        self.device
+            .wait_for_fences(&fences, true, u64::MAX)
+            .unwrap();
         self.device.destroy_fence(fence, None);
     }
 
@@ -2421,7 +2455,8 @@ impl VkRenderCore {
                             .layer_count(1)
                             .color_attachments(&color_attachment_info);
 
-                        self.device.cmd_begin_rendering(render_buffer, &rendering_info);
+                        self.device
+                            .cmd_begin_rendering(render_buffer, &rendering_info);
                         self.device.cmd_set_viewport(render_buffer, 0, &viewport);
                         self.device.cmd_set_scissor(render_buffer, 0, &scissor);
                         self.device.cmd_bind_pipeline(
@@ -2456,8 +2491,14 @@ impl VkRenderCore {
                             0,
                             vk::IndexType::UINT32,
                         );
-                        self.device
-                            .cmd_draw_indexed(render_buffer, skybox_mesh.index_count, 1, 0, 0, 0);
+                        self.device.cmd_draw_indexed(
+                            render_buffer,
+                            skybox_mesh.index_count,
+                            1,
+                            0,
+                            0,
+                            0,
+                        );
                         self.device.cmd_end_rendering(render_buffer);
 
                         vk_util::transition_image(
@@ -2562,7 +2603,10 @@ impl VkRenderCore {
         )?;
         let irr_desc = desc_pool.allocate(
             &self.device,
-            &[self.vulkan_cache.desc_layouts.get(VkDescType::EnvIrradiance)],
+            &[self
+                .vulkan_cache
+                .desc_layouts
+                .get(VkDescType::EnvIrradiance)],
         )?;
         let filter_desc = desc_pool.allocate(
             &self.device,

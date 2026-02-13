@@ -27,27 +27,31 @@
 
 use crate::data::camera::FPSController;
 
-use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator};
+use crate::data::data_cache::{EnvMaps, VkPipelineType};
+use crate::data::data_util::{
+    BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError,
+};
+use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
+use crate::vulkan::vk_descriptor::{
+    PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
+};
 use crate::vulkan::vk_util;
 use ash::vk::{DeviceSize, Extent2D};
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
+use log::{debug, error};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
-use std::sync::{Arc, mpsc, Mutex};
-use std::{mem, slice};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use log::{debug, error};
+use std::{mem, slice};
 use vk_mem::{Alloc, Allocator};
 use winit::dpi::LogicalPosition;
 use winit::event::ElementState::{Pressed, Released};
 use winit::event::Event::WindowEvent;
-use crate::data::data_cache::{EnvMaps, VkPipelineType};
-use crate::data::data_util::{BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError};
-use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 
 /// Core RAII trait for all Vulkan resources requiring cleanup.
 ///
@@ -63,7 +67,6 @@ use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
 pub trait VkDestroyable {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator);
 }
-
 
 #[derive(Debug)]
 pub enum VkError {
@@ -87,7 +90,6 @@ pub enum VkError {
 /// - Holds FPSController (Rc<RefCell<>> for shared mutable access from event loop)
 /// - Viewport/scissor updated on resize and cached for command buffer recording
 pub struct VkWindowState {
-    pub window: winit::window::Window,
     pub resize_requested: bool,
     max_extent: vk::Extent2D,
     curr_extent: vk::Extent2D,
@@ -98,10 +100,8 @@ pub struct VkWindowState {
     pub controller: Rc<RefCell<FPSController>>,
 }
 
-
 impl VkWindowState {
     pub fn new(
-        window: winit::window::Window,
         curr_extent: vk::Extent2D,
         max_extent: vk::Extent2D,
         controller: FPSController,
@@ -113,7 +113,7 @@ impl VkWindowState {
             .x(0.0)
             .y(curr_extent.height as f32)
             .width(curr_extent.width as f32)
-            .height(-(curr_extent.height as f32))  // Negative height = Y-flip
+            .height(-(curr_extent.height as f32)) // Negative height = Y-flip
             .min_depth(0.0)
             .max_depth(1.0)];
 
@@ -124,7 +124,6 @@ impl VkWindowState {
         let curr_aspect_ratio = curr_extent.width as f32 / curr_extent.height as f32;
 
         Self {
-            window,
             curr_extent,
             max_extent,
             controller: Rc::new(RefCell::new(controller)),
@@ -155,7 +154,7 @@ impl VkWindowState {
             .x(0.0)
             .y(self.curr_extent.height as f32)
             .width(self.curr_extent.width as f32)
-            .height(-(self.curr_extent.height as f32))  // Maintain Y-flip
+            .height(-(self.curr_extent.height as f32)) // Maintain Y-flip
             .min_depth(0.0)
             .max_depth(1.0)];
 
@@ -196,8 +195,8 @@ impl VkWindowState {
         &self.viewport_scissor.1
     }
 
-    pub fn center_cursor(&self) {
-        self.window
+    pub fn center_cursor(&self, window: &winit::window::Window) {
+        window
             .set_cursor_position(LogicalPosition {
                 x: self.curr_extent.width / 2,
                 y: self.curr_extent.height / 2,
@@ -206,19 +205,16 @@ impl VkWindowState {
     }
 }
 
-
 pub struct VkDebug {
     pub debug_utils: ash::ext::debug_utils::Instance,
     pub debug_callback: vk::DebugUtilsMessengerEXT,
 }
-
 
 pub struct SwapchainSupport {
     pub capabilities: vk::SurfaceCapabilitiesKHR,
     pub formats: Vec<vk::SurfaceFormatKHR>,
     pub present_modes: Vec<vk::PresentModeKHR>,
 }
-
 
 pub struct VkSwapchain {
     pub swapchain_loader: ash::khr::swapchain::Device,
@@ -228,19 +224,16 @@ pub struct VkSwapchain {
     pub extent: vk::Extent2D,
 }
 
-
 pub struct VkSurface {
     pub surface: vk::SurfaceKHR,
     pub surface_instance: ash::khr::surface::Instance,
 }
-
 
 pub struct PhyDevice {
     pub name: String,
     pub id: u32,
     pub p_device: vk::PhysicalDevice,
 }
-
 
 pub struct LogicalDevice {
     pub device: ash::Device,
@@ -294,9 +287,7 @@ pub struct VkBufferAndDescriptorLimits {
     pub max_descriptor_set_update_after_bind_uniform_buffers: u32,
     pub max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
     pub max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
-
 }
-
 
 #[derive(Debug)]
 pub struct QueueIndex {
@@ -331,7 +322,6 @@ pub enum VkQueueType {
     Transfer = 3,
 }
 
-
 impl VkQueueType {
     // Define an array of all the enum variants
     const ALL_QUEUE_TYPES: [VkQueueType; 4] = [
@@ -345,7 +335,6 @@ impl VkQueueType {
         Self::ALL_QUEUE_TYPES.iter()
     }
 }
-
 
 /// Map of command pools indexed by queue type.
 ///
@@ -366,7 +355,6 @@ pub struct VkCommandPoolMap {
     pools: [VkCommandPool; 4],
 }
 
-
 impl VkDestroyable for VkCommandPoolMap {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.pools
@@ -374,7 +362,6 @@ impl VkDestroyable for VkCommandPoolMap {
             .for_each(|pool| pool.destroy(device, allocator));
     }
 }
-
 
 impl VkCommandPoolMap {
     /// Create pool map from Vec, ensuring all 4 queue types are present.
@@ -386,13 +373,16 @@ impl VkCommandPoolMap {
     pub fn new(mut pools: Vec<(VkQueueType, VkCommandPool)>) -> Result<Self, String> {
         pools.sort_by_key(|(typ, _)| *typ);
 
-        let sorted_pools: [VkCommandPool; 4] = pools.into_iter()
+        let sorted_pools: [VkCommandPool; 4] = pools
+            .into_iter()
             .map(|(_, pool)| pool)
             .collect::<Vec<_>>()
             .try_into()
             .map_err(|_| "Invalid pool count, expected 4".to_string())?;
 
-        Ok(Self { pools: sorted_pools })
+        Ok(Self {
+            pools: sorted_pools,
+        })
     }
 
     /// Get pool for a specific queue type using enum value as array index.
@@ -422,16 +412,17 @@ pub struct VkCommandPool {
     pub buffers: Vec<vk::CommandBuffer>,
 }
 
-
-pub type VkSubmitFn = Box<dyn Fn(&VkCmdSubmitInfo, &vk::Device, &mut VkFenceQueue, &VkDeviceQueues) -> Result<(), String> + Send + Sync>;
-
+pub type VkSubmitFn = Box<
+    dyn Fn(&VkCmdSubmitInfo, &vk::Device, &mut VkFenceQueue, &VkDeviceQueues) -> Result<(), String>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug)]
 pub struct VkSubmitParam {
     pub is_signal: bool,
     pub stage_mask: vk::PipelineStageFlags2,
 }
-
 
 impl VkSubmitParam {
     pub fn signaling(flags: vk::PipelineStageFlags2) -> Self {
@@ -449,7 +440,6 @@ impl VkSubmitParam {
     }
 }
 
-
 #[derive(Debug)]
 pub struct VkCmdSubmitInfo {
     pub cmd_buffer: vk::CommandBuffer,
@@ -460,14 +450,21 @@ pub struct VkCmdSubmitInfo {
     pub submit_params: VkSubmitParam,
 }
 
-
 impl VkCmdSubmitInfo {
-    pub fn submit(self, device: &ash::Device, device_queues: &VkDeviceQueues, fence_queue: &mut VkFenceQueue) {
+    pub fn submit(
+        self,
+        device: &ash::Device,
+        device_queues: &VkDeviceQueues,
+        fence_queue: &mut VkFenceQueue,
+    ) {
         let cmd_buffer = [self.cmd_buffer];
         let cmd_info = [vk_util::command_buffer_submit_info(self.cmd_buffer)];
         let queue = device_queues.get_queue(self.queue_type);
 
-        debug!("Submitted off-thread cmd buffer: {:?} | {:?} ", self.queue_type, self.cmd_buffer);
+        debug!(
+            "Submitted off-thread cmd buffer: {:?} | {:?} ",
+            self.queue_type, self.cmd_buffer
+        );
 
         let semaphore_info = [vk::SemaphoreSubmitInfo::default()
             .semaphore(self.semaphore[0])
@@ -476,16 +473,25 @@ impl VkCmdSubmitInfo {
 
         let queue_submit = vk::SubmitInfo2::default()
             .command_buffer_infos(&cmd_info)
-            .signal_semaphore_infos(if self.submit_params.is_signal { &semaphore_info } else { &[] })
-            .wait_semaphore_infos(if !self.submit_params.is_signal { &semaphore_info } else { &[] });
+            .signal_semaphore_infos(if self.submit_params.is_signal {
+                &semaphore_info
+            } else {
+                &[]
+            })
+            .wait_semaphore_infos(if !self.submit_params.is_signal {
+                &semaphore_info
+            } else {
+                &[]
+            });
 
         unsafe {
-            device.queue_submit2(queue, &[queue_submit], self.fence[0]).unwrap();
+            device
+                .queue_submit2(queue, &[queue_submit], self.fence[0])
+                .unwrap();
         }
         fence_queue.queue_fence(self.fence, self.latch_guard)
     }
 }
-
 
 impl VkDestroyable for VkCommandPool {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -494,7 +500,6 @@ impl VkDestroyable for VkCommandPool {
         }
     }
 }
-
 
 /// Synchronization primitives for a single frame in flight.
 ///
@@ -515,7 +520,6 @@ pub struct VkFrameSync {
     pub render_semaphore: vk::Semaphore,
     pub render_fence: vk::Fence,
 }
-
 
 impl VkDestroyable for VkFrameSync {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -545,7 +549,6 @@ pub struct VkImageAlloc {
     pub image_format: vk::Format,
     pub mip_levels: u32,
 }
-
 
 impl VkDestroyable for VkImageAlloc {
     fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
@@ -584,13 +587,12 @@ pub struct VkFrame {
     pub sync: VkFrameSync,
     pub draw: VkImageAlloc,
     pub depth: VkImageAlloc,
-    pub present_image: vk::Image,          // Not owned (swapchain owns this)
+    pub present_image: vk::Image, // Not owned (swapchain owns this)
     pub present_image_view: vk::ImageView, // Not owned
     pub cmd_pools: VkCommandPoolMap,
     pub descriptors: VkDynamicDescriptorAllocator,
     deletions: Vec<VkDeletable>,
 }
-
 
 impl VkDestroyable for VkFrame {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -603,7 +605,6 @@ impl VkDestroyable for VkFrame {
         // device.destroy_image(self.present_image, None);
     }
 }
-
 
 impl VkFrame {
     pub fn new(
@@ -689,17 +690,13 @@ pub struct VkPresent {
     max_frames_active: u32,
 }
 
-
 impl VkDestroyable for VkPresent {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.frame_data
             .iter_mut()
-            .for_each(|frame| {
-                frame.destroy(device, allocator)
-            });
+            .for_each(|frame| frame.destroy(device, allocator));
     }
 }
-
 
 // TODO allow for multiple buffers and related sync structures
 impl VkPresent {
@@ -739,7 +736,10 @@ impl VkPresent {
             .map(
                 |(
                     i,
-                    (((((sync, draw), depth), (present_image, present_image_view)), cmd_pools), descriptors),
+                    (
+                        ((((sync, draw), depth), (present_image, present_image_view)), cmd_pools),
+                        descriptors,
+                    ),
                 )| {
                     VkFrame::new(
                         i as u32,
@@ -834,7 +834,6 @@ impl VkPresent {
     }
 }
 
-
 #[derive(Debug)]
 pub struct VkDeviceQueues {
     pub(crate) graphics_queue: (u32, vk::Queue),
@@ -842,7 +841,6 @@ pub struct VkDeviceQueues {
     pub(crate) compute_queue: (u32, vk::Queue),
     pub(crate) transfer_queue: (u32, vk::Queue),
 }
-
 
 impl Default for VkDeviceQueues {
     fn default() -> Self {
@@ -854,7 +852,6 @@ impl Default for VkDeviceQueues {
         }
     }
 }
-
 
 impl VkDeviceQueues {
     pub fn get_queue(&self, typ: VkQueueType) -> vk::Queue {
@@ -906,13 +903,11 @@ impl VkDeviceQueues {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VkPipeline {
     pub pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
 }
-
 
 impl VkPipeline {
     pub fn new(pipeline: vk::Pipeline, pipeline_layout: vk::PipelineLayout) -> Self {
@@ -923,7 +918,6 @@ impl VkPipeline {
     }
 }
 
-
 impl VkDestroyable for VkPipeline {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         unsafe {
@@ -933,12 +927,10 @@ impl VkDestroyable for VkPipeline {
     }
 }
 
-
 pub struct VkImmediate {
     pub command_pool: VkCommandPool,
     pub fence: [vk::Fence; 1],
 }
-
 
 impl VkImmediate {
     pub fn new(command_pool: VkCommandPool, fence: vk::Fence) -> Self {
@@ -980,13 +972,12 @@ pub struct VkHostBuffer {
     pub render_sender: Sender<VkCmdSubmitInfo>,
     pub transfer_pool: VkCommandPool,
     pub graphics_pool: VkCommandPool,
-    pub fence: [vk::Fence; 2],  // [0] = transfer, [1] = graphics
+    pub fence: [vk::Fence; 2], // [0] = transfer, [1] = graphics
     pub semaphore: [vk::Semaphore; 1],
     pub transfer_queue_index: u32,
     pub graphics_queue_index: u32,
     pub countdown_latch: CountdownLatch,
 }
-
 
 impl VkHostBuffer {
     /// Submit transfer queue command buffer to render thread.
@@ -1001,7 +992,10 @@ impl VkHostBuffer {
     /// - **Waiting**: Less common, waits on semaphore from previous operation
     ///
     /// Called from background asset loading threads.
-    pub fn submit_transfer_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
+    pub fn submit_transfer_commands(
+        &self,
+        submit_params: VkSubmitParam,
+    ) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.transfer_pool.buffers[0],
             fence: [self.fence[0]],
@@ -1013,7 +1007,9 @@ impl VkHostBuffer {
 
         if let Err(err) = self.render_sender.send(submit_info) {
             Err(err)
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     /// Submit graphics queue command buffer to render thread.
@@ -1021,7 +1017,10 @@ impl VkHostBuffer {
     /// ## Use Case
     /// Image layout transitions after transfer completion. Some hardware requires
     /// barriers on graphics queue even if transfer queue did the copy.
-    pub fn submit_graphics_commands(&self, submit_params: VkSubmitParam) -> Result<(), SendError<VkCmdSubmitInfo>> {
+    pub fn submit_graphics_commands(
+        &self,
+        submit_params: VkSubmitParam,
+    ) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
             cmd_buffer: self.graphics_pool.buffers[0],
             fence: [self.fence[1]],
@@ -1033,7 +1032,9 @@ impl VkHostBuffer {
 
         if let Err(err) = self.render_sender.send(submit_info) {
             Err(err)
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     /// Block background thread until GPU completes transfer.
@@ -1042,17 +1043,27 @@ impl VkHostBuffer {
     /// Allows background thread to reuse staging buffer after transfer finishes.
     /// Latch counts down when fences signal (via CountDownDropGuard).
     pub fn await_done(&self, timeout_sec: u64) -> Result<(), LatchTimeOutError> {
-        self.countdown_latch.await_zero(Duration::from_secs(timeout_sec))
+        self.countdown_latch
+            .await_zero(Duration::from_secs(timeout_sec))
     }
 
     pub fn reset_buffers(&self, device: &ash::Device) {
         unsafe {
-            device.reset_command_buffer(self.transfer_pool.buffers[0], vk::CommandBufferResetFlags::empty()).unwrap();
-            device.reset_command_buffer(self.graphics_pool.buffers[0], vk::CommandBufferResetFlags::empty()).unwrap();
+            device
+                .reset_command_buffer(
+                    self.transfer_pool.buffers[0],
+                    vk::CommandBufferResetFlags::empty(),
+                )
+                .unwrap();
+            device
+                .reset_command_buffer(
+                    self.graphics_pool.buffers[0],
+                    vk::CommandBufferResetFlags::empty(),
+                )
+                .unwrap();
         }
     }
 }
-
 
 impl VkDestroyable for VkHostBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1090,7 +1101,6 @@ pub struct VkTransfer {
     transfer_pool: VkCommandPool,
 }
 
-
 impl VkTransfer {
     pub fn new(transfer_pool: VkCommandPool) -> Self {
         let (sender, receiver) = channel::<VkCmdSubmitInfo>();
@@ -1122,7 +1132,6 @@ impl VkTransfer {
     }
 }
 
-
 impl VkDestroyable for VkTransfer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.transfer_pool.destroy(device, allocator);
@@ -1132,14 +1141,12 @@ impl VkDestroyable for VkTransfer {
     }
 }
 
-
 pub struct VkImgui {
     pub context: imgui::Context,
     pub platform: imgui_winit_support::WinitPlatform,
     pub renderer: imgui_rs_vulkan_renderer::Renderer,
     pub opened: bool,
 }
-
 
 impl VkImgui {
     pub fn new(
@@ -1171,7 +1178,6 @@ impl VkImgui {
     }
 }
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Compute4x4PushConstants {
@@ -1180,7 +1186,6 @@ pub struct Compute4x4PushConstants {
     pub data_3: glam::Vec4,
     pub data_4: glam::Vec4,
 }
-
 
 impl Default for Compute4x4PushConstants {
     fn default() -> Self {
@@ -1192,7 +1197,6 @@ impl Default for Compute4x4PushConstants {
         }
     }
 }
-
 
 impl Compute4x4PushConstants {
     pub fn set_data_1(mut self, data: glam::Vec4) -> Self {
@@ -1213,13 +1217,11 @@ impl Compute4x4PushConstants {
     }
 }
 
-
 impl Compute4x4PushConstants {
     pub fn as_byte_slice(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 }
-
 
 pub struct ComputeEffect {
     pub name: String,
@@ -1228,7 +1230,6 @@ pub struct ComputeEffect {
     pub descriptors: VkDescriptors,
     pub data: Compute4x4PushConstants,
 }
-
 
 impl VkDestroyable for ComputeEffect {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1240,19 +1241,16 @@ impl VkDestroyable for ComputeEffect {
     }
 }
 
-
 pub struct ComputeData {
     pub effects: Vec<ComputeEffect>,
     pub current: u32,
 }
-
 
 impl ComputeData {
     pub fn get_current_effect(&self) -> &ComputeEffect {
         self.effects.get(self.current as usize).unwrap()
     }
 }
-
 
 impl VkDestroyable for ComputeData {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1261,7 +1259,6 @@ impl VkDestroyable for ComputeData {
             .for_each(|e| e.destroy(device, allocator));
     }
 }
-
 
 impl Default for ComputeData {
     fn default() -> Self {
@@ -1272,7 +1269,6 @@ impl Default for ComputeData {
     }
 }
 
-
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
 pub struct VkDescriptors {
@@ -1280,7 +1276,6 @@ pub struct VkDescriptors {
     pub descriptor_sets: Vec<vk::DescriptorSet>,
     pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
 }
-
 
 impl VkDestroyable for VkDescriptors {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1292,7 +1287,6 @@ impl VkDestroyable for VkDescriptors {
         }
     }
 }
-
 
 impl VkDescriptors {
     pub fn new(allocator: VkDescriptorAllocator) -> Self {
@@ -1308,7 +1302,6 @@ impl VkDescriptors {
         self.descriptor_layouts.push(layout);
     }
 }
-
 
 /// Vulkan buffer with vk_mem allocation.
 ///
@@ -1357,13 +1350,11 @@ pub struct VkSubAlloc {
     pub sub_buffer_index: u32,
 }
 
-
 pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
     pub extent: Extent2D,
 }
-
 
 impl VkBuffer {
     pub fn new(
@@ -1380,7 +1371,6 @@ impl VkBuffer {
         }
     }
 }
-
 
 impl VkDestroyable for VkBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
@@ -1415,7 +1405,6 @@ pub enum VkDeletable {
     AllocatedBuffer(VkBuffer),
 }
 
-
 impl VkDeletable {
     pub fn delete(&mut self, device: &ash::Device, allocator: &Allocator) {
         match self {
@@ -1425,7 +1414,6 @@ impl VkDeletable {
         }
     }
 }
-
 
 /// Pre-allocated scene descriptor sets with backing uniform buffers.
 ///
@@ -1459,7 +1447,6 @@ pub struct VkSceneDescriptors {
     alignment: u64,
 }
 
-
 impl VkSceneDescriptors {
     pub fn new(
         device: &ash::Device,
@@ -1474,29 +1461,31 @@ impl VkSceneDescriptors {
             PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 3.0),
         ];
-        let mut descriptor_pool = VkDynamicDescriptorAllocator::new(device, count, &pool_ratios).unwrap();
+        let mut descriptor_pool =
+            VkDynamicDescriptorAllocator::new(device, count, &pool_ratios).unwrap();
 
         let scene_buffer = vk_util::allocate_buffer(
             allocator,
-            (std::mem::size_of::<SceneDataUBO>()
-                .next_multiple_of(uniform_alignment as usize) * count as usize) as DeviceSize,
+            (std::mem::size_of::<SceneDataUBO>().next_multiple_of(uniform_alignment as usize)
+                * count as usize) as DeviceSize,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
-        ).unwrap();
+        )
+        .unwrap();
 
         let env_buffer = vk_util::allocate_buffer(
             allocator,
-            (std::mem::size_of::<EnvironmentUBO>()
-                .next_multiple_of(uniform_alignment as usize) * count as usize) as DeviceSize,
+            (std::mem::size_of::<EnvironmentUBO>().next_multiple_of(uniform_alignment as usize)
+                * count as usize) as DeviceSize,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
-        ).unwrap();
-
+        )
+        .unwrap();
 
         let scene_data = SceneDataUBO::default();
 
-        let scene_data_size = size_of::<SceneDataUBO>()
-            .next_multiple_of(uniform_alignment as usize) as DeviceSize;
+        let scene_data_size =
+            size_of::<SceneDataUBO>().next_multiple_of(uniform_alignment as usize) as DeviceSize;
 
         let env_data_size = std::mem::size_of::<EnvironmentUBO>()
             .next_multiple_of(uniform_alignment as usize) as DeviceSize;
@@ -1504,73 +1493,76 @@ impl VkSceneDescriptors {
         let mut scene_ptr = scene_buffer.alloc_info.mapped_data as *mut u8;
         let mut env_ptr = env_buffer.alloc_info.mapped_data as *mut u8;
 
+        let scene_descriptors: Vec<vk::DescriptorSet> = (0..count)
+            .into_iter()
+            .map(|i| {
+                println!("Writing buffers: {}", i);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &scene_data as *const SceneDataUBO as *const u8,
+                        scene_ptr.cast(),
+                        scene_data_size as usize,
+                    );
 
-        let scene_descriptors: Vec<vk::DescriptorSet> = (0..count).into_iter().map(|i| {
-            println!("Writing buffers: {}", i);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    &scene_data as *const SceneDataUBO as *const u8,
-                    scene_ptr.cast(),
-                    scene_data_size as usize,
+                    std::ptr::copy_nonoverlapping(
+                        &env_maps.environment_ubo as *const EnvironmentUBO as *const u8,
+                        env_ptr.cast(),
+                        env_data_size as usize,
+                    );
+
+                    scene_ptr = scene_ptr.add(scene_data_size as usize);
+                    env_ptr = env_ptr.add((env_data_size) as usize);
+                }
+
+                let desc_set = descriptor_pool
+                    .allocate(&device, &[scene_desc_layout])
+                    .unwrap();
+
+                let mut writer = VkDescriptorWriter::default();
+                writer.write_buffer(
+                    0,
+                    scene_buffer.buffer,
+                    scene_data_size,
+                    (scene_data_size * i as u64) as usize,
+                    vk::DescriptorType::UNIFORM_BUFFER,
                 );
 
-                std::ptr::copy_nonoverlapping(
-                    &env_maps.environment_ubo as *const EnvironmentUBO as *const u8,
-                    env_ptr.cast(),
-                    env_data_size as usize,
+                writer.write_buffer(
+                    1,
+                    env_buffer.buffer,
+                    env_data_size,
+                    (env_data_size * i as u64) as usize,
+                    vk::DescriptorType::UNIFORM_BUFFER,
                 );
 
-                scene_ptr = scene_ptr.add(scene_data_size as usize);
-                env_ptr = env_ptr.add((env_data_size) as usize);
-            }
+                writer.write_image(
+                    2,
+                    env_maps.irradiance.image_view,
+                    env_maps.irradiance.sampler,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                );
 
+                writer.write_image(
+                    3,
+                    env_maps.pre_filter.image_view,
+                    env_maps.pre_filter.sampler,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                );
 
-            let desc_set = descriptor_pool.allocate(&device, &[scene_desc_layout]).unwrap();
+                writer.write_image(
+                    4,
+                    brdf_lut.image_alloc.image_view,
+                    brdf_lut.sampler,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                );
 
-            let mut writer = VkDescriptorWriter::default();
-            writer.write_buffer(
-                0,
-                scene_buffer.buffer,
-                scene_data_size,
-                (scene_data_size * i as u64) as usize,
-                vk::DescriptorType::UNIFORM_BUFFER,
-            );
-
-            writer.write_buffer(
-                1,
-                env_buffer.buffer,
-                env_data_size,
-                (env_data_size * i as u64) as usize,
-                vk::DescriptorType::UNIFORM_BUFFER,
-            );
-
-            writer.write_image(
-                2,
-                env_maps.irradiance.image_view,
-                env_maps.irradiance.sampler,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            );
-
-            writer.write_image(
-                3,
-                env_maps.pre_filter.image_view,
-                env_maps.pre_filter.sampler,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            );
-
-            writer.write_image(
-                4,
-                brdf_lut.image_alloc.image_view,
-                brdf_lut.sampler,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            );
-
-            writer.update_set(device, desc_set);
-            desc_set
-        }).collect();
+                writer.update_set(device, desc_set);
+                desc_set
+            })
+            .collect();
 
         Self {
             descriptor_pool,
@@ -1581,15 +1573,13 @@ impl VkSceneDescriptors {
         }
     }
 
-
     pub fn update_scene_uniform(
         &mut self,
         device: &ash::Device,
         scene_data: SceneDataUBO,
         index: u32,
     ) -> vk::DescriptorSet {
-        let data_size = size_of::<SceneDataUBO>()
-            .next_multiple_of(self.alignment as usize);
+        let data_size = size_of::<SceneDataUBO>().next_multiple_of(self.alignment as usize);
 
         unsafe {
             let mut data_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
@@ -1616,12 +1606,10 @@ impl VkSceneDescriptors {
         desc
     }
 
-
     pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
         self.scene_descriptors[index as usize]
     }
 }
-
 
 /// Queue for polling async transfer fences.
 ///
@@ -1646,10 +1634,11 @@ pub struct VkFenceQueue {
     fence_awaits: Vec<(vk::Fence, CountDownDropGuard)>,
 }
 
-
 impl VkFenceQueue {
     pub fn new() -> Self {
-        Self { fence_awaits: Vec::with_capacity(4) }
+        Self {
+            fence_awaits: Vec::with_capacity(4),
+        }
     }
 
     pub fn queue_fence(&mut self, fence: [vk::Fence; 1], latch_guard: CountDownDropGuard) {
@@ -1675,8 +1664,10 @@ impl VkFenceQueue {
             if signaled {
                 unsafe { device.reset_fences(&[*fence]).unwrap() };
                 debug!("Signaling and removing fence: {:?}", fence);
-                false  // Remove from queue
-            } else { true }  // Keep in queue
+                false // Remove from queue
+            } else {
+                true
+            } // Keep in queue
         });
     }
 }

@@ -2,10 +2,9 @@
 //!
 //! Utility routines for copying GPU images to CPU and writing debug snapshots to disk.
 
+use crate::vulkan::vk_util;
 use ash::vk;
 use image::{ImageBuffer, Rgba};
-use crate::vulkan::vk_util;
-
 
 pub fn capture_and_save_image_view(
     device: &ash::Device,
@@ -18,26 +17,36 @@ pub fn capture_and_save_image_view(
     path: &str,
 ) {
     let buffer_size = (extent.width * extent.height * 4) as vk::DeviceSize;
-    let buffer = vk_util::allocate_buffer(allocator, buffer_size, vk::BufferUsageFlags::TRANSFER_DST, vk_mem::MemoryUsage::Auto).unwrap();
+    let buffer = vk_util::allocate_buffer(
+        allocator,
+        buffer_size,
+        vk::BufferUsageFlags::TRANSFER_DST,
+        vk_mem::MemoryUsage::Auto,
+    )
+    .unwrap();
 
     let buffer_memory = buffer.alloc_info.mapped_data;
-
 
     let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
 
-    let command_buffer = unsafe { device.allocate_command_buffers(&command_buffer_allocate_info).unwrap()[0] };
-    let command_buffer_begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let command_buffer = unsafe {
+        device
+            .allocate_command_buffers(&command_buffer_allocate_info)
+            .unwrap()[0]
+    };
+    let command_buffer_begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
-    unsafe { device.begin_command_buffer(command_buffer, &command_buffer_begin_info).unwrap(); }
-
-    
+    unsafe {
+        device
+            .begin_command_buffer(command_buffer, &command_buffer_begin_info)
+            .unwrap();
+    }
 
     // Get the image from the image view
-
 
     // Transition image layout for transfer
     let barrier = vk::ImageMemoryBarrier::default()
@@ -78,7 +87,6 @@ pub fn capture_and_save_image_view(
         })
         .image_extent(extent);
 
-
     unsafe {
         device.cmd_copy_image_to_buffer(
             command_buffer,
@@ -89,23 +97,26 @@ pub fn capture_and_save_image_view(
         );
     }
 
-
     // End and submit command buffer
     unsafe {
         device.end_command_buffer(command_buffer).unwrap();
         let command_buffer = [command_buffer];
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(&command_buffer);
-        device.queue_submit(queue, &[submit_info], vk::Fence::null()).unwrap();
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffer);
+        device
+            .queue_submit(queue, &[submit_info], vk::Fence::null())
+            .unwrap();
         device.queue_wait_idle(queue).unwrap();
     }
 
     // Map memory and create image
     let memory_ptr = buffer_memory as *mut u8;
-    let data_slice = unsafe { std::slice::from_raw_parts(memory_ptr as *const u8, buffer_size as usize) };
+    let data_slice =
+        unsafe { std::slice::from_raw_parts(memory_ptr as *const u8, buffer_size as usize) };
 
-    let img = ImageBuffer::<Rgba<u8>, _>::from_raw(extent.width, extent.height, data_slice.to_vec())
-        .ok_or("Failed to create image from raw data").unwrap();
+    let img =
+        ImageBuffer::<Rgba<u8>, _>::from_raw(extent.width, extent.height, data_slice.to_vec())
+            .ok_or("Failed to create image from raw data")
+            .unwrap();
 
     img.save(path).unwrap();
 
@@ -115,5 +126,4 @@ pub fn capture_and_save_image_view(
         // device.free_memory(buffer.alloc_info.device_memory, None);
         device.destroy_buffer(buffer.buffer, None);
     }
-    
 }

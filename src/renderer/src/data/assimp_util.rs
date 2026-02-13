@@ -6,8 +6,8 @@
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
-    AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap,
-    OcclusionMap, Sampler, SurfaceMeta, TextureMeta, Vertex,
+    AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap, OcclusionMap,
+    Sampler, SurfaceMeta, TextureMeta, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
