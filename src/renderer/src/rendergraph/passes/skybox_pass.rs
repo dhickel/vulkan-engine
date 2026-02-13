@@ -1,3 +1,5 @@
+//! Environment background draw pass.
+
 use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 
 pub struct SkyboxPass;

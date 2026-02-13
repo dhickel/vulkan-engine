@@ -1,3 +1,8 @@
+//! # Data Utilities and Synchronization Primitives
+//!
+//! Shared helpers for image/format math and lightweight synchronization utilities used by
+//! upload workers and Vulkan transfer orchestration.
+
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex,

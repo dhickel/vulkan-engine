@@ -1,3 +1,8 @@
+//! # Per-Frame Render Submission
+//!
+//! Flat draw payload emitted by `SceneWorld` and consumed by the rendergraph.
+//! Keeps only stable handles and transforms so render code can resolve cache data safely.
+
 use crate::data::data_cache::MeshCache;
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::{EnvironmentHandle, MeshHandle};

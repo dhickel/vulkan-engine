@@ -636,6 +636,8 @@ impl TextureCache {
         let mut next_upload = Vec::<&TextureMeta>::with_capacity(texture_ids.len());
         let mut loaded = Vec::<CachedTexture>::with_capacity(texture_ids.len());
 
+        // 1. Filter for Unloaded Textures
+        // We only want to process textures that haven't been uploaded to the GPU yet.
         texture_ids.retain(|id| {
             let Ok(slot) = self.validate_texture_slot(*id) else {
                 return false;
@@ -653,6 +655,8 @@ impl TextureCache {
 
             match self.cached_textures.get(slot) {
                 Some(CachedTexture::Unloaded(meta)) => {
+                    // 2. Batching Check
+                    // If adding this texture would exceed the staging buffer's size, we must flush the current batch.
                     if curr_bytes
                         + meta
                             .bytes
@@ -660,6 +664,9 @@ impl TextureCache {
                             .next_multiple_of(self.host_alignment as usize)
                         > max_upload_bytes as usize
                     {
+                        // 3. Record GPU Copy Commands
+                        // This records the vkCmdCopyBufferToImage commands. The GPU will read from our host-visible
+                        // staging buffer and write into the device-local image memory.
                         let image_allocs = vk_util::record_host_to_image_buffer(
                             &self.device,
                             &self.allocator.lock().unwrap(),
@@ -671,9 +678,9 @@ impl TextureCache {
                             self.gfx_queue,
                         );
 
-                        // Submit texture uploads, requires graphics queue for mips
-
                         debug!("Submitting Material Commands");
+                        // 4. Submit to GPU
+                        // We submit to both the transfer queue (for the copy) and the graphics queue (if mipmap generation is needed).
                         host_buffer
                             .submit_transfer_commands(VkSubmitParam::signaling(
                                 vk::PipelineStageFlags2::ALL_TRANSFER,
@@ -685,10 +692,15 @@ impl TextureCache {
                             ))
                             .unwrap();
 
+                        // 5. Synchronous Wait (The Hitch)
+                        // We wait for the GPU to finish the copy before we can reuse the staging buffer.
+                        // WARNING: A 10s timeout is a safety net. If this triggers, it usually means the 
+                        // transfer queue is stalled or the fence was never signaled.
                         if let Err(error) = host_buffer.await_done(10000) {
                             error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
                             return false;
                         } else {
+                            // Reset the staging buffer's internal offset so we can start filling it from the beginning again.
                             host_buffer.reset_buffers(&self.device);
                             debug!("Storage upload latch passed")
                         }
@@ -714,6 +726,7 @@ impl TextureCache {
                             }
                         }
                     }
+                    // Accumulate texture data for the next batch
                     curr_bytes += meta
                         .bytes
                         .len()
@@ -728,7 +741,8 @@ impl TextureCache {
             }
         }
 
-        // Upload any remaining data
+        // 6. Final Batch Flush
+        // Upload any remaining textures that didn't trigger the "buffer full" check above.
         if curr_bytes > 0 {
             let image_allocs = vk_util::record_host_to_image_buffer(
                 &self.device,
@@ -742,7 +756,6 @@ impl TextureCache {
             );
 
             debug!("Submitting Material Commands");
-            // Submit texture uploads, requires graphics queue for mips
             host_buffer
                 .submit_transfer_commands(VkSubmitParam::signaling(
                     vk::PipelineStageFlags2::ALL_TRANSFER,
@@ -782,12 +795,9 @@ impl TextureCache {
             }
         }
 
+        // 7. Promote to Loaded State
+        // Final step: Update our cache state from Unloaded to Loaded, storing the new GPU handles.
         assert_eq!(texture_ids.len(), loaded.len());
-        println!(
-            "Texitre Ids len :{}, loaded_len: {}",
-            texture_ids.len(),
-            loaded.len()
-        );
         for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
             let Ok(slot) = self.validate_texture_slot(*id) else {
                 error!("Error loading textures: stale texture handle {:?}", id);
@@ -1597,7 +1607,7 @@ impl VkDestroyable for MeshCache {
 //////////////////
 
 #[repr(C)]
-#[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy)]
+#[derive(Ord, Eq, PartialEq, PartialOrd, Debug, Clone, Copy, Hash)]
 pub enum CoreShaderType {
     MetRoughVert,
     MetRoughFrag,
@@ -1613,6 +1623,81 @@ pub enum CoreShaderType {
 
 impl CoreShaderType {
     const COUNT: usize = 10;
+
+    fn from_manifest_key(key: &str) -> Option<Self> {
+        match key {
+            "MetRoughVert" => Some(Self::MetRoughVert),
+            "MetRoughFrag" => Some(Self::MetRoughFrag),
+            "MetRoughFragUnlit" => Some(Self::MetRoughFragUnlit),
+            "BrtFlutVert" => Some(Self::BrtFlutVert),
+            "BrtFlutFrag" => Some(Self::BrtFlutFrag),
+            "SkyBoxVert" => Some(Self::SkyBoxVert),
+            "SkyBoxFrag" => Some(Self::SkyBoxFrag),
+            "CubeFilterVert" => Some(Self::CubeFilterVert),
+            "EnvIrradianceFrag" => Some(Self::EnvIrradianceFrag),
+            "EnvPrefilterFrag" => Some(Self::EnvPrefilterFrag),
+            _ => None,
+        }
+    }
+}
+
+const CORE_SHADER_MANIFEST: &str = include_str!("../shaders/core_shader_manifest.txt");
+
+pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>, String> {
+    let mut shader_paths = Vec::<(CoreShaderType, &'static str)>::with_capacity(CoreShaderType::COUNT);
+    let mut seen = std::collections::HashSet::with_capacity(CoreShaderType::COUNT);
+
+    for (line_index, line) in CORE_SHADER_MANIFEST.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, path)) = trimmed.split_once('=') else {
+            return Err(format!(
+                "Invalid shader manifest entry at line {}: '{}'",
+                line_index + 1,
+                line
+            ));
+        };
+
+        let shader_type = CoreShaderType::from_manifest_key(key.trim()).ok_or_else(|| {
+            format!(
+                "Unknown shader key '{}' in manifest at line {}",
+                key.trim(),
+                line_index + 1
+            )
+        })?;
+
+        if !seen.insert(shader_type) {
+            return Err(format!(
+                "Duplicate shader key '{}' in manifest at line {}",
+                key.trim(),
+                line_index + 1
+            ));
+        }
+
+        let path = path.trim();
+        if path.is_empty() {
+            return Err(format!(
+                "Empty shader path for key '{}' at line {}",
+                key.trim(),
+                line_index + 1
+            ));
+        }
+
+        shader_paths.push((shader_type, path));
+    }
+
+    if shader_paths.len() != CoreShaderType::COUNT {
+        return Err(format!(
+            "Shader manifest size mismatch: expected {}, found {}",
+            CoreShaderType::COUNT,
+            shader_paths.len()
+        ));
+    }
+
+    Ok(shader_paths)
 }
 
 pub struct VkShaderCache {

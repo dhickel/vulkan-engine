@@ -1,3 +1,5 @@
+//! Blit/copy pass from offscreen draw target into present image.
+
 use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 
 pub struct PresentCopyPass;

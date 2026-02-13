@@ -1,3 +1,7 @@
+//! # Startup Debug Scene Selection
+//!
+//! Small runtime helper for deterministic scene startup scenarios used in render-path testing.
+
 use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::VkDataCache;
 use crate::data::gpu_data::MaterialShadingModel;

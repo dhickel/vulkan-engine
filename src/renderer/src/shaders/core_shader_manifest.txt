@@ -1,0 +1,12 @@
+# Core shader manifest used by VkShaderCache initialization.
+# Format: CoreShaderType=path-to-spv
+MetRoughVert=src/renderer/src/shaders/pbr_base.vert.spv
+MetRoughFrag=src/renderer/src/shaders/material_pbr.frag.spv
+MetRoughFragUnlit=src/renderer/src/shaders/material_unlit.frag.spv
+BrtFlutVert=src/renderer/src/shaders/gen_brd_flut.vert.spv
+BrtFlutFrag=src/renderer/src/shaders/gen_brd_flut.frag.spv
+SkyBoxVert=src/renderer/src/shaders/skybox.vert.spv
+SkyBoxFrag=src/renderer/src/shaders/skybox.frag.spv
+CubeFilterVert=src/renderer/src/shaders/filtered_cube.vert.spv
+EnvIrradianceFrag=src/renderer/src/shaders/env_irradiance_cube.frag.spv
+EnvPrefilterFrag=src/renderer/src/shaders/env_prefilter_cube.frag.spv

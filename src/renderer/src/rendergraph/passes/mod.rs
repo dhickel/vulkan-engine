@@ -1,3 +1,7 @@
+//! # RenderGraph Pass Set
+//!
+//! Canonical frame-pass list used by the renderer's default rendergraph.
+
 mod geometry_pass;
 mod imgui_pass;
 mod prepare_targets_pass;

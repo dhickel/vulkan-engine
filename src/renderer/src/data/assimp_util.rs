@@ -1,3 +1,8 @@
+//! # Assimp Model Ingest
+//!
+//! Active model loading path: imports meshes/materials via Assimp, maps them to engine cache
+//! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
+
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
@@ -5,7 +10,7 @@ use crate::data::gpu_data::{
     OcclusionMap, Sampler, SurfaceMeta, TextureMeta, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
-use crate::scene::scene_world::SceneWorld;
+use crate::scene::scene_world::{SceneNodeId, SceneWorld};
 use ash::vk;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
@@ -867,8 +872,8 @@ fn process_node(
     ai_node: *const aiNode,
     mapped_meshes: &HashMap<u32, MeshHandle>,
     scene_world: &mut SceneWorld,
-    parent: Option<u32>,
-) -> u32 {
+    parent: Option<SceneNodeId>,
+) -> SceneNodeId {
     unsafe {
         let ai_matrix = (*ai_node).mTransformation;
 

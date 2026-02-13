@@ -46,7 +46,7 @@ Deep dives:
 
 - Explicit Vulkan wrappers over `ash`.
 - Traditional descriptor sets (not bindless indexing architecture).
-- Scene ownership via `SceneWorld` node indices (not ECS).
+- Scene ownership via `SceneWorld` stable node handles (slot + generation, not ECS).
 - Mixed memory management:
 - `vk_mem` for images/buffers
 - custom sub-allocator for packed geometry/material data

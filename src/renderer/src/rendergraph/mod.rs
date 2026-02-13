@@ -1,3 +1,25 @@
+//! # RenderGraph Architecture
+//!
+//! ## Purpose
+//! The RenderGraph is a high-level abstraction that decouples the "what" to render from the
+//! "how" it's recorded in Vulkan. It organizes the frame into a sequence of logical "passes"
+//! (e.g., Geometry, Skybox, UI).
+//!
+//! ## Key Concepts
+//! - **RenderPassNode**: A single stage in the frame (e.g., `GeometryPass`). It implements
+//!   `execute` to record Vulkan commands for that stage.
+//! - **RenderGraphContext**: Provides passes with everything they need: the frame's resources,
+//!   the scene submission, and access to the core renderer.
+//! - **Pass Ordering**: The order of passes in the graph is the order they are recorded into
+//!   the command buffer.
+//!
+//! ## Why use a RenderGraph?
+//! - **Modularity**: New rendering features (like shadows or post-processing) can be added as
+//!   new nodes without touching the core frame loop.
+//! - **Clarity**: It provides a clear high-level overview of the frame's structure.
+//! - **Future-Proofing**: It allows for automatic optimization of resource transitions and
+//!   memory aliases between passes.
+
 use crate::rendergraph::passes::{
     GeometryPass, ImguiPass, PrepareTargetsPass, PresentCopyPass, SkyboxPass,
 };

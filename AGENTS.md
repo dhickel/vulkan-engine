@@ -51,7 +51,8 @@ Use it to understand where to work, then switch to module-level `AGENTS.md` file
 ## Known High-Risk Areas to Keep in Mind
 
 - ID stability risk in data caches:
-  - Several deallocation paths use `Vec::remove`, which shifts indices and can invalidate cached IDs.
+  - Core mesh/material/texture and scene-node paths now use slot+generation handles.
+  - Remaining risk is concentrated in unchecked/deallocation edge paths and any code that bypasses handle validation contracts.
 - Incomplete destructors:
   - Some `VkDestroyable` impls still contain `todo!()`.
 - Render-path sharp edges:

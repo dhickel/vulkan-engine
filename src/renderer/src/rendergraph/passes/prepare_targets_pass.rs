@@ -1,3 +1,5 @@
+//! Prepare draw/depth targets for passes that will write color/depth this frame.
+
 use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 
 pub struct PrepareTargetsPass;

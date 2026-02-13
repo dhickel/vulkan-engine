@@ -8,6 +8,7 @@ This directory holds the renderer's active GLSL sources plus precompiled SPIR-V 
 
 Key point:
 - Runtime currently consumes `.spv` files from disk during cache init.
+- Core shader load order/path mapping is declared in `src/renderer/src/shaders/core_shader_manifest.txt`.
 - Compile-at-startup path in `VkRender::new(..., compile_shaders)` is effectively disabled.
 
 ## Local Shader Map

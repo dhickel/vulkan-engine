@@ -606,6 +606,29 @@ impl VkDestroyable for VkFrame {
 
 
 impl VkFrame {
+    pub fn new(
+        index: u32,
+        sync: VkFrameSync,
+        draw: VkImageAlloc,
+        depth: VkImageAlloc,
+        present_image: vk::Image,
+        present_image_view: vk::ImageView,
+        cmd_pools: VkCommandPoolMap,
+        descriptors: VkDynamicDescriptorAllocator,
+    ) -> Self {
+        Self {
+            index,
+            sync,
+            draw,
+            depth,
+            present_image,
+            present_image_view,
+            cmd_pools,
+            descriptors,
+            deletions: Vec::with_capacity(100),
+        }
+    }
+
     pub fn destroy_for_rebuild(
         &mut self,
         device: &Device,
@@ -661,6 +684,7 @@ impl VkFrame {
 /// On resize, draw/depth images destroyed but sync/pools reused (see destroy_for_rebuild).
 pub struct VkPresent {
     pub frame_data: Vec<VkFrame>,
+    present_targets: Vec<(vk::Image, vk::ImageView)>,
     curr_frame_count: u32,
     max_frames_active: u32,
 }
@@ -681,11 +705,11 @@ impl VkDestroyable for VkPresent {
 impl VkPresent {
     pub fn new(
         frame_sync: Vec<VkFrameSync>,
-        mut draw_images: Vec<VkImageAlloc>,
-        mut depth_images: Vec<VkImageAlloc>,
+        draw_images: Vec<VkImageAlloc>,
+        depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
-        mut command_pools: Vec<VkCommandPoolMap>,
-        mut descriptor_allocators: Vec<VkDynamicDescriptorAllocator>,
+        command_pools: Vec<VkCommandPoolMap>,
+        descriptor_allocators: Vec<VkDynamicDescriptorAllocator>,
     ) -> Result<Self, VkError> {
         let lengths = [
             frame_sync.len(),
@@ -703,26 +727,38 @@ impl VkPresent {
             ));
         };
 
-        let data_len = frame_sync.len();
-        // Not the most efficient since items are removed from the head, but keeps resource
-        // alignment simple, and there's only 2-3 elements anyway.
-        let mut frame_data = Vec::<VkFrame>::with_capacity(data_len);
-        for i in 0..data_len {
-            let frame = VkFrame {
-                index: i as u32,
-                sync: frame_sync[i],
-                draw: draw_images.remove(0),
-                depth: depth_images.remove(0),
-                present_image: present_images[i].0,
-                present_image_view: present_images[i].1,
-                cmd_pools: command_pools.remove(0),
-                descriptors: descriptor_allocators.remove(0),
-                deletions: Vec::with_capacity(100),
-            };
-            frame_data.push(frame);
-        }
+        let present_targets = present_images.clone();
+        let frame_data = frame_sync
+            .into_iter()
+            .zip(draw_images.into_iter())
+            .zip(depth_images.into_iter())
+            .zip(present_images.into_iter())
+            .zip(command_pools.into_iter())
+            .zip(descriptor_allocators.into_iter())
+            .enumerate()
+            .map(
+                |(
+                    i,
+                    (((((sync, draw), depth), (present_image, present_image_view)), cmd_pools), descriptors),
+                )| {
+                    VkFrame::new(
+                        i as u32,
+                        sync,
+                        draw,
+                        depth,
+                        present_image,
+                        present_image_view,
+                        cmd_pools,
+                        descriptors,
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let data_len = frame_data.len();
         Ok(Self {
             frame_data,
+            present_targets,
             curr_frame_count: 0,
             max_frames_active: data_len as u32,
         })
@@ -758,11 +794,29 @@ impl VkPresent {
         if images.len() != self.frame_data.len() {
             panic!("Replacement present images, more than existing")
         }
+        self.present_targets = images.clone();
         for x in 0..images.len() {
             self.frame_data[x].present_image = images[x].0;
             self.frame_data[x].present_image_view = images[x].1;
         }
         self.curr_frame_count = 0;
+    }
+
+    pub fn bind_acquired_present_target(&mut self, image_index: u32) -> Result<(), VkError> {
+        let Some(&(present_image, present_image_view)) =
+            self.present_targets.get(image_index as usize)
+        else {
+            return Err(VkError::Present(format!(
+                "Acquired swapchain image index {} out of range ({} present targets)",
+                image_index,
+                self.present_targets.len()
+            )));
+        };
+
+        let curr_frame = self.get_curr_frame_mut();
+        curr_frame.present_image = present_image;
+        curr_frame.present_image_view = present_image_view;
+        Ok(())
     }
 
     pub fn destroy_for_rebuild(

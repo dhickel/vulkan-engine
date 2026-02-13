@@ -1,3 +1,5 @@
+//! Main scene geometry draw pass.
+
 use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 
 pub struct GeometryPass;

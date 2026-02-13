@@ -70,6 +70,7 @@ If working specifically on radiance/PBR behavior, start here:
   - `init_descriptor_cache(...)`
 
 Shader files are mapped in `src/renderer/src/shaders/AGENTS.md`.
+Core shader manifest path mapping for cache init lives in `src/renderer/src/shaders/core_shader_manifest.txt`.
 
 External lineage reference:
 - `https://github.com/SaschaWillems/Vulkan-glTF-PBR`

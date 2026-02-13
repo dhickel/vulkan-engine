@@ -1,3 +1,5 @@
+//! UI overlay pass that draws ImGui into the present color attachment.
+
 use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 
 pub struct ImguiPass;

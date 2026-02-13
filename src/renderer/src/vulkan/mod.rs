@@ -1,3 +1,8 @@
+//! # Vulkan Backend Module
+//!
+//! Entry point for Vulkan subsystems: init, descriptors, pipelines, frame execution, memory,
+//! and debug helpers.
+
 pub mod vk_descriptor;
 pub mod vk_init;
 pub mod vk_pipeline;

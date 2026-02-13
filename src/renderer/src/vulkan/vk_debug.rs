@@ -1,3 +1,7 @@
+//! # Vulkan Debug Capture Helpers
+//!
+//! Utility routines for copying GPU images to CPU and writing debug snapshots to disk.
+
 use ash::vk;
 use image::{ImageBuffer, Rgba};
 use crate::vulkan::vk_util;

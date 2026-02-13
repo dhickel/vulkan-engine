@@ -31,7 +31,7 @@ This is the deep guide for scene data, caches, asset loading, and camera/input c
 ### Scene and Draw
 
 - `SceneWorld`/`SceneNode` (`src/renderer/src/scene/scene_world.rs`)
-- indexed parent/children links (`SceneNodeId`)
+- stable slot+generation parent/children links (`SceneNodeId`)
 - meshes: `MeshHandle` stable handles (slot + generation)
 - local/world transforms + dirty flag
 

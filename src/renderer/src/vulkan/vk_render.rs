@@ -57,7 +57,7 @@
 //! - Updates viewport/scissor
 
 use crate::data::data_cache::{
-    CoreShaderType, EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache,
+    EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache,
     VkCache, VkDataCache, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType,
     VkSamplerCache, VkSamplerInfo, VkShaderCache,
 };
@@ -209,51 +209,9 @@ pub fn init_caches(
     supported_formats: HashSet<vk::Format>,
     limits: &VkBufferAndDescriptorLimits,
     device_queues: VkDeviceQueues,
-) -> (Arc<VkDataCache>, VkCache, EnvironmentHandle) {
-    let shader_paths = vec![
-        (
-            CoreShaderType::MetRoughVert,
-            "src/renderer/src/shaders/pbr_base.vert.spv",
-        ),
-        (
-            CoreShaderType::MetRoughFrag,
-            "src/renderer/src/shaders/material_pbr.frag.spv",
-        ),
-        (
-            CoreShaderType::MetRoughFragUnlit,
-            "src/renderer/src/shaders/material_unlit.frag.spv",
-        ),
-        (
-            CoreShaderType::BrtFlutFrag,
-            "src/renderer/src/shaders/gen_brd_flut.frag.spv",
-        ),
-        (
-            CoreShaderType::BrtFlutVert,
-            "src/renderer/src/shaders/gen_brd_flut.vert.spv",
-        ),
-        (
-            CoreShaderType::SkyBoxFrag,
-            "src/renderer/src/shaders/skybox.frag.spv",
-        ),
-        (
-            CoreShaderType::SkyBoxVert,
-            "src/renderer/src/shaders/skybox.vert.spv",
-        ),
-        (
-            CoreShaderType::CubeFilterVert,
-            "src/renderer/src/shaders/filtered_cube.vert.spv",
-        ),
-        (
-            CoreShaderType::EnvIrradianceFrag,
-            "src/renderer/src/shaders/env_irradiance_cube.frag.spv",
-        ),
-        (
-            CoreShaderType::EnvPrefilterFrag,
-            "src/renderer/src/shaders/env_prefilter_cube.frag.spv",
-        ),
-    ];
-
-    let shader_cache = VkShaderCache::new(device, shader_paths).unwrap();
+) -> Result<(Arc<VkDataCache>, VkCache, EnvironmentHandle), String> {
+    let shader_paths = data_cache::load_core_shader_manifest()?;
+    let shader_cache = VkShaderCache::new(device, shader_paths)?;
     let desc_layout_cache = vk_descriptor::init_descriptor_cache(device);
     let pipeline_cache = vk_pipeline::init_pipeline_cache(
         device,
@@ -332,7 +290,7 @@ pub fn init_caches(
         queues: device_queues,
     };
 
-    (Arc::new(data_cache), vulkan_cache, default_env)
+    Ok((Arc::new(data_cache), vulkan_cache, default_env))
 }
 
 pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
@@ -378,87 +336,44 @@ pub fn init_present_pools(
     device: &ash::Device,
     device_queues: &VkDeviceQueues,
     count: u32,
-) -> Vec<VkCommandPoolMap> {
-    // Graphics/Present share the same queue and pool
+) -> Result<Vec<VkCommandPoolMap>, String> {
+    fn create_pool_for_queue(
+        device: &ash::Device,
+        device_queues: &VkDeviceQueues,
+        queue_type: VkQueueType,
+    ) -> Result<VkCommandPool, String> {
+        let queue_index = device_queues.get_queue_index(queue_type);
+        let pool = vk_init::create_command_pool(
+            device,
+            queue_index,
+            vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+        )?;
+        let buffers = vk_init::create_command_buffers(device, &pool, CommandBufferLevel::PRIMARY, 1)?;
+
+        Ok(VkCommandPool {
+            queue_index,
+            queue_type,
+            pool,
+            buffers,
+        })
+    }
+
+    // Graphics/Present intentionally share the same command pool for each frame.
     (0..count)
         .map(|_| {
-            let graphics_pool = vk_init::create_command_pool(
-                &device,
-                device_queues.get_queue_index(VkQueueType::Graphics),
-                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )
-            .unwrap();
-
-            let graphics_buffers = vk_init::create_command_buffers(
-                &device,
-                &graphics_pool,
-                CommandBufferLevel::PRIMARY,
-                1,
-            )
-            .unwrap();
-
-            let transfer_pool = vk_init::create_command_pool(
-                &device,
-                device_queues.get_queue_index(VkQueueType::Transfer),
-                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )
-            .unwrap();
-
-            let transfer_buffers = vk_init::create_command_buffers(
-                &device,
-                &transfer_pool,
-                CommandBufferLevel::PRIMARY,
-                1,
-            )
-            .unwrap();
-
-            let compute_pool = vk_init::create_command_pool(
-                &device,
-                device_queues.get_queue_index(VkQueueType::Compute),
-                vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )
-            .unwrap();
-
-            let compute_buffers = vk_init::create_command_buffers(
-                &device,
-                &compute_pool,
-                CommandBufferLevel::PRIMARY,
-                1,
-            )
-            .unwrap();
-
-            let graphics_pool = VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Graphics),
-                queue_type: VkQueueType::Graphics,
-                pool: graphics_pool,
-                buffers: graphics_buffers,
-            };
-
-            let present_pool = graphics_pool.clone();
-
-            let transfer_pool = VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Transfer),
-                queue_type: VkQueueType::Transfer,
-                pool: transfer_pool,
-                buffers: transfer_buffers,
-            };
-
-            let compute_pool = VkCommandPool {
-                queue_index: device_queues.get_queue_index(VkQueueType::Compute),
-                queue_type: VkQueueType::Compute,
-                pool: compute_pool,
-                buffers: compute_buffers,
-            };
+            let graphics_pool = create_pool_for_queue(device, device_queues, VkQueueType::Graphics)?;
+            let transfer_pool = create_pool_for_queue(device, device_queues, VkQueueType::Transfer)?;
+            let compute_pool = create_pool_for_queue(device, device_queues, VkQueueType::Compute)?;
 
             VkCommandPoolMap::new(vec![
-                (VkQueueType::Graphics, graphics_pool),
-                (VkQueueType::Present, present_pool),
+                (VkQueueType::Graphics, graphics_pool.clone()),
+                (VkQueueType::Present, graphics_pool),
                 (VkQueueType::Transfer, transfer_pool),
                 (VkQueueType::Compute, compute_pool),
             ])
-            .unwrap()
+            .map_err(|err| format!("Failed to create frame command pool map: {:?}", err))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
 }
 
 impl Drop for VkRenderCore {
@@ -731,7 +646,7 @@ impl VkRenderCore {
             }
         };
 
-        let present_pools = init_present_pools(&device, &device_queues, swapchain_image_count);
+        let present_pools = init_present_pools(&device, &device_queues, swapchain_image_count)?;
 
         let mut host_graphic_pools: Vec<VkCommandPool> = {
             let pool = vk_init::create_command_pool(
@@ -937,7 +852,7 @@ impl VkRenderCore {
             supported_image_formats.clone(),
             &buffer_and_desc_limits,
             device_queues,
-        );
+        )?;
 
         ///////////////////
         // GENERATE BRDF //
@@ -1092,12 +1007,22 @@ impl VkRenderCore {
         submission: &RenderSubmission,
         rendergraph: &RenderGraph,
     ) {
+        // 1. Service Async Transfers
+        // Before we start recording a new frame, we check if any background asset uploads (textures/meshes)
+        // have completed on the GPU. This keeps our caches up-to-date and releases staging buffers.
         self.service_async_transfers();
 
         let start = SystemTime::now();
 
+        // 2. Prepare Environment
+        // If the scene requested a different skybox/environment, we prepare it now.
+        // NOTE: This currently causes a synchronous stall (device_wait_idle) if a switch occurs.
         self.scene_data = submission.camera;
         self.prepare_submission_environment(submission);
+
+        // 3. Get Frame Resources
+        // We use double or triple buffering to allow the CPU to work on frame N+1 while the GPU
+        // is still executing frame N. get_next_frame() rotates through these per-frame resources.
         let frame_data = self.presentation.get_next_frame();
         let frame_sync = frame_data.sync;
         let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
@@ -1109,17 +1034,30 @@ impl VkRenderCore {
         let swapchain = [self.swapchain.swapchain];
 
         unsafe {
+            // 4. CPU-GPU Synchronization (Wait for Fence)
+            // We MUST wait for the GPU to finish using the resources (command buffers, descriptor sets)
+            // allocated for THIS specific frame slot before we can safely reuse/reset them.
             self.device
                 .wait_for_fences(fence, true, u32::MAX as u64)
                 .unwrap();
 
+            // Once the fence is signaled, we reset it so we can use it again for this frame's submission.
             self.device.reset_fences(fence).unwrap();
 
-            let curr_frame = self.presentation.get_curr_frame_mut();
+            {
+                let curr_frame = self.presentation.get_curr_frame_mut();
 
-            curr_frame.process_deletions(&self.device, &self.allocator.lock().unwrap());
-            curr_frame.descriptors.clear_pools(&self.device).unwrap();
+                // 5. Resource Maintenance
+                // Clean up any GPU resources that were marked for deletion once we know the GPU is done with them.
+                curr_frame.process_deletions(&self.device, &self.allocator.lock().unwrap());
+                // Descriptor pools are reset every frame. In Vulkan, it's faster to reset the whole pool
+                // than to free individual sets.
+                curr_frame.descriptors.clear_pools(&self.device).unwrap();
+            }
 
+            // 6. Acquire Swapchain Image
+            // Ask the swapchain for the next available image index to render into.
+            // swap_semaphore will be signaled by the GPU when the image is ready for us.
             let acquire_info = vk::AcquireNextImageInfoKHR::default()
                 .swapchain(self.swapchain.swapchain)
                 .semaphore(frame_sync.swap_semaphore)
@@ -1133,11 +1071,20 @@ impl VkRenderCore {
             {
                 Ok((index, _)) => index,
                 Err(_) => {
+                    // If acquire fails (usually due to window resize), trigger a swapchain rebuild.
                     self.resize_requested = true;
                     return;
                 }
             };
 
+            if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
+                error!("Failed to bind acquired present target {}: {:?}", image_index, err);
+                self.resize_requested = true;
+                return;
+            }
+
+            // 7. Record Command Buffer
+            // We reset the command buffer to clear previous commands.
             self.device
                 .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
@@ -1149,6 +1096,9 @@ impl VkRenderCore {
                 .begin_command_buffer(cmd_buffer, &begin_info)
                 .unwrap();
 
+            // 8. Execute RenderGraph
+            // The RenderGraph traverses the passes (Geometry, Skybox, ImGui, etc.) and records
+            // the actual draw commands into our command buffer.
             let frame_ptr = self.presentation.get_curr_frame_mut() as *mut VkFrame;
             let mut graph_ctx = RenderGraphContext {
                 submission,
@@ -1163,7 +1113,10 @@ impl VkRenderCore {
 
             self.device.end_command_buffer(cmd_buffer).unwrap();
 
-            // Wait for semaphores and submit
+            // 9. Submit to Queue
+            // We tell the GPU to execute our recorded commands.
+            // We WAIT on swap_semaphore (ensures image is acquired).
+            // We SIGNAL render_semaphore (tells the presentation engine we are done rendering).
             let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
 
             let wait_info = [vk_util::semaphore_submit_info(
@@ -1182,6 +1135,8 @@ impl VkRenderCore {
                 .queue_submit2(queue, &submit, frame_sync.render_fence)
                 .unwrap();
 
+            // 10. Present to Screen
+            // Queue the image for presentation. The GPU will wait for render_semaphore.
             let r_sem = [frame_sync.render_semaphore];
             let imf_idex = [image_index];
 
@@ -1199,10 +1154,6 @@ impl VkRenderCore {
                 self.resize_requested = true;
             }
         }
-        // println!(
-        //     "Render Took: {}ms",
-        //     SystemTime::now().duration_since(start).unwrap().as_millis()
-        // )
     }
 
     pub fn ensure_environment_ready(&mut self, env_id: EnvironmentHandle) -> Result<(), String> {
@@ -1381,6 +1332,8 @@ impl VkRenderCore {
         let draw_image = frame.draw.image;
         let depth_image = frame.depth.image;
 
+        // Draw image starts undefined each frame; transition to GENERAL as a permissive
+        // intermediate before selecting the exact attachment layout used for rendering.
         vk_util::transition_image(
             &self.device,
             cmd_buffer,
@@ -1389,6 +1342,7 @@ impl VkRenderCore {
             vk::ImageLayout::GENERAL,
         );
 
+        // Depth must be in DEPTH_ATTACHMENT_OPTIMAL before beginning dynamic rendering.
         vk_util::transition_image(
             &self.device,
             cmd_buffer,
@@ -1397,6 +1351,8 @@ impl VkRenderCore {
             vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
         );
 
+        // Order is important: this transition must happen after UNDEFINED->GENERAL and before
+        // any color writes so the pipeline sees valid COLOR_ATTACHMENT usage.
         vk_util::transition_image(
             &self.device,
             cmd_buffer,
@@ -1414,10 +1370,15 @@ impl VkRenderCore {
         let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
 
+        let clear_color = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
         let color_attachment = [vk_util::attachment_info(
             frame.draw.image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            None,
+            Some(clear_color),
         )];
 
         let extent = self.window_state.get_curr_extent();
@@ -1430,15 +1391,13 @@ impl VkRenderCore {
             .get_pipeline(VkPipelineType::Skybox);
 
         let active_env_id = self.active_env_id;
-        let skybox_desc = if let Some(desc) = self.sky_box.descriptors.get(&active_env_id) {
-            desc.descriptor
-        } else {
+        let skybox_desc = self.sky_box.descriptors.get(&active_env_id).map(|desc| desc.descriptor);
+        if skybox_desc.is_none() {
             error!(
-                "Skipping skybox draw because no descriptor is ready for env {:?}",
+                "Skybox descriptor missing for env {:?}; clearing color attachment only",
                 active_env_id
             );
-            return;
-        };
+        }
 
         self.sky_box.skybox_consts.projection = self.scene_data.projection;
         self.sky_box.skybox_consts.model = self.scene_data.view;
@@ -1449,13 +1408,12 @@ impl VkRenderCore {
             .lock()
             .unwrap()
             .get_loaded_id(submission.skybox_mesh_id);
-        let Ok(mesh) = mesh else {
+        if mesh.is_err() {
             error!(
-                "Skipping skybox draw because mesh {:?} is unavailable",
+                "Skybox mesh {:?} is unavailable; clearing color attachment only",
                 submission.skybox_mesh_id
             );
-            return;
-        };
+        }
 
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
@@ -1465,38 +1423,40 @@ impl VkRenderCore {
             self.device
                 .cmd_set_scissor(cmd_buffer, 0, self.window_state.get_scissor());
 
-            self.device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                skybox_pipeline.pipeline,
-            );
+            if let (Some(skybox_desc), Ok(mesh)) = (skybox_desc, mesh) {
+                self.device.cmd_bind_pipeline(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    skybox_pipeline.pipeline,
+                );
 
-            self.device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                skybox_pipeline.layout,
-                0,
-                &skybox_desc,
-                &[],
-            );
+                self.device.cmd_bind_descriptor_sets(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    skybox_pipeline.layout,
+                    0,
+                    &skybox_desc,
+                    &[],
+                );
 
-            self.device.cmd_bind_index_buffer(
-                cmd_buffer,
-                mesh.index_buffer.buffer,
-                0,
-                vk::IndexType::UINT32,
-            );
+                self.device.cmd_bind_index_buffer(
+                    cmd_buffer,
+                    mesh.index_buffer.buffer,
+                    0,
+                    vk::IndexType::UINT32,
+                );
 
-            self.device.cmd_push_constants(
-                cmd_buffer,
-                skybox_pipeline.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                self.sky_box.skybox_consts.as_byte_slice(),
-            );
+                self.device.cmd_push_constants(
+                    cmd_buffer,
+                    skybox_pipeline.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    self.sky_box.skybox_consts.as_byte_slice(),
+                );
 
-            self.device
-                .cmd_draw_indexed(cmd_buffer, mesh.index_count, 1, 0, 0, 0);
+                self.device
+                    .cmd_draw_indexed(cmd_buffer, mesh.index_count, 1, 0, 0, 0);
+            }
 
             // End dynamic rendering
             self.device.cmd_end_rendering(cmd_buffer);
@@ -1584,6 +1544,7 @@ impl VkRenderCore {
         let cmd_buffer = cmd_pool.buffers[0];
         let extent = self.window_state.get_curr_extent();
 
+        // Source image must be transfer-readable before blit/copy.
         vk_util::transition_image(
             &self.device,
             cmd_buffer,
@@ -1592,6 +1553,8 @@ impl VkRenderCore {
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
         );
 
+        // Destination image must be transfer-writable before blit/copy.
+        // This barrier must be recorded before vkCmdBlitImage.
         vk_util::transition_image(
             &self.device,
             cmd_buffer,
@@ -1609,6 +1572,7 @@ impl VkRenderCore {
             extent,
         );
 
+        // Transition back for UI rendering and final PRESENT_SRC_KHR handoff.
         vk_util::transition_image(
             &self.device,
             cmd_buffer,
@@ -1691,10 +1655,23 @@ impl VkRenderCore {
         let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
 
+        let color_clear = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+        let color_clear = if submission.flags.draw_skybox {
+            None
+        } else {
+            Some(color_clear)
+        };
+
+        // 1. Setup Render Pass Attachments
+        // We use dynamic rendering here, so we define our attachments (color and depth) at record time.
         let color_attachment = [vk_util::attachment_info(
             frame.draw.image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            None,
+            color_clear,
         )];
 
         let depth_attachment = vk_util::depth_attachment_info(
@@ -1703,27 +1680,28 @@ impl VkRenderCore {
         );
 
         let extent = self.window_state.get_curr_extent();
-
         let rendering_info =
             vk_util::rendering_info(extent, &color_attachment, Some(&depth_attachment));
 
-        // Build explicit pass buckets:
-        // PBR opaque -> Unlit opaque -> PBR mask -> Unlit mask -> PBR blend -> Unlit blend.
+        // 2. Resolve Submission Buckets
+        // We group objects by pipeline type (PBR Opaque, Unlit, Blend, etc.) to minimize pipeline switches,
+        // which are expensive on the GPU.
+        let draw_buckets = self.resolve_submission_buckets(submission);
+        
+        // Pipeline indices for different material paths
         let pbr_opaque_idx = VkPipelineType::PbrMetRoughOpaque as usize;
         let unlit_opaque_idx = VkPipelineType::UnlitOpaque as usize;
         let pbr_blend_idx = VkPipelineType::PbrMetRoughAlpha as usize;
         let unlit_blend_idx = VkPipelineType::UnlitAlpha as usize;
-        debug_assert!(pbr_opaque_idx < VkPipelineType::COUNT);
-        debug_assert!(unlit_opaque_idx < VkPipelineType::COUNT);
-        debug_assert!(pbr_blend_idx < VkPipelineType::COUNT);
-        debug_assert!(unlit_blend_idx < VkPipelineType::COUNT);
 
-        let draw_buckets = self.resolve_submission_buckets(submission);
         let pbr_opaque_bucket = &draw_buckets[pbr_opaque_idx];
         let unlit_opaque_bucket = &draw_buckets[unlit_opaque_idx];
         let pbr_blend_bucket = &draw_buckets[pbr_blend_idx];
         let unlit_blend_bucket = &draw_buckets[unlit_blend_idx];
 
+        // 3. Separate Alpha Mask from Opaque
+        // Masked materials (like leaves/fences) are drawn in the opaque pass but use a shader
+        // that 'discards' pixels. They are separated here for potential future optimizations (like depth pre-pass).
         let mut pbr_opaque_objects = Vec::with_capacity(pbr_opaque_bucket.len());
         let mut pbr_mask_objects = Vec::new();
         let mut unlit_opaque_objects = Vec::with_capacity(unlit_opaque_bucket.len());
@@ -1749,6 +1727,8 @@ impl VkRenderCore {
             }
         }
 
+        // 4. Back-to-Front Sorting for Blended Objects
+        // Transparent objects MUST be drawn from furthest to nearest to ensure correct alpha blending.
         let cam_pos = self.scene_data.cam_pos;
         let blend_sort = |a: &RenderObject, b: &RenderObject| {
             let a_dist = a.transform.w_axis.truncate().distance_squared(cam_pos);
@@ -1770,6 +1750,8 @@ impl VkRenderCore {
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &rendering_info);
 
+            // 5. Scene Descriptor Update
+            // Set 0: Global scene data (View/Proj, Lights, Environment Maps).
             let Some(scene_descriptors) = self.scene_descriptors.get_mut(&self.active_env_id) else {
                 error!(
                     "Skipping geometry draw because scene descriptors for env {:?} are missing",
@@ -1779,7 +1761,6 @@ impl VkRenderCore {
                 return;
             };
 
-            // Write the new scene view/pos
             let scene_desc =
                 scene_descriptors.update_scene_uniform(&self.device, self.scene_data, frame_index);
 
@@ -1792,10 +1773,12 @@ impl VkRenderCore {
             let mut curr_pipeline_layout = vk::PipelineLayout::null();
             let mut curr_joint_desc = default_joint_desc;
 
+            // 6. Draw Command Loop
+            // This closure handles the state binding logic. It only binds what changes.
             let mut draw_fn = |obj: &RenderObject, pipeline_type: VkPipelineType| {
                 let material = &(*obj.material);
 
-                // Rebind pipeline + set 0 whenever the pass changes.
+                // If the pipeline type changes, we rebind the pipeline and the global scene descriptors (Set 0).
                 if curr_pipeline_type != Some(pipeline_type) {
                     let next_pipeline = *self.vulkan_cache.pipelines.get_pipeline(pipeline_type);
                     curr_pipeline_type = Some(pipeline_type);
@@ -1815,6 +1798,7 @@ impl VkRenderCore {
                         &[scene_desc],
                         &[],
                     );
+                    // Set 1: Joint data (for skinning). Defaults to identity matrices.
                     self.device.cmd_bind_descriptor_sets(
                         cmd_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
@@ -1825,7 +1809,7 @@ impl VkRenderCore {
                     );
                 }
 
-                // Bind joints if changed (set 1)
+                // Bind joints if changed (Set 1)
                 if obj.joint_desc != curr_joint_desc {
                     self.device.cmd_bind_descriptor_sets(
                         cmd_buffer,
@@ -1839,7 +1823,7 @@ impl VkRenderCore {
                     curr_joint_desc = obj.joint_desc;
                 }
 
-                // Bind material image descriptor (set 2)
+                // Set 2: Material texture samplers (BaseColor, Normal, etc.).
                 self.device.cmd_bind_descriptor_sets(
                     cmd_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
@@ -1856,6 +1840,7 @@ impl VkRenderCore {
                     vk::IndexType::UINT32,
                 );
 
+                // Push Constants: Small, fast-to-update data (Transform matrix, buffer addresses).
                 let push_consts = VkModelPushConsts::new(
                     obj.transform,
                     obj.vertex_buffer_addr,
@@ -1870,6 +1855,7 @@ impl VkRenderCore {
                     push_consts.as_byte_slice(),
                 );
 
+                // FINALLY: Execute the draw call.
                 self.device
                     .cmd_draw_indexed(cmd_buffer, obj.index_count, 1, obj.first_index, 0, 0);
             };
@@ -1880,6 +1866,7 @@ impl VkRenderCore {
                 }
             };
 
+            // Execute passes in order: Opaque -> Masked -> Blended
             draw_bucket(&pbr_opaque_objects, VkPipelineType::PbrMetRoughOpaque);
             draw_bucket(&unlit_opaque_objects, VkPipelineType::UnlitOpaque);
             draw_bucket(&pbr_mask_objects, VkPipelineType::PbrMetRoughOpaque);
