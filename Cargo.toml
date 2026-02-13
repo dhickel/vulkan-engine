@@ -1,4 +1,4 @@
-workspace = { members = ["src/input", "src/renderer"] }
+workspace = { members = ["src/input", "src/renderer", "apps/dungeon_dogfood"] }
 
 [package]
 name = "engine"
