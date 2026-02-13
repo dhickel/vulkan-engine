@@ -1948,8 +1948,7 @@ impl EnvironmentCache {
         self.skyboxes.get(slot).ok_or(CacheError::OutOfBounds)
     }
 
-    pub fn load_cubemap_file(&mut self, path: &str) -> Result<EnvironmentHandle, String> {
-        let path = path::Path::new(path);
+    pub fn load_cubemap_file(&mut self, path: &path::Path) -> Result<EnvironmentHandle, String> {
         match image::open(path) {
             Ok(image) => {
                 let index = self.skyboxes.len() as u32;
@@ -1965,7 +1964,11 @@ impl EnvironmentCache {
                             .as_bytes()
                             .to_vec()
                     } else {
-                        panic!("No Fallback format") // Not sure if falling back to rgba8 is acceptable
+                        return Err(format!(
+                            "Unsupported environment format {:?} for '{}' and no fallback format is available",
+                            format,
+                            path.display()
+                        ));
                     }
                 } else {
                     image.as_bytes().to_vec()
@@ -2016,15 +2019,22 @@ impl EnvironmentCache {
         self.env_maps.get(slot).ok_or(CacheError::OutOfBounds)
     }
 
-    pub fn load_cubemap_dir(&mut self, dir: &str) -> Result<EnvironmentHandle, String> {
+    pub fn load_cubemap_dir(&mut self, dir: &path::Path) -> Result<EnvironmentHandle, String> {
         let face_files = ["px.hdr", "nx.hdr", "py.hdr", "ny.hdr", "pz.hdr", "nz.hdr"];
         let mut face_images: Vec<Rgba32FImage> = Vec::new();
         let mut width = 0;
         let mut height = 0;
         let format = vk::Format::R32G32B32A32_SFLOAT;
+        if !self.supported_formats.contains(&format) {
+            return Err(format!(
+                "Device does not support required cubemap format {:?} for '{}'",
+                format,
+                dir.display()
+            ));
+        }
 
         for face_file in face_files.iter() {
-            let path = path::Path::new(dir).join(face_file);
+            let path = dir.join(face_file);
 
             match image::open(&path) {
                 Ok(image) => {

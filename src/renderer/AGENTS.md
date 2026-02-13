@@ -13,11 +13,11 @@ Use this for architecture and maintenance strategy across `data/` and `vulkan/`.
 - model/material/texture/mesh caching and upload
 - ImGui rendering integration
 
-Entrypoint: `src/renderer/src/lib.rs` (`renderer::run()`)
+Entrypoints: `src/renderer/examples/*.rs` (facade-first runtime examples)
 
 ## Package Structure
 
-- `src/renderer/src/lib.rs`: event loop orchestration.
+- `src/renderer/src/lib.rs`: public facade exports and internal module wiring.
 - `src/renderer/src/data/`: scene, camera, caches, model loaders.
 - `src/renderer/src/vulkan/`: Vulkan initialization, wrappers, sync, render loop.
 - `src/renderer/src/shaders/`: GLSL + SPIR-V artifacts.
@@ -30,12 +30,12 @@ Deep dives:
 
 ## End-to-End Runtime Flow
 
-1. `renderer::run()` creates event loop, window, FPS controller, and `InputManager`.
-2. `VkRender::new(...)` initializes Vulkan core and all caches.
+1. A renderer example creates event loop, window, FPS controller, and `Renderer`.
+2. `Renderer::new(...)` initializes `VkRender` and core caches.
 3. Startup scene load path currently uses Assimp:
 - `assimp_util::load_model("src/renderer/src/assets/DamagedHelmet.glb", ...)`
 - Then concurrent mesh/material allocation threads run.
-4. Each frame (`renderer::run` + `VkRender::render`):
+4. Each frame (example loop + `Renderer` facade + `VkRender::render`):
 - poll async transfer completions
 - update camera and build `RenderSubmission` from `SceneWorld`
 - acquire swapchain image
@@ -57,16 +57,12 @@ Deep dives:
 - Graphics and present queues are currently treated as effectively shared in render path submission.
 - Shader compile-at-runtime path is disabled by default (uses precompiled `.spv` artifacts).
 - Startup loads a hardcoded asset and skybox resources.
-- Runtime debug selector for parity + facade dogfooding:
-  - `cargo run -- debug_runtime testpbr`
-  - `cargo run -- debug_runtime testunlit`
-  - `cargo run -- --debug-runtime=testunlit`
-  - `cargo run -- debug_runtime facade_pbr`
-  - `cargo run -- debug_runtime facade_unlit`
-  - `cargo run -- debug_runtime facade_model_load`
+- Runtime example entrypoints:
+  - `cargo run -p renderer --example api_test`
   - `cargo run -p renderer --example demo_pbr`
   - `cargo run -p renderer --example demo_unlit`
   - `cargo run -p renderer --example demo_model_load`
+  - `cargo run -p renderer --example demo_async_loading`
 
 ## PBR and Radiance Reference Map
 
@@ -133,6 +129,7 @@ External lineage reference:
 ## Build and Verification
 
 - Compile renderer crate: `cargo check -p renderer`
+- Compile renderer examples: `cargo check -p renderer --examples`
 - Full project: `cargo check`
 - Runtime validation requires a Vulkan environment.
 

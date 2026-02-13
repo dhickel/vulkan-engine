@@ -22,7 +22,7 @@ This is the deep guide for scene data, caches, asset loading, and camera/input c
 
 ### Frame Render Prep
 
-1. `renderer::run()` updates camera transforms and writes them into `SceneWorld`.
+1. Example/facade frame loop updates camera transforms and writes them into `SceneWorld`.
 2. `SceneWorld::build_submission(...)` traverses nodes and emits draw items.
 3. `VkRender` resolves submission mesh handles into internal Vulkan draw buckets per frame.
 

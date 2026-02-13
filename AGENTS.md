@@ -6,7 +6,8 @@ Use it to understand where to work, then switch to module-level `AGENTS.md` file
 ## Scope and Intent
 
 - Language/runtime: Rust 2021, desktop Vulkan renderer.
-- Primary binary crate: `engine` (`src/main.rs`), which calls into `renderer::run()`.
+- Primary runtime entrypoints: facade-first renderer examples under `src/renderer/examples/`.
+- Root binary crate: `engine` (`src/main.rs`) is a migration stub that points to renderer examples.
 - Internal package crates:
   - `src/renderer` (`renderer`) - rendering runtime and most engine logic.
   - `src/input` (`input`) - input event broadcast/listener layer.
@@ -14,8 +15,8 @@ Use it to understand where to work, then switch to module-level `AGENTS.md` file
 
 ## Repository Layout
 
-- `Cargo.toml`: root crate plus path dependency on `renderer`.
-- `src/main.rs`: minimal entrypoint.
+- `Cargo.toml`: workspace root (`engine`, `src/input`, `src/renderer`).
+- `src/main.rs`: migration stub that prints canonical renderer example commands.
 - `src/renderer/`: rendering crate (Vulkan, asset loading, frame loop).
 - `src/input/`: reusable input system crate.
 - `.internal-dev/`: architecture notes, reviews, and maintenance docs.
@@ -36,10 +37,10 @@ Use it to understand where to work, then switch to module-level `AGENTS.md` file
 
 ## Runtime Flow
 
-1. `src/main.rs` calls `renderer::run()`.
-2. `renderer::run()` creates window/event loop and `InputManager`.
-3. `VkRender::new()` initializes Vulkan, caches, transfer system, pipelines, ImGui, default scene.
-4. Event loop updates input/controller and calls `app.render(frame_number)`.
+1. Launch one of the facade-first renderer examples (`cargo run -p renderer --example ...`).
+2. Example creates window/event loop and `Renderer`.
+3. `Renderer::new()` initializes `VkRender`, caches, transfer system, pipelines, ImGui, and startup resources.
+4. Event loop calls `Renderer::update_input(...)` then `Renderer::render_scene(...)` (or explicit frame API).
 5. `VkRender::render()` performs per-frame acquire/update/record/submit/present.
 
 ## High-Level Module Insights
@@ -82,27 +83,38 @@ Use module-level docs for exact files/lines and safe editing strategy.
 
 - Check compile: `cargo check`
 - Check renderer crate: `cargo check -p renderer`
+- Check renderer examples: `cargo check -p renderer --examples`
 - Check input crate: `cargo check -p input`
-- Runtime debug selector (startup material/pipeline testing):
-  - `cargo run -- debug_runtime testpbr`
-  - `cargo run -- debug_runtime testunlit`
-  - `cargo run -- --debug-runtime=testunlit`
-  - `cargo run -- debug_runtime facade_pbr`
-  - `cargo run -- debug_runtime facade_unlit`
-  - `cargo run -- debug_runtime facade_model_load`
+- Runtime example entrypoints:
+  - `cargo run -p renderer --example api_test`
   - `cargo run -p renderer --example demo_pbr`
   - `cargo run -p renderer --example demo_unlit`
   - `cargo run -p renderer --example demo_model_load`
+  - `cargo run -p renderer --example demo_async_loading`
+  - `cargo run` (prints migration guidance and exits; runtime removed from root binary)
 
-## Runtime Debug Scenarios
+## Headless Runtime Smoke (Terminal Agents)
 
-- `debug_runtime` is the runtime test selector entrypoint for controlled render-path validation.
-- Current scenarios:
-  - `testpbr`: legacy parity baseline for startup PBR path.
-  - `testunlit`: legacy parity baseline for startup Unlit path.
-  - `facade_pbr`: facade-driven pbr demo path in `renderer::run()`.
-  - `facade_unlit`: facade runtime path with unlit startup parity behavior.
-  - `facade_model_load`: facade model load + scene fragment merge path.
-- This selector is intentionally extensible for future test scenarios; when adding new modes, keep this file and `src/renderer/AGENTS.md` in sync.
+- In headless agent sessions, renderer examples can still be launched from terminal.
+- You will not see display output, but verbose startup/runtime logs are still visible.
+- Always run runtime examples with bounded execution and auto-close after startup load completes.
+- Preferred pattern:
+  - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_pbr`
+  - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_unlit`
+  - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_model_load`
+  - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_async_loading`
+  - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example api_test`
+- Treat successful startup logs plus no fatal errors before timeout as headless runtime smoke pass.
+
+## Runtime Example Scenarios
+
+- Canonical scenarios:
+  - `demo_pbr`: startup PBR path.
+  - `demo_unlit`: startup Unlit path.
+  - `demo_model_load`: model load + scene fragment merge path.
+  - `demo_async_loading`: deferred ticket polling + mount path.
+  - `api_test`: explicit `begin_frame`/`render_scene_in_frame`/`end_frame` flow.
+- Example-per-scenario binaries are the canonical runtime validation path.
+- Do not leave long-running render loops active; terminate after load/smoke capture.
 
 Note: runtime validation of rendering features requires a Vulkan-capable environment.

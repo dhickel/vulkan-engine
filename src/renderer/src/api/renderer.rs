@@ -5,21 +5,33 @@ use std::time::Instant;
 use ash::vk::Extent2D;
 use glam::Mat4;
 use input::InputManager;
+use log::error;
 use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::keyboard::PhysicalKey;
 use winit::window::Window;
 
 use crate::data::camera::{Camera, FPSController};
+use crate::data::handles::EnvironmentHandle;
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
-use super::assets::AssetManager;
+use super::assets::{AssetLoadTracker, AssetManager};
 use super::config::RendererConfig;
 use super::errors::{
-    map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, HookError,
-    RendererError, RendererInitError,
+    map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, RendererError,
+    RendererInitError,
 };
+use super::hooks::{invoke_render_hook, RenderHook, RenderHookStage};
 use super::scene::Scene;
+
+const DEFAULT_ASSET_PUMP_STEPS: usize = 32;
+
+#[derive(Debug, Copy, Clone)]
+pub struct EnvironmentRuntimeStatus {
+    pub requested: Option<EnvironmentHandle>,
+    pub active: EnvironmentHandle,
+    pub transitioning: bool,
+}
 
 pub struct FrameContext {
     frame_number: u32,
@@ -33,6 +45,9 @@ pub struct Renderer {
     last_frame_time: Instant,
     open_frame: Option<u32>,
     startup_scene: Option<Scene>,
+    asset_loads: AssetLoadTracker,
+    pre_render_hook: Option<RenderHook>,
+    post_render_hook: Option<RenderHook>,
 }
 
 impl Renderer {
@@ -62,6 +77,9 @@ impl Renderer {
             last_frame_time: Instant::now(),
             open_frame: None,
             startup_scene: Some(Scene::from_world(scene_world)),
+            asset_loads: AssetLoadTracker::new(),
+            pre_render_hook: None,
+            post_render_hook: None,
         })
     }
 
@@ -155,6 +173,7 @@ impl Renderer {
             ));
         }
 
+        self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
         self.prepare_frame(window)?;
         self.render_scene_internal(scene, self.frame_number)?;
         self.frame_number = self.frame_number.wrapping_add(1);
@@ -170,6 +189,7 @@ impl Renderer {
             ));
         }
 
+        self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
         self.prepare_frame(window)?;
         let frame_number = self.frame_number;
         self.open_frame = Some(frame_number);
@@ -231,21 +251,42 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn assets(&mut self) -> AssetManager<'_> {
-        AssetManager::new(&mut self.runtime.core)
+        AssetManager::new(&mut self.runtime.core, &mut self.asset_loads)
     }
 
     /// Thread: Main
     /// May Stall: No
-    pub fn register_render_hook(&mut self, _name: &str) -> Result<(), HookError> {
-        Err(HookError::Unsupported(
-            "custom render hooks are not implemented in this phase".to_string(),
-        ))
+    pub fn pump_asset_tasks(&mut self, max_steps: usize) -> Result<usize, RendererError> {
+        Ok(self.asset_loads.pump(&mut self.runtime.core, max_steps))
+    }
+
+    /// Thread: Main
+    /// May Stall: No
+    pub fn set_pre_render_hook(&mut self, hook: Option<RenderHook>) {
+        self.pre_render_hook = hook;
+    }
+
+    /// Thread: Main
+    /// May Stall: No
+    pub fn set_post_render_hook(&mut self, hook: Option<RenderHook>) {
+        self.post_render_hook = hook;
     }
 
     /// Thread: Main
     /// May Stall: No
     pub fn resize_requested(&self) -> bool {
         self.runtime.resize_requested()
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn environment_runtime_status(&self) -> EnvironmentRuntimeStatus {
+        let status = self.runtime.environment_runtime_status();
+        EnvironmentRuntimeStatus {
+            requested: status.requested,
+            active: status.active,
+            transitioning: status.transitioning,
+        }
     }
 
     fn prepare_frame(&mut self, window: &Window) -> Result<(), RendererError> {
@@ -306,9 +347,43 @@ impl Renderer {
 
         scene.update_camera(camera_view, proj, camera_pos);
         let submission = scene.build_submission();
+        let viewport_size = self.viewport_size();
+        let frame_index = frame_number as u64;
+        let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
+
+        let runtime = &mut self.runtime;
+        let pre_hook = &mut self.pre_render_hook;
+        let post_hook = &mut self.post_render_hook;
 
         catch_unwind(AssertUnwindSafe(|| {
-            self.runtime.render(frame_number, &submission);
+            if hooks_enabled {
+                runtime.render_with_hooks(
+                    frame_number,
+                    &submission,
+                    || {
+                        if let Err(err) = invoke_render_hook(
+                            pre_hook,
+                            RenderHookStage::PreRender,
+                            frame_index,
+                            viewport_size,
+                        ) {
+                            error!("pre_render hook failed at frame {}: {}", frame_index, err);
+                        }
+                    },
+                    || {
+                        if let Err(err) = invoke_render_hook(
+                            post_hook,
+                            RenderHookStage::PostRender,
+                            frame_index,
+                            viewport_size,
+                        ) {
+                            error!("post_render hook failed at frame {}: {}", frame_index, err);
+                        }
+                    },
+                );
+            } else {
+                runtime.render(frame_number, &submission);
+            }
         }))
         .map_err(|panic| {
             map_frame_render_err(format!(
@@ -318,6 +393,11 @@ impl Renderer {
         })?;
 
         Ok(())
+    }
+
+    fn viewport_size(&self) -> (u32, u32) {
+        let extent = self.runtime.core.window_state.get_curr_extent();
+        (extent.width, extent.height)
     }
 
     fn handle_cursor_focus(

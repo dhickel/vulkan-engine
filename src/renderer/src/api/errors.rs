@@ -138,7 +138,7 @@ impl Display for SceneError {
 
 impl Error for SceneError {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AssetError {
     Load {
         path: Option<PathBuf>,
@@ -176,6 +176,13 @@ pub enum AssetError {
         resource: &'static str,
         slot: u32,
         generation: u32,
+    },
+    UnknownTicket {
+        ticket: u64,
+    },
+    CancelRejected {
+        ticket: u64,
+        reason: String,
     },
     Cache(String),
     Sync(String),
@@ -239,6 +246,10 @@ impl Display for AssetError {
                 f,
                 "cannot unload reserved {resource} handle (slot={slot}, generation={generation})"
             ),
+            Self::UnknownTicket { ticket } => write!(f, "unknown load ticket ({ticket})"),
+            Self::CancelRejected { ticket, reason } => {
+                write!(f, "cannot cancel load ticket ({ticket}): {reason}")
+            }
             Self::Cache(msg) => write!(f, "cache operation failed: {msg}"),
             Self::Sync(msg) => write!(f, "asset synchronization failed: {msg}"),
             Self::Unsupported(msg) => write!(f, "{msg}"),

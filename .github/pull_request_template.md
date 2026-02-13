@@ -9,11 +9,13 @@
 ```bash
 cargo check
 cargo check -p renderer
+cargo check -p renderer --examples
 cargo check -p input
 ```
 
 - [ ] `cargo check`
 - [ ] `cargo check -p renderer`
+- [ ] `cargo check -p renderer --examples`
 - [ ] `cargo check -p input`
 
 ### Required Runtime Smoke (Vulkan Environment)

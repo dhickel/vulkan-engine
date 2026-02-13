@@ -152,8 +152,10 @@ pub struct VkRenderCore {
     pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
     pub transfer: VkTransfer,
     pub scene_descriptors: HashMap<EnvironmentHandle, VkSceneDescriptors>,
-    pub requested_env_id: EnvironmentHandle,
+    pub default_env_id: EnvironmentHandle,
+    pub requested_env_id: Option<EnvironmentHandle>,
     pub active_env_id: EnvironmentHandle,
+    pub environment_failures: HashMap<EnvironmentHandle, String>,
     pub imgui: VkImgui,
     pub scene_data: SceneDataUBO,
     pub sky_box: SkyBox,
@@ -167,6 +169,13 @@ pub struct VkRenderCore {
 pub struct VkRender {
     pub core: VkRenderCore,
     pub rendergraph: RenderGraph,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct VkEnvironmentRuntimeStatus {
+    pub requested: Option<EnvironmentHandle>,
+    pub active: EnvironmentHandle,
+    pub transitioning: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -271,8 +280,8 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let default_env = environment_cache
-        .load_cubemap_dir("src/renderer/src/assets/sky_maps/sky")
-        .unwrap();
+        .load_cubemap_dir(path::Path::new("src/renderer/src/assets/sky_maps/sky"))
+        .map_err(|err| format!("Failed to load default environment: {err}"))?;
 
     let data_cache = VkDataCache {
         mesh_cache: Mutex::new(mesh_cache),
@@ -450,19 +459,32 @@ impl VkRenderCore {
         })
     }
 
-    fn drain_transfer_submissions(&mut self) {
-        while let Some(cmd) = self.transfer.query_channel() {
+    fn drain_transfer_submissions(&mut self, max_submissions: usize) -> usize {
+        let mut submitted = 0usize;
+        while submitted < max_submissions {
+            let Some(cmd) = self.transfer.query_channel() else {
+                break;
+            };
             cmd.submit(
                 &self.device,
                 &self.vulkan_cache.queues,
                 &mut self.fence_await_queue,
             );
+            submitted += 1;
         }
+        submitted
     }
 
     fn service_async_transfers(&mut self) {
+        self.pump_transfer_submissions(usize::MAX);
+    }
+
+    pub fn pump_transfer_submissions(&mut self, max_submissions: usize) -> usize {
         self.fence_await_queue.check_fences(&self.device);
-        self.drain_transfer_submissions();
+        if max_submissions == 0 {
+            return 0;
+        }
+        self.drain_transfer_submissions(max_submissions)
     }
 
     fn pump_transfer_until_startup_done(
@@ -1036,8 +1058,10 @@ impl VkRenderCore {
             presentation,
             transfer,
             scene_descriptors: HashMap::new(),
-            requested_env_id: default_env_id,
+            default_env_id,
+            requested_env_id: None,
             active_env_id: default_env_id,
+            environment_failures: HashMap::new(),
             imgui,
             main_deletion_queue: Vec::new(),
             fence_await_queue: VkFenceQueue::new(),
@@ -1116,12 +1140,34 @@ impl VkRender {
     }
 
     pub fn render(&mut self, frame_number: u32, submission: &RenderSubmission) {
-        self.core
-            .render(frame_number, submission, &self.rendergraph);
+        self.render_with_hooks(frame_number, submission, || {}, || {});
+    }
+
+    pub fn render_with_hooks<PreRenderHook, PostRenderHook>(
+        &mut self,
+        frame_number: u32,
+        submission: &RenderSubmission,
+        pre_render_hook: PreRenderHook,
+        post_render_hook: PostRenderHook,
+    ) where
+        PreRenderHook: FnMut(),
+        PostRenderHook: FnMut(),
+    {
+        self.core.render_with_hooks(
+            frame_number,
+            submission,
+            &self.rendergraph,
+            pre_render_hook,
+            post_render_hook,
+        );
     }
 
     pub fn resize_requested(&self) -> bool {
         self.core.resize_requested
+    }
+
+    pub fn environment_runtime_status(&self) -> VkEnvironmentRuntimeStatus {
+        self.core.environment_runtime_status()
     }
 }
 
@@ -1213,6 +1259,25 @@ struct GeometryDrawLists {
 }
 
 impl VkRenderCore {
+    pub fn environment_runtime_status(&self) -> VkEnvironmentRuntimeStatus {
+        let requested = self.requested_env_id;
+        VkEnvironmentRuntimeStatus {
+            requested,
+            active: self.active_env_id,
+            transitioning: requested
+                .map(|requested_env| requested_env != self.active_env_id)
+                .unwrap_or(false),
+        }
+    }
+
+    pub fn environment_failure(&self, env_id: EnvironmentHandle) -> Option<String> {
+        self.environment_failures.get(&env_id).cloned()
+    }
+
+    pub fn clear_environment_failure(&mut self, env_id: EnvironmentHandle) {
+        self.environment_failures.remove(&env_id);
+    }
+
     /// Service background uploads and update active environment state before frame recording.
     fn service_transfers_and_prepare_environment(&mut self, submission: &RenderSubmission) {
         self.service_async_transfers();
@@ -1374,12 +1439,17 @@ impl VkRenderCore {
         }
     }
 
-    pub fn render(
+    pub fn render_with_hooks<PreRenderHook, PostRenderHook>(
         &mut self,
         frame_number: u32,
         submission: &RenderSubmission,
         rendergraph: &RenderGraph,
-    ) {
+        mut pre_render_hook: PreRenderHook,
+        mut post_render_hook: PostRenderHook,
+    ) where
+        PreRenderHook: FnMut(),
+        PostRenderHook: FnMut(),
+    {
         // 1. Service transfer completions and resolve requested environment before recording.
         self.service_transfers_and_prepare_environment(submission);
 
@@ -1390,6 +1460,8 @@ impl VkRenderCore {
 
         // 3. Record this frame.
         self.reset_and_begin_frame_cmd(frame.cmd_buffer);
+        pre_render_hook();
+
         let graph_result = unsafe { self.execute_rendergraph_for_frame(submission, rendergraph) };
         if let Err(err) = graph_result {
             error!("RenderGraph execution failed: {err}");
@@ -1397,6 +1469,7 @@ impl VkRenderCore {
             return;
         }
 
+        post_render_hook();
         self.end_frame_cmd(frame.cmd_buffer);
 
         // 4. Submit then present in acquire -> render -> present semaphore order.
@@ -1583,27 +1656,31 @@ impl VkRenderCore {
     }
 
     fn prepare_submission_environment(&mut self, submission: &RenderSubmission) {
-        self.requested_env_id = submission.skybox_env_id;
+        let requested_env_id = submission.skybox_env_id;
+        self.requested_env_id = Some(requested_env_id);
 
-        if self.requested_env_id == self.active_env_id {
+        if requested_env_id == self.active_env_id {
+            self.clear_environment_failure(requested_env_id);
             return;
         }
 
         let switch_start = SystemTime::now();
         info!(
             "Switching active environment from {:?} to {:?}",
-            self.active_env_id, self.requested_env_id
+            self.active_env_id, requested_env_id
         );
 
-        if let Err(err) = self.ensure_environment_ready(self.requested_env_id) {
+        if let Err(err) = self.ensure_environment_ready(requested_env_id) {
             error!(
                 "Failed to prepare requested environment {:?}: {}. Falling back to active env {:?}",
-                self.requested_env_id, err, self.active_env_id
+                requested_env_id, err, self.active_env_id
             );
+            self.environment_failures.insert(requested_env_id, err);
             return;
         }
 
-        self.active_env_id = self.requested_env_id;
+        self.clear_environment_failure(requested_env_id);
+        self.active_env_id = requested_env_id;
         let switch_ms = SystemTime::now()
             .duration_since(switch_start)
             .unwrap_or_default()
