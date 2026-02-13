@@ -213,8 +213,12 @@ impl SceneWorld {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
 
-        // Collect active point lights, clamped to GPU max
-        for entry in self.point_lights.iter().take(MAX_POINT_LIGHTS_GPU) {
+        // Collect first N active lights (not first N slots) so sparse slot churn
+        // does not accidentally submit zero lights.
+        for entry in self.point_lights.iter() {
+            if submission.point_lights.len() >= MAX_POINT_LIGHTS_GPU {
+                break;
+            }
             if let Some(light) = entry.light {
                 submission.point_lights.push(FramePointLight {
                     position: light.position,
@@ -645,6 +649,38 @@ mod tests {
         // Build submission with no lights
         let submission = scene.build_submission();
         assert_eq!(submission.point_lights.len(), 0);
+    }
+
+    #[test]
+    fn submission_collects_active_lights_from_sparse_slots() {
+        use crate::api::scene::PointLight;
+
+        let mut scene = SceneWorld::new();
+
+        let base_light = PointLight {
+            position: Vec3::new(0.0, 5.0, 0.0),
+            color: Vec3::new(1.0, 1.0, 1.0),
+            intensity: 30.0,
+            range: 8.0,
+        };
+
+        let mut ids = Vec::new();
+        for i in 0..20 {
+            let mut light_instance = base_light;
+            light_instance.position.x = i as f32;
+            ids.push(scene.add_point_light(light_instance));
+        }
+
+        for id in ids.iter().take(16) {
+            assert!(scene.remove_point_light(*id));
+        }
+
+        let submission = scene.build_submission();
+        assert_eq!(submission.point_lights.len(), 4);
+
+        for (expected_x, frame_light) in (16..20).zip(submission.point_lights.iter()) {
+            assert_eq!(frame_light.position.x, expected_x as f32);
+        }
     }
 
     #[test]
