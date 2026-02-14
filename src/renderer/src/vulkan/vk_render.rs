@@ -205,6 +205,8 @@ impl DebugRuntimeMode {
 }
 
 pub fn init_caches(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
     device: &ash::Device,
     allocator: &Arc<Mutex<Allocator>>,
     texture_host_buffer: Arc<Mutex<VkHostBuffer>>,
@@ -233,6 +235,8 @@ pub fn init_caches(
 
     let sampler_cache = VkSamplerCache::default();
     let texture_cache = TextureCache::new(
+        instance,
+        physical_device,
         device,
         allocator.clone(),
         sampler_cache,
@@ -917,7 +921,8 @@ impl VkRenderCore {
     ) -> Result<SceneWorld, String> {
         let force_unlit_materials = debug_runtime_mode == DebugRuntimeMode::TestUnlit;
         let mut loaded_scene =
-            debug_scenarios::load_startup_scene(render.data_cache.clone(), force_unlit_materials)?;
+            debug_scenarios::load_startup_scene(render.data_cache.clone(), force_unlit_materials)
+                .map_err(|e| e.to_string())?;
 
         if force_unlit_materials {
             info!(
@@ -1016,6 +1021,8 @@ impl VkRenderCore {
             vk_init::get_buffer_and_descriptor_limits(&instance, physical_device.p_device);
 
         let (data_cache, vulkan_cache, default_env_id) = init_caches(
+            &instance,
+            physical_device.p_device,
             &device,
             &allocator,
             texture_host_buffer,

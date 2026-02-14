@@ -268,6 +268,33 @@ impl Display for AssetError {
 
 impl Error for AssetError {}
 
+impl From<crate::data::assimp_util::AssimpImportError> for AssetError {
+    fn from(err: crate::data::assimp_util::AssimpImportError) -> Self {
+        use crate::data::assimp_util::AssimpImportError;
+        match &err {
+            AssimpImportError::InvalidPath(path) => AssetError::Load {
+                path: Some(std::path::PathBuf::from(path)),
+                message: err.to_string(),
+            },
+            AssimpImportError::SceneLoadFailed { path, .. } => AssetError::Load {
+                path: Some(std::path::PathBuf::from(path)),
+                message: err.to_string(),
+            },
+            AssimpImportError::TextureDecode { texture_ref, .. } => AssetError::Decode {
+                path: std::path::PathBuf::from(texture_ref),
+                message: err.to_string(),
+            },
+            AssimpImportError::Internal(msg) if msg.contains("lock poisoned") => {
+                AssetError::Sync(err.to_string())
+            }
+            _ => AssetError::Load {
+                path: None,
+                message: err.to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum HookError {
     Unsupported(String),

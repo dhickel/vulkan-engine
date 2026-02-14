@@ -934,10 +934,7 @@ fn load_model_gpu_ready(
 
     let loaded_model =
         assimp_util::load_model(path_str, data_cache.clone(), false).map_err(|err| {
-            AssetError::Load {
-                path: Some(path.clone()),
-                message: err,
-            }
+            AssetError::from(err)
         })?;
 
     let upload_result = promote_model_gpu_allocations(&path, &data_cache, &loaded_model);
