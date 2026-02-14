@@ -12,7 +12,6 @@ use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
-use crate::data::environment_import;
 use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
