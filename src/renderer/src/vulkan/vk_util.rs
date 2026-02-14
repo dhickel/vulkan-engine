@@ -1420,8 +1420,8 @@ pub fn record_host_to_image_buffer(
                 vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_DST
                     | vk::ImageUsageFlags::TRANSFER_SRC,
-                1,
-            ) //calc_mips_count(meta.width, meta.height))
+                meta.mips_levels,
+            )
         })
         .collect();
 

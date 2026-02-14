@@ -63,6 +63,19 @@ pub fn calc_mips_count(width: u32, height: u32) -> u32 {
     (max_dimension.log2().floor() as u32) + 1
 }
 
+/// Resolves the effective mip count for a 2D texture.
+///
+/// - `requested == None` means auto full chain.
+/// - `requested == Some(v)` where `v > 0` is clamped to the hardware-valid max.
+/// - `requested == Some(0)` or negative-equivalent falls back to auto.
+pub fn resolve_texture_mip_count(width: u32, height: u32, requested: Option<u32>) -> u32 {
+    let auto = calc_mips_count(width, height);
+    match requested {
+        Some(v) if v > 0 => v.min(auto),
+        _ => auto,
+    }
+}
+
 pub fn bytes_per_pixel(format: vk::Format) -> u32 {
     match format {
         vk::Format::R8_UNORM => 1,
@@ -477,3 +490,64 @@ impl std::fmt::Display for LatchTimeOutError {
 }
 
 impl std::error::Error for LatchTimeOutError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calc_mips_count_1x1() {
+        assert_eq!(calc_mips_count(1, 1), 1);
+    }
+
+    #[test]
+    fn calc_mips_count_2x2() {
+        assert_eq!(calc_mips_count(2, 2), 2);
+    }
+
+    #[test]
+    fn calc_mips_count_1024x1024() {
+        // log2(1024) = 10, so 10 + 1 = 11
+        assert_eq!(calc_mips_count(1024, 1024), 11);
+    }
+
+    #[test]
+    fn calc_mips_count_1024x256() {
+        // max(1024, 256) = 1024, log2(1024) = 10, so 11
+        assert_eq!(calc_mips_count(1024, 256), 11);
+    }
+
+    #[test]
+    fn calc_mips_count_non_power_of_two() {
+        // max dim 300, log2(300) = 8.22, floor = 8, + 1 = 9
+        assert_eq!(calc_mips_count(300, 200), 9);
+    }
+
+    #[test]
+    fn resolve_mip_count_auto_full_chain() {
+        assert_eq!(resolve_texture_mip_count(1024, 1024, None), 11);
+    }
+
+    #[test]
+    fn resolve_mip_count_explicit_clamped() {
+        // Request 20 but max is 11 for 1024x1024
+        assert_eq!(resolve_texture_mip_count(1024, 1024, Some(20)), 11);
+    }
+
+    #[test]
+    fn resolve_mip_count_explicit_within_range() {
+        // Request 5 which is less than auto=11
+        assert_eq!(resolve_texture_mip_count(1024, 1024, Some(5)), 5);
+    }
+
+    #[test]
+    fn resolve_mip_count_zero_falls_back_to_auto() {
+        assert_eq!(resolve_texture_mip_count(1024, 1024, Some(0)), 11);
+    }
+
+    #[test]
+    fn resolve_mip_count_1x1_always_1() {
+        assert_eq!(resolve_texture_mip_count(1, 1, None), 1);
+        assert_eq!(resolve_texture_mip_count(1, 1, Some(5)), 1);
+    }
+}

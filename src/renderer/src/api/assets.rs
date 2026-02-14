@@ -12,6 +12,7 @@ use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
+use crate::data::data_util::resolve_texture_mip_count;
 use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
@@ -1024,7 +1025,7 @@ fn load_texture_gpu_ready(
         width: image.width(),
         height: image.height(),
         format,
-        mips_levels: 1,
+        mips_levels: resolve_texture_mip_count(image.width(), image.height(), None),
         uv_index: 0,
     };
 

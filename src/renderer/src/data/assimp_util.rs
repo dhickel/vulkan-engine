@@ -4,6 +4,7 @@
 //! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
 
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
+use crate::data::data_util::resolve_texture_mip_count;
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap, OcclusionMap,
@@ -484,7 +485,7 @@ unsafe fn get_texture_meta(
                         width,
                         height,
                         format,
-                        mips_levels: 1,
+                        mips_levels: resolve_texture_mip_count(width, height, None),
                         uv_index,
                     });
                 }
