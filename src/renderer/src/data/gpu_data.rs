@@ -619,6 +619,16 @@ pub struct PushConstCubeCapture {
     _pad: [u32; 2],
 }
 
+impl PushConstCubeCapture {
+    pub fn new(mvp: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            mvp,
+            vertex_buffer_addr,
+            _pad: [0; 2],
+        }
+    }
+}
+
 ////////////////////////////
 // VULKAN ALLOCATION DATA //
 ////////////////////////////

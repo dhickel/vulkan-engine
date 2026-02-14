@@ -954,6 +954,110 @@ pub fn upload_cubemap_faces(
     upload_skybox(device, allocator, meta, transfer_pool, transfer_queue)
 }
 
+/// Upload a 2D texture to GPU and return a VkImageAlloc with sampler.
+///
+/// Used for staging equirectangular source images before GPU conversion.
+pub fn upload_texture_2d(
+    device: &ash::Device,
+    allocator: &Allocator,
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    bytes: &[u8],
+    transfer_pool: &VkCommandPool,
+    transfer_queue: vk::Queue,
+) -> Result<(VkImageAlloc, vk::Sampler), String> {
+    let staging_buffer = allocate_and_write_buffer(
+        allocator,
+        bytes,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+    )?;
+
+    let extent = vk::Extent3D {
+        width,
+        height,
+        depth: 1,
+    };
+
+    let mut image = create_image(
+        device,
+        allocator,
+        extent,
+        format,
+        vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+        1,
+    );
+
+    let cmd_buffer = transfer_pool.buffers[0];
+    unsafe {
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        device.begin_command_buffer(cmd_buffer, &begin_info).unwrap();
+
+        transition_image(
+            device,
+            cmd_buffer,
+            image.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        );
+
+        let region = [vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(extent)];
+
+        device.cmd_copy_buffer_to_image(
+            cmd_buffer,
+            staging_buffer.buffer,
+            image.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &region,
+        );
+
+        transition_image(
+            device,
+            cmd_buffer,
+            image.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        device.end_command_buffer(cmd_buffer).unwrap();
+
+        let cmd_info = [command_buffer_submit_info(cmd_buffer)];
+        let submit_info = [submit_info_2(&cmd_info, &[], &[])];
+        device
+            .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
+            .unwrap();
+        let _ = device.device_wait_idle();
+
+        destroy_buffer(allocator, staging_buffer);
+
+        let sampler_info = vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .min_lod(0.0)
+            .max_lod(0.0);
+
+        let sampler = device.create_sampler(&sampler_info, None).unwrap();
+
+        Ok((image, sampler))
+    }
+}
+
 fn create_buffer_image_copy(
     face_index: u32, // 0-based index of the face in the horizontal strip
     face_width: u32,

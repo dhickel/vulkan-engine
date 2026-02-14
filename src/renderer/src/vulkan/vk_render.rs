@@ -1514,11 +1514,44 @@ impl VkRenderCore {
                 self.transfer.get_local_transfer_pool(),
                 self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
             ),
-            PendingSkyboxSource::Equirectangular2D { .. } => {
-                // TODO: Phase 4/5 - GPU equirect-to-cubemap conversion
-                return Err(
-                    "Equirectangular-to-cubemap GPU conversion not yet implemented".to_string(),
+            PendingSkyboxSource::Equirectangular2D {
+                width,
+                height,
+                format,
+                bytes,
+            } => {
+                // Upload equirect source as 2D texture
+                let (src_image, src_sampler) = vk_util::upload_texture_2d(
+                    &self.device,
+                    &self.allocator.lock().unwrap(),
+                    width,
+                    height,
+                    format,
+                    &bytes,
+                    self.transfer.get_local_transfer_pool(),
+                    self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+                )
+                .map_err(|e| format!("Failed to upload equirect source: {}", e))?;
+
+                // Compute cube face dimension: h/2 (clamped)
+                let cube_dim = (height / 2).max(1).min(2048);
+
+                // Convert via GPU rendering
+                let result = self.convert_equirect_to_cubemap(
+                    src_image.image_view,
+                    src_sampler,
+                    cube_dim,
+                    format,
                 );
+
+                // Destroy temporary source texture
+                unsafe {
+                    self.device.destroy_sampler(src_sampler, None);
+                }
+                let mut src_img = src_image;
+                src_img.destroy(&self.device, &self.allocator.lock().unwrap());
+
+                result.map_err(|e| format!("Equirect-to-cubemap conversion failed: {}", e))?
             }
         };
 
@@ -2722,6 +2755,241 @@ impl VkRenderCore {
             "Finished Generating: {:?}, Generation took: {} ms",
             target, target_end
         );
+
+        generation_result
+    }
+
+    /// Convert an equirectangular 2D source image to a cubemap via GPU rendering.
+    fn convert_equirect_to_cubemap(
+        &self,
+        src_view: vk::ImageView,
+        src_sampler: vk::Sampler,
+        cube_dim: u32,
+        cube_format: vk::Format,
+    ) -> Result<VkCubeMap, String> {
+        use crate::data::gpu_data::{AsByteSlice, PushConstCubeCapture};
+
+        info!(
+            "Converting equirectangular to cubemap: dim={}, format={:?}",
+            cube_dim, cube_format
+        );
+
+        let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
+        let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
+        let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
+
+        // Allocate descriptor for the equirect source texture
+        let desc_pool = VkDescriptorAllocator::new(
+            &self.device,
+            1,
+            &[PoolSizeRatio::new(
+                vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                1.0,
+            )],
+        )?;
+        let source_desc = desc_pool.allocate(
+            &self.device,
+            &[self
+                .vulkan_cache
+                .desc_layouts
+                .get(VkDescType::EnvEquirect)],
+        )?;
+        self.write_environment_source_descriptor(source_desc, src_view, src_sampler);
+
+        let skybox_mesh = self.skybox_mesh_draw_info()?;
+        let pipeline = self
+            .vulkan_cache
+            .pipelines
+            .get_pipeline(VkPipelineType::EnvEquirectToCube);
+        let matrices = Self::cubemap_capture_matrices();
+        let perspective = glam::Mat4::perspective_rh(FRAC_PI_2, 1.0, 0.1, 512.0);
+
+        // Create offscreen render target
+        let dim_extent = Extent2D {
+            width: cube_dim,
+            height: cube_dim,
+        };
+        let mut offscreen_image = vk_util::create_image(
+            &self.device,
+            &self.allocator.lock().unwrap(),
+            vk::Extent3D::from(dim_extent).depth(1),
+            cube_format,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+            1,
+        );
+
+        let generation_result = (|| -> Result<VkCubeMap, String> {
+            let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                cube_format,
+                cube_dim,
+                1, // single mip level for skybox source
+            )?;
+
+            let viewport = [vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: cube_dim as f32,
+                height: cube_dim as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }];
+            let scissor = [vk::Rect2D::default()
+                .offset(vk::Offset2D::default())
+                .extent(dim_extent)];
+
+            unsafe {
+                self.device
+                    .reset_command_buffer(render_buffer, vk::CommandBufferResetFlags::empty())
+                    .unwrap();
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                self.device
+                    .begin_command_buffer(render_buffer, &begin_info)
+                    .unwrap();
+
+                vk_util::transition_image_layered(
+                    &self.device,
+                    render_buffer,
+                    cubemap_image.image,
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    6,
+                    1,
+                );
+
+                let mut offscreen_layout = vk::ImageLayout::UNDEFINED;
+                for face in 0..6usize {
+                    vk_util::transition_image(
+                        &self.device,
+                        render_buffer,
+                        offscreen_image.image,
+                        offscreen_layout,
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    );
+
+                    let color_attachment_info = [vk::RenderingAttachmentInfo::default()
+                        .image_view(offscreen_image.image_view)
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue {
+                            color: vk::ClearColorValue {
+                                float32: [0.0, 0.0, 0.0, 1.0],
+                            },
+                        })];
+
+                    let rendering_info = vk::RenderingInfo::default()
+                        .render_area(scissor[0])
+                        .layer_count(1)
+                        .color_attachments(&color_attachment_info);
+
+                    self.device
+                        .cmd_begin_rendering(render_buffer, &rendering_info);
+                    self.device.cmd_set_viewport(render_buffer, 0, &viewport);
+                    self.device.cmd_set_scissor(render_buffer, 0, &scissor);
+                    self.device.cmd_bind_pipeline(
+                        render_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.pipeline,
+                    );
+                    self.device.cmd_bind_descriptor_sets(
+                        render_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.layout,
+                        0,
+                        &[source_desc],
+                        &[],
+                    );
+
+                    let mvp = perspective * matrices[face];
+                    let pc = PushConstCubeCapture::new(mvp, skybox_mesh.vertex_buffer_addr);
+                    self.device.cmd_push_constants(
+                        render_buffer,
+                        pipeline.layout,
+                        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                        0,
+                        pc.as_byte_slice(),
+                    );
+
+                    self.device.cmd_bind_index_buffer(
+                        render_buffer,
+                        skybox_mesh.index_buffer,
+                        0,
+                        vk::IndexType::UINT32,
+                    );
+                    self.device
+                        .cmd_draw_indexed(render_buffer, skybox_mesh.index_count, 1, 0, 0, 0);
+                    self.device.cmd_end_rendering(render_buffer);
+
+                    vk_util::transition_image(
+                        &self.device,
+                        render_buffer,
+                        offscreen_image.image,
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    );
+                    offscreen_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+
+                    let copy_region = vk::ImageCopy::default()
+                        .src_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                        .dst_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: face as u32,
+                            layer_count: 1,
+                        })
+                        .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                        .extent(vk::Extent3D {
+                            width: cube_dim,
+                            height: cube_dim,
+                            depth: 1,
+                        });
+
+                    self.device.cmd_copy_image(
+                        render_buffer,
+                        offscreen_image.image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        cubemap_image.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[copy_region],
+                    );
+                }
+
+                vk_util::transition_image_layered(
+                    &self.device,
+                    render_buffer,
+                    cubemap_image.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    6,
+                    1,
+                );
+
+                self.device.end_command_buffer(render_buffer).unwrap();
+                self.submit_and_wait_graphics(render_buffer, render_queue);
+            }
+
+            Ok(VkCubeMap {
+                texture_meta: None,
+                full_extent: Extent3D::from(dim_extent).depth(1),
+                face_extent: Extent3D::from(dim_extent).depth(1),
+                allocation: cubemap_image.allocation,
+                image: cubemap_image.image,
+                image_view: cubemap_image.image_view,
+                sampler: cubemap_sampler,
+            })
+        })();
+
+        offscreen_image.destroy(&self.device, &self.allocator.lock().unwrap());
+        desc_pool.destroy(&self.device);
 
         generation_result
     }
