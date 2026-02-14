@@ -1,6 +1,7 @@
 use log::{error, info};
-use renderer::{FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene};
+use renderer::{EnvironmentSource, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene};
 use std::env;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -48,6 +49,20 @@ fn main() {
     };
 
     let mut scene = renderer.take_startup_scene().unwrap_or_else(Scene::new);
+
+    if let Some(env_path) = parse_env_arg() {
+        info!("Loading custom environment from: {}", env_path.display());
+        match renderer.assets().load_environment(EnvironmentSource::Auto(env_path)) {
+            Ok(handle) => {
+                scene.set_skybox(handle);
+                info!("Custom environment set as skybox");
+            }
+            Err(err) => {
+                error!("Failed to load custom environment: {err}");
+            }
+        }
+    }
+
     let mut fps_timer = Instant::now();
     let mut frame_counter: u32 = 0;
 
@@ -125,6 +140,23 @@ fn render_frame(
     let outcome = renderer.render_scene_in_frame(&mut frame, scene)?;
     renderer.end_frame(frame)?;
     Ok(outcome)
+}
+
+fn parse_env_arg() -> Option<PathBuf> {
+    let args: Vec<String> = env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--env" {
+            if let Some(path) = args.get(i + 1) {
+                return Some(PathBuf::from(path));
+            } else {
+                error!("--env requires a path argument");
+                return None;
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn init_logging() {

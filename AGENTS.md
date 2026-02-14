@@ -87,6 +87,7 @@ Use module-level docs for exact files/lines and safe editing strategy.
 - Check input crate: `cargo check -p input`
 - Runtime example entrypoints:
   - `cargo run -p renderer --example api_test`
+  - `cargo run -p renderer --example api_test -- --env <path>` (custom environment map)
   - `cargo run -p renderer --example demo_pbr`
   - `cargo run -p renderer --example demo_unlit`
   - `cargo run -p renderer --example demo_model_load`
@@ -104,6 +105,7 @@ Use module-level docs for exact files/lines and safe editing strategy.
   - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_model_load`
   - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_async_loading`
   - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example api_test`
+  - `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr`
 - Treat successful startup logs plus no fatal errors before timeout as headless runtime smoke pass.
 
 ## Runtime Example Scenarios
@@ -113,7 +115,7 @@ Use module-level docs for exact files/lines and safe editing strategy.
   - `demo_unlit`: startup Unlit path.
   - `demo_model_load`: model load + scene fragment merge path.
   - `demo_async_loading`: deferred ticket polling + mount path.
-  - `api_test`: explicit `begin_frame`/`render_scene_in_frame`/`end_frame` flow.
+  - `api_test`: explicit `begin_frame`/`render_scene_in_frame`/`end_frame` flow. Supports `--env <path>` for custom environment loading.
 - Example-per-scenario binaries are the canonical runtime validation path.
 - Do not leave long-running render loops active; terminate after load/smoke capture.
 

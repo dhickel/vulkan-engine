@@ -1891,7 +1891,8 @@ impl VkDescLayoutCache {
                 5 => VkDescType::Skybox,
                 6 => VkDescType::EnvIrradiance,
                 7 => VkDescType::EnvPreFilter,
-                8 => VkDescType::Empty,
+                8 => VkDescType::EnvEquirect,
+                9 => VkDescType::Empty,
                 _ => panic!(),
             };
             debug!("\t{:?} : {:?}", typ, *set)

@@ -59,6 +59,7 @@ Deep dives:
 - Startup loads a hardcoded asset and skybox resources.
 - Runtime example entrypoints:
   - `cargo run -p renderer --example api_test`
+  - `cargo run -p renderer --example api_test -- --env <path>` (custom environment map)
   - `cargo run -p renderer --example demo_pbr`
   - `cargo run -p renderer --example demo_unlit`
   - `cargo run -p renderer --example demo_model_load`
