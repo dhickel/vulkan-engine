@@ -12,6 +12,7 @@ use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
+use crate::data::environment_import;
 use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
@@ -24,11 +25,7 @@ use super::errors::AssetError;
 
 const TERMINAL_TICKET_RETAIN_LIMIT: usize = 2_048;
 
-#[derive(Debug)]
-pub enum EnvironmentSource {
-    EquirectFile(PathBuf),
-    CubemapDir(PathBuf),
-}
+pub use crate::data::environment_import::{EnvironmentSource, FacePattern};
 
 #[derive(Debug)]
 pub enum EnvironmentState {
@@ -530,24 +527,21 @@ impl<'a> AssetManager<'a> {
         &mut self,
         source: EnvironmentSource,
     ) -> Result<EnvironmentHandle, AssetError> {
-        let env_id =
-            {
-                let mut env_cache = self
-                    .core
-                    .data_cache
-                    .environment_cache
-                    .lock()
-                    .map_err(|_| poisoned_lock_err("environment_cache"))?;
+        let env_id = {
+            let mut env_cache = self
+                .core
+                .data_cache
+                .environment_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("environment_cache"))?;
 
-                match source {
-                    EnvironmentSource::EquirectFile(path) => env_cache
-                        .load_cubemap_file(path.as_path())
-                        .map_err(|message| map_environment_load_err(&path, message))?,
-                    EnvironmentSource::CubemapDir(path) => env_cache
-                        .load_cubemap_dir(path.as_path())
-                        .map_err(|message| map_environment_load_err(&path, message))?,
-                }
-            };
+            env_cache
+                .import_environment(source)
+                .map_err(|message| AssetError::Load {
+                    path: None,
+                    message,
+                })?
+        };
 
         self.core.clear_environment_failure(env_id);
         Ok(env_id)

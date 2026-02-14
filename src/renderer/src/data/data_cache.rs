@@ -57,6 +57,9 @@
 //! - Batch transfers: Multiple textures uploaded in single frame
 
 use crate::data::data_util::PackUnorm;
+use crate::data::environment_import::{
+    self, EnvironmentSource, PendingSkyboxSource,
+};
 use crate::data::gpu_data::{
     AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialShadingModel,
     MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap,
@@ -1901,7 +1904,7 @@ impl VkDestroyable for VkDescLayoutCache {
 }
 
 pub enum CachedEnvironment {
-    Unloaded(TextureMeta),
+    Unloaded(PendingSkyboxSource),
     Loaded(VkCubeMap),
 }
 
@@ -1948,56 +1951,19 @@ impl EnvironmentCache {
         self.skyboxes.get(slot).ok_or(CacheError::OutOfBounds)
     }
 
-    pub fn load_cubemap_file(&mut self, path: &path::Path) -> Result<EnvironmentHandle, String> {
-        match image::open(path) {
-            Ok(image) => {
-                let index = self.skyboxes.len() as u32;
-                let mut format = assimp_util::to_vk_format(&image);
+    pub fn import_environment(
+        &mut self,
+        source: EnvironmentSource,
+    ) -> Result<EnvironmentHandle, String> {
+        let pending = environment_import::import_environment_source(&source, &self.supported_formats)?;
+        let index = self.skyboxes.len() as u32;
 
-                let image_bytes = if !self.supported_formats.contains(&format) {
-                    if self
-                        .supported_formats
-                        .contains(&vk::Format::R32G32B32A32_SFLOAT)
-                    {
-                        format = vk::Format::R32G32B32A32_SFLOAT;
-                        data_util::convert_rgb32f_to_rgba32f(image.to_rgb32f())
-                            .as_bytes()
-                            .to_vec()
-                    } else {
-                        return Err(format!(
-                            "Unsupported environment format {:?} for '{}' and no fallback format is available",
-                            format,
-                            path.display()
-                        ));
-                    }
-                } else {
-                    image.as_bytes().to_vec()
-                };
+        info!("Imported environment source as Unloaded: {:?}", source);
 
-                info!(
-                    "Added cube map file as Unloaded: {:?} \tformat: {:?}  \twidth: {:?}, height: {:?}",
-                    path,
-                    format,
-                    image.width(),
-                    image.height()
-                );
-
-                let meta = TextureMeta {
-                    bytes: image_bytes,
-                    width: image.width(),
-                    height: image.height(),
-                    format,
-                    mips_levels: 1,
-                    ..Default::default()
-                };
-
-                self.skyboxes.push(CachedEnvironment::Unloaded(meta));
-                self.env_maps.push(None);
-                self.env_generations.push(0);
-                Ok(self.env_handle_for_slot(index))
-            }
-            Err(err) => Err(format!("Failed to add cube map file: {:?}", err)),
-        }
+        self.skyboxes.push(CachedEnvironment::Unloaded(pending));
+        self.env_maps.push(None);
+        self.env_generations.push(0);
+        Ok(self.env_handle_for_slot(index))
     }
 
     pub fn add_env_maps(
@@ -2019,105 +1985,24 @@ impl EnvironmentCache {
         self.env_maps.get(slot).ok_or(CacheError::OutOfBounds)
     }
 
-    pub fn load_cubemap_dir(&mut self, dir: &path::Path) -> Result<EnvironmentHandle, String> {
-        let face_files = ["px.hdr", "nx.hdr", "py.hdr", "ny.hdr", "pz.hdr", "nz.hdr"];
-        let mut face_images: Vec<Rgba32FImage> = Vec::new();
-        let mut width = 0;
-        let mut height = 0;
-        let format = vk::Format::R32G32B32A32_SFLOAT;
-        if !self.supported_formats.contains(&format) {
-            return Err(format!(
-                "Device does not support required cubemap format {:?} for '{}'",
-                format,
-                dir.display()
-            ));
-        }
-
-        for face_file in face_files.iter() {
-            let path = dir.join(face_file);
-
-            match image::open(&path) {
-                Ok(image) => {
-                    // Convert to RGBA32F
-                    let rgba32f = image.into_rgba32f();
-
-                    if width == 0 {
-                        width = rgba32f.width();
-                        height = rgba32f.height();
-                    } else if width != rgba32f.width() || height != rgba32f.height() {
-                        return Err(format!("Inconsistent face dimensions in {}", face_file));
-                    }
-
-                    face_images.push(rgba32f);
-
-                    info!(
-                        "Loaded cubemap face: {:?} \tformat: {:?} \twidth: {:?}, height: {:?}",
-                        path, format, width, height
-                    );
-                }
-                Err(err) => return Err(format!("Failed to load face {}: {:?}", face_file, err)),
-            }
-        }
-
-        // Combine all face data into a single vector of f32
-        let combined_data: Vec<f32> = face_images
-            .into_iter()
-            .flat_map(|img| img.into_raw())
-            .collect();
-
-        // Convert f32 data to bytes
-        let byte_data: Vec<u8> = bytemuck::cast_slice(&combined_data).to_vec();
-
-        let index = self.skyboxes.len() as u32;
-        width *= 6;
-        info!(
-            "Loaded cubemap meta: \tformat: {:?}, width: {:?}, height: {:?}, total bytes: {:?}",
-            format,
-            width,
-            height,
-            byte_data.len()
-        );
-
-        let meta = TextureMeta {
-            bytes: byte_data,
-            width,
-            height,
-            format,
-            mips_levels: 1,
-            ..Default::default()
-        };
-
-        self.skyboxes.push(CachedEnvironment::Unloaded(meta));
-        self.env_maps.push(None);
-        self.env_generations.push(0);
-        Ok(self.env_handle_for_slot(index))
-    }
-
-    fn empty_texture_meta() -> TextureMeta {
-        TextureMeta {
-            bytes: vec![],
-            width: 0,
-            height: 0,
-            format: vk::Format::UNDEFINED,
-            mips_levels: 0,
-            uv_index: 0,
-        }
-    }
-
-    pub fn take_unloaded_cube_map_meta(
+    pub fn take_unloaded_source(
         &mut self,
         env_id: EnvironmentHandle,
-    ) -> Result<Option<TextureMeta>, CacheError> {
+    ) -> Result<Option<PendingSkyboxSource>, CacheError> {
         let slot = self.validate_env_slot(env_id)?;
         match self.skyboxes.get(slot) {
             Some(CachedEnvironment::Loaded(_)) => Ok(None),
             Some(CachedEnvironment::Unloaded(_)) => {
                 let old = std::mem::replace(
                     &mut self.skyboxes[slot],
-                    CachedEnvironment::Unloaded(Self::empty_texture_meta()),
+                    CachedEnvironment::Unloaded(PendingSkyboxSource::CubemapFaces {
+                        face_size: 0,
+                        format: vk::Format::UNDEFINED,
+                        bytes: vec![],
+                    }),
                 );
                 match old {
-                    CachedEnvironment::Unloaded(meta) => Ok(Some(meta)),
+                    CachedEnvironment::Unloaded(source) => Ok(Some(source)),
                     CachedEnvironment::Loaded(_) => unreachable!(),
                 }
             }
@@ -2125,13 +2010,13 @@ impl EnvironmentCache {
         }
     }
 
-    pub fn restore_unloaded_cube_map_meta(
+    pub fn restore_unloaded_source(
         &mut self,
         env_id: EnvironmentHandle,
-        meta: TextureMeta,
+        source: PendingSkyboxSource,
     ) -> Result<(), CacheError> {
         let slot = self.validate_env_slot(env_id)?;
-        self.skyboxes[slot] = CachedEnvironment::Unloaded(meta);
+        self.skyboxes[slot] = CachedEnvironment::Unloaded(source);
         Ok(())
     }
 

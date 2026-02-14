@@ -65,8 +65,8 @@ use crate::data::data_cache::{
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
     AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
-    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap,
-    VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
+    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, TextureMeta, Vertex,
+    VkCubeMap, VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
 };
 use crate::data::handles::EnvironmentHandle;
 use crate::data::{data_cache, data_util, gpu_data};
@@ -280,7 +280,10 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let default_env = environment_cache
-        .load_cubemap_dir(path::Path::new("src/renderer/src/assets/sky_maps/sky"))
+        .import_environment(crate::data::environment_import::EnvironmentSource::FaceDirectory {
+            path: "src/renderer/src/assets/sky_maps/sky".into(),
+            pattern: crate::data::environment_import::FacePattern::PxNxPyNyPzNz,
+        })
         .map_err(|err| format!("Failed to load default environment: {err}"))?;
 
     let data_cache = VkDataCache {
@@ -1479,10 +1482,12 @@ impl VkRenderCore {
 
     /// Upload unloaded skybox cubemap data for the requested environment handle.
     fn upload_pending_skybox_if_needed(&mut self, env_id: EnvironmentHandle) -> Result<(), String> {
-        let pending_skybox_meta = {
+        use crate::data::environment_import::PendingSkyboxSource;
+
+        let pending_source = {
             let mut env_cache = self.data_cache.environment_cache.lock().unwrap();
             env_cache
-                .take_unloaded_cube_map_meta(env_id)
+                .take_unloaded_source(env_id)
                 .map_err(|err| {
                     format!(
                         "Failed to query skybox cubemap state for env {:?}: {:?}",
@@ -1491,17 +1496,39 @@ impl VkRenderCore {
                 })?
         };
 
-        let Some(skybox_meta) = pending_skybox_meta else {
+        let Some(source) = pending_source else {
             return Ok(());
         };
 
-        let cube_map = vk_util::upload_skybox(
-            &self.device,
-            &self.allocator.lock().unwrap(),
-            skybox_meta,
-            self.transfer.get_local_transfer_pool(),
-            self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
-        );
+        let cube_map = match source {
+            PendingSkyboxSource::CubemapFaces {
+                face_size,
+                format,
+                bytes,
+            } => {
+                let meta = TextureMeta {
+                    bytes,
+                    width: face_size * 6,
+                    height: face_size,
+                    format,
+                    mips_levels: 1,
+                    uv_index: 0,
+                };
+                vk_util::upload_skybox(
+                    &self.device,
+                    &self.allocator.lock().unwrap(),
+                    meta,
+                    self.transfer.get_local_transfer_pool(),
+                    self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+                )
+            }
+            PendingSkyboxSource::Equirectangular2D { .. } => {
+                // TODO: Phase 4/5 - GPU equirect-to-cubemap conversion
+                return Err(
+                    "Equirectangular-to-cubemap GPU conversion not yet implemented".to_string(),
+                );
+            }
+        };
 
         self.data_cache
             .environment_cache
