@@ -310,7 +310,10 @@ pub fn process_materials(
                 &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
             );
 
-            let mut tex_cache = data_cache.texture_cache.lock().unwrap();
+            let mut tex_cache = data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
 
             if let Some((meta, _source)) = base_color {
                 let color = get_color_factor(ai_material);

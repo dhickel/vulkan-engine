@@ -535,7 +535,7 @@ impl Default for EnvironmentUBO {
             exposure: 4.5,
             gamma: 2.2,
             prefilter_mips_levels: 5.0,
-            ibl_ambient_scale: 3.0,
+            ibl_ambient_scale: 1.0,
             debug_view_inputs: 0.0,
             debug_view_equation: 0.0,
             _pad0: [0, 0],

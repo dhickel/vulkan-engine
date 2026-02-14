@@ -216,6 +216,8 @@ impl VkDataCache {
 }
 
 pub struct TextureCache {
+    instance: ash::Instance,
+    physical_device: vk::PhysicalDevice,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
     cached_textures: Vec<CachedTexture>,
@@ -232,6 +234,7 @@ pub struct TextureCache {
     host_alignment: u64,
     gfx_pool: VkCommandPool,
     gfx_queue: vk::Queue,
+    linear_blit_support: Mutex<HashMap<vk::Format, bool>>,
 }
 
 impl TextureCache {
@@ -271,6 +274,8 @@ impl TextureCache {
     };
 
     pub fn new(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
         sampler_cache: VkSamplerCache,
@@ -397,6 +402,8 @@ impl TextureCache {
         };
 
         Ok(Self {
+            instance: instance.clone(),
+            physical_device,
             device: device.clone(),
             allocator,
             texture_generations: vec![0; cached_textures.len()],
@@ -413,11 +420,27 @@ impl TextureCache {
             host_alignment: std::cmp::max(limits.optimal_buffer_copy_offset_alignment, 4),
             gfx_pool,
             gfx_queue,
+            linear_blit_support: Mutex::new(HashMap::new()),
         })
     }
 
     pub fn is_supported_format(&self, format: vk::Format) -> bool {
         self.supported_formats.contains(&format)
+    }
+
+    fn supports_linear_mip_blit(&self, format: vk::Format) -> bool {
+        let mut cache = self.linear_blit_support.lock().unwrap();
+        if let Some(supported) = cache.get(&format) {
+            return *supported;
+        }
+
+        let supported = vk_util::format_supports_linear_mip_blit(
+            &self.instance,
+            self.physical_device,
+            format,
+        );
+        cache.insert(format, supported);
+        supported
     }
 
     fn texture_handle_for_slot(&self, slot: u32) -> TextureHandle {
@@ -642,6 +665,7 @@ impl TextureCache {
 
         let mut curr_bytes = 0;
         let mut next_upload = Vec::<&TextureMeta>::with_capacity(texture_ids.len());
+        let mut next_upload_blit_support = Vec::<bool>::with_capacity(texture_ids.len());
         let mut loaded = Vec::<CachedTexture>::with_capacity(texture_ids.len());
 
         // 1. Filter for Unloaded Textures
@@ -681,6 +705,7 @@ impl TextureCache {
                             &mut self.sampler_cache,
                             &host_buffer,
                             &next_upload,
+                            &next_upload_blit_support,
                             self.host_alignment,
                             &ids,
                             self.gfx_queue,
@@ -717,6 +742,7 @@ impl TextureCache {
                             Ok(images) => {
                                 curr_bytes = 0;
                                 next_upload.clear();
+                                next_upload_blit_support.clear();
 
                                 assert!(!images.is_empty());
 
@@ -740,6 +766,7 @@ impl TextureCache {
                         .len()
                         .next_multiple_of(self.host_alignment as usize);
                     next_upload.push(meta);
+                    next_upload_blit_support.push(self.supports_linear_mip_blit(meta.format));
                     ids.push(id.slot);
                 }
                 _ => {
@@ -758,6 +785,7 @@ impl TextureCache {
                 &mut self.sampler_cache,
                 &host_buffer,
                 &next_upload,
+                &next_upload_blit_support,
                 self.host_alignment,
                 &ids,
                 self.gfx_queue,
@@ -786,6 +814,7 @@ impl TextureCache {
             match image_allocs {
                 Ok(images) => {
                     next_upload.clear();
+                    next_upload_blit_support.clear();
 
                     assert!(!images.is_empty());
                     for image in images {

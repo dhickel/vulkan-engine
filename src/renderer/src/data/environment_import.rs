@@ -622,7 +622,7 @@ mod tests {
 
         // Check face 3 (+Y = face index 3), pixel (1, 0) => row=1, col=0
         let face3_offset = 3 * (4 * 4); // 3 faces * 4 pixels * 4 floats
-        let pixel_offset = face3_offset + 1 * (2 * 4) + 0 * 4; // row=1, col=0
+        let pixel_offset = face3_offset + 1 * (2 * 4) + 0 * 4; // row=1, col=0 // FIXME getting warning here operation will always equal zero for the offet
         assert_eq!(faces.rgba32f[pixel_offset], 3.0); // face_idx
         assert_eq!(faces.rgba32f[pixel_offset + 1], 1.0); // row
         assert_eq!(faces.rgba32f[pixel_offset + 2], 0.0); // local_col

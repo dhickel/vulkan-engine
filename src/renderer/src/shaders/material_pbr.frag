@@ -142,10 +142,10 @@ vec3 getIBLContribution(PBRInfo pbrInputs, vec3 n, vec3 reflection)
     vec3 diffuseLight = texture(samplerIrradiance, n).rgb;
     vec3 specularLight = textureLod(prefilteredMap, reflection, lod).rgb;
 
-    vec3 diffuse = diffuseLight * pbrInputs.diffuseColor;
-    vec3 specular = specularLight * (pbrInputs.specularColor * brdf.x + brdf.y);
+    vec3 kS = pbrInputs.specularColor * brdf.x + brdf.y;
+    vec3 diffuse = (vec3(1.0) - kS) * diffuseLight * pbrInputs.diffuseColor;
+    vec3 specular = specularLight * kS;
 
-    // For presentation, this allows us to disable IBL terms
     // For presentation, this allows us to disable IBL terms
     diffuse *= uboParams.scaleIBLAmbient;
     specular *= uboParams.scaleIBLAmbient;

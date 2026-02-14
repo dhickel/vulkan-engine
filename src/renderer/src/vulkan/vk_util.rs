@@ -46,7 +46,7 @@ use ash::vk::{
     ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo,
     PipelineStageFlags2, Rect2D, RenderingInfo,
 };
-use log::{error, info};
+use log::{error, info, warn};
 use std::io::{Bytes, Read, Seek, SeekFrom};
 use std::mem::align_of;
 use std::process::Command;
@@ -1365,16 +1365,46 @@ pub fn record_host_to_storage_buffer(
     Ok(())
 }
 
+pub fn format_supports_linear_mip_blit(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+) -> bool {
+    let props = unsafe { instance.get_physical_device_format_properties(physical_device, format) };
+    let required = vk::FormatFeatureFlags::BLIT_SRC
+        | vk::FormatFeatureFlags::BLIT_DST
+        | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+
+    props.optimal_tiling_features.contains(required)
+}
+
+pub fn resolve_upload_mip_levels(requested_mips: u32, supports_linear_mip_blit: bool) -> u32 {
+    let requested_mips = requested_mips.max(1);
+    if requested_mips > 1 && !supports_linear_mip_blit {
+        1
+    } else {
+        requested_mips
+    }
+}
+
 pub fn record_host_to_image_buffer(
     device: &ash::Device,
     allocator: &vk_mem::Allocator,
     sampler_cache: &mut VkSamplerCache,
     host_info: &VkHostBuffer,
     image_meta: &[&TextureMeta],
+    supports_linear_mip_blit: &[bool],
     alignment: u64,
     ids: &[u32],
     queue: vk::Queue,
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
+    if image_meta.len() != ids.len() {
+        return Err("Image upload metadata and ids length mismatch".to_string());
+    }
+    if image_meta.len() != supports_linear_mip_blit.len() {
+        return Err("Image upload metadata and linear blit support length mismatch".to_string());
+    }
+
     let alignment = if alignment < 4 { 4 } else { alignment };
 
     let host_buffer = &host_info.buffer;
@@ -1408,7 +1438,17 @@ pub fn record_host_to_image_buffer(
 
     let image_allocs: Vec<VkImageAlloc> = image_meta
         .iter()
-        .map(|meta| {
+        .zip(ids.iter())
+        .zip(supports_linear_mip_blit.iter())
+        .map(|((meta, id), supports_linear_blit)| {
+            let effective_mips =
+                resolve_upload_mip_levels(meta.mips_levels, *supports_linear_blit);
+            if effective_mips != meta.mips_levels {
+                warn!(
+                    "Texture id {} format {:?} does not support linear mip blit; clamping mip levels from {} to 1",
+                    id, meta.format, meta.mips_levels
+                );
+            }
             create_image(
                 device,
                 allocator,
@@ -1420,7 +1460,7 @@ pub fn record_host_to_image_buffer(
                 vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_DST
                     | vk::ImageUsageFlags::TRANSFER_SRC,
-                meta.mips_levels,
+                effective_mips,
             )
         })
         .collect();
@@ -1776,5 +1816,30 @@ pub fn record_image_barrier(
             &[],
             &barrier,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_upload_mip_levels;
+
+    #[test]
+    fn resolve_upload_mips_keeps_requested_when_blit_supported() {
+        assert_eq!(resolve_upload_mip_levels(6, true), 6);
+    }
+
+    #[test]
+    fn resolve_upload_mips_clamps_to_one_when_blit_unsupported() {
+        assert_eq!(resolve_upload_mip_levels(6, false), 1);
+    }
+
+    #[test]
+    fn resolve_upload_mips_keeps_single_level_when_blit_unsupported() {
+        assert_eq!(resolve_upload_mip_levels(1, false), 1);
+    }
+
+    #[test]
+    fn resolve_upload_mips_zero_request_is_sanitized() {
+        assert_eq!(resolve_upload_mip_levels(0, true), 1);
     }
 }
