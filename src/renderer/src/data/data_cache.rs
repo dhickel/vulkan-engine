@@ -1641,10 +1641,11 @@ pub enum CoreShaderType {
     CubeFilterVert,
     EnvIrradianceFrag,
     EnvPrefilterFrag,
+    EnvEquirectToCubeFrag,
 }
 
 impl CoreShaderType {
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -1658,6 +1659,7 @@ impl CoreShaderType {
             "CubeFilterVert" => Some(Self::CubeFilterVert),
             "EnvIrradianceFrag" => Some(Self::EnvIrradianceFrag),
             "EnvPrefilterFrag" => Some(Self::EnvPrefilterFrag),
+            "EnvEquirectToCubeFrag" => Some(Self::EnvEquirectToCubeFrag),
             _ => None,
         }
     }
@@ -1789,10 +1791,11 @@ pub enum VkPipelineType {
     Skybox,
     EnvPreFilter,
     EnvIrradiance,
+    EnvEquirectToCube,
 }
 
 impl VkPipelineType {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 }
 
 //#[derive(Clone, Copy)]
@@ -1844,11 +1847,12 @@ pub enum VkDescType {
     Skybox,
     EnvIrradiance,
     EnvPreFilter,
+    EnvEquirect,
     Empty,
 }
 
 impl VkDescType {
-    const COUNT: usize = 9;
+    const COUNT: usize = 10;
 }
 
 pub struct VkDescLayoutCache {

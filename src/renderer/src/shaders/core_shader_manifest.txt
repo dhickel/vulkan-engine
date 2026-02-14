@@ -10,3 +10,4 @@ SkyBoxFrag=src/renderer/src/shaders/skybox.frag.spv
 CubeFilterVert=src/renderer/src/shaders/filtered_cube.vert.spv
 EnvIrradianceFrag=src/renderer/src/shaders/env_irradiance_cube.frag.spv
 EnvPrefilterFrag=src/renderer/src/shaders/env_prefilter_cube.frag.spv
+EnvEquirectToCubeFrag=src/renderer/src/shaders/env_equirect_to_cube.frag.spv

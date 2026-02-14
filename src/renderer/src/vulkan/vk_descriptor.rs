@@ -585,6 +585,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         (VkDescType::Skybox, frag_combined_image),
         (VkDescType::EnvIrradiance, frag_combined_image),
         (VkDescType::EnvPreFilter, frag_combined_image),
+        (VkDescType::EnvEquirect, frag_combined_image),
         (VkDescType::Empty, empty),
     ]);
     cache.debug();

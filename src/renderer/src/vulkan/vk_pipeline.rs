@@ -35,7 +35,8 @@ use crate::data::data_cache::{
     CoreShaderType, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
 };
 use crate::data::gpu_data::{
-    PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox, VkModelPushConsts,
+    PushConstCubeCapture, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox,
+    VkModelPushConsts,
 };
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_util};
@@ -361,6 +362,9 @@ pub fn init_pipeline_cache(
 
     let env_prefilter_pipeline = init_pre_filter_pipeline(device, desc_layout_cache, shader_cache);
 
+    let env_equirect_pipeline =
+        init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache);
+
     VkPipelineCache::new(vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
         (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
@@ -370,6 +374,7 @@ pub fn init_pipeline_cache(
         (VkPipelineType::Skybox, skybox_pipeline),
         (VkPipelineType::EnvIrradiance, env_irradiance_pipeline),
         (VkPipelineType::EnvPreFilter, env_prefilter_pipeline),
+        (VkPipelineType::EnvEquirectToCube, env_equirect_pipeline),
     ])
     .unwrap()
 }
@@ -645,6 +650,45 @@ fn init_pre_filter_pipeline(
         .disable_blending()
         .disable_depth_test()
         .set_color_attachment_format(vk::Format::R16G16B16A16_SFLOAT) //Prefilter cubemap format
+        .set_pipeline_layout(layout);
+
+    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+
+    VkPipeline::new(pipeline, layout)
+}
+
+fn init_equirect_to_cube_pipeline(
+    device: &ash::Device,
+    desc_layout_cache: &VkDescLayoutCache,
+    shader_cache: &VkShaderCache,
+) -> VkPipeline {
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
+    let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvEquirectToCubeFrag);
+
+    let push_constant_range = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(std::mem::size_of::<PushConstCubeCapture>() as u32)];
+
+    let layouts = [desc_layout_cache.get(VkDescType::EnvEquirect)];
+
+    let layout_info = vk_util::pipeline_layout_create_info()
+        .set_layouts(&layouts)
+        .push_constant_ranges(&push_constant_range);
+
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+
+    let entry = CString::new("main").unwrap();
+
+    let mut pipeline_builder = PipelineBuilder::default()
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .disable_depth_test()
+        .set_color_attachment_format(vk::Format::R32G32B32A32_SFLOAT)
         .set_pipeline_layout(layout);
 
     let pipeline = pipeline_builder.build_pipeline(device).unwrap();
