@@ -65,7 +65,7 @@ use crate::data::data_cache::{
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
     AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
-    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, TextureMeta, Vertex,
+    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex,
     VkCubeMap, VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
 };
 use crate::data::handles::EnvironmentHandle;
@@ -1505,23 +1505,15 @@ impl VkRenderCore {
                 face_size,
                 format,
                 bytes,
-            } => {
-                let meta = TextureMeta {
-                    bytes,
-                    width: face_size * 6,
-                    height: face_size,
-                    format,
-                    mips_levels: 1,
-                    uv_index: 0,
-                };
-                vk_util::upload_skybox(
-                    &self.device,
-                    &self.allocator.lock().unwrap(),
-                    meta,
-                    self.transfer.get_local_transfer_pool(),
-                    self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
-                )
-            }
+            } => vk_util::upload_cubemap_faces(
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                face_size,
+                format,
+                bytes,
+                self.transfer.get_local_transfer_pool(),
+                self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
+            ),
             PendingSkyboxSource::Equirectangular2D { .. } => {
                 // TODO: Phase 4/5 - GPU equirect-to-cubemap conversion
                 return Err(

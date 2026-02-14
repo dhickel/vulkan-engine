@@ -611,6 +611,14 @@ impl PushConstPrefilterEnv {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PushConstCubeCapture {
+    pub mvp: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    _pad: [u32; 2],
+}
+
 ////////////////////////////
 // VULKAN ALLOCATION DATA //
 ////////////////////////////

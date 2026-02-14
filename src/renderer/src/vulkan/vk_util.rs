@@ -929,6 +929,31 @@ pub fn upload_skybox(
     }
 }
 
+/// Upload face-major cubemap data to GPU.
+///
+/// `bytes` must contain exactly 6 faces in order +X, -X, +Y, -Y, +Z, -Z,
+/// each face being `face_size x face_size` pixels in the specified format.
+pub fn upload_cubemap_faces(
+    device: &ash::Device,
+    allocator: &Allocator,
+    face_size: u32,
+    format: vk::Format,
+    bytes: Vec<u8>,
+    transfer_pool: &VkCommandPool,
+    transfer_queue: vk::Queue,
+) -> VkCubeMap {
+    // Delegate to upload_skybox with face-major layout convention
+    let meta = TextureMeta {
+        bytes,
+        width: face_size * 6,
+        height: face_size,
+        format,
+        mips_levels: 1,
+        uv_index: 0,
+    };
+    upload_skybox(device, allocator, meta, transfer_pool, transfer_queue)
+}
+
 fn create_buffer_image_copy(
     face_index: u32, // 0-based index of the face in the horizontal strip
     face_width: u32,
