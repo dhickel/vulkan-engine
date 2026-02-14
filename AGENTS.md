@@ -71,13 +71,6 @@ Use module-level docs for exact files/lines and safe editing strategy.
 - Keep nested guides implementation-focused and opinionated about gotchas.
 - `.internal-dev/` is intentionally gitignored in this repository; it is acceptable for planning/review docs there to remain local and untracked unless explicitly force-added for sharing.
 
-## Git Workflow Requirements
-
-- Make heavy use of small, incremental commits while implementing changes.
-- Stage and commit logical slices frequently so specific logic can be rolled back or edited without disturbing unrelated work.
-- Any improvements to renderer/engine internals that are not required by or exposed through the public API must be implemented on a separate branch first.
-- Merge those internal-only commits into `dogfood-dungeon` after they are isolated, so they can later be promoted to `master` as standalone improvements.
-
 ## Where to Start for a Task
 
 - Input or controls: `src/input/AGENTS.md`.
