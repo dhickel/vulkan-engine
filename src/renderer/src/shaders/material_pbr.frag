@@ -139,9 +139,8 @@ vec3 getIBLContribution(PBRInfo pbrInputs, vec3 n, vec3 reflection)
     float lod = (pbrInputs.perceptualRoughness * uboParams.prefilteredCubeMipLevels);
     // retrieve a scale and bias to F0. See [1], Figure 3
     vec3 brdf = (texture(samplerBRDFLUT, vec2(pbrInputs.NdotV, 1.0 - pbrInputs.perceptualRoughness))).rgb;
-    vec3 diffuseLight = SRGBtoLINEAR(tonemap(texture(samplerIrradiance, n), uboParams.exposure, uboParams.gamma)).rgb;
-
-    vec3 specularLight = SRGBtoLINEAR(tonemap(textureLod(prefilteredMap, reflection, lod), uboParams.exposure, uboParams.gamma)).rgb;
+    vec3 diffuseLight = texture(samplerIrradiance, n).rgb;
+    vec3 specularLight = textureLod(prefilteredMap, reflection, lod).rgb;
 
     vec3 diffuse = diffuseLight * pbrInputs.diffuseColor;
     vec3 specular = specularLight * (pbrInputs.specularColor * brdf.x + brdf.y);
@@ -396,7 +395,8 @@ void main()
     };
     color += emissive;
 
-    outColor = vec4(color, baseColor.a);
+    vec3 tonemapped = tonemap(vec4(color, baseColor.a), uboParams.exposure, uboParams.gamma).rgb;
+    outColor = vec4(tonemapped, baseColor.a);
 
     // Shader inputs debug visualization
     if (uboParams.debugViewInputs > 0.0) {
