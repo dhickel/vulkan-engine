@@ -375,6 +375,7 @@ pub struct MeshMeta {
     pub indices: Vec<u32>,
     pub vertices: Vec<Vertex>,
     pub material_index: Option<MaterialHandle>,
+    pub has_uv1: bool,
 }
 
 /////////////////////
@@ -450,7 +451,8 @@ pub struct VkModelPushConsts {
     pub vertex_buffer_addr: vk::DeviceAddress,
     pub mat_meta_buffer_addr: vk::DeviceAddress,
     pub joint_count: u32,
-    _pad: [u32; 3],
+    pub has_uv1: u32,
+    _pad: [u32; 2],
 }
 
 impl VkModelPushConsts {
@@ -458,13 +460,15 @@ impl VkModelPushConsts {
         model_matrix: Mat4,
         vertex_buffer_addr: vk::DeviceAddress,
         mat_meta_buffer_addr: vk::DeviceAddress,
+        has_uv1: bool,
     ) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
             mat_meta_buffer_addr,
             joint_count: 0,
-            _pad: [0; 3],
+            has_uv1: if has_uv1 { 1 } else { 0 },
+            _pad: [0; 2],
         }
     }
 
@@ -473,13 +477,15 @@ impl VkModelPushConsts {
         joint_count: u32,
         vertex_buffer_addr: vk::DeviceAddress,
         mat_meta_buffer_addr: vk::DeviceAddress,
+        has_uv1: bool,
     ) -> Self {
         Self {
             model_matrix,
             vertex_buffer_addr,
             mat_meta_buffer_addr,
             joint_count,
-            _pad: [0; 3],
+            has_uv1: if has_uv1 { 1 } else { 0 },
+            _pad: [0; 2],
         }
     }
 }
@@ -643,6 +649,7 @@ pub struct VkMeshBuffers {
     pub index_buffer: VkSubAlloc,
     pub vertex_buffer: VkSubAlloc,
     pub joint_desc: vk::DescriptorSet,
+    pub has_uv1: bool,
 }
 
 impl VkMeshBuffers {
@@ -701,6 +708,7 @@ pub struct RenderObject {
     pub material: *const VkLoadedMaterial,
     pub transform: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
+    pub has_uv1: bool,
 }
 
 #[repr(C)]

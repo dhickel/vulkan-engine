@@ -176,6 +176,7 @@ fn make_vertex(position: Vec3, normal: Vec3, tangent: Vec4, uv0: Vec2) -> Proced
         normal,
         tangent,
         uv0,
+        uv1: Vec2::ZERO,
         color: Vec4::ONE,
     }
 }

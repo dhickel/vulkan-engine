@@ -166,6 +166,7 @@ pub struct VkLoadedMaterial {
     pub image_descriptor: vk::DescriptorSet,
     pub pipeline: VkPipelineType,
     pub alpha_mode: AlphaMode,
+    pub requires_uv1: bool,
 }
 
 #[derive(Debug)]
@@ -1169,12 +1170,19 @@ impl TextureCache {
 
         writer.update_set(&self.device, image_descriptor);
 
+        let requires_uv1 = meta.material_values.base_color_uv_set == 1
+            || meta.material_values.met_rough_uv_set == 1
+            || meta.material_values.normal_uv_set == 1
+            || meta.material_values.occlusion_uv_set == 1
+            || meta.material_values.emissive_uv_set == 1;
+
         let mat = VkLoadedMaterial {
             texture_ids: meta.texture_ids,
             meta_alloc,
             image_descriptor,
             pipeline,
             alpha_mode: meta.alpha_mode,
+            requires_uv1,
         };
         debug!("Bound material to descriptorset: {:#?}", mat);
         Ok(mat)
@@ -1446,6 +1454,7 @@ impl MeshCache {
             indices,
             vertices,
             material_index: None,
+            has_uv1: false,
         };
 
         cached_meshes.push(CachedMesh::Unloaded(skybox));
@@ -1653,6 +1662,7 @@ impl MeshCache {
                         vertex_buffer: vert_alloc.clone(),
                         joint_desc: self.default_joint_desc,
                         material_id,
+                        has_uv1: meta.has_uv1,
                     };
 
                     debug!(

@@ -593,7 +593,7 @@ unsafe fn get_texture_meta(
                     };
 
                     let uv_index = if uv_index > 1 {
-                        debug!(
+                        log::warn!(
                             "Texture type {:?} reported unsupported UV set {}. Clamping to UV0.",
                             texture_type, uv_index
                         );
@@ -913,6 +913,7 @@ pub fn process_meshes(
                 None
             };
 
+            let has_uv1 = !ai_mesh.mTextureCoords[1].is_null();
             let vertex_count = ai_mesh.mNumVertices as usize;
             let mut vertices = Vec::with_capacity(vertex_count);
 
@@ -940,7 +941,7 @@ pub fn process_meshes(
                     (0.0, 0.0)
                 };
 
-                let (uv1_x, uv1_y) = if !ai_mesh.mTextureCoords[1].is_null() {
+                let (uv1_x, uv1_y) = if has_uv1 {
                     let uv = ai_mesh.mTextureCoords[1].add(i).read();
                     (uv.x, uv.y)
                 } else {
@@ -998,6 +999,7 @@ pub fn process_meshes(
                 indices,
                 vertices,
                 material_index,
+                has_uv1,
             });
         }
     }

@@ -74,12 +74,19 @@ layout (push_constant) uniform constants {
     VertexBuffer vertexBuffer;
     MaterialMeta mataterialMeta;
     uint jointCount;
-    uint _pad1;
+    uint has_uv1;
     uint _pad2;
     uint _pad3;
 } pc;
 
 layout (location = 0) out vec4 outColor;
+
+vec2 getUV(int uvSet) {
+    if (uvSet == 1 && pc.has_uv1 == 1) {
+        return inUV1;
+    }
+    return inUV0;
+}
 
 // Encapsulate the various inputs used by the various functions in the shading equation
 // We store values in this struct to simplify the integration of alternative implementations
@@ -114,14 +121,15 @@ const float PBR_WORKFLOW_SPECULAR_GLOSSINESS = 1.0;
 vec3 getNormal(MaterialMeta material)
 {
     // Perturb normal, see http://www.thetenthplanet.de/archives/1180
-    vec3 tangentNormal = texture(normalMap, material.normalTextureSet == 0 ? inUV0 : inUV1).xyz * 2.0 - 1.0;
+    vec2 normalUV = getUV(material.normalTextureSet);
+    vec3 tangentNormal = texture(normalMap, normalUV).xyz * 2.0 - 1.0;
     tangentNormal.xy *= material.normalScale;
     tangentNormal = normalize(tangentNormal);
 
     vec3 q1 = dFdx(inWorldPos);
     vec3 q2 = dFdy(inWorldPos);
-    vec2 st1 = dFdx(inUV0);
-    vec2 st2 = dFdy(inUV0);
+    vec2 st1 = dFdx(normalUV);
+    vec2 st2 = dFdy(normalUV);
 
     vec3 N = normalize(inNormal);
     vec3 T = normalize(q1 * st2.t - q2 * st1.t);
@@ -237,7 +245,7 @@ void main()
 
     if (material.alphaMask == 1.0f) {
         if (material.baseColorTextureSet > -1) {
-            baseColor = SRGBtoLINEAR(texture(colorMap, material.baseColorTextureSet == 0 ? inUV0 : inUV1)) * material.baseColorFactor;
+            baseColor = SRGBtoLINEAR(texture(colorMap, getUV(material.baseColorTextureSet))) * material.baseColorFactor;
         } else {
             baseColor = material.baseColorFactor;
         }
@@ -254,7 +262,7 @@ void main()
     if (material.metallicRoughnessSet > -1) {
         // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
         // This layout intentionally reserves the 'r' channel for (optional) occlusion map data
-        vec4 mrSample = texture(roughnessMap, material.metallicRoughnessSet == 0 ? inUV0 : inUV1);
+        vec4 mrSample = texture(roughnessMap, getUV(material.metallicRoughnessSet));
         perceptualRoughness = mrSample.g * perceptualRoughness;
         metallic = mrSample.b * metallic;
     } else {
@@ -266,7 +274,7 @@ void main()
 
     // The albedo may be defined from a base texture or a flat color
     if (material.baseColorTextureSet > -1) {
-        baseColor = SRGBtoLINEAR(texture(colorMap, material.baseColorTextureSet == 0 ? inUV0 : inUV1)) * material.baseColorFactor;
+        baseColor = SRGBtoLINEAR(texture(colorMap, getUV(material.baseColorTextureSet))) * material.baseColorFactor;
     } else {
         baseColor = material.baseColorFactor;
     }
@@ -385,13 +393,13 @@ void main()
 
     // Apply optional PBR terms for additional (optional) shading
     if (material.occlusionTextureSet > -1) {
-        float ao = texture(aoMap, (material.occlusionTextureSet == 0 ? inUV0 : inUV1)).r;
+        float ao = texture(aoMap, getUV(material.occlusionTextureSet)).r;
         color = mix(color, color * ao, material.occlusionStrength);
     }
 
     vec3 emissive = material.emissiveFactor.rgb * material.emissiveStrength;
     if (material.emissiveTextureSet > -1) {
-        emissive *= SRGBtoLINEAR(texture(emissiveMap, material.emissiveTextureSet == 0 ? inUV0 : inUV1)).rgb;
+        emissive *= SRGBtoLINEAR(texture(emissiveMap, getUV(material.emissiveTextureSet))).rgb;
     };
     color += emissive;
 
@@ -403,16 +411,16 @@ void main()
         int index = int(uboParams.debugViewInputs);
         switch (index) {
             case 1:
-                outColor.rgba = material.baseColorTextureSet > -1 ? texture(colorMap, material.baseColorTextureSet == 0 ? inUV0 : inUV1) : vec4(1.0f);
+                outColor.rgba = material.baseColorTextureSet > -1 ? texture(colorMap, getUV(material.baseColorTextureSet)) : vec4(1.0f);
                 break;
             case 2:
-                outColor.rgb = (material.normalTextureSet > -1) ? texture(normalMap, material.normalTextureSet == 0 ? inUV0 : inUV1).rgb : normalize(inNormal);
+                outColor.rgb = (material.normalTextureSet > -1) ? texture(normalMap, getUV(material.normalTextureSet)).rgb : normalize(inNormal);
                 break;
             case 3:
-                outColor.rgb = (material.occlusionTextureSet > -1) ? texture(aoMap, material.occlusionTextureSet == 0 ? inUV0 : inUV1).rrr : vec3(0.0f);
+                outColor.rgb = (material.occlusionTextureSet > -1) ? texture(aoMap, getUV(material.occlusionTextureSet)).rrr : vec3(0.0f);
                 break;
             case 4:
-                outColor.rgb = (material.emissiveTextureSet > -1) ? texture(emissiveMap, material.emissiveTextureSet == 0 ? inUV0 : inUV1).rgb : vec3(0.0f);
+                outColor.rgb = (material.emissiveTextureSet > -1) ? texture(emissiveMap, getUV(material.emissiveTextureSet)).rgb : vec3(0.0f);
                 break;
             case 5:
                 outColor.rgb = texture(roughnessMap, inUV0).bbb;

@@ -942,12 +942,15 @@ impl<'a> AssetManager<'a> {
             .map(procedural_vertex_to_gpu)
             .collect();
 
+        let has_uv1 = mesh.vertices.iter().any(|v| v.uv1 != glam::Vec2::ZERO);
+
         // Create internal MeshMeta
         let mesh_meta = MeshMeta {
             name: mesh.name,
             indices: mesh.indices,
             vertices,
             material_index: mesh.material,
+            has_uv1,
         };
 
         // Add mesh to cache
@@ -1311,6 +1314,7 @@ pub struct ProceduralVertex {
     pub normal: glam::Vec3,
     pub tangent: glam::Vec4,
     pub uv0: glam::Vec2,
+    pub uv1: glam::Vec2,
     pub color: glam::Vec4,
 }
 
@@ -1464,7 +1468,13 @@ fn validate_procedural_mesh(mesh: &ProceduralMeshData) -> Result<(), AssetError>
         }
         if !vertex.uv0.is_finite() {
             return Err(AssetError::Internal(format!(
-                "procedural mesh '{}' vertex {} has non-finite UV coordinates",
+                "procedural mesh '{}' vertex {} has non-finite UV0 coordinates",
+                name, i
+            )));
+        }
+        if !vertex.uv1.is_finite() {
+            return Err(AssetError::Internal(format!(
+                "procedural mesh '{}' vertex {} has non-finite UV1 coordinates",
                 name, i
             )));
         }
@@ -1548,8 +1558,8 @@ fn procedural_vertex_to_gpu(v: &ProceduralVertex) -> Vertex {
         tangent: v.tangent,
         joints: glam::UVec4::ZERO,
         weights: glam::Vec4::ZERO,
-        uv1_x: 0.0,
-        uv1_y: 0.0,
+        uv1_x: v.uv1.x,
+        uv1_y: v.uv1.y,
         _pad: 0,
     }
 }
@@ -1596,6 +1606,22 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_material_desc(&desc_nan_color).is_err());
+    }
+
+    #[test]
+    fn procedural_vertex_conversion_preserves_uv1() {
+        let v = ProceduralVertex {
+            position: glam::Vec3::new(1.0, 2.0, 3.0),
+            normal: glam::Vec3::Y,
+            tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            uv0: glam::Vec2::new(0.1, 0.2),
+            uv1: glam::Vec2::new(0.3, 0.4),
+            color: glam::Vec4::ONE,
+        };
+
+        let gpu_v = procedural_vertex_to_gpu(&v);
+        assert_eq!(gpu_v.uv1_x, 0.3);
+        assert_eq!(gpu_v.uv1_y, 0.4);
     }
 
     #[test]
@@ -1654,6 +1680,7 @@ mod tests {
                 normal: glam::Vec3::Y,
                 tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
                 uv0: glam::Vec2::ZERO,
+                uv1: glam::Vec2::ZERO,
                 color: glam::Vec4::ONE,
             }],
             indices: vec![0, 0, 0],
@@ -1675,6 +1702,7 @@ mod tests {
                 normal: glam::Vec3::Y,
                 tangent: glam::Vec4::new(1.0, 0.0, 0.0, 0.5), // Invalid w component
                 uv0: glam::Vec2::ZERO,
+                uv1: glam::Vec2::ZERO,
                 color: glam::Vec4::ONE,
             }],
             indices: vec![0, 0, 0],
@@ -1693,6 +1721,7 @@ mod tests {
                     normal: glam::Vec3::Y,
                     tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
                     uv0: glam::Vec2::ZERO,
+                    uv1: glam::Vec2::ZERO,
                     color: glam::Vec4::ONE,
                 },
                 ProceduralVertex {
@@ -1700,6 +1729,7 @@ mod tests {
                     normal: glam::Vec3::Y,
                     tangent: glam::Vec4::new(1.0, 0.0, 0.0, -1.0),
                     uv0: glam::Vec2::ZERO,
+                    uv1: glam::Vec2::ZERO,
                     color: glam::Vec4::ONE,
                 },
                 ProceduralVertex {
@@ -1707,6 +1737,7 @@ mod tests {
                     normal: glam::Vec3::Y,
                     tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
                     uv0: glam::Vec2::ZERO,
+                    uv1: glam::Vec2::ZERO,
                     color: glam::Vec4::ONE,
                 },
             ],

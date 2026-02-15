@@ -59,12 +59,19 @@ layout (push_constant) uniform constants {
     VertexBuffer vertexBuffer;
     MaterialMeta mataterialMeta;
     uint jointCount;
-    uint _pad1;
+    uint has_uv1;
     uint _pad2;
     uint _pad3;
 } pc;
 
 layout (location = 0) out vec4 outColor;
+
+vec2 getUV(int uvSet) {
+    if (uvSet == 1 && pc.has_uv1 == 1) {
+        return inUV1;
+    }
+    return inUV0;
+}
 
 void main()
 {
@@ -72,7 +79,7 @@ void main()
 
     vec4 baseColor = material.baseColorFactor;
     if (material.baseColorTextureSet > -1) {
-        vec2 uv = material.baseColorTextureSet == 0 ? inUV0 : inUV1;
+        vec2 uv = getUV(material.baseColorTextureSet);
         baseColor = SRGBtoLINEAR(texture(colorMap, uv)) * baseColor;
     }
     baseColor *= inColor0;
@@ -83,7 +90,7 @@ void main()
 
     vec3 emissive = material.emissiveFactor.rgb * material.emissiveStrength;
     if (material.emissiveTextureSet > -1) {
-        vec2 uv = material.emissiveTextureSet == 0 ? inUV0 : inUV1;
+        vec2 uv = getUV(material.emissiveTextureSet);
         emissive *= SRGBtoLINEAR(texture(emissiveMap, uv)).rgb;
     }
 

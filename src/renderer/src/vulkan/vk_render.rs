@@ -68,7 +68,7 @@ use crate::data::gpu_data::{
     PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex,
     VkCubeMap, VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
 };
-use crate::data::handles::EnvironmentHandle;
+use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::{data_cache, data_util, gpu_data};
 use crate::rendergraph::{RenderGraph, RenderGraphContext};
 use crate::scene::debug_scenarios;
@@ -163,6 +163,7 @@ pub struct VkRenderCore {
     pub brdf_lut: VkBrdfLut,
     pub main_deletion_queue: Vec<VkDeletable>,
     pub fence_await_queue: VkFenceQueue,
+    pub uv_fallback_warnings: Mutex<HashSet<(MeshHandle, MaterialHandle)>>,
     pub resize_requested: bool,
 }
 
@@ -1075,6 +1076,7 @@ impl VkRenderCore {
             imgui,
             main_deletion_queue: Vec::new(),
             fence_await_queue: VkFenceQueue::new(),
+            uv_fallback_warnings: Mutex::new(HashSet::new()),
             scene_data: SceneDataUBO::default(),
             sky_box: SkyBox::default(),
             data_cache,
@@ -2080,6 +2082,19 @@ impl VkRenderCore {
             };
 
             let material = unsafe { *material_ptr };
+
+            if material.requires_uv1 && !mesh.has_uv1 {
+                let mut warnings = self.uv_fallback_warnings.lock().unwrap();
+                if warnings.insert((draw_item.mesh_id, mesh.material_id)) {
+                    log::warn!(
+                        "Material {:?} requires UV1 but mesh {:?} (slot {}) only has UV0. Falling back to UV0 path in shader.",
+                        mesh.material_id,
+                        draw_item.mesh_id,
+                        draw_item.mesh_id.slot
+                    );
+                }
+            }
+
             let pipeline_idx = material.pipeline as usize;
             if pipeline_idx >= VkPipelineType::COUNT {
                 continue;
@@ -2093,6 +2108,7 @@ impl VkRenderCore {
                 material: material_ptr,
                 transform: draw_item.transform,
                 vertex_buffer_addr: mesh.vertex_buffer.alloc_address,
+                has_uv1: mesh.has_uv1,
             });
         }
 
@@ -2290,6 +2306,7 @@ impl VkRenderCore {
                 obj.transform,
                 obj.vertex_buffer_addr,
                 material.meta_alloc.alloc_address,
+                obj.has_uv1,
             );
 
             self.device.cmd_push_constants(
