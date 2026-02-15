@@ -16,7 +16,7 @@ use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
 use super::assets::{AssetLoadTracker, AssetManager};
-use super::config::RendererConfig;
+use super::config::{AssetPolicyConfig, RendererConfig};
 use super::errors::{
     map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, RendererError,
     RendererInitError,
@@ -58,6 +58,7 @@ pub struct Renderer {
     open_frame: Option<u32>,
     startup_scene: Option<Scene>,
     asset_loads: AssetLoadTracker,
+    asset_policy: AssetPolicyConfig,
     pre_render_hook: Option<RenderHook>,
     post_render_hook: Option<RenderHook>,
     resize_skip_state_logged: bool,
@@ -83,6 +84,8 @@ impl Renderer {
         )
         .map_err(|err| map_vk_init_err(err, config.compile_shaders))?;
 
+        let asset_policy = config.asset_policy.clone();
+
         Ok(Self {
             runtime,
             input_manager,
@@ -91,6 +94,7 @@ impl Renderer {
             open_frame: None,
             startup_scene: Some(Scene::from_world(scene_world)),
             asset_loads: AssetLoadTracker::new(),
+            asset_policy,
             pre_render_hook: None,
             post_render_hook: None,
             resize_skip_state_logged: false,
@@ -270,7 +274,7 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn assets(&mut self) -> AssetManager<'_> {
-        AssetManager::new(&mut self.runtime.core, &mut self.asset_loads)
+        AssetManager::new(&mut self.runtime.core, &mut self.asset_loads, &self.asset_policy)
     }
 
     /// Thread: Main

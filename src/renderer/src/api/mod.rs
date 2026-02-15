@@ -15,7 +15,10 @@ pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
     ProceduralMeshData, ProceduralVertex,
 };
-pub use config::{DebugRuntimeMode, RendererConfig};
+pub use crate::data::asset_manifest::{
+    FilterMode, ResolvedTexturePolicy, SamplerOverride, TextureLoadOptions, WrapMode,
+};
+pub use config::{AssetManifestMode, AssetPolicyConfig, DebugRuntimeMode, RendererConfig};
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };

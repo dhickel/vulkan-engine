@@ -1027,6 +1027,26 @@ pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
     }
 }
 
+/// Returns the sRGB variant of the Vulkan format for 8-bit color data.
+/// 16-bit and float formats are returned as-is since sRGB encoding
+/// is only meaningful for 8-bit per channel data.
+pub fn to_vk_format_srgb(format: &DynamicImage) -> vk::Format {
+    match format {
+        DynamicImage::ImageLuma8(_) => vk::Format::R8_SRGB,
+        DynamicImage::ImageLumaA8(_) => vk::Format::R8G8_SRGB,
+        DynamicImage::ImageRgb8(_) => vk::Format::R8G8B8_SRGB,
+        DynamicImage::ImageRgba8(_) => vk::Format::R8G8B8A8_SRGB,
+        // 16-bit and float formats don't have sRGB variants; use linear
+        DynamicImage::ImageLuma16(_) => vk::Format::R16_UNORM,
+        DynamicImage::ImageLumaA16(_) => vk::Format::R16G16_UNORM,
+        DynamicImage::ImageRgb16(_) => vk::Format::R16G16B16_UNORM,
+        DynamicImage::ImageRgba16(_) => vk::Format::R16G16B16A16_UNORM,
+        DynamicImage::ImageRgb32F(_) => vk::Format::R32G32B32_SFLOAT,
+        DynamicImage::ImageRgba32F(_) => vk::Format::R32G32B32A32_SFLOAT,
+        _ => vk::Format::R8G8B8A8_SRGB,
+    }
+}
+
 struct MeshTemp {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,

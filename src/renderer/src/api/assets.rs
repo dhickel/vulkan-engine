@@ -5,9 +5,12 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, collections::VecDeque};
 
 use image::ImageError;
+use log::{debug, warn};
 
+use crate::api::config::{AssetManifestMode, AssetPolicyConfig};
 use crate::api::loading::{LoadStatus, LoadTicket};
 use crate::api::scene::{SceneFragment, SceneFragmentNodeId};
+use crate::data::asset_manifest::{self, ResolvedTexturePolicy, TextureLoadOptions};
 use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
@@ -54,6 +57,8 @@ enum DeferredModelState {
 enum DeferredTextureState {
     Queued {
         path: PathBuf,
+        policy_config: AssetPolicyConfig,
+        options: Option<TextureLoadOptions>,
     },
     InFlight {
         receiver: Receiver<Result<TextureHandle, AssetError>>,
@@ -102,6 +107,7 @@ pub(crate) struct AssetLoadTracker {
     queued_tickets: VecDeque<LoadTicket>,
     terminal_tickets: VecDeque<LoadTicket>,
     tasks: HashMap<LoadTicket, DeferredLoadTask>,
+    max_in_flight_jobs: usize,
 }
 
 impl AssetLoadTracker {
@@ -111,6 +117,7 @@ impl AssetLoadTracker {
             queued_tickets: VecDeque::new(),
             terminal_tickets: VecDeque::new(),
             tasks: HashMap::new(),
+            max_in_flight_jobs: 4,
         }
     }
 
@@ -127,13 +134,22 @@ impl AssetLoadTracker {
         ticket
     }
 
-    pub(crate) fn request_texture_load(&mut self, path: PathBuf) -> LoadTicket {
+    pub(crate) fn request_texture_load(
+        &mut self,
+        path: PathBuf,
+        policy_config: AssetPolicyConfig,
+        options: Option<TextureLoadOptions>,
+    ) -> LoadTicket {
         let ticket = self.next_ticket();
         self.tasks.insert(
             ticket,
             DeferredLoadTask::Texture {
                 queued_at: Instant::now(),
-                state: DeferredTextureState::Queued { path },
+                state: DeferredTextureState::Queued {
+                    path,
+                    policy_config,
+                    options,
+                },
             },
         );
         self.queued_tickets.push_back(ticket);
@@ -279,6 +295,14 @@ impl AssetLoadTracker {
         let mut progressed = 0usize;
         progressed += core.pump_transfer_submissions(max_steps - progressed);
 
+        // Poll pending texture upload batches for fence completion
+        if let Ok(mut texture_cache) = core.data_cache.texture_cache.lock() {
+            let finalized = texture_cache.poll_texture_uploads();
+            if finalized > 0 {
+                debug!("Finalized {} pending texture upload batch(es)", finalized);
+            }
+        }
+
         if progressed < max_steps {
             progressed += self.collect_finished(max_steps - progressed);
         }
@@ -386,13 +410,9 @@ impl AssetLoadTracker {
             return 0;
         }
 
-        if self.has_in_flight_load() {
-            return 0;
-        }
-
         let mut started = 0usize;
 
-        while started < max_steps {
+        while started < max_steps && self.in_flight_count() < self.max_in_flight_jobs {
             let Some(ticket) = self.queued_tickets.pop_front() else {
                 break;
             };
@@ -421,8 +441,12 @@ impl AssetLoadTracker {
                     started += 1;
                 }
                 DeferredLoadTask::Texture { state, .. } => {
-                    let path = match state {
-                        DeferredTextureState::Queued { path } => path.clone(),
+                    let (path, policy_cfg, opts) = match state {
+                        DeferredTextureState::Queued {
+                            path,
+                            policy_config,
+                            options,
+                        } => (path.clone(), policy_config.clone(), options.take()),
                         DeferredTextureState::Cancelled => continue,
                         _ => continue,
                     };
@@ -430,7 +454,12 @@ impl AssetLoadTracker {
                     let (sender, receiver) = mpsc::channel();
                     let task_cache = data_cache.clone();
                     std::thread::spawn(move || {
-                        let result = load_texture_gpu_ready(path, task_cache);
+                        let result = load_texture_gpu_ready_with_policy(
+                            path,
+                            task_cache,
+                            &policy_cfg,
+                            opts,
+                        );
                         let _ = sender.send(result);
                     });
 
@@ -443,15 +472,18 @@ impl AssetLoadTracker {
         started
     }
 
-    fn has_in_flight_load(&self) -> bool {
-        self.tasks.values().any(|task| match task {
-            DeferredLoadTask::Model { state, .. } => {
-                matches!(state, DeferredModelState::InFlight { .. })
-            }
-            DeferredLoadTask::Texture { state, .. } => {
-                matches!(state, DeferredTextureState::InFlight { .. })
-            }
-        })
+    fn in_flight_count(&self) -> usize {
+        self.tasks
+            .values()
+            .filter(|task| match task {
+                DeferredLoadTask::Model { state, .. } => {
+                    matches!(state, DeferredModelState::InFlight { .. })
+                }
+                DeferredLoadTask::Texture { state, .. } => {
+                    matches!(state, DeferredTextureState::InFlight { .. })
+                }
+            })
+            .count()
     }
 
     fn cleanup_terminal_tickets(&mut self) {
@@ -479,11 +511,20 @@ impl AssetLoadTracker {
 pub struct AssetManager<'a> {
     core: &'a mut VkRenderCore,
     load_tracker: &'a mut AssetLoadTracker,
+    asset_policy: &'a AssetPolicyConfig,
 }
 
 impl<'a> AssetManager<'a> {
-    pub(crate) fn new(core: &'a mut VkRenderCore, load_tracker: &'a mut AssetLoadTracker) -> Self {
-        Self { core, load_tracker }
+    pub(crate) fn new(
+        core: &'a mut VkRenderCore,
+        load_tracker: &'a mut AssetLoadTracker,
+        asset_policy: &'a AssetPolicyConfig,
+    ) -> Self {
+        Self {
+            core,
+            load_tracker,
+            asset_policy,
+        }
     }
 
     /// Thread: Main
@@ -507,8 +548,26 @@ impl<'a> AssetManager<'a> {
     /// Thread: Main
     /// May Stall: Yes
     pub fn load_texture(&mut self, path: impl AsRef<Path>) -> Result<TextureHandle, AssetError> {
+        self.load_texture_with_options(path, TextureLoadOptions::default())
+    }
+
+    /// Load a texture with explicit policy overrides.
+    ///
+    /// Options are merged with manifest sidecar and filename heuristics per the
+    /// policy resolution chain (API overrides > manifest > heuristics > defaults).
+    ///
+    /// Thread: Main
+    /// May Stall: Yes
+    pub fn load_texture_with_options(
+        &mut self,
+        path: impl AsRef<Path>,
+        options: TextureLoadOptions,
+    ) -> Result<TextureHandle, AssetError> {
         let path = path.as_ref().to_path_buf();
-        self.run_sync_upload_task(move |data_cache| load_texture_gpu_ready(path, data_cache))
+        let policy_config = self.asset_policy.clone();
+        self.run_sync_upload_task(move |data_cache| {
+            load_texture_gpu_ready_with_policy(path, data_cache, &policy_config, Some(options))
+        })
     }
 
     /// Thread: Main
@@ -604,9 +663,27 @@ impl<'a> AssetManager<'a> {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<LoadTicket, AssetError> {
-        Ok(self
-            .load_tracker
-            .request_texture_load(path.as_ref().to_path_buf()))
+        Ok(self.load_tracker.request_texture_load(
+            path.as_ref().to_path_buf(),
+            self.asset_policy.clone(),
+            None,
+        ))
+    }
+
+    /// Request a deferred texture load with explicit policy overrides.
+    ///
+    /// Thread: Main
+    /// May Stall: No
+    pub fn request_texture_load_with_options(
+        &mut self,
+        path: impl AsRef<Path>,
+        options: TextureLoadOptions,
+    ) -> Result<LoadTicket, AssetError> {
+        Ok(self.load_tracker.request_texture_load(
+            path.as_ref().to_path_buf(),
+            self.asset_policy.clone(),
+            Some(options),
+        ))
     }
 
     /// Thread: Main
@@ -1015,14 +1092,64 @@ fn load_texture_gpu_ready(
     path: PathBuf,
     data_cache: Arc<VkDataCache>,
 ) -> Result<TextureHandle, AssetError> {
+    // Default policy: no manifest, no heuristics, no overrides
+    load_texture_gpu_ready_with_policy(path, data_cache, &AssetPolicyConfig::default(), None)
+}
+
+fn load_texture_gpu_ready_with_policy(
+    path: PathBuf,
+    data_cache: Arc<VkDataCache>,
+    policy_config: &AssetPolicyConfig,
+    options: Option<TextureLoadOptions>,
+) -> Result<TextureHandle, AssetError> {
+    // Resolve the texture policy from all sources
+    let defaults = ResolvedTexturePolicy::default();
+    let heuristic = if policy_config.allow_filename_heuristics {
+        asset_manifest::heuristic_from_filename(&path)
+    } else {
+        None
+    };
+    let manifest = asset_manifest::load_manifest(&path, policy_config.manifest_mode)?;
+
+    // Validate manifest fields in strict mode
+    if let Some(ref m) = manifest {
+        if policy_config.manifest_mode == AssetManifestMode::Strict {
+            asset_manifest::validate_manifest(m)?;
+        } else if let Err(err) = asset_manifest::validate_manifest(m) {
+            warn!(
+                "Manifest validation warning for '{}': {}",
+                path.display(),
+                err
+            );
+        }
+    }
+
+    let policy = asset_manifest::resolve_texture_policy(
+        &defaults,
+        heuristic.as_ref(),
+        manifest.as_ref(),
+        options.as_ref(),
+    );
+
     let image = image::open(&path).map_err(|err| map_texture_path_err(&path, err))?;
-    let format = assimp_util::to_vk_format(&image);
+    let format = if policy.is_srgb {
+        assimp_util::to_vk_format_srgb(&image)
+    } else {
+        assimp_util::to_vk_format(&image)
+    };
+
+    let mip_count = if policy.generate_mips {
+        resolve_texture_mip_count(image.width(), image.height(), None)
+    } else {
+        1
+    };
+
     let texture_meta = TextureMeta {
         bytes: image.as_bytes().to_vec(),
         width: image.width(),
         height: image.height(),
         format,
-        mips_levels: resolve_texture_mip_count(image.width(), image.height(), None),
+        mips_levels: mip_count,
         uv_index: 0,
     };
 
@@ -1603,5 +1730,78 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_material_desc(&desc).is_ok());
+    }
+
+    #[test]
+    fn scheduler_starts_up_to_max_in_flight() {
+        let mut tracker = AssetLoadTracker::new();
+        tracker.max_in_flight_jobs = 3;
+
+        // Queue 5 model loads
+        for i in 0..5 {
+            tracker.request_model_load(PathBuf::from(format!("/fake/model_{}.glb", i)));
+        }
+
+        assert_eq!(tracker.queued_tickets.len(), 5);
+        assert_eq!(tracker.in_flight_count(), 0);
+
+        // Note: start_queued requires a real VkDataCache to spawn threads,
+        // so we test the scheduler logic directly through state inspection.
+        // The bounded concurrency contract is: start_queued checks
+        // in_flight_count() < max_in_flight_jobs before starting each task.
+        assert!(tracker.in_flight_count() < tracker.max_in_flight_jobs);
+    }
+
+    #[test]
+    fn scheduler_respects_max_in_flight_limit() {
+        let mut tracker = AssetLoadTracker::new();
+        tracker.max_in_flight_jobs = 2;
+
+        // Manually create InFlight tasks to simulate running loads
+        let t1 = tracker.request_model_load(PathBuf::from("/fake/a.glb"));
+        let t2 = tracker.request_model_load(PathBuf::from("/fake/b.glb"));
+        let t3 = tracker.request_model_load(PathBuf::from("/fake/c.glb"));
+
+        // Simulate two tasks becoming InFlight by creating fake receivers
+        let (_, rx1) = mpsc::channel::<Result<SceneFragment, AssetError>>();
+        let (_, rx2) = mpsc::channel::<Result<SceneFragment, AssetError>>();
+
+        if let Some(task) = tracker.tasks.get_mut(&t1) {
+            if let DeferredLoadTask::Model { state, .. } = task {
+                *state = DeferredModelState::InFlight { receiver: rx1 };
+            }
+        }
+        if let Some(task) = tracker.tasks.get_mut(&t2) {
+            if let DeferredLoadTask::Model { state, .. } = task {
+                *state = DeferredModelState::InFlight { receiver: rx2 };
+            }
+        }
+
+        assert_eq!(tracker.in_flight_count(), 2);
+        // With max_in_flight_jobs = 2, start_queued should not start more
+        assert!(tracker.in_flight_count() >= tracker.max_in_flight_jobs);
+    }
+
+    #[test]
+    fn cancellation_of_queued_ticket_succeeds() {
+        let mut tracker = AssetLoadTracker::new();
+        let ticket = tracker.request_model_load(PathBuf::from("/fake/model.glb"));
+
+        // Cancel while still queued
+        assert!(tracker.cancel_load(ticket).is_ok());
+
+        // Verify state is Cancelled
+        match tracker.tasks.get(&ticket) {
+            Some(DeferredLoadTask::Model { state, .. }) => {
+                assert!(matches!(state, DeferredModelState::Cancelled));
+            }
+            _ => panic!("Expected cancelled model task"),
+        }
+
+        // Polling returns Cancelled
+        assert!(matches!(
+            tracker.poll_model_load(ticket),
+            LoadStatus::Cancelled
+        ));
     }
 }

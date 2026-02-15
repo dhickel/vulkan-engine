@@ -7,10 +7,12 @@ mod texture;
 mod vulkan;
 
 pub use api::{
-    AssetError, AssetManager, DebugRuntimeMode, EnvironmentHandle, EnvironmentRuntimeStatus,
-    EnvironmentSource, EnvironmentState, FacePattern, FrameContext, FrameRenderOutcome, HookError,
-    LoadStatus, LoadTicket, MaterialHandle, MeshHandle, PbrMaterialDesc, PointLight, PointLightId,
-    ProceduralMeshData, ProceduralVertex, RenderHook, RenderHookContext, Renderer, RendererConfig,
-    RendererError, RendererFrameError, RendererInitError, Scene, SceneError, SceneFragment,
-    SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeId, TextureHandle,
+    AssetError, AssetManager, AssetManifestMode, AssetPolicyConfig, DebugRuntimeMode,
+    EnvironmentHandle, EnvironmentRuntimeStatus, EnvironmentSource, EnvironmentState, FacePattern,
+    FilterMode, FrameContext, FrameRenderOutcome, HookError, LoadStatus, LoadTicket,
+    MaterialHandle, MeshHandle, PbrMaterialDesc, PointLight, PointLightId, ProceduralMeshData,
+    ProceduralVertex, RenderHook, RenderHookContext, Renderer, RendererConfig, RendererError,
+    RendererFrameError, RendererInitError, ResolvedTexturePolicy, SamplerOverride, Scene,
+    SceneError, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId,
+    SceneNodeId, TextureHandle, TextureLoadOptions, WrapMode,
 };

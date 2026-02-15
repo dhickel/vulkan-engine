@@ -98,7 +98,7 @@ use std::path;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, SendError};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use vk_mem::Allocator;
 
 ///////////////////
@@ -108,6 +108,20 @@ use vk_mem::Allocator;
 pub enum LoadResult<T> {
     Success(Option<Vec<T>>),
     Failed(Option<Vec<T>>),
+}
+
+pub struct PendingTextureBatch {
+    pub batch_id: u64,
+    pub texture_ids: Vec<TextureHandle>,
+    pub image_allocs: Vec<(VkImageAlloc, vk::Sampler)>,
+    pub submitted_at: Instant,
+    pub status: UploadBatchStatus,
+}
+
+pub enum UploadBatchStatus {
+    WaitingFence,
+    Completed,
+    Failed(String),
 }
 
 /// Texture loading state: CPU data or GPU resource.
@@ -235,6 +249,9 @@ pub struct TextureCache {
     gfx_pool: VkCommandPool,
     gfx_queue: vk::Queue,
     linear_blit_support: Mutex<HashMap<vk::Format, bool>>,
+    pending_batches: HashMap<u64, PendingTextureBatch>,
+    pending_textures: HashMap<TextureHandle, u64>,
+    next_batch_id: u64,
 }
 
 impl TextureCache {
@@ -421,6 +438,9 @@ impl TextureCache {
             gfx_pool,
             gfx_queue,
             linear_blit_support: Mutex::new(HashMap::new()),
+            pending_batches: HashMap::new(),
+            pending_textures: HashMap::new(),
+            next_batch_id: 1,
         })
     }
 
@@ -659,191 +679,314 @@ impl TextureCache {
         }
     }
 
-    pub fn allocate_textures(&mut self, mut texture_ids: Vec<TextureHandle>) -> bool {
+    fn destroy_uploaded_images(&self, image_allocs: Vec<(VkImageAlloc, vk::Sampler)>) {
+        if image_allocs.is_empty() {
+            return;
+        }
+
+        let allocator = self.allocator.lock().unwrap();
+        for (image_alloc, _) in image_allocs.into_iter() {
+            vk_util::destroy_image(&allocator, image_alloc);
+        }
+    }
+
+    fn promote_uploaded_images(
+        &mut self,
+        texture_ids: &[TextureHandle],
+        image_allocs: Vec<(VkImageAlloc, vk::Sampler)>,
+    ) {
+        if texture_ids.len() != image_allocs.len() {
+            error!(
+                "Texture upload finalize mismatch: {} texture ids, {} image allocs",
+                texture_ids.len(),
+                image_allocs.len()
+            );
+            for id in texture_ids.iter() {
+                self.pending_textures.remove(id);
+            }
+            self.destroy_uploaded_images(image_allocs);
+            return;
+        }
+
+        let mut stale_images = Vec::<(VkImageAlloc, vk::Sampler)>::new();
+        for (id, image) in texture_ids.iter().zip(image_allocs.into_iter()) {
+            self.pending_textures.remove(id);
+            let Ok(slot) = self.validate_texture_slot(*id) else {
+                error!("Stale texture handle {:?} during upload finalization", id);
+                stale_images.push(image);
+                continue;
+            };
+
+            self.cached_textures[slot] = CachedTexture::Loaded(VkLoadedTexture {
+                alloc: image.0,
+                sampler: image.1,
+            });
+        }
+
+        self.destroy_uploaded_images(stale_images);
+    }
+
+    /// Synchronous texture upload: submits GPU transfers and blocks until complete.
+    /// This is the backward-compatible wrapper used by startup and sync loading paths.
+    pub fn allocate_textures(&mut self, texture_ids: Vec<TextureHandle>) -> bool {
+        loop {
+            let all_loaded = texture_ids.iter().all(|id| self.is_texture_loaded(*id));
+            if all_loaded {
+                return true;
+            }
+
+            if let Err(msg) = self.submit_texture_uploads(&texture_ids) {
+                error!("allocate_textures failed: {}", msg);
+                return false;
+            }
+
+            let finalized = self.poll_texture_uploads();
+            if finalized == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// Submit texture data to the GPU without blocking for completion.
+    ///
+    /// Returns `Ok(Some(batch_id))` if a batch was submitted and is now pending,
+    /// `Ok(None)` if there were no unloaded textures to process, or `Err` on failure.
+    pub fn submit_texture_uploads(
+        &mut self,
+        texture_ids: &[TextureHandle],
+    ) -> Result<Option<u64>, String> {
         let host_buffer = self.host_buffer.lock().unwrap();
         let max_upload_bytes = host_buffer.buffer.size;
 
-        let mut curr_bytes = 0;
-        let mut next_upload = Vec::<&TextureMeta>::with_capacity(texture_ids.len());
-        let mut next_upload_blit_support = Vec::<bool>::with_capacity(texture_ids.len());
-        let mut loaded = Vec::<CachedTexture>::with_capacity(texture_ids.len());
+        // A staging upload is already in flight; poll/finalize first, then submit again.
+        if host_buffer.countdown_latch.get_count() != 0 || !self.pending_batches.is_empty() {
+            return Ok(None);
+        }
 
-        // 1. Filter for Unloaded Textures
-        // We only want to process textures that haven't been uploaded to the GPU yet.
-        texture_ids.retain(|id| {
-            let Ok(slot) = self.validate_texture_slot(*id) else {
-                return false;
-            };
-            let tex = self.cached_textures.get(slot);
-            matches!(tex, Some(CachedTexture::Unloaded(_)))
-        });
-
-        let mut ids = Vec::<u32>::new();
+        // Filter for Unloaded textures only while still validating all handles.
+        let mut upload_ids = Vec::<TextureHandle>::with_capacity(texture_ids.len());
         for id in texture_ids.iter().copied() {
+            let slot = self
+                .validate_texture_slot(id)
+                .map_err(|err| format!("invalid texture handle {:?}: {:?}", id, err))?;
+            if matches!(self.cached_textures.get(slot), Some(CachedTexture::Unloaded(_))) {
+                upload_ids.push(id);
+            }
+        }
+
+        if upload_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let mut curr_bytes = 0usize;
+        let mut next_upload = Vec::<&TextureMeta>::with_capacity(upload_ids.len());
+        let mut next_upload_blit_support = Vec::<bool>::with_capacity(upload_ids.len());
+        let mut batch_texture_ids = Vec::<TextureHandle>::new();
+        let mut ids = Vec::<u32>::new();
+
+        for id in upload_ids.iter().copied() {
             let Ok(slot) = self.validate_texture_slot(id) else {
-                error!("Error loading textures: invalid texture handle {:?}", id);
-                return false;
+                return Err(format!("invalid texture handle {:?}", id));
             };
 
             match self.cached_textures.get(slot) {
                 Some(CachedTexture::Unloaded(meta)) => {
-                    // 2. Batching Check
-                    // If adding this texture would exceed the staging buffer's size, we must flush the current batch.
-                    if curr_bytes
-                        + meta
-                            .bytes
-                            .len()
-                            .next_multiple_of(self.host_alignment as usize)
-                        > max_upload_bytes as usize
-                    {
-                        // 3. Record GPU Copy Commands
-                        // This records the vkCmdCopyBufferToImage commands. The GPU will read from our host-visible
-                        // staging buffer and write into the device-local image memory.
-                        let image_allocs = vk_util::record_host_to_image_buffer(
-                            &self.device,
-                            &self.allocator.lock().unwrap(),
-                            &mut self.sampler_cache,
-                            &host_buffer,
-                            &next_upload,
-                            &next_upload_blit_support,
-                            self.host_alignment,
-                            &ids,
-                            self.gfx_queue,
-                        );
-
-                        debug!("Submitting Material Commands");
-                        // 4. Submit to GPU
-                        // We submit to both the transfer queue (for the copy) and the graphics queue (if mipmap generation is needed).
-                        host_buffer
-                            .submit_transfer_commands(VkSubmitParam::signaling(
-                                vk::PipelineStageFlags2::ALL_TRANSFER,
-                            ))
-                            .unwrap();
-                        host_buffer
-                            .submit_graphics_commands(VkSubmitParam::waiting(
-                                vk::PipelineStageFlags2::VERTEX_SHADER,
-                            ))
-                            .unwrap();
-
-                        // 5. Synchronous Wait (The Hitch)
-                        // We wait for the GPU to finish the copy before we can reuse the staging buffer.
-                        // WARNING: A 10s timeout is a safety net. If this triggers, it usually means the
-                        // transfer queue is stalled or the fence was never signaled.
-                        if let Err(error) = host_buffer.await_done(10000) {
-                            error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
-                            return false;
-                        } else {
-                            // Reset the staging buffer's internal offset so we can start filling it from the beginning again.
-                            host_buffer.reset_buffers(&self.device);
-                            debug!("Storage upload latch passed")
-                        }
-
-                        match image_allocs {
-                            Ok(images) => {
-                                curr_bytes = 0;
-                                next_upload.clear();
-                                next_upload_blit_support.clear();
-
-                                assert!(!images.is_empty());
-
-                                for image in images {
-                                    let loaded_tex = VkLoadedTexture {
-                                        alloc: image.0,
-                                        sampler: image.1,
-                                    };
-                                    loaded.push(CachedTexture::Loaded(loaded_tex));
-                                }
-                            }
-                            Err(err) => {
-                                error!("Error loading textures: {:?}", err);
-                                return false;
-                            }
-                        }
-                    }
-                    // Accumulate texture data for the next batch
-                    curr_bytes += meta
+                    let aligned_size = meta
                         .bytes
                         .len()
                         .next_multiple_of(self.host_alignment as usize);
+
+                    if aligned_size > max_upload_bytes as usize {
+                        return Err(format!(
+                            "texture {:?} requires {} bytes but staging buffer holds {} bytes",
+                            id, aligned_size, max_upload_bytes
+                        ));
+                    }
+
+                    // Submit one non-blocking batch per call; larger workloads are chunked
+                    // by repeated submit/poll cycles via allocate_textures().
+                    if curr_bytes + aligned_size > max_upload_bytes as usize {
+                        break;
+                    }
+
+                    curr_bytes += aligned_size;
                     next_upload.push(meta);
                     next_upload_blit_support.push(self.supports_linear_mip_blit(meta.format));
                     ids.push(id.slot);
+                    batch_texture_ids.push(id);
                 }
                 _ => {
-                    error!("Error loading textures: Invalid texture index");
-                    return false;
+                    return Err(format!("texture {:?} not in Unloaded state", id));
                 }
             }
         }
 
-        // 6. Final Batch Flush
-        // Upload any remaining textures that didn't trigger the "buffer full" check above.
-        if curr_bytes > 0 {
-            let image_allocs = vk_util::record_host_to_image_buffer(
-                &self.device,
-                &self.allocator.lock().unwrap(),
-                &mut self.sampler_cache,
-                &host_buffer,
-                &next_upload,
-                &next_upload_blit_support,
-                self.host_alignment,
-                &ids,
-                self.gfx_queue,
+        if curr_bytes == 0 {
+            return Ok(None);
+        }
+
+        let image_allocs = match vk_util::record_host_to_image_buffer(
+            &self.device,
+            &self.allocator.lock().unwrap(),
+            &mut self.sampler_cache,
+            &host_buffer,
+            &next_upload,
+            &next_upload_blit_support,
+            self.host_alignment,
+            &ids,
+            self.gfx_queue,
+        ) {
+            Ok(images) => images,
+            Err(err) => {
+                return Err(format!("texture upload record failed: {:?}", err));
+            }
+        };
+
+        debug!("Submitting texture upload batch (non-blocking)");
+        if let Err(err) = host_buffer.submit_transfer_commands(VkSubmitParam::signaling(
+            vk::PipelineStageFlags2::ALL_TRANSFER,
+        )) {
+            host_buffer.reset_buffers(&self.device);
+            self.destroy_uploaded_images(image_allocs);
+            return Err(format!(
+                "failed to submit transfer commands for texture upload batch: {}",
+                err
+            ));
+        }
+
+        if let Err(err) = host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
+            vk::PipelineStageFlags2::VERTEX_SHADER,
+        )) {
+            let err_msg = format!(
+                "failed to submit graphics commands for texture upload batch: {}",
+                err
             );
+            error!("{}", err_msg);
 
-            debug!("Submitting Material Commands");
-            host_buffer
-                .submit_transfer_commands(VkSubmitParam::signaling(
-                    vk::PipelineStageFlags2::ALL_TRANSFER,
-                ))
-                .unwrap();
-            host_buffer
-                .submit_graphics_commands(VkSubmitParam::waiting(
-                    vk::PipelineStageFlags2::VERTEX_SHADER,
-                ))
-                .unwrap();
-
-            if let Err(error) = host_buffer.await_done(10000) {
-                error!("Texture upload timed out after 10s. This may be due to the main thread not processing transfer commands. Error: {:?}", error);
-                return false;
-            } else {
-                host_buffer.reset_buffers(&self.device);
-                debug!("Storage upload latch passed")
+            // Transfer submission may already be in flight; defer image cleanup through
+            // normal pending-batch finalization once the latch reaches zero.
+            let batch_id = self.next_batch_id;
+            self.next_batch_id = self.next_batch_id.wrapping_add(1).max(1);
+            for id in batch_texture_ids.iter() {
+                self.pending_textures.insert(*id, batch_id);
             }
-
-            match image_allocs {
-                Ok(images) => {
-                    next_upload.clear();
-                    next_upload_blit_support.clear();
-
-                    assert!(!images.is_empty());
-                    for image in images {
-                        let loaded_tex = VkLoadedTexture {
-                            alloc: image.0,
-                            sampler: image.1,
-                        };
-                        loaded.push(CachedTexture::Loaded(loaded_tex));
-                    }
-                }
-                Err(err) => {
-                    error!("Error loading textures: {:?}", err);
-                    return false;
-                }
-            }
+            self.pending_batches.insert(
+                batch_id,
+                PendingTextureBatch {
+                    batch_id,
+                    texture_ids: batch_texture_ids,
+                    image_allocs,
+                    submitted_at: Instant::now(),
+                    status: UploadBatchStatus::Failed(err_msg.clone()),
+                },
+            );
+            return Err(err_msg);
         }
 
-        // 7. Promote to Loaded State
-        // Final step: Update our cache state from Unloaded to Loaded, storing the new GPU handles.
-        assert_eq!(texture_ids.len(), loaded.len());
-        for (id, tex) in texture_ids.iter().zip(loaded.into_iter()) {
-            let Ok(slot) = self.validate_texture_slot(*id) else {
-                error!("Error loading textures: stale texture handle {:?}", id);
-                return false;
+        if host_buffer.countdown_latch.get_count() == 0 {
+            host_buffer.reset_buffers(&self.device);
+            drop(host_buffer);
+            self.promote_uploaded_images(batch_texture_ids.as_slice(), image_allocs);
+            return Ok(None);
+        }
+
+        // Store as pending batch for later poll_texture_uploads() finalization
+        let batch_id = self.next_batch_id;
+        self.next_batch_id = self.next_batch_id.wrapping_add(1).max(1);
+
+        for id in batch_texture_ids.iter() {
+            self.pending_textures.insert(*id, batch_id);
+        }
+
+        self.pending_batches.insert(
+            batch_id,
+            PendingTextureBatch {
+                batch_id,
+                texture_ids: batch_texture_ids,
+                image_allocs,
+                submitted_at: Instant::now(),
+                status: UploadBatchStatus::WaitingFence,
+            },
+        );
+
+        Ok(Some(batch_id))
+    }
+
+    /// Poll pending texture upload batches for completion.
+    ///
+    /// For each completed batch, promotes textures from Unloaded → Loaded and
+    /// resets the staging buffer for reuse. Returns the number of finalized batches.
+    pub fn poll_texture_uploads(&mut self) -> usize {
+        if self.pending_batches.is_empty() {
+            return 0;
+        }
+
+        let host_buffer = self.host_buffer.lock().unwrap();
+        let latch_count = host_buffer.countdown_latch.get_count();
+
+        if latch_count != 0 {
+            // Check for timeout (30s safety net)
+            let now = Instant::now();
+            let timed_out: Vec<u64> = self
+                .pending_batches
+                .iter()
+                .filter(|(_, batch)| {
+                    matches!(batch.status, UploadBatchStatus::WaitingFence)
+                        && now.duration_since(batch.submitted_at) > Duration::from_secs(30)
+                })
+                .map(|(id, _)| *id)
+                .collect();
+
+            for batch_id in timed_out {
+                if let Some(batch) = self.pending_batches.get_mut(&batch_id) {
+                    error!(
+                        "Texture upload batch {} timed out after 30s",
+                        batch.batch_id
+                    );
+                    batch.status =
+                        UploadBatchStatus::Failed("upload timed out after 30s".to_string());
+                }
+            }
+
+            return 0;
+        }
+
+        // All fences signaled — reset staging buffer and promote all pending batches
+        host_buffer.reset_buffers(&self.device);
+        drop(host_buffer);
+
+        let batch_ids: Vec<u64> = self.pending_batches.keys().copied().collect();
+        let mut finalized = 0usize;
+
+        for batch_id in batch_ids {
+            let Some(batch) = self.pending_batches.remove(&batch_id) else {
+                continue;
             };
-            self.cached_textures[slot] = tex;
+
+            match batch.status {
+                UploadBatchStatus::WaitingFence => {
+                    self.promote_uploaded_images(batch.texture_ids.as_slice(), batch.image_allocs);
+                    finalized += 1;
+                }
+                UploadBatchStatus::Failed(ref msg) => {
+                    error!("Dropping failed batch {}: {}", batch_id, msg);
+                    for id in batch.texture_ids.iter() {
+                        self.pending_textures.remove(id);
+                    }
+                    self.destroy_uploaded_images(batch.image_allocs);
+                    finalized += 1;
+                }
+                UploadBatchStatus::Completed => {
+                    for id in batch.texture_ids.iter() {
+                        self.pending_textures.remove(id);
+                    }
+                    self.destroy_uploaded_images(batch.image_allocs);
+                    finalized += 1;
+                }
+            }
         }
 
-        true
+        finalized
     }
 
     fn allocate_materials(
@@ -1223,6 +1366,14 @@ impl TextureCache {
 
 impl VkDestroyable for TextureCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        let pending_images: Vec<(VkImageAlloc, vk::Sampler)> = self
+            .pending_batches
+            .drain()
+            .flat_map(|(_, batch)| batch.image_allocs.into_iter())
+            .collect();
+        self.pending_textures.clear();
+        self.destroy_uploaded_images(pending_images);
+
         for slot in self.cached_textures.iter_mut() {
             let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
             if let CachedTexture::Loaded(tex) = old_tex {
@@ -2077,7 +2228,7 @@ impl EnvironmentCache {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LodBias {
     Sharp,
     Normal,
@@ -2234,5 +2385,45 @@ mod tests {
             TextureCache::pipeline_for_material(&unlit_blend),
             VkPipelineType::UnlitAlpha
         );
+    }
+
+    #[test]
+    fn pending_batch_tracking_records_and_clears() {
+        // Test that PendingTextureBatch types and tracking tables work correctly
+        // without requiring a GPU device.
+        let mut pending_batches: HashMap<u64, PendingTextureBatch> = HashMap::new();
+        let mut pending_textures: HashMap<TextureHandle, u64> = HashMap::new();
+
+        let tex_a = TextureHandle::new(10, 0);
+        let tex_b = TextureHandle::new(11, 0);
+
+        let batch = PendingTextureBatch {
+            batch_id: 1,
+            texture_ids: vec![tex_a, tex_b],
+            image_allocs: Vec::new(), // no GPU allocs in unit test
+            submitted_at: Instant::now(),
+            status: UploadBatchStatus::WaitingFence,
+        };
+
+        pending_textures.insert(tex_a, 1);
+        pending_textures.insert(tex_b, 1);
+        pending_batches.insert(1, batch);
+
+        assert_eq!(pending_batches.len(), 1);
+        assert_eq!(pending_textures.len(), 2);
+        assert_eq!(*pending_textures.get(&tex_a).unwrap(), 1u64);
+        assert_eq!(*pending_textures.get(&tex_b).unwrap(), 1u64);
+
+        // Simulate finalization: remove batch and clear texture tracking
+        let removed = pending_batches.remove(&1).unwrap();
+        assert!(matches!(removed.status, UploadBatchStatus::WaitingFence));
+        assert_eq!(removed.texture_ids.len(), 2);
+
+        for id in removed.texture_ids.iter() {
+            pending_textures.remove(id);
+        }
+
+        assert!(pending_batches.is_empty());
+        assert!(pending_textures.is_empty());
     }
 }

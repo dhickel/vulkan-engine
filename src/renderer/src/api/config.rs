@@ -43,6 +43,40 @@ impl From<DebugRuntimeMode> for vk_render::DebugRuntimeMode {
     }
 }
 
+/// Controls how the engine handles `.meta` sidecar manifest files for assets.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AssetManifestMode {
+    /// Manifests are ignored even if present.
+    Disabled,
+    /// Manifests are loaded when found; parse errors log a warning and fall back to defaults.
+    BestEffort,
+    /// Manifests are required for assets that have them; parse errors fail the load.
+    Strict,
+}
+
+impl Default for AssetManifestMode {
+    fn default() -> Self {
+        Self::BestEffort
+    }
+}
+
+/// Policy configuration for asset loading behavior.
+#[derive(Debug, Clone)]
+pub struct AssetPolicyConfig {
+    pub manifest_mode: AssetManifestMode,
+    /// When true, filename patterns (e.g. `_n.`, `_normal.`) can influence sRGB/sampler defaults.
+    pub allow_filename_heuristics: bool,
+}
+
+impl Default for AssetPolicyConfig {
+    fn default() -> Self {
+        Self {
+            manifest_mode: AssetManifestMode::BestEffort,
+            allow_filename_heuristics: true,
+        }
+    }
+}
+
 /// Public renderer configuration contract.
 #[derive(Debug, Clone)]
 pub struct RendererConfig {
@@ -54,6 +88,7 @@ pub struct RendererConfig {
     pub compile_shaders: bool,
     /// Reserved in v1. `true` currently returns `RendererError::Unsupported`.
     pub headless: bool,
+    pub asset_policy: AssetPolicyConfig,
 }
 
 impl Default for RendererConfig {
@@ -66,6 +101,7 @@ impl Default for RendererConfig {
             shader_debug_mode: DebugRuntimeMode::Default,
             compile_shaders: false,
             headless: false,
+            asset_policy: AssetPolicyConfig::default(),
         }
     }
 }
