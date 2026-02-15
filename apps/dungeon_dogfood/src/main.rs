@@ -1,29 +1,56 @@
 mod collision;
+mod content;
 mod geometry;
 mod layout;
 mod player;
 mod scene_seed;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use collision::CollisionWorld;
+use content::{load_content_pack, resolve_content_path};
 use layout::{load_level_file, tile_to_world};
 use player::{PlayerState, PLAYER_EYE_HEIGHT};
-use renderer::{RendererConfig, RendererError};
+use renderer::{
+    AssetManifestMode, AssetPolicyConfig, RendererConfig, RendererError,
+};
+use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use scene_seed::LevelScene;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
-const LEVEL_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_01.txt";
+const DEFAULT_LEVEL_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_01.txt";
+const CONTENT_PACK_PATH: &str = "apps/dungeon_dogfood/assets/content_pack.toml";
 
 fn main() {
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let level = load_level_file(LEVEL_PATH).unwrap_or_else(|e| {
-        eprintln!("Failed to load level file '{}': {}", LEVEL_PATH, e);
+    let content_pack = load_content_pack(CONTENT_PACK_PATH).unwrap_or_else(|e| {
+        eprintln!("Failed to load content pack '{}': {}", CONTENT_PACK_PATH, e);
+        std::process::exit(1);
+    });
+
+    log::info!(
+        "Loaded content pack: {} props ({} enabled), {} materials, {} environments, {} light presets",
+        content_pack.props.len(),
+        content_pack.enabled_props().len(),
+        content_pack.materials.len(),
+        content_pack.environments.len(),
+        content_pack.light_presets.len()
+    );
+
+    let level_path = parse_level_arg().unwrap_or_else(|| PathBuf::from(DEFAULT_LEVEL_PATH));
+    let resolved_level_path = resolve_content_path(&level_path);
+    let level = load_level_file(&resolved_level_path).unwrap_or_else(|e| {
+        eprintln!(
+            "Failed to load level file '{}': {}",
+            level_path.display(),
+            e
+        );
         eprintln!("\nExpected ASCII level file with tokens:");
         eprintln!("  # = wall");
         eprintln!("  . = floor");
@@ -56,7 +83,14 @@ fn main() {
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         headless: false,
-        asset_policy: renderer::AssetPolicyConfig::default(),
+        asset_policy: AssetPolicyConfig {
+            manifest_mode: AssetManifestMode::BestEffort,
+            allow_filename_heuristics: true,
+            compression: CompressionConfig {
+                mode: TextureCompressionMode::Disabled,
+                quality: 50,
+            },
+        },
     };
 
     let mut renderer =
@@ -68,7 +102,7 @@ fn main() {
 
     let _level_scene = {
         let mut assets = renderer.assets();
-        LevelScene::from_level(&level, &mut scene, &mut assets)
+        LevelScene::from_level(&level, &content_pack, &mut scene, &mut assets)
             .expect("failed to seed scene from level")
     };
 
@@ -134,6 +168,25 @@ fn main() {
             }
         })
         .expect("event loop failed");
+}
+
+fn parse_level_arg() -> Option<PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+
+    while i < args.len() {
+        if args[i] == "--level" {
+            if let Some(path) = args.get(i + 1) {
+                return Some(PathBuf::from(path));
+            }
+            eprintln!("--level requires a path argument");
+            std::process::exit(1);
+        }
+
+        i += 1;
+    }
+
+    None
 }
 
 fn render_frame(

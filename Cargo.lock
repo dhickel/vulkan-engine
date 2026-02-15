@@ -695,7 +695,9 @@ dependencies = [
  "input",
  "log",
  "renderer",
+ "serde",
  "thiserror",
+ "toml 0.8.23",
  "winit",
 ]
 

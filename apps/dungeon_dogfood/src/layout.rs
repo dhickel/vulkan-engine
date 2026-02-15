@@ -435,4 +435,34 @@ mod tests {
         let pos = tile_to_world(5, 3);
         assert_eq!(pos, glam::Vec3::new(5.0, 0.0, -3.0));
     }
+
+    #[test]
+    fn level_pack_files_parse_cleanly() {
+        let level_01 = parse_level(include_str!("../assets/levels/level_01.txt")).unwrap();
+        let level_02 = parse_level(include_str!("../assets/levels/level_02_ramps.txt")).unwrap();
+        let level_03 = parse_level(include_str!("../assets/levels/level_03_lighting.txt")).unwrap();
+
+        assert!(level_01.width > 0 && level_01.height > 0);
+        assert!(level_02.width > 0 && level_02.height > 0);
+        assert!(level_03.width > 0 && level_03.height > 0);
+    }
+
+    #[test]
+    fn level_02_contains_all_ramp_tokens() {
+        let level = parse_level(include_str!("../assets/levels/level_02_ramps.txt"))
+            .expect("level_02_ramps should parse");
+
+        assert!(level.tiles.contains(&Tile::RampNorth));
+        assert!(level.tiles.contains(&Tile::RampEast));
+        assert!(level.tiles.contains(&Tile::RampSouth));
+        assert!(level.tiles.contains(&Tile::RampWest));
+    }
+
+    #[test]
+    fn level_03_has_dense_light_markers() {
+        let level = parse_level(include_str!("../assets/levels/level_03_lighting.txt"))
+            .expect("level_03_lighting should parse");
+
+        assert!(level.light_markers.len() >= 10);
+    }
 }
