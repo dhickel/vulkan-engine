@@ -950,6 +950,7 @@ pub fn upload_cubemap_faces(
         format,
         mips_levels: 1,
         uv_index: 0,
+        sampler_info: None,
     };
     upload_skybox(device, allocator, meta, transfer_pool, transfer_queue)
 }
@@ -1576,25 +1577,37 @@ pub fn record_host_to_image_buffer(
 
     let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
 
-    for (image_alloc, id) in image_allocs.into_iter().zip(ids.iter()) {
-        let sampler_info = VkSamplerInfo {
-            mag_filter: vk::Filter::LINEAR,
-            min_filter: vk::Filter::LINEAR,
-            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
-            // glTF default sampler wrap is REPEAT for UV-mapped materials.
-            address_mode_u: vk::SamplerAddressMode::REPEAT,
-            address_mode_v: vk::SamplerAddressMode::REPEAT,
-            address_mode_w: vk::SamplerAddressMode::REPEAT,
-            mip_lod_bias: LodBias::Sharp,
-            anisotropy_enable: false, // FIXME, we need to implement this in engine
-            max_anisotropy: 0,
-            compare_enable: false,
-            compare_op: Default::default(),
-            min_lod: 0,
-            max_lod: image_alloc.mip_levels,
-            border_color: Default::default(),
-            unnormalized_coordinates: false,
+    for ((image_alloc, _id), meta) in image_allocs
+        .into_iter()
+        .zip(ids.iter())
+        .zip(image_meta.iter())
+    {
+        let mut sampler_info = if let Some(info) = &meta.sampler_info {
+            info.clone()
+        } else {
+            VkSamplerInfo {
+                mag_filter: vk::Filter::LINEAR,
+                min_filter: vk::Filter::LINEAR,
+                mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+                // glTF default sampler wrap is REPEAT for UV-mapped materials.
+                address_mode_u: vk::SamplerAddressMode::REPEAT,
+                address_mode_v: vk::SamplerAddressMode::REPEAT,
+                address_mode_w: vk::SamplerAddressMode::REPEAT,
+                mip_lod_bias: LodBias::Sharp,
+                anisotropy_enable: false,
+                max_anisotropy: 0,
+                compare_enable: false,
+                compare_op: Default::default(),
+                min_lod: 0,
+                max_lod: image_alloc.mip_levels,
+                border_color: Default::default(),
+                unnormalized_coordinates: false,
+            }
         };
+        sampler_info.max_lod = image_alloc.mip_levels;
+        if sampler_info.min_lod > sampler_info.max_lod {
+            sampler_info.min_lod = sampler_info.max_lod;
+        }
 
         let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
 

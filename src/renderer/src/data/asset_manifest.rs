@@ -393,6 +393,44 @@ pub fn resolve_texture_policy(
     result
 }
 
+/// Resolve texture policy for a concrete asset path under a given policy config.
+///
+/// This is the canonical integration path for runtime loaders (API and Assimp)
+/// to avoid precedence/validation drift.
+pub fn resolve_texture_policy_for_path(
+    path: &Path,
+    mode: AssetManifestMode,
+    allow_filename_heuristics: bool,
+    override_opts: Option<&TextureLoadOptions>,
+) -> Result<ResolvedTexturePolicy, AssetError> {
+    let defaults = ResolvedTexturePolicy::default();
+    let heuristic = if allow_filename_heuristics {
+        heuristic_from_filename(path)
+    } else {
+        None
+    };
+    let manifest = load_manifest(path, mode)?;
+
+    if let Some(ref m) = manifest {
+        if mode == AssetManifestMode::Strict {
+            validate_manifest(m)?;
+        } else if let Err(err) = validate_manifest(m) {
+            warn!(
+                "Manifest validation warning for '{}': {}",
+                path.display(),
+                err
+            );
+        }
+    }
+
+    Ok(resolve_texture_policy(
+        &defaults,
+        heuristic.as_ref(),
+        manifest.as_ref(),
+        override_opts,
+    ))
+}
+
 fn apply_sampler_manifest(policy: &mut ResolvedTexturePolicy, sampler: &SamplerManifest) {
     if let Some(ref wrap_u) = sampler.wrap_u {
         if let Ok(w) = WrapMode::from_str(wrap_u) {

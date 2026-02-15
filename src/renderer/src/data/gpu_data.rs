@@ -9,7 +9,7 @@
 //! - **Vertex layout**: Comprehensive layout with all glTF attributes (position, normal, tangent, UVs, skinning)
 //! - **Push constants**: Per-draw data (model matrix, buffer addresses) avoiding descriptor updates
 use crate::data::data_cache::{
-    CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkShaderCache,
+    CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkSamplerInfo, VkShaderCache,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle, TextureHandle};
 use crate::vulkan::vk_descriptor::{
@@ -349,6 +349,7 @@ pub struct TextureMeta {
     pub format: vk::Format,
     pub mips_levels: u32,
     pub uv_index: u32,
+    pub sampler_info: Option<VkSamplerInfo>,
 }
 
 pub struct VkCubeMap {

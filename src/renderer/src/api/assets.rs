@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, collections::VecDeque};
 
 use image::ImageError;
-use log::{debug, warn};
+use log::debug;
 
-use crate::api::config::{AssetManifestMode, AssetPolicyConfig};
+use crate::api::config::AssetPolicyConfig;
 use crate::api::loading::{LoadStatus, LoadTicket};
 use crate::api::scene::{SceneFragment, SceneFragmentNodeId};
-use crate::data::asset_manifest::{self, ResolvedTexturePolicy, TextureLoadOptions};
+use crate::data::asset_manifest::{self, TextureLoadOptions};
 use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
@@ -41,6 +41,7 @@ pub enum EnvironmentState {
 enum DeferredModelState {
     Queued {
         path: PathBuf,
+        policy_config: AssetPolicyConfig,
     },
     InFlight {
         receiver: Receiver<Result<SceneFragment, AssetError>>,
@@ -122,12 +123,23 @@ impl AssetLoadTracker {
     }
 
     pub(crate) fn request_model_load(&mut self, path: PathBuf) -> LoadTicket {
+        self.request_model_load_with_policy(path, AssetPolicyConfig::default())
+    }
+
+    pub(crate) fn request_model_load_with_policy(
+        &mut self,
+        path: PathBuf,
+        policy_config: AssetPolicyConfig,
+    ) -> LoadTicket {
         let ticket = self.next_ticket();
         self.tasks.insert(
             ticket,
             DeferredLoadTask::Model {
                 queued_at: Instant::now(),
-                state: DeferredModelState::Queued { path },
+                state: DeferredModelState::Queued {
+                    path,
+                    policy_config,
+                },
             },
         );
         self.queued_tickets.push_back(ticket);
@@ -423,8 +435,11 @@ impl AssetLoadTracker {
 
             match task {
                 DeferredLoadTask::Model { state, .. } => {
-                    let path = match state {
-                        DeferredModelState::Queued { path } => path.clone(),
+                    let (path, policy_cfg) = match state {
+                        DeferredModelState::Queued {
+                            path,
+                            policy_config,
+                        } => (path.clone(), policy_config.clone()),
                         DeferredModelState::Cancelled => continue,
                         _ => continue,
                     };
@@ -432,7 +447,7 @@ impl AssetLoadTracker {
                     let (sender, receiver) = mpsc::channel();
                     let task_cache = data_cache.clone();
                     std::thread::spawn(move || {
-                        let result = load_model_gpu_ready(path, task_cache)
+                        let result = load_model_gpu_ready(path, task_cache, &policy_cfg)
                             .and_then(|loaded| scene_world_to_fragment(loaded.scene_world));
                         let _ = sender.send(result);
                     });
@@ -532,8 +547,10 @@ impl<'a> AssetManager<'a> {
     pub fn load_mesh(&mut self, path: impl AsRef<Path>) -> Result<MeshHandle, AssetError> {
         let path = path.as_ref().to_path_buf();
         let path_for_err = path.clone();
-        let loaded_model =
-            self.run_sync_upload_task(move |data_cache| load_model_gpu_ready(path, data_cache))?;
+        let policy_config = self.asset_policy.clone();
+        let loaded_model = self.run_sync_upload_task(move |data_cache| {
+            load_model_gpu_ready(path, data_cache, &policy_config)
+        })?;
 
         loaded_model
             .mesh_ids
@@ -574,8 +591,10 @@ impl<'a> AssetManager<'a> {
     /// May Stall: Yes
     pub fn load_model(&mut self, path: impl AsRef<Path>) -> Result<SceneFragment, AssetError> {
         let path = path.as_ref().to_path_buf();
-        let loaded_model =
-            self.run_sync_upload_task(move |data_cache| load_model_gpu_ready(path, data_cache))?;
+        let policy_config = self.asset_policy.clone();
+        let loaded_model = self.run_sync_upload_task(move |data_cache| {
+            load_model_gpu_ready(path, data_cache, &policy_config)
+        })?;
 
         scene_world_to_fragment(loaded_model.scene_world)
     }
@@ -654,7 +673,7 @@ impl<'a> AssetManager<'a> {
     pub fn request_model_load(&mut self, path: impl AsRef<Path>) -> Result<LoadTicket, AssetError> {
         Ok(self
             .load_tracker
-            .request_model_load(path.as_ref().to_path_buf()))
+            .request_model_load_with_policy(path.as_ref().to_path_buf(), self.asset_policy.clone()))
     }
 
     /// Thread: Main
@@ -1001,6 +1020,7 @@ impl<'a> AssetManager<'a> {
 fn load_model_gpu_ready(
     path: PathBuf,
     data_cache: Arc<VkDataCache>,
+    policy_config: &AssetPolicyConfig,
 ) -> Result<ModelMeta, AssetError> {
     let path_str = path.to_str().ok_or_else(|| {
         AssetError::Unsupported(format!(
@@ -1009,10 +1029,8 @@ fn load_model_gpu_ready(
         ))
     })?;
 
-    let loaded_model =
-        assimp_util::load_model(path_str, data_cache.clone(), false).map_err(|err| {
-            AssetError::from(err)
-        })?;
+    let loaded_model = assimp_util::load_model(path_str, data_cache.clone(), false, policy_config)
+        .map_err(AssetError::from)?;
 
     let upload_result = promote_model_gpu_allocations(&path, &data_cache, &loaded_model);
     if upload_result.is_err() {
@@ -1102,34 +1120,12 @@ fn load_texture_gpu_ready_with_policy(
     policy_config: &AssetPolicyConfig,
     options: Option<TextureLoadOptions>,
 ) -> Result<TextureHandle, AssetError> {
-    // Resolve the texture policy from all sources
-    let defaults = ResolvedTexturePolicy::default();
-    let heuristic = if policy_config.allow_filename_heuristics {
-        asset_manifest::heuristic_from_filename(&path)
-    } else {
-        None
-    };
-    let manifest = asset_manifest::load_manifest(&path, policy_config.manifest_mode)?;
-
-    // Validate manifest fields in strict mode
-    if let Some(ref m) = manifest {
-        if policy_config.manifest_mode == AssetManifestMode::Strict {
-            asset_manifest::validate_manifest(m)?;
-        } else if let Err(err) = asset_manifest::validate_manifest(m) {
-            warn!(
-                "Manifest validation warning for '{}': {}",
-                path.display(),
-                err
-            );
-        }
-    }
-
-    let policy = asset_manifest::resolve_texture_policy(
-        &defaults,
-        heuristic.as_ref(),
-        manifest.as_ref(),
+    let policy = asset_manifest::resolve_texture_policy_for_path(
+        &path,
+        policy_config.manifest_mode,
+        policy_config.allow_filename_heuristics,
         options.as_ref(),
-    );
+    )?;
 
     let image = image::open(&path).map_err(|err| map_texture_path_err(&path, err))?;
     let format = if policy.is_srgb {
@@ -1151,6 +1147,7 @@ fn load_texture_gpu_ready_with_policy(
         format,
         mips_levels: mip_count,
         uv_index: 0,
+        sampler_info: Some(policy.to_sampler_info(mip_count)),
     };
 
     let texture_id = {

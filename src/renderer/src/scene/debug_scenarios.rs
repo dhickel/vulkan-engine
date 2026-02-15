@@ -2,6 +2,7 @@
 //!
 //! Small runtime helper for deterministic scene startup scenarios used in render-path testing.
 
+use crate::api::AssetPolicyConfig;
 use crate::data::assimp_util::{self, AssimpImportError, ModelMeta};
 use crate::data::data_cache::VkDataCache;
 use crate::data::gpu_data::MaterialShadingModel;
@@ -14,7 +15,12 @@ pub fn load_startup_scene(
     force_unlit_materials: bool,
 ) -> Result<ModelMeta, AssimpImportError> {
     let loaded_scene =
-        assimp_util::load_model(DEFAULT_STARTUP_MODEL_PATH, data_cache.clone(), false)?;
+        assimp_util::load_model(
+            DEFAULT_STARTUP_MODEL_PATH,
+            data_cache.clone(),
+            false,
+            &AssetPolicyConfig::default(),
+        )?;
 
     if force_unlit_materials {
         let mut tex_cache = data_cache

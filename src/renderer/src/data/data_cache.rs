@@ -312,6 +312,7 @@ impl TextureCache {
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             uv_index: 0,
+            sampler_info: None,
         });
 
         let def_metallic_rough = CachedTexture::Unloaded(TextureMeta {
@@ -323,6 +324,7 @@ impl TextureCache {
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             uv_index: 0,
+            sampler_info: None,
         });
 
         let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
@@ -342,6 +344,7 @@ impl TextureCache {
             },
             mips_levels: 1,
             uv_index: 0,
+            sampler_info: None,
         });
 
         let def_normal = CachedTexture::Unloaded(TextureMeta {
@@ -351,6 +354,7 @@ impl TextureCache {
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             uv_index: 0,
+            sampler_info: None,
         });
 
         let def_emissive = CachedTexture::Unloaded(TextureMeta {
@@ -360,6 +364,7 @@ impl TextureCache {
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             uv_index: 0,
+            sampler_info: None,
         });
 
         let def_error = CachedTexture::Unloaded(TextureMeta {
@@ -369,6 +374,7 @@ impl TextureCache {
             format: vk::Format::R8G8B8A8_UNORM,
             mips_levels: 1,
             uv_index: 0,
+            sampler_info: None,
         });
 
         let err_mat = CachedMaterial::Unloaded(MaterialMeta {
@@ -2245,7 +2251,7 @@ impl LodBias {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VkSamplerInfo {
     pub mag_filter: vk::Filter,
     pub min_filter: vk::Filter,

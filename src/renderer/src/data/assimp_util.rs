@@ -3,6 +3,8 @@
 //! Active model loading path: imports meshes/materials via Assimp, maps them to engine cache
 //! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
 
+use crate::api::AssetPolicyConfig;
+use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::data_util::resolve_texture_mip_count;
 use crate::data::gpu_data;
@@ -69,6 +71,8 @@ pub enum AssimpImportError {
     MissingMeshMapping { node_name: String, mesh_index: u32 },
     /// A texture could not be decoded during material processing.
     TextureDecode { texture_ref: String, reason: String },
+    /// Manifest/policy resolution failed for a discovered texture.
+    TexturePolicy { texture_ref: String, reason: String },
     /// Catch-all for unexpected internal failures (e.g. FFI null pointers in required structures).
     Internal(String),
 }
@@ -102,6 +106,10 @@ impl std::fmt::Display for AssimpImportError {
                 texture_ref,
                 reason,
             } => write!(f, "texture decode failed for '{texture_ref}': {reason}"),
+            Self::TexturePolicy {
+                texture_ref,
+                reason,
+            } => write!(f, "texture policy resolve failed for '{texture_ref}': {reason}"),
             Self::Internal(msg) => write!(f, "internal import error: {msg}"),
         }
     }
@@ -119,6 +127,7 @@ pub fn load_model(
     path: &str,
     data_cache: Arc<VkDataCache>,
     has_animation: bool,
+    policy_config: &AssetPolicyConfig,
 ) -> Result<ModelMeta, AssimpImportError> {
     let mut flags = aiPostProcessSteps_aiProcess_GenSmoothNormals
         | aiPostProcessSteps_aiProcess_JoinIdenticalVertices
@@ -166,7 +175,7 @@ pub fn load_model(
         }
     }?;
 
-    let materials = process_materials(ai_scene, base_path, &data_cache)?;
+    let materials = process_materials(ai_scene, base_path, &data_cache, policy_config)?;
     let mat_indices = 0..materials.len();
 
     let mut mapped_materials = HashMap::<u32, MaterialHandle>::with_capacity(materials.len());
@@ -216,6 +225,7 @@ pub fn process_materials(
     ai_scene: &aiScene,
     base_path: Option<&str>,
     data_cache: &Arc<VkDataCache>,
+    policy_config: &AssetPolicyConfig,
 ) -> Result<Vec<MaterialMeta>, AssimpImportError> {
     let mat_count = ai_scene.mNumMaterials as usize;
     let mut materials = Vec::<MaterialMeta>::with_capacity(mat_count);
@@ -238,19 +248,27 @@ pub fn process_materials(
             let alpha_cutoff = get_alpha_cutoff(ai_material);
             material_meta.set_alpha_mode(alpha_mode, alpha_cutoff);
 
-            let load_first_texture_type = |label: &str, types: &[(aiTextureType, &'static str)]| {
+            let load_first_texture_type =
+                |label: &str,
+                 types: &[(aiTextureType, &'static str)]|
+                 -> Result<Option<(TextureMeta, &'static str)>, AssimpImportError> {
                 for (typ, type_name) in types {
-                    if let Some(meta) =
-                        get_texture_meta(ai_material, ai_scene, *typ, base_path, data_cache)
-                    {
+                    if let Some(meta) = get_texture_meta(
+                        ai_material,
+                        ai_scene,
+                        *typ,
+                        base_path,
+                        data_cache,
+                        policy_config,
+                    )? {
                         debug!(
                             "Material {} {} texture resolved from Assimp type {}",
                             i, label, type_name
                         );
-                        return Some((meta, *type_name));
+                        return Ok(Some((meta, *type_name)));
                     }
                 }
-                None
+                Ok(None)
             };
 
             let base_color = load_first_texture_type(
@@ -259,7 +277,7 @@ pub fn process_materials(
                     (aiTextureType_aiTextureType_BASE_COLOR, "BASE_COLOR"),
                     (aiTextureType_aiTextureType_DIFFUSE, "DIFFUSE"),
                 ],
-            );
+            )?;
 
             // Assimp may expose metallic/roughness as either:
             // - one combined texture (UNKNOWN), or
@@ -270,21 +288,24 @@ pub fn process_materials(
                 aiTextureType_aiTextureType_UNKNOWN,
                 base_path,
                 data_cache,
-            );
+                policy_config,
+            )?;
             let met_rough_metalness = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_METALNESS,
                 base_path,
                 data_cache,
-            );
+                policy_config,
+            )?;
             let met_rough_roughness = get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS,
                 base_path,
                 data_cache,
-            );
+                policy_config,
+            )?;
 
             let normal = load_first_texture_type(
                 "normal",
@@ -292,7 +313,7 @@ pub fn process_materials(
                     (aiTextureType_aiTextureType_NORMAL_CAMERA, "NORMAL_CAMERA"),
                     (aiTextureType_aiTextureType_NORMALS, "NORMALS"),
                 ],
-            );
+            )?;
 
             let occlusion = load_first_texture_type(
                 "occlusion",
@@ -303,12 +324,12 @@ pub fn process_materials(
                     ),
                     (aiTextureType_aiTextureType_LIGHTMAP, "LIGHTMAP"),
                 ],
-            );
+            )?;
 
             let emissive = load_first_texture_type(
                 "emissive",
                 &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
-            );
+            )?;
 
             let mut tex_cache = data_cache
                 .texture_cache
@@ -479,7 +500,8 @@ unsafe fn get_texture_meta(
     texture_type: aiTextureType,
     base_path: Option<&str>,
     data_cache: &Arc<VkDataCache>,
-) -> Option<TextureMeta> {
+    policy_config: &AssetPolicyConfig,
+) -> Result<Option<TextureMeta>, AssimpImportError> {
     if aiGetMaterialTextureCount(ai_material, texture_type) > 0 {
         let mut path = aiString {
             length: 0,
@@ -503,9 +525,9 @@ unsafe fn get_texture_meta(
         {
             let texture_path = CStr::from_ptr(path.data.as_ptr()).to_string_lossy();
 
-            let texture_data = if texture_path.starts_with("*") {
-                // Embedded texture .....This is a doozy
-                if let Ok(index) = texture_path[1..].parse::<usize>() {
+            let (texture_data, source_path) = if texture_path.starts_with("*") {
+                // Embedded texture payload has no on-disk sidecar path.
+                let embedded_bytes = if let Ok(index) = texture_path[1..].parse::<usize>() {
                     if index < ai_scene.mNumTextures as usize {
                         let embedded_texture = *ai_scene.mTextures.add(index);
                         if !embedded_texture.is_null() {
@@ -525,24 +547,48 @@ unsafe fn get_texture_meta(
                     }
                 } else {
                     None
-                }
+                };
+                (embedded_bytes, None)
             } else if let Some(base_path) = base_path {
-                // External texture
+                // External texture with deterministic manifest sidecar path support.
                 let full_path = Path::new(base_path).join(texture_path.as_ref());
-                std::fs::read(full_path).ok()
+                (std::fs::read(&full_path).ok(), Some(full_path))
             } else {
-                None
+                (None, None)
             };
 
             if let Some(bytes) = texture_data {
                 if let Ok(img) = image::load_from_memory(&bytes) {
+                    let policy = if let Some(path) = source_path.as_ref() {
+                        asset_manifest::resolve_texture_policy_for_path(
+                            path,
+                            policy_config.manifest_mode,
+                            policy_config.allow_filename_heuristics,
+                            None,
+                        )
+                        .map_err(|err| AssimpImportError::TexturePolicy {
+                            texture_ref: path.display().to_string(),
+                            reason: err.to_string(),
+                        })?
+                    } else {
+                        ResolvedTexturePolicy::default()
+                    };
+
                     let (width, height) = img.dimensions();
-                    let mut format = to_vk_format(&img);
+                    let mut format = if policy.is_srgb {
+                        to_vk_format_srgb(&img)
+                    } else {
+                        to_vk_format(&img)
+                    };
 
                     let bytes = if data_cache.is_supported_image_format(format) {
                         img.as_bytes().to_vec()
                     } else {
-                        format = vk::Format::R8G8B8A8_UNORM;
+                        format = if policy.is_srgb {
+                            vk::Format::R8G8B8A8_SRGB
+                        } else {
+                            vk::Format::R8G8B8A8_UNORM
+                        };
                         img.to_rgba8().into_raw()
                     };
 
@@ -556,19 +602,26 @@ unsafe fn get_texture_meta(
                         uv_index as u32
                     };
 
-                    return Some(TextureMeta {
+                    let mip_count = if policy.generate_mips {
+                        resolve_texture_mip_count(width, height, None)
+                    } else {
+                        1
+                    };
+
+                    return Ok(Some(TextureMeta {
                         bytes,
                         width,
                         height,
                         format,
-                        mips_levels: resolve_texture_mip_count(width, height, None),
+                        mips_levels: mip_count,
                         uv_index,
-                    });
+                        sampler_info: Some(policy.to_sampler_info(mip_count)),
+                    }));
                 }
             }
         }
     }
-    None
+    Ok(None)
 }
 
 fn normalize_metal_roughness_texture(meta: TextureMeta) -> TextureMeta {
@@ -716,6 +769,7 @@ fn combine_metal_roughness_sources(
         format: vk::Format::R8G8B8A8_UNORM,
         mips_levels: roughness.mips_levels,
         uv_index: roughness.uv_index,
+        sampler_info: roughness.sampler_info.clone(),
     }
 }
 
