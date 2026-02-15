@@ -29,17 +29,19 @@ Reference:
 ## Deferred Loading Progress and Stalls
 
 Current asset tracker behavior:
-- One in-flight deferred load task at a time.
-- Requires render/begin-frame/manual pumping to progress.
+- Bounded concurrency for deferred jobs (default max 4 in flight).
+- Progress still requires render/begin-frame/manual pumping.
+- Texture uploads finalize through poll-based completion; intermediate large batches may still block due to single staging buffer reuse.
 
 Performance implication:
-- Bulk loads through deferred API serialize at tracker level today.
+- Bulk loads improve over strict serialization, but heavy upload sets can still hitch when staging-buffer turnover is high.
 
 ## Known Hotspots
 
 - `vk_render.rs` is high-blast-radius orchestration code.
-- Environment preparation can cause visible frame hitches.
+- Environment preparation can cause visible frame hitches on first activation.
 - Startup and sync model loads may stall while waiting on transfer completion.
+- Texture compression in `Auto/Force` modes can add CPU cost during ingest.
 
 ## Debug Workflow
 

@@ -2,6 +2,7 @@
 
 **Project:** `apps/dungeon_dogfood`  
 **Purpose:** Track runtime content inventory, provenance, and readiness for alpha dogfood.
+**Updated:** 2026-02-15
 
 ## 1. Usage Rules
 
@@ -14,31 +15,35 @@
 
 | Asset ID | Category | Path | Source | License | Status | alpha_blocker | Notes |
 |---|---|---|---|---|---|---|---|
-| lvl_01 | level | `apps/dungeon_dogfood/assets/levels/level_01.txt` | internal | internal | present | no | Existing phase 03/04 level scaffold. |
-| prop_torch_sconce_a | model | `apps/dungeon_dogfood/assets/models/props/torch_sconce.glb` | TBD | TBD | missing | yes | Required for wall-mounted prop validation via `M` markers. |
-| prop_crate_a | model | `apps/dungeon_dogfood/assets/models/props/crate_a.glb` | TBD | TBD | missing | yes | Required for floor prop coverage. |
-| prop_altar_a | model | `apps/dungeon_dogfood/assets/models/props/altar_a.glb` | TBD | TBD | missing | yes | Required landmark/focal prop. |
-| pbr_stone_rough | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/stone_rough/` | TBD | TBD | missing | yes | Base wall/floor family. |
-| pbr_stone_wet | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/stone_wet/` | TBD | TBD | missing | yes | Accent material family. |
-| pbr_metal_worn | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/metal_worn/` | TBD | TBD | missing | yes | Prop/light fixture family. |
-| env_dungeon_neutral | environment | `apps/dungeon_dogfood/assets/environments/dungeon_neutral.hdr` | TBD | TBD | missing | yes | Primary alpha skybox/IBL candidate. |
-| env_dungeon_cool | environment | `apps/dungeon_dogfood/assets/environments/dungeon_cool.hdr` | TBD | TBD | missing | no | A/B tuning variant. |
+| lvl_01 | level | `apps/dungeon_dogfood/assets/levels/level_01.txt` | internal | internal | present | no | Existing level scaffold. |
 | lvl_02_ramps | level | `apps/dungeon_dogfood/assets/levels/level_02_ramps.txt` | internal | internal | missing | yes | Must cover all 4 ramp tokens. |
 | lvl_03_lighting | level | `apps/dungeon_dogfood/assets/levels/level_03_lighting.txt` | internal | internal | missing | yes | Dense lights for tuning matrix. |
+| prop_torch_sconce_a | model | `apps/dungeon_dogfood/assets/models/props/torch_sconce/scene.gltf` | dogfood_dungeon import | needs_verification | present | no | Non-PBR fallback prop for now. |
+| prop_crate_a | model | `apps/dungeon_dogfood/assets/models/props/crate_a/wooden_crate_01_4k.gltf` | dogfood_dungeon import | needs_verification | present | no | Primary PBR prop. |
+| prop_landmark_a | model | `apps/dungeon_dogfood/assets/models/props/landmark_a/` | n/a | n/a | missing | no | Optional follow-up; not required to start phase 2. |
+| pbr_stone_wall | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/stone_rough/` | dogfood_dungeon import | needs_verification | present | yes | Wall material family (PBR). |
+| pbr_stone_floor | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/stone_floor/` | dogfood_dungeon import | needs_verification | present | yes | Floor material family (PBR). |
+| pbr_metal_worn | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/metal_worn/` | n/a | n/a | missing | no | Deferred for later phase if needed. |
+| env_dungeon_neutral | environment | `apps/dungeon_dogfood/assets/environments/dungeon_neutral.exr` | dogfood_dungeon import | needs_verification | present | yes | Primary EXR skybox/IBL candidate. |
+| env_dungeon_alt | environment | `apps/dungeon_dogfood/assets/environments/dungeon_alt.*` | n/a | n/a | missing | no | Optional A/B environment. |
 
-## 3. Required Folder Layout (Alpha)
+## 3. Required Folder Layout (Current Alpha)
 
 - `apps/dungeon_dogfood/assets/levels/`
 - `apps/dungeon_dogfood/assets/models/props/`
 - `apps/dungeon_dogfood/assets/textures/pbr/stone_rough/`
-- `apps/dungeon_dogfood/assets/textures/pbr/stone_wet/`
-- `apps/dungeon_dogfood/assets/textures/pbr/metal_worn/`
+- `apps/dungeon_dogfood/assets/textures/pbr/stone_floor/`
 - `apps/dungeon_dogfood/assets/environments/`
 
 ## 4. Intake Checklist for New Assets
 
-1. Confirm import format compatibility (prefer `.glb` for models, `.hdr` for environments).
-2. Normalize world scale and orientation for consistent placement.
+1. Confirm import format compatibility (prefer `.gltf/.glb` for models, `.exr/.hdr` for environments).
+2. Normalize world scale/orientation and record corrections in machine-readable content pack manifest.
 3. Run compile + bounded runtime smoke after adding assets.
 4. Add/update manifest row with license and source URL/reference.
 5. Mark `Status` as `present` only after runtime validation.
+
+## 5. Manifest Split
+
+- Human-readable inventory/provenance: this file (`content_manifest.md`).
+- Runtime machine-readable content selection: `apps/dungeon_dogfood/assets/content_pack.toml` (phase 02 deliverable).

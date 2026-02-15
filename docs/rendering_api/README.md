@@ -15,6 +15,7 @@ Current API status (as implemented):
 Primary runtime commands:
 ```bash
 cargo run -p renderer --example api_test
+cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr
 cargo run -p renderer --example demo_pbr
 cargo run -p renderer --example demo_unlit
 cargo run -p renderer --example demo_model_load

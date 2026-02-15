@@ -122,7 +122,13 @@ vec3 getNormal(MaterialMeta material)
 {
     // Perturb normal, see http://www.thetenthplanet.de/archives/1180
     vec2 normalUV = getUV(material.normalTextureSet);
-    vec3 tangentNormal = texture(normalMap, normalUV).xyz * 2.0 - 1.0;
+    vec3 normalSample = texture(normalMap, normalUV).xyz;
+    vec2 tangentXY = normalSample.xy * 2.0 - 1.0;
+    float sampledZ = normalSample.z * 2.0 - 1.0;
+    // BC5 normal maps provide XY only; when Z is missing (sampled as 0), reconstruct it.
+    float reconstructedZ = sqrt(max(1.0 - dot(tangentXY, tangentXY), 0.0));
+    float tangentZ = (normalSample.z < 0.001) ? reconstructedZ : sampledZ;
+    vec3 tangentNormal = vec3(tangentXY, tangentZ);
     tangentNormal.xy *= material.normalScale;
     tangentNormal = normalize(tangentNormal);
 
@@ -260,11 +266,10 @@ void main()
     perceptualRoughness = material.roughnessFactor;
     metallic = material.metallicFactor;
     if (material.metallicRoughnessSet > -1) {
-        // Roughness is stored in the 'g' channel, metallic is stored in the 'b' channel.
-        // This layout intentionally reserves the 'r' channel for (optional) occlusion map data
+        // Engine convention for imported PBR maps: R=roughness, G=metallic.
         vec4 mrSample = texture(roughnessMap, getUV(material.metallicRoughnessSet));
-        perceptualRoughness = mrSample.g * perceptualRoughness;
-        metallic = mrSample.b * metallic;
+        perceptualRoughness = mrSample.r * perceptualRoughness;
+        metallic = mrSample.g * metallic;
     } else {
         perceptualRoughness = clamp(perceptualRoughness, c_MinRoughness, 1.0);
         metallic = clamp(metallic, 0.0, 1.0);
@@ -423,10 +428,10 @@ void main()
                 outColor.rgb = (material.emissiveTextureSet > -1) ? texture(emissiveMap, getUV(material.emissiveTextureSet)).rgb : vec3(0.0f);
                 break;
             case 5:
-                outColor.rgb = texture(roughnessMap, inUV0).bbb;
+                outColor.rgb = texture(roughnessMap, inUV0).ggg;
                 break;
             case 6:
-                outColor.rgb = texture(roughnessMap, inUV0).ggg;
+                outColor.rgb = texture(roughnessMap, inUV0).rrr;
                 break;
         }
         outColor = SRGBtoLINEAR(outColor);

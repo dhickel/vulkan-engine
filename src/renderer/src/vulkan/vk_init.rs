@@ -1271,7 +1271,17 @@ pub fn get_supported_image_formats(
         vk::Format::B8G8R8A8_SRGB,
         vk::Format::R16G16B16A16_SFLOAT,
         vk::Format::R32G32B32A32_SFLOAT,
-        // Add any other formats you're interested in here
+        // Compressed formats
+        vk::Format::BC1_RGB_UNORM_BLOCK,
+        vk::Format::BC1_RGB_SRGB_BLOCK,
+        vk::Format::BC3_UNORM_BLOCK,
+        vk::Format::BC3_SRGB_BLOCK,
+        vk::Format::BC4_UNORM_BLOCK,
+        vk::Format::BC4_SNORM_BLOCK,
+        vk::Format::BC5_UNORM_BLOCK,
+        vk::Format::BC5_SNORM_BLOCK,
+        vk::Format::BC7_UNORM_BLOCK,
+        vk::Format::BC7_SRGB_BLOCK,
     ];
 
     let supported: HashSet<vk::Format> = candidate_formats

@@ -1,12 +1,58 @@
-use crate::api::config::{CompressionConfig, TextureCompressionMode};
-use crate::data::gpu_data::{TexturePayload, TextureSemantic};
+use crate::api::config::{AssetPolicyConfig, CompressionConfig, TextureCompressionMode};
+use crate::data::gpu_data::{TextureMeta, TexturePayload, TextureSemantic};
 use ash::vk;
-use image::DynamicImage;
 use intel_tex_2::{bc1, bc3, bc4, bc5, bc7};
+use log::debug;
+use std::collections::HashSet;
 
+#[derive(Debug)]
 pub struct CompressionDecision {
     pub format: vk::Format,
     pub quality: u8,
+}
+
+pub fn apply_compression_policy(
+    mut meta: TextureMeta,
+    semantic: TextureSemantic,
+    config: &AssetPolicyConfig,
+    supported_formats: &HashSet<vk::Format>,
+) -> TextureMeta {
+    let (width, height, bytes, format) = match &meta.payload {
+        TexturePayload::Raw {
+            width,
+            height,
+            bytes,
+            format,
+            ..
+        } => (*width, *height, bytes, *format),
+        _ => return meta,
+    };
+
+    match compress_texture(
+        width,
+        height,
+        bytes,
+        semantic,
+        &config.compression,
+        config.compression.mode != TextureCompressionMode::Disabled,
+        format,
+        supported_formats,
+    ) {
+        Ok(Some(compressed_payload)) => {
+            debug!(
+                "Compressed texture {:?} to {:?}",
+                semantic,
+                compressed_payload.format()
+            );
+            meta.payload = compressed_payload;
+            meta
+        }
+        Ok(None) => meta,
+        Err(e) => {
+            log::warn!("Texture compression failed for {:?}: {}", semantic, e);
+            meta
+        }
+    }
 }
 
 fn is_srgb(format: vk::Format) -> bool {
@@ -23,9 +69,10 @@ pub fn decide_compression(
     semantic: TextureSemantic,
     source_format: vk::Format,
     config: &CompressionConfig,
-) -> Option<CompressionDecision> {
+    supported_formats: &HashSet<vk::Format>,
+) -> Result<Option<CompressionDecision>, String> {
     if config.mode == TextureCompressionMode::Disabled {
-        return None;
+        return Ok(None);
     }
 
     // Only compress standard 8-bit unorm/srgb formats
@@ -37,7 +84,16 @@ pub fn decide_compression(
         | vk::Format::R8G8_UNORM
         | vk::Format::R8_UNORM
         | vk::Format::R8_SRGB => {}
-        _ => return None,
+        _ => {
+            return match config.mode {
+                TextureCompressionMode::Auto => Ok(None),
+                TextureCompressionMode::Force => Err(format!(
+                    "Texture compression forced, but source format {:?} is not supported",
+                    source_format
+                )),
+                TextureCompressionMode::Disabled => Ok(None),
+            };
+        }
     }
 
     let target_format = match semantic {
@@ -49,15 +105,25 @@ pub fn decide_compression(
             }
         }
         TextureSemantic::Normal => vk::Format::BC5_UNORM_BLOCK,
-        TextureSemantic::MetallicRoughness | TextureSemantic::Occlusion => {
-            vk::Format::BC5_UNORM_BLOCK
-        }
+        TextureSemantic::MetallicRoughness => vk::Format::BC5_UNORM_BLOCK,
+        TextureSemantic::Occlusion => vk::Format::BC4_UNORM_BLOCK,
     };
 
-    Some(CompressionDecision {
+    if !supported_formats.contains(&target_format) {
+        return match config.mode {
+            TextureCompressionMode::Auto => Ok(None),
+            TextureCompressionMode::Force => Err(format!(
+                "Texture compression forced for {:?}, but target format {:?} is unsupported by this device",
+                semantic, target_format
+            )),
+            TextureCompressionMode::Disabled => Ok(None),
+        };
+    }
+
+    Ok(Some(CompressionDecision {
         format: target_format,
         quality: config.quality,
-    })
+    }))
 }
 
 pub fn compress_texture(
@@ -68,8 +134,11 @@ pub fn compress_texture(
     config: &CompressionConfig,
     generate_mips: bool,
     source_format: vk::Format,
+    supported_formats: &HashSet<vk::Format>,
 ) -> Result<Option<TexturePayload>, String> {
-    let Some(decision) = decide_compression(semantic, source_format, config) else {
+    let Some(decision) =
+        decide_compression(semantic, source_format, config, supported_formats)?
+    else {
         return Ok(None);
     };
 
@@ -139,24 +208,8 @@ pub fn compress_texture(
         let mip_height = mip.height();
         let mut rgba_bytes = mip.into_raw();
 
-        // 2. Swizzle for BC5 if needed
-        if decision.format == vk::Format::BC5_UNORM_BLOCK
-            || decision.format == vk::Format::BC5_SNORM_BLOCK
-        {
-            if semantic == TextureSemantic::MetallicRoughness {
-                // glTF: G=Roughness, B=Metallic.
-                // BC5 encodes R and G.
-                // We want R=Roughness, G=Metallic (or vice versa, match shader expectation).
-                // Let's assume shader will read .r for Roughness, .g for Metallic.
-                // So input R <- G, Input G <- B.
-                for pixel in rgba_bytes.chunks_exact_mut(4) {
-                    let r_val = pixel[1]; // G (Roughness)
-                    let g_val = pixel[2]; // B (Metallic)
-                    pixel[0] = r_val;
-                    pixel[1] = g_val;
-                }
-            }
-        }
+        // Metallic-roughness textures are normalized to R=roughness, G=metalness upstream.
+        // BC5 encoding simply consumes the RG channels in that canonical layout.
 
         let compressed_data = match decision.format {
             vk::Format::BC1_RGB_UNORM_BLOCK | vk::Format::BC1_RGB_SRGB_BLOCK => {
@@ -190,8 +243,7 @@ pub fn compress_texture(
             }
             vk::Format::BC5_UNORM_BLOCK | vk::Format::BC5_SNORM_BLOCK => {
                 // Extract RG channels for BC5
-                // Note: We already swizzled RGBA in place if needed (MetallicRoughness).
-                // Now we just pack them into RG buffer.
+                // Metallic-roughness data is pre-normalized to RG layout before compression.
                 let rg_bytes: Vec<u8> = rgba_bytes.chunks_exact(4).flat_map(|p| [p[0], p[1]]).collect();
                 let surface = intel_tex_2::RgSurface {
                     width: mip_width,
@@ -232,4 +284,57 @@ pub fn compress_texture(
         mips_levels: mips_count,
         mip_offsets,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(mode: TextureCompressionMode) -> CompressionConfig {
+        CompressionConfig { mode, quality: 50 }
+    }
+
+    #[test]
+    fn choose_bc4_for_occlusion_when_supported() {
+        let mut supported = HashSet::new();
+        supported.insert(vk::Format::BC4_UNORM_BLOCK);
+
+        let decision = decide_compression(
+            TextureSemantic::Occlusion,
+            vk::Format::R8_UNORM,
+            &cfg(TextureCompressionMode::Auto),
+            &supported,
+        )
+        .expect("decision should not error in auto mode")
+        .expect("occlusion should choose compression when supported");
+
+        assert_eq!(decision.format, vk::Format::BC4_UNORM_BLOCK);
+    }
+
+    #[test]
+    fn auto_mode_falls_back_when_target_unsupported() {
+        let supported = HashSet::new();
+        let decision = decide_compression(
+            TextureSemantic::Normal,
+            vk::Format::R8G8B8A8_UNORM,
+            &cfg(TextureCompressionMode::Auto),
+            &supported,
+        )
+        .expect("auto mode should not hard fail");
+        assert!(decision.is_none());
+    }
+
+    #[test]
+    fn force_mode_errors_when_target_unsupported() {
+        let supported = HashSet::new();
+        let err = decide_compression(
+            TextureSemantic::Normal,
+            vk::Format::R8G8B8A8_UNORM,
+            &cfg(TextureCompressionMode::Force),
+            &supported,
+        )
+        .expect_err("force mode must fail when target is unsupported");
+
+        assert!(err.contains("unsupported"));
+    }
 }

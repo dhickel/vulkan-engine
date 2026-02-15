@@ -222,48 +222,6 @@ pub fn load_model(
     }
 }
 
-fn compress_meta(
-    mut meta: TextureMeta,
-    semantic: TextureSemantic,
-    config: &AssetPolicyConfig,
-) -> TextureMeta {
-    let (width, height, bytes, format) = match &meta.payload {
-        TexturePayload::Raw {
-            width,
-            height,
-            bytes,
-            format,
-            ..
-        } => (*width, *height, bytes, *format),
-        _ => return meta,
-    };
-
-    match compression::compress_texture(
-        width,
-        height,
-        bytes,
-        semantic,
-        &config.compression,
-        config.compression.mode != crate::api::config::TextureCompressionMode::Disabled,
-        format,
-    ) {
-        Ok(Some(compressed_payload)) => {
-            debug!(
-                "Compressed texture {:?} to {:?}",
-                semantic,
-                compressed_payload.format()
-            );
-            meta.payload = compressed_payload;
-            meta
-        }
-        Ok(None) => meta,
-        Err(e) => {
-            log::warn!("Texture compression failed for {:?}: {}", semantic, e);
-            meta
-        }
-    }
-}
-
 pub fn process_materials(
     ai_scene: &aiScene,
     base_path: Option<&str>,
@@ -380,7 +338,12 @@ pub fn process_materials(
                 .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
 
             if let Some((mut meta, _source)) = base_color {
-                meta = compress_meta(meta, TextureSemantic::BaseColor, policy_config);
+                meta = compression::apply_compression_policy(
+                    meta,
+                    TextureSemantic::BaseColor,
+                    policy_config,
+                    &data_cache.supported_image_formats,
+                );
                 let color = get_color_factor(ai_material);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
@@ -393,7 +356,12 @@ pub fn process_materials(
                 met_rough_roughness,
                 i,
             ) {
-                meta = compress_meta(meta, TextureSemantic::MetallicRoughness, policy_config);
+                meta = compression::apply_compression_policy(
+                    meta,
+                    TextureSemantic::MetallicRoughness,
+                    policy_config,
+                    &data_cache.supported_image_formats,
+                );
                 let metallic_factor = get_float_factor(ai_material, AI_MATKEY_METALLIC_FACTOR, 1.0);
                 let roughness_factor = get_float_factor(
                     ai_material,
@@ -412,7 +380,12 @@ pub fn process_materials(
             }
 
             if let Some((mut meta, _source)) = normal {
-                meta = compress_meta(meta, TextureSemantic::Normal, policy_config);
+                meta = compression::apply_compression_policy(
+                    meta,
+                    TextureSemantic::Normal,
+                    policy_config,
+                    &data_cache.supported_image_formats,
+                );
                 let normal_scale = get_float_factor(
                     ai_material,
                     AI_MATKEY_BUMPSCALING,
@@ -425,7 +398,12 @@ pub fn process_materials(
             }
 
             if let Some((mut meta, _source)) = occlusion {
-                meta = compress_meta(meta, TextureSemantic::Occlusion, policy_config);
+                meta = compression::apply_compression_policy(
+                    meta,
+                    TextureSemantic::Occlusion,
+                    policy_config,
+                    &data_cache.supported_image_formats,
+                );
                 let occlusion_strength = get_float_factor(
                     ai_material,
                     AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION,
@@ -438,7 +416,12 @@ pub fn process_materials(
             }
 
             if let Some((mut meta, _source)) = emissive {
-                meta = compress_meta(meta, TextureSemantic::Emissive, policy_config);
+                meta = compression::apply_compression_policy(
+                    meta,
+                    TextureSemantic::Emissive,
+                    policy_config,
+                    &data_cache.supported_image_formats,
+                );
                 let emissive_factor = get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE);
                 let emissive_strength =
                     get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
@@ -675,7 +658,7 @@ unsafe fn get_texture_meta(
 }
 
 fn normalize_metal_roughness_texture(meta: TextureMeta) -> TextureMeta {
-    let (width, height, format, bytes, mips_levels) = match &meta.payload {
+    let (width, height, format, _bytes, mips_levels) = match &meta.payload {
         TexturePayload::Raw {
             width,
             height,
@@ -687,65 +670,42 @@ fn normalize_metal_roughness_texture(meta: TextureMeta) -> TextureMeta {
     };
 
     let pixel_count = (width as usize) * (height as usize);
+    let roughness = extract_pbr_scalar_channel_u8(&meta, 0, 1);
+    let metalness = extract_pbr_scalar_channel_u8(&meta, 1, 2);
 
-    match format {
-        // Single channel METALNESS map: place metal in B and default roughness to 1.0 in G.
-        vk::Format::R8_UNORM => {
-            if bytes.len() != pixel_count {
-                debug!(
-                    "Unexpected R8 metallic/roughness byte length (got {}, expected {}). Keeping original.",
-                    bytes.len(),
-                    pixel_count
-                );
-                return meta;
-            }
+    let (Some(roughness), Some(metalness)) = (roughness, metalness) else {
+        debug!(
+            "Could not normalize combined metallic-roughness texture with format {:?}. Keeping original.",
+            format
+        );
+        return meta;
+    };
 
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for &m in bytes {
-                out.extend_from_slice(&[255, 255, m, 255]);
-            }
+    if roughness.len() != pixel_count || metalness.len() != pixel_count {
+        debug!(
+            "Combined metallic-roughness extraction length mismatch (rough {}, metal {}, expected {}). Keeping original.",
+            roughness.len(),
+            metalness.len(),
+            pixel_count
+        );
+        return meta;
+    }
 
-            TextureMeta {
-                payload: TexturePayload::Raw {
-                    bytes: out,
-                    width,
-                    height,
-                    format: vk::Format::R8G8B8A8_UNORM,
-                    mips_levels,
-                },
-                ..meta
-            }
-        }
-        // Two channel map: interpret R as roughness, G as metalness.
-        vk::Format::R8G8_UNORM => {
-            if bytes.len() != pixel_count * 2 {
-                debug!(
-                    "Unexpected R8G8 metallic/roughness byte length (got {}, expected {}). Keeping original.",
-                    bytes.len(),
-                    pixel_count * 2
-                );
-                return meta;
-            }
+    let mut out = Vec::with_capacity(pixel_count * 4);
+    for (&rough, &metal) in roughness.iter().zip(metalness.iter()) {
+        // Engine convention: R=roughness, G=metalness, B unused, A=1.0
+        out.extend_from_slice(&[rough, metal, 255, 255]);
+    }
 
-            let mut out = Vec::with_capacity(pixel_count * 4);
-            for px in bytes.chunks_exact(2) {
-                let roughness = px[0];
-                let metal = px[1];
-                out.extend_from_slice(&[255, roughness, metal, 255]);
-            }
-
-            TextureMeta {
-                payload: TexturePayload::Raw {
-                    bytes: out,
-                    width,
-                    height,
-                    format: vk::Format::R8G8B8A8_UNORM,
-                    mips_levels,
-                },
-                ..meta
-            }
-        }
-        _ => meta,
+    TextureMeta {
+        payload: TexturePayload::Raw {
+            bytes: out,
+            width,
+            height,
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels,
+        },
+        ..meta
     }
 }
 
@@ -834,8 +794,8 @@ fn combine_metal_roughness_sources(
 
     let mut out = Vec::with_capacity(pixel_count * 4);
     for (&rough, &metal) in rough_values.iter().zip(metal_values.iter()) {
-        // R reserved, G=roughness, B=metalness, A=1.0
-        out.extend_from_slice(&[255, rough, metal, 255]);
+        // Engine convention: R=roughness, G=metalness, B unused, A=1.0
+        out.extend_from_slice(&[rough, metal, 255, 255]);
     }
 
     TextureMeta {
@@ -855,7 +815,7 @@ fn normalize_metalness_source_texture(meta: TextureMeta) -> TextureMeta {
     match meta.payload.format() {
         // METALNESS is often authored as a single-channel map.
         vk::Format::R8_UNORM | vk::Format::R8G8_UNORM => normalize_metalness_only_texture(meta),
-        // If source already has full channels, prefer combined handling (g=roughness, b=metalness).
+        // If source already has full channels, normalize to engine convention (R=roughness, G=metalness).
         _ => normalize_metal_roughness_texture(meta),
     }
 }
@@ -880,8 +840,8 @@ fn normalize_metalness_only_texture(meta: TextureMeta) -> TextureMeta {
 
     let mut out = Vec::with_capacity(metalness.len() * 4);
     for m in metalness {
-        // R unused, G=roughness (default 1.0), B=metalness, A=1.0
-        out.extend_from_slice(&[255, 255, m, 255]);
+        // Engine convention: R=roughness (default 1.0), G=metalness, B unused, A=1.0
+        out.extend_from_slice(&[255, m, 255, 255]);
     }
 
     TextureMeta {
@@ -907,8 +867,8 @@ fn normalize_roughness_only_texture(meta: TextureMeta) -> TextureMeta {
 
     let mut out = Vec::with_capacity(roughness.len() * 4);
     for r in roughness {
-        // R unused, G=roughness, B=metalness (default 1.0), A=1.0
-        out.extend_from_slice(&[255, r, 255, 255]);
+        // Engine convention: R=roughness, G=metalness (default 1.0), B unused, A=1.0
+        out.extend_from_slice(&[r, 255, 255, 255]);
     }
 
     TextureMeta {

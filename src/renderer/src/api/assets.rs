@@ -16,7 +16,7 @@ use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
 use crate::data::data_util::resolve_texture_mip_count;
-use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, Vertex};
+use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, TextureSemantic, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
@@ -1143,7 +1143,7 @@ fn load_texture_gpu_ready_with_policy(
         1
     };
 
-    let texture_meta = TextureMeta {
+    let mut texture_meta = TextureMeta {
         payload: crate::data::gpu_data::TexturePayload::Raw {
             bytes: image.as_bytes().to_vec(),
             width: image.width(),
@@ -1154,6 +1154,13 @@ fn load_texture_gpu_ready_with_policy(
         uv_index: 0,
         sampler_info: Some(policy.to_sampler_info(mip_count)),
     };
+
+    texture_meta = crate::data::compression::apply_compression_policy(
+        texture_meta,
+        TextureSemantic::Generic,
+        policy_config,
+        &data_cache.supported_image_formats,
+    );
 
     let texture_id = {
         let mut texture_cache = data_cache

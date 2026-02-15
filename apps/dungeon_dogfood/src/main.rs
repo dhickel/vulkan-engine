@@ -56,6 +56,7 @@ fn main() {
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         headless: false,
+        asset_policy: renderer::AssetPolicyConfig::default(),
     };
 
     let mut renderer =
