@@ -341,13 +341,87 @@ pub enum Sampler {
     Nearest,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TextureSemantic {
+    BaseColor,
+    Normal,
+    MetallicRoughness,
+    Occlusion,
+    Emissive,
+    Generic,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TexturePayload {
+    Raw {
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        mips_levels: u32,
+    },
+    Compressed {
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        mips_levels: u32,
+        mip_offsets: Vec<u32>,
+    },
+}
+
+impl Default for TexturePayload {
+    fn default() -> Self {
+        Self::Raw {
+            bytes: Vec::new(),
+            width: 0,
+            height: 0,
+            format: vk::Format::UNDEFINED,
+            mips_levels: 0,
+        }
+    }
+}
+
+impl TexturePayload {
+    pub fn format(&self) -> vk::Format {
+        match self {
+            Self::Raw { format, .. } => *format,
+            Self::Compressed { format, .. } => *format,
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        match self {
+            Self::Raw { width, .. } => *width,
+            Self::Compressed { width, .. } => *width,
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        match self {
+            Self::Raw { height, .. } => *height,
+            Self::Compressed { height, .. } => *height,
+        }
+    }
+
+    pub fn mips_levels(&self) -> u32 {
+        match self {
+            Self::Raw { mips_levels, .. } => *mips_levels,
+            Self::Compressed { mips_levels, .. } => *mips_levels,
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Raw { bytes, .. } => bytes,
+            Self::Compressed { bytes, .. } => bytes,
+        }
+    }
+}
+
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct TextureMeta {
-    pub bytes: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub format: vk::Format,
-    pub mips_levels: u32,
+    pub payload: TexturePayload,
     pub uv_index: u32,
     pub sampler_info: Option<VkSamplerInfo>,
 }

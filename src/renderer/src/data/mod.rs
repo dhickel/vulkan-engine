@@ -5,6 +5,7 @@
 pub mod asset_manifest;
 pub mod assimp_util;
 pub mod camera;
+pub mod compression;
 pub mod data_cache;
 pub mod data_util;
 pub mod environment_import;

@@ -5,12 +5,13 @@
 
 use crate::api::AssetPolicyConfig;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
+use crate::data::compression;
 use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
 use crate::data::data_util::resolve_texture_mip_count;
 use crate::data::gpu_data;
 use crate::data::gpu_data::{
     AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap, OcclusionMap,
-    Sampler, SurfaceMeta, TextureMeta, Vertex,
+    Sampler, SurfaceMeta, TextureMeta, TexturePayload, TextureSemantic, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
@@ -221,6 +222,48 @@ pub fn load_model(
     }
 }
 
+fn compress_meta(
+    mut meta: TextureMeta,
+    semantic: TextureSemantic,
+    config: &AssetPolicyConfig,
+) -> TextureMeta {
+    let (width, height, bytes, format) = match &meta.payload {
+        TexturePayload::Raw {
+            width,
+            height,
+            bytes,
+            format,
+            ..
+        } => (*width, *height, bytes, *format),
+        _ => return meta,
+    };
+
+    match compression::compress_texture(
+        width,
+        height,
+        bytes,
+        semantic,
+        &config.compression,
+        config.compression.mode != crate::api::config::TextureCompressionMode::Disabled,
+        format,
+    ) {
+        Ok(Some(compressed_payload)) => {
+            debug!(
+                "Compressed texture {:?} to {:?}",
+                semantic,
+                compressed_payload.format()
+            );
+            meta.payload = compressed_payload;
+            meta
+        }
+        Ok(None) => meta,
+        Err(e) => {
+            log::warn!("Texture compression failed for {:?}: {}", semantic, e);
+            meta
+        }
+    }
+}
+
 pub fn process_materials(
     ai_scene: &aiScene,
     base_path: Option<&str>,
@@ -336,19 +379,21 @@ pub fn process_materials(
                 .lock()
                 .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
 
-            if let Some((meta, _source)) = base_color {
+            if let Some((mut meta, _source)) = base_color {
+                meta = compress_meta(meta, TextureSemantic::BaseColor, policy_config);
                 let color = get_color_factor(ai_material);
                 let uv_set = meta.uv_index;
                 let tex_id = tex_cache.add_texture(meta);
                 material_meta.add_base_color(tex_id, color, uv_set);
             }
 
-            if let Some(meta) = resolve_metallic_roughness_meta(
+            if let Some(mut meta) = resolve_metallic_roughness_meta(
                 met_rough_combined,
                 met_rough_metalness,
                 met_rough_roughness,
                 i,
             ) {
+                meta = compress_meta(meta, TextureSemantic::MetallicRoughness, policy_config);
                 let metallic_factor = get_float_factor(ai_material, AI_MATKEY_METALLIC_FACTOR, 1.0);
                 let roughness_factor = get_float_factor(
                     ai_material,
@@ -366,7 +411,8 @@ pub fn process_materials(
                 );
             }
 
-            if let Some((meta, _source)) = normal {
+            if let Some((mut meta, _source)) = normal {
+                meta = compress_meta(meta, TextureSemantic::Normal, policy_config);
                 let normal_scale = get_float_factor(
                     ai_material,
                     AI_MATKEY_BUMPSCALING,
@@ -378,7 +424,8 @@ pub fn process_materials(
                 material_meta.add_normal(tex_id, normal_scale, uv_set);
             }
 
-            if let Some((meta, _source)) = occlusion {
+            if let Some((mut meta, _source)) = occlusion {
+                meta = compress_meta(meta, TextureSemantic::Occlusion, policy_config);
                 let occlusion_strength = get_float_factor(
                     ai_material,
                     AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION,
@@ -390,7 +437,8 @@ pub fn process_materials(
                 material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
             }
 
-            if let Some((meta, _source)) = emissive {
+            if let Some((mut meta, _source)) = emissive {
+                meta = compress_meta(meta, TextureSemantic::Emissive, policy_config);
                 let emissive_factor = get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE);
                 let emissive_strength =
                     get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
@@ -609,11 +657,13 @@ unsafe fn get_texture_meta(
                     };
 
                     return Ok(Some(TextureMeta {
-                        bytes,
-                        width,
-                        height,
-                        format,
-                        mips_levels: mip_count,
+                        payload: TexturePayload::Raw {
+                            bytes,
+                            width,
+                            height,
+                            format,
+                            mips_levels: mip_count,
+                        },
                         uv_index,
                         sampler_info: Some(policy.to_sampler_info(mip_count)),
                     }));
@@ -625,52 +675,73 @@ unsafe fn get_texture_meta(
 }
 
 fn normalize_metal_roughness_texture(meta: TextureMeta) -> TextureMeta {
-    let pixel_count = (meta.width as usize) * (meta.height as usize);
+    let (width, height, format, bytes, mips_levels) = match &meta.payload {
+        TexturePayload::Raw {
+            width,
+            height,
+            format,
+            bytes,
+            mips_levels,
+        } => (*width, *height, *format, bytes, *mips_levels),
+        _ => return meta,
+    };
 
-    match meta.format {
+    let pixel_count = (width as usize) * (height as usize);
+
+    match format {
         // Single channel METALNESS map: place metal in B and default roughness to 1.0 in G.
         vk::Format::R8_UNORM => {
-            if meta.bytes.len() != pixel_count {
+            if bytes.len() != pixel_count {
                 debug!(
                     "Unexpected R8 metallic/roughness byte length (got {}, expected {}). Keeping original.",
-                    meta.bytes.len(),
+                    bytes.len(),
                     pixel_count
                 );
                 return meta;
             }
 
             let mut out = Vec::with_capacity(pixel_count * 4);
-            for &m in &meta.bytes {
+            for &m in bytes {
                 out.extend_from_slice(&[255, 255, m, 255]);
             }
 
             TextureMeta {
-                bytes: out,
-                format: vk::Format::R8G8B8A8_UNORM,
+                payload: TexturePayload::Raw {
+                    bytes: out,
+                    width,
+                    height,
+                    format: vk::Format::R8G8B8A8_UNORM,
+                    mips_levels,
+                },
                 ..meta
             }
         }
         // Two channel map: interpret R as roughness, G as metalness.
         vk::Format::R8G8_UNORM => {
-            if meta.bytes.len() != pixel_count * 2 {
+            if bytes.len() != pixel_count * 2 {
                 debug!(
                     "Unexpected R8G8 metallic/roughness byte length (got {}, expected {}). Keeping original.",
-                    meta.bytes.len(),
+                    bytes.len(),
                     pixel_count * 2
                 );
                 return meta;
             }
 
             let mut out = Vec::with_capacity(pixel_count * 4);
-            for px in meta.bytes.chunks_exact(2) {
+            for px in bytes.chunks_exact(2) {
                 let roughness = px[0];
                 let metal = px[1];
                 out.extend_from_slice(&[255, roughness, metal, 255]);
             }
 
             TextureMeta {
-                bytes: out,
-                format: vk::Format::R8G8B8A8_UNORM,
+                payload: TexturePayload::Raw {
+                    bytes: out,
+                    width,
+                    height,
+                    format: vk::Format::R8G8B8A8_UNORM,
+                    mips_levels,
+                },
                 ..meta
             }
         }
@@ -687,7 +758,8 @@ fn resolve_metallic_roughness_meta(
     if let Some(meta) = combined {
         debug!(
             "Material {} metallic_roughness resolved from Assimp UNKNOWN source (format {:?}).",
-            material_index, meta.format
+            material_index,
+            meta.payload.format()
         );
         return Some(normalize_metal_roughness_texture(meta));
     }
@@ -696,7 +768,7 @@ fn resolve_metallic_roughness_meta(
         (Some(metalness), Some(roughness)) => {
             debug!(
                 "Material {} metallic_roughness resolved from split METALNESS + DIFFUSE_ROUGHNESS sources (formats {:?} + {:?}).",
-                material_index, metalness.format, roughness.format
+                material_index, metalness.payload.format(), roughness.payload.format()
             );
             Some(combine_metal_roughness_sources(
                 metalness,
@@ -707,14 +779,16 @@ fn resolve_metallic_roughness_meta(
         (Some(meta), None) => {
             debug!(
                 "Material {} metallic_roughness resolved from METALNESS-only source (format {:?}).",
-                material_index, meta.format
+                material_index,
+                meta.payload.format()
             );
             Some(normalize_metalness_source_texture(meta))
         }
         (None, Some(meta)) => {
             debug!(
                 "Material {} metallic_roughness resolved from DIFFUSE_ROUGHNESS-only source (format {:?}).",
-                material_index, meta.format
+                material_index,
+                meta.payload.format()
             );
             Some(normalize_roughness_source_texture(meta))
         }
@@ -727,19 +801,21 @@ fn combine_metal_roughness_sources(
     roughness: TextureMeta,
     material_index: usize,
 ) -> TextureMeta {
-    if metalness.width != roughness.width || metalness.height != roughness.height {
+    if metalness.payload.width() != roughness.payload.width()
+        || metalness.payload.height() != roughness.payload.height()
+    {
         debug!(
             "Material {} split METALNESS/DIFFUSE_ROUGHNESS dimensions mismatch ({}x{} vs {}x{}). Falling back to METALNESS-only normalization.",
             material_index,
-            metalness.width,
-            metalness.height,
-            roughness.width,
-            roughness.height
+            metalness.payload.width(),
+            metalness.payload.height(),
+            roughness.payload.width(),
+            roughness.payload.height()
         );
         return normalize_metalness_source_texture(metalness);
     }
 
-    let pixel_count = (metalness.width as usize) * (metalness.height as usize);
+    let pixel_count = (metalness.payload.width() as usize) * (metalness.payload.height() as usize);
     let metal_values =
         extract_pbr_scalar_channel_u8(&metalness, 1, 2).unwrap_or_else(|| vec![255; pixel_count]);
     let rough_values =
@@ -763,18 +839,20 @@ fn combine_metal_roughness_sources(
     }
 
     TextureMeta {
-        bytes: out,
-        width: roughness.width,
-        height: roughness.height,
-        format: vk::Format::R8G8B8A8_UNORM,
-        mips_levels: roughness.mips_levels,
+        payload: TexturePayload::Raw {
+            bytes: out,
+            width: roughness.payload.width(),
+            height: roughness.payload.height(),
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels: roughness.payload.mips_levels(),
+        },
         uv_index: roughness.uv_index,
         sampler_info: roughness.sampler_info.clone(),
     }
 }
 
 fn normalize_metalness_source_texture(meta: TextureMeta) -> TextureMeta {
-    match meta.format {
+    match meta.payload.format() {
         // METALNESS is often authored as a single-channel map.
         vk::Format::R8_UNORM | vk::Format::R8G8_UNORM => normalize_metalness_only_texture(meta),
         // If source already has full channels, prefer combined handling (g=roughness, b=metalness).
@@ -783,7 +861,7 @@ fn normalize_metalness_source_texture(meta: TextureMeta) -> TextureMeta {
 }
 
 fn normalize_roughness_source_texture(meta: TextureMeta) -> TextureMeta {
-    match meta.format {
+    match meta.payload.format() {
         // DIFFUSE_ROUGHNESS is often authored as a single-channel map.
         vk::Format::R8_UNORM | vk::Format::R8G8_UNORM => normalize_roughness_only_texture(meta),
         // If source already has full channels, prefer combined handling.
@@ -795,7 +873,7 @@ fn normalize_metalness_only_texture(meta: TextureMeta) -> TextureMeta {
     let Some(metalness) = extract_pbr_scalar_channel_u8(&meta, 1, 2) else {
         debug!(
             "Could not normalize METALNESS texture with format {:?}. Keeping original.",
-            meta.format
+            meta.payload.format()
         );
         return meta;
     };
@@ -807,8 +885,13 @@ fn normalize_metalness_only_texture(meta: TextureMeta) -> TextureMeta {
     }
 
     TextureMeta {
-        bytes: out,
-        format: vk::Format::R8G8B8A8_UNORM,
+        payload: TexturePayload::Raw {
+            bytes: out,
+            width: meta.payload.width(),
+            height: meta.payload.height(),
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels: meta.payload.mips_levels(),
+        },
         ..meta
     }
 }
@@ -817,7 +900,7 @@ fn normalize_roughness_only_texture(meta: TextureMeta) -> TextureMeta {
     let Some(roughness) = extract_pbr_scalar_channel_u8(&meta, 0, 1) else {
         debug!(
             "Could not normalize DIFFUSE_ROUGHNESS texture with format {:?}. Keeping original.",
-            meta.format
+            meta.payload.format()
         );
         return meta;
     };
@@ -829,8 +912,13 @@ fn normalize_roughness_only_texture(meta: TextureMeta) -> TextureMeta {
     }
 
     TextureMeta {
-        bytes: out,
-        format: vk::Format::R8G8B8A8_UNORM,
+        payload: TexturePayload::Raw {
+            bytes: out,
+            width: meta.payload.width(),
+            height: meta.payload.height(),
+            format: vk::Format::R8G8B8A8_UNORM,
+            mips_levels: meta.payload.mips_levels(),
+        },
         ..meta
     }
 }
@@ -840,35 +928,46 @@ fn extract_pbr_scalar_channel_u8(
     preferred_rg: usize,
     preferred_rgb: usize,
 ) -> Option<Vec<u8>> {
-    let pixel_count = (meta.width as usize) * (meta.height as usize);
-    match meta.format {
+    let (width, height, format, bytes) = match &meta.payload {
+        TexturePayload::Raw {
+            width,
+            height,
+            format,
+            bytes,
+            ..
+        } => (*width, *height, *format, bytes),
+        _ => return None,
+    };
+
+    let pixel_count = (width as usize) * (height as usize);
+    match format {
         vk::Format::R8_UNORM => {
-            if meta.bytes.len() == pixel_count {
-                Some(meta.bytes.clone())
+            if bytes.len() == pixel_count {
+                Some(bytes.clone())
             } else {
                 None
             }
         }
         vk::Format::R8G8_UNORM => {
-            if meta.bytes.len() == pixel_count * 2 {
+            if bytes.len() == pixel_count * 2 {
                 let channel = preferred_rg.min(1);
-                Some(meta.bytes.chunks_exact(2).map(|px| px[channel]).collect())
+                Some(bytes.chunks_exact(2).map(|px| px[channel]).collect())
             } else {
                 None
             }
         }
         vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-            if meta.bytes.len() == pixel_count * 3 {
+            if bytes.len() == pixel_count * 3 {
                 let channel = preferred_rgb.min(2);
-                Some(meta.bytes.chunks_exact(3).map(|px| px[channel]).collect())
+                Some(bytes.chunks_exact(3).map(|px| px[channel]).collect())
             } else {
                 None
             }
         }
         vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
-            if meta.bytes.len() == pixel_count * 4 {
+            if bytes.len() == pixel_count * 4 {
                 let channel = preferred_rgb.min(2);
-                Some(meta.bytes.chunks_exact(4).map(|px| px[channel]).collect())
+                Some(bytes.chunks_exact(4).map(|px| px[channel]).collect())
             } else {
                 None
             }

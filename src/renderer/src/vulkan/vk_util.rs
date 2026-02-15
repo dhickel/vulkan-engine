@@ -741,19 +741,19 @@ pub fn upload_skybox(
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
 ) -> VkCubeMap {
-    let face_width = tex_meta.width / 6;
-    let format_size = get_format_size(tex_meta.format);
+    let face_width = tex_meta.payload.width() / 6;
+    let format_size = get_format_size(tex_meta.payload.format());
 
     let staging_buffer = allocate_and_write_buffer(
         allocator,
-        &tex_meta.bytes,
+        tex_meta.payload.bytes(),
         vk::BufferUsageFlags::TRANSFER_SRC,
     )
     .unwrap();
 
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(tex_meta.format)
+        .format(tex_meta.payload.format())
         .mip_levels(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
@@ -762,7 +762,7 @@ pub fn upload_skybox(
         .extent(
             vk::Extent3D::default()
                 .width(face_width)
-                .height(tex_meta.height)
+                .height(tex_meta.payload.height())
                 .depth(1),
         )
         .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
@@ -806,12 +806,12 @@ pub fn upload_skybox(
         // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
             .map(|i| {
-                let face_size = (face_width * tex_meta.height * format_size) as u64;
+                let face_size = (face_width * tex_meta.payload.height() * format_size) as u64;
                 let buffer_offset = i as u64 * face_size;
                 vk::BufferImageCopy::default()
                     .buffer_offset(buffer_offset)
                     .buffer_row_length(face_width)
-                    .buffer_image_height(tex_meta.height)
+                    .buffer_image_height(tex_meta.payload.height())
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: 0,
@@ -821,7 +821,7 @@ pub fn upload_skybox(
                     .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                     .image_extent(vk::Extent3D {
                         width: face_width,
-                        height: tex_meta.height,
+                        height: tex_meta.payload.height(),
                         depth: 1,
                     })
             })
@@ -892,7 +892,7 @@ pub fn upload_skybox(
         let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::CUBE)
-            .format(tex_meta.format)
+            .format(tex_meta.payload.format())
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
@@ -906,14 +906,14 @@ pub fn upload_skybox(
         destroy_buffer(allocator, staging_buffer);
 
         let full_extent = Extent3D {
-            width: tex_meta.width,
-            height: tex_meta.height,
+            width: tex_meta.payload.width(),
+            height: tex_meta.payload.height(),
             depth: 1,
         };
 
         let face_extent = Extent3D {
             width: face_width,
-            height: tex_meta.height,
+            height: tex_meta.payload.height(),
             depth: 1,
         };
 
@@ -944,11 +944,13 @@ pub fn upload_cubemap_faces(
 ) -> VkCubeMap {
     // Delegate to upload_skybox with face-major layout convention
     let meta = TextureMeta {
-        bytes,
-        width: face_size * 6,
-        height: face_size,
-        format,
-        mips_levels: 1,
+        payload: crate::data::gpu_data::TexturePayload::Raw {
+            bytes,
+            width: face_size * 6,
+            height: face_size,
+            format,
+            mips_levels: 1,
+        },
         uv_index: 0,
         sampler_info: None,
     };
@@ -1397,7 +1399,7 @@ pub fn record_host_to_image_buffer(
     supports_linear_mip_blit: &[bool],
     alignment: u64,
     ids: &[u32],
-    queue: vk::Queue,
+    queue: vk::Queue, // queue is unused in function body, removed from signature? No, keep signature for now.
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
     if image_meta.len() != ids.len() {
         return Err("Image upload metadata and ids length mismatch".to_string());
@@ -1418,17 +1420,11 @@ pub fn record_host_to_image_buffer(
         .iter()
         .zip(ids.iter())
         .map(|(meta, id)| {
-            let size = meta.bytes.len().next_multiple_of(alignment as usize);
+            let bytes = meta.payload.bytes();
+            let size = bytes.len().next_multiple_of(alignment as usize);
 
             unsafe {
-                std::ptr::copy_nonoverlapping(meta.bytes.as_ptr(), host_ptr, meta.bytes.len());
-
-                // data_cache::TextureCache::save_debug_image(
-                //     meta,
-                //     std::slice::from_raw_parts(host_ptr, meta.bytes.len()),
-                //     format!("_buffer_debug_{:?}.png", id),
-                // );
-
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), host_ptr, bytes.len());
                 host_ptr = host_ptr.add(size);
                 let curr_offset = offset;
                 offset = offset.add(size as u64);
@@ -1442,22 +1438,32 @@ pub fn record_host_to_image_buffer(
         .zip(ids.iter())
         .zip(supports_linear_mip_blit.iter())
         .map(|((meta, id), supports_linear_blit)| {
-            let effective_mips =
-                resolve_upload_mip_levels(meta.mips_levels, *supports_linear_blit);
-            if effective_mips != meta.mips_levels {
+            let format = meta.payload.format();
+            let width = meta.payload.width();
+            let height = meta.payload.height();
+            let mips = meta.payload.mips_levels();
+
+            let effective_mips = match &meta.payload {
+                crate::data::gpu_data::TexturePayload::Compressed { .. } => mips,
+                crate::data::gpu_data::TexturePayload::Raw { .. } => {
+                    resolve_upload_mip_levels(mips, *supports_linear_blit)
+                }
+            };
+
+            if effective_mips != mips {
                 warn!(
                     "Texture id {} format {:?} does not support linear mip blit; clamping mip levels from {} to 1",
-                    id, meta.format, meta.mips_levels
+                    id, format, mips
                 );
             }
             create_image(
                 device,
                 allocator,
                 Extent3D::default()
-                    .height(meta.height)
-                    .width(meta.width)
+                    .height(height)
+                    .width(width)
                     .depth(1),
-                meta.format,
+                format,
                 vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_DST
                     | vk::ImageUsageFlags::TRANSFER_SRC,
@@ -1478,7 +1484,11 @@ pub fn record_host_to_image_buffer(
     }
 
     // Perform buffer to image copies
-    for (image_alloc, offset) in image_allocs.iter().zip(image_offsets.iter()) {
+    for ((image_alloc, offset), meta) in image_allocs
+        .iter()
+        .zip(image_offsets.iter())
+        .zip(image_meta.iter())
+    {
         vk_util::record_image_barrier(
             device,
             transfer_cmd_buffer,
@@ -1496,26 +1506,72 @@ pub fn record_host_to_image_buffer(
             None,
         );
 
-        let copy_region = [vk::BufferImageCopy::default()
-            .buffer_offset(*offset)
-            .buffer_row_length(0)
-            .buffer_image_height(0)
-            .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                mip_level: 0,
-                base_array_layer: 0,
-                layer_count: 1,
-            })
-            .image_extent(image_alloc.image_extent)];
+        match &meta.payload {
+            crate::data::gpu_data::TexturePayload::Raw { .. } => {
+                // Copy mip 0 only
+                let copy_region = [vk::BufferImageCopy::default()
+                    .buffer_offset(*offset)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .image_extent(image_alloc.image_extent)];
 
-        unsafe {
-            device.cmd_copy_buffer_to_image(
-                transfer_cmd_buffer,
-                host_buffer.buffer,
-                image_alloc.image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &copy_region,
-            );
+                unsafe {
+                    device.cmd_copy_buffer_to_image(
+                        transfer_cmd_buffer,
+                        host_buffer.buffer,
+                        image_alloc.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &copy_region,
+                    );
+                }
+            }
+            crate::data::gpu_data::TexturePayload::Compressed {
+                width,
+                height,
+                mip_offsets,
+                ..
+            } => {
+                // Copy all mips
+                let regions: Vec<vk::BufferImageCopy> = mip_offsets
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &mip_offset)| {
+                        let mip_width = (width >> i).max(1);
+                        let mip_height = (height >> i).max(1);
+                        vk::BufferImageCopy::default()
+                            .buffer_offset(*offset + mip_offset as u64)
+                            .buffer_row_length(0) // Tightly packed blocks
+                            .buffer_image_height(0)
+                            .image_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: i as u32,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .image_extent(vk::Extent3D {
+                                width: mip_width,
+                                height: mip_height,
+                                depth: 1,
+                            })
+                    })
+                    .collect();
+
+                unsafe {
+                    device.cmd_copy_buffer_to_image(
+                        transfer_cmd_buffer,
+                        host_buffer.buffer,
+                        image_alloc.image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &regions,
+                    );
+                }
+            }
         }
 
         // Record transfer->graphics barrier
@@ -1565,14 +1621,43 @@ pub fn record_host_to_image_buffer(
             )),
         );
 
-        record_mip_maps_generation(
-            device,
-            graphics_cmd_buffer,
-            image_alloc.image,
-            image_alloc.image_extent.height,
-            image_alloc.image_extent.width,
-            image_alloc.mip_levels,
-        );
+        // Generate mips if Raw, otherwise just transition to shader read
+        match &meta.payload {
+            crate::data::gpu_data::TexturePayload::Raw { .. } => {
+                record_mip_maps_generation(
+                    device,
+                    graphics_cmd_buffer,
+                    image_alloc.image,
+                    image_alloc.image_extent.height,
+                    image_alloc.image_extent.width,
+                    image_alloc.mip_levels,
+                );
+            }
+            crate::data::gpu_data::TexturePayload::Compressed { .. } => {
+                // Mips already uploaded, just transition all levels
+                let subresource_range = vk::ImageSubresourceRange::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .layer_count(1)
+                    .level_count(image_alloc.mip_levels);
+
+                vk_util::record_image_barrier(
+                    device,
+                    graphics_cmd_buffer,
+                    image_alloc.image,
+                    Some(subresource_range),
+                    (
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    ),
+                    (
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    ),
+                    Some((vk::AccessFlags::TRANSFER_READ, vk::AccessFlags::SHADER_READ)),
+                    None,
+                );
+            }
+        }
     }
 
     let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
@@ -1589,7 +1674,6 @@ pub fn record_host_to_image_buffer(
                 mag_filter: vk::Filter::LINEAR,
                 min_filter: vk::Filter::LINEAR,
                 mipmap_mode: vk::SamplerMipmapMode::LINEAR,
-                // glTF default sampler wrap is REPEAT for UV-mapped materials.
                 address_mode_u: vk::SamplerAddressMode::REPEAT,
                 address_mode_v: vk::SamplerAddressMode::REPEAT,
                 address_mode_w: vk::SamplerAddressMode::REPEAT,

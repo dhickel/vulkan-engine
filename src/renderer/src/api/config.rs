@@ -60,12 +60,47 @@ impl Default for AssetManifestMode {
     }
 }
 
+/// Controls texture compression behavior.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TextureCompressionMode {
+    /// Compression is disabled; textures remain uncompressed (e.g. R8G8B8A8).
+    Disabled,
+    /// Textures are compressed if supported by the format/device, falling back to uncompressed.
+    Auto,
+    /// Textures must be compressed; failure to compress returns an error.
+    Force,
+}
+
+impl Default for TextureCompressionMode {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+/// Configuration for texture compression.
+#[derive(Debug, Clone)]
+pub struct CompressionConfig {
+    pub mode: TextureCompressionMode,
+    pub quality: u8, // 0..=100, interpreted by backend (e.g. BC7 quality)
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            mode: TextureCompressionMode::Disabled,
+            quality: 50, // Balanced default
+        }
+    }
+}
+
 /// Policy configuration for asset loading behavior.
 #[derive(Debug, Clone)]
 pub struct AssetPolicyConfig {
     pub manifest_mode: AssetManifestMode,
     /// When true, filename patterns (e.g. `_n.`, `_normal.`) can influence sRGB/sampler defaults.
     pub allow_filename_heuristics: bool,
+    /// Texture compression policy.
+    pub compression: CompressionConfig,
 }
 
 impl Default for AssetPolicyConfig {
@@ -73,6 +108,7 @@ impl Default for AssetPolicyConfig {
         Self {
             manifest_mode: AssetManifestMode::BestEffort,
             allow_filename_heuristics: true,
+            compression: CompressionConfig::default(),
         }
     }
 }

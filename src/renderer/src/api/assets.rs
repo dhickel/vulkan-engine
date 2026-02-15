@@ -1144,11 +1144,13 @@ fn load_texture_gpu_ready_with_policy(
     };
 
     let texture_meta = TextureMeta {
-        bytes: image.as_bytes().to_vec(),
-        width: image.width(),
-        height: image.height(),
-        format,
-        mips_levels: mip_count,
+        payload: crate::data::gpu_data::TexturePayload::Raw {
+            bytes: image.as_bytes().to_vec(),
+            width: image.width(),
+            height: image.height(),
+            format,
+            mips_levels: mip_count,
+        },
         uv_index: 0,
         sampler_info: Some(policy.to_sampler_info(mip_count)),
     };

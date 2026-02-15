@@ -307,11 +307,13 @@ impl TextureCache {
         gfx_queue: vk::Queue,
     ) -> Result<Self, String> {
         let def_color = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![255, 255, 255, 255],
-            width: 1,
-            height: 1,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mips_levels: 1,
+            payload: gpu_data::TexturePayload::Raw {
+                bytes: vec![255, 255, 255, 255],
+                width: 1,
+                height: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                mips_levels: 1,
+            },
             uv_index: 0,
             sampler_info: None,
         });
@@ -319,11 +321,13 @@ impl TextureCache {
         let def_metallic_rough = CachedTexture::Unloaded(TextureMeta {
             // Sampled as .g (roughness) and .b (metallic) in the shader.
             // Keep these channels valid even in fallback texture.
-            bytes: vec![255, 255, 255, 255],
-            width: 1,
-            height: 1,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mips_levels: 1,
+            payload: gpu_data::TexturePayload::Raw {
+                bytes: vec![255, 255, 255, 255],
+                width: 1,
+                height: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                mips_levels: 1,
+            },
             uv_index: 0,
             sampler_info: None,
         });
@@ -331,49 +335,57 @@ impl TextureCache {
         let r8_support = supported_formats.contains(&vk::Format::R8_UNORM);
 
         let def_occlusion = CachedTexture::Unloaded(TextureMeta {
-            bytes: if r8_support {
-                vec![255]
-            } else {
-                vec![255, 255, 255, 255]
+            payload: gpu_data::TexturePayload::Raw {
+                bytes: if r8_support {
+                    vec![255]
+                } else {
+                    vec![255, 255, 255, 255]
+                },
+                width: 1,
+                height: 1,
+                format: if r8_support {
+                    vk::Format::R8_UNORM
+                } else {
+                    vk::Format::R8G8B8A8_UNORM
+                },
+                mips_levels: 1,
             },
-            width: 1,
-            height: 1,
-            format: if r8_support {
-                vk::Format::R8_UNORM
-            } else {
-                vk::Format::R8G8B8A8_UNORM
-            },
-            mips_levels: 1,
             uv_index: 0,
             sampler_info: None,
         });
 
         let def_normal = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![128, 128, 255, 255],
-            width: 1,
-            height: 1,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mips_levels: 1,
+            payload: gpu_data::TexturePayload::Raw {
+                bytes: vec![128, 128, 255, 255],
+                width: 1,
+                height: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                mips_levels: 1,
+            },
             uv_index: 0,
             sampler_info: None,
         });
 
         let def_emissive = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![0, 0, 0, 255],
-            width: 1,
-            height: 1,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mips_levels: 1,
+            payload: gpu_data::TexturePayload::Raw {
+                bytes: vec![0, 0, 0, 255],
+                width: 1,
+                height: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                mips_levels: 1,
+            },
             uv_index: 0,
             sampler_info: None,
         });
 
         let def_error = CachedTexture::Unloaded(TextureMeta {
-            bytes: vec![255, 20, 147, 255],
-            width: 2,
-            height: 2,
-            format: vk::Format::R8G8B8A8_UNORM,
-            mips_levels: 1,
+            payload: gpu_data::TexturePayload::Raw {
+                bytes: vec![255, 20, 147, 255],
+                width: 2,
+                height: 2,
+                format: vk::Format::R8G8B8A8_UNORM,
+                mips_levels: 1,
+            },
             uv_index: 0,
             sampler_info: None,
         });
@@ -525,23 +537,43 @@ impl TextureCache {
     }
 
     pub fn add_texture(&mut self, mut data: TextureMeta) -> TextureHandle {
-        if !self.supported_formats.contains(&data.format) {
+        if !self.supported_formats.contains(&data.payload.format()) {
             info!(
                 "Unsupported Format: {:?}, converting to R8G8B8A8_UNORM",
-                data.format
+                data.payload.format()
             );
 
-            let converted =
-                ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, data.bytes);
+            if let gpu_data::TexturePayload::Raw {
+                bytes,
+                width,
+                height,
+                format,
+                mips_levels,
+            } = &data.payload
+            {
+                let converted =
+                    ImageBuffer::<image::Rgb<u8>, _>::from_raw(*width, *height, bytes.clone());
 
-            if let Some(image) = converted {
-                let new_bytes = image::DynamicImage::ImageRgb8(image).to_rgba8();
-                data.format = vk::Format::R8G8B8A8_UNORM;
-                data.bytes = new_bytes.to_vec();
+                if let Some(image) = converted {
+                    let new_bytes = image::DynamicImage::ImageRgb8(image).to_rgba8();
+                    data.payload = gpu_data::TexturePayload::Raw {
+                        bytes: new_bytes.to_vec(),
+                        width: *width,
+                        height: *height,
+                        format: vk::Format::R8G8B8A8_UNORM,
+                        mips_levels: *mips_levels,
+                    };
+                } else {
+                    log::info!(
+                        "Error converting material of type: {:?} to RGBA. Using error texture.",
+                        format
+                    );
+                    return Self::DEFAULT_ERROR_TEX;
+                }
             } else {
-                log::info!(
-                    "Error converting material of type: {:?} to RGBA. Using error texture.",
-                    data.format
+                log::error!(
+                    "Cannot convert unsupported compressed format {:?} to RGBA on the fly.",
+                    data.payload.format()
                 );
                 return Self::DEFAULT_ERROR_TEX;
             }
@@ -554,23 +586,30 @@ impl TextureCache {
         let path = path::Path::new("debug_textures").join(filename);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        match data.format {
+        match data.payload.format() {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
-                if let Some(img) =
-                    ImageBuffer::<Rgba<u8>, _>::from_raw(data.width, data.height, bytes)
-                {
+                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(
+                    data.payload.width(),
+                    data.payload.height(),
+                    bytes,
+                ) {
                     img.save(&path).unwrap();
                 }
             }
             vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-                if let Some(img) =
-                    ImageBuffer::<image::Rgb<u8>, _>::from_raw(data.width, data.height, bytes)
-                {
+                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(
+                    data.payload.width(),
+                    data.payload.height(),
+                    bytes,
+                ) {
                     img.save(&path).unwrap();
                 }
             }
             _ => {
-                println!("Unsupported format for debug save: {:?}", data.format);
+                println!(
+                    "Unsupported format for debug save: {:?}",
+                    data.payload.format()
+                );
             }
         }
 
@@ -799,7 +838,8 @@ impl TextureCache {
             match self.cached_textures.get(slot) {
                 Some(CachedTexture::Unloaded(meta)) => {
                     let aligned_size = meta
-                        .bytes
+                        .payload
+                        .bytes()
                         .len()
                         .next_multiple_of(self.host_alignment as usize);
 
@@ -818,7 +858,7 @@ impl TextureCache {
 
                     curr_bytes += aligned_size;
                     next_upload.push(meta);
-                    next_upload_blit_support.push(self.supports_linear_mip_blit(meta.format));
+                    next_upload_blit_support.push(self.supports_linear_mip_blit(meta.payload.format()));
                     ids.push(id.slot);
                     batch_texture_ids.push(id);
                 }

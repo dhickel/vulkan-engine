@@ -1,5 +1,5 @@
 mod assets;
-mod config;
+pub mod config;
 mod errors;
 mod hooks;
 mod loading;
