@@ -1897,8 +1897,12 @@ impl VkRenderCore {
 
         let image_index = match acquire_result {
             SwapchainAcquireResult::Acquired(index) => index,
-            SwapchainAcquireResult::Retry => return None,
+            SwapchainAcquireResult::Retry => {
+                self.presentation.rewind_frame();
+                return None;
+            }
             SwapchainAcquireResult::Recreate => {
+                self.presentation.rewind_frame();
                 self.resize_requested = true;
                 return None;
             }
@@ -1909,6 +1913,7 @@ impl VkRenderCore {
                 "Failed to bind acquired present target {}: {:?}",
                 image_index, err
             );
+            self.presentation.rewind_frame();
             self.resize_requested = true;
             return None;
         }
@@ -2584,7 +2589,11 @@ impl VkRenderCore {
         }
     }
 
-    pub fn draw_imgui(&mut self, cmd_buffer: vk::CommandBuffer, image_view: vk::ImageView) {
+    pub fn draw_imgui(
+        &mut self,
+        cmd_buffer: vk::CommandBuffer,
+        image_view: vk::ImageView,
+    ) -> Result<(), String> {
         let attachment_info = [vk_util::attachment_info(
             image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -2637,12 +2646,16 @@ impl VkRenderCore {
         self.debug_ui.render(ui);
 
         let draw_data = self.imgui.context.render();
-
-        self.imgui.renderer.cmd_draw(cmd_buffer, draw_data).unwrap();
+        let draw_result = self
+            .imgui
+            .renderer
+            .cmd_draw(cmd_buffer, draw_data)
+            .map_err(|err| format!("imgui cmd_draw failed: {err}"));
 
         unsafe {
             self.device.cmd_end_rendering(cmd_buffer);
         }
+        draw_result
     }
 
     pub fn prepare_present_color_attachment(&mut self, frame: &mut VkFrame) {
@@ -2656,6 +2669,24 @@ impl VkRenderCore {
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
+
+        let clear_color = vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+        };
+        let attachment_info = [vk_util::attachment_info(
+            frame.present_image_view,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            Some(clear_color),
+        )];
+        let render_info =
+            vk_util::rendering_info(self.window_state.get_curr_extent(), &attachment_info, None);
+
+        unsafe {
+            self.device.cmd_begin_rendering(cmd_buffer, &render_info);
+            self.device.cmd_end_rendering(cmd_buffer);
+        }
     }
 
     pub fn copy_draw_to_present(&mut self, frame: &mut VkFrame) {
@@ -2701,11 +2732,14 @@ impl VkRenderCore {
         );
     }
 
-    pub fn draw_imgui_to_present(&mut self, frame: &mut VkFrame) {
+    pub fn draw_imgui_to_present(&mut self, frame: &mut VkFrame) -> Result<(), String> {
         let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
-        self.draw_imgui(cmd_buffer, frame.present_image_view);
+        if let Err(err) = self.draw_imgui(cmd_buffer, frame.present_image_view) {
+            error!("{err}");
+        }
         self.transition_present_for_present(frame);
+        Ok(())
     }
 
     pub fn transition_present_for_present(&mut self, frame: &mut VkFrame) {

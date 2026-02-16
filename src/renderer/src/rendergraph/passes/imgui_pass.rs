@@ -15,7 +15,6 @@ impl RenderPassNode for ImguiPass {
             return Ok(());
         }
 
-        ctx.renderer.draw_imgui_to_present(ctx.frame);
-        Ok(())
+        ctx.renderer.draw_imgui_to_present(ctx.frame)
     }
 }
