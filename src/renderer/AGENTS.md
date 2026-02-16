@@ -60,3 +60,18 @@ Module guides:
 - `cargo run -p renderer --example demo_unlit`
 - `cargo run -p renderer --example demo_model_load`
 - `cargo run -p renderer --example demo_async_loading`
+
+## Runtime Debug Capture
+
+- Use launch recording flags to capture timing JSONL without opening the debug menu.
+- Baseline diagnosis command (recommended default):
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example demo_pbr -- --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/demo_pbr-timing.jsonl`
+- Baseline `api_test` with environment:
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/api_test-timing.jsonl`
+- Engine startup can take ~20-30 seconds; keep timeout at `60s` unless a task specifically needs longer.
+- Agents should default timing-report output to `.internal-dev/debug_reports/` to avoid polluting project root.
+- Adjust as needed:
+- `--record_debug=<seconds>` to capture longer/shorter windows.
+- `--record_debug_interval=<ms>` to trade sample density vs. file size.
+- `--record_debug_path=<path>` to force a known output file path.
+- For complete argument reference, see `docs/api/07-engine-arguments.md`.

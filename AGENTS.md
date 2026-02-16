@@ -66,14 +66,27 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 
 Headless smoke pattern:
 
-- `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_pbr`
-- `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_unlit`
-- `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_model_load`
-- `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example demo_async_loading`
-- `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example api_test`
-- `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr`
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example demo_pbr`
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example demo_unlit`
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example demo_model_load`
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example demo_async_loading`
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test`
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr`
 
 Treat successful startup logs with no fatal errors before timeout as a smoke pass.
+
+Debug-record smoke pattern (agent should use this for runtime diagnosis by default):
+
+- Engine startup can take ~20-30 seconds; use `timeout --signal=INT 60s`.
+- Default debug capture profile: `--record_debug=10 --record_debug_interval=50`.
+- Write capture output under `.internal-dev/debug_reports/` to avoid polluting repo root.
+- Command template:
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example <example_name> -- --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/<example_name>-timing.jsonl`
+- With custom environment:
+- `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/api_test-timing.jsonl`
+- Optional output path override:
+- `--record_debug_path /tmp/engine_timing.jsonl`
+- Tune `--record_debug` seconds and `--record_debug_interval` ms when investigating longer or denser captures.
 
 ## External Baseline
 

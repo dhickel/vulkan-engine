@@ -49,6 +49,7 @@ Migration mapping matrix (implemented scope `00`-`16`):
 | Internal Vulkan sync and frame lifecycle | [`docs/internal/05-vulkan-sync-and-frame-lifecycle.md`](../internal/05-vulkan-sync-and-frame-lifecycle.md) |
 | Internal data sub-allocation and transfer queue | [`docs/internal/06-data-suballocation-and-transfer.md`](../internal/06-data-suballocation-and-transfer.md) |
 | API render hooks and extension points | [`docs/api/05-render-hooks-and-extension-points.md`](05-render-hooks-and-extension-points.md) |
+| Engine launch/runtime arguments | [`docs/api/07-engine-arguments.md`](07-engine-arguments.md) |
 | Internal rendergraph dependencies and aliasing | [`docs/internal/07-rendergraph-dependencies-and-aliasing.md`](../internal/07-rendergraph-dependencies-and-aliasing.md) |
 | API scene graph and fragment workflows | [`docs/api/03-scene-graph-and-fragment-workflows.md`](03-scene-graph-and-fragment-workflows.md) |
 | Internal scene flattening and culling | [`docs/internal/08-scene-flattening-and-culling.md`](../internal/08-scene-flattening-and-culling.md) |
@@ -66,6 +67,7 @@ Current API chapter map (facade-first reading order):
 | Sync/deferred assets + ticket lifecycle | [`docs/api/04-assets-sync-deferred-and-handles.md`](04-assets-sync-deferred-and-handles.md) |
 | Render hooks + extension boundaries | [`docs/api/05-render-hooks-and-extension-points.md`](05-render-hooks-and-extension-points.md) |
 | Input polling + layered dispatch model | [`docs/api/06-input-polling-and-listeners.md`](06-input-polling-and-listeners.md) |
+| Engine launch/runtime arguments | [`docs/api/07-engine-arguments.md`](07-engine-arguments.md) |
 
 Verification audit table (phase `16`):
 
@@ -116,5 +118,6 @@ Snippet Type: Real
 - [`docs/api/04-assets-sync-deferred-and-handles.md`](04-assets-sync-deferred-and-handles.md)
 - [`docs/api/05-render-hooks-and-extension-points.md`](05-render-hooks-and-extension-points.md)
 - [`docs/api/06-input-polling-and-listeners.md`](06-input-polling-and-listeners.md)
+- [`docs/api/07-engine-arguments.md`](07-engine-arguments.md)
 - [`docs/internal/00-index.md`](../internal/00-index.md)
 - [`docs/internal/01-rendering-pipeline-mental-model.md`](../internal/01-rendering-pipeline-mental-model.md)
