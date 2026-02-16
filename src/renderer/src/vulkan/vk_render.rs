@@ -446,6 +446,22 @@ impl Drop for VkRenderCore {
 }
 
 impl VkRenderCore {
+    /// Emit one transparent primitive so imgui draw data is never empty.
+    ///
+    /// The forked imgui Vulkan renderer advances its internal frame ring only when
+    /// `cmd_draw` sees non-zero vertex data. Without this keepalive draw, frames where
+    /// UI is hidden can desynchronize imgui mesh-ring indexing from engine frame slots.
+    fn add_imgui_frame_keepalive(ui: &imgui::Ui) {
+        ui.get_background_draw_list()
+            .add_rect(
+                [0.0, 0.0],
+                [1.0, 1.0],
+                imgui::ImColor32::from_rgba(0, 0, 0, 0),
+            )
+            .filled(true)
+            .build();
+    }
+
     fn run_startup_load_worker(
         data_cache: Arc<VkDataCache>,
     ) -> std::thread::JoinHandle<Result<(), String>> {
@@ -2644,6 +2660,7 @@ impl VkRenderCore {
 
         let ui = self.imgui.context.new_frame();
         self.debug_ui.render(ui);
+        Self::add_imgui_frame_keepalive(ui);
 
         let draw_data = self.imgui.context.render();
         let draw_result = self
