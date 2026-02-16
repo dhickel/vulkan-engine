@@ -446,6 +446,22 @@ impl Drop for VkRenderCore {
 }
 
 impl VkRenderCore {
+    /// Emit one transparent primitive so imgui draw data is never empty.
+    ///
+    /// The forked imgui Vulkan renderer advances its internal frame ring only when
+    /// `cmd_draw` sees non-zero vertex data. Without this keepalive draw, frames where
+    /// UI is hidden can desynchronize imgui mesh-ring indexing from engine frame slots.
+    fn add_imgui_frame_keepalive(ui: &imgui::Ui) {
+        ui.get_background_draw_list()
+            .add_rect(
+                [0.0, 0.0],
+                [1.0, 1.0],
+                imgui::ImColor32::from_rgba(0, 0, 0, 0),
+            )
+            .filled(true)
+            .build();
+    }
+
     fn run_startup_load_worker(
         data_cache: Arc<VkDataCache>,
     ) -> std::thread::JoinHandle<Result<(), String>> {
@@ -1131,6 +1147,13 @@ impl VkRenderCore {
         )
         .unwrap();
 
+        // Surface/compositor may choose an extent different from the requested one
+        // (especially during fullscreen or DPI transitions). Keep render extents in
+        // lock-step with the real swapchain extent to avoid partial/offset rendering.
+        if swapchain.extent != self.window_state.get_curr_extent() {
+            self.window_state.update_curr_size(swapchain.extent);
+        }
+
         // FIXME, I think we will need to destory the old images view when we reassign
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
 
@@ -1149,6 +1172,7 @@ fn elapsed_ms(start: Instant) -> f32 {
 
 const ACQUIRE_STAGE_SPIKE_WARN_MS: f32 = 20.0;
 const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 1_000_000;
+const SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME: u32 = 3;
 
 fn warn_if_acquire_stage_spike(stage: &'static str, duration_ms: f32) {
     if duration_ms >= ACQUIRE_STAGE_SPIKE_WARN_MS {
@@ -1891,13 +1915,30 @@ impl VkRenderCore {
         self.resolve_gpu_timing_for_slot(frame_slot_index);
 
         let swapchain_acquire_start = Instant::now();
-        let acquire_result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+        let mut acquire_retries = 0u32;
+        let acquire_result = loop {
+            let result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+            match result {
+                SwapchainAcquireResult::Retry
+                    if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
+                {
+                    acquire_retries += 1;
+                }
+                _ => break result,
+            }
+        };
         let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
         warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
         let image_index = match acquire_result {
             SwapchainAcquireResult::Acquired(index) => index,
             SwapchainAcquireResult::Retry => {
+                if acquire_retries > 0 {
+                    warn!(
+                        "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total)",
+                        acquire_retries, swapchain_acquire_ms
+                    );
+                }
                 self.presentation.rewind_frame();
                 return None;
             }
@@ -2644,6 +2685,7 @@ impl VkRenderCore {
 
         let ui = self.imgui.context.new_frame();
         self.debug_ui.render(ui);
+        Self::add_imgui_frame_keepalive(ui);
 
         let draw_data = self.imgui.context.render();
         let draw_result = self
