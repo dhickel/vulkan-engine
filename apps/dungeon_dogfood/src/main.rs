@@ -113,6 +113,8 @@ fn main() {
     log::info!("Dungeon dogfood initialized, starting event loop");
 
     let mut last_frame = Instant::now();
+    let mut last_window_size = window.inner_size();
+    window.request_redraw();
 
     event_loop
         .run(move |event, elwt| {
@@ -132,12 +134,42 @@ fn main() {
                             elwt.exit();
                         }
                         WindowEvent::Resized(new_size) => {
+                            last_window_size = new_size;
                             if let Err(e) = renderer.resize(new_size.width, new_size.height) {
                                 log::error!("Resize failed: {}", e);
                                 elwt.exit();
                             }
                         }
+                        WindowEvent::ScaleFactorChanged {
+                            mut inner_size_writer,
+                            ..
+                        } => {
+                            let new_size = window.inner_size();
+                            if let Err(e) = inner_size_writer.request_inner_size(new_size) {
+                                log::error!("Scale factor size request failed: {}", e);
+                                elwt.exit();
+                                return;
+                            }
+                            last_window_size = new_size;
+                            if let Err(e) = renderer.resize(new_size.width, new_size.height) {
+                                log::error!("Resize failed after scale change: {}", e);
+                                elwt.exit();
+                                return;
+                            }
+                        }
                         WindowEvent::RedrawRequested => {
+                            let current_size = window.inner_size();
+                            if current_size != last_window_size {
+                                last_window_size = current_size;
+                                if let Err(e) =
+                                    renderer.resize(current_size.width, current_size.height)
+                                {
+                                    log::error!("Resize failed while redrawing: {}", e);
+                                    elwt.exit();
+                                    return;
+                                }
+                            }
+
                             let now = Instant::now();
                             let delta_seconds = now.duration_since(last_frame).as_secs_f32();
                             last_frame = now;
@@ -161,9 +193,6 @@ fn main() {
                         }
                         _ => {}
                     }
-                }
-                Event::AboutToWait => {
-                    window.request_redraw();
                 }
                 _ => {}
             }
