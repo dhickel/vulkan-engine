@@ -17,6 +17,10 @@ Facade lifecycle path:
   - `Rendered`
   - `SkippedResizePending`
 - Rendering auto-pumps deferred asset work each frame; explicit pumping is available via `pump_asset_tasks(...)`.
+- Debug UI is now renderer-managed and can be controlled via:
+  - `toggle_debug_ui()`, `set_debug_ui_visible(...)`, `is_debug_ui_visible()`
+  - `register_debug_view(...)`, `unregister_debug_view(...)`, `set_debug_view_enabled(...)`
+- Default runtime toggle for debug UI visibility is backquote (`\``) in `update_input(...)`.
 - Current alpha limitation: headless mode is not implemented (`Renderer::new` returns unsupported when `config.headless = true`).
 
 ## 4. Code Walkthrough
@@ -48,6 +52,20 @@ Snippet Type: Real
 ```rust
 // Single-call API (src/renderer/src/api/renderer.rs)
 let outcome = renderer.render_scene(&window, &mut scene)?;
+```
+
+Snippet Type: Real
+```rust
+// Debug view registration API
+let view_id = renderer.register_debug_view(
+    renderer::DebugViewDescriptor::new("app.stats", "App Stats"),
+    Box::new(|ui, ctx| {
+        ui.window("App Stats").build(|| {
+            ui.text(format!("frame {}", ctx.frame_index));
+        });
+    }),
+)?;
+renderer.set_debug_view_enabled(&view_id, true);
 ```
 
 Snippet Type: Pseudocode
@@ -83,6 +101,7 @@ Every loop tick:
 ## 8. Cross-Module Links
 - Facade API surface: `src/renderer/src/api/mod.rs`
 - Renderer lifecycle implementation: `src/renderer/src/api/renderer.rs`
+- Debug UI manager internals: `src/renderer/src/debug_ui/mod.rs`
 - Canonical runtime usage: `src/renderer/examples/api_test.rs`
 - Internal render path mental model: `docs/internal/01-rendering-pipeline-mental-model.md`
 

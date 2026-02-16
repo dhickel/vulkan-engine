@@ -116,3 +116,5 @@ Priority band guidance:
 ## 11. Future Considerations
 - Gamepad input support is a post-alpha target.
 - Future gamepad triggers should plug into `ActionMap`/layer dispatch without changing consumption semantics.
+- Multi-window editor/debug workflows are deferred post-alpha; current runtime remains single-window.
+- Future windowing refactors should isolate per-window input+ImGui contexts before exposing a multi-window public API.

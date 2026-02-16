@@ -6,12 +6,13 @@ use ash::vk::Extent2D;
 use glam::Mat4;
 use input::{ActionMap, InputSystem, LayerDescriptor, LayerHandle, LayerPriority};
 use log::{error, warn};
-use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
-use winit::keyboard::KeyCode;
+use winit::event::{DeviceEvent, ElementState, Event, MouseScrollDelta, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
 use crate::data::camera::{Camera, FPSController, FpsActionBindings};
 use crate::data::handles::EnvironmentHandle;
+use crate::debug_ui::{DebugUiFrameContext, DebugViewCallback, DebugViewDescriptor, DebugViewId};
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
@@ -60,6 +61,8 @@ pub struct Renderer {
     input_system: InputSystem,
     frame_number: u32,
     last_frame_time: Instant,
+    last_frame_delta_seconds: f32,
+    last_asset_pump_steps: usize,
     open_frame: Option<u32>,
     startup_scene: Option<Scene>,
     asset_loads: AssetLoadTracker,
@@ -98,6 +101,8 @@ impl Renderer {
             input_system: InputSystem::new(),
             frame_number: 0,
             last_frame_time: Instant::now(),
+            last_frame_delta_seconds: 0.0,
+            last_asset_pump_steps: 0,
             open_frame: None,
             startup_scene: Some(Scene::from_world(scene_world)),
             asset_loads: AssetLoadTracker::new(),
@@ -198,7 +203,20 @@ impl Renderer {
                 WindowEvent::ModifiersChanged(_) => {
                     self.input_system.queue_winit_window_event(event);
                 }
-                WindowEvent::KeyboardInput { .. } => {
+                WindowEvent::KeyboardInput {
+                    event: key_event, ..
+                } => {
+                    if !key_event.repeat
+                        && key_event.state == ElementState::Pressed
+                        && matches!(
+                            key_event.physical_key,
+                            PhysicalKey::Code(KeyCode::Backquote)
+                        )
+                    {
+                        self.toggle_debug_ui();
+                        return Ok(());
+                    }
+
                     if !consume_keyboard {
                         self.input_system.queue_winit_window_event(event);
                     }
@@ -349,7 +367,9 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn pump_asset_tasks(&mut self, max_steps: usize) -> Result<usize, RendererError> {
-        Ok(self.asset_loads.pump(&mut self.runtime.core, max_steps))
+        let pumped = self.asset_loads.pump(&mut self.runtime.core, max_steps);
+        self.last_asset_pump_steps = pumped;
+        Ok(pumped)
     }
 
     /// Thread: Main
@@ -362,6 +382,52 @@ impl Renderer {
     /// May Stall: No
     pub fn set_post_render_hook(&mut self, hook: Option<RenderHook>) {
         self.post_render_hook = hook;
+    }
+
+    /// Registers a debug view callback rendered by the in-engine debug UI manager.
+    pub fn register_debug_view(
+        &mut self,
+        descriptor: DebugViewDescriptor,
+        callback: DebugViewCallback,
+    ) -> Result<DebugViewId, RendererError> {
+        let id = descriptor.id.clone();
+        if self
+            .runtime
+            .core
+            .debug_ui
+            .register_view(descriptor, callback)
+        {
+            return Ok(id);
+        }
+
+        Err(RendererError::InvalidState(
+            "debug view id already registered",
+        ))
+    }
+
+    /// Removes a previously registered debug view.
+    pub fn unregister_debug_view(&mut self, id: &DebugViewId) -> bool {
+        self.runtime.core.debug_ui.unregister_view(id)
+    }
+
+    /// Enables or disables a debug view by id.
+    pub fn set_debug_view_enabled(&mut self, id: &DebugViewId, enabled: bool) -> bool {
+        self.runtime.core.debug_ui.set_view_enabled(id, enabled)
+    }
+
+    /// Toggles global debug UI visibility.
+    pub fn toggle_debug_ui(&mut self) {
+        self.runtime.core.debug_ui.toggle_visible();
+    }
+
+    /// Sets global debug UI visibility.
+    pub fn set_debug_ui_visible(&mut self, visible: bool) {
+        self.runtime.core.debug_ui.set_visible(visible);
+    }
+
+    /// Returns current global debug UI visibility.
+    pub fn is_debug_ui_visible(&self) -> bool {
+        self.runtime.core.debug_ui.is_visible()
     }
 
     /// Thread: Main
@@ -385,6 +451,7 @@ impl Renderer {
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_time);
         self.last_frame_time = now;
+        self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
         if let Some(plugin) = self.fps_plugin.as_mut() {
@@ -441,6 +508,32 @@ impl Renderer {
         let viewport_size = self.viewport_size();
         let frame_index = frame_number as u64;
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
+        let env_status = self.runtime.environment_runtime_status();
+        let fps = if self.last_frame_delta_seconds > 0.0 {
+            1.0 / self.last_frame_delta_seconds
+        } else {
+            0.0
+        };
+        self.runtime
+            .core
+            .debug_ui
+            .update_frame_context(DebugUiFrameContext {
+                frame_index,
+                delta_seconds: self.last_frame_delta_seconds,
+                fps,
+                viewport_size,
+                resize_pending: self.runtime.resize_requested(),
+                environment_requested: env_status.requested,
+                environment_active: env_status.active,
+                environment_transitioning: env_status.transitioning,
+                draw_item_count: submission.draw_items.len(),
+                point_light_count: submission.point_lights.len(),
+                draw_skybox: submission.flags.draw_skybox,
+                draw_geometry: submission.flags.draw_geometry,
+                draw_imgui: submission.flags.draw_imgui,
+                asset_tasks_pumped_last: self.last_asset_pump_steps,
+                input_debug: self.input_system.debug_snapshot().clone(),
+            });
 
         let runtime = &mut self.runtime;
         let pre_hook = &mut self.pre_render_hook;

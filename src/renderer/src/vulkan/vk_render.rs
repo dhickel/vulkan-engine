@@ -70,6 +70,7 @@ use crate::data::gpu_data::{
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::{data_cache, data_util, gpu_data};
+use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext};
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
@@ -157,6 +158,7 @@ pub struct VkRenderCore {
     pub active_env_id: EnvironmentHandle,
     pub environment_failures: HashMap<EnvironmentHandle, String>,
     pub imgui: VkImgui,
+    pub debug_ui: DebugUiManager,
     pub scene_data: SceneDataUBO,
     pub sky_box: SkyBox,
     pub data_cache: Arc<VkDataCache>,
@@ -1076,6 +1078,7 @@ impl VkRenderCore {
             active_env_id: default_env_id,
             environment_failures: HashMap::new(),
             imgui,
+            debug_ui: DebugUiManager::new(),
             main_deletion_queue: Vec::new(),
             fence_await_queue: VkFenceQueue::new(),
             uv_fallback_warnings: Mutex::new(HashSet::new()),
@@ -1967,10 +1970,8 @@ impl VkRenderCore {
         //
         // self.imgui.platform.prepare_render(frame, &self.window);
 
-        self.imgui
-            .context
-            .new_frame()
-            .show_demo_window(&mut self.imgui.opened);
+        let ui = self.imgui.context.new_frame();
+        self.debug_ui.render(ui);
 
         let draw_data = self.imgui.context.render();
 

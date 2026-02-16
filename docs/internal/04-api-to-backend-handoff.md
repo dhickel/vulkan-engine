@@ -9,6 +9,7 @@ Current handoff path:
 
 ## 3. Key Concepts
 - `RenderSubmission` is the immutable frame snapshot boundary between scene data and backend execution.
+- `DebugUiFrameContext` is a facade-to-backend telemetry snapshot boundary for debug UI composition.
 - Scene-facing types stay Vulkan-opaque: they emit handles (`MeshHandle`, `EnvironmentHandle`) and transforms, not Vulkan objects.
 - Backend code resolves handles to loaded cache data at draw time (`get_loaded_id`, `get_loaded_material_ptr`).
 - Flattening scene graph data into `Vec<FrameDrawItem>` avoids cross-layer borrow/ownership coupling.
@@ -20,6 +21,12 @@ Snippet Type: Real
 // src/renderer/src/api/renderer.rs
 scene.update_camera(camera_view, proj, camera_pos);
 let submission = scene.build_submission();
+runtime.core.debug_ui.update_frame_context(DebugUiFrameContext {
+    frame_index,
+    draw_item_count: submission.draw_items.len(),
+    point_light_count: submission.point_lights.len(),
+    // ...
+});
 runtime.render_with_hooks(frame_number, &submission, || { /* pre */ }, || { /* post */ });
 ```
 
@@ -69,6 +76,7 @@ Submission ownership boundary table:
 |---|---|---|
 | API/Scene (`api`, `scene`) | scene graph, camera, handles, transforms | Vulkan descriptors, command buffers, GPU pipeline objects |
 | Submission (`RenderSubmission`) | frame-local copy of draw intent | persistent cache storage, backend mutable state |
+| Debug UI context (`DebugUiFrameContext`) | frame-local UI telemetry and runtime status | scene graph mutation, Vulkan handles |
 | Backend (`vulkan`) | handle resolution, rendergraph execution, queue submit/present | scene graph mutation API |
 
 Snippet Type: Pseudocode
@@ -106,6 +114,7 @@ Why this helps:
 - Facade frame orchestration: `src/renderer/src/api/renderer.rs`
 - Scene flattening: `src/renderer/src/scene/scene_world.rs`
 - Submission payload contract: `src/renderer/src/scene/render_submission.rs`
+- Debug UI context + manager: `src/renderer/src/debug_ui/mod.rs`
 - Backend frame execution: `src/renderer/src/vulkan/vk_render.rs`
 - High-level frame mental model: `docs/internal/01-rendering-pipeline-mental-model.md`
 

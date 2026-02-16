@@ -12,6 +12,11 @@ Hook flow in the current facade path:
   - `Renderer::set_pre_render_hook(Option<RenderHook>)`
   - `Renderer::set_post_render_hook(Option<RenderHook>)`
   - `RenderHookContext` (`frame_index`, `viewport_size`)
+- Public debug UI extension surface (separate from hooks):
+  - `Renderer::register_debug_view(...)`
+  - `Renderer::unregister_debug_view(...)`
+  - `Renderer::set_debug_view_enabled(...)`
+  - `Renderer::toggle_debug_ui()` / `set_debug_ui_visible(...)`
 - Hook ordering is fixed:
   - pre-hook runs before rendergraph execution
   - post-hook runs after successful rendergraph execution
@@ -88,6 +93,7 @@ Future custom pass strategy (not stable API yet):
 ## 5. Best Practices
 - Keep hooks narrowly scoped and side-effect-light.
 - Use hooks for app-level orchestration, telemetry, and lightweight state checks.
+- Prefer debug views for ongoing UI tooling; use hooks for non-UI orchestration boundaries.
 - Return explicit `HookError` messages so logs are actionable.
 - Keep heavy GPU/resource work out of hooks; use asset APIs and normal frame flow instead.
 - Document expected hook order in your app (`pre` before graph, `post` after successful graph).

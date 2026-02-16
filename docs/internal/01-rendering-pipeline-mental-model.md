@@ -10,6 +10,9 @@ Current end-to-end flow:
 ## 3. Key Concepts
 - `RenderSubmission` is a flat, frame-local snapshot of draw intent (handles + transforms + flags).
 - Rendergraph pass order defines recording order and implicit pipeline of responsibilities.
+- ImGui rendering is now manager-driven:
+  - `VkRenderCore::draw_imgui(...)` creates the frame UI and delegates to `DebugUiManager`.
+  - `DebugUiManager` composes built-in views, registered custom views, and console windows.
 - Descriptor/pipeline ABI is a contract between shader layouts and draw code.
 - Scene graph is CPU-side structure; it is not directly GPU render state.
 - Template contract reference: `docs/internal/00-index.md` (mandatory 10-section order).
@@ -50,7 +53,7 @@ Submission-to-present timeline:
 | SkyboxPass | submission skybox flags/env handle | background color in draw target |
 | GeometryPass | draw items + material/mesh handles | scene geometry in draw target |
 | PresentCopyPass | draw target + present target | present image ready for UI/present |
-| ImguiPass | present attachment + UI draw data | final present image |
+| ImguiPass | present attachment + manager-composed UI draw data | final present image |
 
 Descriptor/pipeline ABI notes (current convention):
 - Set 0: scene descriptors
@@ -92,6 +95,7 @@ present(wait render_semaphore)
 - Submission payload: `src/renderer/src/scene/render_submission.rs`
 - Rendergraph orchestration: `src/renderer/src/rendergraph/mod.rs`
 - Vulkan frame execution: `src/renderer/src/vulkan/vk_render.rs`
+- Debug UI composition: `src/renderer/src/debug_ui/mod.rs`
 
 ## 9. Standard References
 - Vulkan dynamic rendering: https://github.khronos.org/Vulkan-Site/guide/latest/dynamic_rendering.html

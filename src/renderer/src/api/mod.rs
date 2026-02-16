@@ -13,6 +13,9 @@ pub use crate::data::asset_manifest::{
     FilterMode, ResolvedTexturePolicy, SamplerOverride, TextureLoadOptions, WrapMode,
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
+pub use crate::debug_ui::{
+    DebugUiFrameContext, DebugViewCallback, DebugViewDescriptor, DebugViewId,
+};
 pub use crate::scene::SceneNodeId;
 pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
