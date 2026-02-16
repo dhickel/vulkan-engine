@@ -1148,6 +1148,7 @@ fn elapsed_ms(start: Instant) -> f32 {
 }
 
 const ACQUIRE_STAGE_SPIKE_WARN_MS: f32 = 20.0;
+const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 1_000_000;
 
 fn warn_if_acquire_stage_spike(stage: &'static str, duration_ms: f32) {
     if duration_ms >= ACQUIRE_STAGE_SPIKE_WARN_MS {
@@ -1239,6 +1240,13 @@ struct FrameAcquire {
     frame_fence_wait_ms: f32,
     frame_cleanup_ms: f32,
     swapchain_acquire_ms: f32,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum SwapchainAcquireResult {
+    Acquired(u32),
+    Retry,
+    Recreate,
 }
 
 struct VulkanCoreInit {
@@ -1832,20 +1840,27 @@ impl VkRenderCore {
     }
 
     /// Acquire the next swapchain image index for this frame slot.
-    unsafe fn acquire_swapchain_image_index(&self, frame_sync: VkFrameSync) -> Option<u32> {
+    unsafe fn acquire_swapchain_image_index(&self, frame_sync: VkFrameSync) -> SwapchainAcquireResult {
         let acquire_info = vk::AcquireNextImageInfoKHR::default()
             .swapchain(self.swapchain.swapchain)
             .semaphore(frame_sync.swap_semaphore)
             .device_mask(1)
-            .timeout(u32::MAX as u64);
+            .timeout(SWAPCHAIN_ACQUIRE_TIMEOUT_NS);
 
         match self
             .swapchain
             .swapchain_loader
             .acquire_next_image2(&acquire_info)
         {
-            Ok((index, _)) => Some(index),
-            Err(_) => None,
+            Ok((index, _)) => SwapchainAcquireResult::Acquired(index),
+            Err(vk::Result::NOT_READY) | Err(vk::Result::TIMEOUT) => SwapchainAcquireResult::Retry,
+            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
+                SwapchainAcquireResult::Recreate
+            }
+            Err(err) => {
+                warn!("Swapchain acquire failed with {:?}; requesting swapchain rebuild", err);
+                SwapchainAcquireResult::Recreate
+            }
         }
     }
 
@@ -1871,13 +1886,17 @@ impl VkRenderCore {
         self.resolve_gpu_timing_for_slot(frame_slot_index);
 
         let swapchain_acquire_start = Instant::now();
-        let image_index = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+        let acquire_result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
         let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
         warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
-        let Some(image_index) = image_index else {
-            self.resize_requested = true;
-            return None;
+        let image_index = match acquire_result {
+            SwapchainAcquireResult::Acquired(index) => index,
+            SwapchainAcquireResult::Retry => return None,
+            SwapchainAcquireResult::Recreate => {
+                self.resize_requested = true;
+                return None;
+            }
         };
 
         if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
