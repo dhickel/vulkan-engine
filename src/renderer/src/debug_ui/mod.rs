@@ -1,6 +1,11 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{Display, Formatter};
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use imgui::{Condition, Ui};
 use input::InputDebugSnapshot;
@@ -18,6 +23,9 @@ const SPIKE_ABSOLUTE_THRESHOLD_MS: f32 = 20.0;
 const SPIKE_RELATIVE_THRESHOLD_SCALE: f32 = 1.5;
 const SIDEBAR_MIN_WIDTH: f32 = 380.0;
 const SIDEBAR_MAX_WIDTH: f32 = 640.0;
+const DEFAULT_TIMING_REPORT_PREFIX: &str = "timing_report";
+const DEFAULT_TIMING_RECORD_INTERVAL_MS: u64 = 250;
+const DEFAULT_TIMING_RECORD_DURATION_SECS: u64 = 10;
 
 pub type DebugViewCallback = Box<dyn FnMut(&Ui, &DebugUiFrameContext) + 'static>;
 
@@ -246,6 +254,16 @@ pub struct DebugUiManager {
     spike_attribution_enabled: bool,
     spike_record_while_hidden: bool,
     spike_history: VecDeque<SpikeAttribution>,
+    timing_report_path: String,
+    timing_report_status: Option<String>,
+    timing_record_interval_ms: u64,
+    timing_record_duration_secs: u64,
+    timing_recording_active: bool,
+    timing_record_started_at: Option<Instant>,
+    timing_record_next_snapshot_at: Option<Instant>,
+    timing_record_end_at: Option<Instant>,
+    timing_record_samples_written: u64,
+    timing_record_active_path: Option<String>,
 }
 
 impl Default for DebugUiManager {
@@ -281,6 +299,16 @@ impl DebugUiManager {
             spike_attribution_enabled: false,
             spike_record_while_hidden: false,
             spike_history: VecDeque::new(),
+            timing_report_path: default_timing_report_path(),
+            timing_report_status: None,
+            timing_record_interval_ms: DEFAULT_TIMING_RECORD_INTERVAL_MS,
+            timing_record_duration_secs: DEFAULT_TIMING_RECORD_DURATION_SECS,
+            timing_recording_active: false,
+            timing_record_started_at: None,
+            timing_record_next_snapshot_at: None,
+            timing_record_end_at: None,
+            timing_record_samples_written: 0,
+            timing_record_active_path: None,
         };
 
         manager.register_builtin_views();
@@ -442,7 +470,10 @@ impl DebugUiManager {
                 ui.text("Input");
                 ui.text(format!("Queued events: {}", ctx.input_debug.queued_events));
                 ui.text(format!("Layer count: {}", ctx.input_debug.layer_count));
-                ui.text(format!("Active layers: {}", ctx.input_debug.active_layer_count));
+                ui.text(format!(
+                    "Active layers: {}",
+                    ctx.input_debug.active_layer_count
+                ));
                 ui.text(format!(
                     "Last dispatch consumed: {}",
                     ctx.input_debug.last_dispatch_consumed_events
@@ -535,11 +566,9 @@ impl DebugUiManager {
                 self.render_performance_section(ui);
                 ui.separator();
 
-                ui.child_window("debug_views")
-                    .size([0.0, 0.0])
-                    .build(|| {
-                        self.render_enabled_views(ui);
-                    });
+                ui.child_window("debug_views").size([0.0, 0.0]).build(|| {
+                    self.render_enabled_views(ui);
+                });
             });
     }
 
@@ -586,7 +615,25 @@ impl DebugUiManager {
         if ui.button("Reset Maxima##timing_max_reset") {
             self.reset_timing_maxima();
         }
+        let Some(_tab_bar) = ui.tab_bar("performance_tabs##engine_debug") else {
+            self.render_performance_timing_tab(ui, &timings);
+            return;
+        };
 
+        if let Some(_tab) = ui.tab_item("Timing##performance_tab_timing") {
+            self.render_performance_timing_tab(ui, &timings);
+        }
+
+        if let Some(_tab) = ui.tab_item("Graph##performance_tab_graph") {
+            self.render_performance_graph_tab(ui);
+        }
+
+        if let Some(_tab) = ui.tab_item("Record##performance_tab_record") {
+            self.render_performance_record_tab(ui, &timings);
+        }
+    }
+
+    fn render_performance_timing_tab(&self, ui: &Ui, timings: &DebugTimingSnapshot) {
         let mode_label = if !timings.gpu_supported {
             "CPU-only fallback (GPU timestamps unsupported)"
         } else if timings.frame_gpu_ms.is_some() {
@@ -618,21 +665,6 @@ impl DebugUiManager {
             ui.text("Frame GPU avg/max: cpu-only/pending");
         }
 
-        let cpu_samples: Vec<f32> = self.cpu_frame_history.iter().copied().collect();
-        if cpu_samples.len() > 2 {
-            ui.plot_lines("Frame pacing history (CPU ms, sampled)", &cpu_samples)
-                .graph_size([0.0, 64.0])
-                .build();
-        }
-
-        let gpu_samples: Vec<f32> = self.gpu_frame_history.iter().copied().collect();
-        let has_gpu_samples = gpu_samples.iter().any(|value| value.is_finite());
-        if has_gpu_samples {
-            ui.plot_lines("Frame pacing history (GPU ms, sampled)", &gpu_samples)
-                .graph_size([0.0, 64.0])
-                .build();
-        }
-
         if !timings.stage_timings.is_empty() {
             ui.separator();
             ui.text(format!(
@@ -640,18 +672,7 @@ impl DebugUiManager {
                 TIMING_AVG_WINDOW
             ));
             for row in &timings.stage_timings {
-                let metrics = self
-                    .stage_timing_windows
-                    .get(row.label)
-                    .and_then(|window| {
-                        Some((
-                            window.avg_cpu().unwrap_or(row.cpu_ms),
-                            window.max_cpu().unwrap_or(row.cpu_ms),
-                            window.avg_gpu().or(row.gpu_ms),
-                            window.max_gpu().or(row.gpu_ms),
-                        ))
-                    })
-                    .unwrap_or((row.cpu_ms, row.cpu_ms, row.gpu_ms, row.gpu_ms));
+                let window = self.stage_timing_windows.get(row.label);
                 let peak = self
                     .stage_timing_peaks
                     .get(row.label)
@@ -661,13 +682,18 @@ impl DebugUiManager {
                 ui.text(row.label);
                 ui.text(format!(
                     "  CPU avg {:.3} ms | max {:.3} ms",
-                    metrics.0,
-                    peak.cpu_ms.unwrap_or(metrics.1)
+                    window.and_then(TimingWindow::avg_cpu).unwrap_or(row.cpu_ms),
+                    peak.cpu_ms
+                        .unwrap_or(window.and_then(TimingWindow::max_cpu).unwrap_or(row.cpu_ms),)
                 ));
                 ui.text(format!(
                     "  GPU avg {} | max {}",
-                    format_gpu_ms(metrics.2),
-                    format_gpu_ms(peak.gpu_ms.or(metrics.3))
+                    format_gpu_ms(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
+                    format_gpu_ms(
+                        peak.gpu_ms
+                            .or(window.and_then(TimingWindow::max_gpu))
+                            .or(row.gpu_ms),
+                    )
                 ));
             }
         }
@@ -679,18 +705,7 @@ impl DebugUiManager {
                 TIMING_AVG_WINDOW
             ));
             for row in &timings.pass_timings {
-                let metrics = self
-                    .pass_timing_windows
-                    .get(row.label)
-                    .and_then(|window| {
-                        Some((
-                            window.avg_cpu().unwrap_or(row.cpu_ms),
-                            window.max_cpu().unwrap_or(row.cpu_ms),
-                            window.avg_gpu().or(row.gpu_ms),
-                            window.max_gpu().or(row.gpu_ms),
-                        ))
-                    })
-                    .unwrap_or((row.cpu_ms, row.cpu_ms, row.gpu_ms, row.gpu_ms));
+                let window = self.pass_timing_windows.get(row.label);
                 let peak = self
                     .pass_timing_peaks
                     .get(row.label)
@@ -700,20 +715,126 @@ impl DebugUiManager {
                 ui.text(row.label);
                 ui.text(format!(
                     "  CPU avg {:.3} ms | max {:.3} ms",
-                    metrics.0,
-                    peak.cpu_ms.unwrap_or(metrics.1)
+                    window.and_then(TimingWindow::avg_cpu).unwrap_or(row.cpu_ms),
+                    peak.cpu_ms
+                        .unwrap_or(window.and_then(TimingWindow::max_cpu).unwrap_or(row.cpu_ms),)
                 ));
                 ui.text(format!(
                     "  GPU avg {} | max {}",
-                    format_gpu_ms(metrics.2),
-                    format_gpu_ms(peak.gpu_ms.or(metrics.3))
+                    format_gpu_ms(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
+                    format_gpu_ms(
+                        peak.gpu_ms
+                            .or(window.and_then(TimingWindow::max_gpu))
+                            .or(row.gpu_ms),
+                    )
+                ));
+            }
+        }
+    }
+
+    fn render_performance_graph_tab(&self, ui: &Ui) {
+        ui.text("Frame pacing history");
+        let cpu_samples: Vec<f32> = self.cpu_frame_history.iter().copied().collect();
+        if cpu_samples.len() > 2 {
+            ui.plot_lines("Frame pacing history (CPU ms, sampled)", &cpu_samples)
+                .graph_size([0.0, 64.0])
+                .build();
+        } else {
+            ui.text_disabled("Need more CPU samples.");
+        }
+
+        let gpu_samples: Vec<f32> = self.gpu_frame_history.iter().copied().collect();
+        let has_gpu_samples = gpu_samples.iter().any(|value| value.is_finite());
+        if has_gpu_samples {
+            ui.plot_lines("Frame pacing history (GPU ms, sampled)", &gpu_samples)
+                .graph_size([0.0, 64.0])
+                .build();
+        } else {
+            ui.text_disabled("No GPU samples yet.");
+        }
+    }
+
+    fn render_performance_record_tab(&mut self, ui: &Ui, timings: &DebugTimingSnapshot) {
+        ui.text("Timing JSONL");
+        ui.input_text(
+            "Output path##timing_report_path",
+            &mut self.timing_report_path,
+        )
+        .build();
+        if ui.small_button("New Timestamp Path##timing_report_reset_path") {
+            self.timing_report_path = default_timing_report_path();
+        }
+
+        let mut interval_ms = self.timing_record_interval_ms as i32;
+        if ui
+            .input_int(
+                "Snapshot interval (ms)##timing_record_interval",
+                &mut interval_ms,
+            )
+            .build()
+        {
+            self.timing_record_interval_ms = interval_ms.max(1) as u64;
+        }
+
+        let mut duration_secs = self.timing_record_duration_secs as i32;
+        if ui
+            .input_int(
+                "Record length (sec)##timing_record_duration",
+                &mut duration_secs,
+            )
+            .build()
+        {
+            self.timing_record_duration_secs = duration_secs.max(1) as u64;
+        }
+
+        ui.same_line();
+        if self.timing_recording_active {
+            if ui.button("Stop Recording##timing_report_stop") {
+                self.stop_timing_recording("stopped by user");
+            }
+        } else if ui.button("Start Recording##timing_report_start") {
+            match self.start_timing_recording(timings) {
+                Ok(saved_path) => {
+                    let message = format!("recording JSONL to: {saved_path}");
+                    self.timing_report_status = Some(message.clone());
+                    self.push_console_output(message);
+                }
+                Err(err) => {
+                    let message = format!("timing recording failed: {err}");
+                    self.timing_report_status = Some(message.clone());
+                    self.push_console_output(message);
+                }
+            }
+        }
+
+        if self.timing_recording_active {
+            if let (Some(started_at), Some(end_at)) =
+                (self.timing_record_started_at, self.timing_record_end_at)
+            {
+                let now = Instant::now();
+                let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
+                let remaining = end_at.saturating_duration_since(now).as_secs_f32();
+                ui.text(format!(
+                    "Recording: {:.2}s elapsed, {:.2}s remaining, {} samples",
+                    elapsed.max(0.0),
+                    remaining.max(0.0),
+                    self.timing_record_samples_written
                 ));
             }
         }
 
+        if let Some(status) = self.timing_report_status.as_ref() {
+            ui.text(status);
+        } else {
+            ui.text_disabled("No timing log recorded yet.");
+        }
+
         ui.separator();
-        ui.text("Spike attribution");
-        ui.checkbox("Spike Attribution##toggle_spike_attr", &mut self.spike_attribution_enabled);
+        ui.text("Cause table (spike attribution)");
+        ui.checkbox(
+            "Spike Attribution##toggle_spike_attr",
+            &mut self.spike_attribution_enabled,
+        );
         ui.same_line();
         ui.checkbox(
             "Record while hidden##toggle_spike_hidden",
@@ -782,6 +903,274 @@ impl DebugUiManager {
             });
     }
 
+    fn start_timing_recording(&mut self, timings: &DebugTimingSnapshot) -> Result<String, String> {
+        let report_path = self.timing_report_path.trim().to_string();
+        if report_path.is_empty() {
+            return Err("output path is empty".to_string());
+        }
+
+        let now = Instant::now();
+        let interval = Duration::from_millis(self.timing_record_interval_ms.max(1));
+        let duration = Duration::from_secs(self.timing_record_duration_secs.max(1));
+        let end_at = now + duration;
+
+        self.prepare_timing_record_path(report_path.as_str())?;
+        fs::write(report_path.as_str(), "")
+            .map_err(|err| format!("failed to initialize '{}': {err}", report_path))?;
+
+        self.timing_recording_active = true;
+        self.timing_record_started_at = Some(now);
+        self.timing_record_next_snapshot_at = Some(now + interval);
+        self.timing_record_end_at = Some(end_at);
+        self.timing_record_samples_written = 0;
+        self.timing_record_active_path = Some(report_path.clone());
+
+        self.append_timing_jsonl_snapshot(timings, now, "start")?;
+        Ok(report_path)
+    }
+
+    fn stop_timing_recording(&mut self, reason: &str) {
+        self.timing_recording_active = false;
+        self.timing_record_started_at = None;
+        self.timing_record_next_snapshot_at = None;
+        self.timing_record_end_at = None;
+        self.timing_record_active_path = None;
+        self.timing_report_status = Some(format!(
+            "timing recording {reason}; samples={}",
+            self.timing_record_samples_written
+        ));
+    }
+
+    fn update_timing_recording(&mut self, timings: &DebugTimingSnapshot) {
+        if !self.timing_recording_active {
+            return;
+        }
+
+        let now = Instant::now();
+        let Some(end_at) = self.timing_record_end_at else {
+            self.stop_timing_recording("stopped (missing end time)");
+            return;
+        };
+
+        if now >= end_at {
+            let _ = self.append_timing_jsonl_snapshot(timings, now, "end");
+            self.stop_timing_recording("completed");
+            return;
+        }
+
+        let Some(next_snapshot_at) = self.timing_record_next_snapshot_at else {
+            self.stop_timing_recording("stopped (missing next snapshot)");
+            return;
+        };
+
+        if now < next_snapshot_at {
+            return;
+        }
+
+        let interval = Duration::from_millis(self.timing_record_interval_ms.max(1));
+        self.timing_record_next_snapshot_at = Some(now + interval);
+
+        if let Err(err) = self.append_timing_jsonl_snapshot(timings, now, "interval") {
+            self.stop_timing_recording("aborted");
+            let message = format!("timing recording failed: {err}");
+            self.timing_report_status = Some(message.clone());
+            self.push_console_output(message);
+        }
+    }
+
+    fn prepare_timing_record_path(&self, report_path: &str) -> Result<(), String> {
+        if report_path.is_empty() {
+            return Err("output path is empty".to_string());
+        }
+
+        let path = Path::new(report_path);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "failed to create parent directory '{}': {err}",
+                        parent.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn append_timing_jsonl_snapshot(
+        &mut self,
+        timings: &DebugTimingSnapshot,
+        now: Instant,
+        reason: &str,
+    ) -> Result<(), String> {
+        let report_path = self
+            .timing_record_active_path
+            .as_deref()
+            .unwrap_or(self.timing_report_path.trim());
+        self.prepare_timing_record_path(report_path)?;
+
+        let elapsed_ms = self
+            .timing_record_started_at
+            .map(|started| now.saturating_duration_since(started).as_millis() as u64)
+            .unwrap_or(0);
+        let line = self.build_timing_jsonl_line(timings, elapsed_ms, reason);
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(report_path)
+            .map_err(|err| format!("failed to open '{}': {err}", report_path))?;
+        file.write_all(line.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|err| format!("failed to append '{}': {err}", report_path))?;
+
+        self.timing_record_samples_written += 1;
+        Ok(())
+    }
+
+    fn build_timing_jsonl_line(
+        &self,
+        timings: &DebugTimingSnapshot,
+        elapsed_ms: u64,
+        reason: &str,
+    ) -> String {
+        let mut fields = Vec::new();
+
+        let mode_label = if !timings.gpu_supported {
+            "CPU-only fallback (GPU timestamps unsupported)"
+        } else if timings.frame_gpu_ms.is_some() {
+            "CPU + GPU"
+        } else {
+            "CPU-only fallback (GPU timing pending/unavailable)"
+        };
+
+        fields.push(format!(
+            "\"record_type\":\"{}\"",
+            json_escape("timing_snapshot")
+        ));
+        fields.push(format!(
+            "\"frame_index\":{}",
+            self.frame_context.frame_index
+        ));
+        fields.push(format!(
+            "\"wall_timestamp_unix_s\":{}",
+            unix_timestamp_seconds().unwrap_or(0)
+        ));
+        fields.push(format!("\"elapsed_ms\":{}", elapsed_ms));
+        fields.push(format!("\"reason\":\"{}\"", json_escape(reason)));
+        fields.push(format!("\"mode\":\"{}\"", json_escape(mode_label)));
+        fields.push(format!("\"avg_window_frames\":{}", TIMING_AVG_WINDOW));
+        fields.push(format!(
+            "\"frame_cpu_ms\":{{\"current\":{:.3},\"avg\":{:.3},\"max\":{:.3}}}",
+            timings.frame_cpu_ms.max(0.0),
+            self.frame_timing_window
+                .avg_cpu()
+                .unwrap_or(timings.frame_cpu_ms.max(0.0)),
+            self.frame_timing_peak
+                .cpu_ms
+                .or_else(|| self.frame_timing_window.max_cpu())
+                .unwrap_or(timings.frame_cpu_ms.max(0.0))
+        ));
+        fields.push(format!(
+            "\"frame_gpu_ms\":{{\"current\":{},\"avg\":{},\"max\":{}}}",
+            json_number_or_null(timings.frame_gpu_ms),
+            json_number_or_null(self.frame_timing_window.avg_gpu()),
+            json_number_or_null(
+                self.frame_timing_peak
+                    .gpu_ms
+                    .or_else(|| self.frame_timing_window.max_gpu())
+            )
+        ));
+
+        let mut stage_rows = Vec::new();
+        for row in timings.stage_timings.iter() {
+            let window = self.stage_timing_windows.get(row.label);
+            let peak = self
+                .stage_timing_peaks
+                .get(row.label)
+                .copied()
+                .unwrap_or_default();
+            stage_rows.push(format!(
+                "{{\"label\":\"{}\",\"cpu_ms\":{{\"current\":{:.3},\"avg\":{:.3},\"max\":{:.3}}},\"gpu_ms\":{{\"current\":{},\"avg\":{},\"max\":{}}}}}",
+                json_escape(row.label),
+                row.cpu_ms.max(0.0),
+                window
+                    .and_then(TimingWindow::avg_cpu)
+                    .unwrap_or(row.cpu_ms.max(0.0)),
+                peak.cpu_ms.unwrap_or(
+                    window
+                        .and_then(TimingWindow::max_cpu)
+                        .unwrap_or(row.cpu_ms.max(0.0))
+                ),
+                json_number_or_null(row.gpu_ms),
+                json_number_or_null(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
+                json_number_or_null(
+                    peak.gpu_ms
+                        .or(window.and_then(TimingWindow::max_gpu))
+                        .or(row.gpu_ms)
+                ),
+            ));
+        }
+        fields.push(format!("\"stages\":[{}]", stage_rows.join(",")));
+
+        let mut pass_rows = Vec::new();
+        for row in timings.pass_timings.iter() {
+            let window = self.pass_timing_windows.get(row.label);
+            let peak = self
+                .pass_timing_peaks
+                .get(row.label)
+                .copied()
+                .unwrap_or_default();
+            pass_rows.push(format!(
+                "{{\"label\":\"{}\",\"cpu_ms\":{{\"current\":{:.3},\"avg\":{:.3},\"max\":{:.3}}},\"gpu_ms\":{{\"current\":{},\"avg\":{},\"max\":{}}}}}",
+                json_escape(row.label),
+                row.cpu_ms.max(0.0),
+                window
+                    .and_then(TimingWindow::avg_cpu)
+                    .unwrap_or(row.cpu_ms.max(0.0)),
+                peak.cpu_ms.unwrap_or(
+                    window
+                        .and_then(TimingWindow::max_cpu)
+                        .unwrap_or(row.cpu_ms.max(0.0))
+                ),
+                json_number_or_null(row.gpu_ms),
+                json_number_or_null(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
+                json_number_or_null(
+                    peak.gpu_ms
+                        .or(window.and_then(TimingWindow::max_gpu))
+                        .or(row.gpu_ms)
+                ),
+            ));
+        }
+        fields.push(format!("\"passes\":[{}]", pass_rows.join(",")));
+
+        let mut cause_rows = Vec::new();
+        for spike in self.spike_history.iter() {
+            let stage_label = spike.top_stage.as_ref().map_or("n/a", |item| item.label);
+            let stage_cpu = spike.top_stage.as_ref().map(|item| item.cpu_ms);
+            let stage_gpu = spike.top_stage.as_ref().and_then(|item| item.gpu_ms);
+            let pass_label = spike.top_pass.as_ref().map_or("n/a", |item| item.label);
+            let pass_cpu = spike.top_pass.as_ref().map(|item| item.cpu_ms);
+            let pass_gpu = spike.top_pass.as_ref().and_then(|item| item.gpu_ms);
+            cause_rows.push(format!(
+                "{{\"frame_index\":{},\"frame_cpu_ms\":{:.3},\"frame_gpu_ms\":{},\"threshold_cpu_ms\":{:.3},\"top_stage\":{{\"label\":\"{}\",\"cpu_ms\":{},\"gpu_ms\":{}}},\"top_pass\":{{\"label\":\"{}\",\"cpu_ms\":{},\"gpu_ms\":{}}}}}",
+                spike.frame_index,
+                spike.frame_cpu_ms,
+                json_number_or_null(spike.frame_gpu_ms),
+                spike.threshold_cpu_ms,
+                json_escape(stage_label),
+                json_number_or_null(stage_cpu),
+                json_number_or_null(stage_gpu),
+                json_escape(pass_label),
+                json_number_or_null(pass_cpu),
+                json_number_or_null(pass_gpu)
+            ));
+        }
+        fields.push(format!("\"cause_table\":[{}]", cause_rows.join(",")));
+
+        format!("{{{}}}", fields.join(","))
+    }
+
     fn render_enabled_views(&mut self, ui: &Ui) {
         for id in self.ordered_view_ids() {
             let mut panic_message = None;
@@ -791,8 +1180,9 @@ impl DebugUiManager {
                     continue;
                 }
 
-                let result =
-                    catch_unwind(AssertUnwindSafe(|| (entry.callback)(ui, &self.frame_context)));
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    (entry.callback)(ui, &self.frame_context)
+                }));
                 if let Err(payload) = result {
                     panic_message = Some(panic_payload_to_string(payload));
                 }
@@ -1004,23 +1394,23 @@ impl DebugUiManager {
             self.frame_sample_gpu_count += 1;
         }
 
-        if self.frame_sample_count < FRAME_HISTORY_SAMPLE_SIZE {
-            return;
+        self.update_timing_recording(&timings);
+
+        if self.frame_sample_count >= FRAME_HISTORY_SAMPLE_SIZE {
+            self.push_sampled_frame_history(
+                self.frame_sample_cpu_sum / self.frame_sample_count as f32,
+                if self.frame_sample_gpu_count > 0 {
+                    Some(self.frame_sample_gpu_sum / self.frame_sample_gpu_count as f32)
+                } else {
+                    None
+                },
+            );
+
+            self.frame_sample_count = 0;
+            self.frame_sample_cpu_sum = 0.0;
+            self.frame_sample_gpu_sum = 0.0;
+            self.frame_sample_gpu_count = 0;
         }
-
-        self.push_sampled_frame_history(
-            self.frame_sample_cpu_sum / self.frame_sample_count as f32,
-            if self.frame_sample_gpu_count > 0 {
-                Some(self.frame_sample_gpu_sum / self.frame_sample_gpu_count as f32)
-            } else {
-                None
-            },
-        );
-
-        self.frame_sample_count = 0;
-        self.frame_sample_cpu_sum = 0.0;
-        self.frame_sample_gpu_sum = 0.0;
-        self.frame_sample_gpu_count = 0;
     }
 
     fn reset_timing_maxima(&mut self) {
@@ -1099,6 +1489,40 @@ fn format_gpu_ms(gpu_ms: Option<f32>) -> String {
     } else {
         "cpu-only/pending".to_string()
     }
+}
+
+fn json_number_or_null(value: Option<f32>) -> String {
+    value
+        .filter(|candidate| candidate.is_finite())
+        .map(|number| format!("{number:.3}"))
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn json_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn unix_timestamp_seconds() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
+fn default_timing_report_path() -> String {
+    let suffix = unix_timestamp_seconds().unwrap_or(0);
+    format!("{DEFAULT_TIMING_REPORT_PREFIX}_{suffix}.jsonl")
 }
 
 fn average_iter(values: impl Iterator<Item = f32>) -> Option<f32> {
