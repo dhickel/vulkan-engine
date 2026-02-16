@@ -1407,7 +1407,7 @@ pub fn resolve_upload_mip_levels(requested_mips: u32, supports_linear_mip_blit: 
 
 pub fn record_host_to_image_buffer(
     device: &ash::Device,
-    allocator: &vk_mem::Allocator,
+    allocator: &Arc<Mutex<vk_mem::Allocator>>,
     sampler_cache: &mut VkSamplerCache,
     host_info: &VkHostBuffer,
     image_meta: &[&TextureMeta],
@@ -1448,32 +1448,36 @@ pub fn record_host_to_image_buffer(
         })
         .collect();
 
-    let image_allocs: Vec<VkImageAlloc> = image_meta
+    let mut image_allocs: Vec<VkImageAlloc> = Vec::with_capacity(image_meta.len());
+    for ((meta, id), supports_linear_blit) in image_meta
         .iter()
         .zip(ids.iter())
         .zip(supports_linear_mip_blit.iter())
-        .map(|((meta, id), supports_linear_blit)| {
-            let format = meta.payload.format();
-            let width = meta.payload.width();
-            let height = meta.payload.height();
-            let mips = meta.payload.mips_levels();
+    {
+        let format = meta.payload.format();
+        let width = meta.payload.width();
+        let height = meta.payload.height();
+        let mips = meta.payload.mips_levels();
 
-            let effective_mips = match &meta.payload {
-                crate::data::gpu_data::TexturePayload::Compressed { .. } => mips,
-                crate::data::gpu_data::TexturePayload::Raw { .. } => {
-                    resolve_upload_mip_levels(mips, *supports_linear_blit)
-                }
-            };
-
-            if effective_mips != mips {
-                warn!(
-                    "Texture id {} format {:?} does not support linear mip blit; clamping mip levels from {} to 1",
-                    id, format, mips
-                );
+        let effective_mips = match &meta.payload {
+            crate::data::gpu_data::TexturePayload::Compressed { .. } => mips,
+            crate::data::gpu_data::TexturePayload::Raw { .. } => {
+                resolve_upload_mip_levels(mips, *supports_linear_blit)
             }
+        };
+
+        if effective_mips != mips {
+            warn!(
+                "Texture id {} format {:?} does not support linear mip blit; clamping mip levels from {} to 1",
+                id, format, mips
+            );
+        }
+
+        let image_alloc = {
+            let allocator = allocator.lock().unwrap();
             create_image(
                 device,
-                allocator,
+                &allocator,
                 Extent3D::default()
                     .height(height)
                     .width(width)
@@ -1484,8 +1488,9 @@ pub fn record_host_to_image_buffer(
                     | vk::ImageUsageFlags::TRANSFER_SRC,
                 effective_mips,
             )
-        })
-        .collect();
+        };
+        image_allocs.push(image_alloc);
+    }
 
     let begin_info =
         vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);

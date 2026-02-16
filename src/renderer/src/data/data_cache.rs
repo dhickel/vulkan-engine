@@ -725,8 +725,8 @@ impl TextureCache {
             return;
         }
 
-        let allocator = self.allocator.lock().unwrap();
         for (image_alloc, _) in image_allocs.into_iter() {
+            let allocator = self.allocator.lock().unwrap();
             vk_util::destroy_image(&allocator, image_alloc);
         }
     }
@@ -873,7 +873,7 @@ impl TextureCache {
 
         let image_allocs = match vk_util::record_host_to_image_buffer(
             &self.device,
-            &self.allocator.lock().unwrap(),
+            &self.allocator,
             &mut self.sampler_cache,
             &host_buffer,
             &next_upload,

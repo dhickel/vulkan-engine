@@ -617,7 +617,8 @@ impl VkRenderCore {
             &device_queues,
             &surface,
             window_state.get_curr_extent(),
-            Some(2),
+            // Prefer a spare present image to reduce acquire starvation under MAILBOX.
+            Some(3),
             None,
             Some(vk::PresentModeKHR::MAILBOX),
             None,
@@ -1121,7 +1122,8 @@ impl VkRenderCore {
             &self.vulkan_cache.queues,
             &self.surface,
             new_size,
-            Some(2),
+            // Keep startup and rebuild swapchain depth aligned for frame pacing.
+            Some(3),
             None,
             Some(vk::PresentModeKHR::MAILBOX),
             Some(self.swapchain.swapchain),
@@ -1143,6 +1145,17 @@ impl VkRenderCore {
 
 fn elapsed_ms(start: Instant) -> f32 {
     start.elapsed().as_secs_f64() as f32 * 1000.0
+}
+
+const ACQUIRE_STAGE_SPIKE_WARN_MS: f32 = 20.0;
+
+fn warn_if_acquire_stage_spike(stage: &'static str, duration_ms: f32) {
+    if duration_ms >= ACQUIRE_STAGE_SPIKE_WARN_MS {
+        warn!(
+            "Acquire stage '{}' spike: {:.3} ms (threshold {:.1} ms)",
+            stage, duration_ms, ACQUIRE_STAGE_SPIKE_WARN_MS
+        );
+    }
 }
 
 fn timestamp_delta_to_ms(delta_ticks: u64, timestamp_period_ns: f32) -> f32 {
@@ -1223,6 +1236,9 @@ struct FrameAcquire {
     frame_sync: VkFrameSync,
     image_index: u32,
     frame_slot_index: usize,
+    frame_fence_wait_ms: f32,
+    frame_cleanup_ms: f32,
+    swapchain_acquire_ms: f32,
 }
 
 struct VulkanCoreInit {
@@ -1681,6 +1697,9 @@ impl VkRenderCore {
         frame_start: Instant,
         transfer_ms: f32,
         acquire_ms: f32,
+        frame_fence_wait_ms: f32,
+        frame_cleanup_ms: f32,
+        swapchain_acquire_ms: f32,
         pre_hook_ms: f32,
         rendergraph_ms: f32,
         post_hook_ms: f32,
@@ -1738,6 +1757,21 @@ impl VkRenderCore {
                     label: "acquire_frame",
                     cpu_ms: acquire_ms,
                     gpu_ms: gpu_pass_map.get("acquire_frame").copied(),
+                },
+                DebugTimingRow {
+                    label: "frame_fence_wait",
+                    cpu_ms: frame_fence_wait_ms,
+                    gpu_ms: gpu_pass_map.get("frame_fence_wait").copied(),
+                },
+                DebugTimingRow {
+                    label: "frame_cleanup",
+                    cpu_ms: frame_cleanup_ms,
+                    gpu_ms: gpu_pass_map.get("frame_cleanup").copied(),
+                },
+                DebugTimingRow {
+                    label: "swapchain_acquire",
+                    cpu_ms: swapchain_acquire_ms,
+                    gpu_ms: gpu_pass_map.get("swapchain_acquire").copied(),
                 },
                 DebugTimingRow {
                     label: "pre_hook",
@@ -1824,13 +1858,23 @@ impl VkRenderCore {
         let cmd_buffer = cmd_pool.buffers[0];
         let queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
-        unsafe {
-            self.wait_and_reset_frame_fence(frame_sync);
-            self.cleanup_curr_frame_resources();
-        }
+        let fence_wait_start = Instant::now();
+        unsafe { self.wait_and_reset_frame_fence(frame_sync) };
+        let frame_fence_wait_ms = elapsed_ms(fence_wait_start);
+        warn_if_acquire_stage_spike("frame_fence_wait", frame_fence_wait_ms);
+
+        let cleanup_start = Instant::now();
+        unsafe { self.cleanup_curr_frame_resources() };
+        let frame_cleanup_ms = elapsed_ms(cleanup_start);
+        warn_if_acquire_stage_spike("frame_cleanup", frame_cleanup_ms);
+
         self.resolve_gpu_timing_for_slot(frame_slot_index);
 
+        let swapchain_acquire_start = Instant::now();
         let image_index = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+        let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
+        warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
+
         let Some(image_index) = image_index else {
             self.resize_requested = true;
             return None;
@@ -1851,6 +1895,9 @@ impl VkRenderCore {
             frame_sync,
             image_index,
             frame_slot_index,
+            frame_fence_wait_ms,
+            frame_cleanup_ms,
+            swapchain_acquire_ms,
         })
     }
 
@@ -1980,6 +2027,9 @@ impl VkRenderCore {
             return;
         };
         let acquire_ms = elapsed_ms(acquire_start);
+        let frame_fence_wait_ms = frame.frame_fence_wait_ms;
+        let frame_cleanup_ms = frame.frame_cleanup_ms;
+        let swapchain_acquire_ms = frame.swapchain_acquire_ms;
 
         // 3. Record this frame.
         let record_start = Instant::now();
@@ -2012,6 +2062,21 @@ impl VkRenderCore {
                         DebugTimingRow {
                             label: "acquire_frame",
                             cpu_ms: acquire_ms,
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "frame_fence_wait",
+                            cpu_ms: frame_fence_wait_ms,
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "frame_cleanup",
+                            cpu_ms: frame_cleanup_ms,
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "swapchain_acquire",
+                            cpu_ms: swapchain_acquire_ms,
                             gpu_ms: None,
                         },
                         DebugTimingRow {
@@ -2052,6 +2117,9 @@ impl VkRenderCore {
             frame_start,
             transfer_ms,
             acquire_ms,
+            frame_fence_wait_ms,
+            frame_cleanup_ms,
+            swapchain_acquire_ms,
             pre_hook_ms,
             rendergraph_ms,
             post_hook_ms,
