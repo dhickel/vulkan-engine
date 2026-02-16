@@ -72,6 +72,7 @@ pub struct Renderer {
     resize_skip_state_logged: bool,
     camera: Camera,
     fps_plugin: Option<FpsInputPlugin>,
+    cursor_in_window: bool,
 }
 
 impl Renderer {
@@ -112,6 +113,7 @@ impl Renderer {
             resize_skip_state_logged: false,
             camera: Camera::default(),
             fps_plugin: None,
+            cursor_in_window: true,
         })
     }
 
@@ -168,8 +170,9 @@ impl Renderer {
         self.runtime.core.imgui.handle_event(window, event);
 
         let io = self.runtime.core.imgui.context.io();
-        let consume_keyboard = io.want_capture_keyboard;
-        let consume_mouse = io.want_capture_mouse;
+        let ui_visible = self.runtime.core.debug_ui.is_any_visible();
+        let consume_keyboard = ui_visible || io.want_capture_keyboard;
+        let consume_mouse = ui_visible || io.want_capture_mouse;
 
         match event {
             Event::DeviceEvent {
@@ -208,12 +211,19 @@ impl Renderer {
                 } => {
                     if !key_event.repeat
                         && key_event.state == ElementState::Pressed
-                        && matches!(
-                            key_event.physical_key,
-                            PhysicalKey::Code(KeyCode::Backquote)
-                        )
+                        && matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::F1))
                     {
-                        self.toggle_debug_ui();
+                        self.toggle_console_ui();
+                        self.apply_cursor_policy(window)?;
+                        return Ok(());
+                    }
+
+                    if !key_event.repeat
+                        && key_event.state == ElementState::Pressed
+                        && matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::F2))
+                    {
+                        self.toggle_debug_overlay_ui();
+                        self.apply_cursor_policy(window)?;
                         return Ok(());
                     }
 
@@ -430,6 +440,41 @@ impl Renderer {
         self.runtime.core.debug_ui.is_visible()
     }
 
+    /// Toggles in-engine console visibility.
+    pub fn toggle_console_ui(&mut self) {
+        self.runtime.core.debug_ui.toggle_console_visible();
+    }
+
+    /// Sets in-engine console visibility.
+    pub fn set_console_ui_visible(&mut self, visible: bool) {
+        self.runtime.core.debug_ui.set_console_visible(visible);
+    }
+
+    /// Returns current in-engine console visibility.
+    pub fn is_console_ui_visible(&self) -> bool {
+        self.runtime.core.debug_ui.is_console_visible()
+    }
+
+    /// Toggles debug overlay visibility.
+    pub fn toggle_debug_overlay_ui(&mut self) {
+        self.runtime.core.debug_ui.toggle_debug_visible();
+    }
+
+    /// Sets debug overlay visibility.
+    pub fn set_debug_overlay_ui_visible(&mut self, visible: bool) {
+        self.runtime.core.debug_ui.set_debug_visible(visible);
+    }
+
+    /// Returns current debug overlay visibility.
+    pub fn is_debug_overlay_ui_visible(&self) -> bool {
+        self.runtime.core.debug_ui.is_debug_visible()
+    }
+
+    /// Returns true if either debug overlay or console is visible.
+    pub fn is_any_debug_ui_visible(&self) -> bool {
+        self.runtime.core.debug_ui.is_any_visible()
+    }
+
     /// Thread: Main
     /// May Stall: No
     pub fn resize_requested(&self) -> bool {
@@ -454,12 +499,16 @@ impl Renderer {
         self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
-        if let Some(plugin) = self.fps_plugin.as_mut() {
-            let snapshot = self.input_system.snapshot();
-            plugin
-                .controller
-                .update_from_snapshot(snapshot, delta.as_secs_f32(), &mut self.camera);
+        if !self.runtime.core.debug_ui.is_any_visible() {
+            if let Some(plugin) = self.fps_plugin.as_mut() {
+                let snapshot = self.input_system.snapshot();
+                plugin
+                    .controller
+                    .update_from_snapshot(snapshot, delta.as_secs_f32(), &mut self.camera);
+            }
         }
+
+        self.apply_cursor_policy(window)?;
 
         if self.runtime.resize_requested() {
             self.enter_resize_skip_state();
@@ -508,32 +557,6 @@ impl Renderer {
         let viewport_size = self.viewport_size();
         let frame_index = frame_number as u64;
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
-        let env_status = self.runtime.environment_runtime_status();
-        let fps = if self.last_frame_delta_seconds > 0.0 {
-            1.0 / self.last_frame_delta_seconds
-        } else {
-            0.0
-        };
-        self.runtime
-            .core
-            .debug_ui
-            .update_frame_context(DebugUiFrameContext {
-                frame_index,
-                delta_seconds: self.last_frame_delta_seconds,
-                fps,
-                viewport_size,
-                resize_pending: self.runtime.resize_requested(),
-                environment_requested: env_status.requested,
-                environment_active: env_status.active,
-                environment_transitioning: env_status.transitioning,
-                draw_item_count: submission.draw_items.len(),
-                point_light_count: submission.point_lights.len(),
-                draw_skybox: submission.flags.draw_skybox,
-                draw_geometry: submission.flags.draw_geometry,
-                draw_imgui: submission.flags.draw_imgui,
-                asset_tasks_pumped_last: self.last_asset_pump_steps,
-                input_debug: self.input_system.debug_snapshot().clone(),
-            });
 
         let runtime = &mut self.runtime;
         let pre_hook = &mut self.pre_render_hook;
@@ -576,6 +599,34 @@ impl Renderer {
             ))
         })?;
 
+        let env_status = self.runtime.environment_runtime_status();
+        let fps = if self.last_frame_delta_seconds > 0.0 {
+            1.0 / self.last_frame_delta_seconds
+        } else {
+            0.0
+        };
+        self.runtime
+            .core
+            .debug_ui
+            .update_frame_context(DebugUiFrameContext {
+                frame_index,
+                delta_seconds: self.last_frame_delta_seconds,
+                fps,
+                viewport_size,
+                resize_pending: self.runtime.resize_requested(),
+                environment_requested: env_status.requested,
+                environment_active: env_status.active,
+                environment_transitioning: env_status.transitioning,
+                draw_item_count: submission.draw_items.len(),
+                point_light_count: submission.point_lights.len(),
+                draw_skybox: submission.flags.draw_skybox,
+                draw_geometry: submission.flags.draw_geometry,
+                draw_imgui: submission.flags.draw_imgui,
+                asset_tasks_pumped_last: self.last_asset_pump_steps,
+                input_debug: self.input_system.debug_snapshot().clone(),
+                timings: self.runtime.frame_timing_snapshot(),
+            });
+
         Ok(FrameRenderOutcome::Rendered)
     }
 
@@ -584,23 +635,28 @@ impl Renderer {
         (extent.width, extent.height)
     }
 
+    fn apply_cursor_policy(&mut self, window: &Window) -> Result<(), RendererError> {
+        if self.runtime.core.debug_ui.is_any_visible() || !self.cursor_in_window {
+            window
+                .set_cursor_grab(winit::window::CursorGrabMode::None)
+                .map_err(|err| map_frame_input_err(format!("cursor release failed: {err}")))?;
+            window.set_cursor_visible(true);
+        } else {
+            window
+                .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                .map_err(|err| map_frame_input_err(format!("cursor grab failed: {err}")))?;
+            window.set_cursor_visible(false);
+        }
+        Ok(())
+    }
+
     fn handle_cursor_focus(
         &mut self,
         window: &Window,
         entered_window: bool,
     ) -> Result<(), RendererError> {
-        if entered_window {
-            window
-                .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                .map_err(|err| map_frame_input_err(format!("cursor grab failed: {err}")))?;
-            window.set_cursor_visible(false);
-        } else {
-            window
-                .set_cursor_grab(winit::window::CursorGrabMode::None)
-                .map_err(|err| map_frame_input_err(format!("cursor release failed: {err}")))?;
-            window.set_cursor_visible(true);
-        }
-        Ok(())
+        self.cursor_in_window = entered_window;
+        self.apply_cursor_policy(window)
     }
 
     pub(crate) fn raw_core_mut(&mut self) -> &mut vk_render::VkRenderCore {

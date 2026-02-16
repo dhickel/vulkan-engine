@@ -25,7 +25,8 @@ use crate::rendergraph::passes::{
 };
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_render::VkRenderCore;
-use crate::vulkan::vk_types::VkFrame;
+use crate::vulkan::vk_types::{VkFrame, VkQueueType};
+use std::time::Instant;
 
 pub mod passes;
 
@@ -44,6 +45,18 @@ pub trait RenderPassNode {
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String>;
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RenderGraphPassTiming {
+    pub name: &'static str,
+    pub cpu_ms: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RenderGraphExecutionReport {
+    pub total_cpu_ms: f32,
+    pub pass_timings: Vec<RenderGraphPassTiming>,
+}
+
 impl RenderGraph {
     pub fn new(passes: Vec<Box<dyn RenderPassNode>>) -> Self {
         Self { passes }
@@ -59,11 +72,34 @@ impl RenderGraph {
         ])
     }
 
-    pub fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
+    pub fn execute(&self, ctx: &mut RenderGraphContext) -> Result<RenderGraphExecutionReport, String> {
+        let graph_start = Instant::now();
+        let mut pass_timings = Vec::with_capacity(self.passes.len());
+
         for pass in self.passes.iter() {
-            pass.execute(ctx)
+            let cmd_pool = ctx.frame.cmd_pools.get(VkQueueType::Graphics);
+            let cmd_buffer = cmd_pool.buffers[0];
+            ctx.renderer.begin_gpu_pass_timing(cmd_buffer, pass.name());
+
+            let pass_start = Instant::now();
+            let result = pass.execute(ctx);
+            let cpu_ms = elapsed_ms(pass_start);
+            ctx.renderer.end_gpu_pass_timing(cmd_buffer);
+
+            result
                 .map_err(|err| format!("render pass '{}' failed: {err}", pass.name()))?;
+            pass_timings.push(RenderGraphPassTiming {
+                name: pass.name(),
+                cpu_ms,
+            });
         }
-        Ok(())
+        Ok(RenderGraphExecutionReport {
+            total_cpu_ms: elapsed_ms(graph_start),
+            pass_timings,
+        })
     }
+}
+
+fn elapsed_ms(start: Instant) -> f32 {
+    start.elapsed().as_secs_f64() as f32 * 1000.0
 }

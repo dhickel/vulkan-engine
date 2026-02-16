@@ -10,7 +10,10 @@ Current runtime path:
 ## 3. Key Concepts
 - Ingestion is per-event (`update_input`).
 - Dispatch is per-frame (`dispatch_frame`).
-- UI capture is handled during ingestion using ImGui `want_capture_*` flags.
+- UI capture is handled during ingestion using ImGui `want_capture_*` flags plus explicit engine
+  overlay visibility gating.
+- `F1` toggles the left console panel and `F2` toggles the right debug panel independently.
+- When either panel is visible, cursor grab is released and FPS camera-look updates are paused.
 - Layer dispatch model uses priority groups with same-priority peer execution.
 - Snapshot state is read-only to consumers after dispatch.
 - Action profile parsing (`ActionMap::from_toml_str`) is strict `version = 1` with validated triggers.
@@ -23,8 +26,9 @@ pub fn update_input(&mut self, window: &Window, event: &winit::event::Event<()>)
     self.runtime.core.imgui.handle_event(window, event);
 
     let io = self.runtime.core.imgui.context.io();
-    let consume_keyboard = io.want_capture_keyboard;
-    let consume_mouse = io.want_capture_mouse;
+    let ui_visible = self.runtime.core.debug_ui.is_any_visible();
+    let consume_keyboard = ui_visible || io.want_capture_keyboard;
+    let consume_mouse = ui_visible || io.want_capture_mouse;
 
     match event {
         Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
@@ -33,6 +37,7 @@ pub fn update_input(&mut self, window: &Window, event: &winit::event::Event<()>)
             }
         }
         Event::WindowEvent { window_id, event } if *window_id == window.id() => {
+            // F1/F2 toggle overlay panels.
             // keyboard/mouse are queued only when not UI-captured.
             // focus/modifiers are always tracked.
             // ...

@@ -70,8 +70,8 @@ use crate::data::gpu_data::{
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::{data_cache, data_util, gpu_data};
-use crate::debug_ui::DebugUiManager;
-use crate::rendergraph::{RenderGraph, RenderGraphContext};
+use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot, DebugUiManager};
+use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
@@ -91,9 +91,8 @@ use ash::{vk, Device};
 use data_util::PackUnorm;
 use glam::{vec3, Vec4};
 use gltf::accessor::Dimensions::Mat4;
-use gltf::json::serialize::to_string;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
-use log::{debug, error, info, log};
+use log::{debug, error, info, log, warn};
 use std::cell::Ref;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -102,7 +101,7 @@ use std::ffi::{CStr, CString};
 use std::mem::align_of;
 use std::path;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
 
 pub struct SkyBox {
@@ -166,6 +165,8 @@ pub struct VkRenderCore {
     pub main_deletion_queue: Vec<VkDeletable>,
     pub fence_await_queue: VkFenceQueue,
     pub uv_fallback_warnings: Mutex<HashSet<(MeshHandle, MaterialHandle)>>,
+    gpu_timing: GpuTimingState,
+    frame_timing_snapshot: DebugTimingSnapshot,
     pub resize_requested: bool,
 }
 
@@ -409,6 +410,10 @@ impl Drop for VkRenderCore {
 
             self.transfer
                 .destroy(&self.device, &self.allocator.lock().unwrap());
+
+            for slot in self.gpu_timing.slots.iter() {
+                self.device.destroy_query_pool(slot.query_pool, None);
+            }
 
             self.presentation
                 .destroy(&self.device, &self.allocator.lock().unwrap());
@@ -811,6 +816,7 @@ impl VkRenderCore {
         window: &winit::window::Window,
     ) -> VkImgui {
         let mut imgui_context = imgui::Context::create();
+        imgui_context.set_ini_filename(None);
         let mut platform = WinitPlatform::init(&mut imgui_context);
         platform.attach_window(imgui_context.io_mut(), window, HiDpiMode::Default);
 
@@ -1024,6 +1030,13 @@ impl VkRenderCore {
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
         let buffer_and_desc_limits =
             vk_init::get_buffer_and_descriptor_limits(&instance, physical_device.p_device);
+        let gpu_timing = Self::init_gpu_timing_state(
+            &instance,
+            physical_device.p_device,
+            &device,
+            device_queues.get_queue_index(VkQueueType::Graphics),
+            swapchain_image_count as usize,
+        );
 
         let (data_cache, vulkan_cache, default_env_id) = init_caches(
             &instance,
@@ -1082,6 +1095,8 @@ impl VkRenderCore {
             main_deletion_queue: Vec::new(),
             fence_await_queue: VkFenceQueue::new(),
             uv_fallback_warnings: Mutex::new(HashSet::new()),
+            gpu_timing,
+            frame_timing_snapshot: DebugTimingSnapshot::default(),
             scene_data: SceneDataUBO::default(),
             sky_box: SkyBox::default(),
             data_cache,
@@ -1123,6 +1138,14 @@ impl VkRenderCore {
         //self.presentation = presentation;
         self.resize_requested = false;
     }
+}
+
+fn elapsed_ms(start: Instant) -> f32 {
+    start.elapsed().as_secs_f64() as f32 * 1000.0
+}
+
+fn timestamp_delta_to_ms(delta_ticks: u64, timestamp_period_ns: f32) -> f32 {
+    (delta_ticks as f64 * timestamp_period_ns as f64 / 1_000_000.0) as f32
 }
 
 impl VkRender {
@@ -1186,6 +1209,10 @@ impl VkRender {
     pub fn environment_runtime_status(&self) -> VkEnvironmentRuntimeStatus {
         self.core.environment_runtime_status()
     }
+
+    pub fn frame_timing_snapshot(&self) -> DebugTimingSnapshot {
+        self.core.frame_timing_snapshot()
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1194,6 +1221,7 @@ struct FrameAcquire {
     cmd_buffer: vk::CommandBuffer,
     frame_sync: VkFrameSync,
     image_index: u32,
+    frame_slot_index: usize,
 }
 
 struct VulkanCoreInit {
@@ -1275,6 +1303,63 @@ struct GeometryDrawLists {
     unlit_blend: Vec<RenderObject>,
 }
 
+const MAX_GPU_TIMING_QUERIES: u32 = 64;
+
+#[derive(Clone, Debug)]
+struct GpuPassQueryRecord {
+    name: &'static str,
+    start_query: u32,
+    end_query: u32,
+}
+
+struct GpuTimingFrameSlot {
+    query_pool: vk::QueryPool,
+    pass_queries: Vec<GpuPassQueryRecord>,
+    open_pass: Option<(&'static str, u32)>,
+    frame_start_query: Option<u32>,
+    frame_end_query: Option<u32>,
+    next_query: u32,
+    raw_results: Vec<u64>,
+}
+
+impl GpuTimingFrameSlot {
+    fn new(query_pool: vk::QueryPool) -> Self {
+        Self {
+            query_pool,
+            pass_queries: Vec::new(),
+            open_pass: None,
+            frame_start_query: None,
+            frame_end_query: None,
+            next_query: 0,
+            raw_results: vec![0; MAX_GPU_TIMING_QUERIES as usize],
+        }
+    }
+}
+
+struct GpuTimingState {
+    supported: bool,
+    timestamp_period_ns: f32,
+    max_queries: u32,
+    active_slot: Option<usize>,
+    slots: Vec<GpuTimingFrameSlot>,
+    latest_frame_gpu_ms: Option<f32>,
+    latest_pass_gpu_ms: Vec<(&'static str, f32)>,
+}
+
+impl GpuTimingState {
+    fn unsupported() -> Self {
+        Self {
+            supported: false,
+            timestamp_period_ns: 0.0,
+            max_queries: MAX_GPU_TIMING_QUERIES,
+            active_slot: None,
+            slots: Vec::new(),
+            latest_frame_gpu_ms: None,
+            latest_pass_gpu_ms: Vec::new(),
+        }
+    }
+}
+
 impl VkRenderCore {
     pub fn environment_runtime_status(&self) -> VkEnvironmentRuntimeStatus {
         let requested = self.requested_env_id;
@@ -1293,6 +1378,388 @@ impl VkRenderCore {
 
     pub fn clear_environment_failure(&mut self, env_id: EnvironmentHandle) {
         self.environment_failures.remove(&env_id);
+    }
+
+    pub fn frame_timing_snapshot(&self) -> DebugTimingSnapshot {
+        self.frame_timing_snapshot.clone()
+    }
+
+    fn init_gpu_timing_state(
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        device: &ash::Device,
+        graphics_queue_index: u32,
+        frame_slots: usize,
+    ) -> GpuTimingState {
+        let properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let queue_properties =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+        let queue_supports_timestamps = queue_properties
+            .get(graphics_queue_index as usize)
+            .map(|info| info.timestamp_valid_bits > 0)
+            .unwrap_or(false);
+
+        let supports_timestamps = properties.limits.timestamp_compute_and_graphics == vk::TRUE
+            && queue_supports_timestamps
+            && properties.limits.timestamp_period > 0.0;
+        if !supports_timestamps {
+            return GpuTimingState::unsupported();
+        }
+
+        let mut slots: Vec<GpuTimingFrameSlot> = Vec::with_capacity(frame_slots);
+        for _ in 0..frame_slots {
+            let create_info = vk::QueryPoolCreateInfo::default()
+                .query_type(vk::QueryType::TIMESTAMP)
+                .query_count(MAX_GPU_TIMING_QUERIES);
+            let query_pool = unsafe { device.create_query_pool(&create_info, None) };
+            let Ok(query_pool) = query_pool else {
+                warn!(
+                    "failed to create GPU timing query pool; falling back to CPU-only timings"
+                );
+                for slot in slots.iter() {
+                    unsafe { device.destroy_query_pool(slot.query_pool, None) };
+                }
+                return GpuTimingState::unsupported();
+            };
+            slots.push(GpuTimingFrameSlot::new(query_pool));
+        }
+
+        GpuTimingState {
+            supported: true,
+            timestamp_period_ns: properties.limits.timestamp_period,
+            max_queries: MAX_GPU_TIMING_QUERIES,
+            active_slot: None,
+            slots,
+            latest_frame_gpu_ms: None,
+            latest_pass_gpu_ms: Vec::new(),
+        }
+    }
+
+    fn begin_gpu_timing_for_frame_slot(&mut self, frame_slot_index: usize, cmd_buffer: vk::CommandBuffer) {
+        if !self.gpu_timing.supported {
+            return;
+        }
+
+        let Some(slot) = self.gpu_timing.slots.get_mut(frame_slot_index) else {
+            return;
+        };
+
+        slot.pass_queries.clear();
+        slot.open_pass = None;
+        slot.frame_start_query = None;
+        slot.frame_end_query = None;
+        slot.next_query = 0;
+        self.gpu_timing.active_slot = Some(frame_slot_index);
+
+        unsafe {
+            self.device.cmd_reset_query_pool(
+                cmd_buffer,
+                slot.query_pool,
+                0,
+                self.gpu_timing.max_queries,
+            );
+        }
+
+        slot.frame_start_query = Some(slot.next_query);
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                cmd_buffer,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                slot.query_pool,
+                slot.next_query,
+            );
+        }
+        slot.next_query += 1;
+    }
+
+    fn finish_gpu_timing_for_frame_slot(&mut self, cmd_buffer: vk::CommandBuffer) {
+        if !self.gpu_timing.supported {
+            return;
+        }
+
+        let Some(frame_slot_index) = self.gpu_timing.active_slot else {
+            return;
+        };
+        let Some(slot) = self.gpu_timing.slots.get_mut(frame_slot_index) else {
+            self.gpu_timing.active_slot = None;
+            return;
+        };
+
+        if let Some((name, start_query)) = slot.open_pass.take() {
+            if slot.next_query < self.gpu_timing.max_queries {
+                let end_query = slot.next_query;
+                unsafe {
+                    self.device.cmd_write_timestamp2(
+                        cmd_buffer,
+                        vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                        slot.query_pool,
+                        end_query,
+                    );
+                }
+                slot.next_query += 1;
+                slot.pass_queries.push(GpuPassQueryRecord {
+                    name,
+                    start_query,
+                    end_query,
+                });
+            }
+        }
+
+        if slot.next_query >= self.gpu_timing.max_queries {
+            self.gpu_timing.active_slot = None;
+            return;
+        }
+
+        slot.frame_end_query = Some(slot.next_query);
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                cmd_buffer,
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                slot.query_pool,
+                slot.next_query,
+            );
+        }
+        slot.next_query += 1;
+        self.gpu_timing.active_slot = None;
+    }
+
+    pub(crate) fn begin_gpu_pass_timing(&mut self, cmd_buffer: vk::CommandBuffer, pass_name: &'static str) {
+        if !self.gpu_timing.supported {
+            return;
+        }
+
+        let Some(frame_slot_index) = self.gpu_timing.active_slot else {
+            return;
+        };
+        let Some(slot) = self.gpu_timing.slots.get_mut(frame_slot_index) else {
+            return;
+        };
+
+        if let Some((name, start_query)) = slot.open_pass.take() {
+            if slot.next_query < self.gpu_timing.max_queries {
+                let end_query = slot.next_query;
+                unsafe {
+                    self.device.cmd_write_timestamp2(
+                        cmd_buffer,
+                        vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                        slot.query_pool,
+                        end_query,
+                    );
+                }
+                slot.next_query += 1;
+                slot.pass_queries.push(GpuPassQueryRecord {
+                    name,
+                    start_query,
+                    end_query,
+                });
+            }
+        }
+
+        if slot.next_query >= self.gpu_timing.max_queries {
+            return;
+        }
+
+        let start_query = slot.next_query;
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                cmd_buffer,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                slot.query_pool,
+                start_query,
+            );
+        }
+        slot.next_query += 1;
+        slot.open_pass = Some((pass_name, start_query));
+    }
+
+    pub(crate) fn end_gpu_pass_timing(&mut self, cmd_buffer: vk::CommandBuffer) {
+        if !self.gpu_timing.supported {
+            return;
+        }
+
+        let Some(frame_slot_index) = self.gpu_timing.active_slot else {
+            return;
+        };
+        let Some(slot) = self.gpu_timing.slots.get_mut(frame_slot_index) else {
+            return;
+        };
+
+        let Some((name, start_query)) = slot.open_pass.take() else {
+            return;
+        };
+
+        if slot.next_query >= self.gpu_timing.max_queries {
+            return;
+        }
+
+        let end_query = slot.next_query;
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                cmd_buffer,
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                slot.query_pool,
+                end_query,
+            );
+        }
+        slot.next_query += 1;
+        slot.pass_queries.push(GpuPassQueryRecord {
+            name,
+            start_query,
+            end_query,
+        });
+    }
+
+    fn resolve_gpu_timing_for_slot(&mut self, frame_slot_index: usize) {
+        if !self.gpu_timing.supported {
+            self.gpu_timing.latest_frame_gpu_ms = None;
+            self.gpu_timing.latest_pass_gpu_ms.clear();
+            return;
+        }
+
+        let Some(slot) = self.gpu_timing.slots.get_mut(frame_slot_index) else {
+            return;
+        };
+
+        let Some(frame_end_query) = slot.frame_end_query else {
+            return;
+        };
+
+        let query_count = frame_end_query + 1;
+        let query_result = unsafe {
+            self.device.get_query_pool_results(
+                slot.query_pool,
+                0,
+                &mut slot.raw_results[..query_count as usize],
+                vk::QueryResultFlags::TYPE_64,
+            )
+        };
+        if query_result.is_err() {
+            self.gpu_timing.latest_frame_gpu_ms = None;
+            self.gpu_timing.latest_pass_gpu_ms.clear();
+            return;
+        }
+
+        let Some(frame_start_query) = slot.frame_start_query else {
+            self.gpu_timing.latest_frame_gpu_ms = None;
+            self.gpu_timing.latest_pass_gpu_ms.clear();
+            return;
+        };
+
+        let frame_start = slot.raw_results[frame_start_query as usize];
+        let frame_end = slot.raw_results[frame_end_query as usize];
+        self.gpu_timing.latest_frame_gpu_ms =
+            Some(timestamp_delta_to_ms(frame_end.saturating_sub(frame_start), self.gpu_timing.timestamp_period_ns));
+
+        self.gpu_timing.latest_pass_gpu_ms = slot
+            .pass_queries
+            .iter()
+            .filter_map(|record| {
+                let start = *slot.raw_results.get(record.start_query as usize)?;
+                let end = *slot.raw_results.get(record.end_query as usize)?;
+                Some((
+                    record.name,
+                    timestamp_delta_to_ms(end.saturating_sub(start), self.gpu_timing.timestamp_period_ns),
+                ))
+            })
+            .collect();
+    }
+
+    fn build_frame_timing_snapshot(
+        &self,
+        frame_start: Instant,
+        transfer_ms: f32,
+        acquire_ms: f32,
+        pre_hook_ms: f32,
+        rendergraph_ms: f32,
+        post_hook_ms: f32,
+        record_ms: f32,
+        submit_ms: f32,
+        present_ms: f32,
+        graph_report: RenderGraphExecutionReport,
+    ) -> DebugTimingSnapshot {
+        let gpu_supported = self.gpu_timing.supported;
+        let frame_gpu_ms = self.gpu_timing.latest_frame_gpu_ms;
+        let mut gpu_pass_map = HashMap::new();
+        for (name, gpu_ms) in self.gpu_timing.latest_pass_gpu_ms.iter() {
+            gpu_pass_map.insert(*name, *gpu_ms);
+        }
+
+        let rendergraph_gpu_ms = if gpu_supported {
+            let mut pass_sum = 0.0;
+            let mut pass_count = 0usize;
+            for pass in graph_report.pass_timings.iter() {
+                if let Some(gpu_ms) = gpu_pass_map.get(pass.name).copied() {
+                    pass_sum += gpu_ms;
+                    pass_count += 1;
+                }
+            }
+            if pass_count > 0 {
+                Some(pass_sum)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let pass_timings = graph_report
+            .pass_timings
+            .into_iter()
+            .map(|pass| DebugTimingRow {
+                gpu_ms: gpu_pass_map.get(pass.name).copied(),
+                label: pass.name,
+                cpu_ms: pass.cpu_ms,
+            })
+            .collect();
+
+        DebugTimingSnapshot {
+            gpu_supported,
+            frame_cpu_ms: elapsed_ms(frame_start),
+            frame_gpu_ms,
+            stage_timings: vec![
+                DebugTimingRow {
+                    label: "transfer_prepare",
+                    cpu_ms: transfer_ms,
+                    gpu_ms: gpu_pass_map.get("transfer_prepare").copied(),
+                },
+                DebugTimingRow {
+                    label: "acquire_frame",
+                    cpu_ms: acquire_ms,
+                    gpu_ms: gpu_pass_map.get("acquire_frame").copied(),
+                },
+                DebugTimingRow {
+                    label: "pre_hook",
+                    cpu_ms: pre_hook_ms,
+                    gpu_ms: gpu_pass_map.get("pre_hook").copied(),
+                },
+                DebugTimingRow {
+                    label: "rendergraph",
+                    cpu_ms: rendergraph_ms.max(graph_report.total_cpu_ms),
+                    gpu_ms: rendergraph_gpu_ms,
+                },
+                DebugTimingRow {
+                    label: "post_hook",
+                    cpu_ms: post_hook_ms,
+                    gpu_ms: gpu_pass_map.get("post_hook").copied(),
+                },
+                DebugTimingRow {
+                    label: "record_commands",
+                    cpu_ms: record_ms,
+                    gpu_ms: gpu_pass_map.get("record_commands").copied(),
+                },
+                DebugTimingRow {
+                    label: "submit",
+                    cpu_ms: submit_ms,
+                    gpu_ms: gpu_pass_map.get("submit").copied(),
+                },
+                DebugTimingRow {
+                    label: "present",
+                    cpu_ms: present_ms,
+                    gpu_ms: gpu_pass_map.get("present").copied(),
+                },
+            ],
+            pass_timings,
+        }
     }
 
     /// Service background uploads and update active environment state before frame recording.
@@ -1339,6 +1806,7 @@ impl VkRenderCore {
     /// Reserve frame resources, synchronize CPU/GPU ownership, and bind acquired present target.
     fn acquire_frame_slot(&mut self) -> Option<FrameAcquire> {
         let frame_data = self.presentation.get_next_frame();
+        let frame_slot_index = frame_data.index as usize;
         let frame_sync = frame_data.sync;
         let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
@@ -1348,6 +1816,7 @@ impl VkRenderCore {
             self.wait_and_reset_frame_fence(frame_sync);
             self.cleanup_curr_frame_resources();
         }
+        self.resolve_gpu_timing_for_slot(frame_slot_index);
 
         let image_index = unsafe { self.acquire_swapchain_image_index(frame_sync) };
         let Some(image_index) = image_index else {
@@ -1369,6 +1838,7 @@ impl VkRenderCore {
             cmd_buffer,
             frame_sync,
             image_index,
+            frame_slot_index,
         })
     }
 
@@ -1396,7 +1866,7 @@ impl VkRenderCore {
         &mut self,
         submission: &RenderSubmission,
         rendergraph: &RenderGraph,
-    ) -> Result<(), String> {
+    ) -> Result<RenderGraphExecutionReport, String> {
         let frame_ptr = self.presentation.get_curr_frame_mut() as *mut VkFrame;
         let mut graph_ctx = RenderGraphContext {
             submission,
@@ -1467,31 +1937,117 @@ impl VkRenderCore {
         PreRenderHook: FnMut(),
         PostRenderHook: FnMut(),
     {
+        let frame_start = Instant::now();
+
         // 1. Service transfer completions and resolve requested environment before recording.
+        let transfer_start = Instant::now();
         self.service_transfers_and_prepare_environment(submission);
+        let transfer_ms = elapsed_ms(transfer_start);
 
         // 2. Acquire frame resources, synchronize ownership, and bind present target.
+        let acquire_start = Instant::now();
         let Some(frame) = self.acquire_frame_slot() else {
+            self.frame_timing_snapshot = DebugTimingSnapshot {
+                gpu_supported: self.gpu_timing.supported,
+                frame_cpu_ms: elapsed_ms(frame_start),
+                frame_gpu_ms: self.gpu_timing.latest_frame_gpu_ms,
+                stage_timings: vec![
+                    DebugTimingRow {
+                        label: "transfer_prepare",
+                        cpu_ms: transfer_ms,
+                        gpu_ms: None,
+                    },
+                    DebugTimingRow {
+                        label: "acquire_frame",
+                        cpu_ms: elapsed_ms(acquire_start),
+                        gpu_ms: None,
+                    },
+                ],
+                pass_timings: Vec::new(),
+            };
             return;
         };
+        let acquire_ms = elapsed_ms(acquire_start);
 
         // 3. Record this frame.
+        let record_start = Instant::now();
         self.reset_and_begin_frame_cmd(frame.cmd_buffer);
+        self.begin_gpu_timing_for_frame_slot(frame.frame_slot_index, frame.cmd_buffer);
+
+        let pre_hook_start = Instant::now();
         pre_render_hook();
+        let pre_hook_ms = elapsed_ms(pre_hook_start);
 
+        let rendergraph_start = Instant::now();
         let graph_result = unsafe { self.execute_rendergraph_for_frame(submission, rendergraph) };
-        if let Err(err) = graph_result {
-            error!("RenderGraph execution failed: {err}");
-            self.resize_requested = true;
-            return;
-        }
+        let rendergraph_ms = elapsed_ms(rendergraph_start);
+        let graph_report = match graph_result {
+            Ok(report) => report,
+            Err(err) => {
+                error!("RenderGraph execution failed: {err}");
+                self.resize_requested = true;
+                self.gpu_timing.active_slot = None;
+                self.frame_timing_snapshot = DebugTimingSnapshot {
+                    gpu_supported: self.gpu_timing.supported,
+                    frame_cpu_ms: elapsed_ms(frame_start),
+                    frame_gpu_ms: self.gpu_timing.latest_frame_gpu_ms,
+                    stage_timings: vec![
+                        DebugTimingRow {
+                            label: "transfer_prepare",
+                            cpu_ms: transfer_ms,
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "acquire_frame",
+                            cpu_ms: acquire_ms,
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "record_commands",
+                            cpu_ms: elapsed_ms(record_start),
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "rendergraph",
+                            cpu_ms: rendergraph_ms,
+                            gpu_ms: None,
+                        },
+                    ],
+                    pass_timings: Vec::new(),
+                };
+                return;
+            }
+        };
 
+        let post_hook_start = Instant::now();
         post_render_hook();
+        let post_hook_ms = elapsed_ms(post_hook_start);
+
+        self.finish_gpu_timing_for_frame_slot(frame.cmd_buffer);
         self.end_frame_cmd(frame.cmd_buffer);
+        let record_ms = elapsed_ms(record_start);
 
         // 4. Submit then present in acquire -> render -> present semaphore order.
+        let submit_start = Instant::now();
         self.submit_frame(frame);
+        let submit_ms = elapsed_ms(submit_start);
+
+        let present_start = Instant::now();
         self.present_frame(frame);
+        let present_ms = elapsed_ms(present_start);
+
+        self.frame_timing_snapshot = self.build_frame_timing_snapshot(
+            frame_start,
+            transfer_ms,
+            acquire_ms,
+            pre_hook_ms,
+            rendergraph_ms,
+            post_hook_ms,
+            record_ms,
+            submit_ms,
+            present_ms,
+            graph_report,
+        );
     }
 
     /// Upload unloaded skybox cubemap data for the requested environment handle.
