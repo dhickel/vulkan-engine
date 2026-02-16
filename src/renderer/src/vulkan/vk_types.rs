@@ -802,7 +802,11 @@ impl VkPresent {
         }
     }
 
-    pub fn replace_present_images(&mut self, device: &Device, images: Vec<(vk::Image, vk::ImageView)>) {
+    pub fn replace_present_images(
+        &mut self,
+        device: &Device,
+        images: Vec<(vk::Image, vk::ImageView)>,
+    ) {
         if images.len() != self.frame_data.len() {
             panic!("Replacement present images, more than existing")
         }
@@ -822,7 +826,8 @@ impl VkPresent {
         draw_images: Vec<VkImageAlloc>,
         depth_images: Vec<VkImageAlloc>,
     ) {
-        if draw_images.len() != self.frame_data.len() || depth_images.len() != self.frame_data.len() {
+        if draw_images.len() != self.frame_data.len() || depth_images.len() != self.frame_data.len()
+        {
             panic!("Replacement draw/depth images have mismatched frame count");
         }
 

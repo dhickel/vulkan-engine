@@ -412,6 +412,46 @@ impl DebugUiManager {
         self.is_any_visible()
     }
 
+    pub fn configure_timing_recording_options(
+        &mut self,
+        duration_secs: Option<u64>,
+        interval_ms: Option<u64>,
+        report_path: Option<String>,
+    ) -> Result<(), String> {
+        if let Some(duration_secs) = duration_secs {
+            if duration_secs == 0 {
+                return Err("record duration must be >= 1 second".to_string());
+            }
+            self.timing_record_duration_secs = duration_secs;
+        }
+
+        if let Some(interval_ms) = interval_ms {
+            if interval_ms == 0 {
+                return Err("snapshot interval must be >= 1 ms".to_string());
+            }
+            self.timing_record_interval_ms = interval_ms;
+        }
+
+        if let Some(report_path) = report_path {
+            let report_path = report_path.trim();
+            if report_path.is_empty() {
+                return Err("output path is empty".to_string());
+            }
+            self.timing_report_path = report_path.to_string();
+        }
+
+        Ok(())
+    }
+
+    pub fn start_timing_recording_now(&mut self) -> Result<String, String> {
+        if self.timing_recording_active {
+            return Err("timing recording is already active".to_string());
+        }
+
+        let timings = self.frame_context.timings.clone();
+        self.start_timing_recording(&timings)
+    }
+
     pub fn render(&mut self, ui: &Ui) {
         if !self.is_any_visible() {
             return;

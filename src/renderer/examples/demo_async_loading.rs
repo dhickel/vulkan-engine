@@ -1,3 +1,5 @@
+mod common;
+
 use log::{error, info, warn};
 use renderer::{
     FrameRenderOutcome, LoadStatus, LoadTicket, Renderer, RendererConfig, RendererError, Scene,
@@ -14,6 +16,13 @@ const DEMO_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHelmet.glb";
 
 fn main() {
     init_logging();
+    let launch_options = match common::parse_launch_options() {
+        Ok(options) => options,
+        Err(err) => {
+            error!("Failed to parse launch arguments: {err}");
+            return;
+        }
+    };
 
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -51,6 +60,20 @@ fn main() {
         }
     };
     renderer.install_default_fps_input();
+    match common::apply_debug_record_launch_options(&mut renderer, &launch_options) {
+        Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
+        Ok(None) => {
+            if launch_options.record_debug_interval_ms.is_some()
+                || launch_options.record_debug_path.is_some()
+            {
+                info!("Debug timing defaults configured (not started): use --record_debug=<seconds> to start on launch");
+            }
+        }
+        Err(err) => {
+            error!("Failed to configure debug timing recording: {err}");
+            return;
+        }
+    }
 
     // Force the demo down the public facade ticket-loading path.
     let _ = renderer.take_startup_scene();

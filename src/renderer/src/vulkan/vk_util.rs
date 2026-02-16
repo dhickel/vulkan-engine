@@ -125,6 +125,22 @@ pub fn semaphore_submit_info<'a>(
         .value(0)
 }
 
+/// Stage used when transfer-queue async uploads signal completion.
+pub fn async_transfer_signal_stage_mask() -> vk::PipelineStageFlags2 {
+    vk::PipelineStageFlags2::ALL_TRANSFER
+}
+
+/// Stage used when graphics queue waits before running texture upload follow-up work
+/// (ownership acquire + transfer-domain mip operations).
+pub fn async_texture_upload_wait_stage_mask() -> vk::PipelineStageFlags2 {
+    vk::PipelineStageFlags2::ALL_TRANSFER
+}
+
+/// Stage used when graphics queue waits before consuming uploaded vertex/index buffers.
+pub fn async_buffer_upload_wait_stage_mask() -> vk::PipelineStageFlags2 {
+    vk::PipelineStageFlags2::VERTEX_INPUT
+}
+
 pub fn command_buffer_submit_info<'a>(cmd: vk::CommandBuffer) -> vk::CommandBufferSubmitInfo<'a> {
     vk::CommandBufferSubmitInfo::default()
         .command_buffer(cmd)

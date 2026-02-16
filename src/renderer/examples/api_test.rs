@@ -1,9 +1,10 @@
+mod common;
+
 use log::{error, info};
 use renderer::{
     EnvironmentSource, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
 };
 use std::env;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
@@ -13,6 +14,13 @@ use winit::window::{Fullscreen, Window, WindowBuilder};
 
 fn main() {
     init_logging();
+    let launch_options = match common::parse_launch_options() {
+        Ok(options) => options,
+        Err(err) => {
+            error!("Failed to parse launch arguments: {err}");
+            return;
+        }
+    };
 
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -50,10 +58,24 @@ fn main() {
         }
     };
     renderer.install_default_fps_input();
+    match common::apply_debug_record_launch_options(&mut renderer, &launch_options) {
+        Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
+        Ok(None) => {
+            if launch_options.record_debug_interval_ms.is_some()
+                || launch_options.record_debug_path.is_some()
+            {
+                info!("Debug timing defaults configured (not started): use --record_debug=<seconds> to start on launch");
+            }
+        }
+        Err(err) => {
+            error!("Failed to configure debug timing recording: {err}");
+            return;
+        }
+    }
 
     let mut scene = renderer.take_startup_scene().unwrap_or_else(Scene::new);
 
-    if let Some(env_path) = parse_env_arg() {
+    if let Some(env_path) = launch_options.env_path {
         info!("Loading custom environment from: {}", env_path.display());
         match renderer
             .assets()
@@ -182,23 +204,6 @@ fn render_frame(
     let outcome = renderer.render_scene_in_frame(&mut frame, scene)?;
     renderer.end_frame(frame)?;
     Ok(outcome)
-}
-
-fn parse_env_arg() -> Option<PathBuf> {
-    let args: Vec<String> = env::args().collect();
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--env" {
-            if let Some(path) = args.get(i + 1) {
-                return Some(PathBuf::from(path));
-            } else {
-                error!("--env requires a path argument");
-                return None;
-            }
-        }
-        i += 1;
-    }
-    None
 }
 
 fn handle_fullscreen_toggle(

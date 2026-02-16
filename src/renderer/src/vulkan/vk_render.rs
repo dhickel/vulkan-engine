@@ -1133,7 +1133,8 @@ impl VkRenderCore {
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
 
         self.swapchain = swapchain;
-        self.presentation.replace_present_images(present_images);
+        self.presentation
+            .replace_present_images(&self.device, present_images);
 
         //self.presentation = presentation;
         self.resize_requested = false;
@@ -1413,9 +1414,7 @@ impl VkRenderCore {
                 .query_count(MAX_GPU_TIMING_QUERIES);
             let query_pool = unsafe { device.create_query_pool(&create_info, None) };
             let Ok(query_pool) = query_pool else {
-                warn!(
-                    "failed to create GPU timing query pool; falling back to CPU-only timings"
-                );
+                warn!("failed to create GPU timing query pool; falling back to CPU-only timings");
                 for slot in slots.iter() {
                     unsafe { device.destroy_query_pool(slot.query_pool, None) };
                 }
@@ -1435,7 +1434,11 @@ impl VkRenderCore {
         }
     }
 
-    fn begin_gpu_timing_for_frame_slot(&mut self, frame_slot_index: usize, cmd_buffer: vk::CommandBuffer) {
+    fn begin_gpu_timing_for_frame_slot(
+        &mut self,
+        frame_slot_index: usize,
+        cmd_buffer: vk::CommandBuffer,
+    ) {
         if !self.gpu_timing.supported {
             return;
         }
@@ -1523,7 +1526,11 @@ impl VkRenderCore {
         self.gpu_timing.active_slot = None;
     }
 
-    pub(crate) fn begin_gpu_pass_timing(&mut self, cmd_buffer: vk::CommandBuffer, pass_name: &'static str) {
+    pub(crate) fn begin_gpu_pass_timing(
+        &mut self,
+        cmd_buffer: vk::CommandBuffer,
+        pass_name: &'static str,
+    ) {
         if !self.gpu_timing.supported {
             return;
         }
@@ -1647,8 +1654,10 @@ impl VkRenderCore {
 
         let frame_start = slot.raw_results[frame_start_query as usize];
         let frame_end = slot.raw_results[frame_end_query as usize];
-        self.gpu_timing.latest_frame_gpu_ms =
-            Some(timestamp_delta_to_ms(frame_end.saturating_sub(frame_start), self.gpu_timing.timestamp_period_ns));
+        self.gpu_timing.latest_frame_gpu_ms = Some(timestamp_delta_to_ms(
+            frame_end.saturating_sub(frame_start),
+            self.gpu_timing.timestamp_period_ns,
+        ));
 
         self.gpu_timing.latest_pass_gpu_ms = slot
             .pass_queries
@@ -1658,7 +1667,10 @@ impl VkRenderCore {
                 let end = *slot.raw_results.get(record.end_query as usize)?;
                 Some((
                     record.name,
-                    timestamp_delta_to_ms(end.saturating_sub(start), self.gpu_timing.timestamp_period_ns),
+                    timestamp_delta_to_ms(
+                        end.saturating_sub(start),
+                        self.gpu_timing.timestamp_period_ns,
+                    ),
                 ))
             })
             .collect();

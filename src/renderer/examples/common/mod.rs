@@ -6,6 +6,7 @@ use renderer::{
     DebugRuntimeMode, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
 };
 use std::env;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
@@ -39,8 +40,137 @@ impl DemoScenario {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct LaunchOptions {
+    pub env_path: Option<PathBuf>,
+    pub record_debug_secs: Option<u64>,
+    pub record_debug_interval_ms: Option<u64>,
+    pub record_debug_path: Option<String>,
+}
+
+pub fn parse_launch_options() -> Result<LaunchOptions, String> {
+    let args: Vec<String> = env::args().collect();
+    let mut options = LaunchOptions::default();
+    let mut i = 1;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if arg == "--env" {
+            let Some(value) = args.get(i + 1) else {
+                return Err("--env requires a path argument".to_string());
+            };
+            options.env_path = Some(PathBuf::from(value));
+            i += 2;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--env=") {
+            options.env_path = Some(PathBuf::from(value));
+            i += 1;
+            continue;
+        }
+
+        if arg == "--record_debug" {
+            let Some(value) = args.get(i + 1) else {
+                return Err("--record_debug requires seconds (e.g. --record_debug=10)".to_string());
+            };
+            options.record_debug_secs = Some(parse_positive_u64("--record_debug", value)?);
+            i += 2;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--record_debug=") {
+            options.record_debug_secs = Some(parse_positive_u64("--record_debug", value)?);
+            i += 1;
+            continue;
+        }
+
+        if arg == "--record_debug_interval" {
+            let Some(value) = args.get(i + 1) else {
+                return Err(
+                    "--record_debug_interval requires milliseconds (e.g. --record_debug_interval=100)"
+                        .to_string(),
+                );
+            };
+            options.record_debug_interval_ms =
+                Some(parse_positive_u64("--record_debug_interval", value)?);
+            i += 2;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--record_debug_interval=") {
+            options.record_debug_interval_ms =
+                Some(parse_positive_u64("--record_debug_interval", value)?);
+            i += 1;
+            continue;
+        }
+
+        if arg == "--record_debug_path" {
+            let Some(value) = args.get(i + 1) else {
+                return Err(
+                    "--record_debug_path requires a file path (e.g. --record_debug_path=timing.jsonl)"
+                        .to_string(),
+                );
+            };
+            options.record_debug_path = Some(value.to_string());
+            i += 2;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--record_debug_path=") {
+            options.record_debug_path = Some(value.to_string());
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    Ok(options)
+}
+
+pub fn apply_debug_record_launch_options(
+    renderer: &mut Renderer,
+    options: &LaunchOptions,
+) -> Result<Option<String>, RendererError> {
+    if options.record_debug_secs.is_none()
+        && options.record_debug_interval_ms.is_none()
+        && options.record_debug_path.is_none()
+    {
+        return Ok(None);
+    }
+
+    renderer.configure_debug_timing_recording(
+        options.record_debug_secs,
+        options.record_debug_interval_ms,
+        options.record_debug_path.clone(),
+    )?;
+
+    if options.record_debug_secs.is_some() {
+        return renderer.start_debug_timing_recording().map(Some);
+    }
+
+    Ok(None)
+}
+
+fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("{flag} expects a positive integer, got '{value}'"))?;
+    if parsed == 0 {
+        return Err(format!("{flag} expects a value >= 1, got '{value}'"));
+    }
+    Ok(parsed)
+}
+
 pub fn run_demo(scenario: DemoScenario) {
     init_logging();
+    let launch_options = match parse_launch_options() {
+        Ok(options) => options,
+        Err(err) => {
+            error!("Failed to parse launch arguments: {err}");
+            return;
+        }
+    };
 
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
@@ -79,6 +209,20 @@ pub fn run_demo(scenario: DemoScenario) {
         }
     };
     renderer.install_default_fps_input();
+    match apply_debug_record_launch_options(&mut renderer, &launch_options) {
+        Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
+        Ok(None) => {
+            if launch_options.record_debug_interval_ms.is_some()
+                || launch_options.record_debug_path.is_some()
+            {
+                info!("Debug timing defaults configured (not started): use --record_debug=<seconds> to start on launch");
+            }
+        }
+        Err(err) => {
+            error!("Failed to configure debug timing recording: {err}");
+            return;
+        }
+    }
 
     let mut scene = match initialize_scene(&mut renderer, scenario) {
         Ok(scene) => scene,

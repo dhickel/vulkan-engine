@@ -72,7 +72,10 @@ impl RenderGraph {
         ])
     }
 
-    pub fn execute(&self, ctx: &mut RenderGraphContext) -> Result<RenderGraphExecutionReport, String> {
+    pub fn execute(
+        &self,
+        ctx: &mut RenderGraphContext,
+    ) -> Result<RenderGraphExecutionReport, String> {
         let graph_start = Instant::now();
         let mut pass_timings = Vec::with_capacity(self.passes.len());
 
@@ -86,8 +89,7 @@ impl RenderGraph {
             let cpu_ms = elapsed_ms(pass_start);
             ctx.renderer.end_gpu_pass_timing(cmd_buffer);
 
-            result
-                .map_err(|err| format!("render pass '{}' failed: {err}", pass.name()))?;
+            result.map_err(|err| format!("render pass '{}' failed: {err}", pass.name()))?;
             pass_timings.push(RenderGraphPassTiming {
                 name: pass.name(),
                 cpu_ms,

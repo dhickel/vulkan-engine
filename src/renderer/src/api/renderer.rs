@@ -475,6 +475,29 @@ impl Renderer {
         self.runtime.core.debug_ui.is_any_visible()
     }
 
+    /// Configures launch-time debug timing recording options.
+    pub fn configure_debug_timing_recording(
+        &mut self,
+        duration_secs: Option<u64>,
+        interval_ms: Option<u64>,
+        output_path: Option<String>,
+    ) -> Result<(), RendererError> {
+        self.runtime
+            .core
+            .debug_ui
+            .configure_timing_recording_options(duration_secs, interval_ms, output_path)
+            .map_err(|err| map_frame_input_err(format!("debug timing configuration failed: {err}")))
+    }
+
+    /// Starts debug timing recording immediately using configured options.
+    pub fn start_debug_timing_recording(&mut self) -> Result<String, RendererError> {
+        self.runtime
+            .core
+            .debug_ui
+            .start_timing_recording_now()
+            .map_err(|err| map_frame_input_err(format!("debug timing start failed: {err}")))
+    }
+
     /// Thread: Main
     /// May Stall: No
     pub fn resize_requested(&self) -> bool {
@@ -502,9 +525,11 @@ impl Renderer {
         if !self.runtime.core.debug_ui.is_any_visible() {
             if let Some(plugin) = self.fps_plugin.as_mut() {
                 let snapshot = self.input_system.snapshot();
-                plugin
-                    .controller
-                    .update_from_snapshot(snapshot, delta.as_secs_f32(), &mut self.camera);
+                plugin.controller.update_from_snapshot(
+                    snapshot,
+                    delta.as_secs_f32(),
+                    &mut self.camera,
+                );
             }
         }
 
@@ -709,7 +734,10 @@ fn create_window_state(window: &Window, config: &RendererConfig) -> VkWindowStat
         .available_monitors()
         .map(|monitor| monitor.size())
         .fold((width, height), |(acc_w, acc_h), monitor_size| {
-            (acc_w.max(monitor_size.width), acc_h.max(monitor_size.height))
+            (
+                acc_w.max(monitor_size.width),
+                acc_h.max(monitor_size.height),
+            )
         });
 
     let curr_extent = Extent2D::default().width(width).height(height);
