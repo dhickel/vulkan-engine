@@ -705,15 +705,12 @@ fn create_window_state(window: &Window, config: &RendererConfig) -> VkWindowStat
         config.window_height.max(1)
     };
 
-    let monitor_size = window.current_monitor().map(|monitor| monitor.size());
-    let max_width = monitor_size
-        .map(|size| size.width)
-        .unwrap_or(width)
-        .max(width);
-    let max_height = monitor_size
-        .map(|size| size.height)
-        .unwrap_or(height)
-        .max(height);
+    let (max_width, max_height) = window
+        .available_monitors()
+        .map(|monitor| monitor.size())
+        .fold((width, height), |(acc_w, acc_h), monitor_size| {
+            (acc_w.max(monitor_size.width), acc_h.max(monitor_size.height))
+        });
 
     let curr_extent = Extent2D::default().width(width).height(height);
     let max_extent = Extent2D::default().width(max_width).height(max_height);

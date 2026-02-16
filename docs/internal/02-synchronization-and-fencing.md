@@ -25,7 +25,7 @@ Snippet Type: Real
 // src/renderer/src/vulkan/vk_render.rs
 unsafe fn wait_and_reset_frame_fence(&self, frame_sync: VkFrameSync) {
     let fence = [frame_sync.render_fence];
-    self.device.wait_for_fences(&fence, true, u32::MAX as u64).unwrap();
+    self.device.wait_for_fences(&fence, true, u64::MAX).unwrap();
     self.device.reset_fences(&fence).unwrap();
 }
 ```
@@ -34,13 +34,27 @@ Snippet Type: Real
 ```rust
 // src/renderer/src/vulkan/vk_render.rs
 let wait_info = [vk_util::semaphore_submit_info(
-    vk::PipelineStageFlags2::ALL_COMMANDS,
+    vk_util::frame_acquire_wait_stage_mask(),
     frame.frame_sync.swap_semaphore,
 )];
 let signal_info = [vk_util::semaphore_submit_info(
-    vk::PipelineStageFlags2::ALL_GRAPHICS,
+    vk_util::frame_render_complete_signal_stage_mask(),
     frame.frame_sync.render_semaphore,
 )];
+```
+
+Snippet Type: Real
+```rust
+// src/renderer/src/data/data_cache.rs + src/renderer/src/vulkan/vk_storage.rs
+host_buffer.submit_transfer_commands(VkSubmitParam::signaling(
+    vk_util::async_transfer_signal_stage_mask(),
+))?;
+host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
+    vk_util::async_texture_upload_wait_stage_mask(), // texture upload path
+))?;
+host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
+    vk_util::async_buffer_upload_wait_stage_mask(), // storage buffer upload path
+))?;
 ```
 
 Snippet Type: Real
@@ -83,12 +97,14 @@ for each frame slot:
 ## 5. Best Practices
 - Keep wait/reset fence operations before touching frame-owned resources.
 - Tie every barrier to a concrete hazard (write->read, write->write, ownership transfer).
+- Prefer named stage-mask helpers in `vk_util` over inline bitmasks so sync intent stays explicit.
 - Keep queue-family transfer logic explicit when transfer and graphics queues differ.
 - Treat validation-layer warnings as correctness bugs until proven otherwise.
 
 ## 6. Gotchas & Failure Modes
 - Fence wait/reset in wrong order can race CPU frame resource reuse.
 - Stage/access mismatches can appear to work on one GPU and fail on another.
+- Upload waits at the wrong stage (for example waiting at shader stages when work starts in transfer/vertex-input) can cause hidden stalls or hazards.
 - Assuming transfer completion before fence/latch completion causes stale uploads.
 - Swapchain rebuild failures can surface as acquire/present errors and trigger resize loops.
 

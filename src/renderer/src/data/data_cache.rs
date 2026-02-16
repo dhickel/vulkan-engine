@@ -890,7 +890,9 @@ impl TextureCache {
 
         debug!("Submitting texture upload batch (non-blocking)");
         if let Err(err) = host_buffer.submit_transfer_commands(VkSubmitParam::signaling(
-            vk::PipelineStageFlags2::ALL_TRANSFER,
+            // Transfer submit contains staging copies, so signal once transfer-domain
+            // commands are complete and ownership can move to graphics.
+            vk_util::async_transfer_signal_stage_mask(),
         )) {
             host_buffer.reset_buffers(&self.device);
             self.destroy_uploaded_images(image_allocs);
@@ -901,7 +903,9 @@ impl TextureCache {
         }
 
         if let Err(err) = host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
-            vk::PipelineStageFlags2::VERTEX_SHADER,
+            // Texture upload graphics work starts in transfer domain (ownership acquire +
+            // mip blits), so waiting at TRANSFER is the earliest correct synchronization point.
+            vk_util::async_texture_upload_wait_stage_mask(),
         )) {
             let err_msg = format!(
                 "failed to submit graphics commands for texture upload batch: {}",

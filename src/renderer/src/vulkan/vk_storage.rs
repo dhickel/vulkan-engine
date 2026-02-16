@@ -626,7 +626,7 @@ impl VkStorageBuffer {
     /// ## Synchronization
     /// Each upload:
     /// - Transfer queue: Copy staging→device, signal semaphore
-    /// - Graphics queue: Wait on semaphore, apply barrier (TRANSFER_WRITE→VERTEX_SHADER_READ)
+    /// - Graphics queue: Wait on semaphore, apply barrier (TRANSFER_WRITE→VERTEX_INPUT)
     /// - Latch: Block until both fences signal
     ///
     /// ## Fragmentation Handling
@@ -724,12 +724,14 @@ impl VkStorageBuffer {
                 debug!("Submitting VkStorage Commands");
                 host_buffer
                     .submit_transfer_commands(VkSubmitParam::signaling(
-                        vk::PipelineStageFlags2::ALL_TRANSFER,
+                        // Transfer queue records staging copies, so signal on transfer completion.
+                        vk_util::async_transfer_signal_stage_mask(),
                     ))
                     .unwrap();
                 host_buffer
                     .submit_graphics_commands(VkSubmitParam::waiting(
-                        vk::PipelineStageFlags2::VERTEX_SHADER,
+                        // Buffer acquire barrier targets VERTEX_INPUT consumption.
+                        vk_util::async_buffer_upload_wait_stage_mask(),
                     ))
                     .unwrap();
 
@@ -804,12 +806,14 @@ impl VkStorageBuffer {
             debug!("Submitting VkStorage Commands");
             host_buffer
                 .submit_transfer_commands(VkSubmitParam::signaling(
-                    vk::PipelineStageFlags2::ALL_TRANSFER,
+                    // Transfer queue records staging copies, so signal on transfer completion.
+                    vk_util::async_transfer_signal_stage_mask(),
                 ))
                 .unwrap();
             host_buffer
                 .submit_graphics_commands(VkSubmitParam::waiting(
-                    vk::PipelineStageFlags2::VERTEX_SHADER,
+                    // Buffer acquire barrier targets VERTEX_INPUT consumption.
+                    vk_util::async_buffer_upload_wait_stage_mask(),
                 ))
                 .unwrap();
 

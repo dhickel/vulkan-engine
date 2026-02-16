@@ -176,6 +176,17 @@ impl VkWindowState {
         self.max_extent
     }
 
+    pub fn ensure_max_extent_at_least(&mut self, extent: vk::Extent2D) -> bool {
+        let grown_extent = vk::Extent2D::default()
+            .width(self.max_extent.width.max(extent.width))
+            .height(self.max_extent.height.max(extent.height));
+        let changed = grown_extent != self.max_extent;
+        if changed {
+            self.max_extent = grown_extent;
+        }
+        changed
+    }
+
     pub fn get_viewport(&self) -> &[vk::Viewport; 1] {
         &self.viewport_scissor.0
     }
@@ -681,6 +692,7 @@ pub struct VkPresent {
 
 impl VkDestroyable for VkPresent {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.destroy_present_views(device);
         self.frame_data
             .iter_mut()
             .for_each(|frame| frame.destroy(device, allocator));
@@ -779,16 +791,52 @@ impl VkPresent {
         self.frame_data[index as usize].add_deletion(deletion);
     }
 
-    pub fn replace_present_images(&mut self, images: Vec<(vk::Image, vk::ImageView)>) {
+    fn destroy_present_views(&mut self, device: &Device) {
+        for (_, view) in self.present_targets.iter_mut() {
+            if *view != vk::ImageView::null() {
+                unsafe {
+                    device.destroy_image_view(*view, None);
+                }
+                *view = vk::ImageView::null();
+            }
+        }
+    }
+
+    pub fn replace_present_images(&mut self, device: &Device, images: Vec<(vk::Image, vk::ImageView)>) {
         if images.len() != self.frame_data.len() {
             panic!("Replacement present images, more than existing")
         }
+        self.destroy_present_views(device);
         self.present_targets = images.clone();
         for x in 0..images.len() {
             self.frame_data[x].present_image = images[x].0;
             self.frame_data[x].present_image_view = images[x].1;
         }
         self.curr_frame_count = 0;
+    }
+
+    pub fn replace_draw_depth_images(
+        &mut self,
+        device: &Device,
+        allocator: &Allocator,
+        draw_images: Vec<VkImageAlloc>,
+        depth_images: Vec<VkImageAlloc>,
+    ) {
+        if draw_images.len() != self.frame_data.len() || depth_images.len() != self.frame_data.len() {
+            panic!("Replacement draw/depth images have mismatched frame count");
+        }
+
+        for ((frame, draw), depth) in self
+            .frame_data
+            .iter_mut()
+            .zip(draw_images.into_iter())
+            .zip(depth_images.into_iter())
+        {
+            frame.draw.destroy(device, allocator);
+            frame.depth.destroy(device, allocator);
+            frame.draw = draw;
+            frame.depth = depth;
+        }
     }
 
     pub fn bind_acquired_present_target(&mut self, image_index: u32) -> Result<(), VkError> {
@@ -1683,6 +1731,10 @@ impl VkFenceQueue {
         }
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.fence_awaits.len()
+    }
+
     pub fn queue_fence(&mut self, fence: [vk::Fence; 1], latch_guard: CountDownDropGuard) {
         debug!("Queued fence: {:?}", fence);
         self.fence_awaits.push((fence[0], latch_guard));
@@ -1701,15 +1753,26 @@ impl VkFenceQueue {
             return;
         }
 
-        self.fence_awaits.retain(|(fence, signal)| {
-            let signaled = unsafe { device.get_fence_status(*fence).unwrap() };
+        let mut pending = Vec::with_capacity(self.fence_awaits.len());
+        let mut signaled_fences = Vec::new();
+
+        for (fence, signal) in self.fence_awaits.drain(..) {
+            let signaled = unsafe { device.get_fence_status(fence).unwrap() };
             if signaled {
-                unsafe { device.reset_fences(&[*fence]).unwrap() };
+                signaled_fences.push(fence);
                 debug!("Signaling and removing fence: {:?}", fence);
-                false // Remove from queue
+                drop(signal);
             } else {
-                true
-            } // Keep in queue
-        });
+                pending.push((fence, signal));
+            }
+        }
+
+        if !signaled_fences.is_empty() {
+            // Reset all completed fences in one driver call to reduce burst overhead when
+            // multiple async uploads complete in the same frame.
+            unsafe { device.reset_fences(&signaled_fences).unwrap() };
+        }
+
+        self.fence_awaits = pending;
     }
 }

@@ -17,6 +17,10 @@ Per-frame backend flow:
 - Two barrier helper styles exist:
   - `transition_image` / `transition_image_layered`: broad `ALL_COMMANDS` + memory read/write masks (`vk_sync2` path).
   - `record_image_barrier`: explicit `layout/stage/access` (legacy-style helper, heavily used in texture upload/mip generation).
+- Semaphore stage masks are centralized in `vk_util` helpers:
+  - frame submit: `frame_acquire_wait_stage_mask()`, `frame_render_complete_signal_stage_mask()`
+  - async upload submit: `async_transfer_signal_stage_mask()`, `async_texture_upload_wait_stage_mask()`, `async_buffer_upload_wait_stage_mask()`
+- Frame timing now records `frame_fence_wait` so CPU await spikes are isolated from broader `acquire_frame`.
 - Rendergraph pass order is explicit and semantic: `PrepareTargets -> Skybox -> Geometry -> PresentCopy -> Imgui`.
 
 Synchronization primitive role table:
@@ -68,11 +72,11 @@ Snippet Type: Real
 fn submit_frame(&self, frame: FrameAcquire) {
     let cmd_info = [vk_util::command_buffer_submit_info(frame.cmd_buffer)];
     let wait_info = [vk_util::semaphore_submit_info(
-        vk::PipelineStageFlags2::ALL_COMMANDS,
+        vk_util::frame_acquire_wait_stage_mask(),
         frame.frame_sync.swap_semaphore,
     )];
     let signal_info = [vk_util::semaphore_submit_info(
-        vk::PipelineStageFlags2::ALL_GRAPHICS,
+        vk_util::frame_render_complete_signal_stage_mask(),
         frame.frame_sync.render_semaphore,
     )];
     let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];

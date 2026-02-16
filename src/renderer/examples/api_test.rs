@@ -6,10 +6,10 @@ use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowBuilder};
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::window::{Fullscreen, Window, WindowBuilder};
 
 fn main() {
     init_logging();
@@ -71,6 +71,8 @@ fn main() {
 
     let mut fps_timer = Instant::now();
     let mut frame_counter: u32 = 0;
+    let mut modifiers = ModifiersState::default();
+    let mut last_window_size = window.inner_size();
 
     window.request_redraw();
 
@@ -91,17 +93,51 @@ fn main() {
                         WindowEvent::KeyboardInput {
                             event: key_event, ..
                         } => {
+                            if handle_fullscreen_toggle(&window, &key_event, modifiers) {
+                                return;
+                            }
                             if key_event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
                                 control_flow.exit();
                             }
                         }
+                        WindowEvent::ModifiersChanged(next_modifiers) => {
+                            modifiers = next_modifiers.state();
+                        }
                         WindowEvent::Resized(new_size) => {
+                            last_window_size = new_size;
                             if let Err(err) = renderer.resize(new_size.width, new_size.height) {
                                 error!("Resize failed: {err}");
                                 control_flow.exit();
                             }
                         }
+                        WindowEvent::ScaleFactorChanged {
+                            mut inner_size_writer,
+                            ..
+                        } => {
+                            let new_size = window.inner_size();
+                            if let Err(err) = inner_size_writer.request_inner_size(new_size) {
+                                error!("Scale factor size request failed: {err}");
+                                control_flow.exit();
+                                return;
+                            }
+                            last_window_size = new_size;
+                            if let Err(err) = renderer.resize(new_size.width, new_size.height) {
+                                error!("Resize failed after scale change: {err}");
+                                control_flow.exit();
+                            }
+                        }
                         WindowEvent::RedrawRequested => {
+                            let current_size = window.inner_size();
+                            if current_size != last_window_size {
+                                last_window_size = current_size;
+                                if let Err(err) =
+                                    renderer.resize(current_size.width, current_size.height)
+                                {
+                                    error!("Resize failed while redrawing: {err}");
+                                    control_flow.exit();
+                                    return;
+                                }
+                            }
                             let outcome = match render_frame(&mut renderer, &window, &mut scene) {
                                 Ok(outcome) => outcome,
                                 Err(err) => {
@@ -163,6 +199,28 @@ fn parse_env_arg() -> Option<PathBuf> {
         i += 1;
     }
     None
+}
+
+fn handle_fullscreen_toggle(
+    window: &Window,
+    key_event: &KeyEvent,
+    modifiers: ModifiersState,
+) -> bool {
+    if key_event.state != ElementState::Pressed || key_event.repeat {
+        return false;
+    }
+
+    if key_event.physical_key != PhysicalKey::Code(KeyCode::KeyF) || !modifiers.control_key() {
+        return false;
+    }
+
+    let next_mode = if window.fullscreen().is_some() {
+        None
+    } else {
+        Some(Fullscreen::Borderless(window.current_monitor()))
+    };
+    window.set_fullscreen(next_mode);
+    true
 }
 
 fn init_logging() {
