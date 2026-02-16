@@ -970,11 +970,8 @@ pub fn upload_texture_2d(
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
 ) -> Result<(VkImageAlloc, vk::Sampler), String> {
-    let staging_buffer = allocate_and_write_buffer(
-        allocator,
-        bytes,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-    )?;
+    let staging_buffer =
+        allocate_and_write_buffer(allocator, bytes, vk::BufferUsageFlags::TRANSFER_SRC)?;
 
     let extent = vk::Extent3D {
         width,
@@ -995,7 +992,9 @@ pub fn upload_texture_2d(
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        device.begin_command_buffer(cmd_buffer, &begin_info).unwrap();
+        device
+            .begin_command_buffer(cmd_buffer, &begin_info)
+            .unwrap();
 
         transition_image(
             device,

@@ -65,8 +65,8 @@ use crate::data::data_cache::{
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
     AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
-    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex,
-    VkCubeMap, VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
+    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap,
+    VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::{data_cache, data_util, gpu_data};
@@ -285,10 +285,12 @@ pub fn init_caches(
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
     let default_env = environment_cache
-        .import_environment(crate::data::environment_import::EnvironmentSource::FaceDirectory {
-            path: "src/renderer/src/assets/sky_maps/sky".into(),
-            pattern: crate::data::environment_import::FacePattern::PxNxPyNyPzNz,
-        })
+        .import_environment(
+            crate::data::environment_import::EnvironmentSource::FaceDirectory {
+                path: "src/renderer/src/assets/sky_maps/sky".into(),
+                pattern: crate::data::environment_import::FacePattern::PxNxPyNyPzNz,
+            },
+        )
         .map_err(|err| format!("Failed to load default environment: {err}"))?;
 
     let data_cache = VkDataCache {
@@ -1495,14 +1497,12 @@ impl VkRenderCore {
 
         let pending_source = {
             let mut env_cache = self.data_cache.environment_cache.lock().unwrap();
-            env_cache
-                .take_unloaded_source(env_id)
-                .map_err(|err| {
-                    format!(
-                        "Failed to query skybox cubemap state for env {:?}: {:?}",
-                        env_id, err
-                    )
-                })?
+            env_cache.take_unloaded_source(env_id).map_err(|err| {
+                format!(
+                    "Failed to query skybox cubemap state for env {:?}: {:?}",
+                    env_id, err
+                )
+            })?
         };
 
         let Some(source) = pending_source else {
@@ -2194,10 +2194,18 @@ impl VkRenderCore {
             color_intensity: glam::Vec4::ZERO,
         }; MAX_POINT_LIGHTS_GPU];
 
-        for (i, light) in submission.point_lights.iter().take(MAX_POINT_LIGHTS_GPU).enumerate() {
+        for (i, light) in submission
+            .point_lights
+            .iter()
+            .take(MAX_POINT_LIGHTS_GPU)
+            .enumerate()
+        {
             env.point_lights[i] = GpuPointLight {
                 position_range: light.position.extend(light.range.max(0.001)),
-                color_intensity: light.color.max(glam::Vec3::ZERO).extend(light.intensity.max(0.0)),
+                color_intensity: light
+                    .color
+                    .max(glam::Vec3::ZERO)
+                    .extend(light.intensity.max(0.0)),
             };
         }
 
@@ -2813,10 +2821,7 @@ impl VkRenderCore {
         )?;
         let source_desc = desc_pool.allocate(
             &self.device,
-            &[self
-                .vulkan_cache
-                .desc_layouts
-                .get(VkDescType::EnvEquirect)],
+            &[self.vulkan_cache.desc_layouts.get(VkDescType::EnvEquirect)],
         )?;
         self.write_environment_source_descriptor(source_desc, src_view, src_sampler);
 
@@ -2943,8 +2948,14 @@ impl VkRenderCore {
                         0,
                         vk::IndexType::UINT32,
                     );
-                    self.device
-                        .cmd_draw_indexed(render_buffer, skybox_mesh.index_count, 1, 0, 0, 0);
+                    self.device.cmd_draw_indexed(
+                        render_buffer,
+                        skybox_mesh.index_count,
+                        1,
+                        0,
+                        0,
+                        0,
+                    );
                     self.device.cmd_end_rendering(render_buffer);
 
                     vk_util::transition_image(

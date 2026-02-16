@@ -211,10 +211,7 @@ pub fn convert_strip_to_face_major(decoded: &DecodedImageF32) -> Result<CubemapF
 // ─── Face Directory Loading ─────────────────────────────────────────────────
 
 /// Load a cubemap from a directory of face images.
-pub fn load_face_directory(
-    dir: &Path,
-    pattern: FacePattern,
-) -> Result<CubemapFaces, String> {
+pub fn load_face_directory(dir: &Path, pattern: FacePattern) -> Result<CubemapFaces, String> {
     if !dir.is_dir() {
         return Err(format!(
             "Face directory path '{}' does not exist or is not a directory",
@@ -277,9 +274,7 @@ pub fn load_face_directory(
 fn resolve_face_paths(dir: &Path, pattern: FacePattern) -> Result<Vec<PathBuf>, String> {
     match pattern {
         FacePattern::PxNxPyNyPzNz => resolve_specific_aliases(dir, &FACE_ALIASES_PX),
-        FacePattern::PosxNegxPosyNegyPoszNegz => {
-            resolve_specific_aliases(dir, &FACE_ALIASES_POSX)
-        }
+        FacePattern::PosxNegxPosyNegyPoszNegz => resolve_specific_aliases(dir, &FACE_ALIASES_POSX),
         FacePattern::AutoAliases => resolve_auto_aliases(dir),
     }
 }
@@ -432,10 +427,7 @@ pub enum EnvironmentSource {
     /// Horizontal 6:1 cube strip file.
     CubeStrip(PathBuf),
     /// Directory of 6 face images.
-    FaceDirectory {
-        path: PathBuf,
-        pattern: FacePattern,
-    },
+    FaceDirectory { path: PathBuf, pattern: FacePattern },
 }
 
 /// Import an environment source into a `PendingSkyboxSource`.
@@ -451,9 +443,7 @@ pub fn import_environment_source(
             let layout = detect_source_layout(decoded.width, decoded.height)?;
 
             match layout {
-                SourceLayout::Equirectangular => {
-                    make_equirect_source(decoded, format)
-                }
+                SourceLayout::Equirectangular => make_equirect_source(decoded, format),
                 SourceLayout::CubeStrip => {
                     let faces = convert_strip_to_face_major(&decoded)?;
                     make_cubemap_source(faces, format)
@@ -536,10 +526,7 @@ mod tests {
             detect_source_layout(6144, 1024).unwrap(),
             SourceLayout::CubeStrip
         );
-        assert_eq!(
-            detect_source_layout(6, 1).unwrap(),
-            SourceLayout::CubeStrip
-        );
+        assert_eq!(detect_source_layout(6, 1).unwrap(), SourceLayout::CubeStrip);
     }
 
     #[test]
@@ -563,9 +550,9 @@ mod tests {
         let mut rgba32f = Vec::new();
         for face_idx in 0..6 {
             rgba32f.push(face_idx as f32); // R
-            rgba32f.push(0.0);             // G
-            rgba32f.push(0.0);             // B
-            rgba32f.push(1.0);             // A
+            rgba32f.push(0.0); // G
+            rgba32f.push(0.0); // B
+            rgba32f.push(1.0); // A
         }
 
         let decoded = DecodedImageF32 {

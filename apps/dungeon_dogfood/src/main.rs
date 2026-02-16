@@ -12,10 +12,8 @@ use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
 use layout::{load_level_file, tile_to_world};
 use player::{PlayerState, PLAYER_EYE_HEIGHT};
-use renderer::{
-    AssetManifestMode, AssetPolicyConfig, RendererConfig, RendererError,
-};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
+use renderer::{AssetManifestMode, AssetPolicyConfig, RendererConfig, RendererError};
 use scene_seed::LevelScene;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -127,41 +125,43 @@ fn main() {
             }
 
             match event {
-                Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
-                    WindowEvent::CloseRequested => {
-                        log::info!("Close requested, exiting");
-                        elwt.exit();
-                    }
-                    WindowEvent::Resized(new_size) => {
-                        if let Err(e) = renderer.resize(new_size.width, new_size.height) {
-                            log::error!("Resize failed: {}", e);
+                Event::WindowEvent { event, window_id } if window_id == window.id() => {
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            log::info!("Close requested, exiting");
                             elwt.exit();
                         }
-                    }
-                    WindowEvent::RedrawRequested => {
-                        let now = Instant::now();
-                        let delta_seconds = now.duration_since(last_frame).as_secs_f32();
-                        last_frame = now;
-
-                        match render_frame(
-                            &mut renderer,
-                            &window,
-                            &mut scene,
-                            &collision_world,
-                            &mut player,
-                            delta_seconds,
-                        ) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                log::error!("Render failed: {}", e);
+                        WindowEvent::Resized(new_size) => {
+                            if let Err(e) = renderer.resize(new_size.width, new_size.height) {
+                                log::error!("Resize failed: {}", e);
                                 elwt.exit();
                             }
                         }
+                        WindowEvent::RedrawRequested => {
+                            let now = Instant::now();
+                            let delta_seconds = now.duration_since(last_frame).as_secs_f32();
+                            last_frame = now;
 
-                        window.request_redraw();
+                            match render_frame(
+                                &mut renderer,
+                                &window,
+                                &mut scene,
+                                &collision_world,
+                                &mut player,
+                                delta_seconds,
+                            ) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    log::error!("Render failed: {}", e);
+                                    elwt.exit();
+                                }
+                            }
+
+                            window.request_redraw();
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                },
+                }
                 Event::AboutToWait => {
                     window.request_redraw();
                 }

@@ -263,7 +263,11 @@ impl Display for AssetError {
                 write!(f, "cannot cancel load ticket ({ticket}): {reason}")
             }
             Self::ManifestParse { path, message } => {
-                write!(f, "manifest parse error for '{}': {message}", path.display())
+                write!(
+                    f,
+                    "manifest parse error for '{}': {message}",
+                    path.display()
+                )
             }
             Self::Cache(msg) => write!(f, "cache operation failed: {msg}"),
             Self::Sync(msg) => write!(f, "asset synchronization failed: {msg}"),

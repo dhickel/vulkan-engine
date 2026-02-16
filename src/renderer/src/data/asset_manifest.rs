@@ -192,11 +192,11 @@ impl FilterMode {
 
     pub fn to_vk_mipmap_mode(self) -> vk::SamplerMipmapMode {
         match self {
-            Self::Nearest | Self::Linear | Self::NearestMipmapNearest
+            Self::Nearest
+            | Self::Linear
+            | Self::NearestMipmapNearest
             | Self::LinearMipmapNearest => vk::SamplerMipmapMode::NEAREST,
-            Self::NearestMipmapLinear | Self::LinearMipmapLinear => {
-                vk::SamplerMipmapMode::LINEAR
-            }
+            Self::NearestMipmapLinear | Self::LinearMipmapLinear => vk::SamplerMipmapMode::LINEAR,
         }
     }
 
@@ -204,9 +204,7 @@ impl FilterMode {
         match s.to_ascii_lowercase().as_str() {
             "nearest" => Ok(Self::Nearest),
             "linear" => Ok(Self::Linear),
-            "nearest_mipmap_nearest" | "nearest-mipmap-nearest" => {
-                Ok(Self::NearestMipmapNearest)
-            }
+            "nearest_mipmap_nearest" | "nearest-mipmap-nearest" => Ok(Self::NearestMipmapNearest),
             "linear_mipmap_nearest" | "linear-mipmap-nearest" => Ok(Self::LinearMipmapNearest),
             "nearest_mipmap_linear" | "nearest-mipmap-linear" => Ok(Self::NearestMipmapLinear),
             "linear_mipmap_linear" | "linear-mipmap-linear" => Ok(Self::LinearMipmapLinear),
@@ -240,11 +238,7 @@ pub fn load_manifest(
             return Ok(None);
         }
         Err(err) => {
-            let msg = format!(
-                "failed to read manifest '{}': {}",
-                meta_path.display(),
-                err
-            );
+            let msg = format!("failed to read manifest '{}': {}", meta_path.display(), err);
             return match mode {
                 AssetManifestMode::Strict => Err(AssetError::ManifestParse {
                     path: meta_path,
@@ -272,11 +266,7 @@ fn parse_manifest(
             Ok(Some(manifest))
         }
         Err(err) => {
-            let msg = format!(
-                "manifest parse error in '{}': {}",
-                meta_path.display(),
-                err
-            );
+            let msg = format!("manifest parse error in '{}': {}", meta_path.display(), err);
             match mode {
                 AssetManifestMode::Strict => Err(AssetError::ManifestParse {
                     path: meta_path.to_path_buf(),
@@ -688,8 +678,7 @@ max_anisotropy = 8
             is_srgb: Some(false),
             ..Default::default()
         };
-        let result =
-            resolve_texture_policy(&defaults, Some(&heuristic), Some(&manifest), None);
+        let result = resolve_texture_policy(&defaults, Some(&heuristic), Some(&manifest), None);
         assert_eq!(result.is_srgb, false);
     }
 
@@ -706,8 +695,7 @@ max_anisotropy = 8
             generate_mips: Some(true),
             ..Default::default()
         };
-        let result =
-            resolve_texture_policy(&defaults, None, Some(&manifest), Some(&opts));
+        let result = resolve_texture_policy(&defaults, None, Some(&manifest), Some(&opts));
         assert_eq!(result.is_srgb, true);
         assert_eq!(result.generate_mips, true);
     }
@@ -753,8 +741,7 @@ max_anisotropy = 8
             }),
             ..Default::default()
         };
-        let result =
-            resolve_texture_policy(&defaults, None, Some(&manifest), Some(&opts));
+        let result = resolve_texture_policy(&defaults, None, Some(&manifest), Some(&opts));
         assert_eq!(result.wrap_u, WrapMode::MirroredRepeat);
     }
 
@@ -772,7 +759,7 @@ max_anisotropy = 8
             ..Default::default()
         };
         let manifest = TextureManifest {
-            is_srgb: None,           // does not override heuristic
+            is_srgb: None,              // does not override heuristic
             generate_mips: Some(false), // overrides default
             sampler: Some(SamplerManifest {
                 wrap_u: Some("clamp_to_edge".to_string()),
@@ -786,12 +773,8 @@ max_anisotropy = 8
             ..Default::default()
         };
 
-        let result = resolve_texture_policy(
-            &defaults,
-            Some(&heuristic),
-            Some(&manifest),
-            Some(&opts),
-        );
+        let result =
+            resolve_texture_policy(&defaults, Some(&heuristic), Some(&manifest), Some(&opts));
 
         assert_eq!(result.is_srgb, false); // API override won
         assert_eq!(result.generate_mips, false); // manifest won

@@ -8,7 +8,7 @@
 //! - Handle-based layer lifecycle (add/remove/enable/priority updates).
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
@@ -57,6 +57,9 @@ impl LayerHandle {
     }
 }
 
+/// Preferred name for a stable layer identifier in the rebuilt API.
+pub type LayerId = LayerHandle;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct LayerPriority(pub i16);
 
@@ -80,6 +83,23 @@ impl LayerDescriptor {
         self.enabled = enabled;
         self
     }
+}
+
+/// Preferred name for a layer configuration descriptor in the rebuilt API.
+pub type LayerSpec = LayerDescriptor;
+
+/// Suggested priority bands for layer registration.
+pub mod priority_bands {
+    use super::LayerPriority;
+
+    pub const ENGINE_CAPTURE_MIN: LayerPriority = LayerPriority(900);
+    pub const ENGINE_CAPTURE_MAX: LayerPriority = LayerPriority(1000);
+    pub const UI_ROUTING_MIN: LayerPriority = LayerPriority(500);
+    pub const UI_ROUTING_MAX: LayerPriority = LayerPriority(899);
+    pub const GAMEPLAY_MIN: LayerPriority = LayerPriority(100);
+    pub const GAMEPLAY_MAX: LayerPriority = LayerPriority(499);
+    pub const DEBUG_MIN: LayerPriority = LayerPriority(0);
+    pub const DEBUG_MAX: LayerPriority = LayerPriority(99);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,7 +189,10 @@ impl ActionStateStore {
     }
 
     fn value(&self, action: &ActionId) -> f32 {
-        self.states.get(action).map(|state| state.value).unwrap_or(0.0)
+        self.states
+            .get(action)
+            .map(|state| state.value)
+            .unwrap_or(0.0)
     }
 
     fn pressed(&self, action: &ActionId) -> bool {
@@ -191,7 +214,9 @@ impl ActionStateStore {
     }
 
     fn iter_values(&self) -> impl Iterator<Item = (&ActionId, f32)> {
-        self.states.iter().map(|(action, state)| (action, state.value))
+        self.states
+            .iter()
+            .map(|(action, state)| (action, state.value))
     }
 }
 
@@ -235,6 +260,9 @@ pub struct InputSnapshot {
     action_just_pressed: HashSet<ActionId>,
     action_just_released: HashSet<ActionId>,
 }
+
+/// Preferred name for frame-scoped pollable input state.
+pub type FrameInputSnapshot = InputSnapshot;
 
 impl Default for InputSnapshot {
     fn default() -> Self {
@@ -325,15 +353,25 @@ pub struct InputDebugSnapshot {
     pub last_dispatch_consumed_events: usize,
 }
 
+/// Preferred name for frame debug counters.
+pub type InputDebugFrame = InputDebugSnapshot;
+
 pub struct InputSystem {
     next_layer_id: u64,
     next_insertion_order: u64,
     layers: HashMap<LayerHandle, LayerEntry>,
     queued_events: Vec<InputEvent>,
+    ingest_modifiers: ModifiersState,
     snapshot: InputSnapshot,
     action_state: ActionStateStore,
+    dispatch_groups: Vec<Vec<LayerHandle>>,
+    frame_end_order: Vec<LayerHandle>,
+    layer_layout_dirty: bool,
     debug: InputDebugSnapshot,
 }
+
+/// Preferred name for the input runtime in the rebuilt API.
+pub type InputRuntime = InputSystem;
 
 impl Default for InputSystem {
     fn default() -> Self {
@@ -348,8 +386,12 @@ impl InputSystem {
             next_insertion_order: 1,
             layers: HashMap::new(),
             queued_events: Vec::new(),
+            ingest_modifiers: ModifiersState::default(),
             snapshot: InputSnapshot::default(),
             action_state: ActionStateStore::default(),
+            dispatch_groups: Vec::new(),
+            frame_end_order: Vec::new(),
+            layer_layout_dirty: true,
             debug: InputDebugSnapshot::default(),
         }
     }
@@ -370,17 +412,23 @@ impl InputSystem {
 
         self.next_insertion_order += 1;
         self.layers.insert(handle, entry);
+        self.layer_layout_dirty = true;
 
         handle
     }
 
     pub fn remove_layer(&mut self, handle: LayerHandle) -> bool {
-        self.layers.remove(&handle).is_some()
+        let removed = self.layers.remove(&handle).is_some();
+        if removed {
+            self.layer_layout_dirty = true;
+        }
+        removed
     }
 
     pub fn set_layer_enabled(&mut self, handle: LayerHandle, enabled: bool) -> bool {
         if let Some(layer) = self.layers.get_mut(&handle) {
             layer.desc.enabled = enabled;
+            self.layer_layout_dirty = true;
             return true;
         }
 
@@ -390,6 +438,7 @@ impl InputSystem {
     pub fn set_layer_priority(&mut self, handle: LayerHandle, priority: LayerPriority) -> bool {
         if let Some(layer) = self.layers.get_mut(&handle) {
             layer.desc.priority = priority;
+            self.layer_layout_dirty = true;
             return true;
         }
 
@@ -401,19 +450,24 @@ impl InputSystem {
     }
 
     pub fn queue_event(&mut self, event: InputEvent) {
+        if let InputEvent::ModifiersChanged { modifiers } = event {
+            self.ingest_modifiers = modifiers;
+        }
         self.queued_events.push(event);
         self.debug.queued_events = self.queued_events.len();
     }
 
     pub fn queue_winit_window_event(&mut self, event: &WindowEvent) {
         match event {
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 if let PhysicalKey::Code(code) = key_event.physical_key {
                     self.queue_event(InputEvent::Key {
                         code,
                         state: key_event.state,
                         repeat: key_event.repeat,
-                        modifiers: self.snapshot.modifiers,
+                        modifiers: self.ingest_modifiers,
                     });
                 }
             }
@@ -426,7 +480,7 @@ impl InputSystem {
                 self.queue_event(InputEvent::MouseButton {
                     button: *button,
                     state: *state,
-                    modifiers: self.snapshot.modifiers,
+                    modifiers: self.ingest_modifiers,
                 });
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -462,43 +516,17 @@ impl InputSystem {
 
     pub fn dispatch_frame(&mut self) {
         self.begin_frame_reset();
+        self.rebuild_layer_layout_if_dirty();
         self.debug.layer_count = self.layers.len();
-        self.debug.active_layer_count = self
-            .layers
-            .values()
-            .filter(|entry| entry.desc.enabled)
-            .count();
+        self.debug.active_layer_count = self.dispatch_groups.iter().map(Vec::len).sum();
 
         let mut consumed_events = 0usize;
-
-        let mut priority_groups: BTreeMap<Reverse<LayerPriority>, Vec<LayerHandle>> =
-            BTreeMap::new();
-
-        for (handle, entry) in &self.layers {
-            if !entry.desc.enabled {
-                continue;
-            }
-
-            priority_groups
-                .entry(Reverse(entry.desc.priority))
-                .or_default()
-                .push(*handle);
-        }
-
-        for handles in priority_groups.values_mut() {
-            handles.sort_by_key(|handle| {
-                self.layers
-                    .get(handle)
-                    .map(|entry| entry.insertion_order)
-                    .unwrap_or(0)
-            });
-        }
 
         for idx in 0..self.queued_events.len() {
             let event = self.queued_events[idx];
             self.apply_event_to_raw_snapshot(event);
             let mut stop_lower_priorities = false;
-            for handles in priority_groups.values() {
+            for handles in &self.dispatch_groups {
                 let mut group_consumed = false;
                 for handle in handles {
                     let Some(layer_entry) = self.layers.get_mut(handle) else {
@@ -526,21 +554,8 @@ impl InputSystem {
         }
 
         self.refresh_action_snapshot();
-
-        let mut frame_end_handles: Vec<(u64, LayerHandle)> = self
-            .layers
-            .iter()
-            .filter_map(|(handle, entry)| {
-                if entry.desc.enabled {
-                    Some((entry.insertion_order, *handle))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        frame_end_handles.sort_by_key(|(insertion, _)| *insertion);
-
-        for (_, handle) in frame_end_handles {
+        for idx in 0..self.frame_end_order.len() {
+            let handle = self.frame_end_order[idx];
             let Some(layer_entry) = self.layers.get_mut(&handle) else {
                 continue;
             };
@@ -648,6 +663,87 @@ impl InputSystem {
         self.snapshot.action_just_released.clear();
         self.action_state.clear_transients();
     }
+
+    fn rebuild_layer_layout_if_dirty(&mut self) {
+        if !self.layer_layout_dirty {
+            return;
+        }
+
+        let mut active_layers: Vec<(LayerPriority, u64, LayerHandle)> = self
+            .layers
+            .iter()
+            .filter_map(|(handle, entry)| {
+                if entry.desc.enabled {
+                    Some((entry.desc.priority, entry.insertion_order, *handle))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        active_layers.sort_by_key(|(priority, insertion, _)| (Reverse(*priority), *insertion));
+
+        self.dispatch_groups.clear();
+        let mut current_priority: Option<LayerPriority> = None;
+        for (priority, _, handle) in active_layers {
+            if current_priority != Some(priority) {
+                self.dispatch_groups.push(Vec::new());
+                current_priority = Some(priority);
+            }
+            if let Some(group) = self.dispatch_groups.last_mut() {
+                group.push(handle);
+            }
+        }
+
+        let mut frame_end: Vec<(u64, LayerHandle)> = self
+            .layers
+            .iter()
+            .filter_map(|(handle, entry)| {
+                if entry.desc.enabled {
+                    Some((entry.insertion_order, *handle))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        frame_end.sort_by_key(|(insertion, _)| *insertion);
+        self.frame_end_order.clear();
+        self.frame_end_order
+            .extend(frame_end.into_iter().map(|(_, handle)| handle));
+
+        self.layer_layout_dirty = false;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub struct BindingModifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub super_key: bool,
+}
+
+impl BindingModifiers {
+    fn matches(self, modifiers: ModifiersState) -> bool {
+        if self.shift && !modifiers.shift_key() {
+            return false;
+        }
+        if self.ctrl && !modifiers.control_key() {
+            return false;
+        }
+        if self.alt && !modifiers.alt_key() {
+            return false;
+        }
+        if self.super_key && !modifiers.super_key() {
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BindingTrigger {
+    Key(KeyCode),
+    MouseButton(MouseButton),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -683,107 +779,121 @@ impl InputChord {
         }
     }
 
-    fn matches(&self, event: &InputEvent) -> bool {
-        match event {
-            InputEvent::Key {
-                code,
-                state,
-                modifiers,
-                ..
-            } => {
-                if *state != ElementState::Pressed {
-                    return false;
-                }
-
-                if self.key != Some(*code) {
-                    return false;
-                }
-
-                self.matches_modifiers(*modifiers)
-            }
-            InputEvent::MouseButton {
-                button,
-                state,
-                modifiers,
-            } => {
-                if *state != ElementState::Pressed {
-                    return false;
-                }
-
-                if self.mouse_button != Some(*button) {
-                    return false;
-                }
-
-                self.matches_modifiers(*modifiers)
-            }
-            _ => false,
-        }
-    }
-
-    fn matches_release(&self, event: &InputEvent) -> bool {
-        match event {
-            InputEvent::Key {
-                code,
-                state,
-                modifiers,
-                ..
-            } => {
-                if *state != ElementState::Released {
-                    return false;
-                }
-
-                if self.key != Some(*code) {
-                    return false;
-                }
-
-                self.matches_modifiers(*modifiers)
-            }
-            InputEvent::MouseButton {
-                button,
-                state,
-                modifiers,
-            } => {
-                if *state != ElementState::Released {
-                    return false;
-                }
-
-                if self.mouse_button != Some(*button) {
-                    return false;
-                }
-
-                self.matches_modifiers(*modifiers)
-            }
-            _ => false,
-        }
-    }
-
-    fn matches_modifiers(&self, modifiers: ModifiersState) -> bool {
-        if self.require_shift && !modifiers.shift_key() {
-            return false;
-        }
-
-        if self.require_ctrl && !modifiers.control_key() {
-            return false;
-        }
-
-        if self.require_alt && !modifiers.alt_key() {
-            return false;
-        }
-
-        if self.require_super && !modifiers.super_key() {
-            return false;
-        }
-
-        true
+    pub fn into_parts(self) -> Option<(BindingTrigger, BindingModifiers)> {
+        let trigger = match (self.key, self.mouse_button) {
+            (Some(key), None) => BindingTrigger::Key(key),
+            (None, Some(button)) => BindingTrigger::MouseButton(button),
+            _ => return None,
+        };
+        let modifiers = BindingModifiers {
+            shift: self.require_shift,
+            ctrl: self.require_ctrl,
+            alt: self.require_alt,
+            super_key: self.require_super,
+        };
+        Some((trigger, modifiers))
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct ActionBinding {
     pub action: ActionId,
-    pub chord: InputChord,
+    pub trigger: BindingTrigger,
+    pub modifiers: BindingModifiers,
     pub scale: f32,
     pub consume: bool,
+    pub context: Option<String>,
+}
+
+impl ActionBinding {
+    pub fn key(action: impl Into<ActionId>, key: KeyCode) -> Self {
+        Self {
+            action: action.into(),
+            trigger: BindingTrigger::Key(key),
+            modifiers: BindingModifiers::default(),
+            scale: 1.0,
+            consume: false,
+            context: None,
+        }
+    }
+
+    pub fn mouse_button(action: impl Into<ActionId>, button: MouseButton) -> Self {
+        Self {
+            action: action.into(),
+            trigger: BindingTrigger::MouseButton(button),
+            modifiers: BindingModifiers::default(),
+            scale: 1.0,
+            consume: false,
+            context: None,
+        }
+    }
+
+    pub fn with_modifiers(mut self, modifiers: BindingModifiers) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+
+    fn matches_press(&self, event: &InputEvent) -> bool {
+        match (self.trigger, event) {
+            (
+                BindingTrigger::Key(key),
+                InputEvent::Key {
+                    code,
+                    state,
+                    modifiers,
+                    ..
+                },
+            ) => {
+                *state == ElementState::Pressed
+                    && key == *code
+                    && self.modifiers.matches(*modifiers)
+            }
+            (
+                BindingTrigger::MouseButton(expected),
+                InputEvent::MouseButton {
+                    button,
+                    state,
+                    modifiers,
+                },
+            ) => {
+                *state == ElementState::Pressed
+                    && expected == *button
+                    && self.modifiers.matches(*modifiers)
+            }
+            _ => false,
+        }
+    }
+
+    fn matches_release(&self, event: &InputEvent) -> bool {
+        match (self.trigger, event) {
+            (
+                BindingTrigger::Key(key),
+                InputEvent::Key {
+                    code,
+                    state,
+                    modifiers,
+                    ..
+                },
+            ) => {
+                *state == ElementState::Released
+                    && key == *code
+                    && self.modifiers.matches(*modifiers)
+            }
+            (
+                BindingTrigger::MouseButton(expected),
+                InputEvent::MouseButton {
+                    button,
+                    state,
+                    modifiers,
+                },
+            ) => {
+                *state == ElementState::Released
+                    && expected == *button
+                    && self.modifiers.matches(*modifiers)
+            }
+            _ => false,
+        }
+    }
 }
 
 fn default_binding_scale() -> f32 {
@@ -805,21 +915,11 @@ impl ActionMap {
     }
 
     pub fn bind_key(&mut self, action: impl Into<ActionId>, key: KeyCode) {
-        self.bind(ActionBinding {
-            action: action.into(),
-            chord: InputChord::key(key),
-            scale: 1.0,
-            consume: false,
-        });
+        self.bind(ActionBinding::key(action, key));
     }
 
     pub fn bind_mouse_button(&mut self, action: impl Into<ActionId>, button: MouseButton) {
-        self.bind(ActionBinding {
-            action: action.into(),
-            chord: InputChord::mouse(button),
-            scale: 1.0,
-            consume: false,
-        });
+        self.bind(ActionBinding::mouse_button(action, button));
     }
 
     pub fn bind(&mut self, binding: ActionBinding) {
@@ -839,63 +939,95 @@ impl ActionMap {
     }
 
     pub fn from_toml_str(content: &str) -> Result<Self, String> {
-        let profile: ActionProfile =
+        let profile: InputProfileV1 =
             toml::from_str(content).map_err(|err| format!("toml parse error: {err}"))?;
+        if profile.version != 1 {
+            return Err(format!(
+                "unsupported input profile version: {}",
+                profile.version
+            ));
+        }
+
         let mut bindings = Vec::with_capacity(profile.bindings.len());
-        for binding in profile.bindings {
-            let key = if let Some(key_name) = binding.key {
-                Some(parse_key_code(&key_name).ok_or_else(|| {
-                    format!("unsupported key code in profile: {key_name}")
-                })?)
-            } else {
-                None
-            };
-            let mouse_button = if let Some(button_name) = binding.mouse_button {
-                Some(parse_mouse_button(&button_name).ok_or_else(|| {
-                    format!("unsupported mouse button in profile: {button_name}")
-                })?)
-            } else {
-                None
+        for (index, binding) in profile.bindings.into_iter().enumerate() {
+            if binding.action.trim().is_empty() {
+                return Err(format!("binding[{index}] has empty action id"));
+            }
+
+            let trigger = match (binding.trigger.key, binding.trigger.mouse_button) {
+                (Some(key_name), None) => {
+                    BindingTrigger::Key(parse_key_code(&key_name).ok_or_else(|| {
+                        format!("binding[{index}] has unsupported key code: {key_name}")
+                    })?)
+                }
+                (None, Some(button_name)) => {
+                    BindingTrigger::MouseButton(parse_mouse_button(&button_name).ok_or_else(
+                        || format!("binding[{index}] has unsupported mouse button: {button_name}"),
+                    )?)
+                }
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "binding[{index}] must define exactly one trigger: key or mouse_button"
+                    ));
+                }
+                (None, None) => {
+                    return Err(format!(
+                        "binding[{index}] must define a trigger (key or mouse_button)"
+                    ));
+                }
             };
 
             bindings.push(ActionBinding {
                 action: ActionId::new(binding.action),
-                chord: InputChord {
-                    key,
-                    mouse_button,
-                    require_shift: binding.require_shift,
-                    require_ctrl: binding.require_ctrl,
-                    require_alt: binding.require_alt,
-                    require_super: binding.require_super,
+                trigger,
+                modifiers: BindingModifiers {
+                    shift: binding.modifiers.shift,
+                    ctrl: binding.modifiers.ctrl,
+                    alt: binding.modifiers.alt,
+                    super_key: binding.modifiers.super_key,
                 },
                 scale: binding.scale,
                 consume: binding.consume,
+                context: binding.context,
             });
         }
 
-        Ok(Self {
-            bindings,
-        })
+        Ok(Self { bindings })
     }
 
     pub fn to_toml_string(&self) -> Result<String, String> {
         let bindings = self
             .bindings
             .iter()
-            .map(|binding| ProfileBinding {
-                action: binding.action.as_str().to_string(),
-                key: binding.chord.key.map(key_code_to_string),
-                mouse_button: binding.chord.mouse_button.map(mouse_button_to_string),
-                require_shift: binding.chord.require_shift,
-                require_ctrl: binding.chord.require_ctrl,
-                require_alt: binding.chord.require_alt,
-                require_super: binding.chord.require_super,
-                scale: binding.scale,
-                consume: binding.consume,
+            .map(|binding| {
+                let trigger = match binding.trigger {
+                    BindingTrigger::Key(key) => ProfileTriggerV1 {
+                        key: Some(key_code_to_string(key)),
+                        mouse_button: None,
+                    },
+                    BindingTrigger::MouseButton(button) => ProfileTriggerV1 {
+                        key: None,
+                        mouse_button: Some(mouse_button_to_string(button)),
+                    },
+                };
+
+                ProfileBindingV1 {
+                    action: binding.action.as_str().to_string(),
+                    trigger,
+                    modifiers: ProfileModifiersV1 {
+                        shift: binding.modifiers.shift,
+                        ctrl: binding.modifiers.ctrl,
+                        alt: binding.modifiers.alt,
+                        super_key: binding.modifiers.super_key,
+                    },
+                    scale: binding.scale,
+                    consume: binding.consume,
+                    context: binding.context.clone(),
+                }
             })
             .collect();
 
-        toml::to_string_pretty(&ActionProfile {
+        toml::to_string_pretty(&InputProfileV1 {
             version: 1,
             bindings,
         })
@@ -919,31 +1051,48 @@ impl ActionMap {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ActionProfile {
+#[serde(deny_unknown_fields)]
+struct InputProfileV1 {
     version: u32,
     #[serde(default)]
-    bindings: Vec<ProfileBinding>,
+    bindings: Vec<ProfileBindingV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct ProfileBinding {
+#[serde(deny_unknown_fields)]
+struct ProfileBindingV1 {
     action: String,
+    trigger: ProfileTriggerV1,
     #[serde(default)]
-    key: Option<String>,
-    #[serde(default)]
-    mouse_button: Option<String>,
-    #[serde(default)]
-    require_shift: bool,
-    #[serde(default)]
-    require_ctrl: bool,
-    #[serde(default)]
-    require_alt: bool,
-    #[serde(default)]
-    require_super: bool,
+    modifiers: ProfileModifiersV1,
     #[serde(default = "default_binding_scale")]
     scale: f32,
     #[serde(default)]
     consume: bool,
+    #[serde(default)]
+    context: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileTriggerV1 {
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    mouse_button: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileModifiersV1 {
+    #[serde(default)]
+    shift: bool,
+    #[serde(default)]
+    ctrl: bool,
+    #[serde(default)]
+    alt: bool,
+    #[serde(default)]
+    super_key: bool,
 }
 
 fn key_code_to_string(key: KeyCode) -> String {
@@ -951,79 +1100,207 @@ fn key_code_to_string(key: KeyCode) -> String {
 }
 
 fn parse_key_code(value: &str) -> Option<KeyCode> {
-    if let Some(rest) = value.strip_prefix("Key") {
-        if rest.len() == 1 {
-            return match rest.chars().next()? {
-                'A' => Some(KeyCode::KeyA),
-                'B' => Some(KeyCode::KeyB),
-                'C' => Some(KeyCode::KeyC),
-                'D' => Some(KeyCode::KeyD),
-                'E' => Some(KeyCode::KeyE),
-                'F' => Some(KeyCode::KeyF),
-                'G' => Some(KeyCode::KeyG),
-                'H' => Some(KeyCode::KeyH),
-                'I' => Some(KeyCode::KeyI),
-                'J' => Some(KeyCode::KeyJ),
-                'K' => Some(KeyCode::KeyK),
-                'L' => Some(KeyCode::KeyL),
-                'M' => Some(KeyCode::KeyM),
-                'N' => Some(KeyCode::KeyN),
-                'O' => Some(KeyCode::KeyO),
-                'P' => Some(KeyCode::KeyP),
-                'Q' => Some(KeyCode::KeyQ),
-                'R' => Some(KeyCode::KeyR),
-                'S' => Some(KeyCode::KeyS),
-                'T' => Some(KeyCode::KeyT),
-                'U' => Some(KeyCode::KeyU),
-                'V' => Some(KeyCode::KeyV),
-                'W' => Some(KeyCode::KeyW),
-                'X' => Some(KeyCode::KeyX),
-                'Y' => Some(KeyCode::KeyY),
-                'Z' => Some(KeyCode::KeyZ),
-                _ => None,
-            };
-        }
-    }
-
-    if let Some(rest) = value.strip_prefix("Digit") {
-        if rest.len() == 1 {
-            return match rest.chars().next()? {
-                '0' => Some(KeyCode::Digit0),
-                '1' => Some(KeyCode::Digit1),
-                '2' => Some(KeyCode::Digit2),
-                '3' => Some(KeyCode::Digit3),
-                '4' => Some(KeyCode::Digit4),
-                '5' => Some(KeyCode::Digit5),
-                '6' => Some(KeyCode::Digit6),
-                '7' => Some(KeyCode::Digit7),
-                '8' => Some(KeyCode::Digit8),
-                '9' => Some(KeyCode::Digit9),
-                _ => None,
-            };
-        }
-    }
-
-    match value {
-        "Escape" => Some(KeyCode::Escape),
-        "Space" => Some(KeyCode::Space),
-        "ShiftLeft" => Some(KeyCode::ShiftLeft),
-        "ShiftRight" => Some(KeyCode::ShiftRight),
-        "ControlLeft" => Some(KeyCode::ControlLeft),
-        "ControlRight" => Some(KeyCode::ControlRight),
-        "AltLeft" => Some(KeyCode::AltLeft),
-        "AltRight" => Some(KeyCode::AltRight),
-        "SuperLeft" => Some(KeyCode::SuperLeft),
-        "SuperRight" => Some(KeyCode::SuperRight),
-        "ArrowUp" => Some(KeyCode::ArrowUp),
-        "ArrowDown" => Some(KeyCode::ArrowDown),
-        "ArrowLeft" => Some(KeyCode::ArrowLeft),
-        "ArrowRight" => Some(KeyCode::ArrowRight),
-        "Tab" => Some(KeyCode::Tab),
-        "Enter" => Some(KeyCode::Enter),
-        "Backspace" => Some(KeyCode::Backspace),
-        _ => None,
-    }
+    KEY_CODE_TABLE
+        .iter()
+        .find_map(|(name, key)| if *name == value { Some(*key) } else { None })
 }
+
+const KEY_CODE_TABLE: &[(&str, KeyCode)] = &[
+    ("Backquote", KeyCode::Backquote),
+    ("Backslash", KeyCode::Backslash),
+    ("BracketLeft", KeyCode::BracketLeft),
+    ("BracketRight", KeyCode::BracketRight),
+    ("Comma", KeyCode::Comma),
+    ("Digit0", KeyCode::Digit0),
+    ("Digit1", KeyCode::Digit1),
+    ("Digit2", KeyCode::Digit2),
+    ("Digit3", KeyCode::Digit3),
+    ("Digit4", KeyCode::Digit4),
+    ("Digit5", KeyCode::Digit5),
+    ("Digit6", KeyCode::Digit6),
+    ("Digit7", KeyCode::Digit7),
+    ("Digit8", KeyCode::Digit8),
+    ("Digit9", KeyCode::Digit9),
+    ("Equal", KeyCode::Equal),
+    ("IntlBackslash", KeyCode::IntlBackslash),
+    ("IntlRo", KeyCode::IntlRo),
+    ("IntlYen", KeyCode::IntlYen),
+    ("KeyA", KeyCode::KeyA),
+    ("KeyB", KeyCode::KeyB),
+    ("KeyC", KeyCode::KeyC),
+    ("KeyD", KeyCode::KeyD),
+    ("KeyE", KeyCode::KeyE),
+    ("KeyF", KeyCode::KeyF),
+    ("KeyG", KeyCode::KeyG),
+    ("KeyH", KeyCode::KeyH),
+    ("KeyI", KeyCode::KeyI),
+    ("KeyJ", KeyCode::KeyJ),
+    ("KeyK", KeyCode::KeyK),
+    ("KeyL", KeyCode::KeyL),
+    ("KeyM", KeyCode::KeyM),
+    ("KeyN", KeyCode::KeyN),
+    ("KeyO", KeyCode::KeyO),
+    ("KeyP", KeyCode::KeyP),
+    ("KeyQ", KeyCode::KeyQ),
+    ("KeyR", KeyCode::KeyR),
+    ("KeyS", KeyCode::KeyS),
+    ("KeyT", KeyCode::KeyT),
+    ("KeyU", KeyCode::KeyU),
+    ("KeyV", KeyCode::KeyV),
+    ("KeyW", KeyCode::KeyW),
+    ("KeyX", KeyCode::KeyX),
+    ("KeyY", KeyCode::KeyY),
+    ("KeyZ", KeyCode::KeyZ),
+    ("Minus", KeyCode::Minus),
+    ("Period", KeyCode::Period),
+    ("Quote", KeyCode::Quote),
+    ("Semicolon", KeyCode::Semicolon),
+    ("Slash", KeyCode::Slash),
+    ("AltLeft", KeyCode::AltLeft),
+    ("AltRight", KeyCode::AltRight),
+    ("Backspace", KeyCode::Backspace),
+    ("CapsLock", KeyCode::CapsLock),
+    ("ContextMenu", KeyCode::ContextMenu),
+    ("ControlLeft", KeyCode::ControlLeft),
+    ("ControlRight", KeyCode::ControlRight),
+    ("Enter", KeyCode::Enter),
+    ("SuperLeft", KeyCode::SuperLeft),
+    ("SuperRight", KeyCode::SuperRight),
+    ("ShiftLeft", KeyCode::ShiftLeft),
+    ("ShiftRight", KeyCode::ShiftRight),
+    ("Space", KeyCode::Space),
+    ("Tab", KeyCode::Tab),
+    ("Convert", KeyCode::Convert),
+    ("KanaMode", KeyCode::KanaMode),
+    ("Lang1", KeyCode::Lang1),
+    ("Lang2", KeyCode::Lang2),
+    ("Lang3", KeyCode::Lang3),
+    ("Lang4", KeyCode::Lang4),
+    ("Lang5", KeyCode::Lang5),
+    ("NonConvert", KeyCode::NonConvert),
+    ("Delete", KeyCode::Delete),
+    ("End", KeyCode::End),
+    ("Help", KeyCode::Help),
+    ("Home", KeyCode::Home),
+    ("Insert", KeyCode::Insert),
+    ("PageDown", KeyCode::PageDown),
+    ("PageUp", KeyCode::PageUp),
+    ("ArrowDown", KeyCode::ArrowDown),
+    ("ArrowLeft", KeyCode::ArrowLeft),
+    ("ArrowRight", KeyCode::ArrowRight),
+    ("ArrowUp", KeyCode::ArrowUp),
+    ("NumLock", KeyCode::NumLock),
+    ("Numpad0", KeyCode::Numpad0),
+    ("Numpad1", KeyCode::Numpad1),
+    ("Numpad2", KeyCode::Numpad2),
+    ("Numpad3", KeyCode::Numpad3),
+    ("Numpad4", KeyCode::Numpad4),
+    ("Numpad5", KeyCode::Numpad5),
+    ("Numpad6", KeyCode::Numpad6),
+    ("Numpad7", KeyCode::Numpad7),
+    ("Numpad8", KeyCode::Numpad8),
+    ("Numpad9", KeyCode::Numpad9),
+    ("NumpadAdd", KeyCode::NumpadAdd),
+    ("NumpadBackspace", KeyCode::NumpadBackspace),
+    ("NumpadClear", KeyCode::NumpadClear),
+    ("NumpadClearEntry", KeyCode::NumpadClearEntry),
+    ("NumpadComma", KeyCode::NumpadComma),
+    ("NumpadDecimal", KeyCode::NumpadDecimal),
+    ("NumpadDivide", KeyCode::NumpadDivide),
+    ("NumpadEnter", KeyCode::NumpadEnter),
+    ("NumpadEqual", KeyCode::NumpadEqual),
+    ("NumpadHash", KeyCode::NumpadHash),
+    ("NumpadMemoryAdd", KeyCode::NumpadMemoryAdd),
+    ("NumpadMemoryClear", KeyCode::NumpadMemoryClear),
+    ("NumpadMemoryRecall", KeyCode::NumpadMemoryRecall),
+    ("NumpadMemoryStore", KeyCode::NumpadMemoryStore),
+    ("NumpadMemorySubtract", KeyCode::NumpadMemorySubtract),
+    ("NumpadMultiply", KeyCode::NumpadMultiply),
+    ("NumpadParenLeft", KeyCode::NumpadParenLeft),
+    ("NumpadParenRight", KeyCode::NumpadParenRight),
+    ("NumpadStar", KeyCode::NumpadStar),
+    ("NumpadSubtract", KeyCode::NumpadSubtract),
+    ("Escape", KeyCode::Escape),
+    ("Fn", KeyCode::Fn),
+    ("FnLock", KeyCode::FnLock),
+    ("PrintScreen", KeyCode::PrintScreen),
+    ("ScrollLock", KeyCode::ScrollLock),
+    ("Pause", KeyCode::Pause),
+    ("BrowserBack", KeyCode::BrowserBack),
+    ("BrowserFavorites", KeyCode::BrowserFavorites),
+    ("BrowserForward", KeyCode::BrowserForward),
+    ("BrowserHome", KeyCode::BrowserHome),
+    ("BrowserRefresh", KeyCode::BrowserRefresh),
+    ("BrowserSearch", KeyCode::BrowserSearch),
+    ("BrowserStop", KeyCode::BrowserStop),
+    ("Eject", KeyCode::Eject),
+    ("LaunchApp1", KeyCode::LaunchApp1),
+    ("LaunchApp2", KeyCode::LaunchApp2),
+    ("LaunchMail", KeyCode::LaunchMail),
+    ("MediaPlayPause", KeyCode::MediaPlayPause),
+    ("MediaSelect", KeyCode::MediaSelect),
+    ("MediaStop", KeyCode::MediaStop),
+    ("MediaTrackNext", KeyCode::MediaTrackNext),
+    ("MediaTrackPrevious", KeyCode::MediaTrackPrevious),
+    ("Power", KeyCode::Power),
+    ("Sleep", KeyCode::Sleep),
+    ("AudioVolumeDown", KeyCode::AudioVolumeDown),
+    ("AudioVolumeMute", KeyCode::AudioVolumeMute),
+    ("AudioVolumeUp", KeyCode::AudioVolumeUp),
+    ("WakeUp", KeyCode::WakeUp),
+    ("Meta", KeyCode::Meta),
+    ("Hyper", KeyCode::Hyper),
+    ("Turbo", KeyCode::Turbo),
+    ("Abort", KeyCode::Abort),
+    ("Resume", KeyCode::Resume),
+    ("Suspend", KeyCode::Suspend),
+    ("Again", KeyCode::Again),
+    ("Copy", KeyCode::Copy),
+    ("Cut", KeyCode::Cut),
+    ("Find", KeyCode::Find),
+    ("Open", KeyCode::Open),
+    ("Paste", KeyCode::Paste),
+    ("Props", KeyCode::Props),
+    ("Select", KeyCode::Select),
+    ("Undo", KeyCode::Undo),
+    ("Hiragana", KeyCode::Hiragana),
+    ("Katakana", KeyCode::Katakana),
+    ("F1", KeyCode::F1),
+    ("F2", KeyCode::F2),
+    ("F3", KeyCode::F3),
+    ("F4", KeyCode::F4),
+    ("F5", KeyCode::F5),
+    ("F6", KeyCode::F6),
+    ("F7", KeyCode::F7),
+    ("F8", KeyCode::F8),
+    ("F9", KeyCode::F9),
+    ("F10", KeyCode::F10),
+    ("F11", KeyCode::F11),
+    ("F12", KeyCode::F12),
+    ("F13", KeyCode::F13),
+    ("F14", KeyCode::F14),
+    ("F15", KeyCode::F15),
+    ("F16", KeyCode::F16),
+    ("F17", KeyCode::F17),
+    ("F18", KeyCode::F18),
+    ("F19", KeyCode::F19),
+    ("F20", KeyCode::F20),
+    ("F21", KeyCode::F21),
+    ("F22", KeyCode::F22),
+    ("F23", KeyCode::F23),
+    ("F24", KeyCode::F24),
+    ("F25", KeyCode::F25),
+    ("F26", KeyCode::F26),
+    ("F27", KeyCode::F27),
+    ("F28", KeyCode::F28),
+    ("F29", KeyCode::F29),
+    ("F30", KeyCode::F30),
+    ("F31", KeyCode::F31),
+    ("F32", KeyCode::F32),
+    ("F33", KeyCode::F33),
+    ("F34", KeyCode::F34),
+    ("F35", KeyCode::F35),
+];
 
 fn mouse_button_to_string(button: MouseButton) -> String {
     match button {
@@ -1077,13 +1354,13 @@ impl InputLayer for ActionMapLayer {
         let mut consumed = false;
 
         for binding in &self.map.bindings {
-            if binding.chord.matches(event) {
+            if binding.matches_press(event) {
                 ctx.set_action_value(&binding.action, binding.scale);
                 if binding.consume {
                     consumed = true;
                 }
             }
-            if binding.chord.matches_release(event) {
+            if binding.matches_release(event) {
                 ctx.set_action_value(&binding.action, 0.0);
                 if binding.consume {
                     consumed = true;
@@ -1141,6 +1418,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use winit::event::DeviceId;
 
     struct TraceLayer {
         name: &'static str,
@@ -1284,5 +1562,67 @@ mod tests {
 
         assert_eq!(loaded.bindings().len(), 1);
         assert_eq!(loaded.bindings()[0].action, ActionId::new("jump"));
+        assert_eq!(
+            loaded.bindings()[0].trigger,
+            BindingTrigger::Key(KeyCode::Space)
+        );
+    }
+
+    #[test]
+    fn modifier_state_is_used_for_subsequent_window_event_queueing() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind(
+            ActionBinding::mouse_button("ui.shift_click", MouseButton::Left).with_modifiers(
+                BindingModifiers {
+                    shift: true,
+                    ..BindingModifiers::default()
+                },
+            ),
+        );
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(10)),
+            map.into_layer(),
+        );
+
+        system.queue_event(InputEvent::ModifiersChanged {
+            modifiers: ModifiersState::SHIFT,
+        });
+        system.queue_winit_window_event(&WindowEvent::MouseInput {
+            device_id: unsafe { DeviceId::dummy() },
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        });
+
+        system.dispatch_frame();
+        assert!(system
+            .snapshot()
+            .action_pressed(&ActionId::new("ui.shift_click")));
+    }
+
+    #[test]
+    fn profile_parser_rejects_invalid_trigger_shapes() {
+        let invalid = r#"
+version = 1
+
+[[bindings]]
+action = "foo"
+trigger = { key = "KeyW", mouse_button = "Left" }
+"#;
+        let err = ActionMap::from_toml_str(invalid).expect_err("must reject invalid trigger");
+        assert!(err.contains("exactly one trigger"));
+    }
+
+    #[test]
+    fn profile_parser_supports_extended_key_codes() {
+        let mut map = ActionMap::new();
+        map.bind(ActionBinding::key("debug.step", KeyCode::F35));
+
+        let toml = map.to_toml_string().expect("toml serialize should work");
+        let loaded = ActionMap::from_toml_str(&toml).expect("toml parse should work");
+        assert_eq!(
+            loaded.bindings()[0].trigger,
+            BindingTrigger::Key(KeyCode::F35)
+        );
     }
 }

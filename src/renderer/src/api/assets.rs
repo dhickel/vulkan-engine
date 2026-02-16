@@ -469,12 +469,8 @@ impl AssetLoadTracker {
                     let (sender, receiver) = mpsc::channel();
                     let task_cache = data_cache.clone();
                     std::thread::spawn(move || {
-                        let result = load_texture_gpu_ready_with_policy(
-                            path,
-                            task_cache,
-                            &policy_cfg,
-                            opts,
-                        );
+                        let result =
+                            load_texture_gpu_ready_with_policy(path, task_cache, &policy_cfg, opts);
                         let _ = sender.send(result);
                     });
 
@@ -843,9 +839,9 @@ impl<'a> AssetManager<'a> {
 
             for tex_handle in material_meta.texture_ids.to_vec() {
                 if tex_handle.slot >= TextureCache::DEFAULT_TEX_ITER_START as u32 {
-                    texture_cache
-                        .get_texture(tex_handle)
-                        .map_err(|err| map_cache_err("texture", tex_handle.slot, tex_handle.generation, err))?;
+                    texture_cache.get_texture(tex_handle).map_err(|err| {
+                        map_cache_err("texture", tex_handle.slot, tex_handle.generation, err)
+                    })?;
                 }
             }
         }
@@ -921,26 +917,30 @@ impl<'a> AssetManager<'a> {
                 .map_err(|_| poisoned_lock_err("texture_cache"))?;
 
             // Verify material exists
-            texture_cache
-                .get_material(material_handle)
-                .map_err(|err| {
-                    map_cache_err("material", material_handle.slot, material_handle.generation, err)
-                })?;
+            texture_cache.get_material(material_handle).map_err(|err| {
+                map_cache_err(
+                    "material",
+                    material_handle.slot,
+                    material_handle.generation,
+                    err,
+                )
+            })?;
 
             // Verify material is loaded (not just cached)
             texture_cache
                 .get_loaded_material(material_handle)
                 .map_err(|err| {
-                    map_cache_err("material", material_handle.slot, material_handle.generation, err)
+                    map_cache_err(
+                        "material",
+                        material_handle.slot,
+                        material_handle.generation,
+                        err,
+                    )
                 })?;
         }
 
         // Convert vertices to internal format
-        let vertices: Vec<Vertex> = mesh
-            .vertices
-            .iter()
-            .map(procedural_vertex_to_gpu)
-            .collect();
+        let vertices: Vec<Vertex> = mesh.vertices.iter().map(procedural_vertex_to_gpu).collect();
 
         let has_uv1 = mesh.vertices.iter().any(|v| v.uv1 != glam::Vec2::ZERO);
 
@@ -991,7 +991,9 @@ impl<'a> AssetManager<'a> {
 
                 mesh_cache.deallocate_id(mesh_id);
 
-                Err(AssetError::Internal("mesh GPU allocation failed".to_string()))
+                Err(AssetError::Internal(
+                    "mesh GPU allocation failed".to_string(),
+                ))
             }
         }
     }
@@ -1512,10 +1514,8 @@ fn material_desc_to_meta(desc: &PbrMaterialDesc) -> MaterialMeta {
     let mut meta = MaterialMeta::default();
 
     // Clamp base color channels to [0.0, 1.0]
-    meta.material_values.base_color_factor = desc.base_color.clamp(
-        glam::Vec4::ZERO,
-        glam::Vec4::ONE,
-    );
+    meta.material_values.base_color_factor =
+        desc.base_color.clamp(glam::Vec4::ZERO, glam::Vec4::ONE);
 
     // Clamp metallic to [0.0, 1.0]
     meta.material_values.metallic_factor = desc.metallic.clamp(0.0, 1.0);
@@ -1580,8 +1580,8 @@ mod tests {
     #[test]
     fn material_desc_clamps_metallic_and_roughness() {
         let desc = PbrMaterialDesc {
-            metallic: 1.5,      // Should clamp to 1.0
-            roughness: -0.5,    // Should clamp to 0.02
+            metallic: 1.5,   // Should clamp to 1.0
+            roughness: -0.5, // Should clamp to 0.02
             ..Default::default()
         };
 
@@ -1656,10 +1656,7 @@ mod tests {
     fn procedural_mesh_rejects_non_triangle_index_count() {
         let mesh = ProceduralMeshData {
             name: "test".to_string(),
-            vertices: vec![
-                ProceduralVertex::default(),
-                ProceduralVertex::default(),
-            ],
+            vertices: vec![ProceduralVertex::default(), ProceduralVertex::default()],
             indices: vec![0, 1], // Only 2 indices, not divisible by 3
             material: None,
         };
@@ -1670,10 +1667,7 @@ mod tests {
     fn procedural_mesh_rejects_out_of_bounds_index() {
         let mesh = ProceduralMeshData {
             name: "test".to_string(),
-            vertices: vec![
-                ProceduralVertex::default(),
-                ProceduralVertex::default(),
-            ],
+            vertices: vec![ProceduralVertex::default(), ProceduralVertex::default()],
             indices: vec![0, 1, 5], // Index 5 is out of bounds (only 2 vertices)
             material: None,
         };

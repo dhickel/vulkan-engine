@@ -6,9 +6,7 @@ use ash::vk::Extent2D;
 use glam::Mat4;
 use input::{ActionMap, InputSystem, LayerDescriptor, LayerHandle, LayerPriority};
 use log::{error, warn};
-use winit::event::{
-    DeviceEvent, Event, MouseScrollDelta, WindowEvent,
-};
+use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
 use winit::keyboard::KeyCode;
 use winit::window::Window;
 
@@ -341,7 +339,11 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn assets(&mut self) -> AssetManager<'_> {
-        AssetManager::new(&mut self.runtime.core, &mut self.asset_loads, &self.asset_policy)
+        AssetManager::new(
+            &mut self.runtime.core,
+            &mut self.asset_loads,
+            &self.asset_policy,
+        )
     }
 
     /// Thread: Main

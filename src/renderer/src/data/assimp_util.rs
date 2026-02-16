@@ -110,7 +110,10 @@ impl std::fmt::Display for AssimpImportError {
             Self::TexturePolicy {
                 texture_ref,
                 reason,
-            } => write!(f, "texture policy resolve failed for '{texture_ref}': {reason}"),
+            } => write!(
+                f,
+                "texture policy resolve failed for '{texture_ref}': {reason}"
+            ),
             Self::Internal(msg) => write!(f, "internal import error: {msg}"),
         }
     }
@@ -153,7 +156,8 @@ pub fn load_model(
         );
     }
 
-    let path_c = CString::new(path).map_err(|_| AssimpImportError::InvalidPath(path.to_string()))?;
+    let path_c =
+        CString::new(path).map_err(|_| AssimpImportError::InvalidPath(path.to_string()))?;
     let base_path = Path::new(path)
         .parent()
         .map_or_else(|| None, |p| p.to_str());
@@ -253,24 +257,24 @@ pub fn process_materials(
                 |label: &str,
                  types: &[(aiTextureType, &'static str)]|
                  -> Result<Option<(TextureMeta, &'static str)>, AssimpImportError> {
-                for (typ, type_name) in types {
-                    if let Some(meta) = get_texture_meta(
-                        ai_material,
-                        ai_scene,
-                        *typ,
-                        base_path,
-                        data_cache,
-                        policy_config,
-                    )? {
-                        debug!(
-                            "Material {} {} texture resolved from Assimp type {}",
-                            i, label, type_name
-                        );
-                        return Ok(Some((meta, *type_name)));
+                    for (typ, type_name) in types {
+                        if let Some(meta) = get_texture_meta(
+                            ai_material,
+                            ai_scene,
+                            *typ,
+                            base_path,
+                            data_cache,
+                            policy_config,
+                        )? {
+                            debug!(
+                                "Material {} {} texture resolved from Assimp type {}",
+                                i, label, type_name
+                            );
+                            return Ok(Some((meta, *type_name)));
+                        }
                     }
-                }
-                Ok(None)
-            };
+                    Ok(None)
+                };
 
             let base_color = load_first_texture_type(
                 "base_color",
@@ -332,10 +336,9 @@ pub fn process_materials(
                 &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
             )?;
 
-            let mut tex_cache = data_cache
-                .texture_cache
-                .lock()
-                .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
+            let mut tex_cache = data_cache.texture_cache.lock().map_err(|_| {
+                AssimpImportError::Internal("texture_cache lock poisoned".to_string())
+            })?;
 
             if let Some((mut meta, _source)) = base_color {
                 meta = compression::apply_compression_policy(
@@ -597,9 +600,11 @@ unsafe fn get_texture_meta(
                             policy_config.allow_filename_heuristics,
                             None,
                         )
-                        .map_err(|err| AssimpImportError::TexturePolicy {
-                            texture_ref: path.display().to_string(),
-                            reason: err.to_string(),
+                        .map_err(|err| {
+                            AssimpImportError::TexturePolicy {
+                                texture_ref: path.display().to_string(),
+                                reason: err.to_string(),
+                            }
                         })?
                     } else {
                         ResolvedTexturePolicy::default()
@@ -626,7 +631,8 @@ unsafe fn get_texture_meta(
                     let uv_index = if uv_index > 1 {
                         log::warn!(
                             "Texture type {:?} reported unsupported UV set {}. Clamping to UV0.",
-                            texture_type, uv_index
+                            texture_type,
+                            uv_index
                         );
                         0
                     } else {
@@ -1105,13 +1111,12 @@ fn process_node(
         let mut meshes = Vec::with_capacity(mesh_count);
         for i in 0..mesh_count {
             let mesh_index = *(*ai_node).mMeshes.add(i) as u32;
-            let handle = mapped_meshes
-                .get(&mesh_index)
-                .copied()
-                .ok_or_else(|| AssimpImportError::MissingMeshMapping {
+            let handle = mapped_meshes.get(&mesh_index).copied().ok_or_else(|| {
+                AssimpImportError::MissingMeshMapping {
                     node_name: node_name.clone(),
                     mesh_index,
-                })?;
+                }
+            })?;
             meshes.push(handle);
         }
 

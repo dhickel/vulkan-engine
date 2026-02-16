@@ -291,7 +291,21 @@ mod tests {
 
     #[test]
     fn wall_blocking() {
-        let level = parsed_level(3, 3, vec![Tile::Floor, Tile::Floor, Tile::Floor, Tile::Floor, Tile::Wall, Tile::Floor, Tile::Floor, Tile::Floor, Tile::Floor]);
+        let level = parsed_level(
+            3,
+            3,
+            vec![
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+            ],
+        );
         let world = CollisionWorld::from_level(&level);
 
         let mut player = PlayerState::new(Vec3::new(0.6, PLAYER_EYE_HEIGHT, -1.5));
@@ -305,7 +319,21 @@ mod tests {
 
     #[test]
     fn corner_slide_behavior() {
-        let level = parsed_level(3, 3, vec![Tile::Floor, Tile::Wall, Tile::Floor, Tile::Wall, Tile::Wall, Tile::Floor, Tile::Floor, Tile::Floor, Tile::Floor]);
+        let level = parsed_level(
+            3,
+            3,
+            vec![
+                Tile::Floor,
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+            ],
+        );
         let world = CollisionWorld::from_level(&level);
 
         let mut player = PlayerState::new(Vec3::new(0.6, PLAYER_EYE_HEIGHT, -2.4));
@@ -317,7 +345,10 @@ mod tests {
         }
 
         assert!(player.position.x < 1.0 + PLAYER_RADIUS + 1e-3);
-        assert!(player.position.z > before_z, "player should slide along non-blocked axis");
+        assert!(
+            player.position.z > before_z,
+            "player should slide along non-blocked axis"
+        );
     }
 
     #[test]
@@ -355,7 +386,21 @@ mod tests {
 
     #[test]
     fn no_penetration_invariant_after_solver() {
-        let level = parsed_level(3, 3, vec![Tile::Wall, Tile::Wall, Tile::Wall, Tile::Wall, Tile::Floor, Tile::Wall, Tile::Wall, Tile::Wall, Tile::Wall]);
+        let level = parsed_level(
+            3,
+            3,
+            vec![
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Wall,
+                Tile::Wall,
+            ],
+        );
         let world = CollisionWorld::from_level(&level);
 
         let mut player = PlayerState::new(Vec3::new(1.5, PLAYER_EYE_HEIGHT, -1.5));

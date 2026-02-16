@@ -36,7 +36,10 @@ pub struct ParsedLevel {
 
 impl ParsedLevel {
     pub fn tile_at(&self, x: usize, y: usize) -> Tile {
-        assert!(x < self.width && y < self.height, "tile coordinates out of bounds");
+        assert!(
+            x < self.width && y < self.height,
+            "tile coordinates out of bounds"
+        );
         self.tiles[y * self.width + x]
     }
 }
@@ -287,7 +290,11 @@ mod tests {
         let input = "#####\n#.X.#\n#####";
         let err = parse_level(input).unwrap_err();
         match err {
-            LayoutError::UnknownToken { token, line, column } => {
+            LayoutError::UnknownToken {
+                token,
+                line,
+                column,
+            } => {
                 assert_eq!(token, 'X');
                 assert_eq!(line, 2);
                 assert_eq!(column, 3);
@@ -301,7 +308,11 @@ mod tests {
         let input = "#####\n#..#\n#####";
         let err = parse_level(input).unwrap_err();
         match err {
-            LayoutError::NonRectangular { line, expected, actual } => {
+            LayoutError::NonRectangular {
+                line,
+                expected,
+                actual,
+            } => {
                 assert_eq!(line, 2);
                 assert_eq!(expected, 5);
                 assert_eq!(actual, 4);
@@ -384,7 +395,11 @@ mod tests {
         let input = "#####\n#RX.#\n#S..#\n#####";
         let err = parse_level(input).unwrap_err();
         match err {
-            LayoutError::InvalidRampDir { line, column, token } => {
+            LayoutError::InvalidRampDir {
+                line,
+                column,
+                token,
+            } => {
                 assert_eq!(line, 2);
                 assert_eq!(column, 3);
                 assert_eq!(token, 'X');

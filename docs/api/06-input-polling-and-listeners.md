@@ -16,6 +16,7 @@ Direct crate flow:
 - Consumption rule: all same-priority handlers run; if any consume, lower priorities do not run.
 - Polling snapshot: gameplay can query held/just-pressed keys, mouse delta, scroll, and action values.
 - Action mapping: bind semantic actions (`"move.forward"`) to chords (keys/buttons + modifiers).
+- Input profiles: `ActionMap` load/save uses strict `version = 1` TOML with `trigger` + `modifiers`.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -71,18 +72,36 @@ queue events all frame
 -> otherwise continue downward
 ```
 
+Snippet Type: Real
+```toml
+version = 1
+
+[[bindings]]
+action = "move.forward"
+trigger = { key = "KeyW" }
+modifiers = { shift = false, ctrl = false, alt = false, super_key = false }
+scale = 1.0
+consume = false
+```
+
 ## 5. Best Practices
 - Call `update_input(...)` for every event.
 - Keep exactly one frame boundary (`begin_frame` or `render_scene`) per rendered frame.
 - Use action names for gameplay logic; avoid hardcoding key codes in systems.
 - Keep UI/input-capture layers at higher priority than gameplay layers.
 - Prefer stable action IDs and load/save binding profiles for user rebinding.
+- Keep layer registration in explicit bands:
+  - `900-1000`: engine capture/system overlays
+  - `500-899`: UI routing/capture
+  - `100-499`: gameplay
+  - `0-99`: debug/fallback
 
 ## 6. Gotchas & Failure Modes
 - If `dispatch_frame()` never runs (implicitly through renderer frame prep), snapshots will not advance.
 - If two systems must both process input, keep them in the same priority group.
 - If a high-priority layer consumes events unexpectedly, lower layers will appear "dead".
 - `mouse_delta` and `just_*` states are transient and valid only for the current frame.
+- Profile load is strict: unsupported keys, malformed triggers, or unknown fields are hard errors.
 
 ## 7. Debugging Playbook
 - Step 1: verify `renderer.update_input(...)` is called for every event.
@@ -105,3 +124,7 @@ queue events all frame
 - `docs/api/02-renderer-lifecycle-and-frame-api.md`
 - `docs/internal/09-input-winit-integration.md`
 - `src/input/AGENTS.md`
+
+## 11. Future Considerations
+- Gamepad support is intentionally post-alpha.
+- Plan for gamepad action triggers should reuse the same layered dispatch and consumption semantics.

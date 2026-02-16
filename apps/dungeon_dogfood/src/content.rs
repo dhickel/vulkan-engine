@@ -172,7 +172,10 @@ pub fn load_content_pack(path: impl AsRef<Path>) -> Result<ContentPack, ContentE
 }
 
 pub fn select_prop_index(marker_idx: usize, prop_count: usize) -> usize {
-    assert!(prop_count > 0, "prop_count must be > 0 for deterministic selection");
+    assert!(
+        prop_count > 0,
+        "prop_count must be > 0 for deterministic selection"
+    );
     marker_idx % prop_count
 }
 
@@ -197,7 +200,11 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
     }
 
     if pack.props.is_empty() {
-        return Err(validation_err(pack_path, "props", "at least one prop is required"));
+        return Err(validation_err(
+            pack_path,
+            "props",
+            "at least one prop is required",
+        ));
     }
 
     let mut prop_ids = HashSet::new();
@@ -216,12 +223,7 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
 
         if prop.enabled {
             enabled_prop_count += 1;
-            require_existing_path(
-                &prop.path,
-                &format!("{key}.path"),
-                &prop.id,
-                pack_path,
-            )?;
+            require_existing_path(&prop.path, &format!("{key}.path"), &prop.id, pack_path)?;
         }
 
         for (axis, value) in ["x", "y", "z"].into_iter().zip(prop.scale) {

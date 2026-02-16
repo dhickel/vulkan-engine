@@ -9,6 +9,7 @@ Use this guide for input-system maintenance in `src/input`.
 - per-event consumption
 - action mapping
 - snapshot polling
+- strict profile serialization/parsing (`version = 1`)
 
 Primary implementation: `src/input/src/lib.rs`.
 
@@ -37,6 +38,7 @@ Primary implementation: `src/input/src/lib.rs`.
 - Preserve priority-group consumption behavior.
 - Keep hot path allocation-minimal.
 - Add/adjust tests for layer ordering, consumption, and per-frame reset behavior.
+- Prefer explicit layer priority bands (engine/UI/gameplay/debug) when introducing new layers.
 - If docs and code diverge, treat code as logical truth and record divergence.
 
 ## Validation

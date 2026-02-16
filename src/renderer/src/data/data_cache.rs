@@ -57,9 +57,7 @@
 //! - Batch transfers: Multiple textures uploaded in single frame
 
 use crate::data::data_util::PackUnorm;
-use crate::data::environment_import::{
-    self, EnvironmentSource, PendingSkyboxSource,
-};
+use crate::data::environment_import::{self, EnvironmentSource, PendingSkyboxSource};
 use crate::data::gpu_data::{
     AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialShadingModel,
     MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap,
@@ -473,11 +471,8 @@ impl TextureCache {
             return *supported;
         }
 
-        let supported = vk_util::format_supports_linear_mip_blit(
-            &self.instance,
-            self.physical_device,
-            format,
-        );
+        let supported =
+            vk_util::format_supports_linear_mip_blit(&self.instance, self.physical_device, format);
         cache.insert(format, supported);
         supported
     }
@@ -815,7 +810,10 @@ impl TextureCache {
             let slot = self
                 .validate_texture_slot(id)
                 .map_err(|err| format!("invalid texture handle {:?}: {:?}", id, err))?;
-            if matches!(self.cached_textures.get(slot), Some(CachedTexture::Unloaded(_))) {
+            if matches!(
+                self.cached_textures.get(slot),
+                Some(CachedTexture::Unloaded(_))
+            ) {
                 upload_ids.push(id);
             }
         }
@@ -858,7 +856,8 @@ impl TextureCache {
 
                     curr_bytes += aligned_size;
                     next_upload.push(meta);
-                    next_upload_blit_support.push(self.supports_linear_mip_blit(meta.payload.format()));
+                    next_upload_blit_support
+                        .push(self.supports_linear_mip_blit(meta.payload.format()));
                     ids.push(id.slot);
                     batch_texture_ids.push(id);
                 }
@@ -2196,7 +2195,8 @@ impl EnvironmentCache {
         &mut self,
         source: EnvironmentSource,
     ) -> Result<EnvironmentHandle, String> {
-        let pending = environment_import::import_environment_source(&source, &self.supported_formats)?;
+        let pending =
+            environment_import::import_environment_source(&source, &self.supported_formats)?;
         let index = self.skyboxes.len() as u32;
 
         info!("Imported environment source as Unloaded: {:?}", source);

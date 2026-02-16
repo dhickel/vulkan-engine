@@ -136,15 +136,14 @@ pub fn compress_texture(
     source_format: vk::Format,
     supported_formats: &HashSet<vk::Format>,
 ) -> Result<Option<TexturePayload>, String> {
-    let Some(decision) =
-        decide_compression(semantic, source_format, config, supported_formats)?
+    let Some(decision) = decide_compression(semantic, source_format, config, supported_formats)?
     else {
         return Ok(None);
     };
 
     // 1. Generate mips on CPU
     let mut mips = Vec::new();
-    
+
     // Convert input bytes to Rgba8 for processing.
     // We assume input is R8G8B8A8_UNORM/SRGB based on decide_compression check.
     // If it's R8, we need to expand? decide_compression only returns Some for 8-bit formats.
@@ -153,37 +152,51 @@ pub fn compress_texture(
     let base_image = match source_format {
         vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
             if bytes.len() != (width * height * 4) as usize {
-                return Err(format!("Input bytes length {} does not match R8G8B8A8 dimensions {}x{}", bytes.len(), width, height));
+                return Err(format!(
+                    "Input bytes length {} does not match R8G8B8A8 dimensions {}x{}",
+                    bytes.len(),
+                    width,
+                    height
+                ));
             }
-            image::RgbaImage::from_raw(width, height, bytes.to_vec()).ok_or("Failed to create image from raw bytes")?
+            image::RgbaImage::from_raw(width, height, bytes.to_vec())
+                .ok_or("Failed to create image from raw bytes")?
         }
         vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-             // Expand RGB to RGBA
-             if bytes.len() != (width * height * 3) as usize {
-                 return Err("Input bytes length mismatch for RGB".to_string());
-             }
-             let img = image::RgbImage::from_raw(width, height, bytes.to_vec()).ok_or("Failed to create RGB image")?;
-             image::DynamicImage::ImageRgb8(img).to_rgba8()
+            // Expand RGB to RGBA
+            if bytes.len() != (width * height * 3) as usize {
+                return Err("Input bytes length mismatch for RGB".to_string());
+            }
+            let img = image::RgbImage::from_raw(width, height, bytes.to_vec())
+                .ok_or("Failed to create RGB image")?;
+            image::DynamicImage::ImageRgb8(img).to_rgba8()
         }
         vk::Format::R8_UNORM | vk::Format::R8_SRGB => {
-             // Expand R to RGBA (Luma)
-             if bytes.len() != (width * height) as usize {
-                 return Err("Input bytes length mismatch for R8".to_string());
-             }
-             let img = image::GrayImage::from_raw(width, height, bytes.to_vec()).ok_or("Failed to create Gray image")?;
-             image::DynamicImage::ImageLuma8(img).to_rgba8()
+            // Expand R to RGBA (Luma)
+            if bytes.len() != (width * height) as usize {
+                return Err("Input bytes length mismatch for R8".to_string());
+            }
+            let img = image::GrayImage::from_raw(width, height, bytes.to_vec())
+                .ok_or("Failed to create Gray image")?;
+            image::DynamicImage::ImageLuma8(img).to_rgba8()
         }
         vk::Format::R8G8_UNORM => {
-             // Expand RG to RGBA (LumaAlpha)
-             if bytes.len() != (width * height * 2) as usize {
-                 return Err("Input bytes length mismatch for R8G8".to_string());
-             }
-             let img = image::GrayAlphaImage::from_raw(width, height, bytes.to_vec()).ok_or("Failed to create GrayAlpha image")?;
-             image::DynamicImage::ImageLumaA8(img).to_rgba8()
+            // Expand RG to RGBA (LumaAlpha)
+            if bytes.len() != (width * height * 2) as usize {
+                return Err("Input bytes length mismatch for R8G8".to_string());
+            }
+            let img = image::GrayAlphaImage::from_raw(width, height, bytes.to_vec())
+                .ok_or("Failed to create GrayAlpha image")?;
+            image::DynamicImage::ImageLumaA8(img).to_rgba8()
         }
-        _ => return Err(format!("Unsupported source format for compression input: {:?}", source_format)),
+        _ => {
+            return Err(format!(
+                "Unsupported source format for compression input: {:?}",
+                source_format
+            ))
+        }
     };
-    
+
     mips.push(base_image.clone());
 
     if generate_mips {
@@ -244,7 +257,10 @@ pub fn compress_texture(
             vk::Format::BC5_UNORM_BLOCK | vk::Format::BC5_SNORM_BLOCK => {
                 // Extract RG channels for BC5
                 // Metallic-roughness data is pre-normalized to RG layout before compression.
-                let rg_bytes: Vec<u8> = rgba_bytes.chunks_exact(4).flat_map(|p| [p[0], p[1]]).collect();
+                let rg_bytes: Vec<u8> = rgba_bytes
+                    .chunks_exact(4)
+                    .flat_map(|p| [p[0], p[1]])
+                    .collect();
                 let surface = intel_tex_2::RgSurface {
                     width: mip_width,
                     height: mip_height,
@@ -261,15 +277,20 @@ pub fn compress_texture(
                     data: &rgba_bytes,
                 };
                 let settings = if decision.quality < 30 {
-                     intel_tex_2::bc7::opaque_ultra_fast_settings()
+                    intel_tex_2::bc7::opaque_ultra_fast_settings()
                 } else if decision.quality < 70 {
-                     intel_tex_2::bc7::opaque_fast_settings()
+                    intel_tex_2::bc7::opaque_fast_settings()
                 } else {
-                     intel_tex_2::bc7::opaque_basic_settings()
+                    intel_tex_2::bc7::opaque_basic_settings()
                 };
                 bc7::compress_blocks(&settings, &surface)
             }
-            _ => return Err(format!("Unsupported compression format: {:?}", decision.format)),
+            _ => {
+                return Err(format!(
+                    "Unsupported compression format: {:?}",
+                    decision.format
+                ))
+            }
         };
 
         mip_offsets.push(all_compressed_bytes.len() as u32);

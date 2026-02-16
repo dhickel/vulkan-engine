@@ -739,7 +739,9 @@ mod tests {
         };
 
         // Create light
-        let id = scene.create_point_light(light).expect("create should succeed");
+        let id = scene
+            .create_point_light(light)
+            .expect("create should succeed");
 
         // Update light
         let updated = PointLight {
@@ -802,7 +804,9 @@ mod tests {
         };
 
         // Should succeed - negative colors are clamped to zero
-        let id = scene.create_point_light(light).expect("should clamp and succeed");
+        let id = scene
+            .create_point_light(light)
+            .expect("should clamp and succeed");
         scene.remove_point_light(id).unwrap();
     }
 }

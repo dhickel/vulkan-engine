@@ -1,5 +1,7 @@
 use log::{error, info};
-use renderer::{EnvironmentSource, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene};
+use renderer::{
+    EnvironmentSource, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
+};
 use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -53,7 +55,10 @@ fn main() {
 
     if let Some(env_path) = parse_env_arg() {
         info!("Loading custom environment from: {}", env_path.display());
-        match renderer.assets().load_environment(EnvironmentSource::Auto(env_path)) {
+        match renderer
+            .assets()
+            .load_environment(EnvironmentSource::Auto(env_path))
+        {
             Ok(handle) => {
                 scene.set_skybox(handle);
                 info!("Custom environment set as skybox");

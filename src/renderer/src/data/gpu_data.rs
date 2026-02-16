@@ -589,7 +589,7 @@ pub struct SceneDataUBO {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct GpuPointLight {
-    pub position_range: Vec4, // xyz = position, w = range
+    pub position_range: Vec4,  // xyz = position, w = range
     pub color_intensity: Vec4, // rgb = color, w = intensity
 }
 

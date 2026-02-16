@@ -14,13 +14,12 @@ pub fn load_startup_scene(
     data_cache: Arc<VkDataCache>,
     force_unlit_materials: bool,
 ) -> Result<ModelMeta, AssimpImportError> {
-    let loaded_scene =
-        assimp_util::load_model(
-            DEFAULT_STARTUP_MODEL_PATH,
-            data_cache.clone(),
-            false,
-            &AssetPolicyConfig::default(),
-        )?;
+    let loaded_scene = assimp_util::load_model(
+        DEFAULT_STARTUP_MODEL_PATH,
+        data_cache.clone(),
+        false,
+        &AssetPolicyConfig::default(),
+    )?;
 
     if force_unlit_materials {
         let mut tex_cache = data_cache

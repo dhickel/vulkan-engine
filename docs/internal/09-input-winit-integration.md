@@ -13,6 +13,7 @@ Current runtime path:
 - UI capture is handled during ingestion using ImGui `want_capture_*` flags.
 - Layer dispatch model uses priority groups with same-priority peer execution.
 - Snapshot state is read-only to consumers after dispatch.
+- Action profile parsing (`ActionMap::from_toml_str`) is strict `version = 1` with validated triggers.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -70,6 +71,12 @@ once per frame:
   gameplay systems read snapshot/action states
 ```
 
+Priority band guidance:
+- `900-1000`: engine capture/system overlays
+- `500-899`: UI/input routing
+- `100-499`: gameplay/action layers
+- `0-99`: debug/fallback
+
 ## 5. Best Practices
 - Keep all winit-to-input translation in `Renderer::update_input`.
 - Preserve one dispatch boundary per frame.
@@ -81,6 +88,7 @@ once per frame:
 - Dispatching more than once per frame causes incorrect transient state.
 - Dispatching less than once per frame causes stale input and lag.
 - Consuming in high-priority layers can mask lower gameplay layers unexpectedly.
+- Profile reload failures should be surfaced to logs/UX; never silently drop invalid bindings.
 
 ## 7. Debugging Playbook
 - Step 1: verify `update_input` is called before event-specific branching in examples/apps.
@@ -104,3 +112,7 @@ once per frame:
 - `docs/api/06-input-polling-and-listeners.md`
 - `docs/internal/04-api-to-backend-handoff.md`
 - `src/input/AGENTS.md`
+
+## 11. Future Considerations
+- Gamepad input support is a post-alpha target.
+- Future gamepad triggers should plug into `ActionMap`/layer dispatch without changing consumption semantics.

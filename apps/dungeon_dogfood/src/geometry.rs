@@ -62,15 +62,51 @@ fn emit_chunk(
 
         if width >= height && width > 1 {
             let mid = x0 + width / 2;
-            emit_chunk(level, material, x0, y0, mid, y1, &format!("{base_name}_a"), out);
-            emit_chunk(level, material, mid, y0, x1, y1, &format!("{base_name}_b"), out);
+            emit_chunk(
+                level,
+                material,
+                x0,
+                y0,
+                mid,
+                y1,
+                &format!("{base_name}_a"),
+                out,
+            );
+            emit_chunk(
+                level,
+                material,
+                mid,
+                y0,
+                x1,
+                y1,
+                &format!("{base_name}_b"),
+                out,
+            );
             return;
         }
 
         if height > 1 {
             let mid = y0 + height / 2;
-            emit_chunk(level, material, x0, y0, x1, mid, &format!("{base_name}_a"), out);
-            emit_chunk(level, material, x0, mid, x1, y1, &format!("{base_name}_b"), out);
+            emit_chunk(
+                level,
+                material,
+                x0,
+                y0,
+                x1,
+                mid,
+                &format!("{base_name}_a"),
+                out,
+            );
+            emit_chunk(
+                level,
+                material,
+                x0,
+                mid,
+                x1,
+                y1,
+                &format!("{base_name}_b"),
+                out,
+            );
             return;
         }
     }
@@ -412,8 +448,18 @@ fn emit_ramp_caps(
             inds,
             make_vertex(Vec3::new(x0, 0.0, z1), normal, tangent, Vec2::new(0.0, 0.0)),
             make_vertex(Vec3::new(x0, 0.0, z0), normal, tangent, Vec2::new(1.0, 0.0)),
-            make_vertex(Vec3::new(x0, h_sw, z1), normal, tangent, Vec2::new(0.0, h_sw)),
-            make_vertex(Vec3::new(x0, h_nw, z0), normal, tangent, Vec2::new(1.0, h_nw)),
+            make_vertex(
+                Vec3::new(x0, h_sw, z1),
+                normal,
+                tangent,
+                Vec2::new(0.0, h_sw),
+            ),
+            make_vertex(
+                Vec3::new(x0, h_nw, z0),
+                normal,
+                tangent,
+                Vec2::new(1.0, h_nw),
+            ),
         );
     }
 
@@ -425,8 +471,18 @@ fn emit_ramp_caps(
             inds,
             make_vertex(Vec3::new(x1, 0.0, z0), normal, tangent, Vec2::new(0.0, 0.0)),
             make_vertex(Vec3::new(x1, 0.0, z1), normal, tangent, Vec2::new(1.0, 0.0)),
-            make_vertex(Vec3::new(x1, h_ne, z0), normal, tangent, Vec2::new(0.0, h_ne)),
-            make_vertex(Vec3::new(x1, h_se, z1), normal, tangent, Vec2::new(1.0, h_se)),
+            make_vertex(
+                Vec3::new(x1, h_ne, z0),
+                normal,
+                tangent,
+                Vec2::new(0.0, h_ne),
+            ),
+            make_vertex(
+                Vec3::new(x1, h_se, z1),
+                normal,
+                tangent,
+                Vec2::new(1.0, h_se),
+            ),
         );
     }
 
@@ -438,8 +494,18 @@ fn emit_ramp_caps(
             inds,
             make_vertex(Vec3::new(x0, 0.0, z0), normal, tangent, Vec2::new(0.0, 0.0)),
             make_vertex(Vec3::new(x1, 0.0, z0), normal, tangent, Vec2::new(1.0, 0.0)),
-            make_vertex(Vec3::new(x0, h_nw, z0), normal, tangent, Vec2::new(0.0, h_nw)),
-            make_vertex(Vec3::new(x1, h_ne, z0), normal, tangent, Vec2::new(1.0, h_ne)),
+            make_vertex(
+                Vec3::new(x0, h_nw, z0),
+                normal,
+                tangent,
+                Vec2::new(0.0, h_nw),
+            ),
+            make_vertex(
+                Vec3::new(x1, h_ne, z0),
+                normal,
+                tangent,
+                Vec2::new(1.0, h_ne),
+            ),
         );
     }
 
@@ -451,8 +517,18 @@ fn emit_ramp_caps(
             inds,
             make_vertex(Vec3::new(x1, 0.0, z1), normal, tangent, Vec2::new(0.0, 0.0)),
             make_vertex(Vec3::new(x0, 0.0, z1), normal, tangent, Vec2::new(1.0, 0.0)),
-            make_vertex(Vec3::new(x1, h_se, z1), normal, tangent, Vec2::new(0.0, h_se)),
-            make_vertex(Vec3::new(x0, h_sw, z1), normal, tangent, Vec2::new(1.0, h_sw)),
+            make_vertex(
+                Vec3::new(x1, h_se, z1),
+                normal,
+                tangent,
+                Vec2::new(0.0, h_se),
+            ),
+            make_vertex(
+                Vec3::new(x0, h_sw, z1),
+                normal,
+                tangent,
+                Vec2::new(1.0, h_sw),
+            ),
         );
     }
 }
