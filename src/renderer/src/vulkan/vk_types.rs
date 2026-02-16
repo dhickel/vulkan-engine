@@ -678,6 +678,7 @@ impl VkFrame {
 ///
 /// ## Synchronization
 /// - `get_next_frame`: Advances counter, returns next frame (fence must be waited on first!)
+/// - `rewind_frame`: Rolls back one reservation when a frame is skipped before submission
 /// - `get_curr_frame`: Returns active frame being recorded
 /// - Frame fence ensures we don't overwrite resources GPU is using
 ///
@@ -770,6 +771,14 @@ impl VkPresent {
         let frame = &self.frame_data[index as usize]; // FIXME
         self.curr_frame_count += 1;
         frame
+    }
+
+    /// Roll back one frame reservation when acquire/record paths early-return.
+    ///
+    /// This keeps frame-slot selection in lock-step with systems that only advance
+    /// on successful submission paths (for example ImGui internal in-flight buffers).
+    pub fn rewind_frame(&mut self) {
+        self.curr_frame_count = self.curr_frame_count.saturating_sub(1);
     }
 
     pub fn get_curr_frame_count(&self) -> u32 {
