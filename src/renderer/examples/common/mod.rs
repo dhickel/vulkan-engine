@@ -78,6 +78,7 @@ pub fn run_demo(scenario: DemoScenario) {
             return;
         }
     };
+    renderer.install_default_fps_input();
 
     let mut scene = match initialize_scene(&mut renderer, scenario) {
         Ok(scene) => scene,

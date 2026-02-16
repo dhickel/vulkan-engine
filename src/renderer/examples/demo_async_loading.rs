@@ -50,6 +50,7 @@ fn main() {
             return;
         }
     };
+    renderer.install_default_fps_input();
 
     // Force the demo down the public facade ticket-loading path.
     let _ = renderer.take_startup_scene();

@@ -95,6 +95,7 @@ fn main() {
 
     let mut renderer =
         renderer::Renderer::new(config, &window).expect("failed to initialize renderer");
+    renderer.install_default_fps_input();
 
     let mut scene = renderer
         .take_startup_scene()

@@ -25,8 +25,6 @@
 //! - **Command pools are NOT thread-safe**: Each pool is tied to a single queue family
 //! - **Frame resource lifecycle**: Resources deleted via VkDeletable deferred to frame completion
 
-use crate::data::camera::FPSController;
-
 use crate::data::data_cache::{EnvMaps, VkPipelineType};
 use crate::data::data_util::{
     BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError,
@@ -41,9 +39,7 @@ use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 use log::{debug, error};
-use std::cell::RefCell;
 use std::ffi::{CStr, CString};
-use std::rc::Rc;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -87,7 +83,6 @@ pub enum VkError {
 /// **Why negative height**: Flips clip-space Y without modifying all shaders and projection math.
 ///
 /// ## Integration
-/// - Holds FPSController (Rc<RefCell<>> for shared mutable access from event loop)
 /// - Viewport/scissor updated on resize and cached for command buffer recording
 pub struct VkWindowState {
     pub resize_requested: bool,
@@ -97,15 +92,10 @@ pub struct VkWindowState {
     pub render_scale: f32,
     /// Cached viewport and scissor to avoid recreation every frame
     viewport_scissor: ([vk::Viewport; 1], [vk::Rect2D; 1]),
-    pub controller: Rc<RefCell<FPSController>>,
 }
 
 impl VkWindowState {
-    pub fn new(
-        curr_extent: vk::Extent2D,
-        max_extent: vk::Extent2D,
-        controller: FPSController,
-    ) -> Self {
+    pub fn new(curr_extent: vk::Extent2D, max_extent: vk::Extent2D) -> Self {
         // Viewport with Y-flip: negative height flips Vulkan's Y-down to Y-up
         // Y starts at bottom (curr_extent.height) and goes negative (-height)
         // This is the standard Vulkan technique to match OpenGL-style coordinates
@@ -126,7 +116,6 @@ impl VkWindowState {
         Self {
             curr_extent,
             max_extent,
-            controller: Rc::new(RefCell::new(controller)),
             viewport_scissor: (viewport, scissor),
             resize_requested: false,
             curr_aspect_ratio,

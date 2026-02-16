@@ -11,6 +11,10 @@ pub mod advanced;
 
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
 pub use crate::scene::SceneNodeId;
+pub use input::{
+    ActionBinding, ActionId, ActionMap, ActionMapLayer, InputChord, InputConsume, InputDebugSnapshot,
+    InputEvent, InputLayer, InputSnapshot, InputSystem, LayerDescriptor, LayerHandle, LayerPriority,
+};
 pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
     ProceduralMeshData, ProceduralVertex,

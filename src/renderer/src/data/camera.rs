@@ -1,38 +1,12 @@
-//! # Camera & FPS Controller
+//! Camera and FPS controller utilities.
 //!
-//! ## Purpose
-//! Implements first-person camera with Quake-style movement (WASD + mouse look).
-//! Integrates with input system via listener pattern.
-//!
-//! ## Components
-//! - **Camera**: Core camera with position/orientation, generates view matrix
-//! - **FPSController**: Input handling + movement logic, owns Camera
-//!
-//! ## Movement Style
-//! Quake-style FPS controls:
-//! - Mouse: Yaw (Y-axis) and pitch (X-axis) rotation
-//! - WASD: Forward/backward/strafe
-//! - Space/Shift: Up/down (noclip)
-//! - Pitch clamped to ±89° to prevent gimbal lock
-//!
-//! ## Input Integration
-//! FPSController implements KeyboardListener and MousePosListener traits.
-//! Registered with input system broadcaster (see input/lib.rs).
+//! The FPS controller no longer receives raw key events directly; it consumes
+//! semantic actions from the input snapshot.
 
-use glam::{vec3, Mat4, Quat, Vec3, Vec4};
-use input::{KeyboardListener, ListenerType, MousePosListener};
-use std::collections::HashSet;
-
-use winit::event::Modifiers;
-use winit::keyboard::KeyCode;
+use glam::{Mat4, Quat, Vec3};
+use input::{ActionId, InputSnapshot};
 
 /// Camera with position and quaternion orientation.
-///
-/// ## View Matrix
-/// Computed as inverse of translation * rotation. Standard FPS camera.
-///
-/// ## Rotation Storage
-/// Stores pitch/yaw as floats for clamping, but orientation as Quat for smooth interpolation.
 pub struct Camera {
     position: Vec3,
     orientation: Quat,
@@ -84,148 +58,96 @@ impl Camera {
 
         let yaw_quat = Quat::from_rotation_y(self.yaw);
         let pitch_quat = Quat::from_rotation_x(self.pitch);
-
         self.orientation = yaw_quat * pitch_quat;
     }
 
     pub fn update_position(&mut self, direction: Vec3, amount: f32) {
         let yaw_rotation = Quat::from_rotation_y(self.yaw);
         let velocity = yaw_rotation * direction * amount;
-
         self.position += velocity;
     }
 }
 
-pub struct FPSController {
-    id: u32,
-    prev_m_pos: glam::Vec2,
-    m_delta: (f64, f64),
-    view_vec: glam::Vec2,
-    m_sensitivity: f64,
-    in_window: bool,
-    camera: Camera,
-    input_actions: [bool; 6],
-    move_speed: f32,
-    move_vec: glam::Vec3,
+#[derive(Clone, Debug)]
+pub struct FpsActionBindings {
+    pub forward: ActionId,
+    pub backward: ActionId,
+    pub left: ActionId,
+    pub right: ActionId,
+    pub up: ActionId,
+    pub down: ActionId,
 }
 
-#[repr(C)]
-pub enum InputAction {
-    Forward = 0,
-    Backward = 1,
-    Left = 2,
-    Right = 3,
-    Up = 4,
-    Down = 5,
+impl Default for FpsActionBindings {
+    fn default() -> Self {
+        Self {
+            forward: ActionId::new("move.forward"),
+            backward: ActionId::new("move.backward"),
+            left: ActionId::new("move.left"),
+            right: ActionId::new("move.right"),
+            up: ActionId::new("move.up"),
+            down: ActionId::new("move.down"),
+        }
+    }
+}
+
+pub struct FPSController {
+    m_sensitivity: f64,
+    move_speed: f32,
+    action_bindings: FpsActionBindings,
 }
 
 impl FPSController {
-    pub fn new(id: u32, camera: Camera, m_sensitivity: f64, move_speed: f32) -> Self {
+    pub fn new(m_sensitivity: f64, move_speed: f32) -> Self {
         Self {
-            id: id,
-            prev_m_pos: Default::default(),
-            m_delta: Default::default(),
-            view_vec: Default::default(),
-            move_vec: Default::default(),
-            in_window: true,
-            input_actions: [false; 6],
             m_sensitivity,
-            camera,
             move_speed,
+            action_bindings: FpsActionBindings::default(),
         }
     }
 
-    pub fn get_camera(&self) -> &Camera {
-        &self.camera
+    pub fn with_bindings(mut self, bindings: FpsActionBindings) -> Self {
+        self.action_bindings = bindings;
+        self
     }
 
-    pub fn get_camera_mut(&mut self) -> &mut Camera {
-        &mut self.camera
-    }
+    pub fn update_from_snapshot(
+        &mut self,
+        snapshot: &InputSnapshot,
+        delta_seconds: f32,
+        camera: &mut Camera,
+    ) {
+        let m_delta = snapshot.mouse_delta();
+        let rot_x = m_delta.0 * self.m_sensitivity;
+        let rot_y = m_delta.1 * self.m_sensitivity;
+        camera.update_rotation(-rot_x as f32, -rot_y as f32);
 
-    pub fn update(&mut self, delta_seconds: f32) {
-        let rot_x = self.m_delta.0 * self.m_sensitivity;
-        let rot_y = self.m_delta.1 * self.m_sensitivity;
-
-        // Update rotation
-        self.camera.update_rotation(-rot_x as f32, -rot_y as f32);
-
-        // Calculate movement direction and amount
         let amount = delta_seconds * self.move_speed;
-        self.move_vec = Vec3::ZERO;
+        let mut move_vec = Vec3::ZERO;
 
-        if self.input_actions[InputAction::Forward as usize] {
-            self.move_vec.z -= 1.0;
+        if snapshot.action_pressed(&self.action_bindings.forward) {
+            move_vec.z -= 1.0;
         }
-        if self.input_actions[InputAction::Backward as usize] {
-            self.move_vec.z += 1.0;
+        if snapshot.action_pressed(&self.action_bindings.backward) {
+            move_vec.z += 1.0;
         }
-        if self.input_actions[InputAction::Left as usize] {
-            self.move_vec.x -= 1.0;
+        if snapshot.action_pressed(&self.action_bindings.left) {
+            move_vec.x -= 1.0;
         }
-        if self.input_actions[InputAction::Right as usize] {
-            self.move_vec.x += 1.0;
+        if snapshot.action_pressed(&self.action_bindings.right) {
+            move_vec.x += 1.0;
         }
-        if self.input_actions[InputAction::Up as usize] {
-            self.move_vec.y += 1.0;
+        if snapshot.action_pressed(&self.action_bindings.up) {
+            move_vec.y += 1.0;
         }
-        if self.input_actions[InputAction::Down as usize] {
-            self.move_vec.y -= 1.0;
-        }
-
-        if self.move_vec.length_squared() > 0.0 {
-            self.move_vec = self.move_vec.normalize();
+        if snapshot.action_pressed(&self.action_bindings.down) {
+            move_vec.y -= 1.0;
         }
 
-        // Update position
-        self.camera.update_position(self.move_vec, amount);
-    }
-}
-
-impl MousePosListener for FPSController {
-    fn listener_type(&self) -> ListenerType {
-        ListenerType::GameInput
-    }
-
-    fn listener_id(&self) -> u32 {
-        self.id
-    }
-
-    fn broadcast(&mut self, delta: (f64, f64), modifiers: &HashSet<Modifiers>) {
-        self.m_delta = delta;
-    }
-}
-
-impl KeyboardListener for FPSController {
-    fn listener_type(&self) -> ListenerType {
-        ListenerType::GameInput
-    }
-
-    fn listener_id(&self) -> u32 {
-        self.id
-    }
-
-    fn listener_for(&self, key: KeyCode) -> bool {
-        matches!(
-            key,
-            KeyCode::KeyW
-                | KeyCode::KeyA
-                | KeyCode::KeyS
-                | KeyCode::KeyD
-                | KeyCode::Space
-                | KeyCode::ShiftLeft
-        )
-    }
-
-    fn broadcast(&mut self, key: KeyCode, pressed: bool, modifiers: &HashSet<Modifiers>) {
-        match key {
-            KeyCode::KeyW => self.input_actions[InputAction::Forward as usize] = pressed,
-            KeyCode::KeyA => self.input_actions[InputAction::Left as usize] = pressed,
-            KeyCode::KeyS => self.input_actions[InputAction::Backward as usize] = pressed,
-            KeyCode::KeyD => self.input_actions[InputAction::Right as usize] = pressed,
-            KeyCode::Space => self.input_actions[InputAction::Up as usize] = pressed,
-            KeyCode::ShiftLeft => self.input_actions[InputAction::Down as usize] = pressed,
-            _ => {}
+        if move_vec.length_squared() > 0.0 {
+            move_vec = move_vec.normalize();
         }
+
+        camera.update_position(move_vec, amount);
     }
 }

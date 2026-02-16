@@ -4,13 +4,15 @@ use std::time::Instant;
 
 use ash::vk::Extent2D;
 use glam::Mat4;
-use input::InputManager;
+use input::{ActionMap, InputSystem, LayerDescriptor, LayerHandle, LayerPriority};
 use log::{error, warn};
-use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
-use winit::keyboard::PhysicalKey;
+use winit::event::{
+    DeviceEvent, Event, MouseScrollDelta, WindowEvent,
+};
+use winit::keyboard::KeyCode;
 use winit::window::Window;
 
-use crate::data::camera::{Camera, FPSController};
+use crate::data::camera::{Camera, FPSController, FpsActionBindings};
 use crate::data::handles::EnvironmentHandle;
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
@@ -50,9 +52,14 @@ pub struct FrameContext {
     render_attempted: bool,
 }
 
+struct FpsInputPlugin {
+    action_layer: LayerHandle,
+    controller: FPSController,
+}
+
 pub struct Renderer {
     runtime: vk_render::VkRender,
-    input_manager: InputManager,
+    input_system: InputSystem,
     frame_number: u32,
     last_frame_time: Instant,
     open_frame: Option<u32>,
@@ -62,6 +69,8 @@ pub struct Renderer {
     pre_render_hook: Option<RenderHook>,
     post_render_hook: Option<RenderHook>,
     resize_skip_state_logged: bool,
+    camera: Camera,
+    fps_plugin: Option<FpsInputPlugin>,
 }
 
 impl Renderer {
@@ -72,7 +81,7 @@ impl Renderer {
             return Err(RendererError::Unsupported("headless mode not implemented"));
         }
 
-        let (window_state, input_manager) = create_window_state(window, &config);
+        let window_state = create_window_state(window, &config);
         let vk_debug_mode: vk_render::DebugRuntimeMode = config.shader_debug_mode.into();
         let (runtime, scene_world) = vk_render::VkRender::new(
             window_state,
@@ -88,7 +97,7 @@ impl Renderer {
 
         Ok(Self {
             runtime,
-            input_manager,
+            input_system: InputSystem::new(),
             frame_number: 0,
             last_frame_time: Instant::now(),
             open_frame: None,
@@ -98,7 +107,52 @@ impl Renderer {
             pre_render_hook: None,
             post_render_hook: None,
             resize_skip_state_logged: false,
+            camera: Camera::default(),
+            fps_plugin: None,
         })
+    }
+
+    /// Installs classic FPS controls as an optional plugin layer.
+    pub fn install_default_fps_input(&mut self) -> LayerHandle {
+        if let Some(plugin) = self.fps_plugin.take() {
+            self.input_system.remove_layer(plugin.action_layer);
+        }
+
+        let bindings = FpsActionBindings::default();
+        let mut map = ActionMap::new();
+        map.bind_key(bindings.forward.clone(), KeyCode::KeyW);
+        map.bind_key(bindings.backward.clone(), KeyCode::KeyS);
+        map.bind_key(bindings.left.clone(), KeyCode::KeyA);
+        map.bind_key(bindings.right.clone(), KeyCode::KeyD);
+        map.bind_key(bindings.up.clone(), KeyCode::Space);
+        map.bind_key(bindings.down.clone(), KeyCode::ShiftLeft);
+
+        let action_layer = self.input_system.add_layer(
+            LayerDescriptor::new("fps-actions", LayerPriority(10)),
+            map.into_layer(),
+        );
+
+        let controller = FPSController::new(0.002, 1.0).with_bindings(bindings);
+        self.fps_plugin = Some(FpsInputPlugin {
+            action_layer,
+            controller,
+        });
+
+        action_layer
+    }
+
+    pub fn uninstall_default_fps_input(&mut self) {
+        if let Some(plugin) = self.fps_plugin.take() {
+            self.input_system.remove_layer(plugin.action_layer);
+        }
+    }
+
+    pub fn input_mut(&mut self) -> &mut InputSystem {
+        &mut self.input_system
+    }
+
+    pub fn input(&self) -> &InputSystem {
+        &self.input_system
     }
 
     /// Thread: Main
@@ -110,12 +164,18 @@ impl Renderer {
     ) -> Result<(), RendererError> {
         self.runtime.core.imgui.handle_event(window, event);
 
+        let io = self.runtime.core.imgui.context.io();
+        let consume_keyboard = io.want_capture_keyboard;
+        let consume_mouse = io.want_capture_mouse;
+
         match event {
             Event::DeviceEvent {
                 event: DeviceEvent::MouseMotion { delta },
                 ..
             } => {
-                self.input_manager.update_mouse_pos(*delta);
+                if !consume_mouse {
+                    self.input_system.queue_mouse_motion(*delta);
+                }
             }
             Event::DeviceEvent {
                 event:
@@ -124,24 +184,31 @@ impl Renderer {
                     },
                 ..
             } => {
-                self.input_manager.update_scroll_state(*delta);
+                if !consume_mouse {
+                    self.input_system.queue_scroll_lines(*delta);
+                }
             }
             Event::WindowEvent { window_id, event } if *window_id == window.id() => match event {
-                WindowEvent::KeyboardInput {
-                    event: key_event, ..
-                } => {
-                    if let PhysicalKey::Code(key) = key_event.physical_key {
-                        self.input_manager
-                            .add_keycode(key, key_event.state.is_pressed());
+                WindowEvent::CursorEntered { .. } => {
+                    self.handle_cursor_focus(window, true)?;
+                    self.input_system.queue_winit_window_event(event);
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    self.handle_cursor_focus(window, false)?;
+                    self.input_system.queue_winit_window_event(event);
+                }
+                WindowEvent::ModifiersChanged(_) => {
+                    self.input_system.queue_winit_window_event(event);
+                }
+                WindowEvent::KeyboardInput { .. } => {
+                    if !consume_keyboard {
+                        self.input_system.queue_winit_window_event(event);
                     }
                 }
-                WindowEvent::CursorEntered { .. } => self.handle_cursor_focus(window, true)?,
-                WindowEvent::CursorLeft { .. } => self.handle_cursor_focus(window, false)?,
-                WindowEvent::MouseWheel {
-                    delta: MouseScrollDelta::LineDelta(delta, ..),
-                    ..
-                } => {
-                    self.input_manager.update_scroll_state(*delta);
+                WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => {
+                    if !consume_mouse {
+                        self.input_system.queue_winit_window_event(event);
+                    }
                 }
                 _ => {}
             },
@@ -317,13 +384,13 @@ impl Renderer {
         let delta = now.duration_since(self.last_frame_time);
         self.last_frame_time = now;
 
-        self.input_manager.update();
-        self.runtime
-            .core
-            .window_state
-            .controller
-            .borrow_mut()
-            .update(delta.as_secs_f32());
+        self.input_system.dispatch_frame();
+        if let Some(plugin) = self.fps_plugin.as_mut() {
+            let snapshot = self.input_system.snapshot();
+            plugin
+                .controller
+                .update_from_snapshot(snapshot, delta.as_secs_f32(), &mut self.camera);
+        }
 
         if self.runtime.resize_requested() {
             self.enter_resize_skip_state();
@@ -358,13 +425,8 @@ impl Renderer {
         }
 
         self.clear_resize_skip_state();
-        let (camera_view, camera_pos) = {
-            let controller = self.runtime.core.window_state.controller.borrow();
-            (
-                controller.get_camera().get_view_matrix(),
-                controller.get_camera().get_position(),
-            )
-        };
+        let camera_view = self.camera.get_view_matrix();
+        let camera_pos = self.camera.get_position();
 
         let fovy = 70_f32.to_radians();
         let aspect_ratio = self.runtime.core.window_state.get_aspect_ratio();
@@ -466,8 +528,7 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn camera_position(&self) -> glam::Vec3 {
-        let controller = self.runtime.core.window_state.controller.borrow();
-        controller.get_camera().get_position()
+        self.camera.get_position()
     }
 
     /// Set camera position in world space
@@ -475,12 +536,11 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn set_camera_position(&mut self, position: glam::Vec3) {
-        let mut controller = self.runtime.core.window_state.controller.borrow_mut();
-        controller.get_camera_mut().set_position(position);
+        self.camera.set_position(position);
     }
 }
 
-fn create_window_state(window: &Window, config: &RendererConfig) -> (VkWindowState, InputManager) {
+fn create_window_state(window: &Window, config: &RendererConfig) -> VkWindowState {
     let inner_size = window.inner_size();
 
     let width = if inner_size.width > 0 {
@@ -507,15 +567,7 @@ fn create_window_state(window: &Window, config: &RendererConfig) -> (VkWindowSta
     let curr_extent = Extent2D::default().width(width).height(height);
     let max_extent = Extent2D::default().width(max_width).height(max_height);
 
-    let camera = Camera::default();
-    let fps_controller = FPSController::new(1, camera, 0.002, 1.0);
-
-    let window_state = VkWindowState::new(curr_extent, max_extent, fps_controller);
-    let mut input_manager = InputManager::default();
-    input_manager.register_key_listener(window_state.controller.clone());
-    input_manager.register_m_pos_listener(window_state.controller.clone());
-
-    (window_state, input_manager)
+    VkWindowState::new(curr_extent, max_extent)
 }
 
 fn map_vk_init_err(err: String, compile_shaders: bool) -> RendererError {
