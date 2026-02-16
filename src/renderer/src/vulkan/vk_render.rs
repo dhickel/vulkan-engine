@@ -1147,6 +1147,13 @@ impl VkRenderCore {
         )
         .unwrap();
 
+        // Surface/compositor may choose an extent different from the requested one
+        // (especially during fullscreen or DPI transitions). Keep render extents in
+        // lock-step with the real swapchain extent to avoid partial/offset rendering.
+        if swapchain.extent != self.window_state.get_curr_extent() {
+            self.window_state.update_curr_size(swapchain.extent);
+        }
+
         // FIXME, I think we will need to destory the old images view when we reassign
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
 
@@ -1165,6 +1172,7 @@ fn elapsed_ms(start: Instant) -> f32 {
 
 const ACQUIRE_STAGE_SPIKE_WARN_MS: f32 = 20.0;
 const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 1_000_000;
+const SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME: u32 = 3;
 
 fn warn_if_acquire_stage_spike(stage: &'static str, duration_ms: f32) {
     if duration_ms >= ACQUIRE_STAGE_SPIKE_WARN_MS {
@@ -1907,13 +1915,30 @@ impl VkRenderCore {
         self.resolve_gpu_timing_for_slot(frame_slot_index);
 
         let swapchain_acquire_start = Instant::now();
-        let acquire_result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+        let mut acquire_retries = 0u32;
+        let acquire_result = loop {
+            let result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+            match result {
+                SwapchainAcquireResult::Retry
+                    if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
+                {
+                    acquire_retries += 1;
+                }
+                _ => break result,
+            }
+        };
         let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
         warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
         let image_index = match acquire_result {
             SwapchainAcquireResult::Acquired(index) => index,
             SwapchainAcquireResult::Retry => {
+                if acquire_retries > 0 {
+                    warn!(
+                        "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total)",
+                        acquire_retries, swapchain_acquire_ms
+                    );
+                }
                 self.presentation.rewind_frame();
                 return None;
             }
