@@ -798,20 +798,14 @@ pub fn create_swapchain(
     log::info!("Swapchain: Setting extent");
     let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
 
-    let image_count = if let Some(explicit_count) = image_count {
-        std::cmp::min(
-            swapchain_support.capabilities.max_image_count,
-            explicit_count,
-        )
+    let min_count = swapchain_support.capabilities.min_image_count.max(1);
+    let requested_count = image_count.unwrap_or(min_count.saturating_add(1));
+    let image_count = if swapchain_support.capabilities.max_image_count > 0 {
+        requested_count
+            .max(min_count)
+            .min(swapchain_support.capabilities.max_image_count)
     } else {
-        let count = swapchain_support.capabilities.min_image_count + 1;
-        if swapchain_support.capabilities.max_image_count > 0
-            && count > swapchain_support.capabilities.max_image_count
-        {
-            swapchain_support.capabilities.max_image_count
-        } else {
-            count
-        }
+        requested_count.max(min_count)
     };
     log::info!("Swapchain: Requesting image count: {}", image_count);
 

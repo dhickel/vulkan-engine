@@ -1823,12 +1823,17 @@ impl VkRenderCore {
         self.prepare_submission_environment(submission);
     }
 
-    /// Wait for GPU completion of this frame slot, then reset the fence for current submission.
-    unsafe fn wait_and_reset_frame_fence(&self, frame_sync: VkFrameSync) {
+    /// Wait for GPU completion of this frame slot before reusing per-frame resources.
+    unsafe fn wait_for_frame_fence(&self, frame_sync: VkFrameSync) {
         let fence = [frame_sync.render_fence];
         self.device
-            .wait_for_fences(&fence, true, u32::MAX as u64)
+            .wait_for_fences(&fence, true, u64::MAX)
             .unwrap();
+    }
+
+    /// Reset frame fence immediately before submitting work that will signal it again.
+    unsafe fn reset_frame_fence(&self, frame_sync: VkFrameSync) {
+        let fence = [frame_sync.render_fence];
         self.device.reset_fences(&fence).unwrap();
     }
 
@@ -1874,7 +1879,7 @@ impl VkRenderCore {
         let queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         let fence_wait_start = Instant::now();
-        unsafe { self.wait_and_reset_frame_fence(frame_sync) };
+        unsafe { self.wait_for_frame_fence(frame_sync) };
         let frame_fence_wait_ms = elapsed_ms(fence_wait_start);
         warn_if_acquire_stage_spike("frame_fence_wait", frame_fence_wait_ms);
 
@@ -1907,6 +1912,9 @@ impl VkRenderCore {
             self.resize_requested = true;
             return None;
         }
+
+        // Reset only when we have a frame to submit; on retry/skip paths leave signaled.
+        unsafe { self.reset_frame_fence(frame_sync) };
 
         Some(FrameAcquire {
             queue,
