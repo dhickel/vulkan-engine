@@ -1,118 +1,2175 @@
-    Checking winit v0.29.15
-error[E0463]: can't find crate for `wayland_protocols_plasma`
- --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/wayland/types/kwin_blur.rs:7:5
+warning: unused import: `MeshCache`
+ --> src/renderer/src/data/assimp_util.rs:9:31
   |
-7 | use wayland_protocols_plasma::blur::client::{
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^ can't find crate
-
-error[E0463]: can't find crate for `x11rb`
- --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/monitor.rs:6:5
+9 | use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
+  |                               ^^^^^^^^^
   |
-6 | use x11rb::{
-  |     ^^^^^ can't find crate
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-error[E0432]: unresolved import `super::atoms::Atoms`
-  --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/xdisplay.rs:13:13
+warning: unused import: `crate::data::gpu_data`
+  --> src/renderer/src/data/assimp_util.rs:11:5
    |
-13 | use super::{atoms::Atoms, ffi, monitor::MonitorHandle};
-   |             ^^^^^^^^^^^^ no `Atoms` in `platform_impl::platform::x11::atoms`
+11 | use crate::data::gpu_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^
 
-error[E0425]: cannot find type `Atoms` in this scope
-   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/atoms.rs:24:25
-    |
- 24 |                   atoms: &Atoms
-    |                           ^^^^^ not found in this scope
+warning: unused imports: `EmissiveMap`, `NormalMap`, `OcclusionMap`, `Sampler`, and `SurfaceMeta`
+  --> src/renderer/src/data/assimp_util.rs:13:16
+   |
+13 |     AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap, OcclusionMap,
+   |                ^^^^^^^^^^^                                                ^^^^^^^^^  ^^^^^^^^^^^^
+14 |     Sampler, SurfaceMeta, TextureMeta, TexturePayload, TextureSemantic, Vertex,
+   |     ^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `Quat`
+  --> src/renderer/src/data/assimp_util.rs:19:18
+   |
+19 | use glam::{Mat4, Quat, Vec3, Vec4};
+   |                  ^^^^
+
+warning: unused imports: `AI_DEFAULT_MATERIAL_NAME`, `aiImportFile`, `aiPostProcessSteps_aiProcess_LimitBoneWeights`, `aiPostProcessSteps`, `aiShadingMode_aiShadingMode_PBR_BRDF`, `aiTextureType_aiTextureType_AMBIENT`, `aiTextureType_aiTextureType_HEIGHT`, `aiTextureType_aiTextureType_SPECULAR`, `aiTexture`, and `ai_real`
+  --> src/renderer/src/data/assimp_util.rs:24:75
+   |
+24 |     aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile,
+   |                                                                           ^^^^^^^^^^^^
+25 |     aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps,
+   |                                                       ^^^^^^^^^^^^^^^^^^
 ...
- 34 | / atom_manager! {
- 35 | |     // General Use Atoms
- 36 | |     CARD32,
- 37 | |     UTF8_STRING,
-...   |
-104 | |     _XSETTINGS_SETTINGS
-105 | | }
-    | |_- in this macro invocation
-    |
-    = note: this error originates in the macro `atom_manager` (in Nightly builds, run with -Z macro-backtrace for more info)
+29 |     aiPostProcessSteps_aiProcess_LimitBoneWeights,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+32 |     aiShadingMode_aiShadingMode_PBR_BRDF, aiString, aiTexture, aiTextureType,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^            ^^^^^^^^^
+33 |     aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+36 |     aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+37 |     aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS,
+38 |     aiTextureType_aiTextureType_NORMAL_CAMERA, aiTextureType_aiTextureType_SPECULAR,
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+39 |     aiTextureType_aiTextureType_UNKNOWN, ai_real, AI_DEFAULT_MATERIAL_NAME,
+   |                                          ^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0425]: cannot find type `Atoms` in this scope
-   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/atoms.rs:107:26
-    |
-107 | impl Index<AtomName> for Atoms {
-    |                          ^^^^^ not found in this scope
-
-error[E0425]: cannot find type `GetCrtcInfoReply` in module `randr`
-  --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:59:23
+warning: unused import: `HashSet`
+  --> src/renderer/src/data/assimp_util.rs:41:33
    |
-59 |         crtc: &randr::GetCrtcInfoReply,
-   |                       ^^^^^^^^^^^^^^^^ not found in `randr`
+41 | use std::collections::{HashMap, HashSet};
+   |                                 ^^^^^^^
 
-error[E0425]: cannot find type `Crtc` in module `randr`
-   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:158:25
-    |
-158 |         crtc_id: randr::Crtc,
-    |                         ^^^^ not found in `randr`
-
-error[E0425]: cannot find type `Mode` in module `randr`
-   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:159:25
-    |
-159 |         mode_id: randr::Mode,
-    |                         ^^^^ not found in `randr`
-    |
-help: consider importing one of these items
-    |
-  1 + use calloop::Mode;
-    |
-  1 + use rustix::shm::Mode;
-    |
-  1 + use sctk::output::Mode;
-    |
-  1 + use wayland_client::protocol::wl_output::Mode;
-    |
-    = and 1 other candidate
-help: if you import `Mode`, refer to it directly
-    |
-159 -         mode_id: randr::Mode,
-159 +         mode_id: Mode,
-    |
-
-error[E0425]: cannot find type `Crtc` in module `randr`
-   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:182:49
-    |
-182 |     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<randr::Mode, X11Error> {
-    |                                                 ^^^^ not found in `randr`
-
-error[E0425]: cannot find type `Mode` in module `randr`
-   --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/randr.rs:182:72
-    |
-182 |     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<randr::Mode, X11Error> {
-    |                                                                        ^^^^ not found in `randr`
-    |
-help: consider importing one of these items
-    |
-  1 + use calloop::Mode;
-    |
-  1 + use rustix::shm::Mode;
-    |
-  1 + use sctk::output::Mode;
-    |
-  1 + use wayland_client::protocol::wl_output::Mode;
-    |
-    = and 1 other candidate
-help: if you import `Mode`, refer to it directly
-    |
-182 -     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<randr::Mode, X11Error> {
-182 +     pub fn get_crtc_mode(&self, crtc_id: randr::Crtc) -> Result<Mode, X11Error> {
-    |
-
-error[E0119]: conflicting implementations of trait `From<window_property::GetPropertyError>` for type `window_property::GetPropertyError`
-  --> /home/hickelpickle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.29.15/src/platform_impl/linux/x11/util/window_property.rs:33:1
+warning: unused import: `std::fs::File`
+  --> src/renderer/src/data/assimp_util.rs:44:5
    |
-33 | impl<T: Into<ReplyError>> From<T> for GetPropertyError {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: conflicting implementation in crate `core`:
-           - impl<T> From<T> for T;
+44 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
 
-Some errors have detailed explanations: E0119, E0425, E0432, E0463.
-For more information about an error, try `rustc --explain E0119`.
-error: could not compile `winit` (lib) due to 11 previous errors
+warning: unused imports: `DefaultHasher` and `Hasher`
+  --> src/renderer/src/data/assimp_util.rs:45:17
+   |
+45 | use std::hash::{DefaultHasher, Hasher};
+   |                 ^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `std::os::raw`
+  --> src/renderer/src/data/assimp_util.rs:47:5
+   |
+47 | use std::os::raw;
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `std::os::raw::c_int`
+  --> src/renderer/src/data/assimp_util.rs:48:5
+   |
+48 | use std::os::raw::c_int;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::data::data_util::PackUnorm`
+  --> src/renderer/src/data/data_cache.rs:59:5
+   |
+59 | use crate::data::data_util::PackUnorm;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `MaterialValues`, `MetRoughUniformExt`, `MetRoughUniform`, `Sampler`, `SurfaceMeta`, `TextureSamplers`, and `Vertex`
+  --> src/renderer/src/data/data_cache.rs:63:5
+   |
+63 |     MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap,
+   |     ^^^^^^^^^^^^^^            ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+64 |     Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap,
+   |     ^^^^^^^  ^^^^^^^^^^^                           ^^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `assimp_util`
+  --> src/renderer/src/data/data_cache.rs:70:19
+   |
+70 | use crate::data::{assimp_util, data_util, gpu_data};
+   |                   ^^^^^^^^^^^
+
+warning: unused import: `VkDescriptorAllocator`
+  --> src/renderer/src/data/data_cache.rs:72:20
+   |
+72 |     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
+   |                    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `VkCmdSubmitInfo`, `VkFenceQueue`, `VkImmediate`, and `VkQueueType`
+  --> src/renderer/src/data/data_cache.rs:76:44
+   |
+76 |     VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkCommandPool, VkDestroyable,
+   |                                            ^^^^^^^^^^^^^^^
+77 |     VkDeviceQueues, VkFenceQueue, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkQueueType,
+   |                     ^^^^^^^^^^^^                              ^^^^^^^^^^^              ^^^^^^^^^^^
+
+warning: unused import: `vk_debug`
+  --> src/renderer/src/data/data_cache.rs:81:21
+   |
+81 | use crate::vulkan::{vk_debug, vk_util};
+   |                     ^^^^^^^^
+
+warning: unused import: `ash::prelude::VkResult`
+  --> src/renderer/src/data/data_cache.rs:82:5
+   |
+82 | use ash::prelude::VkResult;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Format` and `PFN_vkFreeDescriptorSets`
+  --> src/renderer/src/data/data_cache.rs:83:15
+   |
+83 | use ash::vk::{Format, PFN_vkFreeDescriptorSets};
+   |               ^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `vec3`
+  --> src/renderer/src/data/data_cache.rs:85:12
+   |
+85 | use glam::{vec3, vec4, Vec3, Vec4};
+   |            ^^^^
+
+warning: unused import: `gltf::json::Path`
+  --> src/renderer/src/data/data_cache.rs:86:5
+   |
+86 | use gltf::json::Path;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `EncodableLayout`, `ImageResult`, `Rgb32FImage`, and `Rgba32FImage`
+  --> src/renderer/src/data/data_cache.rs:88:5
+   |
+88 |     EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba, Rgba32FImage,
+   |     ^^^^^^^^^^^^^^^                                 ^^^^^^^^^^^  ^^^^^^^^^^^        ^^^^^^^^^^^^
+
+warning: unused import: `once_cell::unsync::Lazy`
+  --> src/renderer/src/data/data_cache.rs:91:5
+   |
+91 | use once_cell::unsync::Lazy;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `DefaultHasher`
+  --> src/renderer/src/data/data_cache.rs:93:17
+   |
+93 | use std::hash::{DefaultHasher, Hasher};
+   |                 ^^^^^^^^^^^^^
+
+warning: unused import: `std::marker::PhantomData`
+  --> src/renderer/src/data/data_cache.rs:94:5
+   |
+94 | use std::marker::PhantomData;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::rc::Rc`
+  --> src/renderer/src/data/data_cache.rs:96:5
+   |
+96 | use std::rc::Rc;
+   |     ^^^^^^^^^^^
+
+warning: unused imports: `Receiver` and `SendError`
+  --> src/renderer/src/data/data_cache.rs:97:23
+   |
+97 | use std::sync::mpsc::{Receiver, SendError};
+   |                       ^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `LazyLock`
+  --> src/renderer/src/data/data_cache.rs:98:22
+   |
+98 | use std::sync::{Arc, LazyLock, Mutex};
+   |                      ^^^^^^^^
+
+warning: unused import: `SystemTime`
+  --> src/renderer/src/data/data_cache.rs:99:36
+   |
+99 | use std::time::{Duration, Instant, SystemTime};
+   |                                    ^^^^^^^^^^
+
+warning: unused imports: `Vec3` and `Vec4`
+    --> src/renderer/src/data/data_cache.rs:1490:20
+     |
+1490 |         use glam::{Vec3, Vec4};
+     |                    ^^^^  ^^^^
+
+warning: unused import: `crate::data::gpu_data`
+ --> src/renderer/src/data/data_util.rs:6:5
+  |
+6 | use crate::data::gpu_data;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `MaterialMeta`, `MeshMeta`, `MetRoughUniform`, `Sampler`, `SurfaceMeta`, `TextureMeta`, `VkGpuTextureBuffer`, and `VkMeshBuffers`
+ --> src/renderer/src/data/data_util.rs:8:5
+  |
+8 |     MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex,
+  |     ^^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^^^
+9 |     VkGpuTextureBuffer, VkMeshBuffers,
+  |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused imports: `VkBuffer`, `VkImageAlloc`, and `VkPipeline`
+  --> src/renderer/src/data/data_util.rs:11:31
+   |
+11 | use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
+   |                               ^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_util`
+  --> src/renderer/src/data/data_util.rs:12:5
+   |
+12 | use crate::vulkan::vk_util;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `vec4`
+  --> src/renderer/src/data/data_util.rs:14:12
+   |
+14 | use glam::{vec4, Vec3, Vec4};
+   |            ^^^^
+
+warning: unused import: `half::f16`
+  --> src/renderer/src/data/data_util.rs:15:5
+   |
+15 | use half::f16;
+   |     ^^^^^^^^^
+
+warning: unused import: `DynamicImage`
+  --> src/renderer/src/data/data_util.rs:16:13
+   |
+16 | use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
+   |             ^^^^^^^^^^^^
+
+warning: unused import: `std::cell::Cell`
+  --> src/renderer/src/data/data_util.rs:17:5
+   |
+17 | use std::cell::Cell;
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> src/renderer/src/data/data_util.rs:19:5
+   |
+19 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `vk_mem::Alloc`
+  --> src/renderer/src/data/data_util.rs:23:5
+   |
+23 | use vk_mem::Alloc;
+   |     ^^^^^^^^^^^^^
+
+warning: unused imports: `ImageBuffer` and `Rgba`
+ --> src/renderer/src/data/environment_import.rs:9:45
+  |
+9 | use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
+  |                                             ^^^^^^^^^^^  ^^^^
+
+warning: unused imports: `CoreShaderType`, `MeshCache`, and `VkShaderCache`
+  --> src/renderer/src/data/gpu_data.rs:12:5
+   |
+12 |     CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkSamplerInfo, VkShaderCache,
+   |     ^^^^^^^^^^^^^^  ^^^^^^^^^                                                 ^^^^^^^^^^^^^
+
+warning: unused imports: `DescriptorLayoutBuilder`, `VkDescWriterType`, `VkDescriptorWriter`, and `VkDynamicDescriptorAllocator`
+  --> src/renderer/src/data/gpu_data.rs:16:5
+   |
+16 |     DescriptorLayoutBuilder, VkDescWriterType, VkDescriptorWriter, VkDynamicDescriptorAllocator,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_pipeline::PipelineBuilder`
+  --> src/renderer/src/data/gpu_data.rs:18:5
+   |
+18 | use crate::vulkan::vk_pipeline::PipelineBuilder;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_render::VkRender`
+  --> src/renderer/src/data/gpu_data.rs:19:5
+   |
+19 | use crate::vulkan::vk_render::VkRender;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `LogicalDevice`, `VkBuffer`, `VkDescriptors`, and `VkPipeline`
+  --> src/renderer/src/data/gpu_data.rs:21:5
+   |
+21 |     LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline, VkSubAlloc,
+   |     ^^^^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^                ^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_util`
+  --> src/renderer/src/data/gpu_data.rs:23:5
+   |
+23 | use crate::vulkan::vk_util;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ash::vk::DescriptorSet`
+  --> src/renderer/src/data/gpu_data.rs:25:5
+   |
+25 | use ash::vk::DescriptorSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Vec2` and `vec4`
+  --> src/renderer/src/data/gpu_data.rs:27:12
+   |
+27 | use glam::{vec4, Mat4, UVec4, Vec2, Vec3, Vec4};
+   |            ^^^^               ^^^^
+
+warning: unused imports: `CStr` and `CString`
+  --> src/renderer/src/data/gpu_data.rs:30:16
+   |
+30 | use std::ffi::{CStr, CString};
+   |                ^^^^  ^^^^^^^
+
+warning: unused imports: `RenderSubmission` and `SubmissionFlags`
+  --> src/renderer/src/scene/mod.rs:10:29
+   |
+10 | pub use render_submission::{RenderSubmission, SubmissionFlags};
+   |                             ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `SceneNode` and `SceneWorld`
+  --> src/renderer/src/scene/mod.rs:11:23
+   |
+11 | pub use scene_world::{SceneNode, SceneNodeId, SceneWorld};
+   |                       ^^^^^^^^^               ^^^^^^^^^^
+
+warning: unused import: `glam::*`
+ --> src/renderer/src/texture.rs:3:5
+  |
+3 | use glam::*;
+  |     ^^^^^^^
+
+warning: unused import: `image::GenericImageView`
+ --> src/renderer/src/texture.rs:4:5
+  |
+4 | use image::GenericImageView;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_descriptor`
+  --> src/renderer/src/vulkan/vk_descriptor.rs:32:5
+   |
+32 | use crate::vulkan::vk_descriptor;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ash::prelude::VkResult`
+  --> src/renderer/src/vulkan/vk_descriptor.rs:34:5
+   |
+34 | use ash::prelude::VkResult;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::backtrace::Backtrace`
+  --> src/renderer/src/vulkan/vk_descriptor.rs:37:5
+   |
+37 | use std::backtrace::Backtrace;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::VecDeque`
+  --> src/renderer/src/vulkan/vk_descriptor.rs:38:5
+   |
+38 | use std::collections::VecDeque;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `CommandBuffer`
+  --> src/renderer/src/vulkan/vk_init.rs:40:15
+   |
+40 | use ash::vk::{CommandBuffer, Extent2D};
+   |               ^^^^^^^^^^^^^
+
+warning: unused import: `c_void`
+  --> src/renderer/src/vulkan/vk_init.rs:44:16
+   |
+44 | use std::ffi::{c_void, CStr, CString};
+   |                ^^^^^^
+
+warning: unused imports: `ffi`, `iter`, and `ptr`
+  --> src/renderer/src/vulkan/vk_init.rs:47:11
+   |
+47 | use std::{ffi, iter, ptr};
+   |           ^^^  ^^^^  ^^^
+
+warning: unused import: `vk_descriptor`
+  --> src/renderer/src/vulkan/vk_pipeline.rs:42:21
+   |
+42 | use crate::vulkan::{vk_descriptor, vk_util};
+   |                     ^^^^^^^^^^^^^
+
+warning: unused imports: `Read`, `SeekFrom`, and `Seek`
+  --> src/renderer/src/vulkan/vk_pipeline.rs:45:15
+   |
+45 | use std::io::{Read, Seek, SeekFrom};
+   |               ^^^^  ^^^^  ^^^^^^^^
+
+warning: unused imports: `LodBias`, `VkDescLayoutCache`, `VkPipelineCache`, and `VkSamplerInfo`
+  --> src/renderer/src/vulkan/vk_render.rs:60:32
+   |
+60 |     EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache, VkCache, VkDataCache,
+   |                                ^^^^^^^
+61 |     VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerCache, VkSamplerInfo,
+   |     ^^^^^^^^^^^^^^^^^              ^^^^^^^^^^^^^^^                                  ^^^^^^^^^^^^^
+
+warning: unused imports: `GPUSceneData`, `MaterialPass`, `MetRoughUniform`, `VkGpuTextureBuffer`, and `VkMeshBuffers`
+  --> src/renderer/src/vulkan/vk_render.rs:67:34
+   |
+67 |     AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
+   |                                  ^^^^^^^^^^^^  ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+68 |     PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap,
+69 |     VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
+   |     ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused import: `crate::vulkan`
+  --> src/renderer/src/vulkan/vk_render.rs:78:5
+   |
+78 | use crate::vulkan;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_util::allocate_buffer`
+  --> src/renderer/src/vulkan/vk_render.rs:82:5
+   |
+82 | use crate::vulkan::vk_util::allocate_buffer;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `vk_debug` and `vk_types`
+  --> src/renderer/src/vulkan/vk_render.rs:83:21
+   |
+83 | use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
+   |                     ^^^^^^^^                                       ^^^^^^^^
+
+warning: unused import: `ash::prelude::VkResult`
+  --> src/renderer/src/vulkan/vk_render.rs:84:5
+   |
+84 | use ash::prelude::VkResult;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `AllocationCallbacks`, `DescriptorSetLayoutCreateFlags`, `DescriptorSet`, `DeviceSize`, `Handle`, `ImageLayout`, `PipelineCache`, and `ShaderStageFlags`
+  --> src/renderer/src/vulkan/vk_render.rs:86:5
+   |
+86 |     AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags,
+   |     ^^^^^^^^^^^^^^^^^^^                      ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+87 |     DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, Handle,
+   |                     ^^^^^^^^^^                                                      ^^^^^^
+88 |     ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags,
+   |     ^^^^^^^^^^^                     ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Device`
+  --> src/renderer/src/vulkan/vk_render.rs:90:15
+   |
+90 | use ash::{vk, Device};
+   |               ^^^^^^
+
+warning: unused import: `data_util::PackUnorm`
+  --> src/renderer/src/vulkan/vk_render.rs:91:5
+   |
+91 | use data_util::PackUnorm;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Vec4` and `vec3`
+  --> src/renderer/src/vulkan/vk_render.rs:92:12
+   |
+92 | use glam::{vec3, Vec4};
+   |            ^^^^  ^^^^
+
+warning: unused import: `gltf::accessor::Dimensions::Mat4`
+  --> src/renderer/src/vulkan/vk_render.rs:93:5
+   |
+93 | use gltf::accessor::Dimensions::Mat4;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `debug` and `log`
+  --> src/renderer/src/vulkan/vk_render.rs:95:11
+   |
+95 | use log::{debug, error, info, log, warn};
+   |           ^^^^^               ^^^
+
+warning: unused import: `std::cell::Ref`
+  --> src/renderer/src/vulkan/vk_render.rs:96:5
+   |
+96 | use std::cell::Ref;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `std::error::Error`
+  --> src/renderer/src/vulkan/vk_render.rs:98:5
+   |
+98 | use std::error::Error;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CStr` and `CString`
+   --> src/renderer/src/vulkan/vk_render.rs:100:16
+    |
+100 | use std::ffi::{CStr, CString};
+    |                ^^^^  ^^^^^^^
+
+warning: unused import: `std::mem::align_of`
+   --> src/renderer/src/vulkan/vk_render.rs:101:5
+    |
+101 | use std::mem::align_of;
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path`
+   --> src/renderer/src/vulkan/vk_render.rs:102:5
+    |
+102 | use std::path;
+    |     ^^^^^^^^^
+
+warning: unused import: `AllocationCreateFlags`
+   --> src/renderer/src/vulkan/vk_render.rs:105:14
+    |
+105 | use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
+    |              ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::scene::render_submission::MAX_POINT_LIGHTS_GPU as SUBMISSION_MAX`
+    --> src/renderer/src/vulkan/vk_render.rs:2943:13
+     |
+2943 |         use crate::scene::render_submission::MAX_POINT_LIGHTS_GPU as SUBMISSION_MAX;
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::data::gpu_data::AsByteSlice`
+  --> src/renderer/src/vulkan/vk_storage.rs:33:5
+   |
+33 | use crate::data::gpu_data::AsByteSlice;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `VkCmdSubmitInfo` and `VkQueueType`
+  --> src/renderer/src/vulkan/vk_storage.rs:35:44
+   |
+35 |     VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkDestroyable, VkHostBuffer,
+   |                                            ^^^^^^^^^^^^^^^
+36 |     VkQueueType, VkSubAlloc, VkSubmitParam,
+   |     ^^^^^^^^^^^
+
+warning: unused import: `info`
+  --> src/renderer/src/vulkan/vk_storage.rs:41:18
+   |
+41 | use log::{debug, info};
+   |                  ^^^^
+
+warning: unused import: `max_by`
+  --> src/renderer/src/vulkan/vk_storage.rs:42:16
+   |
+42 | use std::cmp::{max_by, Ordering, PartialEq};
+   |                ^^^^^^
+
+warning: unused import: `std::marker::PhantomData`
+  --> src/renderer/src/vulkan/vk_storage.rs:43:5
+   |
+43 | use std::marker::PhantomData;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `IndexMut`
+  --> src/renderer/src/vulkan/vk_storage.rs:44:32
+   |
+44 | use std::ops::{Add, AddAssign, IndexMut, Sub};
+   |                                ^^^^^^^^
+
+warning: unused imports: `Receiver`, `RecvTimeoutError`, and `SendError`
+  --> src/renderer/src/vulkan/vk_storage.rs:45:23
+   |
+45 | use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError};
+   |                       ^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+  --> src/renderer/src/vulkan/vk_storage.rs:47:5
+   |
+47 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `VkPipelineType`
+  --> src/renderer/src/vulkan/vk_types.rs:28:40
+   |
+28 | use crate::data::data_cache::{EnvMaps, VkPipelineType};
+   |                                        ^^^^^^^^^^^^^^
+
+warning: unused import: `BinarySemaphore`
+  --> src/renderer/src/vulkan/vk_types.rs:30:5
+   |
+30 |     BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `VkCubeMap`
+  --> src/renderer/src/vulkan/vk_types.rs:32:59
+   |
+32 | use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
+   |                                                           ^^^^^^^^^
+
+warning: unused import: `glam::Vec4`
+  --> src/renderer/src/vulkan/vk_types.rs:40:5
+   |
+40 | use glam::Vec4;
+   |     ^^^^^^^^^^
+
+warning: unused import: `error`
+  --> src/renderer/src/vulkan/vk_types.rs:41:18
+   |
+41 | use log::{debug, error};
+   |                  ^^^^^
+
+warning: unused imports: `CStr` and `CString`
+  --> src/renderer/src/vulkan/vk_types.rs:42:16
+   |
+42 | use std::ffi::{CStr, CString};
+   |                ^^^^  ^^^^^^^
+
+warning: unused import: `TryRecvError`
+  --> src/renderer/src/vulkan/vk_types.rs:43:61
+   |
+43 | use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
+   |                                                             ^^^^^^^^^^^^
+
+warning: unused import: `mpsc`
+  --> src/renderer/src/vulkan/vk_types.rs:44:17
+   |
+44 | use std::sync::{mpsc, Arc, Mutex};
+   |                 ^^^^
+
+warning: unused imports: `mem` and `slice`
+  --> src/renderer/src/vulkan/vk_types.rs:46:11
+   |
+46 | use std::{mem, slice};
+   |           ^^^  ^^^^^
+
+warning: unused imports: `Pressed` and `Released`
+  --> src/renderer/src/vulkan/vk_types.rs:49:34
+   |
+49 | use winit::event::ElementState::{Pressed, Released};
+   |                                  ^^^^^^^  ^^^^^^^^
+
+warning: unused import: `winit::event::Event::WindowEvent`
+  --> src/renderer/src/vulkan/vk_types.rs:50:5
+   |
+50 | use winit::event::Event::WindowEvent;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PartialEq` and `max`
+  --> src/renderer/src/vulkan/vk_util.rs:38:16
+   |
+38 | use std::cmp::{max, PartialEq};
+   |                ^^^  ^^^^^^^^^
+
+warning: unused imports: `Vertex` and `VkMeshBuffers`
+  --> src/renderer/src/vulkan/vk_util.rs:41:42
+   |
+41 | use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
+   |                                          ^^^^^^             ^^^^^^^^^^^^^
+
+warning: unused imports: `AccessFlags2`, `ClearValue`, `DeviceAddress`, `ImageAspectFlags`, `PipelineCache`, and `PipelineStageFlags2`
+  --> src/renderer/src/vulkan/vk_util.rs:45:5
+   |
+45 |     AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D,
+   |     ^^^^^^^^^^^^  ^^^^^^^^^^                   ^^^^^^^^^^^^^
+46 |     ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo,
+   |     ^^^^^^^^^^^^^^^^                          ^^^^^^^^^^^^^
+47 |     PipelineStageFlags2, Rect2D, RenderingInfo,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `error`
+  --> src/renderer/src/vulkan/vk_util.rs:49:11
+   |
+49 | use log::{error, info, warn};
+   |           ^^^^^
+
+warning: unused import: `Bytes`
+  --> src/renderer/src/vulkan/vk_util.rs:50:15
+   |
+50 | use std::io::{Bytes, Read, Seek, SeekFrom};
+   |               ^^^^^
+
+warning: unused import: `std::mem::align_of`
+  --> src/renderer/src/vulkan/vk_util.rs:51:5
+   |
+51 | use std::mem::align_of;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::rc::Rc`
+  --> src/renderer/src/vulkan/vk_util.rs:53:5
+   |
+53 | use std::rc::Rc;
+   |     ^^^^^^^^^^^
+
+warning: unused import: `Duration`
+  --> src/renderer/src/vulkan/vk_util.rs:55:17
+   |
+55 | use std::time::{Duration, SystemTime};
+   |                 ^^^^^^^^
+
+warning: unused imports: `VkDescLayoutCache`, `VkDescType`, `VkPipelineCache`, and `VkPipelineType`
+  --> src/renderer/src/vulkan/vk_util.rs:59:14
+   |
+59 |     LodBias, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerCache,
+   |              ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^
+
+warning: unused imports: `data_cache` and `data_util`
+  --> src/renderer/src/vulkan/vk_util.rs:62:19
+   |
+62 | use crate::data::{data_cache, data_util};
+   |                   ^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused imports: `PoolSizeRatio` and `VkDescriptorAllocator`
+  --> src/renderer/src/vulkan/vk_util.rs:63:36
+   |
+63 | use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
+   |                                    ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::vulkan::vk_render::VkSingleDescriptor`
+  --> src/renderer/src/vulkan/vk_util.rs:64:5
+   |
+64 | use crate::vulkan::vk_render::VkSingleDescriptor;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `vk_debug` and `vk_init`
+  --> src/renderer/src/vulkan/vk_util.rs:65:21
+   |
+65 | use crate::vulkan::{vk_debug, vk_init, vk_util};
+   |                     ^^^^^^^^  ^^^^^^^
+
+warning: unused import: `ash::prelude::VkResult`
+  --> src/renderer/src/vulkan/vk_util.rs:66:5
+   |
+66 | use ash::prelude::VkResult;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::data::data_util::calc_mips_count`
+  --> src/renderer/src/vulkan/vk_util.rs:68:5
+   |
+68 | use crate::data::data_util::calc_mips_count;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::metadata`
+  --> src/renderer/src/vulkan/vk_util.rs:69:5
+   |
+69 | use std::fs::metadata;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Sub`
+  --> src/renderer/src/vulkan/vk_util.rs:70:21
+   |
+70 | use std::ops::{Add, Sub};
+   |                     ^^^
+
+warning: unused import: `path`
+  --> src/renderer/src/vulkan/vk_util.rs:72:15
+   |
+72 | use std::{fs, path};
+   |               ^^^^
+
+warning: unused import: `std::io::Read`
+  --> src/renderer/src/data/assimp_util.rs:46:5
+   |
+46 | use std::io::Read;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `Hasher`
+  --> src/renderer/src/data/data_cache.rs:93:32
+   |
+93 | use std::hash::{DefaultHasher, Hasher};
+   |                                ^^^^^^
+
+warning: unused import: `GenericImageView`
+  --> src/renderer/src/data/data_cache.rs:88:22
+   |
+88 |     EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba, Rgba32FImage,
+   |                      ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Alloc`
+  --> src/renderer/src/vulkan/vk_types.rs:47:14
+   |
+47 | use vk_mem::{Alloc, Allocator};
+   |              ^^^^^
+
+warning: variable does not need to be mutable
+   --> src/renderer/src/data/compression.rs:222:13
+    |
+222 |         let mut rgba_bytes = mip.into_raw();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `meta_desc_layout`
+   --> src/renderer/src/data/data_cache.rs:299:9
+    |
+299 |         meta_desc_layout: vk::DescriptorSetLayout,
+    |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_meta_desc_layout`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `meta_desc_allocator`
+   --> src/renderer/src/data/data_cache.rs:421:13
+    |
+421 |         let meta_desc_allocator =
+    |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_meta_desc_allocator`
+
+warning: unused variable: `meta`
+    --> src/renderer/src/data/data_cache.rs:1690:24
+     |
+1690 |             .map(|(id, meta)| *id)
+     |                        ^^^^ help: if this is intentional, prefix it with an underscore: `_meta`
+
+warning: unused variable: `allocator`
+    --> src/renderer/src/data/data_cache.rs:1852:38
+     |
+1852 |     pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator) {
+     |                                      ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `path`
+    --> src/renderer/src/data/data_cache.rs:1984:45
+     |
+1984 |         compiled_shaders.sort_by_key(|(typ, path)| *typ);
+     |                                             ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+
+warning: unused variable: `device`
+    --> src/renderer/src/data/data_cache.rs:2003:35
+     |
+2003 |     pub fn destory_all(&mut self, device: &ash::Device) {}
+     |                                   ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `allocator`
+    --> src/renderer/src/data/data_cache.rs:2007:44
+     |
+2007 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+     |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `allocator`
+    --> src/renderer/src/data/data_cache.rs:2143:44
+     |
+2143 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+     |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `format`
+  --> src/renderer/src/vulkan/vk_debug.rs:15:5
+   |
+15 |     format: vk::Format,
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_format`
+
+warning: unused variable: `allocator`
+   --> src/renderer/src/vulkan/vk_descriptor.rs:490:44
+    |
+490 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `i`
+   --> src/renderer/src/vulkan/vk_init.rs:288:10
+    |
+288 |     for (i, device) in physical_devices.iter().enumerate() {
+    |          ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `surface_info`
+   --> src/renderer/src/vulkan/vk_init.rs:358:5
+    |
+358 |     surface_info: Option<&VkSurface>,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_surface_info`
+
+warning: unused variable: `queue_family_properties`
+   --> src/renderer/src/vulkan/vk_init.rs:400:9
+    |
+400 |     let queue_family_properties =
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_queue_family_properties`
+
+warning: unused variable: `s_create_info`
+    --> src/renderer/src/vulkan/vk_init.rs:1230:13
+     |
+1230 |         let s_create_info = vk::SemaphoreCreateInfo::default();
+     |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_s_create_info`
+
+warning: unused variable: `depth_format`
+   --> src/renderer/src/vulkan/vk_pipeline.rs:506:5
+    |
+506 |     depth_format: vk::Format,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_depth_format`
+
+warning: unused variable: `depth_format`
+   --> src/renderer/src/vulkan/vk_pipeline.rs:546:5
+    |
+546 |     depth_format: vk::Format,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_depth_format`
+
+warning: unused variable: `frame_number`
+    --> src/renderer/src/vulkan/vk_render.rs:2079:9
+     |
+2079 |         frame_number: u32,
+     |         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_frame_number`
+
+warning: unused variable: `err`
+   --> src/renderer/src/vulkan/vk_storage.rs:277:21
+    |
+277 |                 Err(err) => {
+    |                     ^^^ help: if this is intentional, prefix it with an underscore: `_err`
+
+warning: unused variable: `err`
+   --> src/renderer/src/vulkan/vk_storage.rs:353:25
+    |
+353 |                     Err(err) => {
+    |                         ^^^ help: if this is intentional, prefix it with an underscore: `_err`
+
+warning: unused variable: `successful_allocs`
+   --> src/renderer/src/vulkan/vk_storage.rs:396:17
+    |
+396 |                 successful_allocs,
+    |                 ^^^^^^^^^^^^^^^^^ help: try ignoring the field: `successful_allocs: _`
+
+warning: unused variable: `upload_offset`
+   --> src/renderer/src/vulkan/vk_storage.rs:715:21
+    |
+715 |                 let upload_offset = self.get_offset_from(curr_address);
+    |                     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_upload_offset`
+
+warning: unused variable: `size`
+   --> src/renderer/src/vulkan/vk_storage.rs:764:38
+    |
+764 |                     MemChunk::Tail { size, .. } => {
+    |                                      ^^^^ help: try ignoring the field: `size: _`
+
+warning: unused variable: `upload_offset`
+   --> src/renderer/src/vulkan/vk_storage.rs:798:17
+    |
+798 |             let upload_offset = self.get_offset_from(curr_address);
+    |                 ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_upload_offset`
+
+warning: unused variable: `size`
+   --> src/renderer/src/vulkan/vk_storage.rs:838:34
+    |
+838 |                 MemChunk::Tail { size, .. } => {
+    |                                  ^^^^ help: try ignoring the field: `size: _`
+
+warning: unused variable: `i`
+    --> src/renderer/src/vulkan/vk_storage.rs:1007:27
+     |
+1007 |             .max_by_key(|(i, chunk)| chunk.size);
+     |                           ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `cmd_buffer`
+   --> src/renderer/src/vulkan/vk_types.rs:460:13
+    |
+460 |         let cmd_buffer = [self.cmd_buffer];
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cmd_buffer`
+
+warning: unused variable: `allocator`
+   --> src/renderer/src/vulkan/vk_types.rs:497:44
+    |
+497 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `allocator`
+   --> src/renderer/src/vulkan/vk_types.rs:525:44
+    |
+525 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `allocator`
+   --> src/renderer/src/vulkan/vk_types.rs:973:44
+    |
+973 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `allocator`
+    --> src/renderer/src/vulkan/vk_types.rs:1332:44
+     |
+1332 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+     |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_allocator`
+
+warning: unused variable: `device`
+    --> src/renderer/src/vulkan/vk_types.rs:1427:27
+     |
+1427 |     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+     |                           ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `device`
+    --> src/renderer/src/vulkan/vk_types.rs:1460:30
+     |
+1460 |     pub fn delete(&mut self, device: &ash::Device, allocator: &Allocator) {
+     |                              ^^^^^^ help: if this is intentional, prefix it with an underscore: `_device`
+
+warning: unused variable: `physical_device`
+   --> src/renderer/src/vulkan/vk_util.rs:338:5
+    |
+338 |     physical_device: vk::PhysicalDevice,
+    |     ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_physical_device`
+
+warning: unused variable: `type_filter`
+   --> src/renderer/src/vulkan/vk_util.rs:339:5
+    |
+339 |     type_filter: u32,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_type_filter`
+
+warning: unused variable: `prop_flags`
+   --> src/renderer/src/vulkan/vk_util.rs:340:5
+    |
+340 |     prop_flags: vk::MemoryPropertyFlags,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_prop_flags`
+
+warning: unused variable: `pipeline_rendering_create_info`
+   --> src/renderer/src/vulkan/vk_util.rs:628:9
+    |
+628 |     let pipeline_rendering_create_info = vk::PipelineRenderingCreateInfo::default()
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_pipeline_rendering_create_info`
+
+warning: unused variable: `device_memory`
+   --> src/renderer/src/vulkan/vk_util.rs:797:22
+    |
+797 |     let (allocation, device_memory, alloc_offset) = unsafe {
+    |                      ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_device_memory`
+
+warning: unused variable: `alloc_offset`
+   --> src/renderer/src/vulkan/vk_util.rs:797:37
+    |
+797 |     let (allocation, device_memory, alloc_offset) = unsafe {
+    |                                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_alloc_offset`
+
+warning: variable does not need to be mutable
+   --> src/renderer/src/vulkan/vk_util.rs:998:9
+    |
+998 |     let mut image = create_image(
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `id`
+    --> src/renderer/src/vulkan/vk_util.rs:1437:22
+     |
+1437 |         .map(|(meta, id)| {
+     |                      ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `queue`
+    --> src/renderer/src/vulkan/vk_util.rs:1417:5
+     |
+1417 |     queue: vk::Queue, // queue is unused in function body, removed from signature? No, keep signature for now.
+     |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_queue`
+
+warning: method `request_model_load` is never used
+   --> src/renderer/src/api/assets.rs:125:19
+    |
+114 | impl AssetLoadTracker {
+    | --------------------- method in this implementation
+...
+125 |     pub(crate) fn request_model_load(&mut self, path: PathBuf) -> LoadTicket {
+    |                   ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `load_texture_gpu_ready` is never used
+    --> src/renderer/src/api/assets.rs:1105:4
+     |
+1105 | fn load_texture_gpu_ready(
+     |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `map_environment_load_err` is never used
+    --> src/renderer/src/api/assets.rs:1298:4
+     |
+1298 | fn map_environment_load_err(path: &Path, message: String) -> AssetError {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `map_asset_err` is never used
+   --> src/renderer/src/api/errors.rs:344:15
+    |
+344 | pub(crate) fn map_asset_err(err: impl Into<String>) -> RendererError {
+    |               ^^^^^^^^^^^^^
+
+warning: function `map_hook_err` is never used
+   --> src/renderer/src/api/errors.rs:348:15
+    |
+348 | pub(crate) fn map_hook_err(err: impl Into<String>) -> RendererError {
+    |               ^^^^^^^^^^^^
+
+warning: method `raw_core_mut` is never used
+   --> src/renderer/src/api/renderer.rs:688:19
+    |
+ 78 | impl Renderer {
+    | ------------- method in this implementation
+...
+688 |     pub(crate) fn raw_core_mut(&mut self) -> &mut vk_render::VkRenderCore {
+    |                   ^^^^^^^^^^^^
+
+warning: method `world_mut` is never used
+   --> src/renderer/src/api/scene.rs:450:19
+    |
+219 | impl Scene {
+    | ---------- method in this implementation
+...
+450 |     pub(crate) fn world_mut(&mut self) -> &mut SceneWorld {
+    |                   ^^^^^^^^^
+
+warning: struct `MeshTemp` is never constructed
+    --> src/renderer/src/data/assimp_util.rs:1170:8
+     |
+1170 | struct MeshTemp {
+     |        ^^^^^^^^
+
+warning: constant `AI_MATKEY_COLOR_SPECULAR` is never used
+    --> src/renderer/src/data/assimp_util.rs:1177:7
+     |
+1177 | const AI_MATKEY_COLOR_SPECULAR: *const c_char = b"$clr.specular\0".as_ptr() as *const c_char;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `AI_MATKEY_COLOR_AMBIENT` is never used
+    --> src/renderer/src/data/assimp_util.rs:1178:7
+     |
+1178 | const AI_MATKEY_COLOR_AMBIENT: *const c_char = b"$clr.ambient\0".as_ptr() as *const c_char;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `AI_MATKEY_OPACITY` is never used
+    --> src/renderer/src/data/assimp_util.rs:1184:7
+     |
+1184 | const AI_MATKEY_OPACITY: *const c_char = b"$mat.opacity\0".as_ptr() as *const c_char;
+     |       ^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/renderer/src/data/camera.rs:29:12
+   |
+28 | impl Camera {
+   | ----------- associated function in this implementation
+29 |     pub fn new(position: Vec3) -> Self {
+   |            ^^^
+
+warning: variant `Completed` is never constructed
+   --> src/renderer/src/data/data_cache.rs:121:5
+    |
+119 | pub enum UploadBatchStatus {
+    |          ----------------- variant in this enum
+120 |     WaitingFence,
+121 |     Completed,
+    |     ^^^^^^^^^
+
+warning: field `gfx_pool` is never read
+   --> src/renderer/src/data/data_cache.rs:248:5
+    |
+231 | pub struct TextureCache {
+    |            ------------ field in this struct
+...
+248 |     gfx_pool: VkCommandPool,
+    |     ^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src/renderer/src/data/data_cache.rs:277:15
+     |
+ 256 | impl TextureCache {
+     | ----------------- associated items in this implementation
+...
+ 277 |     pub const DEFAULT_NORMAL_MAP: NormalMap = NormalMap {
+     |               ^^^^^^^^^^^^^^^^^^
+...
+ 282 |     pub const DEFAULT_OCCLUSION_MAP: OcclusionMap = OcclusionMap {
+     |               ^^^^^^^^^^^^^^^^^^^^^
+...
+ 287 |     pub const DEFAULT_EMISSIVE_MAP: EmissiveMap = EmissiveMap {
+     |               ^^^^^^^^^^^^^^^^^^^^
+...
+ 464 |     pub fn is_supported_format(&self, format: vk::Format) -> bool {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+ 580 |     pub(crate) fn save_debug_image(data: &TextureMeta, bytes: &[u8], filename: String) {
+     |                   ^^^^^^^^^^^^^^^^
+...
+ 614 |     pub fn add_textures(&mut self, data: Vec<TextureMeta>) -> Vec<TextureHandle> {
+     |            ^^^^^^^^^^^^
+...
+1374 |     pub fn deallocate_textures_safe(&mut self, texture_ids: Vec<TextureHandle>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1379 |     pub unsafe fn deallocate_textures_unchecked(&mut self, texture_ids: Vec<TextureHandle>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1419 |     pub unsafe fn deallocate_materials_unchecked(&mut self, material_ids: Vec<MaterialHandle>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `joint_desc_pool` and `default_joint_buffer` are never read
+    --> src/renderer/src/data/data_cache.rs:1473:5
+     |
+1467 | pub struct MeshCache {
+     |            --------- fields in this struct
+...
+1473 |     joint_desc_pool: VkDynamicDescriptorAllocator,
+     |     ^^^^^^^^^^^^^^^
+1474 |     default_joint_desc: vk::DescriptorSet,
+1475 |     default_joint_buffer: VkBuffer,
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `add_and_allocate`, `add_and_allocate_multi`, `get_ids`, `is_id_loaded`, `deallocate_id_unchecked`, and `deallocate_all` are never used
+    --> src/renderer/src/data/data_cache.rs:1581:12
+     |
+1478 | impl MeshCache {
+     | -------------- methods in this implementation
+...
+1581 |     pub fn add_and_allocate(
+     |            ^^^^^^^^^^^^^^^^
+...
+1591 |     pub fn add_and_allocate_multi(
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+1616 |     pub fn get_ids(&self, ids: Vec<MeshHandle>) -> Vec<Result<&CachedMesh, CacheError>> {
+     |            ^^^^^^^
+...
+1620 |     pub fn is_id_loaded(&self, id: MeshHandle) -> bool {
+     |            ^^^^^^^^^^^^
+...
+1844 |     pub unsafe fn deallocate_id_unchecked(&mut self, mesh_id: MeshHandle) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1852 |     pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator) {
+     |            ^^^^^^^^^^^^^^
+
+warning: method `destory_all` is never used
+    --> src/renderer/src/data/data_cache.rs:2003:12
+     |
+1972 | impl VkShaderCache {
+     | ------------------ method in this implementation
+...
+2003 |     pub fn destory_all(&mut self, device: &ash::Device) {}
+     |            ^^^^^^^^^^^
+
+warning: method `restore_unloaded_source` is never used
+    --> src/renderer/src/data/data_cache.rs:2258:12
+     |
+2168 | impl EnvironmentCache {
+     | --------------------- method in this implementation
+...
+2258 |     pub fn restore_unloaded_source(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EXTENT3D_ONE` is never used
+  --> src/renderer/src/data/data_util.rs:25:11
+   |
+25 | pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
+   |           ^^^^^^^^^^^^
+
+warning: trait `PackUnorm` is never used
+  --> src/renderer/src/data/data_util.rs:31:11
+   |
+31 | pub trait PackUnorm {
+   |           ^^^^^^^^^
+
+warning: function `convert_rgb32f_to_rgba32f` is never used
+  --> src/renderer/src/data/data_util.rs:50:8
+   |
+50 | pub fn convert_rgb32f_to_rgba32f(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bytes_per_pixel` is never used
+  --> src/renderer/src/data/data_util.rs:79:8
+   |
+79 | pub fn bytes_per_pixel(format: vk::Format) -> u32 {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `BinarySemaphore` is never constructed
+   --> src/renderer/src/data/data_util.rs:335:12
+    |
+335 | pub struct BinarySemaphore {
+    |            ^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `signal`, `wait`, and `is_signaled` are never used
+   --> src/renderer/src/data/data_util.rs:342:12
+    |
+341 | impl BinarySemaphore {
+    | -------------------- associated items in this implementation
+342 |     pub fn new() -> Arc<Self> {
+    |            ^^^
+...
+350 |     pub fn signal(&self) {
+    |            ^^^^^^
+...
+356 |     pub fn wait(&self) {
+    |            ^^^^
+...
+366 |     pub fn is_signaled(&self) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: methods `count_down` and `await_n` are never used
+   --> src/renderer/src/data/data_util.rs:383:12
+    |
+376 | impl CountdownLatch {
+    | ------------------- methods in this implementation
+...
+383 |     pub fn count_down(&self) {
+    |            ^^^^^^^^^^
+...
+424 |     pub fn await_n(&self, n: usize, timeout: Duration) -> Result<(), LatchTimeOutError> {
+    |            ^^^^^^^
+
+warning: struct `EmissiveMap` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:139:12
+    |
+139 | pub struct EmissiveMap {
+    |            ^^^^^^^^^^^
+
+warning: struct `NormalMap` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:145:12
+    |
+145 | pub struct NormalMap {
+    |            ^^^^^^^^^
+
+warning: struct `OcclusionMap` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:151:12
+    |
+151 | pub struct OcclusionMap {
+    |            ^^^^^^^^^^^^
+
+warning: associated functions `unlit` and `pbr_simple` are never used
+   --> src/renderer/src/data/gpu_data.rs:213:12
+    |
+212 | impl MaterialMeta {
+    | ----------------- associated functions in this implementation
+213 |     pub fn unlit(base_color: Vec4, texture: Option<TextureHandle>) -> Self {
+    |            ^^^^^
+...
+228 |     pub fn pbr_simple(base_color: Vec4, metallic: f32, roughness: f32) -> Self {
+    |            ^^^^^^^^^^
+
+warning: struct `TextureSamplers` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:330:12
+    |
+330 | pub struct TextureSamplers {
+    |            ^^^^^^^^^^^^^^^
+
+warning: enum `Sampler` is never used
+   --> src/renderer/src/data/gpu_data.rs:339:10
+    |
+339 | pub enum Sampler {
+    |          ^^^^^^^
+
+warning: fields `texture_meta`, `full_extent`, `face_extent`, `allocation`, and `image` are never read
+   --> src/renderer/src/data/gpu_data.rs:430:9
+    |
+429 | pub struct VkCubeMap {
+    |            --------- fields in this struct
+430 |     pub texture_meta: Option<TextureMeta>,
+    |         ^^^^^^^^^^^^
+431 |     pub full_extent: vk::Extent3D,
+    |         ^^^^^^^^^^^
+432 |     pub face_extent: vk::Extent3D,
+    |         ^^^^^^^^^^^
+433 |     pub allocation: vk_mem::Allocation,
+    |         ^^^^^^^^^^
+434 |     pub image: vk::Image,
+    |         ^^^^^
+
+warning: struct `SurfaceMeta` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:440:12
+    |
+440 | pub struct SurfaceMeta {
+    |            ^^^^^^^^^^^
+
+warning: associated function `new_anim` is never used
+   --> src/renderer/src/data/gpu_data.rs:549:12
+    |
+532 | impl VkModelPushConsts {
+    | ---------------------- associated function in this implementation
+...
+549 |     pub fn new_anim(
+    |            ^^^^^^^^
+
+warning: fields `cache_id` and `vertex_count` are never read
+   --> src/renderer/src/data/gpu_data.rs:719:9
+    |
+718 | pub struct VkMeshBuffers {
+    |            ------------- fields in this struct
+719 |     pub cache_id: MeshHandle,
+    |         ^^^^^^^^
+720 |     pub index_count: u32,
+721 |     pub vertex_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `VkMeshBuffers` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `VkGpuTextureBuffer` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:737:12
+    |
+737 | pub struct VkGpuTextureBuffer {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: struct `VkGpuMetRoughBuffer` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:744:12
+    |
+744 | pub struct VkGpuMetRoughBuffer {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `VkMetRoughUniforms` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:753:12
+    |
+753 | pub struct VkMetRoughUniforms {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: enum `MaterialPass` is never used
+   --> src/renderer/src/data/gpu_data.rs:790:10
+    |
+790 | pub enum MaterialPass {
+    |          ^^^^^^^^^^^^
+
+warning: fields `layer_mask` and `tags` are never read
+  --> src/renderer/src/scene/scene_world.rs:42:9
+   |
+35 | pub struct SceneNode {
+   |            --------- fields in this struct
+...
+42 |     pub layer_mask: u64,
+   |         ^^^^^^^^^^
+43 |     pub tags: Vec<String>,
+   |         ^^^^
+   |
+   = note: `SceneNode` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `get_active_point_lights` is never used
+   --> src/renderer/src/scene/scene_world.rs:417:19
+    |
+103 | impl SceneWorld {
+    | --------------- method in this implementation
+...
+417 |     pub(crate) fn get_active_point_lights(&self) -> Vec<PointLight> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `capture_and_save_image_view` is never used
+ --> src/renderer/src/vulkan/vk_debug.rs:9:8
+  |
+9 | pub fn capture_and_save_image_view(
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `clear` is never used
+   --> src/renderer/src/vulkan/vk_descriptor.rs:106:12
+    |
+ 70 | impl<'a> DescriptorLayoutBuilder<'a> {
+    | ------------------------------------ method in this implementation
+...
+106 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: method `clear` is never used
+   --> src/renderer/src/vulkan/vk_descriptor.rs:181:12
+    |
+155 | impl VkDescriptorAllocator {
+    | -------------------------- method in this implementation
+...
+181 |     pub fn clear(&mut self, device: &LogicalDevice) -> Result<(), String> {
+    |            ^^^^^
+
+warning: method `clear` is never used
+   --> src/renderer/src/vulkan/vk_descriptor.rs:303:12
+    |
+254 | impl<'a> VkDescriptorWriter<'a> {
+    | ------------------------------- method in this implementation
+...
+303 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `graphics_only_queue_indices` is never used
+   --> src/renderer/src/vulkan/vk_init.rs:469:8
+    |
+469 | pub fn graphics_only_queue_indices(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `clear` and `enable_blending_additive` are never used
+   --> src/renderer/src/vulkan/vk_pipeline.rs:93:12
+    |
+ 92 | impl<'a> PipelineBuilder<'a> {
+    | ---------------------------- methods in this implementation
+ 93 |     pub fn clear(&mut self) {
+    |            ^^^^^
+...
+234 |     pub fn enable_blending_additive(mut self) -> Self {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `desc_alloc` is never read
+   --> src/renderer/src/vulkan/vk_render.rs:122:9
+    |
+121 | pub struct VkSingleDescriptor {
+    |            ------------------ field in this struct
+122 |     pub desc_alloc: VkDescriptorAllocator,
+    |         ^^^^^^^^^^
+
+warning: method `get_raw_descriptor` is never used
+   --> src/renderer/src/vulkan/vk_render.rs:134:12
+    |
+126 | impl VkSingleDescriptor {
+    | ----------------------- method in this implementation
+...
+134 |     pub fn get_raw_descriptor(&self) -> vk::DescriptorSet {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: fields `entry` and `supported_image_formats` are never read
+   --> src/renderer/src/vulkan/vk_render.rs:142:9
+    |
+139 | pub struct VkRenderCore {
+    |            ------------ fields in this struct
+...
+142 |     pub entry: ash::Entry,
+    |         ^^^^^
+...
+151 |     pub supported_image_formats: HashSet<vk::Format>,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `from_label` is never used
+   --> src/renderer/src/vulkan/vk_render.rs:193:12
+    |
+192 | impl DebugRuntimeMode {
+    | --------------------- associated function in this implementation
+193 |     pub fn from_label(value: &str) -> Option<Self> {
+    |            ^^^^^^^^^^
+
+warning: method `destroy` is never used
+   --> src/renderer/src/vulkan/vk_render.rs:550:8
+    |
+448 | impl VkRenderCore {
+    | ----------------- method in this implementation
+...
+550 |     fn destroy(&mut self) {}
+    |        ^^^^^^^
+
+warning: associated function `new_uniform_buffer` is never used
+   --> src/renderer/src/vulkan/vk_storage.rs:221:12
+    |
+149 | impl VkSubAllocator {
+    | ------------------- associated function in this implementation
+...
+221 |     pub fn new_uniform_buffer(
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: fields `curr_size` and `buffer_end_addr` are never read
+   --> src/renderer/src/vulkan/vk_storage.rs:449:5
+    |
+446 | struct VkStorageBuffer {
+    |        --------------- fields in this struct
+...
+449 |     curr_size: u64,
+    |     ^^^^^^^^^
+...
+454 |     buffer_end_addr: DeviceAddress,
+    |     ^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> src/renderer/src/vulkan/vk_types.rs:69:13
+   |
+69 |     Present(String),
+   |     ------- ^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `VkError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+69 -     Present(String),
+69 +     Present(()),
+   |
+
+warning: fields `resize_requested` and `render_scale` are never read
+  --> src/renderer/src/vulkan/vk_types.rs:88:9
+   |
+87 | pub struct VkWindowState {
+   |            ------------- fields in this struct
+88 |     pub resize_requested: bool,
+   |         ^^^^^^^^^^^^^^^^
+...
+92 |     pub render_scale: f32,
+   |         ^^^^^^^^^^^^
+
+warning: methods `update_window_scale`, `get_curr_width`, `get_curr_height`, `ensure_max_extent_at_least`, and `center_cursor` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:127:12
+    |
+ 97 | impl VkWindowState {
+    | ------------------ methods in this implementation
+...
+127 |     pub fn update_window_scale(&mut self, new_scalar: Option<f32>) {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+159 |     pub fn get_curr_width(&self) -> u32 {
+    |            ^^^^^^^^^^^^^^
+...
+163 |     pub fn get_curr_height(&self) -> u32 {
+    |            ^^^^^^^^^^^^^^^
+...
+179 |     pub fn ensure_max_extent_at_least(&mut self, extent: vk::Extent2D) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+198 |     pub fn center_cursor(&self, window: &winit::window::Window) {
+    |            ^^^^^^^^^^^^^
+
+warning: fields `name` and `id` are never read
+   --> src/renderer/src/vulkan/vk_types.rs:233:9
+    |
+232 | pub struct PhyDevice {
+    |            --------- fields in this struct
+233 |     pub name: String,
+    |         ^^^^
+234 |     pub id: u32,
+    |         ^^
+
+warning: struct `LogicalDevice` is never constructed
+   --> src/renderer/src/vulkan/vk_types.rs:238:12
+    |
+238 | pub struct LogicalDevice {
+    |            ^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> src/renderer/src/vulkan/vk_types.rs:261:9
+    |
+259 | pub struct VkBufferAndDescriptorLimits {
+    |            --------------------------- fields in this struct
+260 |     // Buffer limits
+261 |     pub max_storage_buffer_range: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+262 |     pub max_uniform_buffer_range: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+263 |     pub max_push_constants_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+...
+267 |     pub min_storage_buffer_offset_alignment: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+268 |     pub min_texel_buffer_offset_alignment: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+269 |     pub buffer_image_granularity: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+270 |     pub optimal_buffer_copy_offset_alignment: vk::DeviceSize,
+271 |     pub non_coherent_atom_size: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+...
+274 |     pub max_bound_descriptor_sets: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+275 |     pub max_per_stage_descriptor_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+276 |     pub max_per_stage_descriptor_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+277 |     pub max_descriptor_set_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+278 |     pub max_descriptor_set_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+279 |     pub max_descriptor_set_storage_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+280 |     pub max_descriptor_set_uniform_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+283 |     pub max_update_after_bind_descriptors_in_all_pools: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+284 |     pub max_per_stage_descriptor_update_after_bind_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+285 |     pub max_per_stage_descriptor_update_after_bind_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+286 |     pub max_descriptor_set_update_after_bind_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+287 |     pub max_descriptor_set_update_after_bind_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+288 |     pub max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+289 |     pub max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `ALL_QUEUE_TYPES` and `iter` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:327:11
+    |
+325 | impl VkQueueType {
+    | ---------------- associated items in this implementation
+326 |     // Define an array of all the enum variants
+327 |     const ALL_QUEUE_TYPES: [VkQueueType; 4] = [
+    |           ^^^^^^^^^^^^^^^
+...
+334 |     pub fn iter() -> std::slice::Iter<'static, VkQueueType> {
+    |            ^^^^
+
+warning: fields `queue_index` and `queue_type` are never read
+   --> src/renderer/src/vulkan/vk_types.rs:409:9
+    |
+408 | pub struct VkCommandPool {
+    |            ------------- fields in this struct
+409 |     pub queue_index: u32,
+    |         ^^^^^^^^^^^
+410 |     pub queue_type: VkQueueType,
+    |         ^^^^^^^^^^
+    |
+    = note: `VkCommandPool` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: type alias `VkSubmitFn` is never used
+   --> src/renderer/src/vulkan/vk_types.rs:415:10
+    |
+415 | pub type VkSubmitFn = Box<
+    |          ^^^^^^^^^^
+
+warning: methods `destroy_for_rebuild` and `add_deletion` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:633:12
+    |
+609 | impl VkFrame {
+    | ------------ methods in this implementation
+...
+633 |     pub fn destroy_for_rebuild(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+645 |     pub fn add_deletion(&mut self, deletion: VkDeletable) {
+    |            ^^^^^^^^^^^^
+
+warning: methods `get_curr_frame_count`, `get_curr_frame`, `add_deletion_to_curr_frame`, `replace_draw_depth_images`, and `destroy_for_rebuild` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:784:12
+    |
+704 | impl VkPresent {
+    | -------------- methods in this implementation
+...
+784 |     pub fn get_curr_frame_count(&self) -> u32 {
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+793 |     pub fn get_curr_frame(&self) -> &VkFrame {
+    |            ^^^^^^^^^^^^^^
+...
+798 |     pub fn add_deletion_to_curr_frame(&mut self, deletion: VkDeletable) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+831 |     pub fn replace_draw_depth_images(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+873 |     pub fn destroy_for_rebuild(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `get_queue_by_index` and `has_queue_type` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:925:12
+    |
+907 | impl VkDeviceQueues {
+    | ------------------- methods in this implementation
+...
+925 |     pub fn get_queue_by_index(&self, index: u32) -> Option<(u32, vk::Queue)> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+939 |     pub fn has_queue_type(&self, typ: VkQueueType) -> bool {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `VkImmediate` is never constructed
+   --> src/renderer/src/vulkan/vk_types.rs:981:12
+    |
+981 | pub struct VkImmediate {
+    |            ^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/renderer/src/vulkan/vk_types.rs:987:12
+    |
+986 | impl VkImmediate {
+    | ---------------- associated function in this implementation
+987 |     pub fn new(command_pool: VkCommandPool, fence: vk::Fence) -> Self {
+    |            ^^^
+
+warning: method `send_to_self` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1177:12
+     |
+1155 | impl VkTransfer {
+     | --------------- method in this implementation
+...
+1177 |     pub fn send_to_self(&self, info: VkCmdSubmitInfo) -> Result<(), SendError<VkCmdSubmitInfo>> {
+     |            ^^^^^^^^^^^^
+
+warning: field `opened` is never read
+    --> src/renderer/src/vulkan/vk_types.rs:1199:9
+     |
+1195 | pub struct VkImgui {
+     |            ------- field in this struct
+...
+1199 |     pub opened: bool,
+     |         ^^^^^^
+
+warning: method `prepare_frame` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1216:12
+     |
+1202 | impl VkImgui {
+     | ------------ method in this implementation
+...
+1216 |     pub fn prepare_frame(&mut self, window: &winit::window::Window) {
+     |            ^^^^^^^^^^^^^
+
+warning: methods `set_data_1`, `set_data_2`, `set_data_3`, and `set_data_4` are never used
+    --> src/renderer/src/vulkan/vk_types.rs:1253:12
+     |
+1252 | impl Compute4x4PushConstants {
+     | ---------------------------- methods in this implementation
+1253 |     pub fn set_data_1(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+...
+1257 |     pub fn set_data_2(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+...
+1261 |     pub fn set_data_3(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+...
+1265 |     pub fn set_data_4(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+
+warning: method `as_byte_slice` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1272:12
+     |
+1271 | impl Compute4x4PushConstants {
+     | ---------------------------- method in this implementation
+1272 |     pub fn as_byte_slice(&self) -> &[u8] {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `ComputeEffect` is never constructed
+    --> src/renderer/src/vulkan/vk_types.rs:1277:12
+     |
+1277 | pub struct ComputeEffect {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `ComputeData` is never constructed
+    --> src/renderer/src/vulkan/vk_types.rs:1295:12
+     |
+1295 | pub struct ComputeData {
+     |            ^^^^^^^^^^^
+
+warning: method `get_current_effect` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1301:12
+     |
+1300 | impl ComputeData {
+     | ---------------- method in this implementation
+1301 |     pub fn get_current_effect(&self) -> &ComputeEffect {
+     |            ^^^^^^^^^^^^^^^^^^
+
+warning: field `extent` is never read
+    --> src/renderer/src/vulkan/vk_types.rs:1407:9
+     |
+1404 | pub struct VkBrdfLut {
+     |            --------- field in this struct
+...
+1407 |     pub extent: Extent2D,
+     |         ^^^^^^
+
+warning: associated function `new` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1411:12
+     |
+1410 | impl VkBuffer {
+     | ------------- associated function in this implementation
+1411 |     pub fn new(
+     |            ^^^
+
+warning: variant `AllocatedBuffer` is never constructed
+    --> src/renderer/src/vulkan/vk_types.rs:1456:5
+     |
+1455 | pub enum VkDeletable {
+     |          ----------- variant in this enum
+1456 |     AllocatedBuffer(VkBuffer),
+     |     ^^^^^^^^^^^^^^^
+
+warning: field `descriptor_pool` is never read
+    --> src/renderer/src/vulkan/vk_types.rs:1494:5
+     |
+1493 | pub struct VkSceneDescriptors {
+     |            ------------------ field in this struct
+1494 |     descriptor_pool: VkDynamicDescriptorAllocator,
+     |     ^^^^^^^^^^^^^^^
+
+warning: methods `update_scene_uniform` and `get_scene_descriptor` are never used
+    --> src/renderer/src/vulkan/vk_types.rs:1627:12
+     |
+1501 | impl VkSceneDescriptors {
+     | ----------------------- methods in this implementation
+...
+1627 |     pub fn update_scene_uniform(
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+1713 |     pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `pending_count` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1748:12
+     |
+1741 | impl VkFenceQueue {
+     | ----------------- method in this implementation
+...
+1748 |     pub fn pending_count(&self) -> usize {
+     |            ^^^^^^^^^^^^^
+
+warning: function `command_pool_create_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:74:8
+   |
+74 | pub fn command_pool_create_info<'a>(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `command_buffer_allocate_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:83:8
+   |
+83 | pub fn command_buffer_allocate_info<'a>(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fence_create_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:94:8
+   |
+94 | pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `semaphore_create_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:98:8
+   |
+98 | pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_pass_begin_info` is never used
+   --> src/renderer/src/vulkan/vk_util.rs:161:8
+    |
+161 | pub fn render_pass_begin_info<'a>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_memory_type` is never used
+   --> src/renderer/src/vulkan/vk_util.rs:337:8
+    |
+337 | pub fn find_memory_type(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `create_buffer_image_copy` is never used
+    --> src/renderer/src/vulkan/vk_util.rs:1079:4
+     |
+1079 | fn create_buffer_image_copy(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `renderer` (lib) generated 254 warnings (run `cargo fix --lib -p renderer` to apply 160 suggestions)
+warning: fields `normal` and `d` are never read
+  --> apps/dungeon_dogfood/src/collision.rs:29:9
+   |
+26 | pub struct RampCollider {
+   |            ------------ fields in this struct
+...
+29 |     pub normal: Vec3,
+   |         ^^^^^^
+30 |     pub d: f32,
+   |         ^
+   |
+   = note: `RampCollider` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `is_penetrating_wall` is never used
+   --> apps/dungeon_dogfood/src/collision.rs:269:8
+    |
+269 | pub fn is_penetrating_wall(pos: Vec3, radius: f32, wall: &WallCollider) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: fields `name` and `world_origin` are never read
+  --> apps/dungeon_dogfood/src/geometry.rs:10:9
+   |
+ 9 | pub struct ChunkBuild {
+   |            ---------- fields in this struct
+10 |     pub name: String,
+   |         ^^^^
+11 |     pub mesh: ProceduralMeshData,
+12 |     pub world_origin: Vec3,
+   |         ^^^^^^^^^^^^
+
+warning: constant `PLAYER_HEIGHT` is never used
+ --> apps/dungeon_dogfood/src/player.rs:3:11
+  |
+3 | pub const PLAYER_HEIGHT: f32 = 1.8;
+  |           ^^^^^^^^^^^^^
+
+warning: fields `wall_material`, `floor_material`, `chunk_meshes`, `chunk_nodes`, `light_ids`, and `prop_roots` are never read
+  --> apps/dungeon_dogfood/src/scene_seed.rs:34:9
+   |
+33 | pub struct LevelScene {
+   |            ---------- fields in this struct
+34 |     pub wall_material: renderer::MaterialHandle,
+   |         ^^^^^^^^^^^^^
+35 |     pub floor_material: renderer::MaterialHandle,
+   |         ^^^^^^^^^^^^^^
+36 |     pub chunk_meshes: Vec<MeshHandle>,
+   |         ^^^^^^^^^^^^
+37 |     pub chunk_nodes: Vec<SceneNodeId>,
+   |         ^^^^^^^^^^^
+38 |     pub light_ids: Vec<PointLightId>,
+   |         ^^^^^^^^^
+39 |     pub prop_roots: Vec<SceneNodeId>,
+   |         ^^^^^^^^^^
+
+warning: `dungeon_dogfood` (bin "dungeon_dogfood") generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running `target/debug/dungeon_dogfood`
+[2026-03-25T20:53:40Z INFO  dungeon_dogfood] Loaded content pack: 2 props (2 enabled), 2 materials, 1 environments, 3 light presets
+[2026-03-25T20:53:40Z INFO  dungeon_dogfood] Loaded level: 19x11 tiles
+[2026-03-25T20:53:40Z INFO  dungeon_dogfood] Spawn position: (8, 4)
+[2026-03-25T20:53:40Z INFO  dungeon_dogfood] Light markers: 1
+[2026-03-25T20:53:40Z INFO  dungeon_dogfood] Model markers: 2
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating entry
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Entry created
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating Vulkan Instance
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Vulkan Instance Created
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating surface
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Surface created
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Iterating devices
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Found device: AMD Radeon Graphics (RADV REMBRANDT):5761
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Checking device for swapchain support
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Device supports swapchain
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Suitable device: AMD Radeon Graphics (RADV REMBRANDT):5761
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Found device: llvmpipe (LLVM 21.1.8, 256 bits):0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Checking device for swapchain support
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Device supports swapchain
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Found: 1 suitable devices
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating Logical Device
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Logical Device: Selecting queue indices
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Logical Device: Crafting queue infos
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Logical Device: Enabling features
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Logical Device: Crafting device info
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Logical Device: Creating device
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Logical Device: Mapping device queues
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Created Logical Device
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Queue Info: Present: 0x55b1a91cf8b0 | Graphics: 0x55b1a91cf8b0 | Compute: 0x55b1a92b2990 | Transfer: 0x55b1a91cf8b0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating swapchain
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Setting surface format
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Selecting swapchain surface format
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Found expected format: B8G8R8A8_UNORM | SRGB_NONLINEAR
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Setting present mode
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Selecting swapchain present mode
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Found expected present mode: MAILBOX 
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Setting extent
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Requesting image count: 3
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Setting pre transform
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Creating info
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Set sharing mode: Exclusive
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Initializing loader
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Initializing swapchain
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain: Initializing images
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Swapchain created
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 1
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 1
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 1
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 1
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating command pool for queue index 0
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Command pool created successfully
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Creating image views
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Image views created
+[2026-03-25T20:53:40Z INFO  renderer::vulkan::vk_init] Supported Texture Formats: {BC5_UNORM_BLOCK, BC3_UNORM_BLOCK, R8_UNORM, R8G8_UNORM, B8G8R8A8_UNORM, BC7_UNORM_BLOCK, BC5_SNORM_BLOCK, R8G8B8A8_SRGB, BC4_UNORM_BLOCK, R32G32B32A32_SFLOAT, B8G8R8A8_SRGB, BC4_SNORM_BLOCK, BC1_RGB_SRGB_BLOCK, R16G16B16A16_SFLOAT, R8G8B8A8_UNORM, BC3_SRGB_BLOCK, BC7_SRGB_BLOCK, BC1_RGB_UNORM_BLOCK}
+[2026-03-25T20:53:41Z INFO  renderer::data::environment_import] Decoded environment file 'src/renderer/src/assets/sky_maps/sky/px.hdr': 1024x1024, 4194304 floats
+[2026-03-25T20:53:41Z INFO  renderer::data::environment_import] Decoded environment file 'src/renderer/src/assets/sky_maps/sky/nx.hdr': 1024x1024, 4194304 floats
+[2026-03-25T20:53:41Z INFO  renderer::data::environment_import] Decoded environment file 'src/renderer/src/assets/sky_maps/sky/py.hdr': 1024x1024, 4194304 floats
+[2026-03-25T20:53:42Z INFO  renderer::data::environment_import] Decoded environment file 'src/renderer/src/assets/sky_maps/sky/ny.hdr': 1024x1024, 4194304 floats
+[2026-03-25T20:53:42Z INFO  renderer::data::environment_import] Decoded environment file 'src/renderer/src/assets/sky_maps/sky/pz.hdr': 1024x1024, 4194304 floats
+[2026-03-25T20:53:42Z INFO  renderer::data::environment_import] Decoded environment file 'src/renderer/src/assets/sky_maps/sky/nz.hdr': 1024x1024, 4194304 floats
+[2026-03-25T20:53:43Z INFO  renderer::data::data_cache] Imported environment source as Unloaded: FaceDirectory { path: "src/renderer/src/assets/sky_maps/sky", pattern: PxNxPyNyPzNz }
+[2026-03-25T20:53:43Z INFO  renderer::vulkan::vk_util] Generating BRDF LUT
+[2026-03-25T20:53:43Z INFO  renderer::vulkan::vk_util] BRDF LUT generation took: 19 ms
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating Environment Map: Irradiance
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 0, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 0, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 0, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 0, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 0, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 0, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 1, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 1, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 1, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 1, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 1, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 1, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 2, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 2, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 2, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 2, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 2, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 2, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 3, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 3, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 3, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 3, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 3, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 3, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 4, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 4, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 4, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 4, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 4, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 4, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 5, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 5, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 5, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 5, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 5, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 5, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 6, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 6, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 6, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 6, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 6, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 6, for Irradiance Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Finished Generating: Irradiance, Generation took: 862 ms
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating Environment Map: PreFiltered
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 0, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 0, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 0, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 0, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 0, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 0, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 1, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 1, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 1, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 1, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 1, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 1, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 2, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 2, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 2, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 2, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 2, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 2, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 3, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 3, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 3, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 3, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 3, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 3, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 4, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 4, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 4, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 4, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 4, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 4, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 5, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 5, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 5, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 5, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 5, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 5, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 6, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 6, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 6, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 6, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 6, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 6, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 7, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 7, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 7, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 7, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 7, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 7, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 8, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 8, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 8, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 8, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 8, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 8, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 0, mip: 9, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 1, mip: 9, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 2, mip: 9, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 3, mip: 9, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 4, mip: 9, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Generating face: 5, mip: 9, for PreFiltered Map
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Finished Generating: PreFiltered, Generation took: 24 ms
+[2026-03-25T20:53:44Z INFO  renderer::vulkan::vk_render] Finished Generating Environment Maps, Generation took: 887 ms
+Writing buffers: 0
+Writing buffers: 1
+Writing buffers: 2
+Writing buffers: 3
+[2026-03-25T20:53:44Z INFO  dungeon_dogfood::scene_seed] Fast startup enabled (DUNGEON_DOGFOOD_FAST_STARTUP=1): loading base-color maps only for material 'stone_wall'.
+[2026-03-25T20:53:44Z WARN  dungeon_dogfood::scene_seed] Material 'stone_wall' missing optional normal map under 'apps/dungeon_dogfood/assets/textures/pbr/stone_rough'; using factor/default fallback.
+[2026-03-25T20:53:44Z WARN  dungeon_dogfood::scene_seed] Material 'stone_wall' missing optional arm map under 'apps/dungeon_dogfood/assets/textures/pbr/stone_rough'; using factor/default fallback.
+[2026-03-25T20:53:50Z INFO  renderer::data::data_cache] Unsupported Format: R8G8B8_SRGB, converting to R8G8B8A8_UNORM
+[2026-03-25T20:53:53Z INFO  dungeon_dogfood::scene_seed] Fast startup enabled (DUNGEON_DOGFOOD_FAST_STARTUP=1): loading base-color maps only for material 'stone_floor'.
+[2026-03-25T20:53:53Z WARN  dungeon_dogfood::scene_seed] Material 'stone_floor' missing optional normal map under 'apps/dungeon_dogfood/assets/textures/pbr/stone_floor'; using factor/default fallback.
+[2026-03-25T20:53:53Z WARN  dungeon_dogfood::scene_seed] Material 'stone_floor' missing optional arm map under 'apps/dungeon_dogfood/assets/textures/pbr/stone_floor'; using factor/default fallback.

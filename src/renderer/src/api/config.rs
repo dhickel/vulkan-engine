@@ -113,6 +113,24 @@ impl Default for AssetPolicyConfig {
     }
 }
 
+/// App-controlled visual baseline applied to skybox tonemapping and IBL shading.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct VisualTuning {
+    pub exposure: f32,
+    pub gamma: f32,
+    pub ibl_ambient_scale: f32,
+}
+
+impl Default for VisualTuning {
+    fn default() -> Self {
+        Self {
+            exposure: 4.5,
+            gamma: 2.2,
+            ibl_ambient_scale: 1.0,
+        }
+    }
+}
+
 /// Public renderer configuration contract.
 #[derive(Debug, Clone)]
 pub struct RendererConfig {
@@ -122,6 +140,11 @@ pub struct RendererConfig {
     pub validation_layer: bool,
     pub shader_debug_mode: DebugRuntimeMode,
     pub compile_shaders: bool,
+    /// When true, renderer preloads the built-in startup/debug scene during initialization.
+    /// Disable this for app-driven scenes to reduce startup latency.
+    pub preload_startup_scene: bool,
+    /// App-owned visual tuning applied consistently across skybox and IBL lighting.
+    pub visual_tuning: VisualTuning,
     /// Reserved in v1. `true` currently returns `RendererError::Unsupported`.
     pub headless: bool,
     pub asset_policy: AssetPolicyConfig,
@@ -136,6 +159,8 @@ impl Default for RendererConfig {
             validation_layer: false,
             shader_debug_mode: DebugRuntimeMode::Default,
             compile_shaders: false,
+            preload_startup_scene: true,
+            visual_tuning: VisualTuning::default(),
             headless: false,
             asset_policy: AssetPolicyConfig::default(),
         }

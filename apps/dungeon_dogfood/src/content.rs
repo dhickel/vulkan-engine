@@ -6,6 +6,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 const CONTENT_PACK_VERSION: u32 = 1;
+const REQUIRED_MATERIAL_IDS: [&str; 2] = ["stone_wall", "stone_floor"];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,7 +97,7 @@ pub enum LightPresetId {
 #[derive(Debug, Copy, Clone)]
 pub struct PropPlacementPolicy {
     pub scale: glam::Vec3,
-    pub yaw_radians: f32,
+    pub yaw_degrees: f32,
     pub y_offset: f32,
     pub prefer_unlit_fallback: bool,
 }
@@ -105,7 +106,7 @@ impl PropSpec {
     pub fn placement_policy(&self) -> PropPlacementPolicy {
         PropPlacementPolicy {
             scale: glam::Vec3::new(self.scale[0], self.scale[1], self.scale[2]),
-            yaw_radians: self.yaw_degrees.to_radians(),
+            yaw_degrees: self.yaw_degrees,
             y_offset: self.y_offset,
             prefer_unlit_fallback: self.prefer_unlit_fallback,
         }
@@ -115,6 +116,10 @@ impl PropSpec {
 impl ContentPack {
     pub fn enabled_props(&self) -> Vec<&PropSpec> {
         self.props.iter().filter(|prop| prop.enabled).collect()
+    }
+
+    pub fn material_by_id(&self, id: &str) -> Option<&MaterialSpec> {
+        self.materials.iter().find(|material| material.id == id)
     }
 
     pub fn primary_environment(&self) -> &EnvironmentSpec {
@@ -168,18 +173,36 @@ pub fn load_content_pack(path: impl AsRef<Path>) -> Result<ContentPack, ContentE
     })?;
 
     validate_content_pack(&pack, &requested_path)?;
+    validate_required_runtime_content(&pack, &requested_path)?;
     Ok(pack)
 }
 
-pub fn select_prop_index(marker_idx: usize, prop_count: usize) -> usize {
-    assert!(
-        prop_count > 0,
-        "prop_count must be > 0 for deterministic selection"
-    );
-    marker_idx % prop_count
+fn validate_required_runtime_content(
+    pack: &ContentPack,
+    pack_path: &Path,
+) -> Result<(), ContentError> {
+    for required_id in REQUIRED_MATERIAL_IDS {
+        if pack.material_by_id(required_id).is_none() {
+            return Err(validation_err(
+                pack_path,
+                "materials",
+                format!("required material id '{required_id}' is missing"),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
-pub fn select_light_preset(marker_idx: usize) -> LightPresetId {
+pub fn prop_for_marker_index(marker_idx: usize, props_len: usize) -> usize {
+    assert!(
+        props_len > 0,
+        "props_len must be > 0 for deterministic selection"
+    );
+    marker_idx % props_len
+}
+
+pub fn light_preset_for_marker_index(marker_idx: usize) -> LightPresetId {
     match marker_idx % 10 {
         0..=6 => LightPresetId::Warm,
         7 | 8 => LightPresetId::Cool,
@@ -197,6 +220,13 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
                 pack.version, CONTENT_PACK_VERSION
             ),
         ));
+    }
+
+    match pack.deterministic.prop_selector {
+        PropSelector::MarkerModulo => {}
+    }
+    match pack.deterministic.light_selector {
+        LightSelector::MarkerModulo721 => {}
     }
 
     if pack.props.is_empty() {
@@ -521,11 +551,11 @@ y_offset = 0.0
         let markers = [0usize, 1, 2, 3, 4, 5, 6, 15, 21, 22, 57];
         let first: Vec<usize> = markers
             .iter()
-            .map(|idx| select_prop_index(*idx, 3))
+            .map(|idx| prop_for_marker_index(*idx, 3))
             .collect();
         let second: Vec<usize> = markers
             .iter()
-            .map(|idx| select_prop_index(*idx, 3))
+            .map(|idx| prop_for_marker_index(*idx, 3))
             .collect();
 
         assert_eq!(first, second);
@@ -539,7 +569,7 @@ y_offset = 0.0
         let mut accent = 0usize;
 
         for idx in 0..10 {
-            match select_light_preset(idx) {
+            match light_preset_for_marker_index(idx) {
                 LightPresetId::Warm => warm += 1,
                 LightPresetId::Cool => cool += 1,
                 LightPresetId::Accent => accent += 1,
@@ -549,5 +579,68 @@ y_offset = 0.0
         assert_eq!(warm, 7);
         assert_eq!(cool, 2);
         assert_eq!(accent, 1);
+    }
+
+    #[test]
+    fn deterministic_light_selector_sequence_is_stable() {
+        let sequence: Vec<LightPresetId> = (0..12).map(light_preset_for_marker_index).collect();
+        let expected = vec![
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+            LightPresetId::Cool,
+            LightPresetId::Cool,
+            LightPresetId::Accent,
+            LightPresetId::Warm,
+            LightPresetId::Warm,
+        ];
+        assert_eq!(sequence, expected);
+    }
+
+    #[test]
+    fn missing_enabled_prop_path_is_fatal_with_key_context() {
+        let canonical = include_str!("../assets/content_pack.toml");
+        let broken = canonical.replacen(
+            "apps/dungeon_dogfood/assets/models/props/torch_sconce/scene.gltf",
+            "apps/dungeon_dogfood/assets/models/props/torch_sconce/DOES_NOT_EXIST.gltf",
+            1,
+        );
+        let temp = write_temp_toml(&broken);
+
+        let err = load_content_pack(&temp).expect_err("missing enabled prop path should fail");
+        match err {
+            ContentError::Validation { key, message, .. } => {
+                assert_eq!(key, "props[0].path");
+                assert!(message.contains("missing path"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        let _ = fs::remove_file(temp);
+    }
+
+    #[test]
+    fn missing_required_material_id_is_fatal() {
+        let canonical = include_str!("../assets/content_pack.toml");
+        let broken = canonical.replace(
+            "[[materials]]\nid = \"stone_floor\"\nfamily = \"pbr\"\nbase_path = \"apps/dungeon_dogfood/assets/textures/pbr/stone_floor\"\n",
+            "",
+        );
+        let temp = write_temp_toml(&broken);
+
+        let err = load_content_pack(&temp).expect_err("missing required material should fail");
+        match err {
+            ContentError::Validation { key, message, .. } => {
+                assert_eq!(key, "materials");
+                assert!(message.contains("stone_floor"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        let _ = fs::remove_file(temp);
     }
 }

@@ -22,7 +22,9 @@ pub use assets::{
     AssetManager, EnvironmentSource, EnvironmentState, FacePattern, PbrMaterialDesc,
     ProceduralMeshData, ProceduralVertex,
 };
-pub use config::{AssetManifestMode, AssetPolicyConfig, DebugRuntimeMode, RendererConfig};
+pub use config::{
+    AssetManifestMode, AssetPolicyConfig, DebugRuntimeMode, RendererConfig, VisualTuning,
+};
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };

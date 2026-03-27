@@ -16,5 +16,5 @@ pub use api::{
     PointLightId, ProceduralMeshData, ProceduralVertex, RenderHook, RenderHookContext, Renderer,
     RendererConfig, RendererError, RendererFrameError, RendererInitError, ResolvedTexturePolicy,
     SamplerOverride, Scene, SceneError, SceneFragment, SceneFragmentMount, SceneFragmentNode,
-    SceneFragmentNodeId, SceneNodeId, TextureHandle, TextureLoadOptions, WrapMode,
+    SceneFragmentNodeId, SceneNodeId, TextureHandle, TextureLoadOptions, VisualTuning, WrapMode,
 };

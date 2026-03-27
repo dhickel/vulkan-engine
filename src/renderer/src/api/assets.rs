@@ -576,10 +576,28 @@ impl<'a> AssetManager<'a> {
         path: impl AsRef<Path>,
         options: TextureLoadOptions,
     ) -> Result<TextureHandle, AssetError> {
-        let path = path.as_ref().to_path_buf();
+        let mut loaded =
+            self.load_textures_with_options(vec![(path.as_ref().to_path_buf(), options)])?;
+        loaded
+            .pop()
+            .ok_or_else(|| AssetError::Internal("texture batch returned no handles".to_string()))
+    }
+
+    /// Load a batch of textures with explicit policy overrides.
+    ///
+    /// Thread: Main
+    /// May Stall: Yes
+    pub fn load_textures_with_options(
+        &mut self,
+        requests: Vec<(PathBuf, TextureLoadOptions)>,
+    ) -> Result<Vec<TextureHandle>, AssetError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let policy_config = self.asset_policy.clone();
         self.run_sync_upload_task(move |data_cache| {
-            load_texture_gpu_ready_with_policy(path, data_cache, &policy_config, Some(options))
+            load_texture_batch_gpu_ready_with_policy(requests, data_cache, &policy_config)
         })
     }
 
@@ -822,73 +840,7 @@ impl<'a> AssetManager<'a> {
         &mut self,
         desc: PbrMaterialDesc,
     ) -> Result<MaterialHandle, AssetError> {
-        // Validate descriptor
-        validate_material_desc(&desc)?;
-
-        // Convert to internal MaterialMeta
-        let material_meta = material_desc_to_meta(&desc);
-
-        // Validate texture handles if provided
-        {
-            let texture_cache = self
-                .core
-                .data_cache
-                .texture_cache
-                .lock()
-                .map_err(|_| poisoned_lock_err("texture_cache"))?;
-
-            for tex_handle in material_meta.texture_ids.to_vec() {
-                if tex_handle.slot >= TextureCache::DEFAULT_TEX_ITER_START as u32 {
-                    texture_cache.get_texture(tex_handle).map_err(|err| {
-                        map_cache_err("texture", tex_handle.slot, tex_handle.generation, err)
-                    })?;
-                }
-            }
-        }
-
-        // Add material to cache
-        let material_id = {
-            let mut texture_cache = self
-                .core
-                .data_cache
-                .texture_cache
-                .lock()
-                .map_err(|_| poisoned_lock_err("texture_cache"))?;
-
-            texture_cache.add_material(material_meta)
-        };
-
-        // Allocate GPU resources
-        let allocation_result = {
-            let mut texture_cache = self
-                .core
-                .data_cache
-                .texture_cache
-                .lock()
-                .map_err(|_| poisoned_lock_err("texture_cache"))?;
-
-            texture_cache.allocate_id(material_id, BufferPlacement::ContiguousPreferred, false)
-        };
-
-        // Handle allocation failure
-        match allocation_result {
-            LoadResult::Success(_) => Ok(material_id),
-            LoadResult::Failed(_) => {
-                // Rollback: deallocate the material
-                let mut texture_cache = self
-                    .core
-                    .data_cache
-                    .texture_cache
-                    .lock()
-                    .map_err(|_| poisoned_lock_err("texture_cache"))?;
-
-                texture_cache.deallocate_materials(vec![material_id]);
-
-                Err(AssetError::Internal(
-                    "material GPU allocation failed".to_string(),
-                ))
-            }
-        }
+        self.run_sync_upload_task(move |data_cache| create_material_pbr_gpu_ready(desc, data_cache))
     }
 
     /// Upload a procedural mesh to the GPU.
@@ -904,98 +856,9 @@ impl<'a> AssetManager<'a> {
         &mut self,
         mesh: ProceduralMeshData,
     ) -> Result<MeshHandle, AssetError> {
-        // Validate mesh data
-        validate_procedural_mesh(&mesh)?;
-
-        // Validate material handle if provided
-        if let Some(material_handle) = mesh.material {
-            let texture_cache = self
-                .core
-                .data_cache
-                .texture_cache
-                .lock()
-                .map_err(|_| poisoned_lock_err("texture_cache"))?;
-
-            // Verify material exists
-            texture_cache.get_material(material_handle).map_err(|err| {
-                map_cache_err(
-                    "material",
-                    material_handle.slot,
-                    material_handle.generation,
-                    err,
-                )
-            })?;
-
-            // Verify material is loaded (not just cached)
-            texture_cache
-                .get_loaded_material(material_handle)
-                .map_err(|err| {
-                    map_cache_err(
-                        "material",
-                        material_handle.slot,
-                        material_handle.generation,
-                        err,
-                    )
-                })?;
-        }
-
-        // Convert vertices to internal format
-        let vertices: Vec<Vertex> = mesh.vertices.iter().map(procedural_vertex_to_gpu).collect();
-
-        let has_uv1 = mesh.vertices.iter().any(|v| v.uv1 != glam::Vec2::ZERO);
-
-        // Create internal MeshMeta
-        let mesh_meta = MeshMeta {
-            name: mesh.name,
-            indices: mesh.indices,
-            vertices,
-            material_index: mesh.material,
-            has_uv1,
-        };
-
-        // Add mesh to cache
-        let mesh_id = {
-            let mut mesh_cache = self
-                .core
-                .data_cache
-                .mesh_cache
-                .lock()
-                .map_err(|_| poisoned_lock_err("mesh_cache"))?;
-
-            mesh_cache.add(mesh_meta)
-        };
-
-        // Allocate GPU resources
-        let allocation_result = {
-            let mut mesh_cache = self
-                .core
-                .data_cache
-                .mesh_cache
-                .lock()
-                .map_err(|_| poisoned_lock_err("mesh_cache"))?;
-
-            mesh_cache.allocate_id(mesh_id, BufferPlacement::ContiguousPreferred, false)
-        };
-
-        // Handle allocation failure
-        match allocation_result {
-            LoadResult::Success(_) => Ok(mesh_id),
-            LoadResult::Failed(_) => {
-                // Rollback: deallocate the mesh
-                let mut mesh_cache = self
-                    .core
-                    .data_cache
-                    .mesh_cache
-                    .lock()
-                    .map_err(|_| poisoned_lock_err("mesh_cache"))?;
-
-                mesh_cache.deallocate_id(mesh_id);
-
-                Err(AssetError::Internal(
-                    "mesh GPU allocation failed".to_string(),
-                ))
-            }
-        }
+        self.run_sync_upload_task(move |data_cache| {
+            upload_procedural_mesh_gpu_ready(mesh, data_cache)
+        })
     }
 
     fn run_sync_upload_task<T, F>(&mut self, task: F) -> Result<T, AssetError>
@@ -1048,6 +911,134 @@ fn load_model_gpu_ready(
     upload_result?;
 
     Ok(loaded_model)
+}
+
+fn create_material_pbr_gpu_ready(
+    desc: PbrMaterialDesc,
+    data_cache: Arc<VkDataCache>,
+) -> Result<MaterialHandle, AssetError> {
+    validate_material_desc(&desc)?;
+    let material_meta = material_desc_to_meta(&desc);
+
+    {
+        let texture_cache = data_cache
+            .texture_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+        for tex_handle in material_meta.texture_ids.to_vec() {
+            if tex_handle.slot >= TextureCache::DEFAULT_TEX_ITER_START as u32 {
+                texture_cache.get_texture(tex_handle).map_err(|err| {
+                    map_cache_err("texture", tex_handle.slot, tex_handle.generation, err)
+                })?;
+            }
+        }
+    }
+
+    let material_id = {
+        let mut texture_cache = data_cache
+            .texture_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("texture_cache"))?;
+        texture_cache.add_material(material_meta)
+    };
+
+    let allocation_result = {
+        let mut texture_cache = data_cache
+            .texture_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("texture_cache"))?;
+        texture_cache.allocate_id(material_id, BufferPlacement::ContiguousPreferred, false)
+    };
+
+    match allocation_result {
+        LoadResult::Success(_) => Ok(material_id),
+        LoadResult::Failed(_) => {
+            let mut texture_cache = data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+            texture_cache.deallocate_materials(vec![material_id]);
+            Err(AssetError::Internal(
+                "material GPU allocation failed".to_string(),
+            ))
+        }
+    }
+}
+
+fn upload_procedural_mesh_gpu_ready(
+    mesh: ProceduralMeshData,
+    data_cache: Arc<VkDataCache>,
+) -> Result<MeshHandle, AssetError> {
+    validate_procedural_mesh(&mesh)?;
+
+    if let Some(material_handle) = mesh.material {
+        let texture_cache = data_cache
+            .texture_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+        texture_cache.get_material(material_handle).map_err(|err| {
+            map_cache_err(
+                "material",
+                material_handle.slot,
+                material_handle.generation,
+                err,
+            )
+        })?;
+
+        texture_cache
+            .get_loaded_material(material_handle)
+            .map_err(|err| {
+                map_cache_err(
+                    "material",
+                    material_handle.slot,
+                    material_handle.generation,
+                    err,
+                )
+            })?;
+    }
+
+    let vertices: Vec<Vertex> = mesh.vertices.iter().map(procedural_vertex_to_gpu).collect();
+    let has_uv1 = mesh.vertices.iter().any(|v| v.uv1 != glam::Vec2::ZERO);
+
+    let mesh_meta = MeshMeta {
+        name: mesh.name,
+        indices: mesh.indices,
+        vertices,
+        material_index: mesh.material,
+        has_uv1,
+    };
+
+    let mesh_id = {
+        let mut mesh_cache = data_cache
+            .mesh_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+        mesh_cache.add(mesh_meta)
+    };
+
+    let allocation_result = {
+        let mut mesh_cache = data_cache
+            .mesh_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+        mesh_cache.allocate_id(mesh_id, BufferPlacement::ContiguousPreferred, false)
+    };
+
+    match allocation_result {
+        LoadResult::Success(_) => Ok(mesh_id),
+        LoadResult::Failed(_) => {
+            let mut mesh_cache = data_cache
+                .mesh_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+            mesh_cache.deallocate_id(mesh_id);
+            Err(AssetError::Internal(
+                "mesh GPU allocation failed".to_string(),
+            ))
+        }
+    }
 }
 
 fn promote_model_gpu_allocations(
@@ -1125,56 +1116,87 @@ fn load_texture_gpu_ready_with_policy(
     policy_config: &AssetPolicyConfig,
     options: Option<TextureLoadOptions>,
 ) -> Result<TextureHandle, AssetError> {
-    let policy = asset_manifest::resolve_texture_policy_for_path(
-        &path,
-        policy_config.manifest_mode,
-        policy_config.allow_filename_heuristics,
-        options.as_ref(),
-    )?;
-
-    let image = image::open(&path).map_err(|err| map_texture_path_err(&path, err))?;
-    let format = if policy.is_srgb {
-        assimp_util::to_vk_format_srgb(&image)
-    } else {
-        assimp_util::to_vk_format(&image)
-    };
-
-    let mip_count = if policy.generate_mips {
-        resolve_texture_mip_count(image.width(), image.height(), None)
-    } else {
-        1
-    };
-
-    let mut texture_meta = TextureMeta {
-        payload: crate::data::gpu_data::TexturePayload::Raw {
-            bytes: image.as_bytes().to_vec(),
-            width: image.width(),
-            height: image.height(),
-            format,
-            mips_levels: mip_count,
-        },
-        uv_index: 0,
-        sampler_info: Some(policy.to_sampler_info(mip_count)),
-    };
-
-    texture_meta = crate::data::compression::apply_compression_policy(
-        texture_meta,
-        TextureSemantic::Generic,
+    let mut loaded = load_texture_batch_gpu_ready_with_policy(
+        vec![(path, options.unwrap_or_default())],
+        data_cache,
         policy_config,
-        &data_cache.supported_image_formats,
-    );
+    )?;
+    loaded
+        .pop()
+        .ok_or_else(|| AssetError::Internal("texture batch returned no handles".to_string()))
+}
 
-    let texture_id = {
+fn load_texture_batch_gpu_ready_with_policy(
+    requests: Vec<(PathBuf, TextureLoadOptions)>,
+    data_cache: Arc<VkDataCache>,
+    policy_config: &AssetPolicyConfig,
+) -> Result<Vec<TextureHandle>, AssetError> {
+    let mut texture_metas = Vec::with_capacity(requests.len());
+    for (path, options) in requests.iter() {
+        let policy = asset_manifest::resolve_texture_policy_for_path(
+            path,
+            policy_config.manifest_mode,
+            policy_config.allow_filename_heuristics,
+            Some(options),
+        )?;
+
+        let image = image::open(path).map_err(|err| map_texture_path_err(path, err))?;
+        let format = if policy.is_srgb {
+            assimp_util::to_vk_format_srgb(&image)
+        } else {
+            assimp_util::to_vk_format(&image)
+        };
+
+        let mip_count = if policy.generate_mips {
+            resolve_texture_mip_count(image.width(), image.height(), None)
+        } else {
+            1
+        };
+
+        let mut texture_meta = TextureMeta {
+            payload: crate::data::gpu_data::TexturePayload::Raw {
+                bytes: image.as_bytes().to_vec(),
+                width: image.width(),
+                height: image.height(),
+                format,
+                mips_levels: mip_count,
+            },
+            uv_index: 0,
+            sampler_info: Some(policy.to_sampler_info(mip_count)),
+        };
+
+        texture_meta = crate::data::compression::apply_compression_policy(
+            texture_meta,
+            TextureSemantic::Generic,
+            policy_config,
+            &data_cache.supported_image_formats,
+        );
+        texture_metas.push(texture_meta);
+    }
+
+    let texture_ids = {
         let mut texture_cache = data_cache
             .texture_cache
             .lock()
             .map_err(|_| poisoned_lock_err("texture_cache"))?;
-        texture_cache.add_texture(texture_meta)
+        texture_metas
+            .into_iter()
+            .map(|meta| texture_cache.add_texture(meta))
+            .collect::<Vec<_>>()
     };
 
-    if texture_id == TextureCache::DEFAULT_ERROR_TEX {
+    if let Some((bad_index, _)) = texture_ids
+        .iter()
+        .enumerate()
+        .find(|(_, id)| **id == TextureCache::DEFAULT_ERROR_TEX)
+    {
+        for id in texture_ids.iter().copied() {
+            if id != TextureCache::DEFAULT_ERROR_TEX {
+                let _ = rollback_texture_allocation(&data_cache, id);
+            }
+        }
         return Err(AssetError::Load {
-            path: Some(path),
+            path: Some(requests[bad_index].0.clone()),
             message: "texture conversion failed during cache import".to_string(),
         });
     }
@@ -1184,18 +1206,21 @@ fn load_texture_gpu_ready_with_policy(
             .texture_cache
             .lock()
             .map_err(|_| poisoned_lock_err("texture_cache"))?;
-        texture_cache.allocate_textures(vec![texture_id])
+        texture_cache.allocate_textures(texture_ids.clone())
     };
 
     if !did_allocate {
-        let _ = rollback_texture_allocation(&data_cache, texture_id);
+        for id in texture_ids.iter().copied() {
+            let _ = rollback_texture_allocation(&data_cache, id);
+        }
+        let first_path = requests.first().map(|(path, _)| path.clone());
         return Err(AssetError::Load {
-            path: Some(path),
+            path: first_path,
             message: "texture GPU allocation failed".to_string(),
         });
     }
 
-    Ok(texture_id)
+    Ok(texture_ids)
 }
 
 fn rollback_texture_allocation(

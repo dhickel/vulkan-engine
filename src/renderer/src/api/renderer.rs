@@ -92,6 +92,8 @@ impl Renderer {
             config.validation_layer,
             config.compile_shaders,
             vk_debug_mode,
+            config.preload_startup_scene,
+            config.visual_tuning,
         )
         .map_err(|err| map_vk_init_err(err, config.compile_shaders))?;
 

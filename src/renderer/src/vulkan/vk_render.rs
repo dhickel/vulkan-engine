@@ -62,6 +62,7 @@ use crate::data::data_cache::{
     VkShaderCache,
 };
 
+use crate::api::config::VisualTuning;
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
     AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
@@ -160,6 +161,7 @@ pub struct VkRenderCore {
     pub debug_ui: DebugUiManager,
     pub scene_data: SceneDataUBO,
     pub sky_box: SkyBox,
+    pub visual_tuning: VisualTuning,
     pub data_cache: Arc<VkDataCache>,
     pub brdf_lut: VkBrdfLut,
     pub main_deletion_queue: Vec<VkDeletable>,
@@ -985,6 +987,8 @@ impl VkRenderCore {
         with_validation: bool,
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
+        preload_startup_scene: bool,
+        visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         Self::compile_shaders_if_requested(compile_shaders)?;
 
@@ -1116,13 +1120,27 @@ impl VkRenderCore {
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             scene_data: SceneDataUBO::default(),
             sky_box: SkyBox::default(),
+            visual_tuning,
             data_cache,
             brdf_lut: brd_flut,
             resize_requested: false,
         };
 
-        let scene_world =
-            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?;
+        let scene_world = if preload_startup_scene {
+            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
+        } else {
+            let startup_loader = Self::run_startup_load_worker(render.data_cache.clone());
+            render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
+            let startup_result = startup_loader
+                .join()
+                .map_err(|_| "Startup loader thread panicked".to_string())?;
+            startup_result?;
+
+            render.ensure_environment_ready(default_env_id)?;
+            let mut scene = SceneWorld::new();
+            scene.set_skybox_env_id(default_env_id);
+            scene
+        };
         Ok((render, scene_world))
     }
 
@@ -1195,6 +1213,8 @@ impl VkRender {
         with_validation: bool,
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
+        preload_startup_scene: bool,
+        visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         let (core, scene_world) = VkRenderCore::new(
             window_state,
@@ -1203,6 +1223,8 @@ impl VkRender {
             with_validation,
             compile_shaders,
             debug_runtime_mode,
+            preload_startup_scene,
+            visual_tuning,
         )?;
 
         Ok((
@@ -1850,9 +1872,7 @@ impl VkRenderCore {
     /// Wait for GPU completion of this frame slot before reusing per-frame resources.
     unsafe fn wait_for_frame_fence(&self, frame_sync: VkFrameSync) {
         let fence = [frame_sync.render_fence];
-        self.device
-            .wait_for_fences(&fence, true, u64::MAX)
-            .unwrap();
+        self.device.wait_for_fences(&fence, true, u64::MAX).unwrap();
     }
 
     /// Reset frame fence immediately before submitting work that will signal it again.
@@ -1869,7 +1889,10 @@ impl VkRenderCore {
     }
 
     /// Acquire the next swapchain image index for this frame slot.
-    unsafe fn acquire_swapchain_image_index(&self, frame_sync: VkFrameSync) -> SwapchainAcquireResult {
+    unsafe fn acquire_swapchain_image_index(
+        &self,
+        frame_sync: VkFrameSync,
+    ) -> SwapchainAcquireResult {
         let acquire_info = vk::AcquireNextImageInfoKHR::default()
             .swapchain(self.swapchain.swapchain)
             .semaphore(frame_sync.swap_semaphore)
@@ -1887,7 +1910,10 @@ impl VkRenderCore {
                 SwapchainAcquireResult::Recreate
             }
             Err(err) => {
-                warn!("Swapchain acquire failed with {:?}; requesting swapchain rebuild", err);
+                warn!(
+                    "Swapchain acquire failed with {:?}; requesting swapchain rebuild",
+                    err
+                );
                 SwapchainAcquireResult::Recreate
             }
         }
@@ -2550,6 +2576,8 @@ impl VkRenderCore {
     fn update_skybox_push_constants(&mut self) {
         self.sky_box.skybox_consts.projection = self.scene_data.projection;
         self.sky_box.skybox_consts.model = self.scene_data.view;
+        self.sky_box.skybox_consts.exposure = self.visual_tuning.exposure;
+        self.sky_box.skybox_consts.gamma = self.visual_tuning.gamma;
     }
 
     /// Record one indexed skybox draw using pre-resolved descriptor and mesh handles.
@@ -2922,11 +2950,15 @@ impl VkRenderCore {
     fn build_frame_environment_ubo(
         base: &EnvironmentUBO,
         submission: &RenderSubmission,
+        visual_tuning: VisualTuning,
     ) -> EnvironmentUBO {
         use crate::data::gpu_data::{GpuPointLight, MAX_POINT_LIGHTS_GPU};
         use crate::scene::render_submission::MAX_POINT_LIGHTS_GPU as SUBMISSION_MAX;
 
         let mut env = *base;
+        env.exposure = visual_tuning.exposure;
+        env.gamma = visual_tuning.gamma;
+        env.ibl_ambient_scale = visual_tuning.ibl_ambient_scale;
         let light_count = submission.point_lights.len().min(MAX_POINT_LIGHTS_GPU);
         env.point_light_count = light_count as u32;
         env.point_lights = [GpuPointLight {
@@ -3148,7 +3180,8 @@ impl VkRenderCore {
             .copied()
             .unwrap_or_default();
 
-        let frame_env_ubo = Self::build_frame_environment_ubo(&base_env_ubo, submission);
+        let frame_env_ubo =
+            Self::build_frame_environment_ubo(&base_env_ubo, submission, self.visual_tuning);
 
         unsafe {
             self.record_geometry_draw_sequence(

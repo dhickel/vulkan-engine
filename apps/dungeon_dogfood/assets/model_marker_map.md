@@ -22,17 +22,17 @@ This gives deterministic variation without changing level token format.
 
 | Map Key | Path | Intended Placement | Scale | Orientation Policy | Shading Note |
 |---|---|---|---|---|---|
-| `prop_wall_torch` | `apps/dungeon_dogfood/assets/models/props/torch_sconce/scene.gltf` | wall-adjacent tiles | `1.0` | rotate to nearest wall normal | non-PBR fallback |
-| `prop_floor_crate` | `apps/dungeon_dogfood/assets/models/props/crate_a/wooden_crate_01_4k.gltf` | floor center tiles | `1.0` | keep default yaw | full PBR |
+| `prop_wall_torch` | `apps/dungeon_dogfood/assets/models/props/torch_sconce/scene.gltf` | marker tile center | `1.0` | use `yaw_degrees` from `content_pack.toml` (currently `0.0`) | non-PBR fallback |
+| `prop_floor_crate` | `apps/dungeon_dogfood/assets/models/props/crate_a/wooden_crate_01_4k.gltf` | marker tile center | `1.0` | use `yaw_degrees` from `content_pack.toml` (currently `0.0`) | full PBR |
 
 ## 4. Placement Rules
 
 - Base position: tile center (`tile_to_world + (0.5, 0.0, -0.5)`).
-- Apply Y offset only if model pivot requires grounding correction.
-- Wall-mounted props may add small wall offset (`~0.1m`) to avoid clipping.
+- Per-prop transform comes from `content_pack.toml` (`scale`, `yaw_degrees`, `y_offset`).
+- v1 does not apply automatic wall-normal alignment or wall offset.
 - If model load fails, log and continue (no panic, no hard abort).
 
 ## 5. Next Extension
 
-- Add machine-readable per-prop placement policy in `content_pack.toml`.
+- Add optional wall-normal placement policy fields in `content_pack.toml` for mounted props.
 - If v2 needs explicit authoring, expand token grammar to typed markers (example: `M1`, `M2`) and retain fallback to v1 modulo behavior for backwards compatibility.

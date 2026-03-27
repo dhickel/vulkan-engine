@@ -1478,10 +1478,7 @@ pub fn record_host_to_image_buffer(
             create_image(
                 device,
                 &allocator,
-                Extent3D::default()
-                    .height(height)
-                    .width(width)
-                    .depth(1),
+                Extent3D::default().height(height).width(width).depth(1),
                 format,
                 vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_DST

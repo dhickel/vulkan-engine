@@ -471,6 +471,31 @@ mod tests {
     }
 
     #[test]
+    fn submission_skips_top_level_orphans() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            SceneNode {
+                meshes: vec![MeshHandle::new(1, 0)],
+                ..SceneNode::default()
+            },
+        );
+        scene.set_root(root);
+
+        scene.add_node(
+            None,
+            SceneNode {
+                meshes: vec![MeshHandle::new(2, 0)],
+                ..SceneNode::default()
+            },
+        );
+
+        let submission = scene.build_submission();
+        assert_eq!(submission.draw_items.len(), 1);
+        assert_eq!(submission.draw_items[0].mesh_id, MeshHandle::new(1, 0));
+    }
+
+    #[test]
     fn parent_transform_update_recomputes_child_world_transform() {
         let mut scene = SceneWorld::new();
         let root = scene.add_node(
