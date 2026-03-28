@@ -1,4 +1,4 @@
- You wi//! # Assimp Model Ingest
+//! # Assimp Model Ingest
 //!
 //! Active model loading path: imports meshes/materials via Assimp, maps them to engine cache
 //! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
