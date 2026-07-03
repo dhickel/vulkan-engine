@@ -1,0 +1,102 @@
+{
+  "plan_slug": "2026-07-03-frame-capture-plan",
+  "status": "plan_created_implementation_pending",
+  "status_notes": "Planning suite created only. No implementation, compile checks, runtime captures, phase validation, or final quality review have run yet.",
+  "model_tooling_constraints": [],
+  "compile_checks": [
+    {
+      "command": "cargo check",
+      "status": "pending"
+    },
+    {
+      "command": "cargo check -p renderer",
+      "status": "pending"
+    },
+    {
+      "command": "cargo check -p renderer --examples",
+      "status": "pending"
+    },
+    {
+      "command": "cargo check -p input",
+      "status": "pending"
+    }
+  ],
+  "capture_matrix": [
+    {
+      "id": "demo_pbr",
+      "status": "pending"
+    },
+    {
+      "id": "demo_unlit",
+      "status": "pending"
+    },
+    {
+      "id": "demo_model_load",
+      "status": "pending"
+    },
+    {
+      "id": "demo_async_loading",
+      "status": "pending"
+    },
+    {
+      "id": "api_test",
+      "status": "pending"
+    },
+    {
+      "id": "api_test_env_indoor_4k",
+      "command_suffix": "--env src/renderer/src/assets/sky_maps/indoor_4k.exr",
+      "status": "pending"
+    }
+  ],
+  "n_frame_capture": {
+    "status": "pending"
+  },
+  "headless_matrix": {
+    "status": "pending",
+    "required": true
+  },
+  "manual_capture": {
+    "status": "pending",
+    "default_dir": ".internal-dev/debug_reports/manual-captures/"
+  },
+  "phase_validations": [
+    {
+      "phase": "phase-01",
+      "report": ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/phase-01-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "phase-02",
+      "report": ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/phase-02-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "phase-03",
+      "report": ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/phase-03-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "phase-04",
+      "report": ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/phase-04-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "phase-05",
+      "report": ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/phase-05-validation-report.md",
+      "status": "pending"
+    }
+  ],
+  "final_quality_review": {
+    "report": ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/final-quality-review.md",
+    "status": "pending"
+  },
+  "artifact_roots": [
+    ".internal-dev/debug_reports/",
+    ".internal-dev/plans/2026-07-03-frame-capture-plan/validation/"
+  ],
+  "superseded_artifacts": [],
+  "residual_risks": [
+    "No implementation has run yet.",
+    "True headless/offscreen architecture may trigger the phase 03 user-decision gate."
+  ]
+}
