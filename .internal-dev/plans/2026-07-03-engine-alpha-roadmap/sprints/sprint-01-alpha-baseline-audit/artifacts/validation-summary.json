@@ -2,15 +2,51 @@
   "sprint": "sprint-01-alpha-baseline-audit",
   "branch": "sprint/alpha-01-baseline-audit",
   "phase_01": {
-    "status": "passed_worker_scope_with_parent_owned_commit_push_email",
-    "head_at_start": "ce43008098fb19bad0cce8fd965f908870d8b988",
+    "status": "passed",
+    "validated_at": "2026-07-03",
     "scope": "process baseline audit",
+    "head_at_start": "ce43008098fb19bad0cce8fd965f908870d8b988",
+    "validated_commit": "e993e72f562deec9a93accbc5762d7c2d255b908",
+    "commit_subject": "Plan alpha baseline audit sprint",
+    "commit_note": "Prompt supplied e993e72f2dc3f147c3d989b2d0957ad1e51bdd92, but local branch and origin ref resolve to e993e72f562deec9a93accbc5762d7c2d255b908.",
+    "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+    "remote_evidence": {
+      "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+      "result": "e993e72f562deec9a93accbc5762d7c2d255b908 refs/heads/sprint/alpha-01-baseline-audit",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit",
+      "commit_url_corrected": "https://github.com/dhickel/vulkan-engine/commit/e993e72f562deec9a93accbc5762d7c2d255b908"
+    },
+    "email_report": {
+      "status": "parent_thread_reported_sent_not_independently_inspected",
+      "message_id": "<0100019f2660b232-0cefbb17-a4c7-4e29-9dd5-62169ec4a15f-000000@email.amazonses.com>",
+      "thread_id": "93d82759-27fb-44e5-8960-f68ab6986651"
+    },
     "changed_files": [
       ".internal-dev/AGENTS.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/advanced-planner-handoff.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TEMPLATE.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/00-specification-lock.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/01-current-state-analysis.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/02-target-design.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/README.md",
       ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/baseline-inventory.md",
       ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json",
-      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/phase-01-validation-report.md"
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/email-report-template.html",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/final-orchestration-plan.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/implementation-notes.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/validation-matrix.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/phase-01-validation-report.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/work-units/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-01-process-baseline-audit.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-02-docs-gap-report-repair.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-03-residual-register-validation-matrix.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-04-final-baseline-validation-closeout.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/tracks/DEEP-TRACKS.md"
     ],
+    "changed_file_scope": "All changed files in the pushed commit are under .internal-dev. No product code or public product docs changed.",
     "preserved_unrelated_dirty": [
       ".idea/engine.iml",
       ".reasonix/"
@@ -19,12 +55,22 @@
       {
         "command": "git status --short --branch",
         "result": "pass",
-        "summary": "On sprint/alpha-01-baseline-audit with only preserved .idea/engine.iml and .reasonix/ dirty state visible."
+        "summary": "On sprint/alpha-01-baseline-audit tracking origin/sprint/alpha-01-baseline-audit with only preserved .idea/engine.iml and .reasonix/ dirty state visible."
       },
       {
-        "command": "git diff -- .internal-dev/AGENTS.md .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit",
+        "command": "git show --stat --oneline --name-only e993e72f2dc3f147c3d989b2d0957ad1e51bdd92",
+        "result": "fail_expected_due_to_bad_supplied_hash",
+        "summary": "fatal: bad object e993e72f2dc3f147c3d989b2d0957ad1e51bdd92"
+      },
+      {
+        "command": "git show --stat --oneline --name-only e993e72f562deec9a93accbc5762d7c2d255b908",
         "result": "pass",
-        "summary": "No tracked diff output because .internal-dev is intentionally untracked/ignored."
+        "summary": "Resolved branch HEAD commit; 23 files changed, 2108 insertions, all under .internal-dev."
+      },
+      {
+        "command": "git diff --name-only codex/frame-capture-plan..sprint/alpha-01-baseline-audit -- ':!/.internal-dev'",
+        "result": "pass",
+        "summary": "No files outside .internal-dev changed in the branch diff."
       },
       {
         "command": "test -f .internal-dev/AGENTS.md",
@@ -35,22 +81,18 @@
         "command": "rg -n \"Source-of-Truth|Access Discipline|Directory Contract|Workflow Rules\" .internal-dev/AGENTS.md",
         "result": "pass",
         "summary": "Required process headings found at lines 11, 18, 25, and 37."
+      },
+      {
+        "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json >/dev/null",
+        "result": "pass",
+        "summary": "Evidence index is valid JSON before validator update."
       }
     ],
     "capture_validation": {
       "required": false,
       "ran": false,
+      "status": "not_required_docs_process_only",
       "reason": "Phase 01 changed process documentation and sprint artifacts only; no visual rendering behavior changed."
-    },
-    "commit": {
-      "required_by_directive": true,
-      "performed": false,
-      "reason": "User explicitly instructed this worker not to commit or push; main thread owns git commits/push and AgentMail."
-    },
-    "email_report": {
-      "required_by_directive": true,
-      "sent": false,
-      "reason": "User explicitly instructed that main thread owns AgentMail."
     }
   },
   "fully_validated": false
