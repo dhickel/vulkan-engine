@@ -16,7 +16,7 @@
     "phase_01_runtime_cli": "validator_passed_committed_pushed_reported",
     "phase_02_runtime_loading_loop": "validator_passed_committed_pushed_reported",
     "phase_03_dev_loop_docs": "validator_passed_committed_pushed_reported",
-    "phase_04_capture_closeout": "validator_passed_pending_commit_push_report"
+    "phase_04_capture_closeout": "validator_passed_committed_pushed_reported"
   },
   "required_commands": [
     {
@@ -303,6 +303,12 @@
         "hash": "127994ae",
         "subject": "Sprint 04 phase 03 dev loop docs",
         "url": "https://github.com/dhickel/vulkan-engine/commit/127994ae"
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "hash": "1b8ebd7c",
+        "subject": "Sprint 04 phase 04 capture closeout",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/1b8ebd7c"
       }
     ],
     "pushes": [
@@ -323,6 +329,12 @@
         "branch": "sprint/alpha-04-runtime-launcher",
         "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
         "pushed_through": "127994ae"
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "branch": "sprint/alpha-04-runtime-launcher",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
+        "pushed_through": "1b8ebd7c"
       }
     ],
     "email_reports": [
@@ -343,6 +355,12 @@
         "subject": "Sprint 04 Phase 03 Progress Report - Dev Loop Docs",
         "message_id": "<0100019f2786b0c3-5c37f71e-edfc-47fa-b5fb-eae970c5e246-000000@email.amazonses.com>",
         "thread_id": "16b22b17-c74f-452b-847d-9fecbd6e63ae"
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "subject": "Sprint 04 Phase 04 Final Report - Capture Closeout",
+        "message_id": "<0100019f278dedf8-0aa6f2b7-d646-494f-9c4f-fbd81961c8c8-000000@email.amazonses.com>",
+        "thread_id": "3f426dad-75c4-4c86-9550-76b6244ee923"
       }
     ]
   },
