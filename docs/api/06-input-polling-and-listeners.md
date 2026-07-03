@@ -18,6 +18,7 @@ Direct crate flow:
 - Event bridge: the renderer emits `InputActionEvent` after `InputSystem::dispatch_frame()` from the refreshed snapshot.
 - Action mapping: bind semantic actions (`"move.forward"`) to chords (keys/buttons + modifiers).
 - Input profiles: `ActionMap` load/save uses strict `version = 1` TOML with `trigger` + `modifiers`.
+- Camera controls: `Renderer::install_default_fps_input()` installs the built-in WASD/mouse-look layer; root-level `Camera`, `FPSController`, `OrbitCamera`, `Frustum`, `Ray`, and `Aabb` are compatibility math helpers, not the beginner app camera architecture.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -42,6 +43,8 @@ renderer.input_mut().add_layer(
     actions.into_layer(),
 );
 ```
+
+The default FPS input layer uses `W`, `A`, `S`, `D`, `Space`, `ShiftLeft`, and mouse motion. It updates the renderer-owned camera during frame preparation. Apps that only need a moving camera can install it and avoid the lower-level camera helper types. Apps that need editor orbit controls or picking math may still use the root-level compatibility helpers, but those helpers are outside `renderer::prelude`.
 
 Snippet Type: Real
 ```rust
@@ -109,6 +112,7 @@ consume = false
 - If a high-priority layer consumes events unexpectedly, lower layers will appear "dead".
 - `mouse_delta` and `just_*` states are transient and valid only for the current frame.
 - Profile load is strict: unsupported keys, malformed triggers, or unknown fields are hard errors.
+- The renderer facade does not auto-load an input profile path from `RendererConfig`; profile TOML is app-owned setup code.
 
 ## 7. Debugging Playbook
 - Step 1: verify `renderer.update_input(...)` is called for every event.

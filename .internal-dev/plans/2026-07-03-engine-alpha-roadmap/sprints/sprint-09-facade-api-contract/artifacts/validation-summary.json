@@ -17,7 +17,7 @@
     "phase_03": {
       "worker_report": "reports/phase-03-friction-hardening.md",
       "validator_report": "validation/phase-03-validation-report.md",
-      "status": "not_started"
+      "status": "validated"
     },
     "phase_04": {
       "worker_report": "reports/phase-04-final-docs-validation.md",
@@ -79,6 +79,48 @@
       "command": "rg -n \"prelude|stable public surface|advanced-interop|SceneWorld|CommandHistory|AnimationPlayer\" docs/api src/renderer/src src/renderer/examples src/renderer/tests",
       "result": "pass_for_phase_intent",
       "notes": "New prelude references are expected. No stale stable-public-surface phrase returned; compatibility and advanced hits remain labeled or internal."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "Passed after running cargo fmt for new integration test formatting."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 20 integration tests, and 5 ignored doctests passed."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_03",
+      "command": "rg -n \"TODO|pending|planned|not implemented|material override|input profile|capture_target|desktop screenshot|advanced-interop\" docs/api src/renderer/src src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "Expected hits include new material/input/capture wording, existing internal pending names, existing TODO comments in renderer internals, and existing advanced-interop docs/gates."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo test -p input",
+      "result": "pass",
+      "notes": "Conditional input-profile validation passed: 10 unit tests and 0 doctests."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "not_run",
+      "notes": "Skipped because no rustdoc or public re-export organization changed."
     }
   ],
   "capture": {

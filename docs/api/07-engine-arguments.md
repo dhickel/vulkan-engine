@@ -79,6 +79,8 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
 
 This command is intentionally rooted at `cargo run --`, not `cargo run -p renderer --example ...`, because the root binary is the data-driven project launcher.
 
+Use `--capture_target draw` for validation evidence when a change affects rendered output. Desktop screenshot capture does not count because it records the compositor/windowing environment rather than the renderer-owned draw target.
+
 ## 8. Cross-Module Links
 - Shared argument parser: `src/renderer/examples/common/mod.rs`
 - Example with environment arg usage: `src/renderer/examples/api_test.rs`

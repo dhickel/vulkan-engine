@@ -207,6 +207,7 @@ Material/settings persistence:
 
 - Package material assets should define reusable defaults by durable material ID.
 - Scene `materials` should store overrides keyed by stable override ID and refer back to a durable base material ID when one exists.
+- Node-level material override entries are string metadata preserved by `Scene::set_node_material_override`, scene save/load, and `SceneNodeSummary`. They are not live GPU material edits.
 - Editor/project settings belong in `engine.project.toml` when they are workspace defaults, and in scene `editor` metadata only when they are authored scene/editor state.
 - Renderer-only cache settings and runtime upload state must not be persisted as authored material/settings data.
 
@@ -311,6 +312,7 @@ The load service can run each tick but should remain logically separate from dra
 - `cancel_load` rejects tickets that are already running or completed.
 - Unloading reserved/default resources can fail (`ReservedHandle`).
 - Using stale handles after resource lifecycle changes produces stale/invalid errors.
+- Package manifest parse errors should be fixed at the TOML source. The facade keeps the manifest path in the error so beginners can distinguish schema mistakes from runtime upload failures.
 
 ## 7. Debugging Playbook
 - Step 1: print ticket IDs and status transitions with timestamps.

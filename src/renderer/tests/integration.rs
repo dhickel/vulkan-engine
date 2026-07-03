@@ -3,8 +3,10 @@
 
 use glam::{Mat4, Vec3};
 use renderer::{
-    Aabb, AssetKind, AssetRegistry, CommandHistory, Frustum, MeshHandle, OrbitCamera, PointLight,
-    Ray, Scene, SceneWorld, SetTransformCommand,
+    Aabb, AssetError, AssetKind, AssetRegistry, CaptureTarget, CommandHistory,
+    FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureSequence, Frustum, MeshHandle,
+    OrbitCamera, PointLight, Ray, RendererError, Scene, SceneError, SceneWorld,
+    SetTransformCommand,
 };
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,6 +67,49 @@ path = "models/crate.glb"
     let _asset_manager_type: Option<AssetManager<'_>> = None;
     let _renderer_type: Option<Renderer> = None;
     let _renderer_error_type: Option<RendererError> = None;
+}
+
+#[test]
+fn beginner_error_display_contract_is_actionable() {
+    let scene_err = RendererError::from(SceneError::MissingAssetId("node asset".to_string()));
+    assert_eq!(
+        scene_err.to_string(),
+        "scene error: missing durable asset id for node asset"
+    );
+
+    let asset_err = RendererError::from(AssetError::ManifestParse {
+        path: PathBuf::from("assets/core.package.toml"),
+        message: "missing field `format_version`".to_string(),
+    });
+    assert!(asset_err
+        .to_string()
+        .contains("asset error: manifest parse error for 'assets/core.package.toml'"));
+    assert!(asset_err.to_string().contains("format_version"));
+}
+
+#[test]
+fn capture_target_and_sequence_config_contracts_are_strict() {
+    assert_eq!(CaptureTarget::parse("draw"), Some(CaptureTarget::Draw));
+    assert_eq!(
+        CaptureTarget::parse("present"),
+        Some(CaptureTarget::Present)
+    );
+    assert_eq!(CaptureTarget::parse("desktop screenshot"), None);
+
+    let request = FrameCaptureRequest::new(CaptureTarget::Draw, "captures/frame.png");
+    assert_eq!(request.target, CaptureTarget::Draw);
+    assert_eq!(request.output_path, PathBuf::from("captures/frame.png"));
+
+    assert_eq!(
+        FrameCaptureSequence::new(CaptureTarget::Draw, "captures", 0, 0, 1)
+            .expect_err("zero interval is invalid"),
+        FrameCaptureConfigError::InvalidInterval
+    );
+    assert_eq!(
+        FrameCaptureSequence::new(CaptureTarget::Draw, "captures", 0, 1, 0)
+            .expect_err("zero count is invalid"),
+        FrameCaptureConfigError::InvalidCount
+    );
 }
 
 #[test]

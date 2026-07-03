@@ -115,6 +115,18 @@ pub struct DebugTimingRow {
 }
 ```
 
+## Frame Capture Evidence
+
+The frame-capture facade distinguishes `CaptureTarget::Present` from
+`CaptureTarget::Draw`. Present captures are useful for interactive debugging.
+Draw captures are the validation path when a change affects visible renderer
+output.
+
+For sprint evidence, use the root project launcher with `--headless
+--capture_target draw` and write artifacts under `.internal-dev/captures/`.
+A desktop screenshot is not accepted as visual proof because it is outside the
+renderer-owned capture path.
+
 ## See Also
 
 - [02-renderer.md](02-renderer.md) — debug API on the Renderer

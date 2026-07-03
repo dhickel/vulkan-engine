@@ -30,6 +30,15 @@ Environment persistence follows the same rule. Use `Scene::set_skybox_asset_refe
 
 Supported material/settings persistence for this phase is scene-local material override IDs attached to node material slots via `Scene::set_node_material_override`, plus node names and tag lists through the scene facade. The editor inspector currently exposes material slot `0` as an override ID string because that is the durable metadata the renderer can persist without mutating GPU material cache state. PBR factor editing, texture assignment, shader graphs, and material asset documents remain deferred.
 
+Current material override limits:
+
+- `Scene::set_node_material_override` validates that the slot and override ID are non-empty strings, then stores the mapping on the node.
+- `Scene::clear_node_material_override` removes one stored slot mapping.
+- `SceneNodeSummary::material_overrides` and scene save/load preserve those strings as durable metadata.
+- The renderer does not yet resolve these strings into live GPU material mutations. Treat them as editor/package identity that later material tooling can interpret.
+
+Common scene error messages are intentionally beginner-readable. A stale or invalid `SceneNodeId` names the slot and generation so callers can find old handles. Missing durable asset references report the context, for example `missing durable asset id for node asset`. Unsupported scene files report the found and expected format versions. Package/project/asset failures that happen while resolving scene content surface as `RendererError::Asset(...)`; scene graph shape failures surface as `RendererError::Scene(...)`.
+
 Required top-level fields:
 
 | Field | Type | Required | Contract |

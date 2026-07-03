@@ -21,6 +21,8 @@ pub struct RendererConfig {
 
 Defined at [`config.rs:127`](../../src/renderer/src/api/config.rs#L127). Use `RendererConfig::default()` for sensible defaults. Windowed apps should call `Renderer::new(config, window)` with `headless = false`; offscreen validation should call `Renderer::new_headless(config)` and render with `render_scene_headless(...)`.
 
+`RendererConfig::headless` is controlled by `Renderer::new_headless`. For visual validation, use the root project launcher with `--headless --capture_target draw`; a desktop screenshot is not renderer-owned proof. Windowed examples can still request present/draw captures through the frame-capture API, but Sprint validation evidence must use true headless draw capture when visible behavior changes.
+
 ### Shader Compilation
 
 When `compile_shaders: true`, the engine invokes `glslc` (or `glslangValidator`) to compile `.glsl` → `.spv` at startup. This requires the tools to be in `PATH`. Pre-compiled `.spv` files are included in the repository; use this only during shader development.
