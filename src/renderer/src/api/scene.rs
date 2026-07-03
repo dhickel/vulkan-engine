@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::api::assets::{AssetManager, EnvironmentSource};
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
+use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use crate::scene::command::{Command, CommandHistory, CommandResult};
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::{PointLightRefError, ReparentError, SceneNodeRefError, SceneWorld};
@@ -14,6 +15,22 @@ use crate::scene::SceneNodeId;
 use super::errors::SceneError;
 
 pub const SCENE_FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Default)]
+pub struct SceneValidationOptions {
+    pub known_asset_ids: Option<HashSet<String>>,
+}
+
+impl SceneValidationOptions {
+    pub fn with_known_asset_ids<I, S>(mut self, known_asset_ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.known_asset_ids = Some(known_asset_ids.into_iter().map(Into::into).collect());
+        self
+    }
+}
 
 /// Durable asset identity stored in editor scene files.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +262,39 @@ pub struct SceneNodeSummary {
     pub tags: Vec<String>,
     pub child_count: usize,
     pub mesh_count: usize,
+}
+
+pub fn validate_scene_str(content: &str) -> Result<(), ValidationError> {
+    validate_scene_str_with_options(content, &SceneValidationOptions::default())
+}
+
+pub fn validate_scene_str_with_options(
+    content: &str,
+    options: &SceneValidationOptions,
+) -> Result<(), ValidationError> {
+    validate_scene_content(content, None, options)
+}
+
+pub fn validate_scene_file(path: impl AsRef<Path>) -> Result<(), ValidationError> {
+    validate_scene_file_with_options(path, &SceneValidationOptions::default())
+}
+
+pub fn validate_scene_file_with_options(
+    path: impl AsRef<Path>,
+    options: &SceneValidationOptions,
+) -> Result<(), ValidationError> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "scene.io",
+                ValidationArea::Scene,
+                format!("failed to read scene file: {err}"),
+            )
+            .with_path(path),
+        )
+    })?;
+    validate_scene_content(&content, Some(path), options)
 }
 
 /// Public scene facade.
@@ -1310,10 +1360,20 @@ impl SerializedScene {
                 expected: SCENE_FORMAT_VERSION,
             });
         }
+        if self.scene_id.trim().is_empty() {
+            return Err(SceneError::DisconnectedGraph(
+                "scene_id must not be empty".to_string(),
+            ));
+        }
 
         let mut seen = HashSet::new();
         let mut index_by_id = HashMap::with_capacity(self.nodes.len());
         for (idx, node) in self.nodes.iter().enumerate() {
+            if node.id.trim().is_empty() {
+                return Err(SceneError::DisconnectedGraph(
+                    "node id must not be empty".to_string(),
+                ));
+            }
             if !seen.insert(node.id.clone()) {
                 return Err(SceneError::DuplicateSerializedNodeId(node.id.clone()));
             }
@@ -1426,6 +1486,251 @@ impl SerializedScene {
         visiting.remove(&node.id);
         visited.insert(node.id.clone());
         Ok(())
+    }
+}
+
+fn validate_scene_content(
+    content: &str,
+    path: Option<&Path>,
+    options: &SceneValidationOptions,
+) -> Result<(), ValidationError> {
+    let raw: serde_json::Value = serde_json::from_str(content).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "scene.parse",
+                ValidationArea::Scene,
+                format!("invalid scene JSON: {err}"),
+            )
+            .with_optional_path(path),
+        )
+    })?;
+
+    let mut diagnostics = Vec::new();
+    if raw.get("format_version").is_none() {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                "scene.missing_format_version",
+                ValidationArea::Scene,
+                "missing required format_version",
+            )
+            .with_optional_path(path),
+        );
+    }
+    collect_scene_runtime_handle_diagnostics(&raw, path, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ValidationError::new(diagnostics));
+    }
+
+    let serialized: SerializedScene = serde_json::from_value(raw).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "scene.parse",
+                ValidationArea::Scene,
+                format!("invalid scene schema: {err}"),
+            )
+            .with_optional_path(path),
+        )
+    })?;
+    serialized
+        .validate()
+        .map_err(|err| ValidationError::single(scene_error_to_diagnostic(err, path)))?;
+
+    if let Some(known_asset_ids) = &options.known_asset_ids {
+        let unknown = collect_unknown_scene_assets(&serialized, known_asset_ids, path);
+        if !unknown.is_empty() {
+            return Err(ValidationError::new(unknown));
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_scene_runtime_handle_diagnostics(
+    raw: &serde_json::Value,
+    path: Option<&Path>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(nodes) = raw.get("nodes").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+
+    for node in nodes {
+        let Some(node_obj) = node.as_object() else {
+            continue;
+        };
+        let node_id = node_obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if node_obj.get("id").is_some_and(is_json_runtime_handle_shape) {
+            diagnostics.push(
+                ValidationDiagnostic::new(
+                    "scene.runtime_handle_identity",
+                    ValidationArea::Node,
+                    "node id must be a stable string, not a runtime handle",
+                )
+                .with_optional_path(path),
+            );
+        }
+        for field in ["asset", "prefab"] {
+            if let Some(value) = node_obj.get(field) {
+                collect_json_handle_shapes(value, path, node_id.as_deref(), diagnostics);
+            }
+        }
+    }
+
+    if let Some(lights) = raw.get("lights").and_then(serde_json::Value::as_array) {
+        for light in lights {
+            let Some(light_obj) = light.as_object() else {
+                continue;
+            };
+            if light_obj
+                .get("id")
+                .is_some_and(is_json_runtime_handle_shape)
+            {
+                diagnostics.push(
+                    ValidationDiagnostic::new(
+                        "scene.runtime_handle_identity",
+                        ValidationArea::Scene,
+                        "light id must be a stable string, not a runtime handle",
+                    )
+                    .with_optional_path(path),
+                );
+            }
+        }
+    }
+
+    if let Some(environment) = raw.get("environment") {
+        collect_json_handle_shapes(environment, path, Some("environment"), diagnostics);
+    }
+}
+
+fn collect_unknown_scene_assets(
+    serialized: &SerializedScene,
+    known_asset_ids: &HashSet<String>,
+    path: Option<&Path>,
+) -> Vec<ValidationDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for node in &serialized.nodes {
+        let Some(asset_id) = node.asset.as_ref().and_then(|asset| asset.id.as_deref()) else {
+            continue;
+        };
+        if !known_asset_ids.contains(asset_id) {
+            diagnostics.push(
+                ValidationDiagnostic::new(
+                    "scene.unknown_asset_id",
+                    ValidationArea::Asset,
+                    format!("unknown durable asset id '{asset_id}'"),
+                )
+                .with_optional_path(path)
+                .with_durable_id(asset_id.to_string()),
+            );
+        }
+    }
+    if let Some(asset_id) = serialized
+        .environment
+        .as_ref()
+        .and_then(|environment| environment.asset.id.as_deref())
+    {
+        if !known_asset_ids.contains(asset_id) {
+            diagnostics.push(
+                ValidationDiagnostic::new(
+                    "scene.unknown_asset_id",
+                    ValidationArea::Environment,
+                    format!("unknown durable asset id '{asset_id}'"),
+                )
+                .with_optional_path(path)
+                .with_durable_id(asset_id.to_string()),
+            );
+        }
+    }
+    diagnostics
+}
+
+fn collect_json_handle_shapes(
+    value: &serde_json::Value,
+    path: Option<&Path>,
+    durable_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if is_json_runtime_handle_shape(value) || map.keys().any(|key| key.ends_with("_handle"))
+            {
+                let mut diagnostic = ValidationDiagnostic::new(
+                    "scene.runtime_handle_identity",
+                    ValidationArea::Scene,
+                    "runtime handles are not durable scene identity",
+                )
+                .with_optional_path(path);
+                if let Some(durable_id) = durable_id {
+                    diagnostic = diagnostic.with_durable_id(durable_id.to_string());
+                }
+                diagnostics.push(diagnostic);
+            }
+            for child in map.values() {
+                collect_json_handle_shapes(child, path, durable_id, diagnostics);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                collect_json_handle_shapes(child, path, durable_id, diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_json_runtime_handle_shape(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.contains_key("slot") && map.contains_key("generation"))
+}
+
+fn scene_error_to_diagnostic(err: SceneError, path: Option<&Path>) -> ValidationDiagnostic {
+    match err {
+        SceneError::UnsupportedSceneVersion { found, expected } => ValidationDiagnostic::new(
+            "scene.unsupported_version",
+            ValidationArea::Scene,
+            format!("unsupported scene format version {found}; expected {expected}"),
+        )
+        .with_optional_path(path),
+        SceneError::MissingAssetId(context) => ValidationDiagnostic::new(
+            "scene.missing_asset_id",
+            ValidationArea::Asset,
+            format!("missing durable asset id for {context}"),
+        )
+        .with_optional_path(path),
+        SceneError::BadSerializedParent { node_id, parent_id } => ValidationDiagnostic::new(
+            "scene.missing_parent",
+            ValidationArea::Node,
+            format!("scene node '{node_id}' references missing parent '{parent_id}'"),
+        )
+        .with_optional_path(path)
+        .with_durable_id(node_id),
+        SceneError::DuplicateSerializedNodeId(id) => ValidationDiagnostic::new(
+            "scene.duplicate_node_id",
+            ValidationArea::Node,
+            format!("duplicate serialized scene node id '{id}'"),
+        )
+        .with_optional_path(path)
+        .with_durable_id(id),
+        SceneError::DisconnectedGraph(message) => ValidationDiagnostic::new(
+            "scene.invalid_graph",
+            ValidationArea::Scene,
+            format!("invalid scene graph: {message}"),
+        )
+        .with_optional_path(path),
+        SceneError::CycleDetected => ValidationDiagnostic::new(
+            "scene.cycle",
+            ValidationArea::Scene,
+            "cycle detected in scene hierarchy",
+        )
+        .with_optional_path(path),
+        other => {
+            ValidationDiagnostic::new("scene.invalid", ValidationArea::Scene, other.to_string())
+                .with_optional_path(path)
+        }
     }
 }
 
@@ -1551,8 +1856,9 @@ fn default_editor_metadata() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        PointLight, Scene, SceneAssetLoader, SceneAssetReference, SceneFragment, SceneFragmentNode,
-        SceneFragmentNodeId, SerializedScene,
+        validate_scene_str, validate_scene_str_with_options, PointLight, Scene, SceneAssetLoader,
+        SceneAssetReference, SceneFragment, SceneFragmentNode, SceneFragmentNodeId,
+        SceneValidationOptions, SerializedScene,
     };
     use crate::api::errors::{AssetError, RendererError, SceneError};
     use crate::data::handles::{EnvironmentHandle, MeshHandle};
@@ -2055,6 +2361,148 @@ mod tests {
             }"#,
             |err| matches!(err, RendererError::Scene(SceneError::MissingAssetId(context)) if context.contains("node.asset")),
         );
+    }
+
+    #[test]
+    fn scene_validation_accepts_valid_schema_without_loading_assets() {
+        validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.valid",
+                "root_nodes": ["node.root"],
+                "nodes": [
+                    {"id":"node.root","parent":null,"name":"Root","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":{"id":"core.model.crate","path_hint":"models/crate.glb"}}
+                ],
+                "lights": [],
+                "environment": {"asset":{"id":"core.env.indoor","path_hint":"sky_maps/indoor.exr"}},
+                "editor": {}
+            }"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scene_validation_reports_missing_version_duplicate_nodes_and_missing_parent() {
+        let missing_version = validate_scene_str(
+            r#"{
+                "scene_id": "scene.no_version",
+                "root_nodes": [],
+                "nodes": [],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(missing_version
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.missing_format_version"));
+
+        let duplicate = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.duplicate",
+                "root_nodes": ["node.a"],
+                "nodes": [
+                    {"id":"node.a","parent":null,"name":"A","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null},
+                    {"id":"node.a","parent":null,"name":"A2","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null}
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(duplicate
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.duplicate_node_id"));
+
+        let missing_parent = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.bad_parent",
+                "root_nodes": ["node.child"],
+                "nodes": [
+                    {"id":"node.child","parent":"node.missing","name":"Child","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null}
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(missing_parent
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.missing_parent"));
+    }
+
+    #[test]
+    fn scene_validation_rejects_runtime_handle_identity_and_missing_asset_id() {
+        let runtime_handle = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.bad_handle",
+                "root_nodes": ["node.a"],
+                "nodes": [
+                    {"id":{"slot":4,"generation":2},"parent":null,"name":"A","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":{"mesh_handle":{"slot":7,"generation":1}}}
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(runtime_handle
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.runtime_handle_identity"));
+
+        let missing_asset_id = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.path_only",
+                "root_nodes": ["node.asset"],
+                "nodes": [
+                    {"id":"node.asset","parent":null,"name":"Asset","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":{"path_hint":"models/crate.glb"}}
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(missing_asset_id
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.missing_asset_id"));
+    }
+
+    #[test]
+    fn scene_validation_can_report_unknown_asset_ids_from_known_package_records() {
+        let err = validate_scene_str_with_options(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.unknown_asset",
+                "root_nodes": ["node.asset"],
+                "nodes": [
+                    {"id":"node.asset","parent":null,"name":"Asset","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":{"id":"core.model.missing","path_hint":"models/missing.glb"}}
+                ],
+                "lights": [],
+                "environment": {"asset":{"id":"core.env.known"}},
+                "editor": {}
+            }"#,
+            &SceneValidationOptions::default().with_known_asset_ids(["core.env.known"]),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.unknown_asset_id"
+                && diagnostic.durable_id.as_deref() == Some("core.model.missing")));
     }
 
     fn assert_scene_load_error(json: &str, predicate: impl FnOnce(RendererError) -> bool) {

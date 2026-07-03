@@ -5,6 +5,7 @@
 //! `Project` type for workspace-level configuration.
 
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
+use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Display, Formatter};
@@ -12,6 +13,36 @@ use std::path::{Component, Path, PathBuf};
 
 pub const PACKAGE_MANIFEST_FORMAT_VERSION: u32 = 1;
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Default)]
+pub struct PackageValidationOptions {
+    pub expected_package_id: Option<String>,
+    pub check_source_files: bool,
+}
+
+impl PackageValidationOptions {
+    pub fn with_expected_package_id(mut self, expected_package_id: impl Into<String>) -> Self {
+        self.expected_package_id = Some(expected_package_id.into());
+        self
+    }
+
+    pub fn check_source_files(mut self, check_source_files: bool) -> Self {
+        self.check_source_files = check_source_files;
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProjectValidationOptions {
+    pub check_files: bool,
+}
+
+impl ProjectValidationOptions {
+    pub fn check_files(mut self, check_files: bool) -> Self {
+        self.check_files = check_files;
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetRegistryError {
@@ -404,6 +435,533 @@ fn parse_package_manifest_records(
         .collect()
 }
 
+pub fn validate_package_manifest_str(
+    content: &str,
+    package_base_dir: impl AsRef<Path>,
+    options: &PackageValidationOptions,
+) -> Result<Vec<DurableAssetRecord>, ValidationError> {
+    validate_package_manifest_content(content, None, package_base_dir.as_ref(), options)
+}
+
+pub fn validate_package_manifest_file(
+    path: impl AsRef<Path>,
+    options: &PackageValidationOptions,
+) -> Result<Vec<DurableAssetRecord>, ValidationError> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "package.io",
+                ValidationArea::Package,
+                format!("failed to read package manifest: {err}"),
+            )
+            .with_path(path),
+        )
+    })?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new(""));
+    validate_package_manifest_content(&content, Some(path), base_dir, options)
+}
+
+fn validate_package_manifest_content(
+    content: &str,
+    manifest_path: Option<&Path>,
+    package_base_dir: &Path,
+    options: &PackageValidationOptions,
+) -> Result<Vec<DurableAssetRecord>, ValidationError> {
+    let raw: toml::Value = toml::from_str(content).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "package.parse",
+                ValidationArea::Package,
+                format!("invalid package TOML: {err}"),
+            )
+            .with_optional_path(manifest_path),
+        )
+    })?;
+    let mut diagnostics = Vec::new();
+    if raw.get("format_version").is_none() {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                "package.missing_format_version",
+                ValidationArea::Package,
+                "missing required format_version",
+            )
+            .with_optional_path(manifest_path),
+        );
+    }
+    collect_package_runtime_handle_diagnostics(&raw, manifest_path, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ValidationError::new(diagnostics));
+    }
+
+    let records = parse_package_manifest_records(
+        content,
+        manifest_path,
+        package_base_dir,
+        options.expected_package_id.as_deref(),
+    )
+    .map_err(|err| ValidationError::single(package_error_to_diagnostic(err, manifest_path)))?;
+
+    if options.check_source_files {
+        let missing: Vec<_> = records
+            .iter()
+            .filter(|record| !record.source_path.exists())
+            .map(|record| {
+                ValidationDiagnostic::new(
+                    "asset.missing_source_path",
+                    ValidationArea::Asset,
+                    format!(
+                        "missing asset source path '{}'",
+                        record.source_path.display()
+                    ),
+                )
+                .with_optional_path(manifest_path)
+                .with_durable_id(record.asset_id.clone())
+            })
+            .collect();
+        if !missing.is_empty() {
+            return Err(ValidationError::new(missing));
+        }
+    }
+
+    Ok(records)
+}
+
+pub fn validate_project_str(
+    content: &str,
+    project_root: impl AsRef<Path>,
+    options: &ProjectValidationOptions,
+) -> Result<Project, ValidationError> {
+    validate_project_content(content, None, project_root.as_ref(), options)
+}
+
+pub fn validate_project_file(
+    path: impl AsRef<Path>,
+    options: &ProjectValidationOptions,
+) -> Result<Project, ValidationError> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "project.io",
+                ValidationArea::Project,
+                format!("failed to read project file: {err}"),
+            )
+            .with_path(path),
+        )
+    })?;
+    let project_root = path.parent().unwrap_or_else(|| Path::new(""));
+    validate_project_content(&content, Some(path), project_root, options)
+}
+
+fn validate_project_content(
+    content: &str,
+    project_path: Option<&Path>,
+    project_root: &Path,
+    options: &ProjectValidationOptions,
+) -> Result<Project, ValidationError> {
+    let raw: toml::Value = toml::from_str(content).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "project.parse",
+                ValidationArea::Project,
+                format!("invalid project TOML: {err}"),
+            )
+            .with_optional_path(project_path),
+        )
+    })?;
+    let mut diagnostics = Vec::new();
+    for field in [
+        "format_version",
+        "project_id",
+        "name",
+        "asset_root",
+        "packages",
+        "settings",
+    ] {
+        if raw.get(field).is_none() {
+            diagnostics.push(
+                ValidationDiagnostic::new(
+                    format!("project.missing_{field}"),
+                    ValidationArea::Project,
+                    format!("missing required {field}"),
+                )
+                .with_optional_path(project_path),
+            );
+        }
+    }
+    if !diagnostics.is_empty() {
+        return Err(ValidationError::new(diagnostics));
+    }
+
+    let project: Project = toml::from_str(content).map_err(|err| {
+        ValidationError::single(
+            ValidationDiagnostic::new(
+                "project.parse",
+                ValidationArea::Project,
+                format!("invalid project TOML: {err}"),
+            )
+            .with_optional_path(project_path),
+        )
+    })?;
+
+    validate_project_value(&project, project_path, project_root, options)
+}
+
+fn validate_project_value(
+    project: &Project,
+    project_path: Option<&Path>,
+    project_root: &Path,
+    options: &ProjectValidationOptions,
+) -> Result<Project, ValidationError> {
+    let mut diagnostics = Vec::new();
+
+    if project.format_version != PROJECT_FORMAT_VERSION {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                "project.unsupported_version",
+                ValidationArea::Project,
+                format!(
+                    "unsupported project format version {}; expected {}",
+                    project.format_version, PROJECT_FORMAT_VERSION
+                ),
+            )
+            .with_optional_path(project_path),
+        );
+    }
+    if project.project_id.trim().is_empty() {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                "project.empty_project_id",
+                ValidationArea::Project,
+                "project_id must not be empty",
+            )
+            .with_optional_path(project_path),
+        );
+    }
+    if project.name.trim().is_empty() {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                "project.empty_name",
+                ValidationArea::Project,
+                "name must not be empty",
+            )
+            .with_optional_path(project_path),
+        );
+    }
+    push_invalid_project_path(
+        &mut diagnostics,
+        project_path,
+        "asset_root",
+        &project.asset_root,
+    );
+    if let Some(scene) = &project.startup_scene {
+        push_invalid_project_path(&mut diagnostics, project_path, "startup_scene", scene);
+    }
+    if let Some(environment) = &project.default_environment {
+        push_invalid_project_path(
+            &mut diagnostics,
+            project_path,
+            "default_environment",
+            environment,
+        );
+    }
+    if project.settings.window_width == 0 || project.settings.window_height == 0 {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                "project.invalid_window_size",
+                ValidationArea::Project,
+                "window_width and window_height must be greater than zero",
+            )
+            .with_optional_path(project_path),
+        );
+    }
+
+    let mut enabled_package_ids = HashSet::new();
+    let mut enabled_asset_ids = HashSet::new();
+    for package in &project.packages {
+        if package.package_id.trim().is_empty() {
+            diagnostics.push(
+                ValidationDiagnostic::new(
+                    "project.empty_package_id",
+                    ValidationArea::Package,
+                    "package_id must not be empty",
+                )
+                .with_optional_path(project_path),
+            );
+        }
+        push_invalid_project_path(
+            &mut diagnostics,
+            project_path,
+            "package manifest",
+            &package.manifest,
+        );
+        if !package.enabled {
+            continue;
+        }
+        if !enabled_package_ids.insert(package.package_id.clone()) {
+            diagnostics.push(
+                ValidationDiagnostic::new(
+                    "project.duplicate_enabled_package_id",
+                    ValidationArea::Package,
+                    format!("duplicate enabled package_id '{}'", package.package_id),
+                )
+                .with_optional_path(project_path)
+                .with_durable_id(package.package_id.clone()),
+            );
+        }
+
+        if options.check_files && project_path.is_some() {
+            let manifest_path = project_root.join(&package.manifest);
+            if !manifest_path.exists() {
+                diagnostics.push(
+                    ValidationDiagnostic::new(
+                        "project.missing_package_manifest",
+                        ValidationArea::Package,
+                        format!("missing package manifest '{}'", manifest_path.display()),
+                    )
+                    .with_optional_path(project_path)
+                    .with_durable_id(package.package_id.clone()),
+                );
+                continue;
+            }
+            let package_options = PackageValidationOptions::default()
+                .with_expected_package_id(package.package_id.clone());
+            match validate_package_manifest_file(&manifest_path, &package_options) {
+                Ok(records) => {
+                    for record in records {
+                        if !enabled_asset_ids.insert(record.asset_id.clone()) {
+                            diagnostics.push(
+                                ValidationDiagnostic::new(
+                                    "project.duplicate_enabled_asset_id",
+                                    ValidationArea::Asset,
+                                    format!("duplicate enabled asset id '{}'", record.asset_id),
+                                )
+                                .with_path(&manifest_path)
+                                .with_durable_id(record.asset_id),
+                            );
+                        }
+                    }
+                }
+                Err(err) => diagnostics.extend(err.into_diagnostics()),
+            }
+        }
+    }
+
+    if options.check_files {
+        if let Some(scene) = &project.startup_scene {
+            let scene_path = project_root.join(scene);
+            if !scene_path.exists() {
+                diagnostics.push(
+                    ValidationDiagnostic::new(
+                        "project.missing_startup_scene",
+                        ValidationArea::Scene,
+                        format!("missing startup_scene '{}'", scene_path.display()),
+                    )
+                    .with_optional_path(project_path),
+                );
+            }
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(project.clone())
+    } else {
+        Err(ValidationError::new(diagnostics))
+    }
+}
+
+fn push_invalid_project_path(
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+    project_path: Option<&Path>,
+    field: &str,
+    path: &Path,
+) {
+    if path.as_os_str().is_empty() || normalize_project_relative_path(path).is_none() {
+        diagnostics.push(
+            ValidationDiagnostic::new(
+                format!("project.invalid_{}", field.replace(' ', "_")),
+                ValidationArea::Project,
+                format!("{field} must be a non-empty project-relative path"),
+            )
+            .with_optional_path(project_path),
+        );
+    }
+}
+
+fn normalize_project_relative_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return None;
+    }
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
+}
+
+fn collect_package_runtime_handle_diagnostics(
+    raw: &toml::Value,
+    manifest_path: Option<&Path>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(assets) = raw.get("assets").and_then(toml::Value::as_array) else {
+        return;
+    };
+    for asset in assets {
+        let Some(table) = asset.as_table() else {
+            continue;
+        };
+        let id = table.get("id").and_then(toml::Value::as_str);
+        for (key, value) in table {
+            collect_toml_runtime_handle_shapes(value, key, manifest_path, id, diagnostics);
+        }
+    }
+}
+
+fn collect_toml_runtime_handle_shapes(
+    value: &toml::Value,
+    field_path: &str,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match value {
+        toml::Value::Table(table) => {
+            if field_path.ends_with("_handle") || is_toml_runtime_handle_shape(value) {
+                let mut diagnostic = ValidationDiagnostic::new(
+                    "asset.runtime_handle_identity",
+                    ValidationArea::Asset,
+                    format!("runtime handle field '{field_path}' is not durable identity"),
+                )
+                .with_optional_path(manifest_path);
+                if let Some(asset_id) = asset_id {
+                    diagnostic = diagnostic.with_durable_id(asset_id);
+                }
+                diagnostics.push(diagnostic);
+            }
+            for (key, child) in table {
+                let child_path = format!("{field_path}.{key}");
+                collect_toml_runtime_handle_shapes(
+                    child,
+                    &child_path,
+                    manifest_path,
+                    asset_id,
+                    diagnostics,
+                );
+            }
+        }
+        toml::Value::Array(values) => {
+            for (index, child) in values.iter().enumerate() {
+                let child_path = format!("{field_path}[{index}]");
+                collect_toml_runtime_handle_shapes(
+                    child,
+                    &child_path,
+                    manifest_path,
+                    asset_id,
+                    diagnostics,
+                );
+            }
+        }
+        _ => {
+            if field_path.ends_with("_handle") {
+                let mut diagnostic = ValidationDiagnostic::new(
+                    "asset.runtime_handle_identity",
+                    ValidationArea::Asset,
+                    format!("runtime handle field '{field_path}' is not durable identity"),
+                )
+                .with_optional_path(manifest_path);
+                if let Some(asset_id) = asset_id {
+                    diagnostic = diagnostic.with_durable_id(asset_id);
+                }
+                diagnostics.push(diagnostic);
+            }
+        }
+    }
+}
+
+fn is_toml_runtime_handle_shape(value: &toml::Value) -> bool {
+    value
+        .as_table()
+        .is_some_and(|table| table.contains_key("slot") && table.contains_key("generation"))
+}
+
+fn package_error_to_diagnostic(
+    err: AssetRegistryError,
+    manifest_path: Option<&Path>,
+) -> ValidationDiagnostic {
+    match err {
+        AssetRegistryError::Io { path, message } => ValidationDiagnostic::new(
+            "package.io",
+            ValidationArea::Package,
+            format!("failed to read package manifest: {message}"),
+        )
+        .with_path(path),
+        AssetRegistryError::Parse { path, message } => ValidationDiagnostic::new(
+            "package.parse",
+            ValidationArea::Package,
+            format!("invalid package TOML: {message}"),
+        )
+        .with_optional_path(path.as_deref().or(manifest_path)),
+        AssetRegistryError::UnsupportedVersion { found, expected } => ValidationDiagnostic::new(
+            "package.unsupported_version",
+            ValidationArea::Package,
+            format!("unsupported package format version {found}; expected {expected}"),
+        )
+        .with_optional_path(manifest_path),
+        AssetRegistryError::PackageIdMismatch { expected, found } => ValidationDiagnostic::new(
+            "package.id_mismatch",
+            ValidationArea::Package,
+            format!("package_id mismatch: expected '{expected}', found '{found}'"),
+        )
+        .with_optional_path(manifest_path)
+        .with_durable_id(found),
+        AssetRegistryError::DuplicateAssetId(id) => ValidationDiagnostic::new(
+            "package.duplicate_asset_id",
+            ValidationArea::Asset,
+            format!("duplicate durable asset id '{id}'"),
+        )
+        .with_optional_path(manifest_path)
+        .with_durable_id(id),
+        AssetRegistryError::InvalidAssetId(id) => ValidationDiagnostic::new(
+            "asset.invalid_id",
+            ValidationArea::Asset,
+            format!("invalid durable asset id '{id}'"),
+        )
+        .with_optional_path(manifest_path)
+        .with_durable_id(id),
+        AssetRegistryError::InvalidAssetPath { asset_id, path } => ValidationDiagnostic::new(
+            "asset.invalid_path",
+            ValidationArea::Asset,
+            format!("invalid asset path '{}'", path.display()),
+        )
+        .with_optional_path(manifest_path)
+        .with_durable_id(asset_id),
+        AssetRegistryError::UnsupportedAssetKind(kind) => ValidationDiagnostic::new(
+            "asset.unsupported_kind",
+            ValidationArea::Asset,
+            format!("unsupported asset kind '{kind}'"),
+        )
+        .with_optional_path(manifest_path),
+        AssetRegistryError::MissingAssetId(id) => ValidationDiagnostic::new(
+            "asset.unknown_id",
+            ValidationArea::Asset,
+            format!("unknown durable asset id '{id}'"),
+        )
+        .with_optional_path(manifest_path)
+        .with_durable_id(id),
+    }
+}
+
 fn validate_package_manifest(
     manifest: &PackageManifest,
     expected_package_id: Option<&str>,
@@ -619,9 +1177,11 @@ fn default_package_enabled() -> bool {
 impl Project {
     /// Load a project from a TOML file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| format!("failed to read project file: {e}"))?;
-        toml::from_str(&content).map_err(|e| format!("invalid project TOML: {e}"))
+        validate_project_file(
+            path,
+            &ProjectValidationOptions::default().check_files(false),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// Save the project to a TOML file.
@@ -630,5 +1190,377 @@ impl Project {
             toml::to_string_pretty(self).map_err(|e| format!("serialization failed: {e}"))?;
         std::fs::write(path.as_ref(), content)
             .map_err(|e| format!("failed to write project file: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
+        PackageValidationOptions, ProjectValidationOptions,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn asset_registry_validate_package_accepts_valid_manifest() {
+        let dir = unique_temp_dir("valid-package");
+        fs::create_dir_all(dir.join("models")).unwrap();
+        fs::write(dir.join("models/crate.glb"), b"placeholder").unwrap();
+        let manifest = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+"#;
+
+        let records = validate_package_manifest_str(
+            manifest,
+            &dir,
+            &PackageValidationOptions::default().check_source_files(true),
+        )
+        .unwrap();
+
+        assert_eq!(records[0].asset_id, "core.model.crate");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn asset_registry_validate_package_reports_missing_source_files() {
+        let dir = unique_temp_dir("missing-asset");
+        fs::create_dir_all(&dir).unwrap();
+        let manifest_path = dir.join("core.package.toml");
+        fs::write(
+            &manifest_path,
+            r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.missing"
+kind = "model"
+path = "models/missing.glb"
+"#,
+        )
+        .unwrap();
+
+        let err = validate_package_manifest_file(
+            &manifest_path,
+            &PackageValidationOptions::default().check_source_files(true),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "asset.missing_source_path"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn asset_registry_validate_package_rejects_runtime_handle_identity() {
+        let manifest = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.model.crate"
+kind = "model"
+path = "models/crate.glb"
+mesh_handle = { slot = 3, generation = 1 }
+"#;
+
+        let err =
+            validate_package_manifest_str(manifest, ".", &PackageValidationOptions::default())
+                .unwrap_err();
+
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "asset.runtime_handle_identity"));
+    }
+
+    #[test]
+    fn asset_registry_validate_package_rejects_nested_runtime_handle_identity() {
+        let manifest = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.model.crate"
+kind = "model"
+path = "models/crate.glb"
+
+[assets.metadata.import]
+mesh_handle = { slot = 3, generation = 1 }
+"#;
+
+        let err =
+            validate_package_manifest_str(manifest, ".", &PackageValidationOptions::default())
+                .unwrap_err();
+
+        assert_has_code(&err, "asset.runtime_handle_identity");
+    }
+
+    #[test]
+    fn asset_registry_validate_package_reports_locked_invalid_cases() {
+        let missing_version = r#"
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+"#;
+        let err = validate_package_manifest_str(
+            missing_version,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "package.missing_format_version");
+
+        let unsupported_version = r#"
+format_version = 999
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+"#;
+        let err = validate_package_manifest_str(
+            unsupported_version,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "package.unsupported_version");
+
+        let duplicate_ids = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate-copy.glb"
+"#;
+        let err =
+            validate_package_manifest_str(duplicate_ids, ".", &PackageValidationOptions::default())
+                .unwrap_err();
+        assert_has_code(&err, "package.duplicate_asset_id");
+
+        let path_shaped_id = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "models/crate.glb"
+kind = "model"
+path = "models/crate.glb"
+"#;
+        let err = validate_package_manifest_str(
+            path_shaped_id,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "asset.invalid_id");
+
+        let invalid_asset_path = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "../crate.glb"
+"#;
+        let err = validate_package_manifest_str(
+            invalid_asset_path,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "asset.invalid_path");
+
+        let id_mismatch = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+"#;
+        let err = validate_package_manifest_str(
+            id_mismatch,
+            ".",
+            &PackageValidationOptions::default().with_expected_package_id("expected"),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "package.id_mismatch");
+    }
+
+    #[test]
+    fn asset_registry_validate_project_checks_files_and_enabled_package_ids() {
+        let dir = unique_temp_dir("project-validation");
+        fs::create_dir_all(dir.join("scenes")).unwrap();
+        fs::write(dir.join("scenes/start.engine.scene.json"), "{}").unwrap();
+        let project_path = dir.join("engine.project.toml");
+        fs::write(
+            &project_path,
+            r#"
+format_version = 1
+project_id = "project.sample"
+name = "Sample"
+project_version = "0.1.0"
+asset_root = "assets"
+startup_scene = "scenes/start.engine.scene.json"
+
+[[packages]]
+package_id = "core"
+manifest = "assets/core.package.toml"
+enabled = true
+
+[[packages]]
+package_id = "core"
+manifest = "assets/missing.package.toml"
+enabled = true
+
+[settings]
+window_width = 1280
+window_height = 720
+fullscreen = false
+vsync = true
+"#,
+        )
+        .unwrap();
+
+        let err = validate_project_file(
+            &project_path,
+            &ProjectValidationOptions::default().check_files(true),
+        )
+        .unwrap_err();
+
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "project.duplicate_enabled_package_id"));
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "project.missing_package_manifest"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn asset_registry_validate_project_rejects_invalid_paths_and_settings() {
+        let project = r#"
+format_version = 1
+project_id = "project.bad"
+name = "Bad"
+asset_root = "../assets"
+startup_scene = "/tmp/start.engine.scene.json"
+
+[[packages]]
+package_id = "core"
+manifest = "../core.package.toml"
+enabled = true
+
+[settings]
+window_width = 0
+window_height = 720
+fullscreen = false
+vsync = true
+"#;
+
+        let err = super::validate_project_str(project, ".", &ProjectValidationOptions::default())
+            .unwrap_err();
+
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "project.invalid_asset_root"));
+        assert!(err
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "project.invalid_window_size"));
+    }
+
+    #[test]
+    fn asset_registry_validate_project_reports_missing_startup_scene() {
+        let dir = unique_temp_dir("missing-startup-scene");
+        fs::create_dir_all(&dir).unwrap();
+        let project_path = dir.join("engine.project.toml");
+        fs::write(
+            &project_path,
+            r#"
+format_version = 1
+project_id = "project.sample"
+name = "Sample"
+project_version = "0.1.0"
+asset_root = "assets"
+startup_scene = "scenes/missing.engine.scene.json"
+packages = []
+
+[settings]
+window_width = 1280
+window_height = 720
+fullscreen = false
+vsync = true
+"#,
+        )
+        .unwrap();
+
+        let err = validate_project_file(
+            &project_path,
+            &ProjectValidationOptions::default().check_files(true),
+        )
+        .unwrap_err();
+
+        assert_has_code(&err, "project.missing_startup_scene");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn assert_has_code(err: &crate::data::validation::ValidationError, code: &str) {
+        assert!(
+            err.diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == code),
+            "expected diagnostic code {code}, got {:?}",
+            err.diagnostics()
+        );
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "renderer-asset-registry-{label}-{}-{nanos}",
+            std::process::id()
+        ))
     }
 }

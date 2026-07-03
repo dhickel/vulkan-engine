@@ -13,10 +13,13 @@ pub use crate::data::asset_manifest::{
     FilterMode, ResolvedTexturePolicy, SamplerOverride, TextureLoadOptions, WrapMode,
 };
 pub use crate::data::asset_registry::{
-    parse_package_manifest, AssetKind, AssetRegistry, AssetRegistryError, DurableAssetRecord,
-    PackageAssetRecord, PackageManifest, Project, ProjectPackage, ProjectSettings,
+    parse_package_manifest, validate_package_manifest_file, validate_package_manifest_str,
+    validate_project_file, validate_project_str, AssetKind, AssetRegistry, AssetRegistryError,
+    DurableAssetRecord, PackageAssetRecord, PackageManifest, PackageValidationOptions, Project,
+    ProjectPackage, ProjectSettings, ProjectValidationOptions,
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
+pub use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 pub use crate::debug_ui::{
     AppUiCallback, DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,
     DebugViewDescriptor, DebugViewId,
@@ -46,6 +49,8 @@ pub use input::{
 pub use loading::{LoadStatus, LoadTicket};
 pub use renderer::{EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer};
 pub use scene::{
-    PointLight, PointLightId, Scene, SceneAssetReference, SceneFragment, SceneFragmentMount,
-    SceneFragmentNode, SceneFragmentNodeId, SceneNodeSummary,
+    validate_scene_file, validate_scene_file_with_options, validate_scene_str,
+    validate_scene_str_with_options, PointLight, PointLightId, Scene, SceneAssetReference,
+    SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeSummary,
+    SceneValidationOptions,
 };

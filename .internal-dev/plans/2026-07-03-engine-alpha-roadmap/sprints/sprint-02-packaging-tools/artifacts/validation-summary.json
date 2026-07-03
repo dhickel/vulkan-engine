@@ -1,0 +1,55 @@
+{
+  "sprint": "Sprint 02 - Asset package authoring and validation tools",
+  "status": "phase_01_passed_local_validation_pending_commit",
+  "branch": "sprint/alpha-02-packaging-tools",
+  "capture_decision": "not_required_cli_schema_only",
+  "phases": [
+    {
+      "phase": "01",
+      "name": "Shared validation contract and schema hardening",
+      "status": "passed_local_validation_pending_commit",
+      "capture_decision": "not_required_cli_schema_only",
+      "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-01-validation-report.md",
+      "validator_agent": "019f26e0-1880-7b10-8e44-bf39a0002151",
+      "remediation": [
+        "Added recursive package runtime-handle detection.",
+        "Expanded package/project invalid-case tests."
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "phase": "01",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p renderer asset_registry",
+      "result": "passed: 8 renderer asset registry tests"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p renderer scene",
+      "result": "passed: 36 lib scene-filtered tests and 2 integration scene-filtered tests"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p renderer",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p renderer --examples",
+      "result": "passed with existing renderer warnings"
+    }
+  ],
+  "commits": [],
+  "pushes": [],
+  "agentmail_reports": [],
+  "residuals": [
+    "Sprint 01 remains blocked on changelog timing confirmation and must not be closed by Sprint 02."
+  ],
+  "tooling_constraints": [],
+  "final_status_rule": "Do not set fully_validated unless all required validators, checks, pushes, emails, and capture decisions pass with no residuals."
+}

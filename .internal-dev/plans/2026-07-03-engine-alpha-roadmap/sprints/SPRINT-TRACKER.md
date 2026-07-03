@@ -17,7 +17,7 @@ Status values:
 | Sprint | Status | Target | Primary Gate | Notes |
 |---|---|---|---|---|
 | 01 | blocked | Alpha baseline audit and process repair | Current docs/process match live repo, stale reports retired | Phase 04 compile/test baseline passed and stale headless docs were remediated; closeout is blocked on changelog timing confirmation and parent-owned commit/push/email gates. Plan suite: `sprints/sprint-01-alpha-baseline-audit/`. Execute on `sprint/alpha-01-baseline-audit`. |
-| 02 | proposed | Asset package authoring and validation tools | Rust CLI validates/authors package/project/scene fixtures and sample project | Recommended Rust tool, not Python. |
+| 02 | executing | Asset package authoring and validation tools | Rust CLI validates/authors package/project/scene fixtures and sample project | Advanced plan suite: `sprints/sprint-02-packaging-tools/`. Execute on `sprint/alpha-02-packaging-tools`. Sprint 01 remains blocked on changelog timing confirmation and must not be closed by Sprint 02. |
 | 03 | proposed | Editor packaged-asset placement hardening | Packaged assets place, select, save, reload, and visually prove | Builds on existing `apps/editor`. |
 | 04 | proposed | Runtime project launcher and application dev loop | Sample project runs outside editor through documented app path | Decide root binary/app template/hot loop role. |
 | 05 | proposed | Event system and application lifecycle | Apps/tools can subscribe to lifecycle/input/scene/asset/physics/audio events | Needed before scripts and gameplay grow. |
@@ -32,7 +32,7 @@ Status values:
 
 ## Active Sprint Pointer
 
-Current active sprint: 01 - Alpha baseline audit and process repair.
+Current active sprint: 02 - Asset package authoring and validation tools.
 
 When starting a sprint:
 
