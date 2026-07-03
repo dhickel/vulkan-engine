@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+engine_events = { path = "../events" }
 rhai = "1"
 log = "0.4"

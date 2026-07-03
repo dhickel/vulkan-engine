@@ -42,7 +42,7 @@ Typed but deferred until later system sprints:
 | `AssetEvent::AssetLoading/Ready/Failed/Invalidated` | Contract exists; package load events are wired in the root runtime, broad per-asset async emission is deferred. |
 | `PhysicsEvent` | Contract exists. The `physics` crate can translate ray hits and contact records into `EngineEvent::Physics` values and emit contact records into an `EventBus`; renderer/root-runtime live physics scene loading is deferred. |
 | `AudioEvent` | Contract exists. `apps/dungeon_dogfood` demonstrates app-owned opt-in audio event emission; root-runtime and editor-wide audio emission are deferred. |
-| `ScriptingEvent` | Contract exists; scripting runtime and Rust hot-reload are later roadmap work. |
+| `ScriptingEvent` | Contract exists. The experimental `scripting` crate can return script-emitted events and script errors with durable `ScriptId` context; app/runtime code is responsible for emitting those values at safe boundaries. Production scripting runtime scheduling and Rust hot-reload are deferred. |
 
 ## 4. Code Walkthrough
 
@@ -79,6 +79,8 @@ Apps in this repository demonstrate the same pattern:
 - `apps/dungeon_dogfood/src/events.rs`
 
 The standalone `physics` crate demonstrates the physics event bridge through `RayHit::to_engine_event`, `PhysicsContactRecord::to_engine_event`, `contact_records_to_engine_events`, and `emit_contact_records`. `apps/dungeon_dogfood/src/audio_bridge.rs` demonstrates the audio bridge by mapping app-owned audio outcomes into `EngineEvent::Audio`. These helpers preserve the event crate boundary: `engine_events` does not depend on `physics` or `audio`, while app code can opt in to event emission.
+
+The experimental `scripting` crate follows the same boundary. `ScriptEngine::eval_for_script`, `eval_with_scope_for_script`, and `eval_file_for_script` return collected `ScriptingEvent` values instead of dispatching them internally. Scripts can log through `log_info`, `log_warn`, and `log_error`, and can request narrow event emission with `emit_event(name)` or `emit_event(name, payload)`. Scripts do not receive renderer, scene, Vulkan, physics, audio, editor, or app-owned mutable state bindings by default.
 
 ## 5. Ordering Rules
 

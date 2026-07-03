@@ -102,7 +102,7 @@ The CLI follows the same durable identity rules as the renderer facade and edito
 | `environment` | `.hdr`, `.exr` |
 | `audio` | `.wav`, `.ogg`, `.flac`, `.mp3` |
 
-`scan-assets` infers basic audio asset records by extension. Audio metadata such as declared format, usage, and default gain may be authored manually under `[assets.metadata.audio]` and is validated by `validate-package`, `validate-project`, `validate-scene`, and `pack` through the renderer validators. Script, collision, and material records are still manually authored; collision metadata is also validated through the same renderer-backed path.
+`scan-assets` infers basic audio asset records by extension. Audio metadata such as declared format, usage, and default gain may be authored manually under `[assets.metadata.audio]` and is validated by `validate-package`, `validate-project`, `validate-scene`, and `pack` through the renderer validators. Collision and material records are still manually authored; collision metadata is also validated through the same renderer-backed path. Package-level script asset records are deferred in this alpha and `script` is not currently accepted as an asset kind.
 
 ## 5. Pack Output Shape
 
@@ -146,7 +146,8 @@ The alpha CLI deliberately does not yet provide:
 - package dependency semantics;
 - hot-reload or reimport pipeline;
 - dynamic Rust hot reload;
-- scripting runtime;
+- package-level script asset scanning/validation;
+- production scripting runtime;
 - runtime physics scene loading or gameplay collision integration;
 - production audio mixing/spatialization/streaming or editor audio placement;
 - renderer-window generated app templates;

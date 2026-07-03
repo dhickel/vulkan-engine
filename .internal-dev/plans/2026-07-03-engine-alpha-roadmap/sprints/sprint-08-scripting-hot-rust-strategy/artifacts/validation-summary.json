@@ -8,7 +8,7 @@
   "phase_reports": {
     "phase_01": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-08-scripting-hot-rust-strategy/validation/phase-01-validation-report.md",
     "phase_02": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-08-scripting-hot-rust-strategy/validation/phase-02-validation-report.md",
-    "phase_03": null,
+    "phase_03": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-08-scripting-hot-rust-strategy/validation/phase-03-validation-report.md",
     "phase_04": null,
     "final_quality_review": null
   },
@@ -59,6 +59,53 @@
       "command": "cargo check --manifest-path /tmp/engine-sprint08-template/Cargo.toml",
       "result": "pass",
       "notes": "Generated support-crate app checked off-workspace using engine_events, input, and physics"
+    },
+    {
+      "phase": "03",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p scripting",
+      "result": "pass",
+      "notes": "9 tests passed"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p engine_events",
+      "result": "pass",
+      "notes": "7 tests passed"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 17 integration tests, 5 ignored doctests; existing renderer warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p engine_pack",
+      "result": "pass",
+      "notes": "20 CLI tests passed; existing renderer warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo tree -p scripting",
+      "result": "pass",
+      "notes": "Direct dependencies limited to engine_events, log, and rhai"
+    },
+    {
+      "phase": "03",
+      "command": "rg -n \"renderer|vulkan|ash|winit|imgui|physics|audio|dungeon_dogfood|editor\" src/scripting",
+      "result": "pass",
+      "notes": "Only expected comment-only negative-language match saying renderer internals are not exposed"
     }
   ],
   "capture": {
@@ -82,11 +129,18 @@
       "phase": "02",
       "status": "accepted_phase_residual",
       "description": "Phase 02 implements a standalone public support-crate scaffold, not a renderer-window generated app. Renderer-window app generation remains deferred because off-workspace renderer dependency checks hit existing renderer Assimp/russimp binding behavior outside Phase 02 scope."
+    },
+    {
+      "id": "script-assets-deferred",
+      "phase": "03",
+      "status": "accepted_phase_residual",
+      "description": "Phase 03 defers package-level script asset scanning/validation and keeps script events as returned values for app/runtime safe-boundary emission."
     }
   ],
   "notes": [
     "Phase 01 validated after correcting the docs/api/01-student-quickstart.md citation from 86-88 to 101.",
     "Phase 02 validated engine_pack new-app as a support-crate scaffold and did not implement dynamic Rust reload, plugin ABI loading, runtime hot reload, or renderer-window app generation.",
+    "Phase 03 validated the experimental scripting boundary around ScriptId-aware eval reports, typed errors, collected ScriptingEvent values, and no hidden dispatch.",
     "This skeleton must not be marked fully_validated until all required phase validators and final quality review pass and any applicable capture evidence is reconciled."
   ]
 }
