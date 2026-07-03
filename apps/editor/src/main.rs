@@ -3,6 +3,7 @@ mod launch;
 mod panels;
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -13,9 +14,9 @@ use log::{error, info};
 use renderer::{
     default_capture_run_dir, single_capture_path, AssetManifestMode, AssetPolicyConfig,
     CaptureTarget, CommandHistory, DebugRuntimeMode, DurableAssetRecord, FrameCaptureRequest,
-    FrameCaptureSequence, FrameRenderOutcome, PlaceAssetCommand, Project, RemoveNodeCommand,
-    Renderer, RendererConfig, RendererError, RendererInitError, Scene, SceneAssetReference,
-    SceneError, SceneNodeId, SetTransformCommand,
+    FrameCaptureSequence, FrameCaptureStatus, FrameRenderOutcome, PlaceAssetCommand, Project,
+    RemoveNodeCommand, Renderer, RendererConfig, RendererError, RendererInitError, Scene,
+    SceneAssetReference, SceneError, SceneNodeId, SetTransformCommand,
 };
 use winit::dpi::PhysicalSize;
 use winit::event::MouseButton;
@@ -45,25 +46,16 @@ fn main() {
 }
 
 fn run(launch_options: LaunchOptions) -> Result<(), String> {
+    let config = editor_renderer_config(launch_options.headless);
+    let capture_run_dir = default_capture_run_dir(APP_NAME);
+
+    if launch_options.headless {
+        return run_headless_editor(config, launch_options, &capture_run_dir);
+    }
+
     let event_loop =
         EventLoop::new().map_err(|err| format!("failed to create event loop: {err}"))?;
     event_loop.set_control_flow(ControlFlow::Poll);
-
-    let config = RendererConfig {
-        app_name: APP_NAME.to_string(),
-        window_width: 1440,
-        window_height: 900,
-        compile_shaders: false,
-        shader_debug_mode: DebugRuntimeMode::Default,
-        headless: launch_options.headless,
-        asset_policy: AssetPolicyConfig {
-            manifest_mode: AssetManifestMode::BestEffort,
-            allow_filename_heuristics: true,
-            ..AssetPolicyConfig::default()
-        },
-        ..RendererConfig::default()
-    };
-    let capture_run_dir = default_capture_run_dir(APP_NAME);
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -280,6 +272,112 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
         .map_err(|err| format!("editor event loop failed: {err}"))?;
 
     Ok(())
+}
+
+fn editor_renderer_config(headless: bool) -> RendererConfig {
+    RendererConfig {
+        app_name: APP_NAME.to_string(),
+        window_width: 1440,
+        window_height: 900,
+        compile_shaders: false,
+        shader_debug_mode: DebugRuntimeMode::Default,
+        headless,
+        asset_policy: AssetPolicyConfig {
+            manifest_mode: AssetManifestMode::BestEffort,
+            allow_filename_heuristics: true,
+            ..AssetPolicyConfig::default()
+        },
+        ..RendererConfig::default()
+    }
+}
+
+fn run_headless_editor(
+    config: RendererConfig,
+    launch_options: LaunchOptions,
+    capture_run_dir: &Path,
+) -> Result<(), String> {
+    let mut renderer = Renderer::new_headless(config)
+        .map_err(|err| format!("headless renderer initialization failed: {err}"))?;
+
+    apply_frame_capture_launch_options(&mut renderer, &launch_options, capture_run_dir)
+        .map_err(|err| format!("failed to configure frame capture: {err}"))?;
+    apply_debug_record_launch_options(&mut renderer, &launch_options)
+        .map_err(|err| format!("failed to configure debug timing recording: {err}"))?;
+
+    let mut project_context = load_project_context(launch_options.project_path.clone())?;
+    let package_records = load_enabled_project_packages(&mut renderer, &mut project_context)?;
+    info!(
+        "Loaded {} package-backed asset record(s) for headless editor capture",
+        package_records.len()
+    );
+
+    let scene_path = launch_options
+        .scene_path
+        .clone()
+        .or_else(|| project_context.startup_scene_path.clone());
+    let mut scene = load_startup_scene(&mut renderer, scene_path.clone())
+        .map_err(|err| format!("failed to initialize editor scene: {err}"))?;
+    ensure_editor_root(&mut scene).map_err(|err| format!("failed to seed editor scene: {err}"))?;
+
+    if let Some(scene_path) = scene_path.as_ref() {
+        info!("Headless editor scene path: {}", scene_path.display());
+    }
+
+    let expected_captures = launch_options
+        .capture_frames
+        .or_else(|| launch_options.capture_frame.map(|_| 1))
+        .unwrap_or(0) as usize;
+    let frame_budget = launch_options
+        .capture_frame
+        .or(launch_options.capture_frame_start)
+        .unwrap_or(0)
+        .saturating_add(
+            launch_options
+                .capture_frame_interval
+                .unwrap_or(1)
+                .saturating_mul(launch_options.capture_frames.unwrap_or(0).saturating_add(2)),
+        )
+        .max(180);
+    let mut succeeded_paths = HashSet::new();
+
+    for _ in 0..frame_budget {
+        match renderer.render_scene_headless(&mut scene) {
+            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Err(err) => return Err(format!("headless render failed: {err}")),
+        }
+
+        match renderer.last_frame_capture_status() {
+            Some(FrameCaptureStatus::Succeeded { output_path, .. }) => {
+                succeeded_paths.insert(output_path.clone());
+                if succeeded_paths.len() >= expected_captures {
+                    info!(
+                        "Headless editor capture completed: {} capture(s) written",
+                        succeeded_paths.len()
+                    );
+                    return Ok(());
+                }
+            }
+            Some(FrameCaptureStatus::Failed { message, .. }) => {
+                return Err(format!("headless capture failed: {message}"));
+            }
+            Some(FrameCaptureStatus::BackendNotImplemented { target, .. }) => {
+                return Err(format!(
+                    "headless capture target '{}' is not implemented",
+                    target.as_label()
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if expected_captures == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "headless capture did not complete within {frame_budget} frames ({} of {expected_captures} capture(s) written)",
+            succeeded_paths.len()
+        ))
+    }
 }
 
 fn load_startup_scene(
