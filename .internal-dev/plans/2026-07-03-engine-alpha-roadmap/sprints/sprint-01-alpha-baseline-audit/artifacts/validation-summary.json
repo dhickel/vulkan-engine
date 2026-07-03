@@ -334,8 +334,11 @@
     "validated_at": "2026-07-03",
     "scope": "final baseline validation and closeout reconciliation",
     "head_at_start": "f669555783171b76d2c8ce4bce4acbc312c0ea8f",
-    "head_at_validation": "f669555783171b76d2c8ce4bce4acbc312c0ea8f",
+    "head_at_validation": "b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
     "pushed_ref_at_start": "origin/sprint/alpha-01-baseline-audit f669555783171b76d2c8ce4bce4acbc312c0ea8f",
+    "validated_commit": "b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+    "commit_subject": "Validate alpha baseline closeout",
+    "pushed_ref_at_validation": "origin/sprint/alpha-01-baseline-audit b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
     "changed_file_scope": "Closeout artifacts and scoped public API docs remediation only. No Rust source changed.",
     "preserved_unrelated_dirty": [
       ".idea/engine.iml",
@@ -460,9 +463,19 @@
       ]
     },
     "closeout_blockers": [
-      "Repo guidance requires changelog entry only when the user confirms it is time; no changelog was created in this worker pass.",
-      "User directive assigns commit, push, and email gates to the main thread; this worker did not commit, push, or email."
+      "Repo guidance requires changelog entry only when the user confirms it is time; no changelog was created in this worker pass."
     ],
+    "commit_push_email": {
+      "status": "observed_from_main_thread_evidence_and_remote_ref",
+      "commit": "b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+      "commit_url": "https://github.com/dhickel/vulkan-engine/commit/b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit",
+      "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+      "remote_evidence": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit returned b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3.",
+      "email_message_id": "<0100019f2682c4be-97751f1a-2219-45f5-8b46-2bc9e563d2a4-000000@email.amazonses.com>",
+      "email_thread_id": "5725f402-9a88-4ee3-9dbd-7672ebda402a",
+      "note": "Email content was reported by the main thread and not independently inspected through AgentMail in this validation pass."
+    },
     "final_quality_review": {
       "path": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/final-quality-review.md",
       "status": "final_quality_pending_changelog_confirmation"
