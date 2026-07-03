@@ -8,7 +8,7 @@ Sprint target: asset package authoring and validation tools.
 
 Phase target: shared renderer-owned validation contract for package, project, and scene files.
 
-Phase status: `passed_local_validation_pending_commit`
+Phase status: `passed_local_validation_committed_pending_push`
 
 Capture decision: `not_required_cli_schema_only`
 
@@ -20,18 +20,20 @@ Out of scope by directive: no CLI crate, no Vulkan/rendergraph/shader/visual run
 
 ## Changed Files Matrix
 
-Commit and GitHub links are pending until the orchestrator creates and pushes the Phase 01 commit.
+Phase 01 implementation commit: `fa7abc33ea76c7f81edd3b04518a37d680bf695a`
+
+Branch link: `https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools`
 
 | File | Created/Changed/Deleted | Added Lines | Removed Lines | Lines After | Commit | GitHub Link |
 |---|---:|---:|---:|---:|---|---|
-| `src/renderer/src/data/validation.rs` | Created | 121 | 0 | 121 | pending | pending |
-| `src/renderer/src/data/asset_registry.rs` | Changed | 935 | 3 | 1566 | pending | pending |
-| `src/renderer/src/data/mod.rs` | Changed | 1 | 0 | 16 | pending | pending |
-| `src/renderer/src/api/scene.rs` | Changed | 451 | 3 | 2545 | pending | pending |
-| `src/renderer/src/api/mod.rs` | Changed | 9 | 4 | 56 | pending | pending |
-| `src/renderer/src/lib.rs` | Changed | 13 | 9 | 42 | pending | pending |
-| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md` | Changed | 2 | 2 | pending | pending | pending |
-| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-01-validation-report.md` | Created | pending | 0 | pending | pending | pending |
+| `src/renderer/src/data/validation.rs` | Created | 121 | 0 | 121 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/src/renderer/src/data/validation.rs` |
+| `src/renderer/src/data/asset_registry.rs` | Changed | 935 | 3 | 1566 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/src/renderer/src/data/asset_registry.rs` |
+| `src/renderer/src/data/mod.rs` | Changed | 1 | 0 | 16 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/src/renderer/src/data/mod.rs` |
+| `src/renderer/src/api/scene.rs` | Changed | 451 | 3 | 2545 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/src/renderer/src/api/scene.rs` |
+| `src/renderer/src/api/mod.rs` | Changed | 9 | 4 | 56 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/src/renderer/src/api/mod.rs` |
+| `src/renderer/src/lib.rs` | Changed | 13 | 9 | 42 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/src/renderer/src/lib.rs` |
+| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md` | Changed | 2 | 2 | 51 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md` |
+| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-01-validation-report.md` | Created | 134 | 0 | 134 | `fa7abc33` | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-01-validation-report.md` |
 
 ## Validation Surface
 

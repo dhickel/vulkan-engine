@@ -44,7 +44,14 @@
       "result": "passed with existing renderer warnings"
     }
   ],
-  "commits": [],
+  "commits": [
+    {
+      "phase": "01",
+      "hash": "fa7abc33ea76c7f81edd3b04518a37d680bf695a",
+      "subject": "Sprint 02 phase 01 shared validation contract",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/fa7abc33ea76c7f81edd3b04518a37d680bf695a"
+    }
+  ],
   "pushes": [],
   "agentmail_reports": [],
   "residuals": [
