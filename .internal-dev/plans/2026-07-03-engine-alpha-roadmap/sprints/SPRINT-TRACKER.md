@@ -22,7 +22,7 @@ Status values:
 | 04 | closed | Runtime project launcher and application dev loop | Sample project runs outside editor through documented app path | Closed with root launcher CLI/runtime loop, docs, true `--headless --capture_target draw` proof, debug timing smoke, validation reports, changelog, pushed phase/evidence commits, and final report email. Branch: `sprint/alpha-04-runtime-launcher`. |
 | 05 | closed | Event system and application lifecycle | Apps/tools can subscribe to lifecycle/input/scene/asset/physics/audio events | Closed with event crate, renderer/root runtime integration, app consumers, docs, true headless draw capture, final quality review, pushed evidence commits, and final closeout email. Branch: `sprint/alpha-05-event-system-lifecycle`. |
 | 06 | closed | Physics and collision foundation | Scene/package authored collision and basic queries/events work | Closed with physics crate alpha contract, package/scene collision metadata validation, physics event bridge, dogfood migration debt artifact, docs, changelog, validation reports, final quality review, pushed phase/evidence commits, and phase closeout email. Branch: `sprint/alpha-06-physics-collision-foundation`. |
-| 07 | proposed | Audio foundation | Packaged audio can be referenced and played in a sample/dogfood path | Do not oversell device-dependent support. |
+| 07 | planned | Audio foundation | Packaged audio can be referenced and played in a sample/dogfood path | Advanced plan suite created at `sprints/sprint-07-audio-foundation/`. Do not oversell device-dependent support. Execute on `sprint/alpha-07-audio-foundation`. |
 | 08 | proposed | Scripting and hot Rust development strategy | App template and scripting/hot reload boundaries are explicit and tested | Rust app crates first; scripts experimental unless proven. |
 | 09 | proposed | Facade API alpha contract | Supported beginner API is documented and examples compile | Keep simple path small. |
 | 10 | proposed | Advanced rendering opt-in contract | Advanced APIs feature-gated and misuse risks documented | Avoid raw internals as default surface. |
@@ -32,7 +32,7 @@ Status values:
 
 ## Active Sprint Pointer
 
-Current active sprint: none. Next proposed sprint: 07 - Audio foundation.
+Current active sprint: 07 - Audio foundation. Next proposed sprint: 08 - Scripting and hot Rust development strategy.
 
 When starting a sprint:
 
