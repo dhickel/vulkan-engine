@@ -4,12 +4,17 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 
 ## Scope and Runtime
 
-- Language/runtime: Rust 2021, desktop Vulkan renderer.
-- Root binary: `engine` (`src/main.rs`) is a migration stub.
-- Canonical runtime entrypoints: `src/renderer/examples/*.rs`.
-- Workspace crates:
-- `src/renderer` (`renderer`): renderer runtime and API facade.
-- `src/input` (`input`): input broadcast/listener crate.
+- Language/runtime: Rust 2021, desktop Vulkan renderer plus alpha-stage engine support crates/apps.
+- Root binary: `engine` (`src/main.rs`) is a migration stub that prints current example commands.
+- Canonical renderer runtime entrypoints: `src/renderer/examples/*.rs`.
+- Workspace members:
+  - `src/renderer` (`renderer`): renderer runtime and API facade.
+  - `src/input` (`input`): frame-buffered input broadcast/listener crate.
+  - `src/audio` (`audio`): alpha audio crate.
+  - `src/physics` (`physics`): alpha physics crate.
+  - `src/scripting` (`scripting`): alpha scripting crate.
+  - `apps/dungeon_dogfood` (`dungeon_dogfood`): dogfood application.
+  - `apps/editor` (`editor`): alpha editor application.
 
 ## Source-of-Truth Policy
 
@@ -63,10 +68,15 @@ When generating plans or reviews you are to always use  `.internal-dev/plans/` o
 
 ## Repository Layout
 
-- `Cargo.toml`: workspace root (`engine`, `src/input`, `src/renderer`)
+- `Cargo.toml`: workspace root (`engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, `apps/editor`)
 - `src/main.rs`: migration stub that prints example commands
 - `src/renderer/`: rendering runtime crate
 - `src/input/`: input crate
+- `src/audio/`: audio crate
+- `src/physics/`: physics crate
+- `src/scripting/`: scripting crate
+- `apps/dungeon_dogfood/`: dogfood application
+- `apps/editor/`: editor application
 - `docs/api/`: facade/API learning and usage path
 - `docs/internal/`: internal implementation references
 - `.internal-dev/`: development document store

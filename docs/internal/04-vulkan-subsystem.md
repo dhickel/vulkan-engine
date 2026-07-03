@@ -1,6 +1,6 @@
 # Vulkan Subsystem
 
-> Source: [`src/renderer/src/vulkan/`](../src/renderer/src/vulkan/) — no legacy docs consulted.
+> Source: [`src/renderer/src/vulkan/`](../../src/renderer/src/vulkan/) — no legacy docs consulted.
 
 ## Module Layout
 
@@ -27,7 +27,7 @@ Queues → Swapchain → Allocators → Command Pools → Sync Primitives
 
 ### Device Features
 
-Requested at [`vk_init.rs:33-45`](../src/renderer/src/vulkan/vk_init.rs:33):
+Requested at [`vk_init.rs:33-45`](../../src/renderer/src/vulkan/vk_init.rs:33):
 
 | Feature | Purpose |
 |---------|---------|
@@ -107,7 +107,7 @@ Three main layouts:
 ## Pipeline Management (`vk_pipeline.rs`)
 
 Pipeline creation is shader-driven. Each shader pair (`.vert` + `.frag` SPIR-V) defines a pipeline with:
-- Vertex input state (matches `Vertex` struct at [`gpu_data.rs:36`](../src/renderer/src/data/gpu_data.rs:36))
+- Vertex input state (matches `Vertex` struct at [`gpu_data.rs:36`](../../src/renderer/src/data/gpu_data.rs:36))
 - Dynamic rendering state (color + depth attachment formats)
 - Depth/stencil state (depth test enabled, depth write enabled, `LESS` compare op)
 - Pipeline layout (derived from descriptor set layouts + push constant ranges)
@@ -123,13 +123,13 @@ The sub-allocator grows by allocating new backing `VkBuffer`s when full. Individ
 
 ## Known Sharp Edges
 
-- **Swapchain image view leak**: old views not destroyed on resize ([`vk_render.rs:1154`](../src/renderer/src/vulkan/vk_render.rs:1154))
+- **Swapchain image view leak**: old views not destroyed on resize ([`vk_render.rs:1154`](../../src/renderer/src/vulkan/vk_render.rs:1154))
 - **`todo!()` destroy paths**: several Vulkan wrapper types have incomplete `Drop` implementations
-- **`unwrap()` in production paths**: descriptor allocation, command buffer recording, and window handle extraction use `unwrap()` where errors should propagate (see [gap report](../gap-report.md) item #13)
-- **Push constant size**: skybox push constants may exceed 128-byte minimum (`// FIXME` at [`gpu_data.rs:628`](../src/renderer/src/data/gpu_data.rs:628))
+- **`unwrap()` in production paths**: descriptor allocation, command buffer recording, and window handle extraction use `unwrap()` where errors should propagate; this remains a residual candidate for alpha readiness classification in the [alpha readiness baseline](../gap-report.md).
+- **Push constant size**: skybox push constants may exceed 128-byte minimum (`// FIXME` at [`gpu_data.rs:628`](../../src/renderer/src/data/gpu_data.rs:628))
 
 ## See Also
 
 - [02-renderer-internals.md](02-renderer-internals.md) — frame lifecycle
 - [03-asset-pipeline.md](03-asset-pipeline.md) — GPU upload and transfer
-- [src/renderer/src/vulkan/AGENTS.md](../src/renderer/src/vulkan/AGENTS.md) — Vulkan contributor guide
+- [src/renderer/src/vulkan/AGENTS.md](../../src/renderer/src/vulkan/AGENTS.md) — Vulkan contributor guide

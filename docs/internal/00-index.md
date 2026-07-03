@@ -6,6 +6,10 @@
 
 Contributors working inside the renderer internals — Vulkan orchestration, data caches, pass execution, and scene flattening. Assumes Rust proficiency and basic Vulkan familiarity.
 
+## Workspace Context
+
+Root `Cargo.toml` currently declares `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/editor`. These internals docs primarily cover the renderer/input path; support crates and apps should not be inferred production-ready from workspace membership alone.
+
 ## Architecture at a Glance
 
 ```
@@ -40,22 +44,22 @@ Renderer (public API)
 
 | File | Role |
 |------|------|
-| [`src/renderer/src/api/renderer.rs`](../src/renderer/src/api/renderer.rs) | Public API facade |
-| [`src/renderer/src/vulkan/vk_render.rs`](../src/renderer/src/vulkan/vk_render.rs) | Vulkan frame orchestration (~3862 lines) |
-| [`src/renderer/src/data/data_cache.rs`](../src/renderer/src/data/data_cache.rs) | Mesh/texture/material caches (~2475 lines) |
-| [`src/renderer/src/scene/scene_world.rs`](../src/renderer/src/scene/scene_world.rs) | Scene graph and submission builder |
-| [`src/renderer/src/rendergraph/mod.rs`](../src/renderer/src/rendergraph/mod.rs) | Render graph and pass trait |
-| [`src/input/src/lib.rs`](../src/input/src/lib.rs) | Input system (single file) |
+| [`src/renderer/src/api/renderer.rs`](../../src/renderer/src/api/renderer.rs) | Public API facade |
+| [`src/renderer/src/vulkan/vk_render.rs`](../../src/renderer/src/vulkan/vk_render.rs) | Vulkan frame orchestration (~3862 lines) |
+| [`src/renderer/src/data/data_cache.rs`](../../src/renderer/src/data/data_cache.rs) | Mesh/texture/material caches (~2475 lines) |
+| [`src/renderer/src/scene/scene_world.rs`](../../src/renderer/src/scene/scene_world.rs) | Scene graph and submission builder |
+| [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) | Render graph and pass trait |
+| [`src/input/src/lib.rs`](../../src/input/src/lib.rs) | Input system (single file) |
 
 ## Distributed Knowledge
 
 Module-level guides provide subsystem detail:
-- Vulkan: [`src/renderer/src/vulkan/AGENTS.md`](../src/renderer/src/vulkan/AGENTS.md)
-- Data/caches: [`src/renderer/src/data/AGENTS.md`](../src/renderer/src/data/AGENTS.md)
-- Shaders: [`src/renderer/src/shaders/AGENTS.md`](../src/renderer/src/shaders/AGENTS.md)
-- Renderer: [`src/renderer/AGENTS.md`](../src/renderer/AGENTS.md)
+- Vulkan: [`src/renderer/src/vulkan/AGENTS.md`](../../src/renderer/src/vulkan/AGENTS.md)
+- Data/caches: [`src/renderer/src/data/AGENTS.md`](../../src/renderer/src/data/AGENTS.md)
+- Shaders: [`src/renderer/src/shaders/AGENTS.md`](../../src/renderer/src/shaders/AGENTS.md)
+- Renderer: [`src/renderer/AGENTS.md`](../../src/renderer/AGENTS.md)
 
 ## See Also
 
 - [API Reference](../api/00-index.md) — public API surface
-- [Gap Report](../gap-report.md) — known limitations
+- [Alpha Readiness Baseline](../gap-report.md) — current readiness and residual-classification routing

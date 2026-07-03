@@ -6,6 +6,10 @@
 
 Rust developers building applications on this Vulkan rendering engine. Familiarity with Rust is assumed; graphics knowledge is explained inline.
 
+## Workspace Context
+
+The root workspace currently contains `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/editor`. This API path is still centered on the renderer and input facade; support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
+
 ## Quick Navigation
 
 | Topic | Document | What You'll Learn |
@@ -22,7 +26,7 @@ Rust developers building applications on this Vulkan rendering engine. Familiari
 
 ## Top-Level Re-exports
 
-Everything a user needs is re-exported from the `renderer` crate (see [`src/renderer/src/lib.rs`](../src/renderer/src/lib.rs)):
+Everything a user needs is re-exported from the `renderer` crate (see [`src/renderer/src/lib.rs`](../../src/renderer/src/lib.rs)):
 
 ```rust
 // Core facade
@@ -38,11 +42,11 @@ pub use input::{InputSystem, InputSnapshot, InputLayer, ActionMap, ...};
 pub use debug_ui::{DebugViewId, DebugViewDescriptor, DebugTimingRow, ...};
 ```
 
-The full re-export list is at [`src/renderer/src/api/mod.rs`](../src/renderer/src/api/mod.rs). Everything below `api::*` in `lib.rs` is the stable public surface.
+The full re-export list is at [`src/renderer/src/api/mod.rs`](../../src/renderer/src/api/mod.rs). Everything below `api::*` in `lib.rs` is the stable public surface.
 
 ## Canonical Example
 
-Every demo follows the same pattern (see [`src/renderer/examples/common/mod.rs`](../src/renderer/examples/common/mod.rs)):
+Every demo follows the same pattern (see [`src/renderer/examples/common/mod.rs`](../../src/renderer/examples/common/mod.rs)):
 
 1. Create a `winit` event loop + window
 2. Construct `Renderer::new(config, &window)`
@@ -82,5 +86,5 @@ cargo run -p renderer --example api_test
 ## See Also
 
 - [Internal Architecture Reference](../internal/00-index.md) — implementation details
-- [Gap Report](../gap-report.md) — known limitations and missing features
-- [Renderer AGENTS.md](../src/renderer/AGENTS.md) — contributor guide
+- [Alpha Readiness Baseline](../gap-report.md) — current readiness and residual-classification routing
+- [Renderer AGENTS.md](../../src/renderer/AGENTS.md) — contributor guide
