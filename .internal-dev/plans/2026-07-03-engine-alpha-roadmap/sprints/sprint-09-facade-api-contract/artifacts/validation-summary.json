@@ -1,0 +1,49 @@
+{
+  "plan": "sprint-09-facade-api-contract",
+  "created": "2026-07-03",
+  "branch": "sprint/alpha-09-facade-api-contract",
+  "status": "planning_locked",
+  "phase_reports": {
+    "phase_01": {
+      "worker_report": "reports/phase-01-export-audit.md",
+      "validator_report": "validation/phase-01-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_02": {
+      "worker_report": "reports/phase-02-example-contract.md",
+      "validator_report": "validation/phase-02-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_03": {
+      "worker_report": "reports/phase-03-friction-hardening.md",
+      "validator_report": "validation/phase-03-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_04": {
+      "worker_report": "reports/phase-04-final-docs-validation.md",
+      "validator_report": "validation/phase-04-validation-report.md",
+      "status": "not_started"
+    }
+  },
+  "commands": [],
+  "capture": {
+    "required": false,
+    "reason": "Planning scope expects docs/API/examples/testing only. Require true engine-owned headless draw capture if visible renderer/editor behavior changes.",
+    "artifact_dir": null,
+    "status": "not_applicable"
+  },
+  "email_reports": [],
+  "branch_pushes": [],
+  "superseded_artifacts": [],
+  "model_tooling_constraints": [],
+  "residual_risks": [
+    "Sprint 08 accepted residuals remain out of scope unless re-opened by implementation findings.",
+    "Existing root-level compatibility exports may remain public but not beginner-supported.",
+    "Renderer doctest/prose failures, if pre-existing, must be separated from Sprint 09 regressions."
+  ],
+  "final_quality_review": {
+    "required": true,
+    "status": "not_started",
+    "report": null
+  }
+}
