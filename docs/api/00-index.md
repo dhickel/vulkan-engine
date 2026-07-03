@@ -28,12 +28,20 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Events and lifecycle | [12-events-and-lifecycle.md](12-events-and-lifecycle.md) | `EventBus`, lifecycle/action events, recorder usage, safe mutation rules |
 | Audio foundation | [13-audio-foundation.md](13-audio-foundation.md) | Packaged audio metadata, device-independent clips, opt-in playback, audio events |
 
-## Top-Level Re-exports
+## Public API Contract
 
-Everything a user needs is re-exported from the `renderer` crate (see [`src/renderer/src/lib.rs`](../../src/renderer/src/lib.rs)):
+The renderer crate is in alpha. Public symbols are split into tiers so beginner
+docs do not imply that every reachable export is the supported beginner facade.
+Existing root exports are preserved for compatibility, but the alpha beginner
+path is the small set used by the quickstart, lifecycle, scene, asset, input,
+debug, and runtime-launcher chapters.
+
+`renderer::api` remains the explicit facade namespace. The crate root re-exports
+that facade plus a few older helper groups used by current tests and examples.
+Those root-only helper groups are compatibility public, not beginner-stable API.
 
 ```rust
-// Core facade
+// Alpha beginner facade examples
 pub use api::{Renderer, RendererConfig, RendererError, Scene, ...};
 
 // Handles
@@ -49,7 +57,18 @@ pub use engine_events::{EventBus, EventRecorder, EngineEvent, EventStage, ...};
 pub use debug_ui::{DebugViewId, DebugViewDescriptor, DebugTimingRow, ...};
 ```
 
-The full re-export list is at [`src/renderer/src/api/mod.rs`](../../src/renderer/src/api/mod.rs). Everything below `api::*` in `lib.rs` is the stable public surface.
+The full facade re-export list is at
+[`src/renderer/src/api/mod.rs`](../../src/renderer/src/api/mod.rs). Extra
+root-only compatibility exports are listed in
+[`src/renderer/src/lib.rs`](../../src/renderer/src/lib.rs).
+
+| Tier | Current exposure | Intended use |
+|------|------------------|--------------|
+| Alpha beginner facade | `renderer::{Renderer, RendererConfig, Scene, AssetManager, LoadTicket, InputSystem, FrameCaptureRequest, EventBus, ...}` and the same names under `renderer::api` | Supported alpha path for opening a renderer, creating or loading scenes, loading assets, updating input, rendering frames, and using debug/capture controls. |
+| Compatibility public | Root-only helpers such as `AnimationPlayer`, `SceneWorld`, `CommandHistory`, scene commands, `Aabb`, `Frustum`, `Ray`, and camera controllers | Preserved for current users, tests, diagnostics, and editor-style workflows. They are not the beginner contract. |
+| Advanced interop | `renderer::api::advanced` behind the `advanced-interop` feature | Explicit opt-in for lower-level renderer integration. Keep this out of beginner examples unless a chapter labels it advanced. |
+| Internal implementation detail | Private renderer modules and public-looking implementation concepts reached only through compatibility paths | Do not document as new user-facing APIs in beginner docs. |
+| Deferred gaps | Larger project runtime, material override, advanced rendering extension, and generated app-template work not implemented in this alpha surface | Document as future work only when needed; do not imply current support. |
 
 ## Runtime Launcher
 

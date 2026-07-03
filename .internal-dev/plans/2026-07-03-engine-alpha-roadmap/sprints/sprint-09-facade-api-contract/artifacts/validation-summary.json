@@ -7,7 +7,7 @@
     "phase_01": {
       "worker_report": "reports/phase-01-export-audit.md",
       "validator_report": "validation/phase-01-validation-report.md",
-      "status": "not_started"
+      "status": "validated"
     },
     "phase_02": {
       "worker_report": "reports/phase-02-example-contract.md",
@@ -25,7 +25,32 @@
       "status": "not_started"
     }
   },
-  "commands": [],
+  "commands": [
+    {
+      "phase": "phase_01",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "No formatting changes required."
+    },
+    {
+      "phase": "phase_01",
+      "command": "cargo check -p renderer",
+      "result": "pass",
+      "notes": "Completed with existing dead-code warnings in renderer internals."
+    },
+    {
+      "phase": "phase_01",
+      "command": "rg -n \"stable public surface|Everything below api|advanced-interop|AnimationPlayer|SceneWorld|CommandHistory\" docs/api src/renderer/src src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "Stale overpromise phrases were removed. Remaining hits are expected advanced-interop and compatibility-symbol references."
+    },
+    {
+      "phase": "phase_01",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "not_run",
+      "notes": "Skipped because this phase changed Markdown docs and evidence only; rustdoc and re-export organization were not materially changed."
+    }
+  ],
   "capture": {
     "required": false,
     "reason": "Planning scope expects docs/API/examples/testing only. Require true engine-owned headless draw capture if visible renderer/editor behavior changes.",
