@@ -26,6 +26,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Packaging CLI | [10-packaging-cli.md](10-packaging-cli.md) | Rust CLI validation, authoring, and folder pack output |
 | Runtime launcher | [11-runtime-project-launcher.md](11-runtime-project-launcher.md) | Root `engine` launcher, project manifests, headless draw capture, app-crate loop |
 | Events and lifecycle | [12-events-and-lifecycle.md](12-events-and-lifecycle.md) | `EventBus`, lifecycle/action events, recorder usage, safe mutation rules |
+| Audio foundation | [13-audio-foundation.md](13-audio-foundation.md) | Packaged audio metadata, device-independent clips, opt-in playback, audio events |
 
 ## Top-Level Re-exports
 
@@ -71,7 +72,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
   --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
 ```
 
-Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. The alpha event contract is available through the renderer facade. The standalone `physics` crate provides durable ID descriptors, basic collider shapes, ray queries, contact records, and helpers that translate physics records into `engine_events` payloads. Runtime scene-to-physics loading, editor collision authoring UI, dynamic Rust hot reload, scripting runtime execution, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
+Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. The alpha event contract is available through the renderer facade. The standalone `physics` crate provides durable ID descriptors, basic collider shapes, ray queries, contact records, and helpers that translate physics records into `engine_events` payloads. The standalone `audio` crate provides durable clip IDs, device-independent load/probe paths, explicit device-backed playback, package/scene validation, and an opt-in dogfood proof. Runtime scene-to-physics loading, editor collision/audio authoring UI, dynamic Rust hot reload, scripting runtime execution, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and generated app templates are deferred.
 
 ## Canonical Renderer Example
 
@@ -116,5 +117,6 @@ cargo run -p renderer --example api_test
 
 - [Internal Architecture Reference](../internal/00-index.md) — implementation details
 - [Events and Lifecycle](12-events-and-lifecycle.md) — event subscriptions, recorders, and lifecycle ordering
+- [Audio Foundation](13-audio-foundation.md) — packaged audio metadata and opt-in playback
 - [Alpha Readiness Baseline](../gap-report.md) — current readiness and residual-classification routing
 - [Renderer AGENTS.md](../../src/renderer/AGENTS.md) — contributor guide

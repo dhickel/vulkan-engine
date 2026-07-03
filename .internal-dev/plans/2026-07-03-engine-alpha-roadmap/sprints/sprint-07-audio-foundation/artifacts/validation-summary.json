@@ -2,14 +2,14 @@
   "sprint": "07",
   "slug": "sprint-07-audio-foundation",
   "branch": "sprint/alpha-07-audio-foundation",
-  "status": "phase_03_validated",
-  "fully_validated": false,
+  "status": "fully_validated_with_recorded_residuals",
+  "fully_validated": true,
   "phase_status": {
     "phase_01_audio_crate_alpha_contract": "validated",
     "phase_02_package_scene_audio_metadata": "validated",
     "phase_03_event_bridge_dogfood_proof": "validated",
-    "phase_04_docs_final_validation": "pending",
-    "final_quality_review": "pending"
+    "phase_04_docs_final_validation": "validated",
+    "final_quality_review": "validated"
   },
   "required_reports": {
     "phase_01": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-07-audio-foundation/validation/phase-01-validation-report.md",
@@ -167,6 +167,88 @@
       "command": "validation_redteam_agent review plus staged artifact completeness revalidation",
       "result": "pass",
       "notes": "Report: validation/phase-03-validation-report.md"
+    },
+    {
+      "phase": "04",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p audio",
+      "result": "pass",
+      "notes": "7 passed, 1 ignored manual device smoke"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p audio",
+      "result": "pass"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p engine_events",
+      "result": "pass",
+      "notes": "7 passed"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 17 integration tests, 5 ignored doctests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p engine_pack",
+      "result": "pass",
+      "notes": "17 CLI tests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p editor",
+      "result": "pass",
+      "notes": "Existing renderer/editor warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p dungeon_dogfood",
+      "result": "pass",
+      "notes": "Existing renderer/dogfood warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p dungeon_dogfood",
+      "result": "blocked",
+      "notes": "Blocked before dogfood tests run by existing renderer test-profile compile errors in src/renderer/src/data/assimp_util.rs against current russimp_sys aiScene/aiNode bindings"
+    },
+    {
+      "phase": "04",
+      "command": "stale-reference sweep over docs and sprint directory",
+      "result": "pass_with_triage",
+      "notes": "No remaining stale public audio claims found. Remaining hits are intentional plan/history records, /tmp command examples, pending validation summary fields, or unrelated rendergraph/texture wording; triaged in reports/phase-04-email.md"
+    },
+    {
+      "phase": "04",
+      "command": "validation_redteam_agent phase 04 docs/evidence review",
+      "result": "pass",
+      "notes": "Report: validation/phase-04-validation-report.md"
+    },
+    {
+      "phase": "final",
+      "command": "validation_redteam_agent final quality review",
+      "result": "pass",
+      "notes": "Report: validation/final-quality-review.md; residuals accepted under plan"
     }
   ],
   "device_smoke": {
@@ -190,10 +272,9 @@
   "tooling_constraints": [],
   "residual_risks": [
     "Device-backed playback depends on host audio output availability and is not required for core validation.",
-    "Phase 04 docs remain necessary because current docs still include pre-Phase-02 statements that audio scan/integration is deferred.",
     "Renderer-side durable audio ID validation intentionally rejects strings containing both slot and generation as runtime-handle-shaped, even if the raw AudioClipId character set would otherwise allow those words.",
     "cargo test -p dungeon_dogfood remains blocked before dogfood tests run by existing renderer test-profile compile errors in src/renderer/src/data/assimp_util.rs against current russimp_sys aiScene/aiNode bindings.",
     "The dogfood content loader validates the configured audio fixture path on normal startup, but it does not load, probe, play, or open an audio device unless audio smoke is explicitly enabled."
   ],
-  "notes": "Phase 03 validated. Do not mark fully_validated until docs/final validation and final quality review pass."
+  "notes": "Sprint 07 is fully validated with recorded residuals. Device smoke was optional and skipped; cargo test -p dungeon_dogfood remains blocked by the existing renderer test-profile russimp_sys binding issue before dogfood tests execute."
 }

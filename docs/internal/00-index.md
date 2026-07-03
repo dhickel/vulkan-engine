@@ -42,6 +42,7 @@ Renderer (public API)
 | 9 | [09-input-winit-integration.md](09-input-winit-integration.md) | Winit ingestion, input dispatch, snapshot bridge |
 | 10 | [10-event-system-and-lifecycle.md](10-event-system-and-lifecycle.md) | Event ownership boundaries, emission ordering, validation |
 | 11 | [11-physics-and-collision.md](11-physics-and-collision.md) | Physics crate boundaries, collision metadata validation, event bridge |
+| 12 | [12-audio-foundation.md](12-audio-foundation.md) | Audio crate boundaries, package/scene validation, event bridge |
 
 ## Key Source Files
 
@@ -55,6 +56,7 @@ Renderer (public API)
 | [`src/input/src/lib.rs`](../../src/input/src/lib.rs) | Input system (single file) |
 | [`src/events/src/lib.rs`](../../src/events/src/lib.rs) | Event contracts, staged bus, recorder |
 | [`src/physics/src/lib.rs`](../../src/physics/src/lib.rs) | Renderer-independent alpha physics API, Rapier wrapper, event bridge |
+| [`src/audio/src/lib.rs`](../../src/audio/src/lib.rs) | Renderer-independent alpha audio clip/probe/playback facade |
 
 ## Distributed Knowledge
 
@@ -69,4 +71,5 @@ Module-level guides provide subsystem detail:
 - [API Reference](../api/00-index.md) — public API surface
 - [API Events and Lifecycle](../api/12-events-and-lifecycle.md) — public event consumption contract
 - [Physics and Collision](11-physics-and-collision.md) — current alpha physics/collision implementation boundary
+- [Audio Foundation](12-audio-foundation.md) — current alpha audio implementation boundary
 - [Alpha Readiness Baseline](../gap-report.md) — current readiness and residual-classification routing

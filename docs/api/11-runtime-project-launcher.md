@@ -4,7 +4,7 @@
 
 This page documents the root `engine` launcher for alpha data-driven projects. Use it when running a project manifest outside the editor, validating packaged scene data, or producing headless draw-target capture evidence.
 
-For custom Rust gameplay or tool behavior, use an app crate under `apps/<name>` and run it with `cargo run -p <app>`. The root launcher emits alpha lifecycle/package/scene/shutdown events for validation and diagnostics, but it is not dynamic Rust hot reload, scripting runtime execution, runtime physics scene loading, audio integration, generated app templates, or a full gameplay lifecycle framework.
+For custom Rust gameplay or tool behavior, use an app crate under `apps/<name>` and run it with `cargo run -p <app>`. The root launcher emits alpha lifecycle/package/scene/shutdown events for validation and diagnostics, but it is not dynamic Rust hot reload, scripting runtime execution, runtime physics scene loading, runtime audio playback, generated app templates, or a full gameplay lifecycle framework.
 
 ## 2. Basic Launch
 
@@ -94,7 +94,7 @@ Use an app crate when the project needs custom Rust behavior:
 cargo run -p dungeon_dogfood
 ```
 
-App crates can depend on `renderer`, `input`, `physics`, and other workspace support crates directly. They own their Rust control flow and may choose whether to consume project/package/scene data. `apps/dungeon_dogfood` is the current custom app path and has not been migrated to project manifests. App crates can consume renderer events through the public facade, and physics crates can translate ray/contact records into `engine_events` payloads for app-owned dispatch. Dynamic Rust hot reload, a scripting runtime, automatic scene collision loading, audio gameplay integration, broad dogfood migration, and generated app templates are later roadmap work, not part of the current root launcher.
+App crates can depend on `renderer`, `input`, `physics`, `audio`, and other workspace support crates directly. They own their Rust control flow and may choose whether to consume project/package/scene data. `apps/dungeon_dogfood` is the current custom app path and has not been migrated to project manifests. App crates can consume renderer events through the public facade, physics crates can translate ray/contact records into `engine_events` payloads for app-owned dispatch, and app-owned audio bridges can emit `AudioEvent` values. Dynamic Rust hot reload, a scripting runtime, automatic scene collision loading, root-runtime audio playback, broad dogfood migration, and generated app templates are later roadmap work, not part of the current root launcher.
 
 ## 7. See Also
 
