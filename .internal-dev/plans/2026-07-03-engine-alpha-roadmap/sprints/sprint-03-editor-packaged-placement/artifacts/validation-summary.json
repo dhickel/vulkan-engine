@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 03 - Editor packaged-asset placement hardening",
-  "status": "phase_01_passed_pending_commit",
+  "status": "phase_01_passed_committed_pushed_reported",
   "branch": "sprint/alpha-03-editor-packaged-placement",
   "based_on": "sprint/alpha-02-packaging-tools tip",
   "capture_decision": "required_visible_editor_runtime_behavior",
@@ -9,7 +9,7 @@
     {
       "phase": "01",
       "name": "State and command hardening",
-      "status": "passed_pending_commit",
+      "status": "passed_committed_pushed_reported",
       "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/validation/phase-01-validation-report.md",
       "capture_decision": "not_required_code_state_tests_only"
     },
@@ -75,9 +75,30 @@
     "sidecars": []
   },
   "main_thread_evidence": {
-    "phase_commits": [],
-    "pushes": [],
-    "email_reports": [],
+    "phase_commits": [
+      {
+        "phase": "01",
+        "hash": "84456475",
+        "subject": "Sprint 03 phase 01 placement state hardening",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/84456475"
+      }
+    ],
+    "pushes": [
+      {
+        "phase": "01",
+        "branch": "sprint/alpha-03-editor-packaged-placement",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-03-editor-packaged-placement",
+        "pushed_through": "84456475"
+      }
+    ],
+    "email_reports": [
+      {
+        "phase": "01",
+        "subject": "Sprint 03 Phase 01 Progress Report - Placement State Hardening",
+        "message_id": "<0100019f2718df10-b0479315-c045-4a58-987c-632834cd19c8-000000@email.amazonses.com>",
+        "thread_id": "bd6543be-a1e0-40ea-a91b-7e8e37398e5e"
+      }
+    ],
     "final_changelog": null
   },
   "residual_risks": [
