@@ -4,11 +4,16 @@
 This guide is for students, hobbyists, and indie developers who are comfortable with Rust but new to engine and rendering workflows. The goal is to get from clone to first rendered frame, then to first model load, in under 30 minutes.
 
 ## 2. Where This Fits in Engine Flow
-Quickstart runtime path:
+Renderer-facade quickstart path:
 choose example binary -> create `EventLoop` and window -> `Renderer::new(...)` -> `take_startup_scene()` (or build your own `Scene`) -> per-event `update_input(...)` -> per-frame `render_scene(...)` or explicit frame API.
 
+Project quickstart path:
+author/validate project package data -> run the root launcher with `cargo run -- --project <path>` -> use `--headless --capture_target draw` for validation captures.
+
 ## 3. Key Concepts
-- Use example binaries from the `renderer` crate; root `cargo run` only prints migration help.
+- Use the root launcher for data-driven projects: `cargo run -- --project apps/editor/sample_project/engine.project.toml`.
+- Use example binaries from the `renderer` crate to learn the facade and diagnose renderer behavior.
+- Use app crates under `apps/<name>` for custom Rust application behavior.
 - Facade-first API boundary:
   - `Renderer` owns rendering runtime and input integration.
   - `Scene` owns runtime graph content to draw.
@@ -26,11 +31,24 @@ choose example binary -> create `EventLoop` and window -> `Renderer::new(...)` -
 ## 4. Code Walkthrough
 Snippet Type: Real
 ```bash
-# Run one of the canonical runtime examples:
+# Run renderer diagnostic examples:
 cargo run -p renderer --example api_test
 cargo run -p renderer --example demo_pbr
 cargo run -p renderer --example demo_model_load
 cargo run -p renderer --example demo_async_loading
+
+# Run the sample project through the root launcher:
+cargo run -- --project apps/editor/sample_project/engine.project.toml
+
+# Produce true headless draw-target validation evidence:
+RUST_LOG=info timeout --signal=INT 60s cargo run -- \
+  --project apps/editor/sample_project/engine.project.toml \
+  --headless \
+  --capture_target draw \
+  --capture_frames 3 \
+  --capture_frame_start 5 \
+  --capture_frame_interval 5 \
+  --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
 
 # Optional: custom environment map with api_test
 cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr
@@ -60,11 +78,12 @@ scene.merge_fragment(None, fragment)?;
 
 Snippet Type: Pseudocode
 ```text
-Project structure idea:
-  app/
-    main.rs           // window + event loop + renderer ownership
-    game_state.rs     // gameplay/editor state
-    scene_setup.rs    // initial scene + model loads
+Custom app structure idea:
+  apps/my_app/
+    Cargo.toml
+    src/main.rs        // window + event loop + renderer ownership
+    src/game_state.rs  // gameplay/editor state
+    src/scene_setup.rs // initial scene + model loads
 
 Frame tick:
   1) ingest OS events
@@ -79,10 +98,11 @@ Frame tick:
 - Handle render outcomes exhaustively and keep the loop alive while resize is pending.
 - Begin with sync model load for correctness, then adopt deferred tickets for larger assets.
 - Keep asset loading code separate from draw submission code so failures are easier to isolate.
+- Keep custom Rust behavior in app crates under `apps/<name>`; dynamic Rust hot reload, scripting runtime, event-system integration, physics integration, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
 
 ## 6. Gotchas & Failure Modes
-- Running `cargo run` at workspace root does not launch rendering; it prints migration guidance and exits.
-- Running the wrong target (`engine` instead of `renderer --example ...`) is the most common startup miss.
+- Running `cargo run` at workspace root requires `--project <path>` for the launcher.
+- Running the wrong target is still a common startup miss: use `cargo run -- --project ...` for project data, `cargo run -p renderer --example ...` for diagnostics, and `cargo run -p <app>` for custom app crates.
 - Missing Vulkan runtime/driver support causes renderer initialization failure.
 - If shader compilation is enabled and tools are missing, startup can fail (`glslc` or `glslangValidator` not found).
 - Calling facade APIs in invalid order can produce `RendererError::InvalidState`.
@@ -90,7 +110,7 @@ Frame tick:
 
 ## 7. Debugging Playbook
 - If the app does not launch rendering:
-  - Check command target first: `cargo run -p renderer --example api_test`.
+  - Check command target first: `cargo run -- --project apps/editor/sample_project/engine.project.toml` for the project launcher, or `cargo run -p renderer --example api_test` for renderer diagnostics.
 - If initialization fails immediately:
   - Check Vulkan runtime/driver setup and then re-run with logs:
   - `RUST_LOG=debug cargo run -p renderer --example api_test`
@@ -107,6 +127,7 @@ Frame tick:
 - Demo scenarios: `src/renderer/examples/common/mod.rs`
 - Async loading example: `src/renderer/examples/demo_async_loading.rs`
 - Renderer API docs: `docs/api/02-renderer-lifecycle-and-frame-api.md`
+- Runtime launcher docs: `docs/api/11-runtime-project-launcher.md`
 - Scene workflow docs: `docs/api/03-scene-graph-and-fragment-workflows.md`
 - Asset workflow docs: `docs/api/04-assets-sync-deferred-and-handles.md`
 

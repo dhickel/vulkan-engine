@@ -8,7 +8,7 @@ Rust developers building applications on this Vulkan rendering engine. Familiari
 
 ## Workspace Context
 
-The root workspace currently contains `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/editor`. This API path is still centered on the renderer and input facade; support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
+The root workspace currently contains `engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/editor`. The root `engine` binary is the alpha data-driven project runtime launcher. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
 
 ## Quick Navigation
 
@@ -24,6 +24,7 @@ The root workspace currently contains `src/input`, `src/renderer`, `src/audio`, 
 | Debug & timing | [08-debug.md](08-debug.md) | Debug UI, timing capture, custom views |
 | Editor placement | [09-editor-asset-browser-and-wall-chunks.md](09-editor-asset-browser-and-wall-chunks.md) | Project package loading, asset browser, wall chunk prefab placement |
 | Packaging CLI | [10-packaging-cli.md](10-packaging-cli.md) | Rust CLI validation, authoring, and folder pack output |
+| Runtime launcher | [11-runtime-project-launcher.md](11-runtime-project-launcher.md) | Root `engine` launcher, project manifests, headless draw capture, app-crate loop |
 
 ## Top-Level Re-exports
 
@@ -45,7 +46,30 @@ pub use debug_ui::{DebugViewId, DebugViewDescriptor, DebugTimingRow, ...};
 
 The full re-export list is at [`src/renderer/src/api/mod.rs`](../../src/renderer/src/api/mod.rs). Everything below `api::*` in `lib.rs` is the stable public surface.
 
-## Canonical Example
+## Runtime Launcher
+
+Data-driven projects run through the root `engine` launcher:
+
+```sh
+cargo run -- --project apps/editor/sample_project/engine.project.toml
+```
+
+Headless visual validation uses the offscreen draw target:
+
+```sh
+RUST_LOG=info timeout --signal=INT 60s cargo run -- \
+  --project apps/editor/sample_project/engine.project.toml \
+  --headless \
+  --capture_target draw \
+  --capture_frames 3 \
+  --capture_frame_start 5 \
+  --capture_frame_interval 5 \
+  --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
+```
+
+Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. Dynamic Rust hot reload, scripting runtime, event-system integration, physics integration, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
+
+## Canonical Renderer Example
 
 Every demo follows the same pattern (see [`src/renderer/examples/common/mod.rs`](../../src/renderer/examples/common/mod.rs)):
 
@@ -74,7 +98,7 @@ event_loop.run(move |event, control_flow| {
 })?;
 ```
 
-## Running Examples
+## Running Renderer Examples
 
 ```sh
 cargo run -p renderer --example demo_pbr

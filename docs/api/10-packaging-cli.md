@@ -8,9 +8,9 @@ This chapter documents the alpha `engine_pack` Rust CLI used to validate, author
 
 Packaging flow:
 
-`new-project` or existing project -> `new-package` or existing package -> `scan-assets`/`add-asset` -> validation commands -> `pack` folder output -> editor/runtime consumption.
+`new-project` or existing project -> `new-package` or existing package -> `scan-assets`/`add-asset` -> validation commands -> `pack` folder output -> editor/root runtime consumption.
 
-The CLI is intentionally backed by the renderer crate validators. It should not become a second schema implementation.
+The CLI is intentionally backed by the renderer crate validators. It should not become a second schema implementation or the project launcher. The root `engine` binary consumes project/package/scene data with `cargo run -- --project <path>`.
 
 ## 3. Command Reference
 
@@ -68,7 +68,7 @@ Create a validated folder pack:
 cargo run -p engine_pack -- pack apps/editor/sample_project/engine.project.toml --out /tmp/editor-sample-pack
 ```
 
-The pack command writes a folder tree plus `PACK_REPORT.json`. It does not create a binary archive, thumbnail cache, import database, runtime launcher, or editor placement transaction.
+The pack command writes a folder tree plus `PACK_REPORT.json`. It does not create a binary archive, thumbnail cache, import database, or editor placement transaction. Runtime launch is handled by the root `engine` binary after project/package/scene validation.
 
 ## 4. Durable Identity Rules
 
@@ -129,6 +129,16 @@ The alpha CLI deliberately does not yet provide:
 - asset thumbnails;
 - editor drag-and-drop imports;
 - editor placement UI;
-- runtime project launcher;
 - package dependency semantics;
-- hot-reload or reimport pipeline.
+- hot-reload or reimport pipeline;
+- dynamic Rust hot reload;
+- scripting runtime;
+- event system, physics integration, or audio integration;
+- generated Rust app templates;
+- broad dogfood migration to project manifests.
+
+Use the runtime launcher for the current alpha project run path:
+
+```sh
+cargo run -- --project apps/editor/sample_project/engine.project.toml
+```

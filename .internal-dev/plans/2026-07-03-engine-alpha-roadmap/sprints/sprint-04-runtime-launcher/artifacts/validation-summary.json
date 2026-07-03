@@ -15,7 +15,7 @@
   "phase_status": {
     "phase_01_runtime_cli": "validator_passed_committed_pushed_reported",
     "phase_02_runtime_loading_loop": "validator_passed_committed_pushed_reported",
-    "phase_03_dev_loop_docs": "pending",
+    "phase_03_dev_loop_docs": "validator_passed_pending_commit_push_report",
     "phase_04_capture_closeout": "pending"
   },
   "required_commands": [
@@ -144,6 +144,60 @@
       "command": "jq empty .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json",
       "status": "passed_validator_rechecked",
       "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo check -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo check -p editor",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo check -p engine_pack --locked",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo run -- --help",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "git diff --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "rg -n 'migration stub|runtime project launcher.*deferred|renderer examples.*only runtime|cargo run` prints|dynamic Rust hot reload|scripting implemented|physics implemented|audio implemented|prints migration guidance' README.md docs apps/dungeon_dogfood",
+      "status": "passed_with_accepted_deferred_feature_hits",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json >/dev/null",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "independent validator rerun: cargo run -- --help; targeted stale sweep; broader stale wording sweep; python -m json.tool; git diff --check",
+      "status": "passed_after_lifecycle_doc_remediation",
+      "exit_code": 0
     }
   ],
   "main_thread_evidence": {
@@ -245,13 +299,15 @@
   "model_tooling_constraints": [],
   "residual_risks": [
     "Renderer doctest/prose snippet failures were repaired by marking diagrams as text and illustrative snippets as ignored doctests; existing renderer dead-code warnings remain.",
-    "Docs still reflect pre-Sprint-04 runtime launcher state until Phase 03 completes."
+    "Existing editor dead-code warning for set_active_scene_text remains visible during cargo check -p editor."
   ],
   "superseded_artifacts": [],
   "notes": [
     "This index remains conservative and must not be promoted to fully_validated until all phase validators and draw-target capture proof pass.",
     "Phase 01 validator passed for parser/options/help/error behavior only.",
     "Phase 02 implementation produced true headless draw-target capture proof.",
-    "Phase 02 independent validator passed on 2026-07-03; Phase 03 remains pending."
+    "Phase 02 independent validator passed on 2026-07-03.",
+    "Phase 03 local validation passed on 2026-07-03.",
+    "Phase 03 independent validator initially found stale lifecycle doc wording; remediation passed revalidation on 2026-07-03."
   ]
 }

@@ -20,8 +20,9 @@ This file keeps the historical `docs/gap-report.md` path stable, but it is no lo
 
 ## Current Runtime Orientation
 
-- `engine` (`src/main.rs`) is a migration stub that prints guidance and exits.
-- Renderer runtime behavior is still exercised through `src/renderer/examples/*.rs`.
+- `engine` (`src/main.rs`) is the alpha data-driven runtime launcher for project manifests.
+- Renderer example behavior is still exercised through `src/renderer/examples/*.rs`, but examples are diagnostics/API references rather than the primary project runtime path.
+- Custom Rust application behavior lives in workspace app crates under `apps/<name>`.
 - Public API docs start at `docs/api/00-index.md`.
 - Contributor/internal docs start at `docs/internal/00-index.md`.
 - Phase 01 restored the active `.internal-dev/AGENTS.md` process guide.
@@ -55,9 +56,11 @@ These are residual candidates, not validated current blockers in this file. Phas
 
 ## Current Readiness Assessment
 
-The workspace has moved beyond a renderer/input-only layout, but the alpha baseline is not yet validated as editor-ready or general-purpose-engine-ready. The defensible current position is:
+The workspace has moved beyond a renderer/input-only layout, but the alpha baseline is not yet validated as general-purpose-engine-ready. The defensible current position is:
 
-- renderer examples remain the canonical runtime path;
+- the root `engine` binary launches data-driven project manifests;
+- renderer examples remain canonical renderer diagnostics;
+- custom Rust apps run as app crates under `apps/<name>`;
 - input has a documented crate contract and validation commands;
 - audio, physics, scripting, editor, and dogfood app presence is confirmed only at the workspace-manifest level in this phase;
 - stale historical claims must not drive planning until Phase 03 validates and classifies them against live source;
