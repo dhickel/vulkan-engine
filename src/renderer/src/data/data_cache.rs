@@ -13,7 +13,7 @@
 //! - **Descriptor Management**: Dynamic allocation for material descriptors
 //!
 //! ## Architecture
-//! ```
+//! ```text
 //! TextureCache
 //!   ├─ cached_textures: Vec<CachedTexture>     // Indexed by texture ID
 //!   │    └─ Unloaded(TextureMeta) | Loaded(VkLoadedTexture)

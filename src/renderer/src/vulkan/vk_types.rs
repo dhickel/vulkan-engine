@@ -1467,7 +1467,7 @@ impl VkDestroyable for VkBuffer {
 /// destroy when frame completes.
 ///
 /// ## Usage Pattern
-/// ```rust
+/// ```ignore
 /// let deletion = VkDeletable::AllocatedBuffer(old_buffer);
 /// vk_present.add_deletion_to_curr_frame(deletion);
 /// // old_buffer destroyed when frame fence signals

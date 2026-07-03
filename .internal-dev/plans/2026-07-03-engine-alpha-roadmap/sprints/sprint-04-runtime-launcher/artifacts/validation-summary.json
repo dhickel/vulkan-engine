@@ -14,7 +14,7 @@
   ],
   "phase_status": {
     "phase_01_runtime_cli": "validator_passed_committed_pushed_reported",
-    "phase_02_runtime_loading_loop": "pending",
+    "phase_02_runtime_loading_loop": "validator_passed_phase_03_pending",
     "phase_03_dev_loop_docs": "pending",
     "phase_04_capture_closeout": "pending"
   },
@@ -66,6 +66,84 @@
       "command": "jq empty .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json",
       "status": "passed",
       "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo test -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo test -p renderer",
+      "status": "passed_after_doctest_fence_repair",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -p engine_pack -- validate-scene apps/editor/sample_project/scenes/start.engine.scene.json --project apps/editor/sample_project/engine.project.toml",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 1 --capture_frame_start 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke",
+      "status": "passed_true_headless_draw_capture",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 1 --capture_frame_start 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke-rerun",
+      "status": "passed_true_headless_draw_capture_after_doctest_fence_repair",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -- --project .internal-dev/does-not-exist/engine.project.toml",
+      "status": "passed_expected_controlled_runtime_error",
+      "exit_code": 1
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -- --project apps/editor/sample_project/engine.project.toml --capture_target swapchain",
+      "status": "passed_expected_controlled_usage_error",
+      "exit_code": 2
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "jq sidecar predicate plus png existence check for .internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke/*.json and phase-02-smoke-rerun/*.json",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "git diff --check",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "jq empty .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
     }
   ],
   "main_thread_evidence": {
@@ -96,13 +174,13 @@
   },
   "capture_proof": {
     "required": true,
-    "status": "pending",
+    "status": "phase_02_draw_capture_passed_pending_final_sprint_closeout",
     "accepted_target": "draw",
     "required_flags": [
       "--headless",
       "--capture_target draw"
     ],
-    "artifact_directory": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw",
+    "artifact_directory": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke",
     "sidecar_predicates": {
       "status": "succeeded",
       "capture_target": "draw",
@@ -115,7 +193,32 @@
       "compositor screenshots",
       "present-target captures"
     ],
-    "sidecars": []
+    "sidecars": [
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke-rerun/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke-rerun/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      }
+    ]
   },
   "debug_record_evidence": {
     "status": "pending",
@@ -123,14 +226,14 @@
   },
   "model_tooling_constraints": [],
   "residual_risks": [
-    "Phase 01 intentionally stops at CLI parsing, help, usage errors, and parser tests.",
-    "Valid launches currently return a controlled Phase 02 runtime-pending error until project loading and rendering are wired.",
-    "Headless Vulkan support not yet validated for this sprint.",
+    "Renderer doctest/prose snippet failures were repaired by marking diagrams as text and illustrative snippets as ignored doctests; existing renderer dead-code warnings remain.",
     "Docs still reflect pre-Sprint-04 runtime launcher state until Phase 03 completes."
   ],
   "superseded_artifacts": [],
   "notes": [
     "This index remains conservative and must not be promoted to fully_validated until all phase validators and draw-target capture proof pass.",
-    "Phase 01 validator passed for parser/options/help/error behavior only; Phase 02 remains pending."
+    "Phase 01 validator passed for parser/options/help/error behavior only.",
+    "Phase 02 implementation produced true headless draw-target capture proof.",
+    "Phase 02 independent validator passed on 2026-07-03; Phase 03 remains pending."
   ]
 }

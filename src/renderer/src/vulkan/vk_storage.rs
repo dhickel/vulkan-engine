@@ -12,7 +12,7 @@
 //! - **Synchronous upload**: Uses VkHostBuffer for immediate staging-to-device transfer
 //!
 //! ## Architecture
-//! ```
+//! ```text
 //! VkSubAllocator
 //!   ├─ VkStorageBuffer (primary)        // Initial large buffer
 //!   │    ├─ buffer_tail: FreeChunk      // Unallocated space at end
@@ -421,7 +421,7 @@ impl VkSubAllocator {
 /// 3. **Fallback**: Disjoint allocation across multiple chunks if needed
 ///
 /// ## Memory Layout
-/// ```
+/// ```text
 /// [allocated][free chunk][allocated][free chunk][buffer_tail (unallocated)]
 ///  ^                                                ^                    ^
 ///  buffer_start_addr                                tail start          buffer_end_addr

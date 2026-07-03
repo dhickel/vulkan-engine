@@ -2,10 +2,13 @@ use std::env;
 use std::process;
 
 mod launch;
+mod runtime;
 
 use launch::{LaunchCommand, LaunchError, LaunchOptions};
 
 fn main() {
+    init_logging();
+
     match launch::parse_command(env::args().skip(1)) {
         Ok(LaunchCommand::Help) => {
             print!("{}", launch::usage());
@@ -18,10 +21,8 @@ fn main() {
     }
 }
 
-fn run(_options: LaunchOptions) -> Result<(), LaunchError> {
-    Err(LaunchError::Runtime(
-        "runtime project loading is not wired until Sprint 04 Phase 02".to_string(),
-    ))
+fn run(options: LaunchOptions) -> Result<(), LaunchError> {
+    runtime::run(options).map_err(LaunchError::Runtime)
 }
 
 fn exit_with_error(err: LaunchError) -> ! {
@@ -31,4 +32,11 @@ fn exit_with_error(err: LaunchError) -> ! {
         eprint!("{}", launch::usage());
     }
     process::exit(err.exit_code());
+}
+
+fn init_logging() {
+    let _ = env_logger::Builder::new()
+        .target(env_logger::Target::Stdout)
+        .parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
+        .try_init();
 }

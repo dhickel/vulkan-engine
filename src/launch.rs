@@ -1,22 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CaptureTarget {
-    #[default]
-    Present,
-    Draw,
-}
-
-impl CaptureTarget {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "present" => Some(Self::Present),
-            "draw" => Some(Self::Draw),
-            _ => None,
-        }
-    }
-}
+pub use renderer::CaptureTarget;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchOptions {
