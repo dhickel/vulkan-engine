@@ -20,7 +20,7 @@ use crate::vulkan::vk_types::VkWindowState;
 
 use super::assets::{AssetLoadTracker, AssetManager};
 use super::config::{
-    AssetPolicyConfig, CaptureTarget, DueFrameCapture, FrameCaptureRequest, FrameCaptureScheduler,
+    AssetPolicyConfig, CaptureTarget, FrameCaptureRequest, FrameCaptureScheduler,
     FrameCaptureSequence, FrameCaptureStatus, RendererConfig,
 };
 use super::errors::{
@@ -711,6 +711,7 @@ impl Renderer {
                 runtime.render_with_hooks(
                     frame_number,
                     &submission,
+                    due_captures,
                     || {
                         if let Err(err) = invoke_render_hook(
                             pre_hook,
@@ -735,7 +736,7 @@ impl Renderer {
                     },
                 );
             } else {
-                runtime.render(frame_number, &submission);
+                runtime.render_with_hooks(frame_number, &submission, due_captures, || {}, || {});
             }
         }))
         .map_err(|panic| {
@@ -745,7 +746,7 @@ impl Renderer {
             ))
         })?;
 
-        self.record_frame_capture_statuses(frame_number, due_captures);
+        self.record_frame_capture_statuses();
 
         let env_status = self.runtime.environment_runtime_status();
         let fps = if self.last_frame_delta_seconds > 0.0 {
@@ -783,15 +784,8 @@ impl Renderer {
         (extent.width, extent.height)
     }
 
-    fn record_frame_capture_statuses(
-        &mut self,
-        frame_number: u32,
-        due_captures: Vec<DueFrameCapture>,
-    ) {
-        for capture in due_captures {
-            let status = self
-                .runtime
-                .process_frame_capture_request(frame_number, &capture);
+    fn record_frame_capture_statuses(&mut self) {
+        for status in self.runtime.take_frame_capture_statuses() {
             self.frame_capture_scheduler.record_status(status);
         }
     }

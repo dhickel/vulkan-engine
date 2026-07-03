@@ -254,6 +254,15 @@ pub enum FrameCaptureStatus {
         output_path: PathBuf,
         source: FrameCaptureSource,
     },
+    Succeeded {
+        frame_number: u32,
+        target: CaptureTarget,
+        output_path: PathBuf,
+        sidecar_path: Option<PathBuf>,
+        source: FrameCaptureSource,
+        width: u32,
+        height: u32,
+    },
     BackendNotImplemented {
         frame_number: u32,
         target: CaptureTarget,

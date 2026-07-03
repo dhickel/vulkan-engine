@@ -797,6 +797,19 @@ pub fn create_swapchain(
 
     log::info!("Swapchain: Setting extent");
     let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
+    let required_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | vk::ImageUsageFlags::TRANSFER_DST
+        | vk::ImageUsageFlags::TRANSFER_SRC;
+    if !swapchain_support
+        .capabilities
+        .supported_usage_flags
+        .contains(required_usage)
+    {
+        return Err(format!(
+            "Swapchain surface does not support required image usage {:?}; windowed present capture needs TRANSFER_SRC",
+            required_usage
+        ));
+    }
 
     let min_count = swapchain_support.capabilities.min_image_count.max(1);
     let requested_count = image_count.unwrap_or(min_count.saturating_add(1));
@@ -827,7 +840,7 @@ pub fn create_swapchain(
         .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
         .image_format(surface_format.format)
         .image_extent(extent)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
+        .image_usage(required_usage)
         .pre_transform(pre_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode)

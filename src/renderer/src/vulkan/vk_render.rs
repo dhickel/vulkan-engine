@@ -61,7 +61,7 @@ use crate::data::data_cache::{
     VkPipelineType, VkSamplerCache, VkShaderCache,
 };
 
-use crate::api::config::{DueFrameCapture, FrameCaptureStatus, VisualTuning};
+use crate::api::config::{CaptureTarget, DueFrameCapture, FrameCaptureStatus, VisualTuning};
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
     AsByteSlice, EnvironmentUBO, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox,
@@ -74,6 +74,9 @@ use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionRe
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
+use crate::vulkan::vk_debug::{
+    finalize_frame_capture, record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture,
+};
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_types::*;
@@ -147,6 +150,9 @@ pub struct VkRenderCore {
     pub uv_fallback_warnings: Mutex<HashSet<(MeshHandle, MaterialHandle)>>,
     gpu_timing: GpuTimingState,
     frame_timing_snapshot: DebugTimingSnapshot,
+    due_frame_captures: Vec<DueFrameCapture>,
+    pending_frame_captures: Vec<PendingFrameCapture>,
+    frame_capture_statuses: Vec<FrameCaptureStatus>,
     pub resize_requested: bool,
 }
 
@@ -1096,6 +1102,9 @@ impl VkRenderCore {
             uv_fallback_warnings: Mutex::new(HashSet::new()),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
+            due_frame_captures: Vec::new(),
+            pending_frame_captures: Vec::new(),
+            frame_capture_statuses: Vec::new(),
             scene_data: SceneDataUBO::default(),
             sky_box: SkyBox::default(),
             visual_tuning,
@@ -1220,13 +1229,14 @@ impl VkRender {
     }
 
     pub fn render(&mut self, frame_number: u32, submission: &RenderSubmission) {
-        self.render_with_hooks(frame_number, submission, || {}, || {});
+        self.render_with_hooks(frame_number, submission, Vec::new(), || {}, || {});
     }
 
     pub fn render_with_hooks<PreRenderHook, PostRenderHook>(
         &mut self,
         frame_number: u32,
         submission: &RenderSubmission,
+        due_captures: Vec<DueFrameCapture>,
         pre_render_hook: PreRenderHook,
         post_render_hook: PostRenderHook,
     ) where
@@ -1237,9 +1247,14 @@ impl VkRender {
             frame_number,
             submission,
             &self.rendergraph,
+            due_captures,
             pre_render_hook,
             post_render_hook,
         );
+    }
+
+    pub fn take_frame_capture_statuses(&mut self) -> Vec<FrameCaptureStatus> {
+        self.core.take_frame_capture_statuses()
     }
 
     pub fn resize_requested(&self) -> bool {
@@ -1252,15 +1267,6 @@ impl VkRender {
 
     pub fn frame_timing_snapshot(&self) -> DebugTimingSnapshot {
         self.core.frame_timing_snapshot()
-    }
-
-    pub fn process_frame_capture_request(
-        &mut self,
-        frame_number: u32,
-        capture: &DueFrameCapture,
-    ) -> FrameCaptureStatus {
-        self.core
-            .process_frame_capture_request(frame_number, capture)
     }
 }
 
@@ -1443,22 +1449,156 @@ impl VkRenderCore {
         self.frame_timing_snapshot.clone()
     }
 
-    pub fn process_frame_capture_request(
-        &mut self,
-        frame_number: u32,
-        capture: &DueFrameCapture,
-    ) -> FrameCaptureStatus {
-        warn!(
-            "Frame capture requested for frame {} target {} -> {}; Vulkan readback/PNG backend is not implemented in Phase 01",
-            frame_number,
-            capture.request.target.as_label(),
-            capture.request.output_path.display()
-        );
-        FrameCaptureStatus::BackendNotImplemented {
-            frame_number,
-            target: capture.request.target,
-            output_path: capture.request.output_path.clone(),
-            source: capture.source,
+    pub fn take_frame_capture_statuses(&mut self) -> Vec<FrameCaptureStatus> {
+        std::mem::take(&mut self.frame_capture_statuses)
+    }
+
+    fn fail_due_frame_captures(&mut self, frame_number: u32, message: impl Into<String>) {
+        let message = message.into();
+        for capture in self.due_frame_captures.drain(..) {
+            self.frame_capture_statuses
+                .push(FrameCaptureStatus::Failed {
+                    frame_number,
+                    target: capture.request.target,
+                    output_path: capture.request.output_path,
+                    source: capture.source,
+                    message: message.clone(),
+                });
+        }
+    }
+
+    fn default_sidecar_path(capture: &DueFrameCapture) -> std::path::PathBuf {
+        capture.request.sidecar_path.clone().unwrap_or_else(|| {
+            let mut sidecar = capture.request.output_path.clone();
+            sidecar.set_extension("json");
+            sidecar
+        })
+    }
+
+    pub fn record_due_frame_captures(&mut self, frame: &VkFrame) {
+        if self.due_frame_captures.is_empty() {
+            return;
+        }
+
+        let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
+        let cmd_buffer = cmd_pool.buffers[0];
+        let extent = self.window_state.get_curr_extent();
+        let due_captures = std::mem::take(&mut self.due_frame_captures);
+
+        for capture in due_captures {
+            let sidecar_path = Self::default_sidecar_path(&capture);
+            let target_desc = match capture.request.target {
+                CaptureTarget::Present => FrameCaptureTargetDesc {
+                    target: CaptureTarget::Present,
+                    image: frame.present_image,
+                    format: self.swapchain.surface_format.format,
+                    extent,
+                    current_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    restored_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                },
+                CaptureTarget::Draw => FrameCaptureTargetDesc {
+                    target: CaptureTarget::Draw,
+                    image: frame.draw.image,
+                    format: frame.draw.image_format,
+                    extent,
+                    current_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    restored_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                },
+            };
+
+            match record_frame_capture(
+                &self.device,
+                &self.allocator.lock().unwrap(),
+                cmd_buffer,
+                capture.frame_number,
+                capture.sequence_index,
+                capture.source,
+                &capture.request.output_path,
+                Some(&sidecar_path),
+                target_desc,
+            ) {
+                Ok(pending) => {
+                    info!(
+                        "Recorded frame capture for frame {} target {} -> {}",
+                        capture.frame_number,
+                        capture.request.target.as_label(),
+                        capture.request.output_path.display()
+                    );
+                    self.pending_frame_captures.push(pending);
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to record frame capture for frame {} target {} -> {}: {}",
+                        capture.frame_number,
+                        capture.request.target.as_label(),
+                        capture.request.output_path.display(),
+                        err
+                    );
+                    self.frame_capture_statuses
+                        .push(FrameCaptureStatus::Failed {
+                            frame_number: capture.frame_number,
+                            target: capture.request.target,
+                            output_path: capture.request.output_path,
+                            source: capture.source,
+                            message: err.to_string(),
+                        });
+                }
+            }
+        }
+    }
+
+    fn finalize_pending_frame_captures(&mut self, frame_sync: VkFrameSync) {
+        if self.pending_frame_captures.is_empty() {
+            return;
+        }
+
+        unsafe {
+            self.wait_for_frame_fence(frame_sync);
+        }
+
+        let pending = std::mem::take(&mut self.pending_frame_captures);
+        for capture in pending {
+            let frame_number = capture.frame_number;
+            let target = capture.target;
+            let output_path = capture.output_path.clone();
+            let source = capture.source;
+            match finalize_frame_capture(&self.device, &self.allocator.lock().unwrap(), capture) {
+                Ok(report) => {
+                    info!(
+                        "Frame capture saved for frame {} target {} -> {}",
+                        report.frame_number,
+                        report.target.as_label(),
+                        report.output_path.display()
+                    );
+                    self.frame_capture_statuses
+                        .push(FrameCaptureStatus::Succeeded {
+                            frame_number: report.frame_number,
+                            target: report.target,
+                            output_path: report.output_path,
+                            sidecar_path: report.sidecar_path,
+                            source: report.source,
+                            width: report.width,
+                            height: report.height,
+                        });
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to finalize frame capture for frame {} target {} -> {}: {}",
+                        frame_number,
+                        target.as_label(),
+                        output_path.display(),
+                        err
+                    );
+                    self.frame_capture_statuses
+                        .push(FrameCaptureStatus::Failed {
+                            frame_number,
+                            target,
+                            output_path,
+                            source,
+                            message: err.to_string(),
+                        });
+                }
+            }
         }
     }
 
@@ -2093,9 +2233,10 @@ impl VkRenderCore {
 
     pub fn render_with_hooks<PreRenderHook, PostRenderHook>(
         &mut self,
-        _frame_number: u32,
+        frame_number: u32,
         submission: &RenderSubmission,
         rendergraph: &RenderGraph,
+        due_captures: Vec<DueFrameCapture>,
         mut pre_render_hook: PreRenderHook,
         mut post_render_hook: PostRenderHook,
     ) where
@@ -2103,6 +2244,9 @@ impl VkRenderCore {
         PostRenderHook: FnMut(),
     {
         let frame_start = Instant::now();
+        self.frame_capture_statuses.clear();
+        self.due_frame_captures.extend(due_captures);
+        self.pending_frame_captures.clear();
 
         // 1. Service transfer completions and resolve requested environment before recording.
         let transfer_start = Instant::now();
@@ -2153,6 +2297,10 @@ impl VkRenderCore {
             Ok(report) => report,
             Err(err) => {
                 error!("RenderGraph execution failed: {err}");
+                self.fail_due_frame_captures(
+                    frame_number,
+                    format!("frame capture skipped: rendergraph failed: {err}"),
+                );
                 self.resize_requested = true;
                 self.gpu_timing.active_slot = None;
                 self.frame_timing_snapshot = DebugTimingSnapshot {
@@ -2201,6 +2349,12 @@ impl VkRenderCore {
                 return;
             }
         };
+        if !self.due_frame_captures.is_empty() {
+            self.fail_due_frame_captures(
+                frame_number,
+                "frame capture skipped: capture pass did not consume due requests",
+            );
+        }
 
         let post_hook_start = Instant::now();
         post_render_hook();
@@ -2218,6 +2372,7 @@ impl VkRenderCore {
         let present_start = Instant::now();
         self.present_frame(frame);
         let present_ms = elapsed_ms(present_start);
+        self.finalize_pending_frame_captures(frame.frame_sync);
 
         self.frame_timing_snapshot = self.build_frame_timing_snapshot(
             frame_start,
@@ -2815,7 +2970,6 @@ impl VkRenderCore {
         if let Err(err) = self.draw_imgui(cmd_buffer, frame.present_image_view) {
             error!("{err}");
         }
-        self.transition_present_for_present(frame);
         Ok(())
     }
 

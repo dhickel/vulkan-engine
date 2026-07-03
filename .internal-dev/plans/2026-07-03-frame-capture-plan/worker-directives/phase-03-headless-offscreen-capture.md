@@ -8,6 +8,8 @@ Implement headless/offscreen frame capture as a core engine target, using render
 
 Users and agents can run `--headless` with capture flags and receive PNG captures without relying on desktop screenshot access.
 
+Visible windowed validation is not reliable as the long-term agent workloop: the runtime window appears on the user's active desktop and may be manually closed while the user is working. Treat manual close events as an expected operator interruption, not as proof that capture failed, and make true headless/offscreen capture the preferred validation path.
+
 ## Editable Targets
 
 - `src/renderer/src/api/config.rs`
@@ -119,4 +121,3 @@ Write `.internal-dev/plans/2026-07-03-frame-capture-plan/validation/phase-03-val
 - true headless/offscreen capture works, or the user-decision gate report is complete and handed to the main thread;
 - compile gates pass or blockers are recorded;
 - phase validation report is written.
-
