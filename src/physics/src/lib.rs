@@ -7,6 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use engine_events::{
+    ColliderId as EventColliderId, ContactPhase as EventContactPhase, EngineEvent, EventBus,
+    EventStage, PhysicsBodyId as EventPhysicsBodyId, PhysicsEvent,
+};
 use rapier3d::na;
 use rapier3d::prelude::*;
 
@@ -151,6 +155,15 @@ pub struct RayHit {
     pub time_of_impact: f32,
 }
 
+impl RayHit {
+    pub fn to_engine_event(&self) -> EngineEvent {
+        EngineEvent::Physics(PhysicsEvent::QueryHit {
+            body: EventPhysicsBodyId::new(self.body.as_str()),
+            collider: EventColliderId::new(self.collider.as_str()),
+        })
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum PhysicsContactPhase {
     Enter,
@@ -170,6 +183,45 @@ pub struct PhysicsContactRecord {
     pub kind: PhysicsContactKind,
     pub a: PhysicsColliderId,
     pub b: PhysicsColliderId,
+}
+
+impl PhysicsContactRecord {
+    pub fn to_engine_event(&self) -> EngineEvent {
+        let phase = match self.phase {
+            PhysicsContactPhase::Enter => EventContactPhase::Enter,
+            PhysicsContactPhase::Stay => EventContactPhase::Stay,
+            PhysicsContactPhase::Exit => EventContactPhase::Exit,
+        };
+        match self.kind {
+            PhysicsContactKind::Collision => EngineEvent::Physics(PhysicsEvent::Collision {
+                phase,
+                a: EventColliderId::new(self.a.as_str()),
+                b: EventColliderId::new(self.b.as_str()),
+            }),
+            PhysicsContactKind::Trigger => EngineEvent::Physics(PhysicsEvent::Trigger {
+                phase,
+                trigger: EventColliderId::new(self.a.as_str()),
+                other: EventColliderId::new(self.b.as_str()),
+            }),
+        }
+    }
+}
+
+pub fn contact_records_to_engine_events(records: &[PhysicsContactRecord]) -> Vec<EngineEvent> {
+    records
+        .iter()
+        .map(PhysicsContactRecord::to_engine_event)
+        .collect()
+}
+
+pub fn emit_contact_records(
+    bus: &mut EventBus,
+    stage: EventStage,
+    records: &[PhysicsContactRecord],
+) {
+    for event in contact_records_to_engine_events(records) {
+        bus.emit(stage, None, event);
+    }
 }
 
 type PairKey = (PhysicsColliderId, PhysicsColliderId);
@@ -412,7 +464,7 @@ impl PhysicsWorld {
             if !(a_collider.is_sensor() || b_collider.is_sensor()) {
                 continue;
             }
-            if let Some(key) = self.pair_key(a, b) {
+            if let Some(key) = self.trigger_pair_key(a, b, a_collider.is_sensor()) {
                 current.insert(key, PhysicsContactKind::Trigger);
             }
         }
@@ -442,6 +494,17 @@ impl PhysicsWorld {
         let a = self.collider_id_for_handle(a)?.clone();
         let b = self.collider_id_for_handle(b)?.clone();
         Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    fn trigger_pair_key(
+        &self,
+        a: ColliderHandle,
+        b: ColliderHandle,
+        a_is_trigger: bool,
+    ) -> Option<PairKey> {
+        let a = self.collider_id_for_handle(a)?.clone();
+        let b = self.collider_id_for_handle(b)?.clone();
+        Some(if a_is_trigger { (a, b) } else { (b, a) })
     }
 
     fn body_id_for_handle(&self, handle: RigidBodyHandle) -> Option<&PhysicsBodyId> {
@@ -775,5 +838,95 @@ mod tests {
             world.last_contact_records()[0].kind,
             PhysicsContactKind::Trigger
         );
+        assert_eq!(
+            world.last_contact_records()[0].a,
+            PhysicsColliderId::new("collider.trigger")
+        );
+    }
+
+    #[test]
+    fn collision_record_maps_to_engine_event() {
+        let record = PhysicsContactRecord {
+            phase: PhysicsContactPhase::Enter,
+            kind: PhysicsContactKind::Collision,
+            a: PhysicsColliderId::new("collider.a"),
+            b: PhysicsColliderId::new("collider.b"),
+        };
+
+        assert_eq!(
+            record.to_engine_event(),
+            EngineEvent::Physics(PhysicsEvent::Collision {
+                phase: EventContactPhase::Enter,
+                a: EventColliderId::new("collider.a"),
+                b: EventColliderId::new("collider.b"),
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_record_maps_trigger_first_to_engine_event() {
+        let record = PhysicsContactRecord {
+            phase: PhysicsContactPhase::Stay,
+            kind: PhysicsContactKind::Trigger,
+            a: PhysicsColliderId::new("collider.sensor"),
+            b: PhysicsColliderId::new("collider.player"),
+        };
+
+        assert_eq!(
+            record.to_engine_event(),
+            EngineEvent::Physics(PhysicsEvent::Trigger {
+                phase: EventContactPhase::Stay,
+                trigger: EventColliderId::new("collider.sensor"),
+                other: EventColliderId::new("collider.player"),
+            })
+        );
+    }
+
+    #[test]
+    fn query_hit_maps_to_engine_event_without_distance_loss_in_physics_record() {
+        let hit = RayHit {
+            body: PhysicsBodyId::new("body.target"),
+            collider: PhysicsColliderId::new("collider.target"),
+            time_of_impact: 4.5,
+        };
+
+        assert_eq!(
+            hit.to_engine_event(),
+            EngineEvent::Physics(PhysicsEvent::QueryHit {
+                body: EventPhysicsBodyId::new("body.target"),
+                collider: EventColliderId::new("collider.target"),
+            })
+        );
+        assert_eq!(hit.time_of_impact, 4.5);
+    }
+
+    #[test]
+    fn physics_step_query_and_event_bridge_run_without_renderer() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(0.0, 0.0, 0.0);
+        world
+            .create_body(BodyDescriptor::new(
+                "body.target",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.target",
+                "body.target",
+                ColliderShape::Sphere { radius: 1.0 },
+            ))
+            .unwrap();
+        world.step(1.0 / 60.0).unwrap();
+        let hit = world
+            .cast_ray(RayQuery::new([0.0, 0.0, -4.0], [0.0, 0.0, 1.0], 10.0))
+            .unwrap()
+            .unwrap();
+
+        let mut bus = EventBus::new();
+        bus.emit(EventStage::PostUpdate, None, hit.to_engine_event());
+        assert_eq!(bus.pending_len(), 1);
+        assert_eq!(bus.dispatch_pending().dispatched, 1);
     }
 }
