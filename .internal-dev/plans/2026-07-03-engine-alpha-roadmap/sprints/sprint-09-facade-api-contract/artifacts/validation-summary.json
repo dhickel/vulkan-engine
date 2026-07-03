@@ -2,7 +2,7 @@
   "plan": "sprint-09-facade-api-contract",
   "created": "2026-07-03",
   "branch": "sprint/alpha-09-facade-api-contract",
-  "status": "phase_04_validated_final_quality_pending",
+  "status": "final_quality_review_passed_with_residuals",
   "phase_reports": {
     "phase_01": {
       "worker_report": "reports/phase-01-export-audit.md",
@@ -257,6 +257,11 @@
       "phase": "future_sprint_plans",
       "commit": "1be254fb",
       "description": "Plan remaining alpha roadmap sprints"
+    },
+    {
+      "phase": "phase_04",
+      "commit": "f4728912",
+      "description": "Finalize sprint 09 docs validation"
     }
   ],
   "superseded_artifacts": [],
@@ -268,7 +273,7 @@
   ],
   "final_quality_review": {
     "required": true,
-    "status": "not_started",
-    "report": null
+    "status": "passed_with_residuals",
+    "report": "validation/final-quality-review.md"
   }
 }
