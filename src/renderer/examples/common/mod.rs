@@ -5,7 +5,7 @@
 use glam::{Mat4, Vec3};
 use log::{error, info};
 use renderer::{
-    default_capture_root, default_single_capture_path, CaptureTarget, DebugRuntimeMode,
+    default_capture_run_dir, single_capture_path, CaptureTarget, DebugRuntimeMode,
     FrameCaptureRequest, FrameCaptureSequence, FrameCaptureStatus, FrameRenderOutcome, Renderer,
     RendererConfig, RendererError, Scene,
 };
@@ -322,11 +322,31 @@ pub fn apply_frame_capture_launch_options(
     options: &LaunchOptions,
     app_name: &str,
 ) -> Result<(), RendererError> {
-    renderer.configure_manual_frame_capture_dir(options.manual_capture_dir.clone())?;
+    let capture_run_dir = default_capture_run_dir(app_name);
+    apply_frame_capture_launch_options_with_run_dir(renderer, options, app_name, &capture_run_dir)
+}
+
+pub fn apply_frame_capture_launch_options_with_run_dir(
+    renderer: &mut Renderer,
+    options: &LaunchOptions,
+    app_name: &str,
+    capture_run_dir: &Path,
+) -> Result<(), RendererError> {
+    renderer.configure_manual_frame_capture_dir(
+        options
+            .manual_capture_dir
+            .clone()
+            .or_else(|| Some(capture_run_dir.to_path_buf())),
+    )?;
 
     if let Some(frame_number) = options.capture_frame {
         let output_path = options.capture_frame_path.clone().unwrap_or_else(|| {
-            default_single_capture_path(app_name, frame_number, options.capture_target)
+            single_capture_path(
+                capture_run_dir,
+                app_name,
+                frame_number,
+                options.capture_target,
+            )
         });
         renderer.request_frame_capture_at(
             frame_number,
@@ -335,9 +355,10 @@ pub fn apply_frame_capture_launch_options(
     }
 
     if let Some(count) = options.capture_frames {
-        let output_dir = options.capture_dir.clone().unwrap_or_else(|| {
-            default_capture_root().join(format!("{}-captures", app_name.replace(' ', "-")))
-        });
+        let output_dir = options
+            .capture_dir
+            .clone()
+            .unwrap_or_else(|| capture_run_dir.to_path_buf());
         let sequence = FrameCaptureSequence::new(
             options.capture_target,
             output_dir,
@@ -419,8 +440,15 @@ pub fn run_demo(scenario: DemoScenario) {
     };
 
     let app_name = config.app_name.clone();
+    let capture_run_dir = default_capture_run_dir(&app_name);
     if launch_options.headless {
-        run_headless_demo(config, launch_options, scenario, &app_name);
+        run_headless_demo(
+            config,
+            launch_options,
+            scenario,
+            &app_name,
+            &capture_run_dir,
+        );
         return;
     }
 
@@ -456,8 +484,12 @@ pub fn run_demo(scenario: DemoScenario) {
         }
     };
     renderer.install_default_fps_input();
-    if let Err(err) = apply_frame_capture_launch_options(&mut renderer, &launch_options, &app_name)
-    {
+    if let Err(err) = apply_frame_capture_launch_options_with_run_dir(
+        &mut renderer,
+        &launch_options,
+        &app_name,
+        &capture_run_dir,
+    ) {
         error!("Failed to configure frame capture: {err}");
         return;
     }
@@ -513,6 +545,9 @@ pub fn run_demo(scenario: DemoScenario) {
                             event: key_event, ..
                         } => {
                             if handle_fullscreen_toggle(&window, &key_event, modifiers) {
+                                return;
+                            }
+                            if handle_manual_capture_key(&mut renderer, &key_event) {
                                 return;
                             }
                             if key_event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
@@ -598,6 +633,7 @@ fn run_headless_demo(
     launch_options: LaunchOptions,
     scenario: DemoScenario,
     app_name: &str,
+    capture_run_dir: &Path,
 ) {
     let mut renderer = match Renderer::new_headless(config.clone()) {
         Ok(renderer) => renderer,
@@ -610,7 +646,12 @@ fn run_headless_demo(
         }
     };
 
-    if let Err(err) = apply_frame_capture_launch_options(&mut renderer, &launch_options, app_name) {
+    if let Err(err) = apply_frame_capture_launch_options_with_run_dir(
+        &mut renderer,
+        &launch_options,
+        app_name,
+        capture_run_dir,
+    ) {
         error!("Failed to configure frame capture: {err}");
         return;
     }
@@ -713,6 +754,21 @@ fn handle_fullscreen_toggle(
         Some(Fullscreen::Borderless(window.current_monitor()))
     };
     window.set_fullscreen(next_mode);
+    true
+}
+
+fn handle_manual_capture_key(renderer: &mut Renderer, key_event: &KeyEvent) -> bool {
+    if key_event.state != ElementState::Pressed || key_event.repeat {
+        return false;
+    }
+
+    if key_event.physical_key != PhysicalKey::Code(KeyCode::F10) {
+        return false;
+    }
+
+    if let Err(err) = renderer.queue_manual_frame_capture(CaptureTarget::Present) {
+        error!("Manual frame capture request rejected: {err}");
+    }
     true
 }
 

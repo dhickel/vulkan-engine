@@ -11,8 +11,8 @@ use app_state::{EditorAction, EditorSelection, EditorSession};
 use launch::LaunchOptions;
 use log::{error, info};
 use renderer::{
-    default_capture_root, default_single_capture_path, AssetManifestMode, AssetPolicyConfig,
-    CommandHistory, DebugRuntimeMode, DurableAssetRecord, FrameCaptureRequest,
+    default_capture_run_dir, single_capture_path, AssetManifestMode, AssetPolicyConfig,
+    CaptureTarget, CommandHistory, DebugRuntimeMode, DurableAssetRecord, FrameCaptureRequest,
     FrameCaptureSequence, FrameRenderOutcome, PlaceAssetCommand, Project, RemoveNodeCommand,
     Renderer, RendererConfig, RendererError, RendererInitError, Scene, SceneAssetReference,
     SceneError, SceneNodeId, SetTransformCommand,
@@ -63,6 +63,7 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
         },
         ..RendererConfig::default()
     };
+    let capture_run_dir = default_capture_run_dir(APP_NAME);
 
     let window = WindowBuilder::new()
         .with_title(APP_NAME)
@@ -74,7 +75,7 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
         .map_err(|err| format!("renderer initialization failed: {err}"))?;
     renderer.install_default_fps_input();
 
-    apply_frame_capture_launch_options(&mut renderer, &launch_options)
+    apply_frame_capture_launch_options(&mut renderer, &launch_options, &capture_run_dir)
         .map_err(|err| format!("failed to configure frame capture: {err}"))?;
     apply_debug_record_launch_options(&mut renderer, &launch_options)
         .map_err(|err| format!("failed to configure debug timing recording: {err}"))?;
@@ -161,6 +162,9 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
                             event: key_event, ..
                         } => {
                             if handle_fullscreen_toggle(&window, &key_event, modifiers) {
+                                return;
+                            }
+                            if handle_manual_capture_key(&mut renderer, &key_event) {
                                 return;
                             }
                             if handle_editor_shortcut(
@@ -814,12 +818,23 @@ fn apply_debug_record_launch_options(
 fn apply_frame_capture_launch_options(
     renderer: &mut Renderer,
     options: &LaunchOptions,
+    capture_run_dir: &Path,
 ) -> Result<(), RendererError> {
-    renderer.configure_manual_frame_capture_dir(options.manual_capture_dir.clone())?;
+    renderer.configure_manual_frame_capture_dir(
+        options
+            .manual_capture_dir
+            .clone()
+            .or_else(|| Some(capture_run_dir.to_path_buf())),
+    )?;
 
     if let Some(frame_number) = options.capture_frame {
         let output_path = options.capture_frame_path.clone().unwrap_or_else(|| {
-            default_single_capture_path(APP_NAME, frame_number, options.capture_target)
+            single_capture_path(
+                capture_run_dir,
+                APP_NAME,
+                frame_number,
+                options.capture_target,
+            )
         });
         renderer.request_frame_capture_at(
             frame_number,
@@ -828,9 +843,10 @@ fn apply_frame_capture_launch_options(
     }
 
     if let Some(count) = options.capture_frames {
-        let output_dir = options.capture_dir.clone().unwrap_or_else(|| {
-            default_capture_root().join(format!("{}-captures", APP_NAME.replace(' ', "-")))
-        });
+        let output_dir = options
+            .capture_dir
+            .clone()
+            .unwrap_or_else(|| capture_run_dir.to_path_buf());
         let sequence = FrameCaptureSequence::new(
             options.capture_target,
             output_dir,
@@ -863,6 +879,21 @@ fn handle_fullscreen_toggle(
         Some(Fullscreen::Borderless(window.current_monitor()))
     };
     window.set_fullscreen(next_mode);
+    true
+}
+
+fn handle_manual_capture_key(renderer: &mut Renderer, key_event: &KeyEvent) -> bool {
+    if key_event.state != ElementState::Pressed || key_event.repeat {
+        return false;
+    }
+
+    if key_event.physical_key != PhysicalKey::Code(KeyCode::F10) {
+        return false;
+    }
+
+    if let Err(err) = renderer.queue_manual_frame_capture(CaptureTarget::Present) {
+        error!("Manual frame capture request rejected: {err}");
+    }
     true
 }
 

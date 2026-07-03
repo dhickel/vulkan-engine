@@ -27,10 +27,11 @@ pub use assets::{
     ProceduralMeshData, ProceduralVertex,
 };
 pub use config::{
-    default_capture_root, default_manual_capture_dir, default_single_capture_path,
-    AssetManifestMode, AssetPolicyConfig, CaptureTarget, DebugRuntimeMode, DueFrameCapture,
-    FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureScheduler, FrameCaptureSequence,
-    FrameCaptureSource, FrameCaptureStatus, RendererConfig, VisualTuning,
+    default_capture_root, default_capture_run_dir, default_manual_capture_dir,
+    default_single_capture_path, single_capture_path, AssetManifestMode, AssetPolicyConfig,
+    CaptureTarget, DebugRuntimeMode, DueFrameCapture, FrameCaptureConfigError, FrameCaptureRequest,
+    FrameCaptureScheduler, FrameCaptureSequence, FrameCaptureSource, FrameCaptureStatus,
+    RendererConfig, VisualTuning,
 };
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
