@@ -1,0 +1,35 @@
+{
+  "sprint": "08",
+  "slug": "sprint-08-scripting-hot-rust-strategy",
+  "status": "planned",
+  "fully_validated": false,
+  "created_at": "2026-07-03",
+  "branch": "sprint/alpha-08-scripting-hot-rust-strategy",
+  "phase_reports": {
+    "phase_01": null,
+    "phase_02": null,
+    "phase_03": null,
+    "phase_04": null,
+    "final_quality_review": null
+  },
+  "commands": [],
+  "capture": {
+    "required": false,
+    "policy": "true engine-owned headless capture only: timeout-bound engine runs with --headless --capture_target draw; desktop screenshots do not count",
+    "artifact_dir": null,
+    "status": "not_applicable_until_visible_behavior_changes"
+  },
+  "known_inherited_residuals": [
+    {
+      "id": "dungeon_dogfood-test-profile-russimp_sys",
+      "status": "accepted_inherited_residual",
+      "description": "cargo test -p dungeon_dogfood is blocked before dogfood tests by an existing renderer test-profile russimp_sys binding issue in src/renderer/src/data/assimp_util.rs unless Sprint 08 directly remediates it."
+    }
+  ],
+  "tooling_constraints": [],
+  "superseded_artifacts": [],
+  "residual_risks": [],
+  "notes": [
+    "This skeleton must not be marked fully_validated until all required phase validators and final quality review pass and any applicable capture evidence is reconciled."
+  ]
+}
