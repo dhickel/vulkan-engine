@@ -1,76 +1,263 @@
-//! Audio subsystem — spatial audio playback via rodio.
+//! Renderer-independent alpha audio facade.
 //!
-//! Provides `AudioEngine` for loading and playing audio clips,
-//! with volume control and spatial positioning support.
+//! Clips have durable authored IDs and can be loaded, constructed, and probed
+//! without opening an output device. Device-backed playback is explicit through
+//! `AudioEngine`.
 
-use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
-use std::io::BufReader;
-use std::path::Path;
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use std::error::Error;
+use std::fmt;
+use std::io::{BufReader, Cursor};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// An audio clip loaded from a file.
+/// Stable authored identity for an audio clip.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct AudioClipId(String);
+
+impl AudioClipId {
+    /// Create a durable clip ID such as `dogfood.audio.pickup`.
+    pub fn new(id: impl Into<String>) -> Result<Self, AudioError> {
+        let id = id.into();
+        if is_valid_clip_id(&id) {
+            Ok(Self(id))
+        } else {
+            Err(AudioError::InvalidClipId { id })
+        }
+    }
+
+    /// Borrow the durable ID as a string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AudioClipId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Audio errors with stable variants for validation and integration tests.
+#[derive(Debug)]
+pub enum AudioError {
+    /// The durable clip ID is empty or contains unsupported characters.
+    InvalidClipId { id: String },
+    /// Clip bytes could not be read from disk.
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    /// Clip bytes could not be decoded by the supported decoder stack.
+    Decode {
+        clip_id: AudioClipId,
+        message: String,
+    },
+    /// The host output device or audio stream could not be opened.
+    Device { message: String },
+    /// A playback sink could not be created or used.
+    Playback {
+        clip_id: AudioClipId,
+        message: String,
+    },
+}
+
+impl fmt::Display for AudioError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidClipId { id } => write!(f, "invalid audio clip id: {id}"),
+            Self::Read { path, source } => {
+                write!(f, "failed to read audio file {}: {source}", path.display())
+            }
+            Self::Decode { clip_id, message } => {
+                write!(f, "failed to decode audio clip {clip_id}: {message}")
+            }
+            Self::Device { message } => write!(f, "failed to open audio device: {message}"),
+            Self::Playback { clip_id, message } => {
+                write!(f, "failed to play audio clip {clip_id}: {message}")
+            }
+        }
+    }
+}
+
+impl Error for AudioError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Device-independent metadata probed from decoded clip bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClipProbe {
+    pub clip_id: AudioClipId,
+    pub byte_len: usize,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub duration: Option<Duration>,
+}
+
+/// Audio clip bytes plus durable authored identity.
+#[derive(Clone, Debug)]
 pub struct AudioClip {
-    data: Vec<u8>,
+    id: AudioClipId,
+    data: Arc<[u8]>,
+    source_path: Option<PathBuf>,
 }
 
 impl AudioClip {
-    /// Load an audio clip from a file (WAV, MP3, FLAC, OGG).
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
-        let data =
-            std::fs::read(path.as_ref()).map_err(|e| format!("failed to read audio file: {e}"))?;
-        Ok(Self { data })
+    /// Load an audio clip from a file without opening an output device.
+    pub fn load(id: impl Into<String>, path: impl AsRef<Path>) -> Result<Self, AudioError> {
+        let id = AudioClipId::new(id)?;
+        let path = path.as_ref();
+        let data = std::fs::read(path).map_err(|source| AudioError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(Self {
+            id,
+            data: data.into(),
+            source_path: Some(path.to_path_buf()),
+        })
     }
 
-    /// Create a clip from raw bytes.
-    pub fn from_bytes(data: Vec<u8>) -> Self {
-        Self { data }
+    /// Create a clip from encoded audio bytes without opening an output device.
+    pub fn from_bytes(id: impl Into<String>, data: impl Into<Vec<u8>>) -> Result<Self, AudioError> {
+        Ok(Self {
+            id: AudioClipId::new(id)?,
+            data: data.into().into(),
+            source_path: None,
+        })
+    }
+
+    /// Durable authored identity for this clip.
+    pub fn id(&self) -> &AudioClipId {
+        &self.id
+    }
+
+    /// Encoded audio byte length.
+    pub fn byte_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Whether the encoded clip byte buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Optional path this clip was loaded from.
+    pub fn source_path(&self) -> Option<&Path> {
+        self.source_path.as_deref()
+    }
+
+    /// Probe decode metadata without opening an output device.
+    pub fn probe(&self) -> Result<ClipProbe, AudioError> {
+        let decoder = self.decoder()?;
+        Ok(ClipProbe {
+            clip_id: self.id.clone(),
+            byte_len: self.byte_len(),
+            channels: decoder.channels(),
+            sample_rate: decoder.sample_rate(),
+            duration: decoder.total_duration(),
+        })
+    }
+
+    fn decoder(&self) -> Result<Decoder<BufReader<Cursor<Vec<u8>>>>, AudioError> {
+        let cursor = Cursor::new(self.data.to_vec());
+        Decoder::new(BufReader::new(cursor)).map_err(|err| AudioError::Decode {
+            clip_id: self.id.clone(),
+            message: err.to_string(),
+        })
     }
 }
 
-/// The audio engine — owns the output stream and manages playback.
+/// Playback settings applied when a clip is attached to a sink.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaybackOptions {
+    volume: f32,
+}
+
+impl PlaybackOptions {
+    /// Create playback options with volume clamped to the supported range.
+    pub fn new(volume: f32) -> Self {
+        Self {
+            volume: clamp_volume(volume),
+        }
+    }
+
+    /// Effective playback volume in the `0.0..=1.0` range.
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+}
+
+impl Default for PlaybackOptions {
+    fn default() -> Self {
+        Self { volume: 1.0 }
+    }
+}
+
+/// Explicit device-backed audio engine.
 pub struct AudioEngine {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
 }
 
 impl AudioEngine {
-    /// Initialize the audio engine.
-    pub fn new() -> Result<Self, String> {
+    /// Open the host default output stream.
+    pub fn new() -> Result<Self, AudioError> {
         let (stream, stream_handle) =
-            OutputStream::try_default().map_err(|e| format!("failed to open audio stream: {e}"))?;
+            OutputStream::try_default().map_err(|err| AudioError::Device {
+                message: err.to_string(),
+            })?;
         Ok(Self {
             _stream: stream,
             stream_handle,
         })
     }
 
-    /// Play an audio clip. Returns a handle that can be used to control playback.
-    pub fn play(&self, clip: &AudioClip) -> Result<PlaybackHandle, String> {
-        let cursor = std::io::Cursor::new(clip.data.clone());
-        let source = rodio::Decoder::new(BufReader::new(cursor))
-            .map_err(|e| format!("failed to decode audio: {e}"))?;
-        let sink = Sink::try_new(&self.stream_handle)
-            .map_err(|e| format!("failed to create audio sink: {e}"))?;
+    /// Play an audio clip with default playback options.
+    pub fn play(&self, clip: &AudioClip) -> Result<PlaybackHandle, AudioError> {
+        self.play_with_options(clip, PlaybackOptions::default())
+    }
+
+    /// Play an audio clip with explicit playback options.
+    pub fn play_with_options(
+        &self,
+        clip: &AudioClip,
+        options: PlaybackOptions,
+    ) -> Result<PlaybackHandle, AudioError> {
+        let source = clip.decoder()?;
+        let sink = Sink::try_new(&self.stream_handle).map_err(|err| AudioError::Playback {
+            clip_id: clip.id().clone(),
+            message: err.to_string(),
+        })?;
+        sink.set_volume(options.volume());
         sink.append(source);
         Ok(PlaybackHandle { sink })
     }
 
-    /// Get the master volume (0.0 - 1.0). Not directly supported by rodio sinks;
-    /// returns a fixed 1.0 for now.
+    /// Current facade-level master volume placeholder.
     pub fn master_volume(&self) -> f32 {
         1.0
     }
 }
 
-/// Handle to an active audio playback. Drop to stop.
+/// Handle to active device-backed playback.
 pub struct PlaybackHandle {
     sink: Sink,
 }
 
 impl PlaybackHandle {
     pub fn set_volume(&self, volume: f32) {
-        self.sink.set_volume(volume.clamp(0.0, 1.0));
+        self.sink.set_volume(clamp_volume(volume));
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.sink.volume()
     }
 
     pub fn pause(&self) {
@@ -90,19 +277,156 @@ impl PlaybackHandle {
     }
 }
 
+fn clamp_volume(volume: f32) -> f32 {
+    if volume.is_nan() {
+        1.0
+    } else {
+        volume.clamp(0.0, 1.0)
+    }
+}
+
+fn is_valid_clip_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn engine_initialization() {
-        let engine = AudioEngine::new();
-        assert!(engine.is_ok());
+    fn clip_from_bytes_keeps_durable_identity() {
+        let bytes = tiny_wav_bytes();
+        let clip = AudioClip::from_bytes("test.audio.beep", bytes.clone()).unwrap();
+
+        assert_eq!(clip.id().as_str(), "test.audio.beep");
+        assert_eq!(clip.byte_len(), bytes.len());
+        assert!(clip.source_path().is_none());
     }
 
     #[test]
-    fn clip_from_bytes() {
-        let clip = AudioClip::from_bytes(vec![0u8; 1024]);
-        assert_eq!(clip.data.len(), 1024);
+    fn valid_wav_probe_is_device_independent() {
+        let clip = AudioClip::from_bytes("test.audio.probe", tiny_wav_bytes()).unwrap();
+        let probe = clip.probe().unwrap();
+
+        assert_eq!(probe.clip_id.as_str(), "test.audio.probe");
+        assert_eq!(probe.channels, 1);
+        assert_eq!(probe.sample_rate, 8_000);
+        assert!(probe.byte_len > 44);
+        assert_eq!(probe.duration, Some(Duration::from_millis(4)));
+    }
+
+    #[test]
+    fn invalid_bytes_report_decode_error_without_device() {
+        let clip = AudioClip::from_bytes("test.audio.invalid", vec![0, 1, 2, 3]).unwrap();
+
+        assert!(matches!(
+            clip.probe(),
+            Err(AudioError::Decode { clip_id, .. }) if clip_id.as_str() == "test.audio.invalid"
+        ));
+    }
+
+    #[test]
+    fn missing_file_reports_read_error() {
+        let path = std::env::temp_dir().join(format!(
+            "engine-audio-missing-{}-{}.wav",
+            std::process::id(),
+            unique_suffix()
+        ));
+
+        let err = AudioClip::load("test.audio.missing", &path).unwrap_err();
+
+        assert!(matches!(err, AudioError::Read { .. }));
+    }
+
+    #[test]
+    fn load_from_file_preserves_source_path_and_probes() {
+        let path = std::env::temp_dir().join(format!(
+            "engine-audio-valid-{}-{}.wav",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::write(&path, tiny_wav_bytes()).unwrap();
+
+        let clip = AudioClip::load("test.audio.file", &path).unwrap();
+
+        assert_eq!(clip.source_path(), Some(path.as_path()));
+        assert_eq!(clip.probe().unwrap().sample_rate, 8_000);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_clip_id_is_typed() {
+        let err = AudioClip::from_bytes("bad clip id", tiny_wav_bytes()).unwrap_err();
+
+        assert!(matches!(err, AudioError::InvalidClipId { .. }));
+    }
+
+    #[test]
+    fn playback_options_clamp_volume_without_device() {
+        assert_eq!(PlaybackOptions::new(-1.0).volume(), 0.0);
+        assert_eq!(PlaybackOptions::new(0.25).volume(), 0.25);
+        assert_eq!(PlaybackOptions::new(3.0).volume(), 1.0);
+        assert_eq!(PlaybackOptions::new(f32::NAN).volume(), 1.0);
+    }
+
+    #[test]
+    #[ignore = "manual smoke: set ENGINE_AUDIO_DEVICE_SMOKE=1 to open the default output device"]
+    fn device_playback_smoke_is_manual_and_gated() {
+        if std::env::var("ENGINE_AUDIO_DEVICE_SMOKE").as_deref() != Ok("1") {
+            return;
+        }
+
+        let engine = AudioEngine::new().unwrap();
+        let clip = AudioClip::from_bytes("test.audio.device_smoke", tiny_wav_bytes()).unwrap();
+        let handle = engine
+            .play_with_options(&clip, PlaybackOptions::new(0.05))
+            .unwrap();
+        handle.stop();
+    }
+
+    fn tiny_wav_bytes() -> Vec<u8> {
+        let channels = 1u16;
+        let sample_rate = 8_000u32;
+        let bits_per_sample = 16u16;
+        let samples: [i16; 32] = [
+            0, 2048, 4096, 2048, 0, -2048, -4096, -2048, 0, 2048, 4096, 2048, 0, -2048, -4096,
+            -2048, 0, 2048, 4096, 2048, 0, -2048, -4096, -2048, 0, 2048, 4096, 2048, 0, -2048,
+            -4096, -2048,
+        ];
+        let data_len = samples.len() as u32 * std::mem::size_of::<i16>() as u32;
+        let byte_rate = sample_rate * channels as u32 * bits_per_sample as u32 / 8;
+        let block_align = channels * bits_per_sample / 8;
+
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn unique_suffix() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
