@@ -2,7 +2,7 @@
   "sprint": "06",
   "slug": "sprint-06-physics-collision-foundation",
   "branch": "sprint/alpha-06-physics-collision-foundation",
-  "status": "planning_ready",
+  "status": "planning_baseline_committed_pushed_reported",
   "fully_validated": false,
   "phase_status": {
     "phase_01_physics_crate_alpha_contract": "planned",
