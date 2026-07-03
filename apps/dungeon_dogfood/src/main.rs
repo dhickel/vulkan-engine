@@ -18,7 +18,8 @@ use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use renderer::{
-    AssetManifestMode, AssetPolicyConfig, FrameRenderOutcome, RendererConfig, RendererError,
+    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureRequest,
+    FrameCaptureSequence, FrameCaptureStatus, FrameRenderOutcome, RendererConfig, RendererError,
 };
 use scene_seed::{renderer_visual_tuning, LevelScene};
 use thiserror::Error;
@@ -37,6 +38,100 @@ const GENERATOR_SEED_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_SEED";
 const GENERATOR_WIDTH_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_WIDTH";
 const GENERATOR_HEIGHT_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_HEIGHT";
 const GENERATOR_LAYERS_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_LAYERS";
+
+#[derive(Debug, Default)]
+struct HeadlessOptions {
+    enabled: bool,
+    capture_target: CaptureTarget,
+    capture_frames: Option<u32>,
+    capture_frame_start: Option<u32>,
+    capture_frame_interval: Option<u32>,
+    capture_dir: Option<PathBuf>,
+}
+
+impl HeadlessOptions {
+    fn from_args() -> Self {
+        let args: Vec<String> = std::env::args().collect();
+        let mut opts = HeadlessOptions::default();
+        let mut i = 1;
+
+        while i < args.len() {
+            match args[i].as_str() {
+                "--headless" => {
+                    opts.enabled = true;
+                    i += 1;
+                }
+                "--capture_target" => {
+                    if let Some(value) = args.get(i + 1) {
+                        opts.capture_target = CaptureTarget::parse(value)
+                            .unwrap_or_else(|| {
+                                eprintln!("invalid --capture_target '{}'; expected 'present' or 'draw'", value);
+                                std::process::exit(1);
+                            });
+                        i += 2;
+                    } else {
+                        eprintln!("--capture_target requires a value");
+                        std::process::exit(1);
+                    }
+                }
+                "--capture_frames" => {
+                    if let Some(value) = args.get(i + 1) {
+                        opts.capture_frames = Some(value.parse().unwrap_or_else(|_| {
+                            eprintln!("--capture_frames expects a positive integer");
+                            std::process::exit(1);
+                        }));
+                        i += 2;
+                    } else {
+                        eprintln!("--capture_frames requires a value");
+                        std::process::exit(1);
+                    }
+                }
+                "--capture_frame_start" => {
+                    if let Some(value) = args.get(i + 1) {
+                        opts.capture_frame_start = Some(value.parse().unwrap_or_else(|_| {
+                            eprintln!("--capture_frame_start expects a non-negative integer");
+                            std::process::exit(1);
+                        }));
+                        i += 2;
+                    } else {
+                        eprintln!("--capture_frame_start requires a value");
+                        std::process::exit(1);
+                    }
+                }
+                "--capture_frame_interval" => {
+                    if let Some(value) = args.get(i + 1) {
+                        opts.capture_frame_interval = Some(value.parse().unwrap_or_else(|_| {
+                            eprintln!("--capture_frame_interval expects a positive integer");
+                            std::process::exit(1);
+                        }));
+                        i += 2;
+                    } else {
+                        eprintln!("--capture_frame_interval requires a value");
+                        std::process::exit(1);
+                    }
+                }
+                "--capture_dir" => {
+                    if let Some(value) = args.get(i + 1) {
+                        opts.capture_dir = Some(PathBuf::from(value));
+                        i += 2;
+                    } else {
+                        eprintln!("--capture_dir requires a value");
+                        std::process::exit(1);
+                    }
+                }
+                // Skip --level and its value (handled by parse_level_arg)
+                "--level" => {
+                    i += 2;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        opts
+    }
+}
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -76,6 +171,7 @@ enum AppError {
 }
 
 fn run() -> Result<(), AppError> {
+    let headless_opts = HeadlessOptions::from_args();
     let content_pack = load_content_pack(CONTENT_PACK_PATH)?;
 
     log::info!(
@@ -124,6 +220,10 @@ fn run() -> Result<(), AppError> {
     }
 
     let collision_world = CollisionWorld::from_level(&level);
+
+    if headless_opts.enabled {
+        return run_headless(&level, &content_pack, &collision_world, &loaded_level, &headless_opts);
+    }
 
     let event_loop = EventLoop::new()?;
     let window = WindowBuilder::new()
@@ -492,6 +592,207 @@ fn print_level_load_help() {
     eprintln!("  L = point light marker");
     eprintln!("  R^ R> Rv R< = ramp tiles");
     eprintln!("  --- = next layer separator");
+    eprintln!();
+    eprintln!("Headless capture options:");
+    eprintln!("  --headless                     Use headless renderer (no window)");
+    eprintln!("  --capture_target <present|draw>");
+    eprintln!("  --capture_frames <n>           Number of frames to capture");
+    eprintln!("  --capture_frame_start <n>      Frame to start capturing (default: 0)");
+    eprintln!("  --capture_frame_interval <n>   Frames between captures (default: 1)");
+    eprintln!("  --capture_dir <dir>            Output directory for captures");
+}
+
+fn run_headless(
+    level: &ParsedLevel,
+    content_pack: &content::ContentPack,
+    collision_world: &CollisionWorld,
+    loaded_level: &LoadedLevel,
+    headless_opts: &HeadlessOptions,
+) -> Result<(), AppError> {
+    log::info!("Starting dogfood headless capture run");
+
+    let config = RendererConfig {
+        app_name: "dungeon_dogfood".to_string(),
+        window_width: 1280,
+        window_height: 720,
+        validation_layer: env_flag("DUNGEON_DOGFOOD_VALIDATION"),
+        compile_shaders: false,
+        shader_debug_mode: renderer::DebugRuntimeMode::Default,
+        preload_startup_scene: false,
+        visual_tuning: renderer_visual_tuning(),
+        headless: true,
+        asset_policy: AssetPolicyConfig {
+            manifest_mode: AssetManifestMode::BestEffort,
+            allow_filename_heuristics: true,
+            compression: CompressionConfig {
+                mode: TextureCompressionMode::Disabled,
+                quality: 50,
+            },
+        },
+    };
+
+    let mut renderer =
+        renderer::Renderer::new_headless(config).map_err(AppError::RendererInit)?;
+    events::install_dogfood_event_logger(&mut renderer);
+    let audio_report = audio_bridge::run_startup_audio_probe(
+        &mut renderer,
+        content_pack,
+        audio_bridge::audio_smoke_requested(),
+    );
+    log::info!(
+        "Dogfood headless audio bridge report: clip={:?} status={:?}",
+        audio_report.clip_id,
+        audio_report.device_smoke_status
+    );
+    renderer.install_default_fps_input();
+
+    let mut scene = renderer::Scene::new();
+    {
+        let assets = renderer.assets();
+        scene.set_skybox(assets.default_environment());
+    }
+
+    let _level_scene = {
+        let mut assets = renderer.assets();
+        LevelScene::from_level(level, content_pack, &mut scene, &mut assets)?
+    };
+
+    let spawn_world = tile_to_world(level.spawn.x, level.spawn.y);
+    let spawn_position = spawn_world
+        + glam::Vec3::new(
+            0.5,
+            level.spawn.layer as f32 * collision::WALL_HEIGHT + PLAYER_EYE_HEIGHT,
+            -0.5,
+        );
+    let mut player = PlayerState::new(spawn_position);
+    renderer.set_camera_position(spawn_position);
+
+    // Configure frame capture if requested
+    let capture_target = headless_opts.capture_target;
+    let capture_run_dir = headless_opts
+        .capture_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".internal-dev/captures/sprint-11-dogfood-vertical-slice/dogfood-baseline"));
+
+    if let Some(count) = headless_opts.capture_frames {
+        let sequence =
+            FrameCaptureSequence::new(
+                capture_target,
+                &capture_run_dir,
+                headless_opts.capture_frame_start.unwrap_or(0),
+                headless_opts.capture_frame_interval.unwrap_or(1),
+                count,
+            )
+            .map_err(AppError::RendererInit)?;
+
+        let _ = std::fs::create_dir_all(&capture_run_dir);
+        renderer
+            .configure_frame_capture_sequence(sequence)
+            .map_err(AppError::RendererInit)?;
+
+        log::info!(
+            "Headless frame capture configured: target={} frames={} start={} interval={} dir={}",
+            capture_target.as_label(),
+            count,
+            headless_opts.capture_frame_start.unwrap_or(0),
+            headless_opts.capture_frame_interval.unwrap_or(1),
+            capture_run_dir.display()
+        );
+    } else {
+        log::info!(
+            "Headless render mode without capture; rendering {} default smoke frames",
+            3
+        );
+    }
+
+    let expected_captures = headless_opts.capture_frames.unwrap_or(0) as usize;
+    let frame_budget = if expected_captures == 0 {
+        3
+    } else {
+        let last_frame = headless_opts.capture_frame_start.unwrap_or(0)
+            + headless_opts
+                .capture_frame_interval
+                .unwrap_or(1)
+                .saturating_mul(
+                    headless_opts.capture_frames.unwrap_or(1).saturating_sub(1),
+                );
+        last_frame.saturating_add(120).max(180)
+    };
+    let mut succeeded_count = 0usize;
+
+    for frame_num in 0..frame_budget {
+        if let Err(err) = renderer.render_scene_headless(&mut scene) {
+            log::error!("Headless render failed at frame {frame_num}: {err}");
+            return Err(AppError::RendererInit(err));
+        }
+
+        match renderer.last_frame_capture_status() {
+            Some(FrameCaptureStatus::Succeeded {
+                output_path,
+                sidecar_path,
+                target,
+                width,
+                height,
+                ..
+            }) => {
+                succeeded_count += 1;
+                log::info!(
+                    "Capture #{succeeded_count} at frame {frame_num}: target={} size={}x{} path={} sidecar={:?}",
+                    target.as_label(),
+                    width,
+                    height,
+                    output_path.display(),
+                    sidecar_path.as_ref().map(|p| p.display().to_string())
+                );
+                if succeeded_count >= expected_captures && expected_captures > 0 {
+                    log::info!(
+                        "Headless capture complete: {succeeded_count}/{expected_captures} captures written"
+                    );
+                    return Ok(());
+                }
+            }
+            Some(FrameCaptureStatus::Failed {
+                message,
+                frame_number,
+                ..
+            }) => {
+                log::error!(
+                    "Headless capture failed at frame {frame_number}: {message}"
+                );
+                return Err(AppError::RendererInit(RendererError::InvalidState(
+                    format!("headless capture failed at frame {frame_number}: {message}"),
+                )));
+            }
+            Some(FrameCaptureStatus::BackendNotImplemented {
+                target,
+                frame_number,
+                ..
+            }) => {
+                log::error!(
+                    "Headless capture target '{}' is not implemented at frame {frame_number}",
+                    target.as_label()
+                );
+                return Err(AppError::RendererInit(RendererError::InvalidState(
+                    format!(
+                        "headless capture target '{}' is not implemented",
+                        target.as_label()
+                    ),
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    if expected_captures == 0 {
+        log::info!("Headless smoke render completed ({frame_budget} frames)");
+        Ok(())
+    } else {
+        Err(AppError::RendererInit(RendererError::InvalidState(
+            format!(
+                "headless capture incomplete: {succeeded_count}/{expected_captures} captures written"
+            ),
+        )))
+    }
 }
 
 fn env_flag(var_name: &str) -> bool {

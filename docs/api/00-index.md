@@ -27,6 +27,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Runtime launcher | [11-runtime-project-launcher.md](11-runtime-project-launcher.md) | Root `engine` launcher, project manifests, headless draw capture, app-crate loop |
 | Events and lifecycle | [12-events-and-lifecycle.md](12-events-and-lifecycle.md) | `EventBus`, lifecycle/action events, recorder usage, safe mutation rules |
 | Audio foundation | [13-audio-foundation.md](13-audio-foundation.md) | Packaged audio metadata, device-independent clips, opt-in playback, audio events |
+| Dogfood vertical slice | [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md) | Alpha demo app walkthrough, headless capture, package/project contracts |
 
 ## Public API Contract
 

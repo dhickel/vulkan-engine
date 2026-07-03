@@ -27,7 +27,11 @@ cargo run -p engine_pack -- <command>
 Validate a package manifest:
 
 ```sh
+# Editor sample package
 cargo run -p engine_pack -- validate-package apps/editor/sample_project/assets/editor_sample.package.toml --expected-package-id editor_sample
+
+# Dogfood dungeon package (10 assets: models, textures, environment, audio)
+cargo run -p engine_pack -- validate-package apps/dungeon_dogfood/assets/dogfood_dungeon.package.toml --expected-package-id dogfood_dungeon
 ```
 
 Validate a project and its enabled package/source files:

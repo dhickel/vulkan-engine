@@ -94,7 +94,7 @@ Use an app crate when the project needs custom Rust behavior:
 cargo run -p dungeon_dogfood
 ```
 
-App crates can depend on `renderer`, `input`, `physics`, `audio`, and other workspace support crates directly. They own their Rust control flow and may choose whether to consume project/package/scene data. `apps/dungeon_dogfood` is the current custom app path and has not been migrated to project manifests. App crates can consume renderer events through the public facade, physics crates can translate ray/contact records into `engine_events` payloads for app-owned dispatch, and app-owned audio bridges can emit `AudioEvent` values.
+App crates can depend on `renderer`, `input`, `physics`, `audio`, and other workspace support crates directly. They own their Rust control flow and may choose whether to consume project/package/scene data. `apps/dungeon_dogfood` is the current custom app path with canonical project/package/scene contracts and its own headless draw capture support (see [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md)). App crates can consume renderer events through the public facade, physics crates can translate ray/contact records into `engine_events` payloads for app-owned dispatch, and app-owned audio bridges can emit `AudioEvent` values.
 
 For an off-workspace compile-first starting point:
 
