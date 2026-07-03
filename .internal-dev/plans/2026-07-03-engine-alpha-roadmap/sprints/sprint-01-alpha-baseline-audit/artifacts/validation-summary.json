@@ -213,10 +213,24 @@
     }
   },
   "phase_03": {
-    "status": "phase_checks_passed_pending_parent_commit_push_email_and_independent_validation",
+    "status": "passed",
     "validated_at": "2026-07-03",
     "scope": "residual register and validation matrix",
     "head_at_start": "4294788d6cd24ca25eba742f6fff9728767144f5",
+    "validated_commit": "60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+    "commit_subject": "Register alpha baseline residuals",
+    "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+    "remote_evidence": {
+      "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+      "result": "60720fa1689fafc99794d4b0b1185e459ff7f7d6 refs/heads/sprint/alpha-01-baseline-audit",
+      "commit_url": "https://github.com/dhickel/vulkan-engine/commit/60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit"
+    },
+    "email_report": {
+      "status": "parent_thread_reported_sent_not_independently_inspected",
+      "message_id": "<0100019f2676f499-47dc80cd-bca7-4a62-8ebd-eb3a6bd673f9-000000@email.amazonses.com>",
+      "thread_id": "2f3334b3-338d-41f1-84c5-bc4deade90b1"
+    },
     "changed_files": [
       ".internal-dev/reviews/2026-07-03-alpha-baseline-register.md",
       ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/validation-matrix.md",
@@ -279,6 +293,21 @@
         "command": "git diff --check",
         "result": "pass",
         "summary": "No whitespace errors in Phase 03 changes."
+      },
+      {
+        "command": "git show --stat --oneline --name-only 60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+        "result": "pass",
+        "summary": "Pushed commit changed four internal review/validation artifacts and no product Rust source."
+      },
+      {
+        "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+        "result": "pass",
+        "summary": "Remote branch resolves to 60720fa1689fafc99794d4b0b1185e459ff7f7d6."
+      },
+      {
+        "command": "git diff --name-only 4294788d6cd24ca25eba742f6fff9728767144f5..60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+        "result": "pass",
+        "summary": "Phase 03 commit changed only the register, shared validation matrix, evidence index, and phase validation report."
       }
     ],
     "capture_validation": {
@@ -288,14 +317,16 @@
       "reason": "Phase 03 changed internal review and validation artifacts only; no renderer, scene, shader, camera, material, asset, or Vulkan visual behavior changed."
     },
     "commit_push_email": {
-      "status": "not_performed_by_worker_per_user_instruction",
-      "note": "User explicitly instructed not to commit, push, or email; parent/main thread owns those gates."
+      "status": "observed_from_parent_thread_evidence_and_remote_ref",
+      "commit": "60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+      "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+      "email_message_id": "<0100019f2676f499-47dc80cd-bca7-4a62-8ebd-eb3a6bd673f9-000000@email.amazonses.com>",
+      "email_thread_id": "2f3334b3-338d-41f1-84c5-bc4deade90b1",
+      "note": "Email content was reported by the parent thread and not independently inspected through AgentMail in this validation pass."
     },
     "residual_risks": [
       "Several historical gap-report candidates are classified unknown_needs_audit until targeted source/runtime validation runs.",
-      "Phase 04 compile/test/runtime checks remain pending.",
-      "The new register and Phase 03 validation report are ignored by .gitignore and require parent/main thread force-add if they should be committed.",
-      "Independent phase validation, commit, push, and email gates remain parent-owned."
+      "Phase 04 compile/test/runtime checks remain pending."
     ]
   },
   "fully_validated": false
