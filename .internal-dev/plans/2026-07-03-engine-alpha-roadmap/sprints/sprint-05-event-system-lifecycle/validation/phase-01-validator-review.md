@@ -22,7 +22,7 @@ Non-blocking boundary note: `.idea/engine.iml` is modified and `.reasonix/` is u
 | Defines stage/order semantics and envelope sequence/frame metadata. | PASS | `EventStage`, `EventSequence`, `FrameId`, and `EventEnvelope` are present; rustdoc documents explicit stage drains, emission order, and listener failure continuation. |
 | Implements subscription, unsubscription, emission, stage drain, full drain/dispatch, and bounded recorder. | PASS | `EventBus::subscribe`, `unsubscribe`, `emit`, `drain_stage`, `dispatch_pending`, and `EventRecorder::bounded` are implemented. |
 | Tests cover event family construction, sequence/order stability, listener removal, recorder bounds, and listener failure policy. | PASS | `cargo test -p engine_events` ran 7 unit tests covering the required areas. |
-| Phase validation report and validation summary are conservative and internally consistent. | PASS | Phase report says implementation checks passed and validator pending; validation summary keeps `fully_validated: false` and later sprint evidence planned. |
+| Phase validation report and validation summary are conservative and internally consistent. | PASS | At review time, phase report said implementation checks passed and validator pending; later main-thread closeout artifacts advanced the phase status after commit/push/report evidence. |
 | Unrelated local `.idea/engine.iml` and `.reasonix` must remain untouched. | PASS for this validation; PRESERVE NOTE | Current worktree contains those paths as dirty/untracked, but this validator did not modify them. Keep them out of phase closeout unless separately approved. |
 
 ## Commands Run
@@ -41,7 +41,7 @@ Non-blocking boundary note: `.idea/engine.iml` is modified and `.reasonix/` is u
 
 ## Evidence Reconciliation
 
-The worker validation report and canonical validation summary match the rerun command results. The summary is conservative: it records Phase 01 as implementation checks passed with validator pending, leaves `fully_validated` false, and keeps runtime/capture evidence planned for later phases. No contradictory pass/fail flags were found.
+The worker validation report and canonical validation summary matched the rerun command results at review time. The summary was later advanced by the main thread after report/commit/push evidence was recorded. No contradictory pass/fail flags were found.
 
 ## Files Changed By Validator
 

@@ -44,7 +44,7 @@ Closeout note: `apps/dungeon_dogfood/src/events.rs` is ignored by the current gi
 
 ## Evidence Notes
 
-- Canonical evidence index remains conservative: `artifacts/validation-summary.json` reports Phase 03 as implementation checks passed and validator pending, with `fully_validated: false`. This review supplies the validator pass artifact but does not mutate the index.
+- Canonical evidence index was later updated by the main thread after this review to report Phase 03 as validator-passed, committed, pushed, and reported while keeping `fully_validated: false` until final quality review.
 - No browser or visual proof is required for this phase. The work changes app-side event observation and documentation, not visible renderer output.
 - Existing renderer dead-code warnings remain outside this phase.
 

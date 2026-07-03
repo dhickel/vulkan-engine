@@ -15,7 +15,7 @@ No blocking findings remain after remediation.
 - Rechecked the original failed findings from `phase-02-validator-review.md`.
 - Verified `LifecycleEvent::ShutdownRequested` is emitted for window close and Escape before `EventLoop` exit in `src/runtime.rs`.
 - Verified `AssetEvent::PackageFailed` is emitted inside the package manifest load error branch before the package load error is returned.
-- Reconciled the updated phase report and `validation-summary.json`; both now describe remediation conservatively and keep final/full validation pending.
+- Reconciled the updated phase report and `validation-summary.json`; at review time both described remediation conservatively and kept final/full validation pending.
 - Confirmed `.idea/engine.iml` and `.reasonix/` were already dirty/untracked local state and were not modified by this rerun.
 
 ## Criterion Results
@@ -30,7 +30,7 @@ No blocking findings remain after remediation.
 | 6. Window close/Escape emits `LifecycleEvent::ShutdownRequested` before `EventLoop` exit; windowed `ShutdownCompleted` is not required. | PASS | `src/runtime.rs` close/Escape branches emit shutdown-requested before `control_flow.exit()`. |
 | 7. Ordering/failure/shutdown behavior has no-Vulkan tests. | PASS | `cargo test -p engine` includes no-Vulkan tests for lifecycle ordering, shutdown-requested helper emission, and package-failure helper emission. |
 | 8. Phase 01 still green and renderer examples compile. | PASS | `cargo test -p engine_events` passed; `cargo check -p renderer --examples` passed with existing renderer warnings. |
-| 9. Phase evidence is conservative and internally consistent after remediation. | PASS | Phase report marks implementation checks passed after remediation with validator rerun pending; summary has `fully_validated: false` and records the initial failure as remediated. |
+| 9. Phase evidence is conservative and internally consistent after remediation. | PASS | At review time, phase report marked implementation checks passed after remediation with validator rerun pending; later main-thread closeout artifacts advanced the phase status after commit/push/report evidence. |
 | 10. Unrelated `.idea/engine.iml` and `.reasonix` remain unmodified by this validation and must not be included in phase closeout. | PASS / PRESERVE | `git status --short` still shows `.idea/engine.iml` modified and `.reasonix/` untracked; this rerun changed only this report file. |
 
 ## Commands Run

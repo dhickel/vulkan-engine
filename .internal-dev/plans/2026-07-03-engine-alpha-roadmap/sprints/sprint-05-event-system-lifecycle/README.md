@@ -1,6 +1,6 @@
 # Sprint 05: Event System And Application Lifecycle
 
-Status: planned
+Status: fully validated
 
 ## Objective
 

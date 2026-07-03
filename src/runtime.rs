@@ -2,9 +2,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use engine_events::EventEnvelope;
 use engine_events::{
-    AssetEvent, EngineEvent, EventBus, EventEnvelope, EventRecorder, EventStage, LifecycleEvent,
-    PackageId, ProjectId, SceneId,
+    AssetEvent, EngineEvent, EventBus, EventRecorder, EventStage, LifecycleEvent, PackageId,
+    ProjectId, SceneId,
 };
 use log::{info, warn};
 use renderer::{
