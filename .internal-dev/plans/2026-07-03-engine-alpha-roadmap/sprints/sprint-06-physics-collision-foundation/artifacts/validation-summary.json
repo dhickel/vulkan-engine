@@ -2,10 +2,10 @@
   "sprint": "06",
   "slug": "sprint-06-physics-collision-foundation",
   "branch": "sprint/alpha-06-physics-collision-foundation",
-  "status": "planning_baseline_committed_pushed_reported",
+  "status": "phase_01_validated",
   "fully_validated": false,
   "phase_status": {
-    "phase_01_physics_crate_alpha_contract": "planned",
+    "phase_01_physics_crate_alpha_contract": "validated",
     "phase_02_package_scene_collision_metadata": "planned",
     "phase_03_event_bridge_dogfood_proof": "planned",
     "phase_04_docs_final_validation": "planned",
@@ -18,7 +18,42 @@
     "phase_04": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/phase-04-validation-report.md",
     "final_quality": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/final-quality-review.md"
   },
-  "command_results": [],
+  "command_results": [
+    {
+      "phase": "01",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p physics",
+      "result": "pass",
+      "notes": "7 unit tests pass"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p physics",
+      "result": "pass"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer dead-code warning noise remains"
+    },
+    {
+      "phase": "01",
+      "command": "rg -n \"renderer|ash|vulkan|winit|imgui|dungeon_dogfood|editor\" src/physics",
+      "result": "pass",
+      "notes": "No matches; rg_exit=1 means clean dependency scan"
+    },
+    {
+      "phase": "01",
+      "command": "cargo tree -p physics",
+      "result": "pass",
+      "notes": "Physics roots at rapier3d; no renderer/window/editor/app dependency"
+    }
+  ],
   "browser_or_capture": {
     "required_by_plan": false,
     "reason": "Pure physics, metadata, event, docs, and dogfood decision-gate work do not require visual proof unless implementation changes visible renderer/editor behavior.",
@@ -32,7 +67,6 @@
   "superseded_artifacts": [],
   "tooling_constraints": [],
   "residual_risks": [
-    "Plan-only artifact; no implementation or validation has run yet.",
     "Dogfood migration scope must be decided after Phase 03 code inspection and tests."
   ]
 }
