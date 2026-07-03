@@ -61,7 +61,7 @@ use crate::data::data_cache::{
     VkPipelineType, VkSamplerCache, VkShaderCache,
 };
 
-use crate::api::config::VisualTuning;
+use crate::api::config::{DueFrameCapture, FrameCaptureStatus, VisualTuning};
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
     AsByteSlice, EnvironmentUBO, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox,
@@ -1253,6 +1253,15 @@ impl VkRender {
     pub fn frame_timing_snapshot(&self) -> DebugTimingSnapshot {
         self.core.frame_timing_snapshot()
     }
+
+    pub fn process_frame_capture_request(
+        &mut self,
+        frame_number: u32,
+        capture: &DueFrameCapture,
+    ) -> FrameCaptureStatus {
+        self.core
+            .process_frame_capture_request(frame_number, capture)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1432,6 +1441,25 @@ impl VkRenderCore {
 
     pub fn frame_timing_snapshot(&self) -> DebugTimingSnapshot {
         self.frame_timing_snapshot.clone()
+    }
+
+    pub fn process_frame_capture_request(
+        &mut self,
+        frame_number: u32,
+        capture: &DueFrameCapture,
+    ) -> FrameCaptureStatus {
+        warn!(
+            "Frame capture requested for frame {} target {} -> {}; Vulkan readback/PNG backend is not implemented in Phase 01",
+            frame_number,
+            capture.request.target.as_label(),
+            capture.request.output_path.display()
+        );
+        FrameCaptureStatus::BackendNotImplemented {
+            frame_number,
+            target: capture.request.target,
+            output_path: capture.request.output_path.clone(),
+            source: capture.source,
+        }
     }
 
     fn init_gpu_timing_state(

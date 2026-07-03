@@ -33,6 +33,7 @@ fn main() {
 
     let config = RendererConfig {
         app_name: "renderer facade api_test".to_string(),
+        headless: launch_options.headless,
         ..RendererConfig::default()
     };
 
@@ -60,6 +61,12 @@ fn main() {
         }
     };
     renderer.install_default_fps_input();
+    if let Err(err) =
+        common::apply_frame_capture_launch_options(&mut renderer, &launch_options, &app_name)
+    {
+        error!("Failed to configure frame capture: {err}");
+        return;
+    }
     match common::apply_debug_record_launch_options(&mut renderer, &launch_options) {
         Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
         Ok(None) => {

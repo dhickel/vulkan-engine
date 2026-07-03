@@ -19,7 +19,10 @@ use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
 use super::assets::{AssetLoadTracker, AssetManager};
-use super::config::{AssetPolicyConfig, RendererConfig};
+use super::config::{
+    AssetPolicyConfig, CaptureTarget, DueFrameCapture, FrameCaptureRequest, FrameCaptureScheduler,
+    FrameCaptureSequence, FrameCaptureStatus, RendererConfig,
+};
 use super::errors::{
     map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, RendererError,
     RendererInitError,
@@ -71,6 +74,7 @@ pub struct Renderer {
     asset_policy: AssetPolicyConfig,
     pre_render_hook: Option<RenderHook>,
     post_render_hook: Option<RenderHook>,
+    frame_capture_scheduler: FrameCaptureScheduler,
     resize_skip_state_logged: bool,
     camera: Camera,
     fps_plugin: Option<FpsInputPlugin>,
@@ -85,6 +89,7 @@ impl Renderer {
             log::warn!("Headless mode: window and swapchain will be created but presentation skipped. Full offscreen rendering via VkImage targets is not yet implemented.");
         }
 
+        let app_name = config.app_name.clone();
         let window_state = create_window_state(window, &config);
         let vk_debug_mode: vk_render::DebugRuntimeMode = config.shader_debug_mode.into();
         let (runtime, scene_world) = vk_render::VkRender::new(
@@ -114,6 +119,7 @@ impl Renderer {
             asset_policy,
             pre_render_hook: None,
             post_render_hook: None,
+            frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
             resize_skip_state_logged: false,
             camera: Camera::default(),
             fps_plugin: None,
@@ -229,6 +235,16 @@ impl Renderer {
                     {
                         self.toggle_debug_overlay_ui();
                         self.apply_cursor_policy(window)?;
+                        return Ok(());
+                    }
+
+                    if !key_event.repeat
+                        && key_event.state == ElementState::Pressed
+                        && matches!(key_event.physical_key, PhysicalKey::Code(KeyCode::F12))
+                    {
+                        if let Err(err) = self.queue_manual_frame_capture(CaptureTarget::Present) {
+                            warn!("manual frame capture request rejected: {err}");
+                        }
                         return Ok(());
                     }
 
@@ -545,6 +561,60 @@ impl Renderer {
             .map_err(|err| map_frame_input_err(format!("debug timing start failed: {err}")))
     }
 
+    /// Queues one frame capture for the next rendered frame.
+    pub fn request_frame_capture(
+        &mut self,
+        request: FrameCaptureRequest,
+    ) -> Result<(), RendererError> {
+        self.frame_capture_scheduler
+            .schedule_single_capture(self.frame_number.wrapping_add(1), request)?;
+        Ok(())
+    }
+
+    /// Queues one frame capture for an exact renderer frame number.
+    pub fn request_frame_capture_at(
+        &mut self,
+        frame_number: u32,
+        request: FrameCaptureRequest,
+    ) -> Result<(), RendererError> {
+        self.frame_capture_scheduler
+            .schedule_single_capture(frame_number, request)?;
+        Ok(())
+    }
+
+    /// Configures a finite frame-capture sequence.
+    pub fn configure_frame_capture_sequence(
+        &mut self,
+        sequence: FrameCaptureSequence,
+    ) -> Result<(), RendererError> {
+        self.frame_capture_scheduler.configure_sequence(sequence)?;
+        Ok(())
+    }
+
+    /// Sets the manual-capture output directory. `None` restores the default location.
+    pub fn configure_manual_frame_capture_dir(
+        &mut self,
+        output_dir: Option<std::path::PathBuf>,
+    ) -> Result<(), RendererError> {
+        self.frame_capture_scheduler
+            .configure_manual_output_dir(output_dir)?;
+        Ok(())
+    }
+
+    /// Queues a manual capture for the next rendered frame.
+    pub fn queue_manual_frame_capture(
+        &mut self,
+        target: CaptureTarget,
+    ) -> Result<(), RendererError> {
+        self.frame_capture_scheduler
+            .queue_manual_capture(self.frame_number, target)?;
+        Ok(())
+    }
+
+    pub fn last_frame_capture_status(&self) -> Option<&FrameCaptureStatus> {
+        self.frame_capture_scheduler.last_status()
+    }
+
     /// Thread: Main
     /// May Stall: No
     pub fn resize_requested(&self) -> bool {
@@ -630,6 +700,8 @@ impl Renderer {
         let frame_index = frame_number as u64;
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
 
+        let due_captures = self.frame_capture_scheduler.due_captures(frame_number);
+
         let runtime = &mut self.runtime;
         let pre_hook = &mut self.pre_render_hook;
         let post_hook = &mut self.post_render_hook;
@@ -673,6 +745,8 @@ impl Renderer {
             ))
         })?;
 
+        self.record_frame_capture_statuses(frame_number, due_captures);
+
         let env_status = self.runtime.environment_runtime_status();
         let fps = if self.last_frame_delta_seconds > 0.0 {
             1.0 / self.last_frame_delta_seconds
@@ -707,6 +781,19 @@ impl Renderer {
     fn viewport_size(&self) -> (u32, u32) {
         let extent = self.runtime.core.window_state.get_curr_extent();
         (extent.width, extent.height)
+    }
+
+    fn record_frame_capture_statuses(
+        &mut self,
+        frame_number: u32,
+        due_captures: Vec<DueFrameCapture>,
+    ) {
+        for capture in due_captures {
+            let status = self
+                .runtime
+                .process_frame_capture_request(frame_number, &capture);
+            self.frame_capture_scheduler.record_status(status);
+        }
     }
 
     fn apply_cursor_policy(&mut self, window: &Window) -> Result<(), RendererError> {

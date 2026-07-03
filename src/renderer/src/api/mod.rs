@@ -27,7 +27,10 @@ pub use assets::{
     ProceduralMeshData, ProceduralVertex,
 };
 pub use config::{
-    AssetManifestMode, AssetPolicyConfig, DebugRuntimeMode, RendererConfig, VisualTuning,
+    default_capture_root, default_manual_capture_dir, default_single_capture_path,
+    AssetManifestMode, AssetPolicyConfig, CaptureTarget, DebugRuntimeMode, DueFrameCapture,
+    FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureScheduler, FrameCaptureSequence,
+    FrameCaptureSource, FrameCaptureStatus, RendererConfig, VisualTuning,
 };
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
