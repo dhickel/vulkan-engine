@@ -2,12 +2,12 @@
   "sprint": "05",
   "slug": "sprint-05-event-system-lifecycle",
   "branch": "sprint/alpha-05-event-system-lifecycle",
-  "status": "phase_02_validator_passed_committed_pushed_reported",
+  "status": "phase_03_validator_passed_commit_push_report_pending",
   "fully_validated": false,
   "phase_status": {
     "phase_01_core_event_crate_api": "validator_passed_committed_pushed_reported",
     "phase_02_renderer_runtime_integration": "validator_passed_committed_pushed_reported",
-    "phase_03_apps_samples_docs": "planned",
+    "phase_03_apps_samples_docs": "validator_passed_commit_push_report_pending",
     "phase_04_validation_closeout": "planned",
     "final_quality_review": "planned"
   },
@@ -112,6 +112,60 @@
     {
       "phase": "phase_02_renderer_runtime_integration",
       "command": "validator rerun review",
+      "status": "passed_no_blocking_findings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "cargo check -p editor",
+      "status": "passed_with_existing_renderer_and_editor_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "cargo check -p dungeon_dogfood",
+      "status": "passed_with_existing_renderer_and_dogfood_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "cargo check -p engine_pack",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "rg docs event cross-link scan",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "rg docs stale sweep for /tmp TODO desktop screenshot playwright not implemented",
+      "status": "reviewed_hits_non_phase03_blockers",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "rg engine_events app/docs/ownership scan",
+      "status": "passed_apps_use_renderer_facade_no_low_level_leakage",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "git diff --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_apps_samples_docs",
+      "command": "validator review",
       "status": "passed_no_blocking_findings",
       "exit_code": 0
     }

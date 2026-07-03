@@ -25,6 +25,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Editor placement | [09-editor-asset-browser-and-wall-chunks.md](09-editor-asset-browser-and-wall-chunks.md) | Project package loading, asset browser, wall chunk prefab placement |
 | Packaging CLI | [10-packaging-cli.md](10-packaging-cli.md) | Rust CLI validation, authoring, and folder pack output |
 | Runtime launcher | [11-runtime-project-launcher.md](11-runtime-project-launcher.md) | Root `engine` launcher, project manifests, headless draw capture, app-crate loop |
+| Events and lifecycle | [12-events-and-lifecycle.md](12-events-and-lifecycle.md) | `EventBus`, lifecycle/action events, recorder usage, safe mutation rules |
 
 ## Top-Level Re-exports
 
@@ -39,6 +40,9 @@ pub use data::handles::{MeshHandle, TextureHandle, MaterialHandle, EnvironmentHa
 
 // Input (re-exported from the input crate)
 pub use input::{InputSystem, InputSnapshot, InputLayer, ActionMap, ...};
+
+// Events (re-exported from engine_events)
+pub use engine_events::{EventBus, EventRecorder, EngineEvent, EventStage, ...};
 
 // Debug
 pub use debug_ui::{DebugViewId, DebugViewDescriptor, DebugTimingRow, ...};
@@ -67,7 +71,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
   --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
 ```
 
-Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. Dynamic Rust hot reload, scripting runtime, event-system integration, physics integration, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
+Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. The alpha event contract is available through the renderer facade; dynamic Rust hot reload, scripting runtime execution, physics integration, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
 
 ## Canonical Renderer Example
 
@@ -111,5 +115,6 @@ cargo run -p renderer --example api_test
 ## See Also
 
 - [Internal Architecture Reference](../internal/00-index.md) — implementation details
+- [Events and Lifecycle](12-events-and-lifecycle.md) — event subscriptions, recorders, and lifecycle ordering
 - [Alpha Readiness Baseline](../gap-report.md) — current readiness and residual-classification routing
 - [Renderer AGENTS.md](../../src/renderer/AGENTS.md) — contributor guide

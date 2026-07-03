@@ -1,5 +1,6 @@
 mod collision;
 mod content;
+mod events;
 mod generator;
 mod geometry;
 mod layout;
@@ -149,6 +150,7 @@ fn run() -> Result<(), AppError> {
     };
 
     let mut renderer = renderer::Renderer::new(config, &window).map_err(AppError::RendererInit)?;
+    events::install_dogfood_event_logger(&mut renderer);
     renderer.install_default_fps_input();
 
     let mut scene = renderer::Scene::new();

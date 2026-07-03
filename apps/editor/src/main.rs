@@ -1,4 +1,5 @@
 mod app_state;
+mod events;
 mod launch;
 mod panels;
 
@@ -65,6 +66,7 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
 
     let mut renderer = Renderer::new(config, &window)
         .map_err(|err| format!("renderer initialization failed: {err}"))?;
+    events::install_editor_event_logger(&mut renderer);
     renderer.install_default_fps_input();
 
     apply_frame_capture_launch_options(&mut renderer, &launch_options, &capture_run_dir)
@@ -298,6 +300,7 @@ fn run_headless_editor(
 ) -> Result<(), String> {
     let mut renderer = Renderer::new_headless(config)
         .map_err(|err| format!("headless renderer initialization failed: {err}"))?;
+    events::install_editor_event_logger(&mut renderer);
 
     apply_frame_capture_launch_options(&mut renderer, &launch_options, capture_run_dir)
         .map_err(|err| format!("failed to configure frame capture: {err}"))?;

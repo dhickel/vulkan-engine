@@ -15,6 +15,7 @@ Direct crate flow:
 - Layered dispatch: input handlers are grouped by priority.
 - Consumption rule: all same-priority handlers run; if any consume, lower priorities do not run.
 - Polling snapshot: gameplay can query held/just-pressed keys, mouse delta, scroll, and action values.
+- Event bridge: the renderer emits `InputActionEvent` after `InputSystem::dispatch_frame()` from the refreshed snapshot.
 - Action mapping: bind semantic actions (`"move.forward"`) to chords (keys/buttons + modifiers).
 - Input profiles: `ActionMap` load/save uses strict `version = 1` TOML with `trigger` + `modifiers`.
 
@@ -114,7 +115,8 @@ consume = false
 - Step 2: inspect `renderer.input().debug_snapshot()` for queued event count and active layers.
 - Step 3: confirm layer priorities and consumption behavior.
 - Step 4: log action values from `snapshot.action_value(...)` to verify mappings.
-- Step 5: reproduce with `cargo run -p renderer --example api_test`.
+- Step 5: subscribe through `Renderer::events_mut()` when you need typed action event telemetry.
+- Step 6: reproduce with `cargo run -p renderer --example api_test`.
 
 ## 8. Cross-Module Links
 - Input crate source: `src/input/src/lib.rs`
@@ -128,6 +130,7 @@ consume = false
 
 ## 10. See Also
 - `docs/api/02-renderer-lifecycle-and-frame-api.md`
+- `docs/api/12-events-and-lifecycle.md`
 - `docs/internal/09-input-winit-integration.md`
 - `src/input/AGENTS.md`
 

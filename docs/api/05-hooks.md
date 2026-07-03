@@ -6,6 +6,8 @@
 
 Render hooks let you inject custom logic before and after the rendergraph executes. They're the primary extension mechanism for users who need to run custom Vulkan commands, update GPU data, or perform post-processing without modifying engine internals.
 
+Use events for lifecycle/input observation and hooks for render-thread extension points. Event listeners receive immutable envelopes and should not perform renderer mutation directly.
+
 ## Hook Types
 
 ```rust
@@ -69,5 +71,6 @@ Defined at [`hooks.rs`](../src/renderer/src/api/hooks.rs). `Fatal` errors propag
 ## See Also
 
 - [02-renderer.md](02-renderer.md) — where hooks fit in the frame lifecycle
+- [12-events-and-lifecycle.md](12-events-and-lifecycle.md) — event observation and mutation safety
 - [Internal: API-to-backend handoff](../internal/02-renderer-internals.md)
 - [src/renderer/src/api/hooks.rs](../src/renderer/src/api/hooks.rs) — implementation

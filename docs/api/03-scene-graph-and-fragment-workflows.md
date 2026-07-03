@@ -7,6 +7,8 @@ This chapter explains how facade users build, mutate, and extend scene content w
 Scene authoring path:
 asset load (`AssetManager`) -> scene creation/mutation (`Scene`) -> optional fragment merge (`Scene::merge_fragment`) -> renderer submission (`Renderer::render_scene*`).
 
+The event crate defines typed scene event contracts, but broad scene mutation emission is deferred. Current scene mutation APIs remain direct facade calls and command-history transactions.
+
 ## 3. Key Concepts
 - `Scene` is the runtime-owned mutable graph used for rendering.
 - `SceneNodeId` and `PointLightId` are slot+generation handles; they can become stale.
@@ -317,6 +319,7 @@ Avoid mutating and removing the same node handle in unrelated systems without ow
 - Scene node IDs and world internals: `src/renderer/src/scene/scene_world.rs`
 - API usage entrypoint: `src/renderer/examples/api_test.rs`
 - Internal scene flattening notes: `docs/internal/01-rendering-pipeline-mental-model.md`
+- Event lifecycle contract: `docs/api/12-events-and-lifecycle.md`
 
 ## 9. Standard References
 - glTF node transform model: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#nodes-and-hierarchy
@@ -326,4 +329,5 @@ Avoid mutating and removing the same node handle in unrelated systems without ow
 ## 10. See Also
 - `docs/api/02-renderer-lifecycle-and-frame-api.md`
 - `docs/api/04-assets-sync-deferred-and-handles.md`
+- `docs/api/12-events-and-lifecycle.md`
 - `docs/internal/01-rendering-pipeline-mental-model.md`

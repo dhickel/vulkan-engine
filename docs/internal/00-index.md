@@ -39,6 +39,8 @@ Renderer (public API)
 | 6 | [06-input-internals.md](06-input-internals.md) | Input dispatch, priority groups, action resolution |
 | 7 | [07-rendergraph.md](07-rendergraph.md) | Pass traits, dependencies, attachment aliasing |
 | 8 | [08-shaders.md](08-shaders.md) | Shader contracts, compilation, PBR pipeline |
+| 9 | [09-input-winit-integration.md](09-input-winit-integration.md) | Winit ingestion, input dispatch, snapshot bridge |
+| 10 | [10-event-system-and-lifecycle.md](10-event-system-and-lifecycle.md) | Event ownership boundaries, emission ordering, validation |
 
 ## Key Source Files
 
@@ -50,6 +52,7 @@ Renderer (public API)
 | [`src/renderer/src/scene/scene_world.rs`](../../src/renderer/src/scene/scene_world.rs) | Scene graph and submission builder |
 | [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) | Render graph and pass trait |
 | [`src/input/src/lib.rs`](../../src/input/src/lib.rs) | Input system (single file) |
+| [`src/events/src/lib.rs`](../../src/events/src/lib.rs) | Event contracts, staged bus, recorder |
 
 ## Distributed Knowledge
 
@@ -62,4 +65,5 @@ Module-level guides provide subsystem detail:
 ## See Also
 
 - [API Reference](../api/00-index.md) — public API surface
+- [API Events and Lifecycle](../api/12-events-and-lifecycle.md) — public event consumption contract
 - [Alpha Readiness Baseline](../gap-report.md) — current readiness and residual-classification routing

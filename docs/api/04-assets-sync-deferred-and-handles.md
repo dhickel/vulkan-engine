@@ -39,6 +39,7 @@ Implemented:
 CLI tooling:
 
 - `engine_pack` is the current Rust CLI for validating project/package/scene files, creating starter project/package manifests, scanning supported asset files, appending asset records, and producing folder-based pack output. See [Packaging CLI](10-packaging-cli.md).
+- The root runtime emits package lifecycle events (`PackageLoading`, `PackageLoaded`, `PackageFailed`) while loading enabled project packages. Broader per-asset load/ready/failure events are typed but deferred. See [Events and Lifecycle](12-events-and-lifecycle.md).
 
 Deferred:
 
