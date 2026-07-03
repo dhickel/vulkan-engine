@@ -1,0 +1,59 @@
+{
+  "task": "sprint-04-runtime-launcher",
+  "plan_root": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher",
+  "status": "planned",
+  "fully_validated": false,
+  "created_at": "2026-07-03",
+  "updated_at": "2026-07-03",
+  "branch": "sprint/alpha-04-runtime-launcher",
+  "required_validation_reports": [
+    "validation/phase-01-validation-report.md",
+    "validation/phase-02-validation-report.md",
+    "validation/phase-03-validation-report.md",
+    "validation/phase-04-validation-report.md"
+  ],
+  "phase_status": {
+    "phase_01_runtime_cli": "pending",
+    "phase_02_runtime_loading_loop": "pending",
+    "phase_03_dev_loop_docs": "pending",
+    "phase_04_capture_closeout": "pending"
+  },
+  "required_commands": [],
+  "capture_proof": {
+    "required": true,
+    "status": "pending",
+    "accepted_target": "draw",
+    "required_flags": [
+      "--headless",
+      "--capture_target draw"
+    ],
+    "artifact_directory": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw",
+    "sidecar_predicates": {
+      "status": "succeeded",
+      "capture_target": "draw",
+      "format": "draw-target format, expected R16G16B16A16_SFLOAT unless current code documents otherwise",
+      "extent": "positive width and height",
+      "png_path": "exists and non-empty"
+    },
+    "rejected_proof": [
+      "desktop screenshots",
+      "compositor screenshots",
+      "present-target captures"
+    ],
+    "sidecars": []
+  },
+  "debug_record_evidence": {
+    "status": "pending",
+    "expected_path": ".internal-dev/debug_reports/sprint-04-runtime-launcher/root-runtime-timing.jsonl"
+  },
+  "model_tooling_constraints": [],
+  "residual_risks": [
+    "Implementation not started.",
+    "Headless Vulkan support not yet validated for this sprint.",
+    "Docs still reflect pre-Sprint-04 runtime launcher state until Phase 03 completes."
+  ],
+  "superseded_artifacts": [],
+  "notes": [
+    "This initial index is intentionally conservative and must not be promoted to fully_validated until all phase validators and draw-target capture proof pass."
+  ]
+}
