@@ -36,7 +36,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
   --capture_frames 3 \
   --capture_frame_start 5 \
   --capture_frame_interval 5 \
-  --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
+  --capture_dir .internal-dev/captures/runtime-launcher/headless-draw
 ```
 
 Accepted Sprint 04 evidence comes from `Renderer::new_headless` and `render_scene_headless`. Sidecar JSON must report `status = "succeeded"`, `capture_target = "draw"`, a draw-target image format such as `R16G16B16A16_SFLOAT`, positive extent, and an existing PNG path. Desktop screenshots, compositor screenshots, and present-target captures are not validation evidence for this path.

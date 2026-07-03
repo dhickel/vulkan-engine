@@ -52,7 +52,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
   --capture_frames 3 \
   --capture_frame_start 5 \
   --capture_frame_interval 5 \
-  --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
+  --capture_dir .internal-dev/captures/runtime-launcher/headless-draw
 
 # Optional: custom environment map with api_test
 cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr

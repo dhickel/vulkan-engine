@@ -90,7 +90,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
   --capture_frames 3 \
   --capture_frame_start 5 \
   --capture_frame_interval 5 \
-  --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
+  --capture_dir .internal-dev/captures/runtime-launcher/headless-draw
 ```
 
 Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. For an off-workspace compile-first starting point, `engine_pack new-app` generates a standalone support-crate scaffold that uses public `engine_events`, `input`, and `physics` dependencies without editing the root workspace. The alpha event contract is available through the renderer facade. The standalone `physics` crate provides durable ID descriptors, basic collider shapes, ray queries, contact records, and helpers that translate physics records into `engine_events` payloads. The standalone `audio` crate provides durable clip IDs, device-independent load/probe paths, explicit device-backed playback, package/scene validation, and an opt-in dogfood proof. Runtime scene-to-physics loading, editor collision/audio authoring UI, dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and renderer-window generated app templates are deferred.

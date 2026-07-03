@@ -126,7 +126,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -p editor -- \
   --capture_frames 3 \
   --capture_frame_start 5 \
   --capture_frame_interval 5 \
-  --capture_dir .internal-dev/captures/sprint-03-editor-packaged-placement-headless-draw
+  --capture_dir .internal-dev/captures/editor-packaged-placement/headless-draw
 ```
 
 Sprint 03 accepted capture sidecars report:
