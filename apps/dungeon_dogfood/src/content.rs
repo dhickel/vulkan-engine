@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use audio::AudioClipId;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -16,6 +17,8 @@ pub struct ContentPack {
     pub props: Vec<PropSpec>,
     pub materials: Vec<MaterialSpec>,
     pub environments: Vec<EnvironmentSpec>,
+    #[serde(default)]
+    pub audio_clips: Vec<AudioClipSpec>,
     pub light_presets: Vec<LightPresetSpec>,
 }
 
@@ -80,6 +83,43 @@ pub enum EnvironmentMode {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AudioClipSpec {
+    pub id: String,
+    pub path: PathBuf,
+    pub format: AudioClipFormat,
+    pub usage: AudioClipUsage,
+    #[serde(default)]
+    pub default_gain: Option<f32>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
+pub enum AudioClipFormat {
+    #[serde(rename = "wav")]
+    Wav,
+    #[serde(rename = "ogg")]
+    Ogg,
+    #[serde(rename = "flac")]
+    Flac,
+    #[serde(rename = "mp3")]
+    Mp3,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Deserialize)]
+pub enum AudioClipUsage {
+    #[serde(rename = "effect")]
+    Effect,
+    #[serde(rename = "music")]
+    Music,
+    #[serde(rename = "ambient")]
+    Ambient,
+    #[serde(rename = "voice")]
+    Voice,
+    #[serde(rename = "ui")]
+    Ui,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LightPresetSpec {
     pub id: String,
     pub color: [f32; 3],
@@ -125,6 +165,10 @@ impl ContentPack {
     pub fn primary_environment(&self) -> &EnvironmentSpec {
         // Validation guarantees at least one environment exists.
         &self.environments[0]
+    }
+
+    pub fn startup_audio_clip(&self) -> Option<&AudioClipSpec> {
+        self.audio_clips.first()
     }
 
     pub fn light_preset(&self, id: LightPresetId) -> Option<&LightPresetSpec> {
@@ -344,6 +388,32 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
         require_existing_path(&env.path, &format!("{key}.path"), &env.id, pack_path)?;
     }
 
+    let mut audio_ids = HashSet::new();
+    for (idx, clip) in pack.audio_clips.iter().enumerate() {
+        let key = format!("audio_clips[{idx}]");
+        validate_audio_clip_id(&clip.id, &format!("{key}.id"), pack_path)?;
+
+        if !audio_ids.insert(clip.id.as_str()) {
+            return Err(validation_err(
+                pack_path,
+                format!("{key}.id"),
+                format!("duplicate id '{}'", clip.id),
+            ));
+        }
+
+        require_existing_path(&clip.path, &format!("{key}.path"), &clip.id, pack_path)?;
+
+        if let Some(default_gain) = clip.default_gain {
+            if !default_gain.is_finite() || default_gain <= 0.0 {
+                return Err(validation_err(
+                    pack_path,
+                    format!("{key}.default_gain"),
+                    "default_gain must be finite and > 0",
+                ));
+            }
+        }
+    }
+
     if pack.light_presets.is_empty() {
         return Err(validation_err(
             pack_path,
@@ -404,6 +474,27 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
             pack_path,
             "light_presets",
             "required preset ids are: warm, cool, accent",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_audio_clip_id(id: &str, key: &str, pack_path: &Path) -> Result<(), ContentError> {
+    AudioClipId::new(id.to_string()).map_err(|err| {
+        validation_err(
+            pack_path,
+            key,
+            format!("invalid durable audio clip id '{id}': {err}"),
+        )
+    })?;
+
+    let lowered = id.to_ascii_lowercase();
+    if lowered.contains("slot") && lowered.contains("generation") {
+        return Err(validation_err(
+            pack_path,
+            key,
+            format!("audio clip id '{id}' looks like a runtime handle"),
         ));
     }
 
@@ -500,6 +591,10 @@ mod tests {
 
         assert_eq!(pack.version, 1);
         assert!(!pack.enabled_props().is_empty());
+        assert_eq!(
+            pack.startup_audio_clip().map(|clip| clip.id.as_str()),
+            Some("dogfood.audio.startup_ping")
+        );
 
         let _ = fs::remove_file(temp);
     }
@@ -637,6 +732,66 @@ y_offset = 0.0
             ContentError::Validation { key, message, .. } => {
                 assert_eq!(key, "materials");
                 assert!(message.contains("stone_floor"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        let _ = fs::remove_file(temp);
+    }
+
+    #[test]
+    fn audio_clip_path_is_validated() {
+        let canonical = include_str!("../assets/content_pack.toml");
+        let broken = canonical.replace(
+            "apps/dungeon_dogfood/assets/audio/startup_ping.wav",
+            "apps/dungeon_dogfood/assets/audio/DOES_NOT_EXIST.wav",
+        );
+        let temp = write_temp_toml(&broken);
+
+        let err = load_content_pack(&temp).expect_err("missing audio clip path should fail");
+        match err {
+            ContentError::Validation { key, message, .. } => {
+                assert_eq!(key, "audio_clips[0].path");
+                assert!(message.contains("missing path"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        let _ = fs::remove_file(temp);
+    }
+
+    #[test]
+    fn duplicate_audio_clip_ids_are_rejected() {
+        let canonical = include_str!("../assets/content_pack.toml");
+        let duplicate = canonical.replace(
+            "[[light_presets]]",
+            "[[audio_clips]]\nid = \"dogfood.audio.startup_ping\"\npath = \"apps/dungeon_dogfood/assets/audio/startup_ping.wav\"\nformat = \"wav\"\nusage = \"ui\"\n\n[[light_presets]]",
+        );
+        let temp = write_temp_toml(&duplicate);
+
+        let err = load_content_pack(&temp).expect_err("duplicate audio clip id should fail");
+        match err {
+            ContentError::Validation { key, message, .. } => {
+                assert_eq!(key, "audio_clips[1].id");
+                assert!(message.contains("duplicate id"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        let _ = fs::remove_file(temp);
+    }
+
+    #[test]
+    fn invalid_audio_gain_is_rejected() {
+        let canonical = include_str!("../assets/content_pack.toml");
+        let broken = canonical.replace("default_gain = 0.15", "default_gain = 0.0");
+        let temp = write_temp_toml(&broken);
+
+        let err = load_content_pack(&temp).expect_err("invalid audio gain should fail");
+        match err {
+            ContentError::Validation { key, message, .. } => {
+                assert_eq!(key, "audio_clips[0].default_gain");
+                assert!(message.contains("finite and > 0"));
             }
             other => panic!("expected validation error, got {other:?}"),
         }

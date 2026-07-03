@@ -1,3 +1,4 @@
+mod audio_bridge;
 mod collision;
 mod content;
 mod events;
@@ -78,11 +79,12 @@ fn run() -> Result<(), AppError> {
     let content_pack = load_content_pack(CONTENT_PACK_PATH)?;
 
     log::info!(
-        "Loaded content pack: {} props ({} enabled), {} materials, {} environments, {} light presets",
+        "Loaded content pack: {} props ({} enabled), {} materials, {} environments, {} audio clips, {} light presets",
         content_pack.props.len(),
         content_pack.enabled_props().len(),
         content_pack.materials.len(),
         content_pack.environments.len(),
+        content_pack.audio_clips.len(),
         content_pack.light_presets.len()
     );
 
@@ -151,6 +153,16 @@ fn run() -> Result<(), AppError> {
 
     let mut renderer = renderer::Renderer::new(config, &window).map_err(AppError::RendererInit)?;
     events::install_dogfood_event_logger(&mut renderer);
+    let audio_report = audio_bridge::run_startup_audio_probe(
+        &mut renderer,
+        &content_pack,
+        audio_bridge::audio_smoke_requested(),
+    );
+    log::info!(
+        "Dogfood audio bridge report: clip={:?} status={:?}",
+        audio_report.clip_id,
+        audio_report.device_smoke_status
+    );
     renderer.install_default_fps_input();
 
     let mut scene = renderer::Scene::new();

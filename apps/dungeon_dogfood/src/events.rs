@@ -36,6 +36,9 @@ fn log_dogfood_event(event: &EventEnvelope) {
                 action.source.as_deref().unwrap_or("unknown")
             );
         }
+        EngineEvent::Audio(audio) => {
+            log::info!("dogfood audio event {:?}", audio);
+        }
         _ => {}
     }
 }

@@ -37,6 +37,13 @@ id = "env_dungeon_neutral"
 path = "apps/dungeon_dogfood/assets/environments/dungeon_neutral.exr"
 mode = "auto"
 
+[[audio_clips]]
+id = "dogfood.audio.startup_ping"
+path = "apps/dungeon_dogfood/assets/audio/startup_ping.wav"
+format = "wav"
+usage = "ui"
+default_gain = 0.15
+
 [[light_presets]]
 id = "warm"
 color = [1.0, 0.6, 0.3]

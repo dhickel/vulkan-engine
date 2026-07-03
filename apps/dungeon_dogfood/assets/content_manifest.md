@@ -22,6 +22,7 @@
 | prop_torch_sconce_a | model | `apps/dungeon_dogfood/assets/models/props/torch_sconce/scene.gltf` | dogfood_dungeon import | needs_verification | present | no | Non-PBR fallback prop for now. |
 | prop_crate_a | model | `apps/dungeon_dogfood/assets/models/props/crate_a/wooden_crate_01_4k.gltf` | dogfood_dungeon import | needs_verification | present | no | Primary PBR prop. |
 | prop_landmark_a | model | `apps/dungeon_dogfood/assets/models/props/landmark_a/` | needs_verification | needs_verification | missing | no | Optional follow-up; not required to start phase 2. |
+| dogfood.audio.startup_ping | audio | `apps/dungeon_dogfood/assets/audio/startup_ping.wav` | internal/generated | internal | present | no | Tiny generated WAV used for opt-in audio bridge proof; startup only probes it unless audio smoke is explicitly enabled. |
 | pbr_stone_wall | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/stone_rough/` | dogfood_dungeon import | needs_verification | present | yes | Wall material family (PBR). |
 | pbr_stone_floor | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/stone_floor/` | dogfood_dungeon import | needs_verification | present | yes | Floor material family (PBR). |
 | pbr_metal_worn | texture_set | `apps/dungeon_dogfood/assets/textures/pbr/metal_worn/` | needs_verification | needs_verification | missing | no | Deferred for later phase if needed. |
@@ -32,6 +33,7 @@
 
 - `apps/dungeon_dogfood/assets/levels/`
 - `apps/dungeon_dogfood/assets/models/props/`
+- `apps/dungeon_dogfood/assets/audio/`
 - `apps/dungeon_dogfood/assets/textures/pbr/stone_rough/`
 - `apps/dungeon_dogfood/assets/textures/pbr/stone_floor/`
 - `apps/dungeon_dogfood/assets/environments/`
