@@ -36,7 +36,7 @@ This module owns:
 
 ## Current Risks
 
-- Some destroy paths remain incomplete (`todo!()`).
+- `VkDestroyable` trait is implemented for all active resource types. As of Sprint 12, one unreachable `find_memory_type` stub remains in `vk_util.rs` (no active callers).
 - Geometry pass and pipeline binding order are correctness-sensitive.
 - Swapchain rebuild still has explicit cleanup FIXME areas.
 - Queue usage assumptions should be revisited if family strategy changes.

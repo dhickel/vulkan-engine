@@ -12,6 +12,7 @@ Hook flow in the current facade path:
   - `Renderer::set_pre_render_hook(Option<RenderHook>)`
   - `Renderer::set_post_render_hook(Option<RenderHook>)`
   - `RenderHookContext` (`frame_index`, `viewport_size`)
+  - **Limitation**: The optional `depth` field in `RenderHookContext` is currently always `None`. Depth texture plumbing from the rendergraph into hooks is not yet implemented. Hooks that need depth must use the `advanced-interop` feature gate to access raw Vulkan resources.
 - Public debug UI extension surface (separate from hooks):
   - `Renderer::register_debug_view(...)`
   - `Renderer::unregister_debug_view(...)`

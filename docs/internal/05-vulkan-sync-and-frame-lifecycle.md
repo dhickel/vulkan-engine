@@ -136,7 +136,7 @@ present(wait=render_semaphore, image_index=acquired.index)
   - Too broad (`ALL_COMMANDS`) may hide performance issues.
   - Too narrow can create intermittent hazards across GPUs/drivers.
 - Descriptor pool exhaustion and churn if `clear_pools` no longer runs on frame-slot reuse.
-- Swapchain rebuild lifecycle sharp edge: `rebuild_swapchain` has an explicit FIXME about old present image-view destruction before rebinding.
+- Swapchain rebuild lifecycle: `rebuild_swapchain` calls `replace_present_images` which invokes `destroy_present_views` before rebinding. This edge was addressed; monitor for regressions around frame slot desync on resize.
 - `VkPresent::get_next_frame`/`get_curr_frame_mut` ring semantics depend on counter ordering; changing this can silently desync acquired image binding.
 
 ## 7. Debugging Playbook

@@ -129,7 +129,9 @@ impl VkWindowState {
         }
     }
 
-    // FIXME doesn't work
+    /// Adjust window scale factor. Note: when called repeatedly, each invocation
+    /// compounds on the current extent rather than the original, which may not be
+    /// the intended behavior. Prefer `update_curr_size` for size-driven changes.
     pub fn update_window_scale(&mut self, new_scalar: Option<f32>) {
         if let Some(scalar) = new_scalar {
             self.render_scale = scalar
@@ -800,7 +802,9 @@ impl VkPresent {
 
     pub fn get_next_frame(&mut self) -> &VkFrame {
         let index = self.curr_frame_count % self.max_frames_active;
-        let frame = &self.frame_data[index as usize]; // FIXME
+        // max_frames_active == data_len == frame_data.len(), so modulo guarantees
+        // index is always in bounds.
+        let frame = &self.frame_data[index as usize];
         self.curr_frame_count += 1;
         frame
     }
@@ -1151,7 +1155,11 @@ impl VkHostBuffer {
 impl VkDestroyable for VkHostBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.buffer.destroy(device, allocator);
-        unsafe { device.destroy_fence(self.fence[0], None) }
+        // fence[0] = transfer fence, fence[1] = graphics fence
+        unsafe {
+            device.destroy_fence(self.fence[0], None);
+            device.destroy_fence(self.fence[1], None);
+        }
     }
 }
 

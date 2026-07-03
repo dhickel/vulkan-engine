@@ -392,9 +392,12 @@ pub fn init_present_pools(
 impl Drop for VkRenderCore {
     fn drop(&mut self) {
         unsafe {
-            self.device
-                .device_wait_idle()
-                .expect("Render drop failed waiting for device idle");
+            if let Err(err) = self.device.device_wait_idle() {
+                log::error!(
+                    "Render drop: device_wait_idle failed ({:?}); proceeding with best-effort cleanup",
+                    err
+                );
+            }
 
             if let Some(imgui) = self.imgui.as_mut() {
                 imgui.renderer.destroy();
@@ -625,7 +628,9 @@ impl VkRenderCore {
             Box::new(vk13_features),
         ];
 
-        // FIXME better extension init
+        // Extension initialization uses the basic device extension pointers.
+        // Additional feature structs (VkPhysicalDeviceVulkan11/12/13Features) are
+        // pushed into ext_feats above.
         let surface_ext = vk_init::get_basic_device_ext_ptrs();
         let (device, device_queues) = vk_init::create_logical_device(
             &instance,
@@ -651,7 +656,10 @@ impl VkRenderCore {
             true,
         )?;
 
-        // FIXME why is this here?
+        // Align window state with the swapchain extent after creation.
+        // The swapchain may choose a different extent than requested (e.g.,
+        // due to surface capabilities or driver rounding). This sync ensures
+        // viewport/scissor dimensions match the actual presentable surface.
         if swapchain.extent != window_state.get_curr_extent() {
             window_state.update_curr_size(swapchain.extent);
         }

@@ -108,7 +108,7 @@ Triggered by `resize()` or `VK_ERROR_OUT_OF_DATE_KHR`:
 4. Create new swapchain with updated extent
 5. Rebuild depth buffer and framebuffer attachments
 
-**Known issue**: old image views are not destroyed before reassignment ([`vk_render.rs:1154`](../src/renderer/src/vulkan/vk_render.rs:1154) — `// FIXME, I think we will need to destroy the old images view when we reassign`).
+**Resolved**: `VkPresent::replace_present_images` (in `vk_types.rs`) calls `destroy_present_views` before reassignment, so old image views are properly destroyed on swapchain rebuild.
 
 ## Render Hooks
 

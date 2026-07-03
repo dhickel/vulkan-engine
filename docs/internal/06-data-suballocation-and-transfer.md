@@ -194,7 +194,7 @@ deallocate(sub_alloc):
 - `VkRender::pump_transfer_submissions` must run frequently (startup loader loop and per-frame render path).
 - If transfer submissions are not drained, `await_done()` callers can block until timeout.
 - Sharp edges worth tracking:
-- `VkHostBuffer::destroy` currently destroys only one fence (`fence[0]`), while two are used for submissions.
+- `VkHostBuffer::destroy` now destroys both fences (`fence[0]` transfer, `fence[1]` graphics) as of Sprint 12.
 - `VkStorageBuffer::select_best_chunk` calls `find_best_fit(self.max_size)`, which is stricter than `find_best_fit(total_bytes)` and biases toward non-best-fit fallback behavior.
 
 ## 7. Debugging Playbook

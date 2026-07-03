@@ -47,7 +47,7 @@ The workspace also includes `apps/dungeon_dogfood/` — a dogfood application th
 
 ### Shutdown
 
-4. **Drop `Renderer`**: device wait idle → destroy resources in reverse order. Some Vulkan destroy paths are incomplete (`todo!()` markers in wrapper types).
+4. **Drop `Renderer`**: device wait idle → destroy resources in reverse order. All active Vulkan resource types implement `VkDestroyable`. As of Sprint 12, one unreachable stub (`find_memory_type` in `vk_util.rs`) exists with no active callers. Known residual: `VkHostBuffer` previously leaked a graphics fence (fixed in Sprint 12).
 
 ## Key Design Decisions
 
