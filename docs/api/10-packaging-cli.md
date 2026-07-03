@@ -88,7 +88,7 @@ The CLI follows the same durable identity rules as the renderer facade and edito
 | `texture` | `.png`, `.jpg`, `.jpeg`, `.ktx`, `.ktx2` |
 | `environment` | `.hdr`, `.exr` |
 
-Other roadmap asset classes such as audio, scripts, collision data, and material documents are not introduced by this CLI phase.
+`scan-assets` does not infer audio, script, collision, or material records. Collision metadata may be authored manually in package manifests and is validated by `validate-package`, `validate-project`, `validate-scene`, and `pack` through the renderer validators.
 
 ## 5. Pack Output Shape
 
@@ -133,7 +133,8 @@ The alpha CLI deliberately does not yet provide:
 - hot-reload or reimport pipeline;
 - dynamic Rust hot reload;
 - scripting runtime;
-- event system, physics integration, or audio integration;
+- runtime physics scene loading or gameplay collision integration;
+- audio integration;
 - generated Rust app templates;
 - broad dogfood migration to project manifests.
 

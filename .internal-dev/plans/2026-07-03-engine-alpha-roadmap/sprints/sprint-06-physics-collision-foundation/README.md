@@ -1,6 +1,6 @@
 # Sprint 06: Physics And Collision Foundation
 
-Status: planning_ready
+Status: closed
 
 ## Objective
 

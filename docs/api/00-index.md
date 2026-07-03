@@ -71,7 +71,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
   --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw
 ```
 
-Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. The alpha event contract is available through the renderer facade; dynamic Rust hot reload, scripting runtime execution, physics integration, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
+Renderer examples remain useful diagnostics and API references. Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`. The alpha event contract is available through the renderer facade. The standalone `physics` crate provides durable ID descriptors, basic collider shapes, ray queries, contact records, and helpers that translate physics records into `engine_events` payloads. Runtime scene-to-physics loading, editor collision authoring UI, dynamic Rust hot reload, scripting runtime execution, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
 
 ## Canonical Renderer Example
 

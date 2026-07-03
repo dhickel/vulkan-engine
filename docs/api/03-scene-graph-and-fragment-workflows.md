@@ -57,6 +57,7 @@ Required node fields:
 | `visibility` | object | recommended | Authoring visibility, layer, and lock metadata. Missing object defaults to visible, unlocked, and runtime default layer. |
 | `tags` | array of string | recommended | Editor/game tags. Missing array defaults to empty. |
 | `prefab` | object | optional | Placement metadata for prefab-backed nodes, including wall chunk v1 records. |
+| `collision` | object | optional | Durable collision metadata for future runtime physics loading. Validation is implemented; editor UI authoring and live physics binding are deferred. |
 
 Asset references inside a scene must use durable IDs first:
 
@@ -83,6 +84,21 @@ Asset references inside a scene must use durable IDs first:
     "layer": "world"
   },
   "tags": ["wall", "chunk"],
+  "collision": {
+    "body": {
+      "id": "body.wall_north_001",
+      "kind": "static"
+    },
+    "colliders": [
+      {
+        "id": "collider.wall_north_001",
+        "shape": { "kind": "box", "half_extents": [1.0, 1.0, 0.125] },
+        "trigger": false,
+        "asset": "core.collision.wall",
+        "offset": [0.0, 0.0, 0.0]
+      }
+    ]
+  },
   "prefab": {
     "kind": "wall_chunk",
     "version": 1,
@@ -101,6 +117,8 @@ Asset references inside a scene must use durable IDs first:
 Use `engine_pack validate-scene <scene.engine.scene.json> --project <engine.project.toml>` to validate scene asset references against the enabled project packages before treating a scene file as editor-ready. The CLI path is documented in [Packaging CLI](10-packaging-cli.md).
 
 Wall chunk v1 is prefab asset placement metadata. It identifies a prefab mesh asset, placement size/snap/connectors, and editor categorization. It must not encode editable polygon, CSG, or brush geometry; true polygon/brush editing is deferred beyond the current package-backed prefab placement and persistence slice.
+
+Collision metadata is a durable authoring contract, not a live physics binding yet. Scene validation accepts `collision.body.kind` values `static`, `dynamic`, and `kinematic`; collider shape kinds `box`/`cuboid`, `sphere`, `capsule`, and `capsule_y`; finite offsets; positive shape dimensions; unique durable body/collider IDs; and optional durable collision asset IDs known to the project registry. Validators reject serialized runtime handles, duplicate collision IDs, invalid dimensions, missing colliders, path-only IDs, and unknown collision asset references. The current alpha does not automatically instantiate a `physics::PhysicsWorld` from scene collision metadata.
 
 Sample scene:
 
@@ -138,6 +156,18 @@ Sample scene:
       "material_overrides": { "0": "mat_override.damp_stone" },
       "visibility": { "visible": true, "locked": false, "layer": "world" },
       "tags": ["wall", "chunk"],
+      "collision": {
+        "body": { "id": "body.wall_north_001", "kind": "static" },
+        "colliders": [
+          {
+            "id": "collider.wall_north_001",
+            "shape": { "kind": "box", "half_extents": [1.0, 1.0, 0.125] },
+            "trigger": false,
+            "asset": "core.collision.wall",
+            "offset": [0.0, 0.0, 0.0]
+          }
+        ]
+      },
       "prefab": {
         "kind": "wall_chunk",
         "version": 1,

@@ -40,7 +40,7 @@ Typed but deferred until later system sprints:
 |---|---|
 | `SceneEvent` | Contract exists; broad scene mutation emission is not wired yet. |
 | `AssetEvent::AssetLoading/Ready/Failed/Invalidated` | Contract exists; package load events are wired in the root runtime, broad per-asset async emission is deferred. |
-| `PhysicsEvent` | Contract exists; live physics/collision systems are later roadmap work. |
+| `PhysicsEvent` | Contract exists. The `physics` crate can translate ray hits and contact records into `EngineEvent::Physics` values and emit contact records into an `EventBus`; renderer/root-runtime live physics scene loading is deferred. |
 | `AudioEvent` | Contract exists; live audio emission is later roadmap work. |
 | `ScriptingEvent` | Contract exists; scripting runtime and Rust hot-reload are later roadmap work. |
 
@@ -77,6 +77,8 @@ Apps in this repository demonstrate the same pattern:
 
 - `apps/editor/src/events.rs`
 - `apps/dungeon_dogfood/src/events.rs`
+
+The standalone `physics` crate demonstrates the physics event bridge through `RayHit::to_engine_event`, `PhysicsContactRecord::to_engine_event`, `contact_records_to_engine_events`, and `emit_contact_records`. These helpers preserve the event crate boundary: `engine_events` does not depend on `physics`, while physics-aware app code can opt in to event emission.
 
 ## 5. Ordering Rules
 
