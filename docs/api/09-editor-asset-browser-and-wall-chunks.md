@@ -69,6 +69,14 @@ Saved scene JSON persists durable IDs such as:
 
 The durable asset ID is the identity. `path_hint` is diagnostic/fallback data and must not be the only identity.
 
+Sprint 03 validation keeps the canonical sample scene unchanged by writing a saved-scene copy under the sprint artifacts directory:
+
+```text
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json
+```
+
+That copy contains one package-backed model node and one package-backed wall chunk node created through `PlaceAssetCommand`, then saved and reloaded through the scene persistence path.
+
 ## Inspector And Save/Load
 
 The inspector shows the selected node name, runtime ID, stable scene node ID, asset reference, numeric local transform, editable tags, and material slot override metadata. Supported editable fields in this phase are:
@@ -85,3 +93,51 @@ Save and Load are available from the top menu. The active scene path is visible 
 ## Wall Chunk V1
 
 Wall chunk v1 is prefab placement metadata only. It does not implement CSG, brush editing, or polygon editing. Metadata such as grid size, connectors, and snap values lives in the package manifest so wall chunks remain searchable package assets instead of hardcoded file paths.
+
+## Validation Commands
+
+Validate the sample project and canonical startup scene with `engine_pack`:
+
+```sh
+cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml
+cargo run -p engine_pack -- validate-scene apps/editor/sample_project/scenes/start.engine.scene.json --project apps/editor/sample_project/engine.project.toml
+```
+
+Validate the Sprint 03 saved-scene copy with the same project registry:
+
+```sh
+cargo run -p engine_pack -- validate-scene .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json --project apps/editor/sample_project/engine.project.toml
+```
+
+The persistence tests also assert that saved package-backed nodes do not serialize runtime handles such as slots, generations, mesh handles, or path-only identity.
+
+## Headless Capture Proof
+
+The editor supports a true headless capture path for validation. With `--headless`, the editor returns into the headless path before constructing a window/event loop, creates `Renderer::new_headless`, loads the project package registry and scene, renders with `render_scene_headless`, and exits after requested captures complete.
+
+Use `--capture_target draw` for visual proof so the sidecars identify the offscreen draw target instead of a present-target path:
+
+```sh
+RUST_LOG=info timeout --signal=INT 60s cargo run -p editor -- \
+  --project apps/editor/sample_project/engine.project.toml \
+  --scene .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json \
+  --headless \
+  --capture_target draw \
+  --capture_frames 3 \
+  --capture_frame_start 5 \
+  --capture_frame_interval 5 \
+  --capture_dir .internal-dev/captures/sprint-03-editor-packaged-placement-headless-draw
+```
+
+Sprint 03 accepted capture sidecars report:
+
+- `capture_target = "draw"`
+- `format = "R16G16B16A16_SFLOAT"`
+- `status = "succeeded"`
+- `extent = 1440 x 900`
+
+The accepted frame 15 PNG shows the block prop on the left and the wall chunk on the right, matching the saved scene transforms.
+
+## Current Limitations
+
+The alpha editor placement slice does not yet include binary package archives, asset thumbnails, CSG/brush wall editing, polygon editing, material graph editing, PBR material authoring, packaged audio placement, physics/collision authoring, scripting, or a runtime project launcher. Wall chunks are currently package-backed prefab/model placements with searchable metadata and durable scene identity.

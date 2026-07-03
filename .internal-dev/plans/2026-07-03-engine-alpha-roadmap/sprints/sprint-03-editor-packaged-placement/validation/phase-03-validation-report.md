@@ -189,7 +189,7 @@ Criterion results:
 | Sidecars report draw target, non-present source format, success | Pass | Accepted and rerun sidecars report `capture_target: draw`, `format: R16G16B16A16_SFLOAT`, and `status: succeeded`. |
 | PNGs exist and are nonblank | Pass | All PNGs exist, are 1440 x 900 RGBA, have 8,007 unique colors, and frame 15 was visually inspected. |
 | Package-backed saved scene path is exercised | Pass | Logs and code path load the sample project/package registry and Phase 02 saved scene copy. |
-| Validation summary is valid JSON and reconciled | Pass | `jq empty` passed; summary updated to `phase_03_passed_pending_commit`. |
+| Validation summary is valid JSON and reconciled | Pass | `jq empty` passed; summary was reconciled through Phase 03 commit, push, and reporting evidence. |
 
 Validator commands:
 
