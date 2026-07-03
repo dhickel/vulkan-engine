@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 03 - Editor packaged-asset placement hardening",
-  "status": "phase_02_passed_pending_commit",
+  "status": "phase_02_passed_committed_pushed_reported",
   "branch": "sprint/alpha-03-editor-packaged-placement",
   "based_on": "sprint/alpha-02-packaging-tools tip",
   "capture_decision": "required_visible_editor_runtime_behavior",
@@ -16,7 +16,7 @@
     {
       "phase": "02",
       "name": "Save/reload validation",
-      "status": "passed_pending_commit",
+      "status": "passed_committed_pushed_reported",
       "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/validation/phase-02-validation-report.md",
       "capture_decision": "not_required_persistence_cli_validation_only",
       "saved_scene_copy": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json",
@@ -143,6 +143,12 @@
         "hash": "84456475",
         "subject": "Sprint 03 phase 01 placement state hardening",
         "url": "https://github.com/dhickel/vulkan-engine/commit/84456475"
+      },
+      {
+        "phase": "02",
+        "hash": "4521a33d",
+        "subject": "Sprint 03 phase 02 save reload validation",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/4521a33d"
       }
     ],
     "pushes": [
@@ -151,6 +157,12 @@
         "branch": "sprint/alpha-03-editor-packaged-placement",
         "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-03-editor-packaged-placement",
         "pushed_through": "84456475"
+      },
+      {
+        "phase": "02",
+        "branch": "sprint/alpha-03-editor-packaged-placement",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-03-editor-packaged-placement",
+        "pushed_through": "4521a33d"
       }
     ],
     "email_reports": [
@@ -159,6 +171,12 @@
         "subject": "Sprint 03 Phase 01 Progress Report - Placement State Hardening",
         "message_id": "<0100019f2718df10-b0479315-c045-4a58-987c-632834cd19c8-000000@email.amazonses.com>",
         "thread_id": "bd6543be-a1e0-40ea-a91b-7e8e37398e5e"
+      },
+      {
+        "phase": "02",
+        "subject": "Sprint 03 Phase 02 Progress Report - Save Reload Validation",
+        "message_id": "<0100019f27259171-371fa150-45cc-4e6e-9bd7-286ac8c629e7-000000@email.amazonses.com>",
+        "thread_id": "c26726b3-394e-45bc-9495-fb862e729f83"
       }
     ],
     "final_changelog": null
