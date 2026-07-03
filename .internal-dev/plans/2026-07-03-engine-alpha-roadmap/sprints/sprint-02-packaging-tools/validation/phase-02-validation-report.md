@@ -8,7 +8,7 @@ Sprint target: asset package authoring and validation tools.
 
 Phase target: read-only Rust CLI validation commands for package, project, and scene files.
 
-Phase status: `passed_red_team_remediation_pending_commit`
+Phase status: `passed_red_team_remediation_committed_pending_push`
 
 Capture decision: `not_required_cli_schema_only`
 
@@ -24,7 +24,7 @@ Out of scope by directive: package authoring, generated manifests, asset copying
 
 ## Changed Files Matrix
 
-Phase 02 implementation commit: pending at report creation.
+Phase 02 implementation commit: `4121f5d0cbacfe12e0132a101d442d84e52042f8`
 
 Branch link: `https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools`
 

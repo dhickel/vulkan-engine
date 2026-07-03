@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 02 - Asset package authoring and validation tools",
-  "status": "phase_02_passed_red_team_remediation_pending_commit",
+  "status": "phase_02_passed_red_team_remediation_committed_pending_push",
   "branch": "sprint/alpha-02-packaging-tools",
   "capture_decision": "not_required_cli_schema_only",
   "phases": [
@@ -109,6 +109,12 @@
       "hash": "fa7abc33ea76c7f81edd3b04518a37d680bf695a",
       "subject": "Sprint 02 phase 01 shared validation contract",
       "url": "https://github.com/dhickel/vulkan-engine/commit/fa7abc33ea76c7f81edd3b04518a37d680bf695a"
+    },
+    {
+      "phase": "02",
+      "hash": "4121f5d0cbacfe12e0132a101d442d84e52042f8",
+      "subject": "Sprint 02 phase 02 engine_pack validation CLI",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/4121f5d0cbacfe12e0132a101d442d84e52042f8"
     }
   ],
   "pushes": [],
