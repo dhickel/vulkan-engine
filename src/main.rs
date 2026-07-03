@@ -1,22 +1,34 @@
 use std::env;
 use std::process;
 
-fn print_runtime_migration_help() {
-    eprintln!("The legacy `renderer::run()` and `debug_runtime` path has been removed.");
-    eprintln!("Run renderer example binaries directly:");
-    eprintln!("  cargo run -p renderer --example api_test");
-    eprintln!("  cargo run -p renderer --example demo_pbr");
-    eprintln!("  cargo run -p renderer --example demo_unlit");
-    eprintln!("  cargo run -p renderer --example demo_model_load");
-    eprintln!("  cargo run -p renderer --example demo_async_loading");
-}
+mod launch;
+
+use launch::{LaunchCommand, LaunchError, LaunchOptions};
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if !args.is_empty() {
-        eprintln!("Unsupported engine binary arguments: {}", args.join(" "));
+    match launch::parse_command(env::args().skip(1)) {
+        Ok(LaunchCommand::Help) => {
+            print!("{}", launch::usage());
+        }
+        Ok(LaunchCommand::Run(options)) => match run(options) {
+            Ok(()) => {}
+            Err(err) => exit_with_error(err),
+        },
+        Err(err) => exit_with_error(err),
     }
+}
 
-    print_runtime_migration_help();
-    process::exit(2);
+fn run(_options: LaunchOptions) -> Result<(), LaunchError> {
+    Err(LaunchError::Runtime(
+        "runtime project loading is not wired until Sprint 04 Phase 02".to_string(),
+    ))
+}
+
+fn exit_with_error(err: LaunchError) -> ! {
+    eprintln!("{err}");
+    if err.is_usage() {
+        eprintln!();
+        eprint!("{}", launch::usage());
+    }
+    process::exit(err.exit_code());
 }

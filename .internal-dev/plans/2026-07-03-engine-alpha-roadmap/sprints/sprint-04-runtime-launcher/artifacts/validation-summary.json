@@ -1,7 +1,7 @@
 {
   "task": "sprint-04-runtime-launcher",
   "plan_root": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher",
-  "status": "planned",
+  "status": "implementation_in_progress",
   "fully_validated": false,
   "created_at": "2026-07-03",
   "updated_at": "2026-07-03",
@@ -13,12 +13,61 @@
     "validation/phase-04-validation-report.md"
   ],
   "phase_status": {
-    "phase_01_runtime_cli": "pending",
+    "phase_01_runtime_cli": "validator_passed",
     "phase_02_runtime_loading_loop": "pending",
     "phase_03_dev_loop_docs": "pending",
     "phase_04_capture_closeout": "pending"
   },
-  "required_commands": [],
+  "required_commands": [
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo check -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo test -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo run -- --help",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo run -- --project apps/editor/sample_project/engine.project.toml --capture_target swapchain",
+      "status": "passed_expected_controlled_usage_error",
+      "exit_code": 2
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo run --",
+      "status": "passed_expected_controlled_usage_error",
+      "exit_code": 2
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "git diff --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "jq empty .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json",
+      "status": "passed",
+      "exit_code": 0
+    }
+  ],
   "capture_proof": {
     "required": true,
     "status": "pending",
@@ -48,12 +97,14 @@
   },
   "model_tooling_constraints": [],
   "residual_risks": [
-    "Implementation not started.",
+    "Phase 01 intentionally stops at CLI parsing, help, usage errors, and parser tests.",
+    "Valid launches currently return a controlled Phase 02 runtime-pending error until project loading and rendering are wired.",
     "Headless Vulkan support not yet validated for this sprint.",
     "Docs still reflect pre-Sprint-04 runtime launcher state until Phase 03 completes."
   ],
   "superseded_artifacts": [],
   "notes": [
-    "This initial index is intentionally conservative and must not be promoted to fully_validated until all phase validators and draw-target capture proof pass."
+    "This index remains conservative and must not be promoted to fully_validated until all phase validators and draw-target capture proof pass.",
+    "Phase 01 validator passed for parser/options/help/error behavior only; Phase 02 remains pending."
   ]
 }
