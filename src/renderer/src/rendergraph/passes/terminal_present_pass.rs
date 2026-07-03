@@ -10,7 +10,9 @@ impl RenderPassNode for TerminalPresentPass {
     }
 
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
-        ctx.renderer.transition_present_for_present(ctx.frame);
+        if !ctx.renderer.is_headless() {
+            ctx.renderer.transition_present_for_present(ctx.frame);
+        }
         Ok(())
     }
 }

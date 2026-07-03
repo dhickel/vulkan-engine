@@ -325,7 +325,7 @@ impl AssetLoadTracker {
         }
 
         if progressed < max_steps {
-            progressed += self.start_queued(core.data_cache.clone(), max_steps - progressed);
+            progressed += self.start_queued(Arc::clone(&core.data_cache), max_steps - progressed);
         }
 
         self.cleanup_terminal_tickets();
@@ -997,7 +997,7 @@ impl<'a> AssetManager<'a> {
         T: Send + 'static,
         F: FnOnce(Arc<VkDataCache>) -> Result<T, AssetError> + Send + 'static,
     {
-        let data_cache = self.core.data_cache.clone();
+        let data_cache = Arc::clone(&self.core.data_cache);
         let worker = std::thread::spawn(move || task(data_cache));
 
         while !worker.is_finished() {

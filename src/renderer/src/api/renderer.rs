@@ -85,16 +85,53 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: Yes
     pub fn new(config: RendererConfig, window: &Window) -> Result<Self, RendererError> {
-        if config.headless {
-            log::warn!("Headless mode: window and swapchain will be created but presentation skipped. Full offscreen rendering via VkImage targets is not yet implemented.");
-        }
-
         let app_name = config.app_name.clone();
         let window_state = create_window_state(window, &config);
         let vk_debug_mode: vk_render::DebugRuntimeMode = config.shader_debug_mode.into();
         let (runtime, scene_world) = vk_render::VkRender::new(
             window_state,
             window,
+            config.app_name.as_str(),
+            config.validation_layer,
+            config.compile_shaders,
+            vk_debug_mode,
+            config.preload_startup_scene,
+            config.visual_tuning,
+        )
+        .map_err(|err| map_vk_init_err(err, config.compile_shaders))?;
+
+        let asset_policy = config.asset_policy.clone();
+
+        Ok(Self {
+            runtime,
+            input_system: InputSystem::new(),
+            frame_number: 0,
+            last_frame_time: Instant::now(),
+            last_frame_delta_seconds: 0.0,
+            last_asset_pump_steps: 0,
+            open_frame: None,
+            startup_scene: Some(Scene::from_world(scene_world)),
+            asset_loads: AssetLoadTracker::new(),
+            asset_policy,
+            pre_render_hook: None,
+            post_render_hook: None,
+            frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
+            resize_skip_state_logged: false,
+            camera: Camera::default(),
+            fps_plugin: None,
+            cursor_in_window: true,
+        })
+    }
+
+    /// Thread: Main
+    /// May Stall: Yes
+    pub fn new_headless(mut config: RendererConfig) -> Result<Self, RendererError> {
+        config.headless = true;
+        let app_name = config.app_name.clone();
+        let window_state = create_headless_window_state(&config);
+        let vk_debug_mode: vk_render::DebugRuntimeMode = config.shader_debug_mode.into();
+        let (runtime, scene_world) = vk_render::VkRender::new_headless(
+            window_state,
             config.app_name.as_str(),
             config.validation_layer,
             config.compile_shaders,
@@ -177,13 +214,22 @@ impl Renderer {
         window: &Window,
         event: &winit::event::Event<()>,
     ) -> Result<(), RendererError> {
-        self.runtime.core.imgui.handle_event(window, event);
+        if let Some(imgui) = self.runtime.core.imgui.as_mut() {
+            imgui.handle_event(window, event);
+        }
 
-        let io = self.runtime.core.imgui.context.io();
+        let io = self
+            .runtime
+            .core
+            .imgui
+            .as_ref()
+            .map(|imgui| imgui.context.io());
         let ui_visible = self.runtime.core.debug_ui.is_any_visible();
         let app_ui_active = self.runtime.core.debug_ui.has_app_ui();
-        let consume_keyboard = app_ui_active || ui_visible || io.want_capture_keyboard;
-        let consume_mouse = app_ui_active || ui_visible || io.want_capture_mouse;
+        let consume_keyboard =
+            app_ui_active || ui_visible || io.is_some_and(|io| io.want_capture_keyboard);
+        let consume_mouse =
+            app_ui_active || ui_visible || io.is_some_and(|io| io.want_capture_mouse);
 
         match event {
             Event::DeviceEvent {
@@ -312,6 +358,30 @@ impl Renderer {
             return Ok(FrameRenderOutcome::SkippedResizePending);
         }
 
+        let outcome = self.render_scene_internal(scene, self.frame_number)?;
+        self.frame_number = self.frame_number.wrapping_add(1);
+        Ok(outcome)
+    }
+
+    /// Thread: Main
+    /// May Stall: Yes
+    pub fn render_scene_headless(
+        &mut self,
+        scene: &mut Scene,
+    ) -> Result<FrameRenderOutcome, RendererError> {
+        if self.open_frame.is_some() {
+            return Err(RendererError::InvalidState(
+                "render_scene_headless cannot run while an explicit frame is open",
+            ));
+        }
+        if !self.runtime.is_headless() {
+            return Err(RendererError::InvalidState(
+                "render_scene_headless requires a headless renderer",
+            ));
+        }
+
+        self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
+        self.prepare_frame_headless();
         let outcome = self.render_scene_internal(scene, self.frame_number)?;
         self.frame_number = self.frame_number.wrapping_add(1);
         Ok(outcome)
@@ -480,7 +550,11 @@ impl Renderer {
     /// text or numeric controls are active. This is narrower than `has_app_ui` so
     /// global editor shortcuts can still work from normal chrome or viewport focus.
     pub fn imgui_wants_keyboard_capture(&self) -> bool {
-        self.runtime.core.imgui.context.io().want_capture_keyboard
+        self.runtime
+            .core
+            .imgui
+            .as_ref()
+            .is_some_and(|imgui| imgui.context.io().want_capture_keyboard)
     }
 
     /// Enables or disables a debug view by id.
@@ -658,20 +732,31 @@ impl Renderer {
         }
 
         self.clear_resize_skip_state();
-        self.runtime
-            .core
-            .imgui
-            .context
-            .io_mut()
-            .update_delta_time(delta);
-        self.runtime
-            .core
-            .imgui
-            .platform
-            .prepare_frame(self.runtime.core.imgui.context.io_mut(), window)
-            .map_err(|err| map_frame_input_err(format!("imgui prepare_frame failed: {err}")))?;
+        if let Some(imgui) = self.runtime.core.imgui.as_mut() {
+            imgui.context.io_mut().update_delta_time(delta);
+            imgui
+                .platform
+                .prepare_frame(imgui.context.io_mut(), window)
+                .map_err(|err| map_frame_input_err(format!("imgui prepare_frame failed: {err}")))?;
+        }
 
         Ok(FramePrepareOutcome::Ready)
+    }
+
+    fn prepare_frame_headless(&mut self) {
+        let now = Instant::now();
+        let delta = now.duration_since(self.last_frame_time);
+        self.last_frame_time = now;
+        self.last_frame_delta_seconds = delta.as_secs_f32();
+
+        self.input_system.dispatch_frame();
+        if let Some(plugin) = self.fps_plugin.as_mut() {
+            let snapshot = self.input_system.snapshot();
+            plugin
+                .controller
+                .update_from_snapshot(snapshot, delta.as_secs_f32(), &mut self.camera);
+        }
+        self.clear_resize_skip_state();
     }
 
     fn render_scene_internal(
@@ -806,11 +891,12 @@ impl Renderer {
     }
 
     fn imgui_capture_active(&self) -> bool {
-        let io = self.runtime.core.imgui.context.io();
         self.runtime.core.debug_ui.has_app_ui()
             || self.runtime.core.debug_ui.is_any_visible()
-            || io.want_capture_keyboard
-            || io.want_capture_mouse
+            || self.runtime.core.imgui.as_ref().is_some_and(|imgui| {
+                let io = imgui.context.io();
+                io.want_capture_keyboard || io.want_capture_mouse
+            })
     }
 
     fn handle_cursor_focus(
@@ -882,6 +968,13 @@ fn create_window_state(window: &Window, config: &RendererConfig) -> VkWindowStat
     let max_extent = Extent2D::default().width(max_width).height(max_height);
 
     VkWindowState::new(curr_extent, max_extent)
+}
+
+fn create_headless_window_state(config: &RendererConfig) -> VkWindowState {
+    let width = config.window_width.max(1);
+    let height = config.window_height.max(1);
+    let extent = Extent2D::default().width(width).height(height);
+    VkWindowState::new(extent, extent)
 }
 
 fn map_vk_init_err(err: String, compile_shaders: bool) -> RendererError {

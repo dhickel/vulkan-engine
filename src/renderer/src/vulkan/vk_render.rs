@@ -90,6 +90,7 @@ use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
+use std::mem::ManuallyDrop;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use vk_mem::{Allocator, AllocatorCreateInfo};
@@ -119,16 +120,19 @@ impl VkSingleDescriptor {
 }
 
 pub struct VkRenderCore {
+    pub surface_mode: RenderSurfaceMode,
     pub window_state: VkWindowState,
-    pub allocator: Arc<Mutex<Allocator>>,
+    pub allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
     pub physical_device: PhyDevice,
     pub device: ash::Device,
     pub vulkan_cache: VkCache,
-    pub surface: VkSurface,
-    pub swapchain: VkSwapchain,
+    pub surface: Option<VkSurface>,
+    pub swapchain: Option<VkSwapchain>,
+    pub present_format: vk::Format,
+    frame_slot_count: u32,
     pub presentation: VkPresent,
     pub supported_image_formats: HashSet<vk::Format>,
     pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
@@ -138,12 +142,12 @@ pub struct VkRenderCore {
     pub requested_env_id: Option<EnvironmentHandle>,
     pub active_env_id: EnvironmentHandle,
     pub environment_failures: HashMap<EnvironmentHandle, String>,
-    pub imgui: VkImgui,
+    pub imgui: Option<VkImgui>,
     pub debug_ui: DebugUiManager,
     pub scene_data: SceneDataUBO,
     pub sky_box: SkyBox,
     pub visual_tuning: VisualTuning,
-    pub data_cache: Arc<VkDataCache>,
+    pub data_cache: ManuallyDrop<Arc<VkDataCache>>,
     pub brdf_lut: VkBrdfLut,
     pub main_deletion_queue: Vec<VkDeletable>,
     pub fence_await_queue: VkFenceQueue,
@@ -392,7 +396,9 @@ impl Drop for VkRenderCore {
                 .device_wait_idle()
                 .expect("Render drop failed waiting for device idle");
 
-            self.imgui.renderer.destroy();
+            if let Some(imgui) = self.imgui.as_mut() {
+                imgui.renderer.destroy();
+            }
 
             self.transfer
                 .destroy(&self.device, &self.allocator.lock().unwrap());
@@ -404,22 +410,36 @@ impl Drop for VkRenderCore {
             self.presentation
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
+            self.scene_descriptors.values_mut().for_each(|descriptors| {
+                descriptors.destroy(&self.device, &self.allocator.lock().unwrap())
+            });
+            self.scene_descriptors.clear();
+
             self.data_cache
+                .destroy(&self.device, &self.allocator.lock().unwrap());
+            ManuallyDrop::drop(&mut self.data_cache);
+
+            self.brdf_lut
                 .destroy(&self.device, &self.allocator.lock().unwrap());
 
             self.main_deletion_queue
                 .iter_mut()
                 .for_each(|del| del.delete(&self.device, &self.allocator.lock().unwrap()));
 
-            self.swapchain
-                .swapchain_loader
-                .destroy_swapchain(self.swapchain.swapchain, None);
+            if let Some(swapchain) = &self.swapchain {
+                swapchain
+                    .swapchain_loader
+                    .destroy_swapchain(swapchain.swapchain, None);
+            }
 
+            ManuallyDrop::drop(&mut self.allocator);
             self.device.destroy_device(None);
 
-            self.surface
-                .surface_instance
-                .destroy_surface(self.surface.surface, None);
+            if let Some(surface) = &self.surface {
+                surface
+                    .surface_instance
+                    .destroy_surface(surface.surface, None);
+            }
 
             if let Some(debug) = &self.debug {
                 debug
@@ -432,6 +452,10 @@ impl Drop for VkRenderCore {
 }
 
 impl VkRenderCore {
+    pub fn is_headless(&self) -> bool {
+        self.surface_mode.is_headless()
+    }
+
     /// Emit one transparent primitive so imgui draw data is never empty.
     ///
     /// The forked imgui Vulkan renderer advances its internal frame ring only when
@@ -636,11 +660,68 @@ impl VkRenderCore {
             entry,
             instance,
             debug,
-            surface,
+            surface: Some(surface),
             physical_device,
             device,
             device_queues,
-            swapchain,
+            swapchain: Some(swapchain),
+        })
+    }
+
+    fn init_headless_vulkan_core(
+        app_name: &str,
+        with_validation: bool,
+    ) -> Result<VulkanCoreInit, String> {
+        let entry = vk_init::init_entry();
+        let mut instance_ext = Vec::new();
+        let (instance, debug) = vk_init::init_instance(
+            &entry,
+            app_name.to_string(),
+            &mut instance_ext,
+            with_validation,
+        )?;
+
+        let physical_device =
+            vk_init::get_physical_devices(&instance, None, &vk_init::simple_device_suitability)?
+                .remove(0);
+
+        let queue_indices = vk_init::queue_indices_without_surface(
+            &instance,
+            &physical_device.p_device,
+            true,
+            true,
+        )?;
+
+        let mut core_features =
+            vk_init::get_general_core_features(&instance, &physical_device.p_device);
+        let vk11_features = vk_init::get_general_v11_features(&instance, &physical_device.p_device);
+        let vk12_features = vk_init::get_general_v12_features(&instance, &physical_device.p_device);
+        let vk13_features = vk_init::get_general_v13_features(&instance, &physical_device.p_device);
+
+        let mut ext_feats: Vec<Box<dyn ExtendsPhysicalDeviceFeatures2>> = vec![
+            Box::new(vk11_features),
+            Box::new(vk12_features),
+            Box::new(vk13_features),
+        ];
+
+        let (device, device_queues) = vk_init::create_logical_device(
+            &instance,
+            &physical_device.p_device,
+            &queue_indices,
+            &mut core_features,
+            Some(&mut ext_feats),
+            None,
+        )?;
+
+        Ok(VulkanCoreInit {
+            entry,
+            instance,
+            debug,
+            surface: None,
+            physical_device,
+            device,
+            device_queues,
+            swapchain: None,
         })
     }
 
@@ -728,7 +809,8 @@ impl VkRenderCore {
         instance: &ash::Instance,
         device: &ash::Device,
         physical_device: &PhyDevice,
-        swapchain: &VkSwapchain,
+        surface_mode: RenderSurfaceMode,
+        swapchain: Option<&VkSwapchain>,
         window_state: &VkWindowState,
         present_pools: Vec<VkCommandPoolMap>,
         swapchain_image_count: u32,
@@ -760,7 +842,28 @@ impl VkRenderCore {
         let draw_views: Vec<vk::ImageView> =
             draw_images.iter().map(|data| data.image_view).collect();
 
-        let present_images = vk_init::create_basic_present_views(device, swapchain)?;
+        let present_format = swapchain
+            .map(|swapchain| swapchain.surface_format.format)
+            .unwrap_or(vk::Format::B8G8R8A8_UNORM);
+        let (present_images, owned_present_images) = if surface_mode.is_headless() {
+            (
+                Vec::new(),
+                Some(vk_init::allocate_offscreen_present_images(
+                    &allocator,
+                    device,
+                    window_state.get_curr_extent(),
+                    swapchain_image_count,
+                    present_format,
+                )?),
+            )
+        } else {
+            let swapchain = swapchain
+                .ok_or_else(|| "Windowed presentation requires a swapchain".to_string())?;
+            (
+                vk_init::create_basic_present_views(device, swapchain)?,
+                None,
+            )
+        };
         let _descriptors = init_descriptors(device, &draw_views);
 
         let depth_images = vk_init::allocate_depth_images(
@@ -794,6 +897,7 @@ impl VkRenderCore {
             draw_images,
             depth_images,
             present_images,
+            owned_present_images,
             present_pools,
             descriptor_allocators,
         )
@@ -805,6 +909,7 @@ impl VkRenderCore {
             draw_format,
             depth_format,
             imgui_pool,
+            present_format,
         })
     }
 
@@ -886,7 +991,7 @@ impl VkRenderCore {
         Arc<Mutex<VkHostBuffer>>,
         Arc<Mutex<VkHostBuffer>>,
     ) {
-        let transfer = VkTransfer::new(local_transfer_pool);
+        let mut transfer = VkTransfer::new(local_transfer_pool);
 
         let fence_info = vk::FenceCreateInfo::default();
         let semaphore_info = vk::SemaphoreCreateInfo::default();
@@ -924,6 +1029,9 @@ impl VkRenderCore {
             semaphores.pop().unwrap(),
         );
 
+        transfer.add_host_buffer(Arc::clone(&mesh_host_buffer));
+        transfer.add_host_buffer(Arc::clone(&texture_host_buffer));
+
         (transfer, mesh_host_buffer, texture_host_buffer)
     }
 
@@ -934,9 +1042,11 @@ impl VkRenderCore {
         debug_runtime_mode: DebugRuntimeMode,
     ) -> Result<SceneWorld, String> {
         let force_unlit_materials = debug_runtime_mode == DebugRuntimeMode::TestUnlit;
-        let mut loaded_scene =
-            debug_scenarios::load_startup_scene(render.data_cache.clone(), force_unlit_materials)
-                .map_err(|e| e.to_string())?;
+        let mut loaded_scene = debug_scenarios::load_startup_scene(
+            Arc::clone(&render.data_cache),
+            force_unlit_materials,
+        )
+        .map_err(|e| e.to_string())?;
 
         if force_unlit_materials {
             info!(
@@ -951,7 +1061,7 @@ impl VkRenderCore {
             );
         }
 
-        let startup_loader = Self::run_startup_load_worker(render.data_cache.clone());
+        let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
         render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
 
         let startup_result = startup_loader
@@ -987,7 +1097,10 @@ impl VkRenderCore {
             swapchain,
         } = Self::init_vulkan_core(&mut window_state, window, app_name, with_validation)?;
 
-        let swapchain_image_count = swapchain.swapchain_images.len() as u32;
+        let swapchain_ref = swapchain.as_ref().ok_or_else(|| {
+            "Windowed Vulkan initialization did not create a swapchain".to_string()
+        })?;
+        let swapchain_image_count = swapchain_ref.swapchain_images.len() as u32;
         let CommandPoolInit {
             host_buffer_pools,
             host_graphic_pools,
@@ -1001,11 +1114,13 @@ impl VkRenderCore {
             draw_format,
             depth_format,
             imgui_pool,
+            present_format,
         } = Self::init_presentation_resources(
             &instance,
             &device,
             &physical_device,
-            &swapchain,
+            RenderSurfaceMode::Windowed,
+            Some(swapchain_ref),
             &window_state,
             present_pools,
             swapchain_image_count,
@@ -1016,7 +1131,7 @@ impl VkRenderCore {
             &device,
             device_queues.get_queue(VkQueueType::Graphics),
             imgui_pool,
-            swapchain.surface_format.format,
+            swapchain_ref.surface_format.format,
             swapchain_image_count,
             window,
         );
@@ -1076,8 +1191,9 @@ impl VkRenderCore {
         );
 
         let mut render = VkRenderCore {
+            surface_mode: RenderSurfaceMode::Windowed,
             window_state,
-            allocator,
+            allocator: ManuallyDrop::new(allocator),
             entry,
             instance,
             debug,
@@ -1086,6 +1202,8 @@ impl VkRenderCore {
             vulkan_cache,
             surface,
             swapchain,
+            present_format,
+            frame_slot_count: swapchain_image_count,
             supported_image_formats,
             buffer_and_desc_limits,
             presentation,
@@ -1095,7 +1213,7 @@ impl VkRenderCore {
             requested_env_id: None,
             active_env_id: default_env_id,
             environment_failures: HashMap::new(),
-            imgui,
+            imgui: Some(imgui),
             debug_ui: DebugUiManager::new(),
             main_deletion_queue: Vec::new(),
             fence_await_queue: VkFenceQueue::new(),
@@ -1108,7 +1226,7 @@ impl VkRenderCore {
             scene_data: SceneDataUBO::default(),
             sky_box: SkyBox::default(),
             visual_tuning,
-            data_cache,
+            data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
             resize_requested: false,
         };
@@ -1116,7 +1234,168 @@ impl VkRenderCore {
         let scene_world = if preload_startup_scene {
             Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
         } else {
-            let startup_loader = Self::run_startup_load_worker(render.data_cache.clone());
+            let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
+            render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
+            let startup_result = startup_loader
+                .join()
+                .map_err(|_| "Startup loader thread panicked".to_string())?;
+            startup_result?;
+
+            render.ensure_environment_ready(default_env_id)?;
+            let mut scene = SceneWorld::new();
+            scene.set_skybox_env_id(default_env_id);
+            scene
+        };
+        Ok((render, scene_world))
+    }
+
+    pub fn new_headless(
+        window_state: VkWindowState,
+        app_name: &str,
+        with_validation: bool,
+        compile_shaders: bool,
+        debug_runtime_mode: DebugRuntimeMode,
+        preload_startup_scene: bool,
+        visual_tuning: VisualTuning,
+    ) -> Result<(Self, SceneWorld), String> {
+        Self::compile_shaders_if_requested(compile_shaders)?;
+
+        let VulkanCoreInit {
+            entry,
+            instance,
+            debug,
+            surface,
+            physical_device,
+            device,
+            device_queues,
+            swapchain,
+        } = Self::init_headless_vulkan_core(app_name, with_validation)?;
+
+        let frame_slot_count = 3;
+        let CommandPoolInit {
+            host_buffer_pools,
+            host_graphic_pools,
+            local_transfer_pool,
+            present_pools,
+        } = Self::init_command_pools(&device, &device_queues, frame_slot_count)?;
+
+        let PresentationInit {
+            allocator,
+            presentation,
+            draw_format,
+            depth_format,
+            imgui_pool: _,
+            present_format,
+        } = Self::init_presentation_resources(
+            &instance,
+            &device,
+            &physical_device,
+            RenderSurfaceMode::HeadlessOffscreen,
+            None,
+            &window_state,
+            present_pools,
+            frame_slot_count,
+        )?;
+
+        let (transfer, mesh_host_buffer, texture_host_buffer) =
+            Self::init_transfer_and_host_buffers(
+                &device,
+                &allocator,
+                &device_queues,
+                local_transfer_pool,
+                host_buffer_pools,
+                host_graphic_pools,
+            );
+
+        let supported_image_formats =
+            vk_init::get_supported_image_formats(&instance, physical_device.p_device);
+        let buffer_and_desc_limits =
+            vk_init::get_buffer_and_descriptor_limits(&instance, physical_device.p_device);
+        let gpu_timing = Self::init_gpu_timing_state(
+            &instance,
+            physical_device.p_device,
+            &device,
+            device_queues.get_queue_index(VkQueueType::Graphics),
+            frame_slot_count as usize,
+        );
+
+        let (data_cache, vulkan_cache, default_env_id) = init_caches(
+            &instance,
+            physical_device.p_device,
+            &device,
+            &allocator,
+            texture_host_buffer,
+            data_util::mb_to_bytes(128),
+            mesh_host_buffer,
+            data_util::mb_to_bytes(384),
+            draw_format,
+            depth_format,
+            supported_image_formats.clone(),
+            &buffer_and_desc_limits,
+            device_queues,
+        )?;
+
+        let brdf_pipeline = vulkan_cache
+            .pipelines
+            .get_pipeline(VkPipelineType::BrdfLut)
+            .pipeline;
+
+        let brd_flut = vk_util::generate_brdf_lut(
+            &device,
+            &allocator.lock().unwrap(),
+            brdf_pipeline,
+            presentation.frame_data[0]
+                .cmd_pools
+                .get(VkQueueType::Graphics)
+                .buffers[0],
+            vulkan_cache.queues.get_queue(VkQueueType::Graphics),
+        );
+
+        let mut render = VkRenderCore {
+            surface_mode: RenderSurfaceMode::HeadlessOffscreen,
+            window_state,
+            allocator: ManuallyDrop::new(allocator),
+            entry,
+            instance,
+            debug,
+            physical_device,
+            device,
+            vulkan_cache,
+            surface,
+            swapchain,
+            present_format,
+            frame_slot_count,
+            supported_image_formats,
+            buffer_and_desc_limits,
+            presentation,
+            transfer,
+            scene_descriptors: HashMap::new(),
+            default_env_id,
+            requested_env_id: None,
+            active_env_id: default_env_id,
+            environment_failures: HashMap::new(),
+            imgui: None,
+            debug_ui: DebugUiManager::new(),
+            main_deletion_queue: Vec::new(),
+            fence_await_queue: VkFenceQueue::new(),
+            uv_fallback_warnings: Mutex::new(HashSet::new()),
+            gpu_timing,
+            frame_timing_snapshot: DebugTimingSnapshot::default(),
+            due_frame_captures: Vec::new(),
+            pending_frame_captures: Vec::new(),
+            frame_capture_statuses: Vec::new(),
+            scene_data: SceneDataUBO::default(),
+            sky_box: SkyBox::default(),
+            visual_tuning,
+            data_cache: ManuallyDrop::new(data_cache),
+            brdf_lut: brd_flut,
+            resize_requested: false,
+        };
+
+        let scene_world = if preload_startup_scene {
+            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
+        } else {
+            let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
             render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
             let startup_result = startup_loader
                 .join()
@@ -1132,22 +1411,36 @@ impl VkRenderCore {
     }
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
+        if self.surface_mode.is_headless() {
+            self.window_state.update_curr_size(new_size);
+            self.resize_requested = false;
+            return;
+        }
         self.window_state.update_curr_size(new_size);
 
         unsafe { self.device.device_wait_idle().unwrap() }
+
+        let surface = self
+            .surface
+            .as_ref()
+            .expect("windowed renderer must own a surface");
+        let old_swapchain = self
+            .swapchain
+            .as_ref()
+            .expect("windowed renderer must own a swapchain");
 
         let swapchain = vk_init::create_swapchain(
             &self.instance,
             &self.physical_device,
             &self.device,
             &self.vulkan_cache.queues,
-            &self.surface,
+            surface,
             new_size,
             // Keep startup and rebuild swapchain depth aligned for frame pacing.
             Some(3),
             None,
             Some(vk::PresentModeKHR::MAILBOX),
-            Some(self.swapchain.swapchain),
+            Some(old_swapchain.swapchain),
             true,
         )
         .unwrap();
@@ -1163,7 +1456,7 @@ impl VkRenderCore {
         // before the new views are installed.
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
 
-        self.swapchain = swapchain;
+        self.swapchain = Some(swapchain);
         self.presentation
             .replace_present_images(&self.device, present_images);
 
@@ -1224,6 +1517,34 @@ impl VkRender {
         ))
     }
 
+    pub fn new_headless(
+        window_state: VkWindowState,
+        app_name: &str,
+        with_validation: bool,
+        compile_shaders: bool,
+        debug_runtime_mode: DebugRuntimeMode,
+        preload_startup_scene: bool,
+        visual_tuning: VisualTuning,
+    ) -> Result<(Self, SceneWorld), String> {
+        let (core, scene_world) = VkRenderCore::new_headless(
+            window_state,
+            app_name,
+            with_validation,
+            compile_shaders,
+            debug_runtime_mode,
+            preload_startup_scene,
+            visual_tuning,
+        )?;
+
+        Ok((
+            Self {
+                core,
+                rendergraph: RenderGraph::default_graph(),
+            },
+            scene_world,
+        ))
+    }
+
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
         self.core.rebuild_swapchain(new_size);
     }
@@ -1261,6 +1582,10 @@ impl VkRender {
         self.core.resize_requested
     }
 
+    pub fn is_headless(&self) -> bool {
+        self.core.surface_mode.is_headless()
+    }
+
     pub fn environment_runtime_status(&self) -> VkEnvironmentRuntimeStatus {
         self.core.environment_runtime_status()
     }
@@ -1293,11 +1618,11 @@ struct VulkanCoreInit {
     entry: ash::Entry,
     instance: ash::Instance,
     debug: Option<VkDebug>,
-    surface: VkSurface,
+    surface: Option<VkSurface>,
     physical_device: PhyDevice,
     device: ash::Device,
     device_queues: VkDeviceQueues,
-    swapchain: VkSwapchain,
+    swapchain: Option<VkSwapchain>,
 }
 
 struct CommandPoolInit {
@@ -1313,6 +1638,7 @@ struct PresentationInit {
     draw_format: vk::Format,
     depth_format: vk::Format,
     imgui_pool: vk::CommandPool,
+    present_format: vk::Format,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1491,7 +1817,7 @@ impl VkRenderCore {
                 CaptureTarget::Present => FrameCaptureTargetDesc {
                     target: CaptureTarget::Present,
                     image: frame.present_image,
-                    format: self.swapchain.surface_format.format,
+                    format: self.present_format,
                     extent,
                     current_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                     restored_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -2040,14 +2366,17 @@ impl VkRenderCore {
         &self,
         frame_sync: VkFrameSync,
     ) -> SwapchainAcquireResult {
+        let Some(swapchain) = self.swapchain.as_ref() else {
+            warn!("Swapchain acquire requested without a swapchain");
+            return SwapchainAcquireResult::Recreate;
+        };
         let acquire_info = vk::AcquireNextImageInfoKHR::default()
-            .swapchain(self.swapchain.swapchain)
+            .swapchain(swapchain.swapchain)
             .semaphore(frame_sync.swap_semaphore)
             .device_mask(1)
             .timeout(SWAPCHAIN_ACQUIRE_TIMEOUT_NS);
 
-        match self
-            .swapchain
+        match swapchain
             .swapchain_loader
             .acquire_next_image2(&acquire_info)
         {
@@ -2088,49 +2417,54 @@ impl VkRenderCore {
         self.resolve_gpu_timing_for_slot(frame_slot_index);
 
         let swapchain_acquire_start = Instant::now();
-        let mut acquire_retries = 0u32;
-        let acquire_result = loop {
-            let result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
-            match result {
-                SwapchainAcquireResult::Retry
-                    if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
-                {
-                    acquire_retries += 1;
+        let (image_index, swapchain_acquire_ms) = if self.surface_mode.is_headless() {
+            (frame_slot_index as u32, 0.0)
+        } else {
+            let mut acquire_retries = 0u32;
+            let acquire_result = loop {
+                let result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
+                match result {
+                    SwapchainAcquireResult::Retry
+                        if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
+                    {
+                        acquire_retries += 1;
+                    }
+                    _ => break result,
                 }
-                _ => break result,
-            }
-        };
-        let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
-        warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
+            };
+            let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
+            warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
-        let image_index = match acquire_result {
-            SwapchainAcquireResult::Acquired(index) => index,
-            SwapchainAcquireResult::Retry => {
-                if acquire_retries > 0 {
-                    warn!(
-                        "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total)",
-                        acquire_retries, swapchain_acquire_ms
-                    );
+            let image_index = match acquire_result {
+                SwapchainAcquireResult::Acquired(index) => index,
+                SwapchainAcquireResult::Retry => {
+                    if acquire_retries > 0 {
+                        warn!(
+                            "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total)",
+                            acquire_retries, swapchain_acquire_ms
+                        );
+                    }
+                    self.presentation.rewind_frame();
+                    return None;
                 }
-                self.presentation.rewind_frame();
-                return None;
-            }
-            SwapchainAcquireResult::Recreate => {
+                SwapchainAcquireResult::Recreate => {
+                    self.presentation.rewind_frame();
+                    self.resize_requested = true;
+                    return None;
+                }
+            };
+
+            if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
+                error!(
+                    "Failed to bind acquired present target {}: {:?}",
+                    image_index, err
+                );
                 self.presentation.rewind_frame();
                 self.resize_requested = true;
                 return None;
             }
+            (image_index, swapchain_acquire_ms)
         };
-
-        if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
-            error!(
-                "Failed to bind acquired present target {}: {:?}",
-                image_index, err
-            );
-            self.presentation.rewind_frame();
-            self.resize_requested = true;
-            return None;
-        }
 
         // Reset only when we have a frame to submit; on retry/skip paths leave signaled.
         unsafe { self.reset_frame_fence(frame_sync) };
@@ -2200,7 +2534,17 @@ impl VkRenderCore {
                 vk::PipelineStageFlags2::ALL_GRAPHICS,
                 frame.frame_sync.render_semaphore,
             )];
-            let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
+            let wait_info = if self.surface_mode.is_headless() {
+                &[][..]
+            } else {
+                &wait_info[..]
+            };
+            let signal_info = if self.surface_mode.is_headless() {
+                &[][..]
+            } else {
+                &signal_info[..]
+            };
+            let submit = [vk_util::submit_info_2(&cmd_info, signal_info, wait_info)];
 
             self.device
                 .queue_submit2(frame.queue, &submit, frame.frame_sync.render_fence)
@@ -2210,18 +2554,24 @@ impl VkRenderCore {
 
     /// Present the rendered swapchain image; request resize if presentation fails.
     fn present_frame(&mut self, frame: FrameAcquire) {
+        if self.surface_mode.is_headless() {
+            return;
+        }
+        let Some(swapchain) = self.swapchain.as_ref() else {
+            self.resize_requested = true;
+            return;
+        };
         unsafe {
-            let swapchain = [self.swapchain.swapchain];
+            let swapchains = [swapchain.swapchain];
             let render_semaphore = [frame.frame_sync.render_semaphore];
             let image_indices = [frame.image_index];
 
             let present_info = vk::PresentInfoKHR::default()
-                .swapchains(&swapchain)
+                .swapchains(&swapchains)
                 .wait_semaphores(&render_semaphore)
                 .image_indices(&image_indices);
 
-            let present_result = self
-                .swapchain
+            let present_result = swapchain
                 .swapchain_loader
                 .queue_present(frame.queue, &present_info);
 
@@ -2581,7 +2931,7 @@ impl VkRenderCore {
                 self.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
                 env_maps,
                 &self.brdf_lut,
-                self.swapchain.swapchain_images.len() as u32,
+                self.frame_slot_count,
             )
         };
 
@@ -2873,13 +3223,16 @@ impl VkRenderCore {
         //
         // self.imgui.platform.prepare_render(frame, &self.window);
 
-        let ui = self.imgui.context.new_frame();
+        let Some(imgui) = self.imgui.as_mut() else {
+            return Ok(());
+        };
+
+        let ui = imgui.context.new_frame();
         self.debug_ui.render(ui);
         Self::add_imgui_frame_keepalive(ui);
 
-        let draw_data = self.imgui.context.render();
-        let draw_result = self
-            .imgui
+        let draw_data = imgui.context.render();
+        let draw_result = imgui
             .renderer
             .cmd_draw(cmd_buffer, draw_data)
             .map_err(|err| format!("imgui cmd_draw failed: {err}"));

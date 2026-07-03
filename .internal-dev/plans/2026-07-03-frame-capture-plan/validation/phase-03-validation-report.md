@@ -1,72 +1,141 @@
-# Phase 03 Validation Report: Headless/Offscreen Capture Gate
+# Phase 03 Validation Report: True Headless/Offscreen Capture
 
 Date: 2026-07-03
 Branch: `codex/frame-capture-plan`
-Worker: Foxtrot
+Worker: Golf
 
 ## Verdict
 
-Phase 03 is blocked at the required user-decision gate. I did not implement or bless the existing `--headless` path as true headless/offscreen capture.
+Phase 03 is implemented and validated.
 
-The current renderer architecture is still window/surface/swapchain centered. A true no-surface, no-swapchain, no-present path requires a broader ownership split than this phase permits: public renderer construction, example control flow, Vulkan instance/device/surface/swapchain setup, queue-family selection, frame-ring present targets, ImGui setup, acquire/submit/present synchronization, resize handling, and rendergraph terminal present behavior are all coupled to the windowed path.
+The renderer now has a true headless/offscreen path that does not create a winit `Window`, Vulkan surface, swapchain, or presentation operation. It creates renderer-owned offscreen present-equivalent images and maps `CaptureTarget::Present` to those images. The required smoke command writes three valid engine-owned PNGs and exits cleanly.
 
-## Evidence
+## Implementation Evidence
 
-- `src/renderer/src/api/renderer.rs:87-94`: `Renderer::new` requires `&Window` and builds `VkWindowState` from that window even when `config.headless` is true. The current warning says a window and swapchain will be created.
-- `src/renderer/examples/api_test.rs:25-51` and `src/renderer/examples/common/mod.rs:413-442`: examples always create a winit `EventLoop` and `WindowBuilder` before constructing the renderer. `--headless` is only copied into `RendererConfig`; it does not select a non-windowed runner.
-- `src/renderer/src/vulkan/vk_render.rs:559-628`: `init_vulkan_core` always gets winit-required instance extensions, creates a window surface, selects a physical device with that surface, requires graphics+present queue support, enables swapchain extensions, and creates a swapchain.
-- `src/renderer/src/vulkan/vk_render.rs:727-808`: presentation resources are sized from the swapchain image count and present targets are created from swapchain image views through `create_basic_present_views`.
-- `src/renderer/src/vulkan/vk_render.rs:811-823`: ImGui platform setup attaches to a winit window and uses the swapchain format/count.
-- `src/renderer/src/vulkan/vk_render.rs:2038-2148`: frame acquisition always calls `acquire_next_image2` on the swapchain and binds the acquired swapchain image as the current present target.
-- `src/renderer/src/vulkan/vk_render.rs:2191-2229`: submit always waits on the acquire semaphore and `present_frame` always calls `queue_present`.
-- `src/renderer/src/rendergraph/mod.rs:66-75` and `src/renderer/src/rendergraph/passes/terminal_present_pass.rs:12-14`: the default graph always includes `TerminalPresentPass`, which transitions the present image for swapchain presentation.
+- `src/renderer/src/vulkan/vk_types.rs`: added `RenderSurfaceMode::{Windowed, HeadlessOffscreen}`, frame-owned offscreen present image storage, shared command-pool destroy deduplication, headless-safe present-view ownership, and transfer host-buffer registration.
+- `src/renderer/src/vulkan/vk_init.rs`: added no-surface queue-family selection and offscreen present image allocation using `COLOR_ATTACHMENT | TRANSFER_SRC | TRANSFER_DST`.
+- `src/renderer/src/vulkan/vk_render.rs`: added `VkRender::new_headless` and `VkRenderCore::new_headless`, no-surface/no-swapchain initialization, mode-aware acquire/submit/present, optional ImGui/surface/swapchain ownership, capture readback using the configured present format, and explicit data-cache/allocator teardown before device destruction.
+- `src/renderer/src/api/renderer.rs`: added `Renderer::new_headless` and `render_scene_headless`.
+- `src/renderer/examples/api_test.rs` and `src/renderer/examples/common/mod.rs`: branch to direct headless runners before creating any `EventLoop` or `Window`.
+- `src/renderer/src/rendergraph/passes/terminal_present_pass.rs`: terminal present pass is a no-op for headless/offscreen mode.
+- `src/renderer/src/data/data_cache.rs`: added cleanup for environment cache resources, scene-adjacent cached resources, joint descriptor pool, and default joint buffer.
 
-## Gate Decision Needed
+## Required Headless Smoke
 
-Choose one option before Phase 03 implementation continues:
+Command:
 
-1. Approve a true headless architecture phase.
-   - Add an explicit renderer surface mode, for example `Windowed` vs `HeadlessOffscreen`.
-   - Add a renderer construction path that does not require `&Window`.
-   - Add no-surface instance/device initialization and queue selection.
-   - Allocate renderer-owned offscreen present-equivalent images and views.
-   - Make frame acquire bind the current offscreen target instead of acquiring a swapchain image.
-   - Submit without acquire/present semaphores in headless mode.
-   - Skip `queue_present` and skip/replace `TerminalPresentPass` in headless mode.
-   - Decide whether headless ImGui/UI is unsupported, disabled, or initialized through a separate offscreen-safe path.
+```bash
+RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_frames=3 --capture_dir=.internal-dev/debug_reports/frame-capture/headless/api_test
+```
 
-2. Approve a labeled hidden/window-backed fallback.
-   - Keep a window/surface/swapchain but minimize visible disruption where the platform allows it.
-   - Continue using engine-owned PNG readback from the render target.
-   - Label all validation as fallback/window-backed, not true headless.
-   - This does not satisfy the locked true headless/offscreen target without explicit user approval.
+Result: pass, exit code 0.
 
-3. Split the work.
-   - First phase: make `--headless` fail fast with a clear unsupported error instead of opening a windowed/swapchain run.
-   - Second phase: implement the true no-surface/offscreen architecture above.
+The run recorded and saved all three requested frame captures, emitted `Headless capture completed: 3 capture(s) written`, and exited without the prior VMA allocation assertion or teardown segfault.
 
-## Validation Commands
+PNG evidence:
 
-No runtime headless smoke was run. Running the requested command with the current code would create a visible winit window and swapchain, which the directive explicitly forbids treating as true headless proof.
+```text
+.internal-dev/debug_reports/frame-capture/headless/api_test/renderer-facade-api-test-frame-0-present-seq-0000.png
+.internal-dev/debug_reports/frame-capture/headless/api_test/renderer-facade-api-test-frame-1-present-seq-0001.png
+.internal-dev/debug_reports/frame-capture/headless/api_test/renderer-facade-api-test-frame-2-present-seq-0002.png
+```
 
-No compile gates were run because this pass made no product-code changes. The only changed artifact is this gate report.
+`identify -format '%f %wx%h %[channels] colors=%k\n'` reported:
+
+```text
+renderer-facade-api-test-frame-0-present-seq-0000.png 1920x1080 srgba 4.0 colors=225576
+renderer-facade-api-test-frame-1-present-seq-0001.png 1920x1080 srgba 4.0 colors=225576
+renderer-facade-api-test-frame-2-present-seq-0002.png 1920x1080 srgba 4.0 colors=225576
+```
+
+## Teardown Root Cause Resolved
+
+The first true-headless implementation wrote valid PNGs but failed during shutdown. The final fix set included:
+
+- Register mesh and texture staging host buffers with `VkTransfer`, so the advertised transfer teardown path actually releases both VMA-backed host buffers.
+- Destroy the mesh cache default joint buffer and joint descriptor pool.
+- Destroy environment cache cubemaps and generated irradiance/prefilter maps.
+- Avoid double-destroying headless present image views that are owned by the offscreen `VkImageAlloc`.
+- Drop the data cache and VMA allocator before `vkDestroyDevice`, preventing allocator destruction after the logical device is gone.
+
+Temporary VMA allocation counters showed the final teardown reached `allocations=0 bytes=0` after BRDF cleanup; those counters were removed before final validation.
 
 ## Criteria Status
 
 | Criterion | Status | Notes |
 |---|---:|---|
-| `--headless` capture writes a valid PNG through engine-owned capture | Blocked | Current `--headless` still uses a window/surface/swapchain path. |
-| Headless mode does not require desktop screenshot access | Blocked | Windowed PNG readback exists from Phase 02, but true headless/offscreen ownership is not present. |
-| Headless capture can run under `timeout --signal=INT 60s` | Blocked | Would currently be a visible windowed run. |
-| Windowed capture from Phase 02 still works | Preserved | No product code changed in this phase. |
-| Full canonical headless matrix passing or blocked with explicit gate evidence | Gate report complete | This report records the blocker and concrete options. |
+| Explicit renderer surface mode | Pass | `RenderSurfaceMode` selects windowed vs headless/offscreen behavior. |
+| Headless construction without winit `Window` | Pass | Headless examples construct the renderer before any event-loop/window path. |
+| No-surface/no-swapchain initialization | Pass | Headless initialization omits surface creation, swapchain extension setup, and swapchain creation. |
+| Offscreen present-equivalent images | Pass | Frame-owned images are created with color attachment and transfer usage. |
+| Headless acquire skips `acquire_next_image2` | Pass | Headless frame acquisition selects the current offscreen frame slot. |
+| Headless submit skips swapchain acquire wait | Pass | Headless submit uses the graphics command buffer without acquire/present semaphore synchronization. |
+| Headless present skips `queue_present` | Pass | `present_frame` returns immediately in headless mode. |
+| Terminal present pass mode-aware | Pass | No-op in headless mode. |
+| `CaptureTarget::Present` maps to headless offscreen target | Pass | Captures read the headless present target. |
+| Requested headless smoke cleanly passes | Pass | Three PNGs written and process exited 0. |
+| Full headless matrix | Partial | `api_test` headless path validated; other examples remain follow-up matrix expansion. |
+| Windowed Phase 02 runtime behavior | Compile-preserved | Windowed path compiles; runtime smoke was not rerun in this continuation. |
 
-## PNG Evidence
+## Validation Commands
 
-No Phase 03 PNG evidence was produced. Phase 02 already validated windowed PNG capture; reusing that path here would violate the Phase 03 negative check against hidden/windowed fallback as true headless.
+```bash
+cargo fmt
+```
+
+Result: pass.
+
+```bash
+git diff --check
+```
+
+Result: pass.
+
+```bash
+cargo test -p renderer capture_tests
+```
+
+Result: pass, 4 tests.
+
+```bash
+cargo test -p renderer --example api_test parse_capture
+```
+
+Result: pass, 2 tests.
+
+```bash
+cargo check
+```
+
+Result: pass.
+
+```bash
+cargo check -p renderer
+```
+
+Result: pass with existing renderer warnings.
+
+```bash
+cargo check -p renderer --examples
+```
+
+Result: pass with existing renderer warnings.
+
+```bash
+cargo check -p input
+```
+
+Result: pass.
+
+```bash
+RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_frames=3 --capture_dir=.internal-dev/debug_reports/frame-capture/headless/api_test
+```
+
+Result: pass, three captures written.
 
 ## Residual Risks
 
-- The current `--headless` flag is misleading: it is parsed and passed into `RendererConfig`, but the renderer still constructs a window, surface, swapchain, acquires swapchain images, and presents. Until the user chooses an option above, workers should not use `--headless` as validation proof.
-- Implementing true headless will likely affect public API shape, example loop structure, Vulkan core initialization, frame sync semantics, rendergraph pass selection, and documentation. It should be planned as a bounded architecture phase rather than patched opportunistically.
-- `.internal-dev/AGENTS.md` remains a previously recorded process gap from Phase 02; I did not touch it in this scoped worker pass.
+- Headless ImGui is disabled in this path; headless captures are scene/present-equivalent captures without UI overlays.
+- The full canonical example matrix is not yet automated for headless capture; `api_test` is the validated environment in this phase.
+- Windowed Phase 02 capture was compile-preserved but not runtime revalidated in this continuation.
+- `.idea/engine.iml` and `.reasonix/` remain unrelated local changes and were not touched.

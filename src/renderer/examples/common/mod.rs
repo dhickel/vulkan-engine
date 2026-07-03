@@ -6,9 +6,10 @@ use glam::{Mat4, Vec3};
 use log::{error, info};
 use renderer::{
     default_capture_root, default_single_capture_path, CaptureTarget, DebugRuntimeMode,
-    FrameCaptureRequest, FrameCaptureSequence, FrameRenderOutcome, Renderer, RendererConfig,
-    RendererError, Scene,
+    FrameCaptureRequest, FrameCaptureSequence, FrameCaptureStatus, FrameRenderOutcome, Renderer,
+    RendererConfig, RendererError, Scene,
 };
+use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -410,6 +411,19 @@ pub fn run_demo(scenario: DemoScenario) {
         }
     };
 
+    let config = RendererConfig {
+        app_name: scenario.title().to_string(),
+        shader_debug_mode: scenario.debug_runtime_mode(),
+        headless: launch_options.headless,
+        ..RendererConfig::default()
+    };
+
+    let app_name = config.app_name.clone();
+    if launch_options.headless {
+        run_headless_demo(config, launch_options, scenario, &app_name);
+        return;
+    }
+
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(err) => {
@@ -419,14 +433,6 @@ pub fn run_demo(scenario: DemoScenario) {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let config = RendererConfig {
-        app_name: scenario.title().to_string(),
-        shader_debug_mode: scenario.debug_runtime_mode(),
-        headless: launch_options.headless,
-        ..RendererConfig::default()
-    };
-
-    let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()
         .with_title(app_name.clone())
         .with_inner_size(PhysicalSize::new(config.window_width, config.window_height))
@@ -585,6 +591,107 @@ pub fn run_demo(scenario: DemoScenario) {
             }
         })
         .expect("failed to run renderer example loop");
+}
+
+fn run_headless_demo(
+    config: RendererConfig,
+    launch_options: LaunchOptions,
+    scenario: DemoScenario,
+    app_name: &str,
+) {
+    let mut renderer = match Renderer::new_headless(config.clone()) {
+        Ok(renderer) => renderer,
+        Err(err) => {
+            error!("Headless renderer initialization failed: {err}");
+            if config.compile_shaders {
+                error!("Shader rebuild requires 'glslc' or 'glslangValidator' in PATH.");
+            }
+            return;
+        }
+    };
+
+    if let Err(err) = apply_frame_capture_launch_options(&mut renderer, &launch_options, app_name) {
+        error!("Failed to configure frame capture: {err}");
+        return;
+    }
+    match apply_debug_record_launch_options(&mut renderer, &launch_options) {
+        Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
+        Ok(None) => {}
+        Err(err) => {
+            error!("Failed to configure debug timing recording: {err}");
+            return;
+        }
+    }
+
+    let model_path = launch_options
+        .model_path
+        .as_deref()
+        .unwrap_or(Path::new(FACADE_DEMO_MODEL_PATH));
+    let mut scene = match initialize_scene(&mut renderer, scenario, model_path) {
+        Ok(scene) => scene,
+        Err(err) => {
+            error!("Failed to initialize headless demo scene: {err}");
+            return;
+        }
+    };
+
+    let expected_captures = expected_launch_captures(&launch_options);
+    let frame_budget = launch_options
+        .capture_frame
+        .or(launch_options.capture_frame_start)
+        .unwrap_or(0)
+        .saturating_add(
+            launch_options
+                .capture_frame_interval
+                .unwrap_or(1)
+                .saturating_mul(launch_options.capture_frames.unwrap_or(0).saturating_add(2)),
+        )
+        .max(180);
+    let mut succeeded_paths = HashSet::new();
+
+    for _ in 0..frame_budget {
+        match renderer.render_scene_headless(&mut scene) {
+            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Err(err) => {
+                error!("Headless render failed: {err}");
+                return;
+            }
+        }
+
+        match renderer.last_frame_capture_status() {
+            Some(FrameCaptureStatus::Succeeded { output_path, .. }) => {
+                succeeded_paths.insert(output_path.clone());
+                if succeeded_paths.len() >= expected_captures {
+                    info!(
+                        "Headless capture completed: {} capture(s) written",
+                        succeeded_paths.len()
+                    );
+                    return;
+                }
+            }
+            Some(FrameCaptureStatus::Failed { message, .. }) => {
+                error!("Headless capture failed: {message}");
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if expected_captures > 0 {
+        error!(
+            "Headless capture did not complete within {} frames ({} of {} capture(s) written)",
+            frame_budget,
+            succeeded_paths.len(),
+            expected_captures
+        );
+    }
+}
+
+fn expected_launch_captures(options: &LaunchOptions) -> usize {
+    options
+        .capture_frames
+        .or_else(|| options.capture_frame.map(|_| 1))
+        .unwrap_or(0) as usize
 }
 
 fn handle_fullscreen_toggle(
