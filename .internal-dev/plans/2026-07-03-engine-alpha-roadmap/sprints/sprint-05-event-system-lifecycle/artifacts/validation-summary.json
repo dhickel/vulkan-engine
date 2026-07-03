@@ -2,10 +2,10 @@
   "sprint": "05",
   "slug": "sprint-05-event-system-lifecycle",
   "branch": "sprint/alpha-05-event-system-lifecycle",
-  "status": "phase_01_validator_passed_commit_push_report_pending",
+  "status": "phase_01_validator_passed_committed_pushed_reported",
   "fully_validated": false,
   "phase_status": {
-    "phase_01_core_event_crate_api": "validator_passed_commit_push_report_pending",
+    "phase_01_core_event_crate_api": "validator_passed_committed_pushed_reported",
     "phase_02_renderer_runtime_integration": "planned",
     "phase_03_apps_samples_docs": "planned",
     "phase_04_validation_closeout": "planned",
