@@ -1,4 +1,4 @@
-workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "apps/dungeon_dogfood", "apps/editor", "tools/engine_pack"] }
+workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "apps/dungeon_dogfood", "apps/editor", "tools/engine_pack"] }
 
 [package]
 name = "engine"

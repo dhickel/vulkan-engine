@@ -2,10 +2,10 @@
   "sprint": "05",
   "slug": "sprint-05-event-system-lifecycle",
   "branch": "sprint/alpha-05-event-system-lifecycle",
-  "status": "planned",
+  "status": "phase_01_validator_passed_commit_push_report_pending",
   "fully_validated": false,
   "phase_status": {
-    "phase_01_core_event_crate_api": "planned",
+    "phase_01_core_event_crate_api": "validator_passed_commit_push_report_pending",
     "phase_02_renderer_runtime_integration": "planned",
     "phase_03_apps_samples_docs": "planned",
     "phase_04_validation_closeout": "planned",
@@ -18,7 +18,44 @@
     "phase_04": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-05-event-system-lifecycle/validation/phase-04-validation-report.md",
     "final_quality": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-05-event-system-lifecycle/validation/final-quality-review.md"
   },
-  "command_results": [],
+  "command_results": [
+    {
+      "phase": "phase_01_core_event_crate_api",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_core_event_crate_api",
+      "command": "cargo test -p engine_events",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_core_event_crate_api",
+      "command": "cargo check",
+      "status": "passed_with_existing_renderer_dead_code_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_core_event_crate_api",
+      "command": "rg dependency/import scan for renderer/ash/vulkan/winit/imgui in src/events",
+      "status": "passed_no_dependency_or_import_hits",
+      "exit_code": 1
+    },
+    {
+      "phase": "phase_01_core_event_crate_api",
+      "command": "cargo tree -p engine_events --no-dedupe",
+      "status": "passed_validator_confirmed_std_only_crate",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_core_event_crate_api",
+      "command": "git diff --check",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
+    }
+  ],
   "runtime_smoke": {
     "status": "planned",
     "command": "RUST_LOG=debug timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/sprint-05-event-system-lifecycle/root-runtime-events-timing.jsonl",
