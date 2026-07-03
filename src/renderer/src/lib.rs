@@ -11,6 +11,24 @@ pub mod prelude {
 pub mod animation;
 mod data;
 mod debug_ui;
+
+// The `advanced-interop` Cargo feature gates unstable, unsafe, or internal
+// rendering surfaces behind an explicit opt-in. When disabled (the default):
+// - `api::advanced` is not available.
+// - `rendergraph` and its `RenderPassNode` trait are private.
+//
+// When enabled (`--features advanced-interop`):
+// - `api::advanced` exposes `unsafe fn renderer_core_mut()` for raw backend access.
+// - `rendergraph` becomes a public module, allowing expert-level custom pass
+//   experimentation.
+//
+// **This feature is alpha/unstable.** The types and functions exposed under
+// `advanced-interop` may change or be removed across alpha sprints without
+// prior notice. Custom rendergraph pass registration has no resource
+// declaration or synchronization validation. Misuse of raw backend access
+// can break frame synchronization, descriptor lifecycle, or swapchain safety.
+//
+// Beginner applications and examples should remain on the default path.
 #[cfg(not(feature = "advanced-interop"))]
 mod rendergraph;
 #[cfg(feature = "advanced-interop")]

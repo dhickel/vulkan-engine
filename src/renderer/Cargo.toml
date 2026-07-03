@@ -10,6 +10,11 @@ edition = "2021"
 
 [features]
 default = []
+# Opt-in feature gate for alpha/unstable advanced rendering interop.
+# When enabled, exposes:
+#   - renderer::api::advanced (unsafe renderer_core_mut for raw backend access)
+#   - renderer::rendergraph (custom pass registration, no safety validation)
+# These APIs may change across alpha sprints without notice.
 advanced-interop = []
 
 

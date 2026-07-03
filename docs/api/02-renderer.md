@@ -88,7 +88,7 @@ pub fn set_pre_render_hook(&mut self, hook: Option<RenderHook>)
 pub fn set_post_render_hook(&mut self, hook: Option<RenderHook>)
 ```
 
-Defined at [`renderer.rs:237-240`](../src/renderer/src/api/renderer.rs:237). Pre-hook fires before rendergraph execution; post-hook fires after. `RenderHook` is `Box<dyn FnMut(&mut RenderHookContext) -> Result<(), HookError> + Send>`. See [05-hooks.md](05-hooks.md).
+Defined at [`renderer.rs:237-240`](../src/renderer/src/api/renderer.rs:237). Pre-hook fires before rendergraph execution; post-hook fires after. `RenderHook` is `Box<dyn FnMut(&mut RenderHookContext) -> Result<(), HookError> + Send>`. See [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md).
 
 ## Camera Access
 
@@ -142,6 +142,6 @@ Defined at [`renderer.rs:223`](../src/renderer/src/api/renderer.rs:223). Returns
 ## See Also
 
 - [03-scene.md](03-scene.md) — scene construction API
-- [05-hooks.md](05-hooks.md) — render hook extension points
+- [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md) — render hook extension points
 - [08-debug.md](08-debug.md) — debug UI and timing capture
 - [Internal: API-to-backend handoff](../internal/02-renderer-internals.md)

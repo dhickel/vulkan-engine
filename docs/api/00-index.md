@@ -18,7 +18,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Renderer lifecycle | [02-renderer.md](02-renderer.md) | `Renderer::new`, frame API, resize, hooks |
 | Scene construction | [03-scene-graph-and-fragment-workflows.md](03-scene-graph-and-fragment-workflows.md) | `Scene`, fragments, transforms, lights, persistence, editor commands |
 | Asset loading | [04-assets-sync-deferred-and-handles.md](04-assets-sync-deferred-and-handles.md) | `AssetManager`, packages, durable IDs, load tickets, models, environments |
-| Render hooks | [05-hooks.md](05-hooks.md) | `RenderHook`, `RenderHookContext`, extension points |
+| Render hooks | [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md) | `RenderHook`, `RenderHookContext`, extension points |
 | Input system | [06-input.md](06-input.md) | `InputSystem`, layers, action maps, snapshots |
 | Configuration | [07-config.md](07-config.md) | `RendererConfig`, `VisualTuning`, asset policies |
 | Debug & timing | [08-debug.md](08-debug.md) | Debug UI, timing capture, custom views |
@@ -64,13 +64,14 @@ The full facade re-export list is at
 root-only compatibility exports are listed in
 [`src/renderer/src/lib.rs`](../../src/renderer/src/lib.rs).
 
-| Tier | Current exposure | Intended use |
-|------|------------------|--------------|
-| Alpha beginner facade | `renderer::prelude::{Renderer, RendererConfig, Scene, AssetManager, LoadTicket, InputSystem, FrameCaptureRequest, EventBus, ...}` with the same names still available under `renderer::api` and, for compatibility, the crate root | Supported alpha path for opening a renderer, creating or loading scenes, loading assets, updating input, rendering frames, and using debug/capture controls. |
-| Compatibility public | Root-only helpers such as `AnimationPlayer`, `SceneWorld`, `CommandHistory`, scene commands, `Aabb`, `Frustum`, `Ray`, and camera controllers | Preserved for current users, tests, diagnostics, and editor-style workflows. They are not the beginner contract. |
-| Advanced interop | `renderer::api::advanced` behind the `advanced-interop` feature | Explicit opt-in for lower-level renderer integration. Keep this out of beginner examples unless a chapter labels it advanced. |
-| Internal implementation detail | Private renderer modules and public-looking implementation concepts reached only through compatibility paths | Do not document as new user-facing APIs in beginner docs. |
-| Deferred gaps | Larger project runtime, material override, advanced rendering extension, and generated app-template work not implemented in this alpha surface | Document as future work only when needed; do not imply current support. |
+| Tier | Feature gate | Current exposure | Intended use | Stability |
+|------|-------------|------------------|--------------|-----------|
+| Alpha beginner facade | default | `renderer::prelude::{Renderer, RendererConfig, Scene, AssetManager, LoadTicket, InputSystem, FrameCaptureRequest, EventBus, ...}` with the same names still available under `renderer::api` and, for compatibility, the crate root. See [`src/renderer/src/api/prelude.rs`](../../src/renderer/src/api/prelude.rs). | Supported alpha path for opening a renderer, creating or loading scenes, loading assets, updating input, rendering frames, and using debug/capture controls. | alpha supported |
+| Safe extension points | default | Public but not in prelude: `RenderHook`, `RenderHookContext`, `DebugViewDescriptor`, `DebugViewCallback`, `DebugTimingSnapshot`, `FrameCaptureScheduler`, `Camera`, `FPSController`, `SceneWorld`, `CommandHistory`, scene commands, `Aabb`, `Frustum`, `Ray`, camera controllers, `AnimationPlayer`. | Intermediate users needing app logic, telemetry, debug UI, lightweight frame observation. | alpha supported with constraints |
+| Advanced interop | `advanced-interop` (opt-in) | `renderer::api::advanced` (unsafe `renderer_core_mut`), `renderer::rendergraph` (`RenderGraph`, `RenderPassNode` trait, `RenderGraphContext`). | Explicit opt-in for engine-internal experiments and expert diagnostics. | **alpha unstable** — no API compatibility guarantee across sprints |
+| Raw backend escape hatch | `advanced-interop` + `unsafe` | `renderer_core_mut()` returns `&mut VkRenderCore`; `RenderGraphContext.renderer` exposes `&mut VkRenderCore`. | Internal escape hatch. Bypasses all facade invariants (synchronization, descriptor lifecycle, swapchain safety). Not a normal user path. | unstable escape hatch |
+| Internal implementation detail | N/A | Private renderer modules and public-looking implementation concepts reached only through compatibility paths. | Do not document as new user-facing APIs in beginner docs. | N/A |
+| Deferred gaps | N/A | Larger project runtime, material override, custom rendergraph pass registration, and generated app-template work not implemented in this alpha surface. | Document as future work only when needed; do not imply current support. | N/A |
 
 ## Runtime Launcher
 
