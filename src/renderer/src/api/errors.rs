@@ -2,6 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
+use super::config::FrameCaptureConfigError;
 use crate::scene::scene_world::SceneNodeId;
 
 #[derive(Debug)]
@@ -11,6 +12,7 @@ pub enum RendererError {
     Scene(SceneError),
     Asset(AssetError),
     Hook(HookError),
+    CaptureConfig(FrameCaptureConfigError),
     Unsupported(&'static str),
     InvalidState(&'static str),
 }
@@ -23,6 +25,7 @@ impl Display for RendererError {
             Self::Scene(err) => write!(f, "scene error: {err}"),
             Self::Asset(err) => write!(f, "asset error: {err}"),
             Self::Hook(err) => write!(f, "hook error: {err}"),
+            Self::CaptureConfig(err) => write!(f, "frame capture configuration error: {err}"),
             Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
         }
@@ -58,6 +61,12 @@ impl From<AssetError> for RendererError {
 impl From<HookError> for RendererError {
     fn from(value: HookError) -> Self {
         Self::Hook(value)
+    }
+}
+
+impl From<FrameCaptureConfigError> for RendererError {
+    fn from(value: FrameCaptureConfigError) -> Self {
+        Self::CaptureConfig(value)
     }
 }
 

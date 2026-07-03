@@ -597,6 +597,87 @@ pub fn queue_indices_with_preferences(
     Ok(indices)
 }
 
+pub fn queue_indices_without_surface(
+    instance: &ash::Instance,
+    p_device: &vk::PhysicalDevice,
+    prefer_unique_transfer: bool,
+    prefer_unique_compute: bool,
+) -> Result<Vec<QueueIndex>, String> {
+    let qf_properties = unsafe { instance.get_physical_device_queue_family_properties(*p_device) };
+
+    let graphics_index = qf_properties
+        .iter()
+        .enumerate()
+        .find_map(|(index, qf)| {
+            if qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
+                Some(index as u32)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "Fatal: Failed to find suitable graphics queue".to_string())?;
+
+    let mut compute_index = None;
+    let mut transfer_index = None;
+
+    for (index, qf) in qf_properties.iter().enumerate() {
+        let index = index as u32;
+
+        if prefer_unique_compute
+            && compute_index.is_none()
+            && qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            && !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            && index != graphics_index
+        {
+            compute_index = Some(index);
+        }
+
+        if prefer_unique_transfer
+            && transfer_index.is_none()
+            && qf.queue_flags.contains(vk::QueueFlags::TRANSFER)
+            && !qf.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            && !qf.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            && index != graphics_index
+            && Some(index) != compute_index
+        {
+            transfer_index = Some(index);
+        }
+    }
+
+    let compute_index = compute_index.unwrap_or(graphics_index);
+    let transfer_index = transfer_index.unwrap_or(graphics_index);
+
+    let mut indices = vec![QueueIndex {
+        index: graphics_index,
+        queue_types: vec![VkQueueType::Graphics, VkQueueType::Present],
+    }];
+
+    if compute_index != graphics_index {
+        indices.push(QueueIndex {
+            index: compute_index,
+            queue_types: vec![VkQueueType::Compute],
+        });
+    } else {
+        indices[0].queue_types.push(VkQueueType::Compute);
+    }
+
+    if transfer_index != graphics_index && transfer_index != compute_index {
+        indices.push(QueueIndex {
+            index: transfer_index,
+            queue_types: vec![VkQueueType::Transfer],
+        });
+    } else if transfer_index == graphics_index {
+        indices[0].queue_types.push(VkQueueType::Transfer);
+    } else if let Some(compute) = indices
+        .iter_mut()
+        .find(|queue| queue.index == transfer_index)
+    {
+        compute.queue_types.push(VkQueueType::Transfer);
+    }
+
+    Ok(indices)
+}
+
 pub fn get_general_core_features(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
@@ -797,6 +878,19 @@ pub fn create_swapchain(
 
     log::info!("Swapchain: Setting extent");
     let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
+    let required_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | vk::ImageUsageFlags::TRANSFER_DST
+        | vk::ImageUsageFlags::TRANSFER_SRC;
+    if !swapchain_support
+        .capabilities
+        .supported_usage_flags
+        .contains(required_usage)
+    {
+        return Err(format!(
+            "Swapchain surface does not support required image usage {:?}; windowed present capture needs TRANSFER_SRC",
+            required_usage
+        ));
+    }
 
     let min_count = swapchain_support.capabilities.min_image_count.max(1);
     let requested_count = image_count.unwrap_or(min_count.saturating_add(1));
@@ -827,7 +921,7 @@ pub fn create_swapchain(
         .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
         .image_format(surface_format.format)
         .image_extent(extent)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST)
+        .image_usage(required_usage)
         .pre_transform(pre_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode)
@@ -1027,6 +1121,71 @@ pub fn allocate_depth_images(
         .collect::<Result<Vec<_>, String>>()?;
 
     Ok(images)
+}
+
+pub fn allocate_offscreen_present_images(
+    allocator: &Arc<Mutex<vk_mem::Allocator>>,
+    device: &ash::Device,
+    size: Extent2D,
+    count: u32,
+    image_format: vk::Format,
+) -> Result<Vec<VkImageAlloc>, String> {
+    let image_extent = vk::Extent3D {
+        width: size.width,
+        height: size.height,
+        depth: 1,
+    };
+    let usage_flags = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | vk::ImageUsageFlags::TRANSFER_SRC
+        | vk::ImageUsageFlags::TRANSFER_DST;
+
+    let allocator_create_info = vk_mem::AllocationCreateInfo {
+        usage: vk_mem::MemoryUsage::AutoPreferDevice,
+        required_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ..Default::default()
+    };
+
+    let image_create_info = vk_util::image_create_info(
+        image_format,
+        usage_flags,
+        image_extent,
+        vk::ImageType::TYPE_2D,
+        vk::SampleCountFlags::TYPE_1,
+        1,
+    );
+
+    (0..count)
+        .map(|_| {
+            let (image, allocation) = unsafe {
+                allocator
+                    .lock()
+                    .unwrap()
+                    .create_image(&image_create_info, &allocator_create_info)
+                    .map_err(|e| format!("Error creating offscreen present image: {:?}", e))?
+            };
+
+            let view_create_info = vk_util::image_view_create_info(
+                image_format,
+                vk::ImageViewType::TYPE_2D,
+                image,
+                vk::ImageAspectFlags::COLOR,
+            );
+            let image_view = unsafe {
+                device
+                    .create_image_view(&view_create_info, None)
+                    .map_err(|e| format!("Error creating offscreen present image view: {:?}", e))?
+            };
+
+            Ok(VkImageAlloc {
+                image,
+                image_view,
+                allocation,
+                image_extent,
+                image_format,
+                mip_levels: 1,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
 }
 
 pub fn create_basic_present_views(

@@ -2,8 +2,10 @@ mod common;
 
 use log::{error, info};
 use renderer::{
-    EnvironmentSource, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
+    EnvironmentSource, FrameCaptureStatus, FrameRenderOutcome, Renderer, RendererConfig,
+    RendererError, Scene,
 };
+use std::collections::HashSet;
 use std::env;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
@@ -22,6 +24,18 @@ fn main() {
         }
     };
 
+    let config = RendererConfig {
+        app_name: "renderer facade api_test".to_string(),
+        headless: launch_options.headless,
+        ..RendererConfig::default()
+    };
+
+    let app_name = config.app_name.clone();
+    if launch_options.headless {
+        run_headless_api_test(config, launch_options, &app_name);
+        return;
+    }
+
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(err) => {
@@ -31,12 +45,6 @@ fn main() {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let config = RendererConfig {
-        app_name: "renderer facade api_test".to_string(),
-        ..RendererConfig::default()
-    };
-
-    let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()
         .with_title(app_name.clone())
         .with_inner_size(PhysicalSize::new(config.window_width, config.window_height))
@@ -60,6 +68,12 @@ fn main() {
         }
     };
     renderer.install_default_fps_input();
+    if let Err(err) =
+        common::apply_frame_capture_launch_options(&mut renderer, &launch_options, &app_name)
+    {
+        error!("Failed to configure frame capture: {err}");
+        return;
+    }
     match common::apply_debug_record_launch_options(&mut renderer, &launch_options) {
         Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
         Ok(None) => {
@@ -195,6 +209,109 @@ fn main() {
             }
         })
         .expect("failed to run renderer api_test example loop");
+}
+
+fn run_headless_api_test(
+    config: RendererConfig,
+    launch_options: common::LaunchOptions,
+    app_name: &str,
+) {
+    let mut renderer = match Renderer::new_headless(config.clone()) {
+        Ok(renderer) => renderer,
+        Err(err) => {
+            error!("Headless renderer initialization failed: {err}");
+            if config.compile_shaders {
+                error!("Shader rebuild requires 'glslc' or 'glslangValidator' in PATH.");
+            }
+            return;
+        }
+    };
+
+    if let Err(err) =
+        common::apply_frame_capture_launch_options(&mut renderer, &launch_options, app_name)
+    {
+        error!("Failed to configure frame capture: {err}");
+        return;
+    }
+    match common::apply_debug_record_launch_options(&mut renderer, &launch_options) {
+        Ok(Some(path)) => info!("Debug timing recording active -> {}", path),
+        Ok(None) => {}
+        Err(err) => {
+            error!("Failed to configure debug timing recording: {err}");
+            return;
+        }
+    }
+
+    let mut scene = renderer.take_startup_scene().unwrap_or_else(Scene::new);
+    if let Some(env_path) = launch_options.env_path.as_ref() {
+        info!("Loading custom environment from: {}", env_path.display());
+        match renderer
+            .assets()
+            .load_environment(EnvironmentSource::Auto(env_path.clone()))
+        {
+            Ok(handle) => {
+                scene.set_skybox(handle);
+                info!("Custom environment set as skybox");
+            }
+            Err(err) => {
+                error!("Failed to load custom environment: {err}");
+            }
+        }
+    }
+
+    let expected_captures = launch_options
+        .capture_frames
+        .or_else(|| launch_options.capture_frame.map(|_| 1))
+        .unwrap_or(0) as usize;
+    let frame_budget = launch_options
+        .capture_frame
+        .or(launch_options.capture_frame_start)
+        .unwrap_or(0)
+        .saturating_add(
+            launch_options
+                .capture_frame_interval
+                .unwrap_or(1)
+                .saturating_mul(launch_options.capture_frames.unwrap_or(0).saturating_add(2)),
+        )
+        .max(180);
+    let mut succeeded_paths = HashSet::new();
+
+    for _ in 0..frame_budget {
+        match renderer.render_scene_headless(&mut scene) {
+            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Err(err) => {
+                error!("Headless render failed: {err}");
+                return;
+            }
+        }
+
+        match renderer.last_frame_capture_status() {
+            Some(FrameCaptureStatus::Succeeded { output_path, .. }) => {
+                succeeded_paths.insert(output_path.clone());
+                if succeeded_paths.len() >= expected_captures {
+                    info!(
+                        "Headless capture completed: {} capture(s) written",
+                        succeeded_paths.len()
+                    );
+                    return;
+                }
+            }
+            Some(FrameCaptureStatus::Failed { message, .. }) => {
+                error!("Headless capture failed: {message}");
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if expected_captures > 0 {
+        error!(
+            "Headless capture did not complete within {} frames ({} of {} capture(s) written)",
+            frame_budget,
+            succeeded_paths.len(),
+            expected_captures
+        );
+    }
 }
 
 fn render_frame(

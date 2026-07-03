@@ -211,6 +211,10 @@ impl VkDataCache {
             .lock()
             .unwrap()
             .destroy(device, allocator);
+        self.environment_cache
+            .lock()
+            .unwrap()
+            .destroy(device, allocator);
     }
 }
 
@@ -1844,6 +1848,8 @@ impl MeshCache {
 impl VkDestroyable for MeshCache {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.cached_meshes.clear();
+        self.joint_desc_pool.destroy(device, allocator);
+        self.default_joint_buffer.destroy(device, allocator);
         self.index_storage.destroy(device, allocator);
         self.vertex_storage.destroy(device, allocator)
     }
@@ -2269,6 +2275,40 @@ impl EnvironmentCache {
             Some(CachedEnvironment::Unloaded(_)) => Ok(None),
             None => Err(CacheError::OutOfBounds),
         }
+    }
+
+    fn destroy_cube_map(device: &Device, allocator: &Allocator, cube_map: &mut VkCubeMap) {
+        unsafe {
+            device.destroy_sampler(cube_map.sampler, None);
+            device.destroy_image_view(cube_map.image_view, None);
+            allocator.destroy_image(cube_map.image, &mut cube_map.allocation);
+        }
+    }
+}
+
+impl VkDestroyable for EnvironmentCache {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        for env_maps in self.env_maps.iter_mut().filter_map(Option::as_mut) {
+            Self::destroy_cube_map(device, allocator, &mut env_maps.irradiance);
+            Self::destroy_cube_map(device, allocator, &mut env_maps.pre_filter);
+        }
+        self.env_maps.clear();
+
+        for skybox in self.skyboxes.iter_mut() {
+            let old = std::mem::replace(
+                skybox,
+                CachedEnvironment::Unloaded(PendingSkyboxSource::CubemapFaces {
+                    face_size: 0,
+                    format: vk::Format::UNDEFINED,
+                    bytes: Vec::new(),
+                }),
+            );
+            if let CachedEnvironment::Loaded(mut cube_map) = old {
+                Self::destroy_cube_map(device, allocator, &mut cube_map);
+            }
+        }
+        self.skyboxes.clear();
+        self.env_generations.clear();
     }
 }
 

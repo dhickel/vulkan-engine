@@ -21,7 +21,8 @@
 //!   memory aliases between passes.
 
 use crate::rendergraph::passes::{
-    GeometryPass, ImguiPass, PrepareTargetsPass, PresentCopyPass, SkyboxPass,
+    DebugCapturePass, GeometryPass, ImguiPass, PrepareTargetsPass, PresentCopyPass, SkyboxPass,
+    TerminalPresentPass,
 };
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_render::VkRenderCore;
@@ -69,6 +70,8 @@ impl RenderGraph {
             Box::new(GeometryPass),
             Box::new(PresentCopyPass),
             Box::new(ImguiPass),
+            Box::new(DebugCapturePass),
+            Box::new(TerminalPresentPass),
         ])
     }
 

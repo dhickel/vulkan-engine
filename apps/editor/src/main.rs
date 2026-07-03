@@ -11,10 +11,11 @@ use app_state::{EditorAction, EditorSelection, EditorSession};
 use launch::LaunchOptions;
 use log::{error, info};
 use renderer::{
-    AssetManifestMode, AssetPolicyConfig, CommandHistory, DebugRuntimeMode, DurableAssetRecord,
-    FrameRenderOutcome, PlaceAssetCommand, Project, RemoveNodeCommand, Renderer, RendererConfig,
-    RendererError, RendererInitError, Scene, SceneAssetReference, SceneError, SceneNodeId,
-    SetTransformCommand,
+    default_capture_root, default_single_capture_path, AssetManifestMode, AssetPolicyConfig,
+    CommandHistory, DebugRuntimeMode, DurableAssetRecord, FrameCaptureRequest,
+    FrameCaptureSequence, FrameRenderOutcome, PlaceAssetCommand, Project, RemoveNodeCommand,
+    Renderer, RendererConfig, RendererError, RendererInitError, Scene, SceneAssetReference,
+    SceneError, SceneNodeId, SetTransformCommand,
 };
 use winit::dpi::PhysicalSize;
 use winit::event::MouseButton;
@@ -54,6 +55,7 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
         window_height: 900,
         compile_shaders: false,
         shader_debug_mode: DebugRuntimeMode::Default,
+        headless: launch_options.headless,
         asset_policy: AssetPolicyConfig {
             manifest_mode: AssetManifestMode::BestEffort,
             allow_filename_heuristics: true,
@@ -72,6 +74,8 @@ fn run(launch_options: LaunchOptions) -> Result<(), String> {
         .map_err(|err| format!("renderer initialization failed: {err}"))?;
     renderer.install_default_fps_input();
 
+    apply_frame_capture_launch_options(&mut renderer, &launch_options)
+        .map_err(|err| format!("failed to configure frame capture: {err}"))?;
     apply_debug_record_launch_options(&mut renderer, &launch_options)
         .map_err(|err| format!("failed to configure debug timing recording: {err}"))?;
 
@@ -802,6 +806,39 @@ fn apply_debug_record_launch_options(
     if options.record_debug_secs.is_some() {
         let path = renderer.start_debug_timing_recording()?;
         info!("Debug timing recording active -> {path}");
+    }
+
+    Ok(())
+}
+
+fn apply_frame_capture_launch_options(
+    renderer: &mut Renderer,
+    options: &LaunchOptions,
+) -> Result<(), RendererError> {
+    renderer.configure_manual_frame_capture_dir(options.manual_capture_dir.clone())?;
+
+    if let Some(frame_number) = options.capture_frame {
+        let output_path = options.capture_frame_path.clone().unwrap_or_else(|| {
+            default_single_capture_path(APP_NAME, frame_number, options.capture_target)
+        });
+        renderer.request_frame_capture_at(
+            frame_number,
+            FrameCaptureRequest::new(options.capture_target, output_path),
+        )?;
+    }
+
+    if let Some(count) = options.capture_frames {
+        let output_dir = options.capture_dir.clone().unwrap_or_else(|| {
+            default_capture_root().join(format!("{}-captures", APP_NAME.replace(' ', "-")))
+        });
+        let sequence = FrameCaptureSequence::new(
+            options.capture_target,
+            output_dir,
+            options.capture_frame_start.unwrap_or(0),
+            options.capture_frame_interval.unwrap_or(1),
+            count,
+        )?;
+        renderer.configure_frame_capture_sequence(sequence)?;
     }
 
     Ok(())

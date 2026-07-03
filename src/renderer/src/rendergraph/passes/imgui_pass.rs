@@ -11,7 +11,6 @@ impl RenderPassNode for ImguiPass {
 
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
         if !ctx.submission.flags.draw_imgui {
-            ctx.renderer.transition_present_for_present(ctx.frame);
             return Ok(());
         }
 

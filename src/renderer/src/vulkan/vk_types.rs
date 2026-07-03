@@ -36,6 +36,7 @@ use ash::vk::{DeviceSize, Extent2D};
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
 use log::debug;
+use std::collections::HashSet;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,6 +61,18 @@ pub trait VkDestroyable {
 #[derive(Debug)]
 pub enum VkError {
     Present(String),
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum RenderSurfaceMode {
+    Windowed,
+    HeadlessOffscreen,
+}
+
+impl RenderSurfaceMode {
+    pub fn is_headless(self) -> bool {
+        matches!(self, Self::HeadlessOffscreen)
+    }
 }
 
 /// Window state management with Vulkan viewport/scissor caching.
@@ -350,9 +363,12 @@ pub struct VkCommandPoolMap {
 
 impl VkDestroyable for VkCommandPoolMap {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.pools
-            .iter_mut()
-            .for_each(|pool| pool.destroy(device, allocator));
+        let mut destroyed = HashSet::new();
+        for pool in self.pools.iter_mut() {
+            if destroyed.insert(pool.pool) {
+                pool.destroy(device, allocator);
+            }
+        }
     }
 }
 
@@ -582,6 +598,7 @@ pub struct VkFrame {
     pub depth: VkImageAlloc,
     pub present_image: vk::Image, // Not owned (swapchain owns this)
     pub present_image_view: vk::ImageView, // Not owned
+    pub owned_present: Option<VkImageAlloc>,
     pub cmd_pools: VkCommandPoolMap,
     pub descriptors: VkDynamicDescriptorAllocator,
     deletions: Vec<VkDeletable>,
@@ -592,6 +609,9 @@ impl VkDestroyable for VkFrame {
         self.sync.destroy(device, allocator);
         self.draw.destroy(device, allocator);
         self.depth.destroy(device, allocator);
+        if let Some(owned_present) = self.owned_present.as_mut() {
+            owned_present.destroy(device, allocator);
+        }
         self.cmd_pools.destroy(device, allocator);
         self.descriptors.destroy(device, allocator);
         // device.destroy_image_view(self.present_image_view, None);
@@ -607,6 +627,7 @@ impl VkFrame {
         depth: VkImageAlloc,
         present_image: vk::Image,
         present_image_view: vk::ImageView,
+        owned_present: Option<VkImageAlloc>,
         cmd_pools: VkCommandPoolMap,
         descriptors: VkDynamicDescriptorAllocator,
     ) -> Self {
@@ -617,6 +638,7 @@ impl VkFrame {
             depth,
             present_image,
             present_image_view,
+            owned_present,
             cmd_pools,
             descriptors,
             deletions: Vec::with_capacity(100),
@@ -630,6 +652,10 @@ impl VkFrame {
     ) -> (VkFrameSync, VkCommandPoolMap) {
         self.draw.destroy(device, allocator);
         self.depth.destroy(device, allocator);
+        if let Some(owned_present) = self.owned_present.as_mut() {
+            owned_present.destroy(device, allocator);
+        }
+        self.owned_present = None;
         // device.destroy_image_view(self.present_image_view, None);
         // device.destroy_image(self.present_image, None);
         (self.sync, self.cmd_pools.clone())
@@ -686,7 +712,13 @@ pub struct VkPresent {
 
 impl VkDestroyable for VkPresent {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.destroy_present_views(device);
+        if self
+            .frame_data
+            .iter()
+            .all(|frame| frame.owned_present.is_none())
+        {
+            self.destroy_present_views(device);
+        }
         self.frame_data
             .iter_mut()
             .for_each(|frame| frame.destroy(device, allocator));
@@ -700,14 +732,19 @@ impl VkPresent {
         draw_images: Vec<VkImageAlloc>,
         depth_images: Vec<VkImageAlloc>,
         present_images: Vec<(vk::Image, vk::ImageView)>,
+        owned_present_images: Option<Vec<VkImageAlloc>>,
         command_pools: Vec<VkCommandPoolMap>,
         descriptor_allocators: Vec<VkDynamicDescriptorAllocator>,
     ) -> Result<Self, VkError> {
+        let present_len = owned_present_images
+            .as_ref()
+            .map(|images| images.len())
+            .unwrap_or(present_images.len());
         let lengths = [
             frame_sync.len(),
             draw_images.len(),
             depth_images.len(),
-            present_images.len(),
+            present_len,
             command_pools.len(),
             descriptor_allocators.len(),
         ];
@@ -720,34 +757,36 @@ impl VkPresent {
         };
 
         let present_targets = present_images.clone();
+        let mut owned_present_images = owned_present_images
+            .map(|images| images.into_iter().map(Some).collect::<Vec<_>>())
+            .unwrap_or_else(|| std::iter::repeat_with(|| None).take(lengths[0]).collect());
         let frame_data = frame_sync
             .into_iter()
             .zip(draw_images)
             .zip(depth_images)
-            .zip(present_images)
             .zip(command_pools)
             .zip(descriptor_allocators)
             .enumerate()
-            .map(
-                |(
-                    i,
-                    (
-                        ((((sync, draw), depth), (present_image, present_image_view)), cmd_pools),
-                        descriptors,
-                    ),
-                )| {
-                    VkFrame::new(
-                        i as u32,
-                        sync,
-                        draw,
-                        depth,
-                        present_image,
-                        present_image_view,
-                        cmd_pools,
-                        descriptors,
-                    )
-                },
-            )
+            .map(|(i, ((((sync, draw), depth), cmd_pools), descriptors))| {
+                let owned_present = owned_present_images[i].take();
+                let (present_image, present_image_view) =
+                    if let Some(owned_present) = owned_present.as_ref() {
+                        (owned_present.image, owned_present.image_view)
+                    } else {
+                        present_images[i]
+                    };
+                VkFrame::new(
+                    i as u32,
+                    sync,
+                    draw,
+                    depth,
+                    present_image,
+                    present_image_view,
+                    owned_present,
+                    cmd_pools,
+                    descriptors,
+                )
+            })
             .collect::<Vec<_>>();
 
         let data_len = frame_data.len();
@@ -1171,6 +1210,10 @@ impl VkTransfer {
     pub fn get_local_transfer_pool(&self) -> &VkCommandPool {
         &self.transfer_pool
     }
+
+    pub fn add_host_buffer(&mut self, host_buffer: Arc<Mutex<VkHostBuffer>>) {
+        self.host_buffers.push(host_buffer);
+    }
 }
 
 impl VkDestroyable for VkTransfer {
@@ -1179,6 +1222,7 @@ impl VkDestroyable for VkTransfer {
         self.host_buffers
             .iter()
             .for_each(|buf| buf.lock().unwrap().destroy(device, allocator));
+        self.host_buffers.clear();
     }
 }
 
@@ -1376,6 +1420,15 @@ pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
     pub extent: Extent2D,
+}
+
+impl VkDestroyable for VkBrdfLut {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        unsafe {
+            device.destroy_sampler(self.sampler, None);
+        }
+        self.image_alloc.destroy(device, allocator);
+    }
 }
 
 impl VkBuffer {
@@ -1682,6 +1735,15 @@ impl VkSceneDescriptors {
 
     pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
         self.scene_descriptors[index as usize]
+    }
+}
+
+impl VkDestroyable for VkSceneDescriptors {
+    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+        self.scene_buffer.destroy(device, allocator);
+        self.env_buffer.destroy(device, allocator);
+        self.descriptor_pool.destroy(device, allocator);
+        self.scene_descriptors.clear();
     }
 }
 
