@@ -8,7 +8,7 @@ Sprint target: asset package authoring and validation tools.
 
 Phase target: API docs, final validation, evidence reconciliation, and closeout.
 
-Phase status: `passed_pending_commit_push_report`
+Phase status: `passed_committed_pushed_reported`
 
 Capture decision: `not_required_cli_schema_only`
 
@@ -27,7 +27,16 @@ Out of scope by directive: editor placement UI, runtime launcher behavior, visua
 
 ## Changed Files Matrix
 
-Phase 04 commit: pending at initial report write time.
+Phase 04 commit: `1e7253be`
+
+Phase 04 commit link: `https://github.com/dhickel/vulkan-engine/commit/1e7253be`
+
+AgentMail reports:
+
+- Phase 04 progress message ID: `<0100019f27098886-e6ad9102-1877-49aa-a880-a6be68146758-000000@email.amazonses.com>`
+- Phase 04 progress thread ID: `bb9fff77-9b55-4012-926d-ffd9f8081112`
+- Final quality message ID: `<0100019f2709dd2d-0043082d-5312-44d9-99c9-d67653072430-000000@email.amazonses.com>`
+- Final quality thread ID: `dc297777-b576-4fd9-9a42-ffe770d0fe85`
 
 Branch link: `https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools`
 
@@ -38,9 +47,9 @@ Branch link: `https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-pack
 | `docs/api/04-assets-sync-deferred-and-handles.md` | Changed | 317 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/docs/api/04-assets-sync-deferred-and-handles.md` |
 | `docs/api/10-packaging-cli.md` | Created | 134 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/docs/api/10-packaging-cli.md` |
 | `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md` | Changed | 51 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md` |
-| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/validation-summary.json` | Changed | 288 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/validation-summary.json` |
-| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-04-validation-report.md` | Created | 157 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-04-validation-report.md` |
-| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/final-quality-review.md` | Created | 55 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/final-quality-review.md` |
+| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/validation-summary.json` | Changed | 312 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/validation-summary.json` |
+| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-04-validation-report.md` | Created | 166 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-04-validation-report.md` |
+| `.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/final-quality-review.md` | Created | 62 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/final-quality-review.md` |
 | `.internal-dev/changelogs/2026-07-03-sprint-02-packaging-tools.md` | Created | 44 | `https://github.com/dhickel/vulkan-engine/blob/sprint/alpha-02-packaging-tools/.internal-dev/changelogs/2026-07-03-sprint-02-packaging-tools.md` |
 
 ## Documentation Evidence

@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 02 - Asset package authoring and validation tools",
-  "status": "sprint_02_closed_pending_phase_04_commit_push_email_evidence",
+  "status": "sprint_02_closed_committed_pushed_reported",
   "branch": "sprint/alpha-02-packaging-tools",
   "capture_decision": "not_required_cli_schema_only",
   "phases": [
@@ -47,7 +47,7 @@
     {
       "phase": "04",
       "name": "API docs, final validation, and closeout",
-      "status": "passed_pending_commit_push_report",
+      "status": "passed_committed_pushed_reported",
       "capture_decision": "not_required_cli_schema_only",
       "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-04-validation-report.md",
       "final_quality_review": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/final-quality-review.md",
@@ -250,6 +250,12 @@
       "hash": "e7f5557412c05dd7b851e04ba5fdaf9cffc08c49",
       "subject": "Sprint 02 phase 03 engine_pack authoring tools",
       "url": "https://github.com/dhickel/vulkan-engine/commit/e7f5557412c05dd7b851e04ba5fdaf9cffc08c49"
+    },
+    {
+      "phase": "04",
+      "hash": "1e7253be",
+      "subject": "Sprint 02 phase 04 docs and closeout",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/1e7253be"
     }
   ],
   "pushes": [
@@ -264,6 +270,12 @@
       "branch": "sprint/alpha-02-packaging-tools",
       "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools",
       "pushed_through": "e7f55574"
+    },
+    {
+      "phase": "04",
+      "branch": "sprint/alpha-02-packaging-tools",
+      "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools",
+      "pushed_through": "1e7253be"
     }
   ],
   "agentmail_reports": [
@@ -278,6 +290,18 @@
       "subject": "Sprint 02 Phase 03 Progress Report - engine_pack Authoring and Pack Commands",
       "message_id": "<0100019f27038188-d508add9-cf7d-428e-af91-0ee7bab12ea5-000000@email.amazonses.com>",
       "thread_id": "c8825a7f-bf67-44a3-b62a-d33ad333932d"
+    },
+    {
+      "phase": "04",
+      "subject": "Sprint 02 Phase 04 Progress Report - Docs and Final Validation",
+      "message_id": "<0100019f27098886-e6ad9102-1877-49aa-a880-a6be68146758-000000@email.amazonses.com>",
+      "thread_id": "bb9fff77-9b55-4012-926d-ffd9f8081112"
+    },
+    {
+      "phase": "final",
+      "subject": "Sprint 02 Final Quality Report - Packaging Tools Closed",
+      "message_id": "<0100019f2709dd2d-0043082d-5312-44d9-99c9-d67653072430-000000@email.amazonses.com>",
+      "thread_id": "dc297777-b576-4fd9-9a42-ffe770d0fe85"
     }
   ],
   "residuals": [
