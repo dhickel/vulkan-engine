@@ -1,6 +1,6 @@
 # Sprint 07: Audio Foundation
 
-Status: planned
+Status: closed
 
 ## Objective
 
@@ -78,5 +78,15 @@ Use the worker directives in `worker-directives/`:
 
 - Validation evidence recorded.
 - Known residuals tracked.
-- Changelog timing confirmed with user if required by repo guidance.
+- Changelog recorded.
 - Sprint tracker updated by main thread after validation/closeout.
+
+## Closeout Status
+
+Sprint 07 is fully validated with recorded residuals in `artifacts/validation-summary.json`.
+
+Accepted residuals:
+
+- Device smoke was skipped and remains optional/host-dependent.
+- `cargo test -p dungeon_dogfood` remains blocked before dogfood tests execute by the existing renderer test-profile `russimp_sys` binding issue in `src/renderer/src/data/assimp_util.rs`.
+- Root-runtime/editor audio playback, editor audio placement, production mixer/spatialization/streaming, and platform/device support matrix remain deferred.
