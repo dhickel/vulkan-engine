@@ -74,6 +74,35 @@ fn validate_package_rejects_invalid_fixtures_with_stable_codes() {
 }
 
 #[test]
+fn validate_package_reports_collision_metadata_failures() {
+    let temp = temp_dir("collision_metadata");
+    let package_path = temp.join("bad_collision.package.toml");
+    fs::write(
+        &package_path,
+        r#"format_version = 1
+package_id = "bad_collision"
+display_name = "Bad Collision"
+
+[[assets]]
+id = "bad_collision.prefab.wall"
+kind = "prefab"
+path = "prefabs/wall.prefab"
+
+[assets.metadata.collision]
+body_kind = "static"
+shape = { kind = "box", half_extents = [0.5, 0.0, 0.5] }
+"#,
+    )
+    .expect("write package");
+
+    let output = engine_pack()
+        .args(["validate-package", path_str(&package_path).as_str()])
+        .output()
+        .expect("run engine_pack");
+    assert_failure_contains(output, "asset.collision_invalid_dimension");
+}
+
+#[test]
 fn validate_project_accepts_valid_fixture_and_rejects_missing_scene() {
     let output = engine_pack()
         .args([

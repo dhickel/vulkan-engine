@@ -2,11 +2,11 @@
   "sprint": "06",
   "slug": "sprint-06-physics-collision-foundation",
   "branch": "sprint/alpha-06-physics-collision-foundation",
-  "status": "phase_01_validated",
+  "status": "phase_02_validated",
   "fully_validated": false,
   "phase_status": {
     "phase_01_physics_crate_alpha_contract": "validated",
-    "phase_02_package_scene_collision_metadata": "planned",
+    "phase_02_package_scene_collision_metadata": "validated",
     "phase_03_event_bridge_dogfood_proof": "planned",
     "phase_04_docs_final_validation": "planned",
     "final_quality_review": "not_started"
@@ -52,6 +52,35 @@
       "command": "cargo tree -p physics",
       "result": "pass",
       "notes": "Physics roots at rapier3d; no renderer/window/editor/app dependency"
+    },
+    {
+      "phase": "02",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "02",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "156 lib tests, 17 integration tests, 5 ignored doc tests"
+    },
+    {
+      "phase": "02",
+      "command": "cargo test -p engine_pack",
+      "result": "pass",
+      "notes": "14 CLI tests"
+    },
+    {
+      "phase": "02",
+      "command": "cargo check -p engine_pack",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "02",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
     }
   ],
   "browser_or_capture": {
@@ -67,6 +96,7 @@
   "superseded_artifacts": [],
   "tooling_constraints": [],
   "residual_risks": [
-    "Dogfood migration scope must be decided after Phase 03 code inspection and tests."
+    "Dogfood migration scope must be decided after Phase 03 code inspection and tests.",
+    "Collision metadata is validated and persisted, but editor UI authoring and runtime physics wiring are deferred to later phases."
   ]
 }

@@ -490,6 +490,7 @@ fn validate_package_manifest_content(
         );
     }
     collect_package_runtime_handle_diagnostics(&raw, manifest_path, &mut diagnostics);
+    collect_package_collision_diagnostics(&raw, manifest_path, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(ValidationError::new(diagnostics));
     }
@@ -893,6 +894,278 @@ fn is_toml_runtime_handle_shape(value: &toml::Value) -> bool {
     value
         .as_table()
         .is_some_and(|table| table.contains_key("slot") && table.contains_key("generation"))
+}
+
+fn collect_package_collision_diagnostics(
+    raw: &toml::Value,
+    manifest_path: Option<&Path>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(assets) = raw.get("assets").and_then(toml::Value::as_array) else {
+        return;
+    };
+    let mut collision_ids = HashSet::new();
+    for asset in assets {
+        let Some(table) = asset.as_table() else {
+            continue;
+        };
+        let asset_id = table.get("id").and_then(toml::Value::as_str);
+        let Some(collision) = table
+            .get("metadata")
+            .and_then(toml::Value::as_table)
+            .and_then(|metadata| metadata.get("collision"))
+        else {
+            continue;
+        };
+        validate_package_collision_value(
+            collision,
+            manifest_path,
+            asset_id,
+            &mut collision_ids,
+            diagnostics,
+        );
+    }
+}
+
+fn validate_package_collision_value(
+    collision: &toml::Value,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    collision_ids: &mut HashSet<String>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(table) = collision.as_table() else {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_schema",
+            "collision metadata must be a table",
+            manifest_path,
+            asset_id,
+        ));
+        return;
+    };
+
+    for field in ["body_id", "collider_id"] {
+        if let Some(id) = table.get(field) {
+            validate_package_collision_id(
+                id,
+                field,
+                manifest_path,
+                asset_id,
+                collision_ids,
+                diagnostics,
+            );
+        }
+    }
+
+    if let Some(kind) = table.get("body_kind") {
+        match kind.as_str() {
+            Some("static" | "dynamic" | "kinematic") => {}
+            _ => diagnostics.push(package_collision_diagnostic(
+                "asset.collision_invalid_body_kind",
+                "collision body_kind must be one of static, dynamic, or kinematic",
+                manifest_path,
+                asset_id,
+            )),
+        }
+    }
+
+    if let Some(trigger) = table.get("trigger") {
+        if !trigger.is_bool() {
+            diagnostics.push(package_collision_diagnostic(
+                "asset.collision_invalid_trigger",
+                "collision trigger must be a boolean",
+                manifest_path,
+                asset_id,
+            ));
+        }
+    }
+
+    match table.get("shape") {
+        Some(shape) => validate_toml_collision_shape(shape, manifest_path, asset_id, diagnostics),
+        None => diagnostics.push(package_collision_diagnostic(
+            "asset.collision_missing_shape",
+            "collision metadata requires a shape",
+            manifest_path,
+            asset_id,
+        )),
+    }
+}
+
+fn validate_package_collision_id(
+    value: &toml::Value,
+    field: &str,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    collision_ids: &mut HashSet<String>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(id) = value.as_str() else {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_id",
+            format!("collision {field} must be a durable string id"),
+            manifest_path,
+            asset_id,
+        ));
+        return;
+    };
+    if is_invalid_durable_collision_id(id) {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_id",
+            format!("collision {field} '{id}' is not a durable id"),
+            manifest_path,
+            asset_id,
+        ));
+        return;
+    }
+    if !collision_ids.insert(id.to_string()) {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.duplicate_collision_id",
+            format!("duplicate collision id '{id}'"),
+            manifest_path,
+            asset_id,
+        ));
+    }
+}
+
+fn validate_toml_collision_shape(
+    shape: &toml::Value,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(table) = shape.as_table() else {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_shape",
+            "collision shape must be a table",
+            manifest_path,
+            asset_id,
+        ));
+        return;
+    };
+    match table.get("kind").and_then(toml::Value::as_str) {
+        Some("box" | "cuboid") => match table.get("half_extents") {
+            Some(value) => validate_toml_positive_vec3(
+                value,
+                "half_extents",
+                manifest_path,
+                asset_id,
+                diagnostics,
+            ),
+            None => diagnostics.push(package_collision_diagnostic(
+                "asset.collision_invalid_dimension",
+                "box collision shape requires positive half_extents",
+                manifest_path,
+                asset_id,
+            )),
+        },
+        Some("sphere") => validate_toml_positive_scalar(
+            table.get("radius"),
+            "radius",
+            manifest_path,
+            asset_id,
+            diagnostics,
+        ),
+        Some("capsule" | "capsule_y") => {
+            validate_toml_positive_scalar(
+                table.get("radius"),
+                "radius",
+                manifest_path,
+                asset_id,
+                diagnostics,
+            );
+            validate_toml_positive_scalar(
+                table.get("half_height"),
+                "half_height",
+                manifest_path,
+                asset_id,
+                diagnostics,
+            );
+        }
+        _ => diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_shape",
+            "collision shape kind must be box, cuboid, sphere, capsule, or capsule_y",
+            manifest_path,
+            asset_id,
+        )),
+    }
+}
+
+fn validate_toml_positive_vec3(
+    value: &toml::Value,
+    field: &str,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(values) = value.as_array() else {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_dimension",
+            format!("collision {field} must be an array of three positive finite numbers"),
+            manifest_path,
+            asset_id,
+        ));
+        return;
+    };
+    if values.len() != 3
+        || values.iter().any(|value| {
+            !toml_number_as_f64(value).is_some_and(|number| number.is_finite() && number > 0.0)
+        })
+    {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_dimension",
+            format!("collision {field} must contain three positive finite numbers"),
+            manifest_path,
+            asset_id,
+        ));
+    }
+}
+
+fn validate_toml_positive_scalar(
+    value: Option<&toml::Value>,
+    field: &str,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if !value
+        .and_then(toml_number_as_f64)
+        .is_some_and(|number| number.is_finite() && number > 0.0)
+    {
+        diagnostics.push(package_collision_diagnostic(
+            "asset.collision_invalid_dimension",
+            format!("collision {field} must be a positive finite number"),
+            manifest_path,
+            asset_id,
+        ));
+    }
+}
+
+fn toml_number_as_f64(value: &toml::Value) -> Option<f64> {
+    value
+        .as_float()
+        .or_else(|| value.as_integer().map(|integer| integer as f64))
+}
+
+fn package_collision_diagnostic(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+) -> ValidationDiagnostic {
+    let mut diagnostic = ValidationDiagnostic::new(code, ValidationArea::Asset, message)
+        .with_optional_path(manifest_path);
+    if let Some(asset_id) = asset_id {
+        diagnostic = diagnostic.with_durable_id(asset_id.to_string());
+    }
+    diagnostic
+}
+
+fn is_invalid_durable_collision_id(id: &str) -> bool {
+    let trimmed = id.trim();
+    trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || (trimmed.contains("slot") && trimmed.contains("generation"))
 }
 
 fn package_error_to_diagnostic(
@@ -1308,6 +1581,115 @@ mesh_handle = { slot = 3, generation = 1 }
                 .unwrap_err();
 
         assert_has_code(&err, "asset.runtime_handle_identity");
+    }
+
+    #[test]
+    fn asset_registry_validate_package_accepts_collision_metadata() {
+        let manifest = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.collision.wall"
+kind = "prefab"
+path = "prefabs/wall.prefab"
+
+[assets.metadata.collision]
+body_id = "body.wall"
+collider_id = "collider.wall"
+body_kind = "static"
+trigger = false
+shape = { kind = "box", half_extents = [0.5, 1.25, 0.5] }
+"#;
+
+        let records =
+            validate_package_manifest_str(manifest, ".", &PackageValidationOptions::default())
+                .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].metadata.contains_key("collision"));
+    }
+
+    #[test]
+    fn asset_registry_validate_package_rejects_invalid_collision_metadata() {
+        let bad_dimensions = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.collision.wall"
+kind = "prefab"
+path = "prefabs/wall.prefab"
+
+[assets.metadata.collision]
+body_kind = "static"
+shape = { kind = "box", half_extents = [0.5, 0.0, 0.5] }
+"#;
+        let err = validate_package_manifest_str(
+            bad_dimensions,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "asset.collision_invalid_dimension");
+
+        let duplicate_collision_ids = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.collision.a"
+kind = "prefab"
+path = "prefabs/a.prefab"
+
+[assets.metadata.collision]
+collider_id = "collider.duplicate"
+body_kind = "static"
+shape = { kind = "sphere", radius = 0.5 }
+
+[[assets]]
+id = "bad.collision.b"
+kind = "prefab"
+path = "prefabs/b.prefab"
+
+[assets.metadata.collision]
+collider_id = "collider.duplicate"
+body_kind = "static"
+shape = { kind = "sphere", radius = 0.5 }
+"#;
+        let err = validate_package_manifest_str(
+            duplicate_collision_ids,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "asset.duplicate_collision_id");
+
+        let runtime_shaped_id = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.collision.handle"
+kind = "prefab"
+path = "prefabs/handle.prefab"
+
+[assets.metadata.collision]
+collider_id = "slot:4,generation:2"
+body_kind = "static"
+shape = { kind = "sphere", radius = 0.5 }
+"#;
+        let err = validate_package_manifest_str(
+            runtime_shaped_id,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "asset.collision_invalid_id");
     }
 
     #[test]

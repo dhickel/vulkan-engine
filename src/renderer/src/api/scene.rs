@@ -1145,6 +1145,8 @@ struct SerializedNode {
     name: String,
     transform: SerializedTransform,
     asset: Option<SerializedAssetReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    collision: Option<SerializedCollisionComponent>,
     #[serde(default)]
     material_overrides: BTreeMap<String, String>,
     #[serde(default = "default_visibility")]
@@ -1178,6 +1180,42 @@ struct SerializedMaterialOverride {
     base: Option<String>,
     #[serde(default)]
     parameters: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SerializedCollisionComponent {
+    body: SerializedCollisionBody,
+    #[serde(default)]
+    colliders: Vec<SerializedCollisionCollider>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SerializedCollisionBody {
+    id: String,
+    kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SerializedCollisionCollider {
+    id: String,
+    shape: SerializedCollisionShape,
+    #[serde(default)]
+    trigger: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    asset: Option<String>,
+    #[serde(default)]
+    offset: [f32; 3],
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SerializedCollisionShape {
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    half_extents: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    radius: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    half_height: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1229,6 +1267,7 @@ impl SerializedScene {
                         .asset
                         .as_ref()
                         .map(SerializedAssetReference::from_scene_ref),
+                    collision: None,
                     material_overrides: node.material_overrides.clone(),
                     visibility: SerializedVisibility {
                         visible: true,
@@ -1547,6 +1586,10 @@ fn validate_scene_content(
             .with_optional_path(path),
         )
     })?;
+    collect_scene_collision_diagnostics(&serialized, path, options, &mut diagnostics);
+    if !diagnostics.is_empty() {
+        return Err(ValidationError::new(diagnostics));
+    }
     serialized
         .validate()
         .map_err(|err| ValidationError::single(scene_error_to_diagnostic(err, path)))?;
@@ -1588,7 +1631,7 @@ fn collect_scene_runtime_handle_diagnostics(
                 .with_optional_path(path),
             );
         }
-        for field in ["asset", "prefab"] {
+        for field in ["asset", "prefab", "collision"] {
             if let Some(value) = node_obj.get(field) {
                 collect_json_handle_shapes(value, path, node_id.as_deref(), diagnostics);
             }
@@ -1663,6 +1706,185 @@ fn collect_unknown_scene_assets(
     diagnostics
 }
 
+fn collect_scene_collision_diagnostics(
+    serialized: &SerializedScene,
+    path: Option<&Path>,
+    options: &SceneValidationOptions,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let mut collision_ids = HashSet::new();
+    for node in &serialized.nodes {
+        let Some(collision) = &node.collision else {
+            continue;
+        };
+        validate_scene_collision_id(
+            &collision.body.id,
+            "body.id",
+            &node.id,
+            path,
+            &mut collision_ids,
+            diagnostics,
+        );
+        match collision.body.kind.as_str() {
+            "static" | "dynamic" | "kinematic" => {}
+            _ => diagnostics.push(scene_collision_diagnostic(
+                "scene.collision_invalid_body_kind",
+                "collision body kind must be static, dynamic, or kinematic",
+                path,
+                &node.id,
+            )),
+        }
+        if collision.colliders.is_empty() {
+            diagnostics.push(scene_collision_diagnostic(
+                "scene.collision_missing_collider",
+                "collision component requires at least one collider",
+                path,
+                &node.id,
+            ));
+        }
+        for collider in &collision.colliders {
+            validate_scene_collision_id(
+                &collider.id,
+                "collider.id",
+                &node.id,
+                path,
+                &mut collision_ids,
+                diagnostics,
+            );
+            validate_scene_collision_shape(&collider.shape, path, &node.id, diagnostics);
+            if !collider.offset.iter().all(|value| value.is_finite()) {
+                diagnostics.push(scene_collision_diagnostic(
+                    "scene.collision_invalid_offset",
+                    "collision collider offset must contain finite numbers",
+                    path,
+                    &node.id,
+                ));
+            }
+            if let Some(asset_id) = &collider.asset {
+                if is_invalid_durable_collision_id(asset_id) {
+                    diagnostics.push(scene_collision_diagnostic(
+                        "scene.collision_invalid_id",
+                        format!("collision asset '{asset_id}' is not a durable id"),
+                        path,
+                        &node.id,
+                    ));
+                } else if options
+                    .known_asset_ids
+                    .as_ref()
+                    .is_some_and(|known| !known.contains(asset_id))
+                {
+                    diagnostics.push(
+                        scene_collision_diagnostic(
+                            "scene.unknown_collision_asset_id",
+                            format!("unknown collision asset id '{asset_id}'"),
+                            path,
+                            &node.id,
+                        )
+                        .with_durable_id(asset_id.clone()),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn validate_scene_collision_id(
+    id: &str,
+    field: &str,
+    node_id: &str,
+    path: Option<&Path>,
+    collision_ids: &mut HashSet<String>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if is_invalid_durable_collision_id(id) {
+        diagnostics.push(scene_collision_diagnostic(
+            "scene.collision_invalid_id",
+            format!("collision {field} '{id}' is not a durable id"),
+            path,
+            node_id,
+        ));
+        return;
+    }
+    if !collision_ids.insert(id.to_string()) {
+        diagnostics.push(scene_collision_diagnostic(
+            "scene.duplicate_collision_id",
+            format!("duplicate collision id '{id}'"),
+            path,
+            node_id,
+        ));
+    }
+}
+
+fn validate_scene_collision_shape(
+    shape: &SerializedCollisionShape,
+    path: Option<&Path>,
+    node_id: &str,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    match shape.kind.as_str() {
+        "box" | "cuboid" => {
+            if !shape
+                .half_extents
+                .is_some_and(|values| values.iter().all(|value| value.is_finite() && *value > 0.0))
+            {
+                diagnostics.push(scene_collision_diagnostic(
+                    "scene.collision_invalid_dimension",
+                    "box collision shape requires positive finite half_extents",
+                    path,
+                    node_id,
+                ));
+            }
+        }
+        "sphere" => {
+            validate_scene_positive_scalar(shape.radius, "radius", path, node_id, diagnostics)
+        }
+        "capsule" | "capsule_y" => {
+            validate_scene_positive_scalar(shape.radius, "radius", path, node_id, diagnostics);
+            validate_scene_positive_scalar(
+                shape.half_height,
+                "half_height",
+                path,
+                node_id,
+                diagnostics,
+            );
+        }
+        _ => diagnostics.push(scene_collision_diagnostic(
+            "scene.collision_invalid_shape",
+            "collision shape kind must be box, cuboid, sphere, capsule, or capsule_y",
+            path,
+            node_id,
+        )),
+    }
+}
+
+fn validate_scene_positive_scalar(
+    value: Option<f32>,
+    field: &str,
+    path: Option<&Path>,
+    node_id: &str,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if !value.is_some_and(|value| value.is_finite() && value > 0.0) {
+        diagnostics.push(scene_collision_diagnostic(
+            "scene.collision_invalid_dimension",
+            format!("collision {field} must be a positive finite number"),
+            path,
+            node_id,
+        ));
+    }
+}
+
+fn scene_collision_diagnostic(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    path: Option<&Path>,
+    node_id: &str,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::new(code, ValidationArea::Scene, message)
+        .with_optional_path(path)
+        .with_durable_id(node_id.to_string())
+}
+
 fn collect_json_handle_shapes(
     value: &serde_json::Value,
     path: Option<&Path>,
@@ -1701,6 +1923,14 @@ fn is_json_runtime_handle_shape(value: &serde_json::Value) -> bool {
     value
         .as_object()
         .is_some_and(|map| map.contains_key("slot") && map.contains_key("generation"))
+}
+
+fn is_invalid_durable_collision_id(id: &str) -> bool {
+    let trimmed = id.trim();
+    trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || (trimmed.contains("slot") && trimmed.contains("generation"))
 }
 
 fn scene_error_to_diagnostic(err: SceneError, path: Option<&Path>) -> ValidationDiagnostic {
@@ -2646,6 +2876,197 @@ mod tests {
             .iter()
             .any(|diagnostic| diagnostic.code == "scene.unknown_asset_id"
                 && diagnostic.durable_id.as_deref() == Some("core.model.missing")));
+    }
+
+    #[test]
+    fn scene_validation_accepts_collision_metadata_round_trip_schema() {
+        let json = r#"{
+            "format_version": 1,
+            "scene_id": "scene.collision",
+            "root_nodes": ["node.wall"],
+            "nodes": [
+                {
+                    "id": "node.wall",
+                    "parent": null,
+                    "name": "Wall",
+                    "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                    "asset": null,
+                    "collision": {
+                        "body": {"id": "body.wall", "kind": "static"},
+                        "colliders": [
+                            {
+                                "id": "collider.wall",
+                                "shape": {"kind": "box", "half_extents": [0.5, 1.25, 0.5]},
+                                "trigger": false,
+                                "asset": "core.collision.wall",
+                                "offset": [0.0, 0.0, 0.0]
+                            }
+                        ]
+                    }
+                }
+            ],
+            "lights": [],
+            "environment": null,
+            "editor": {}
+        }"#;
+
+        validate_scene_str_with_options(
+            json,
+            &SceneValidationOptions::default().with_known_asset_ids(["core.collision.wall"]),
+        )
+        .unwrap();
+
+        let parsed: SerializedScene = serde_json::from_str(json).unwrap();
+        let pretty = serde_json::to_string_pretty(&parsed).unwrap();
+        let round_tripped: SerializedScene = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(
+            round_tripped.nodes[0].collision.as_ref().unwrap().colliders[0].id,
+            "collider.wall"
+        );
+    }
+
+    #[test]
+    fn scene_validation_rejects_invalid_collision_metadata() {
+        let invalid_dimensions = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.bad_collision",
+                "root_nodes": ["node.bad"],
+                "nodes": [
+                    {
+                        "id": "node.bad",
+                        "parent": null,
+                        "name": "Bad",
+                        "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                        "asset": null,
+                        "collision": {
+                            "body": {"id": "body.bad", "kind": "static"},
+                            "colliders": [
+                                {"id": "collider.bad", "shape": {"kind": "sphere", "radius": 0.0}}
+                            ]
+                        }
+                    }
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(invalid_dimensions
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.collision_invalid_dimension"));
+
+        let duplicate_ids = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.duplicate_collision",
+                "root_nodes": ["node.a"],
+                "nodes": [
+                    {
+                        "id": "node.a",
+                        "parent": null,
+                        "name": "A",
+                        "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                        "asset": null,
+                        "collision": {
+                            "body": {"id": "body.a", "kind": "static"},
+                            "colliders": [
+                                {"id": "collider.same", "shape": {"kind": "sphere", "radius": 0.5}}
+                            ]
+                        }
+                    },
+                    {
+                        "id": "node.b",
+                        "parent": "node.a",
+                        "name": "B",
+                        "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                        "asset": null,
+                        "collision": {
+                            "body": {"id": "body.b", "kind": "static"},
+                            "colliders": [
+                                {"id": "collider.same", "shape": {"kind": "sphere", "radius": 0.5}}
+                            ]
+                        }
+                    }
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(duplicate_ids
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.duplicate_collision_id"));
+
+        let unknown_collision_asset = validate_scene_str_with_options(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.unknown_collision_asset",
+                "root_nodes": ["node.asset"],
+                "nodes": [
+                    {
+                        "id": "node.asset",
+                        "parent": null,
+                        "name": "Asset",
+                        "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                        "asset": null,
+                        "collision": {
+                            "body": {"id": "body.asset", "kind": "static"},
+                            "colliders": [
+                                {"id": "collider.asset", "shape": {"kind": "box", "half_extents": [0.5, 0.5, 0.5]}, "asset": "core.collision.missing"}
+                            ]
+                        }
+                    }
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+            &SceneValidationOptions::default().with_known_asset_ids(["core.model.known"]),
+        )
+        .unwrap_err();
+        assert!(unknown_collision_asset
+            .diagnostics()
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == "scene.unknown_collision_asset_id"
+                    && diagnostic.durable_id.as_deref() == Some("core.collision.missing")
+            ));
+
+        let runtime_collision_handle = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.runtime_collision_handle",
+                "root_nodes": ["node.handle"],
+                "nodes": [
+                    {
+                        "id": "node.handle",
+                        "parent": null,
+                        "name": "Handle",
+                        "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                        "asset": null,
+                        "collision": {
+                            "body": {"id": {"slot": 1, "generation": 0}, "kind": "static"},
+                            "colliders": [
+                                {"id": "collider.handle", "shape": {"kind": "sphere", "radius": 0.5}}
+                            ]
+                        }
+                    }
+                ],
+                "lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(runtime_collision_handle
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.runtime_handle_identity"));
     }
 
     fn assert_scene_load_error(json: &str, predicate: impl FnOnce(RendererError) -> bool) {
