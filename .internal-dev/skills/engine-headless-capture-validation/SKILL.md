@@ -28,19 +28,19 @@ Engine startup can take 20-30 seconds. Use a timeout so failed render validation
 Single capture:
 
 ```bash
-RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_frame=5
+RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_target draw --capture_frame=5
 ```
 
 N-frame capture:
 
 ```bash
-RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_frames=3 --capture_frame_start=5 --capture_frame_interval=5
+RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_target draw --capture_frames=3 --capture_frame_start=5 --capture_frame_interval=5
 ```
 
 Alternate environment:
 
 ```bash
-RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --env src/renderer/src/assets/sky_maps/indoor_4k.exr --capture_frames=3 --capture_frame_start=5 --capture_frame_interval=5
+RUST_LOG=info timeout --signal=INT 60s cargo run -p renderer --example api_test -- --headless --capture_target draw --env src/renderer/src/assets/sky_maps/indoor_4k.exr --capture_frames=3 --capture_frame_start=5 --capture_frame_interval=5
 ```
 
 Captures land by default under:
@@ -71,6 +71,7 @@ Captures land by default under:
 Evidence should include:
 
 - command run;
+- confirmation that the command used `--headless --capture_target draw`;
 - capture directory;
 - PNG path(s);
 - sidecar JSON path(s);

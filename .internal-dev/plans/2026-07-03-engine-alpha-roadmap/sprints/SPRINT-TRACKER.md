@@ -20,8 +20,8 @@ Status values:
 | 02 | closed | Asset package authoring and validation tools | Rust CLI validates/authors package/project/scene fixtures and sample project | Closed with docs, validation reports, final quality review, and changelog. Branch: `sprint/alpha-02-packaging-tools`. Sprint 01 remains blocked on changelog timing confirmation and was not closed by Sprint 02. |
 | 03 | closed | Editor packaged-asset placement hardening | Packaged assets place, select, save, reload, and visually prove | Closed with docs, validation reports, final quality review, changelog, pushed closeout/evidence commits, final report email, and accepted `--headless --capture_target draw` evidence under `.internal-dev/captures/sprint-03-editor-packaged-placement-headless-draw/`. Branch: `sprint/alpha-03-editor-packaged-placement`. Sprint 01 remains blocked and was not closed by Sprint 03. |
 | 04 | closed | Runtime project launcher and application dev loop | Sample project runs outside editor through documented app path | Closed with root launcher CLI/runtime loop, docs, true `--headless --capture_target draw` proof, debug timing smoke, validation reports, changelog, pushed phase/evidence commits, and final report email. Branch: `sprint/alpha-04-runtime-launcher`. |
-| 05 | planned | Event system and application lifecycle | Apps/tools can subscribe to lifecycle/input/scene/asset/physics/audio events | Advanced plan suite ready at `sprints/sprint-05-event-system-lifecycle/`. Execute on `sprint/alpha-05-event-system-lifecycle`. |
-| 06 | proposed | Physics and collision foundation | Scene/package authored collision and basic queries/events work | Dogfood collision migration decision required. |
+| 05 | closed | Event system and application lifecycle | Apps/tools can subscribe to lifecycle/input/scene/asset/physics/audio events | Closed with event crate, renderer/root runtime integration, app consumers, docs, true headless draw capture, final quality review, pushed evidence commits, and final closeout email. Branch: `sprint/alpha-05-event-system-lifecycle`. |
+| 06 | ironing-out | Physics and collision foundation | Scene/package authored collision and basic queries/events work | Advanced planning in progress on `sprint/alpha-06-physics-collision-foundation`. Dogfood collision migration should be scoped conservatively. |
 | 07 | proposed | Audio foundation | Packaged audio can be referenced and played in a sample/dogfood path | Do not oversell device-dependent support. |
 | 08 | proposed | Scripting and hot Rust development strategy | App template and scripting/hot reload boundaries are explicit and tested | Rust app crates first; scripts experimental unless proven. |
 | 09 | proposed | Facade API alpha contract | Supported beginner API is documented and examples compile | Keep simple path small. |
@@ -32,7 +32,7 @@ Status values:
 
 ## Active Sprint Pointer
 
-Current active sprint: 05 - Event system and application lifecycle. Next proposed sprint: 06 - Physics and collision foundation.
+Current active sprint: 06 - Physics and collision foundation. Next proposed sprint: 07 - Audio foundation.
 
 When starting a sprint:
 
