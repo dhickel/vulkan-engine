@@ -20,7 +20,12 @@ Facade lifecycle path:
 - Debug UI is now renderer-managed and can be controlled via:
   - `toggle_debug_ui()`, `set_debug_ui_visible(...)`, `is_debug_ui_visible()`
   - `register_debug_view(...)`, `unregister_debug_view(...)`, `set_debug_view_enabled(...)`
+- App-owned imgui chrome can be registered with `register_app_ui(...)` for native tools that
+  need always-visible panels instead of optional debug windows.
 - Default runtime toggle for debug UI visibility is backquote (`\``) in `update_input(...)`.
+- The native editor shell launches with `cargo run -p editor` and accepts
+  `--project <path>`, `--scene <path>`, and the standard
+  `--record_debug`, `--record_debug_interval`, `--record_debug_path` timing flags.
 - Current alpha limitation: headless mode is not implemented (`Renderer::new` returns unsupported when `config.headless = true`).
 
 ## 4. Code Walkthrough
@@ -68,6 +73,19 @@ let view_id = renderer.register_debug_view(
 renderer.set_debug_view_enabled(&view_id, true);
 ```
 
+Snippet Type: Real
+```rust
+// App UI registration API
+renderer.register_app_ui(
+    "editor.workspace",
+    Box::new(|ui, ctx| {
+        ui.window("Viewport").build(|| {
+            ui.text(format!("frame {}", ctx.frame_index));
+        });
+    }),
+)?;
+```
+
 Snippet Type: Pseudocode
 ```text
 App owns Window + Renderer + Scene.
@@ -83,6 +101,8 @@ Every loop tick:
 - Handle `FrameRenderOutcome` with a full `match`; do not assume every frame renders.
 - Use one frame style per loop (`render_scene` or explicit frame API), not both in the same tick.
 - Keep render and load orchestration separate in your app architecture.
+- Use `register_app_ui(...)` for always-present app chrome; use debug views for optional runtime
+  diagnostics.
 
 ## 6. Gotchas & Failure Modes
 - Calling `render_scene(...)` while an explicit frame is open returns `RendererError::InvalidState`.
@@ -90,6 +110,8 @@ Every loop tick:
 - Calling `render_scene_in_frame(...)` twice for one `FrameContext` is invalid.
 - Resize flow can produce repeated `SkippedResizePending` outcomes until resize is serviced.
 - Expecting runtime output from root `cargo run` is a common migration trap.
+- Registering app UI marks imgui/app chrome as active for input capture, cursor release, and
+  built-in FPS-controller suppression.
 
 ## 7. Debugging Playbook
 - Step 1: reproduce with `cargo run -p renderer --example api_test`.

@@ -32,7 +32,7 @@ pub fn load_startup_scene(
                 &loaded_scene.material_ids,
                 MaterialShadingModel::Unlit,
             )
-            .map_err(|e| AssimpImportError::Internal(e))?;
+            .map_err(AssimpImportError::Internal)?;
     }
 
     Ok(loaded_scene)

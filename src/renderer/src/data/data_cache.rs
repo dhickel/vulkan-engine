@@ -56,47 +56,33 @@
 //! - Lazy loading: Only upload textures for visible objects
 //! - Batch transfers: Multiple textures uploaded in single frame
 
-use crate::data::data_util::PackUnorm;
 use crate::data::environment_import::{self, EnvironmentSource, PendingSkyboxSource};
 use crate::data::gpu_data::{
     AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialShadingModel,
-    MaterialValues, MeshMeta, MetRoughUniform, MetRoughUniformExt, NormalMap, OcclusionMap,
-    Sampler, SurfaceMeta, TextureIds, TextureMeta, TextureSamplers, Vertex, VkCubeMap,
-    VkMeshBuffers,
+    MeshMeta, NormalMap, OcclusionMap, TextureIds, TextureMeta, VkCubeMap, VkMeshBuffers,
 };
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
-use crate::data::{assimp_util, data_util, gpu_data};
+use crate::data::{data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
-    PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
+    PoolSizeRatio, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
 use crate::vulkan::vk_types::{
-    VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkCommandPool, VkDestroyable,
-    VkDeviceQueues, VkFenceQueue, VkHostBuffer, VkImageAlloc, VkImmediate, VkPipeline, VkQueueType,
-    VkSubAlloc, VkSubmitParam,
+    VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkDeviceQueues,
+    VkHostBuffer, VkImageAlloc, VkPipeline, VkSubAlloc, VkSubmitParam,
 };
 
-use crate::vulkan::{vk_debug, vk_util};
-use ash::prelude::VkResult;
-use ash::vk::{Format, PFN_vkFreeDescriptorSets};
+use crate::vulkan::vk_util;
 use ash::{vk, Device};
-use glam::{vec3, vec4, Vec3, Vec4};
-use gltf::json::Path;
-use image::{
-    EncodableLayout, GenericImageView, ImageBuffer, ImageResult, Rgb32FImage, Rgba, Rgba32FImage,
-};
+use glam::{vec4, Vec3, Vec4};
+use image::{ImageBuffer, Rgba};
 use log::{debug, error, info};
-use once_cell::unsync::Lazy;
 use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hasher};
-use std::marker::PhantomData;
 use std::path;
-use std::rc::Rc;
-use std::sync::mpsc::{Receiver, SendError};
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use vk_mem::Allocator;
 
 ///////////////////
@@ -182,7 +168,7 @@ impl DescriptorManager {
     pub fn alloc_image_desc(&mut self, device: &ash::Device) -> vk::DescriptorSet {
         self.image_desc_allocator
             .allocate(device, &[self.image_desc_layout])
-            .unwrap()
+            .expect("descriptor pool exhausted during image descriptor allocation")
     }
 }
 
@@ -296,7 +282,7 @@ impl TextureCache {
         allocator: Arc<Mutex<Allocator>>,
         sampler_cache: VkSamplerCache,
         supported_formats: HashSet<vk::Format>,
-        meta_desc_layout: vk::DescriptorSetLayout,
+        _meta_desc_layout: vk::DescriptorSetLayout,
         image_desc_layout: vk::DescriptorSetLayout,
         host_buffer: Arc<Mutex<VkHostBuffer>>,
         meta_buffer_size: u64,
@@ -417,12 +403,14 @@ impl TextureCache {
         let meta_desc_ratios = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 1.0)];
 
         let image_desc_allocator =
-            VkDynamicDescriptorAllocator::new(&device, 5_000, &image_desc_ratios).unwrap();
-        let meta_desc_allocator =
-            VkDynamicDescriptorAllocator::new(&device, 1_000, &meta_desc_ratios).unwrap();
+            VkDynamicDescriptorAllocator::new(device, 5_000, &image_desc_ratios)
+                .expect("failed to create image descriptor allocator");
+        let _meta_desc_allocator =
+            VkDynamicDescriptorAllocator::new(device, 1_000, &meta_desc_ratios)
+                .expect("failed to create meta descriptor allocator");
 
         let material_meta_storage = VkSubAllocator::new_storage_buffer(
-            &device,
+            device,
             allocator.clone(),
             host_buffer.clone(),
             meta_buffer_size,
@@ -1487,8 +1475,6 @@ impl MeshCache {
         vertex_storage: VkSubAllocator,
         index_storage: VkSubAllocator,
     ) -> Self {
-        use glam::{Vec3, Vec4};
-
         let mut cached_meshes = Vec::<CachedMesh>::with_capacity(100);
 
         let (vertices, indices) = data_util::get_skybox_mesh();
@@ -1647,7 +1633,7 @@ impl MeshCache {
 
         let vertex_allocs = match self
             .vertex_storage
-            .allocate_bytes(&mut vertex_data, buffer_placement)
+            .allocate_bytes(&vertex_data, buffer_placement)
         {
             VkAllocResult::Success(allocs) => allocs,
             VkAllocResult::Failure {
@@ -1664,7 +1650,7 @@ impl MeshCache {
 
         let index_allocs = match self
             .index_storage
-            .allocate_bytes(&mut index_data, buffer_placement)
+            .allocate_bytes(&index_data, buffer_placement)
         {
             VkAllocResult::Success(allocs) => allocs,
             VkAllocResult::Failure {
@@ -1687,9 +1673,9 @@ impl MeshCache {
 
         meshes
             .iter()
-            .map(|(id, meta)| *id)
-            .zip(vertex_allocs.into_iter())
-            .zip(index_allocs.into_iter())
+            .map(|(id, _meta)| *id)
+            .zip(vertex_allocs)
+            .zip(index_allocs)
             .for_each(|((id, vert_alloc), index_alloc)| {
                 if let CachedMesh::Unloaded(meta) =
                     unsafe { self.cached_meshes.get_unchecked(id.slot as usize) }
@@ -1701,8 +1687,8 @@ impl MeshCache {
                         cache_id: id,
                         index_count: meta.indices.len() as u32,
                         vertex_count: meta.vertices.len() as u32,
-                        index_buffer: index_alloc.clone(),
-                        vertex_buffer: vert_alloc.clone(),
+                        index_buffer: index_alloc,
+                        vertex_buffer: vert_alloc,
                         joint_desc: self.default_joint_desc,
                         material_id,
                         has_uv1: meta.has_uv1,
@@ -1849,7 +1835,7 @@ impl MeshCache {
         mesh_ids.iter().for_each(|&id| self.deallocate_id(id))
     }
 
-    pub fn deallocate_all(&mut self, allocator: &vk_mem::Allocator) {
+    pub fn deallocate_all(&mut self, _allocator: &vk_mem::Allocator) {
         (Self::DEFAULT_MESH_ITER_START..self.cached_meshes.len())
             .for_each(|i| self.deallocate_id(self.mesh_handle_for_slot(i as u32)))
     }
@@ -1977,11 +1963,11 @@ impl VkShaderCache {
         let mut compiled_shaders = shader_paths
             .iter()
             .map(|(typ, path)| {
-                vk_util::load_shader_module(&device, path).map(|shader| (*typ, shader))
+                vk_util::load_shader_module(device, path).map(|shader| (*typ, shader))
             })
             .collect::<Result<Vec<(CoreShaderType, vk::ShaderModule)>, String>>()?;
 
-        compiled_shaders.sort_by_key(|(typ, path)| *typ);
+        compiled_shaders.sort_by_key(|(typ, _path)| *typ);
 
         let sorted_shaders: [vk::ShaderModule; CoreShaderType::COUNT] = compiled_shaders
             .into_iter()
@@ -1999,12 +1985,10 @@ impl VkShaderCache {
     pub fn get_core_shader(&self, typ: CoreShaderType) -> vk::ShaderModule {
         self.core_shader_cache[typ as usize]
     }
-
-    pub fn destory_all(&mut self, device: &ash::Device) {}
 }
 
 impl VkDestroyable for VkShaderCache {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         self.core_shader_cache
             .iter()
             .for_each(|shader| unsafe { device.destroy_shader_module(*shader, None) });
@@ -2140,7 +2124,7 @@ impl VkDescLayoutCache {
 }
 
 impl VkDestroyable for VkDescLayoutCache {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         self.layouts.iter().for_each(|layout| unsafe {
             device.destroy_descriptor_set_layout(*layout, None);
         })

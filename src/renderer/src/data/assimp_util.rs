@@ -6,46 +6,36 @@
 use crate::api::AssetPolicyConfig;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
 use crate::data::compression;
-use crate::data::data_cache::{MeshCache, TextureCache, VkDataCache};
+use crate::data::data_cache::{TextureCache, VkDataCache};
 use crate::data::data_util::resolve_texture_mip_count;
-use crate::data::gpu_data;
 use crate::data::gpu_data::{
-    AlphaMode, EmissiveMap, MaterialMeta, MaterialShadingModel, MeshMeta, NormalMap, OcclusionMap,
-    Sampler, SurfaceMeta, TextureMeta, TexturePayload, TextureSemantic, Vertex,
+    AlphaMode, MaterialMeta, MaterialShadingModel, MeshMeta, TextureMeta, TexturePayload,
+    TextureSemantic, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
 use ash::vk;
-use glam::{Mat4, Quat, Vec3, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
 use log::debug;
 use russimp_sys::{
     aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray,
-    aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount, aiImportFile,
-    aiImportFileExWithProperties, aiMaterial, aiNode, aiPostProcessSteps,
+    aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount,
+    aiImportFileExWithProperties, aiMaterial, aiNode,
     aiPostProcessSteps_aiProcess_CalcTangentSpace, aiPostProcessSteps_aiProcess_FixInfacingNormals,
     aiPostProcessSteps_aiProcess_FlipUVs, aiPostProcessSteps_aiProcess_GenSmoothNormals,
     aiPostProcessSteps_aiProcess_JoinIdenticalVertices,
-    aiPostProcessSteps_aiProcess_LimitBoneWeights,
     aiPostProcessSteps_aiProcess_PreTransformVertices, aiPostProcessSteps_aiProcess_Triangulate,
-    aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger,
-    aiShadingMode_aiShadingMode_PBR_BRDF, aiString, aiTexture, aiTextureType,
-    aiTextureType_aiTextureType_AMBIENT, aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
-    aiTextureType_aiTextureType_BASE_COLOR, aiTextureType_aiTextureType_DIFFUSE,
-    aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_aiTextureType_EMISSIVE,
-    aiTextureType_aiTextureType_HEIGHT, aiTextureType_aiTextureType_LIGHTMAP,
+    aiReturn_aiReturn_SUCCESS, aiScene, aiSetImportPropertyInteger, aiString, aiTextureType,
+    aiTextureType_aiTextureType_AMBIENT_OCCLUSION, aiTextureType_aiTextureType_BASE_COLOR,
+    aiTextureType_aiTextureType_DIFFUSE, aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS,
+    aiTextureType_aiTextureType_EMISSIVE, aiTextureType_aiTextureType_LIGHTMAP,
     aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS,
-    aiTextureType_aiTextureType_NORMAL_CAMERA, aiTextureType_aiTextureType_SPECULAR,
-    aiTextureType_aiTextureType_UNKNOWN, ai_real, AI_DEFAULT_MATERIAL_NAME,
+    aiTextureType_aiTextureType_NORMAL_CAMERA, aiTextureType_aiTextureType_UNKNOWN,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::default::Default;
 use std::ffi::{c_char, c_uint, CStr, CString};
-use std::fs::File;
-use std::hash::{DefaultHasher, Hasher};
-use std::io::Read;
-use std::os::raw;
-use std::os::raw::c_int;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -143,7 +133,7 @@ pub fn load_model(
     //  | aiPostProcessSteps_aiProcess_LimitBoneWeights;
 
     if has_animation {
-        flags = flags | aiPostProcessSteps_aiProcess_PreTransformVertices;
+        flags |= aiPostProcessSteps_aiProcess_PreTransformVertices;
     };
 
     let props = unsafe { aiCreatePropertyStore() };
@@ -208,7 +198,7 @@ pub fn load_model(
         mapped_meshes.insert(og_idx as u32, *id);
     }
 
-    let root_ai_node = (*ai_scene).mRootNode;
+    let root_ai_node = ai_scene.mRootNode;
 
     if root_ai_node.is_null() {
         Err(AssimpImportError::Internal(
@@ -971,7 +961,7 @@ pub fn process_meshes(
             let material_index = if ai_mesh.mMaterialIndex != u32::MAX {
                 Some(
                     *mapped_materials
-                        .get(&(ai_mesh.mMaterialIndex as u32))
+                        .get(&{ ai_mesh.mMaterialIndex })
                         .unwrap_or(&TextureCache::DEFAULT_ERROR_MAT),
                 )
             } else {
@@ -1047,7 +1037,7 @@ pub fn process_meshes(
                 let count = face.mNumIndices as usize;
 
                 for j in 0..count {
-                    indices.push(*face.mIndices.add(j) as u32);
+                    indices.push(*face.mIndices.add(j));
                 }
             }
 
@@ -1110,7 +1100,7 @@ fn process_node(
         let mesh_count = (*ai_node).mNumMeshes as usize;
         let mut meshes = Vec::with_capacity(mesh_count);
         for i in 0..mesh_count {
-            let mesh_index = *(*ai_node).mMeshes.add(i) as u32;
+            let mesh_index = *(*ai_node).mMeshes.add(i);
             let handle = mapped_meshes.get(&mesh_index).copied().ok_or_else(|| {
                 AssimpImportError::MissingMeshMapping {
                     node_name: node_name.clone(),

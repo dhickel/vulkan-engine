@@ -346,10 +346,7 @@ fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppErr
             level,
             source_description: format!(
                 "procedural generator (seed={}, {}x{}x{})",
-                seed,
-                procedural_config.width,
-                procedural_config.height,
-                procedural_config.layers
+                seed, procedural_config.width, procedural_config.height, procedural_config.layers
             ),
             map_overview: Some(map_overview),
             seed: Some(seed),
@@ -469,10 +466,7 @@ fn print_level_load_help() {
     );
     eprintln!(
         "Procedural generator env: {} {} {} {}",
-        GENERATOR_SEED_ENV,
-        GENERATOR_WIDTH_ENV,
-        GENERATOR_HEIGHT_ENV,
-        GENERATOR_LAYERS_ENV
+        GENERATOR_SEED_ENV, GENERATOR_WIDTH_ENV, GENERATOR_HEIGHT_ENV, GENERATOR_LAYERS_ENV
     );
     eprintln!();
     eprintln!("Expected ASCII level file with tokens:");
@@ -500,19 +494,27 @@ fn env_flag(var_name: &str) -> bool {
 
 fn env_usize(var_name: &str) -> Option<usize> {
     std::env::var(var_name).ok().and_then(|value| {
-        value.trim().parse::<usize>().map_err(|err| {
-            log::warn!("Ignoring invalid {}='{}': {}", var_name, value, err);
-            err
-        }).ok()
+        value
+            .trim()
+            .parse::<usize>()
+            .map_err(|err| {
+                log::warn!("Ignoring invalid {}='{}': {}", var_name, value, err);
+                err
+            })
+            .ok()
     })
 }
 
 fn env_u64(var_name: &str) -> Option<u64> {
     std::env::var(var_name).ok().and_then(|value| {
-        value.trim().parse::<u64>().map_err(|err| {
-            log::warn!("Ignoring invalid {}='{}': {}", var_name, value, err);
-            err
-        }).ok()
+        value
+            .trim()
+            .parse::<u64>()
+            .map_err(|err| {
+                log::warn!("Ignoring invalid {}='{}': {}", var_name, value, err);
+                err
+            })
+            .ok()
     })
 }
 

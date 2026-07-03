@@ -8,11 +8,11 @@ use renderer::{
 };
 use thiserror::Error;
 
+use crate::collision::WALL_HEIGHT;
 use crate::content::{
     light_preset_for_marker_index, prop_for_marker_index, resolve_content_path, ContentPack,
     EnvironmentMode, EnvironmentSpec, MaterialFamily, MaterialSpec,
 };
-use crate::collision::WALL_HEIGHT;
 use crate::geometry::build_level_chunks;
 use crate::layout::{tile_to_world, ParsedLevel, TileCoord};
 
@@ -202,8 +202,8 @@ impl LevelScene {
                 };
 
                 let y_offset = layer as f32 * WALL_HEIGHT;
-                let world_pos = tile_to_world(x, y)
-                    + glam::Vec3::new(0.5, y_offset + placement.y_offset, -0.5);
+                let world_pos =
+                    tile_to_world(x, y) + glam::Vec3::new(0.5, y_offset + placement.y_offset, -0.5);
                 let transform = Mat4::from_scale_rotation_translation(
                     placement.scale,
                     glam::Quat::from_rotation_y(placement.yaw_degrees.to_radians()),
@@ -211,14 +211,14 @@ impl LevelScene {
                 );
 
                 if let Err(err) = scene.set_transform(mount.mounted_root, transform) {
-                        log::warn!(
-                            "Skipping prop '{}' at marker {} ({}, {}, {}): transform failed: {}",
-                            prop.id,
-                            marker_idx,
-                            layer,
-                            x,
-                            y,
-                            err
+                    log::warn!(
+                        "Skipping prop '{}' at marker {} ({}, {}, {}): transform failed: {}",
+                        prop.id,
+                        marker_idx,
+                        layer,
+                        x,
+                        y,
+                        err
                     );
                     continue;
                 }

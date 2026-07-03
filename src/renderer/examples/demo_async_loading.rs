@@ -12,7 +12,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 
-const DEMO_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHelmet.glb";
+const DEFAULT_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHelmet.glb";
 
 fn main() {
     init_logging();
@@ -33,8 +33,10 @@ fn main() {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut config = RendererConfig::default();
-    config.app_name = "renderer facade demo (async loading)".to_string();
+    let config = RendererConfig {
+        app_name: "renderer facade demo (async loading)".to_string(),
+        ..RendererConfig::default()
+    };
 
     let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()
@@ -79,9 +81,13 @@ fn main() {
     let _ = renderer.take_startup_scene();
     let mut scene = Scene::new();
 
+    let model_path = launch_options
+        .model_path
+        .as_deref()
+        .unwrap_or(std::path::Path::new(DEFAULT_MODEL_PATH));
     let load_ticket = {
         let mut assets = renderer.assets();
-        match assets.request_model_load(DEMO_MODEL_PATH) {
+        match assets.request_model_load(model_path) {
             Ok(ticket) => ticket,
             Err(err) => {
                 error!("Failed to queue model load: {err}");

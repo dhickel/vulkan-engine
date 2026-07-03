@@ -10,7 +10,8 @@
 //! This allows deletion without invalidating all outstanding references to the old slot.
 //! Stale handles fail validation and are ignored during traversal.
 
-use crate::api::scene::{PointLight, PointLightId};
+use crate::api::scene::{PointLight, PointLightId, SceneAssetReference};
+use crate::data::camera::{Aabb, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
@@ -18,8 +19,10 @@ use crate::scene::render_submission::{
     FrameDrawItem, FramePointLight, RenderSubmission, MAX_POINT_LIGHTS_GPU,
 };
 use glam::{Mat4, Vec3};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SceneNodeId {
     pub slot: u32,
     pub generation: u32,
@@ -31,24 +34,41 @@ impl SceneNodeId {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SceneNode {
+    #[serde(skip)]
+    pub stable_id: Option<String>,
+    #[serde(skip)]
+    pub name: String,
     pub parent: Option<SceneNodeId>,
     pub children: Vec<SceneNodeId>,
+    #[serde(skip)]
     pub meshes: Vec<MeshHandle>,
+    #[serde(skip)]
+    pub asset: Option<SceneAssetReference>,
+    #[serde(skip)]
+    pub material_overrides: BTreeMap<String, String>,
     pub local_transform: Mat4,
+    #[serde(skip)]
     pub world_transform: Mat4,
+    #[serde(skip)]
     pub dirty: bool,
+    #[serde(skip)]
     pub layer_mask: u64,
+    #[serde(skip)]
     pub tags: Vec<String>,
 }
 
 impl Default for SceneNode {
     fn default() -> Self {
         Self {
+            stable_id: None,
+            name: String::new(),
             parent: None,
             children: Vec::new(),
             meshes: Vec::new(),
+            asset: None,
+            material_overrides: BTreeMap::new(),
             local_transform: Mat4::IDENTITY,
             world_transform: Mat4::IDENTITY,
             dirty: true,
@@ -62,6 +82,12 @@ impl Default for SceneNode {
 struct SceneNodeEntry {
     generation: u32,
     node: Option<SceneNode>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RestorableSceneSubtree {
+    node: SceneNode,
+    children: Vec<RestorableSceneSubtree>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -92,6 +118,9 @@ pub struct SceneWorld {
     skybox_env_id: EnvironmentHandle,
     point_lights: Vec<PointLightEntry>,
     free_point_light_slots: Vec<u32>,
+    /// When true, nodes outside the camera frustum are skipped during
+    /// `build_submission`. Off by default for compatibility.
+    pub enable_frustum_culling: bool,
 }
 
 impl Default for SceneWorld {
@@ -101,7 +130,7 @@ impl Default for SceneWorld {
 }
 
 impl SceneWorld {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             nodes: Vec::with_capacity(256),
             free_slots: Vec::new(),
@@ -110,6 +139,7 @@ impl SceneWorld {
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(16),
             free_point_light_slots: Vec::new(),
+            enable_frustum_culling: false,
         }
     }
 
@@ -125,6 +155,34 @@ impl SceneWorld {
 
     pub(crate) fn set_skybox_env_id(&mut self, env_id: EnvironmentHandle) {
         self.skybox_env_id = env_id;
+    }
+
+    /// Returns an iterator over active nodes suitable for serialization.
+    pub(crate) fn serializable_nodes(&self) -> impl Iterator<Item = (SceneNodeId, &SceneNode)> {
+        self.nodes.iter().enumerate().filter_map(|(slot, entry)| {
+            entry
+                .node
+                .as_ref()
+                .map(|node| (SceneNodeId::new(slot as u32, entry.generation), node))
+        })
+    }
+
+    /// Returns all active point lights with their IDs.
+    pub(crate) fn serializable_lights(&self) -> impl Iterator<Item = (PointLightId, &PointLight)> {
+        self.point_lights
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| {
+                entry.light.as_ref().map(|light| {
+                    (
+                        PointLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        },
+                        light,
+                    )
+                })
+            })
     }
 
     pub(crate) fn validate_node_ref(&self, id: SceneNodeId) -> Result<(), SceneNodeRefError> {
@@ -144,7 +202,7 @@ impl SceneWorld {
         self.validate_node_ref(id).is_ok()
     }
 
-    pub(crate) fn get_node(&self, id: SceneNodeId) -> Option<&SceneNode> {
+    pub fn get_node(&self, id: SceneNodeId) -> Option<&SceneNode> {
         let entry = self.nodes.get(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -152,7 +210,7 @@ impl SceneWorld {
         entry.node.as_ref()
     }
 
-    pub(crate) fn get_node_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
+    pub fn get_node_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
         let entry = self.nodes.get_mut(id.slot as usize)?;
         if entry.generation != id.generation {
             return None;
@@ -180,7 +238,7 @@ impl SceneWorld {
         id
     }
 
-    pub(crate) fn add_node_with_parts(
+    pub fn add_node_with_parts(
         &mut self,
         parent: Option<SceneNodeId>,
         local_transform: Mat4,
@@ -195,18 +253,115 @@ impl SceneWorld {
             dirty: true,
             layer_mask: u64::MAX,
             tags: Vec::new(),
+            ..SceneNode::default()
         };
         self.add_node(parent, node)
     }
 
-    pub(crate) fn remove_node(&mut self, node_id: SceneNodeId) -> bool {
+    pub fn remove_node(&mut self, node_id: SceneNodeId) -> bool {
         self.remove_node_recursive(node_id)
+    }
+
+    pub(crate) fn clone_subtree(&self, node_id: SceneNodeId) -> Option<RestorableSceneSubtree> {
+        let node = self.get_node(node_id)?.clone();
+        let children = node
+            .children
+            .iter()
+            .copied()
+            .filter_map(|child| self.clone_subtree(child))
+            .collect();
+        Some(RestorableSceneSubtree { node, children })
+    }
+
+    pub(crate) fn restore_subtree(&mut self, snapshot: RestorableSceneSubtree) -> SceneNodeId {
+        let parent = snapshot
+            .node
+            .parent
+            .filter(|parent_id| self.is_valid_node_id(*parent_id));
+        self.restore_subtree_with_parent(snapshot, parent)
+    }
+
+    pub(crate) fn reparent_node(
+        &mut self,
+        node_id: SceneNodeId,
+        new_parent: Option<SceneNodeId>,
+    ) -> Result<(), ReparentError> {
+        self.validate_node_ref(node_id)
+            .map_err(ReparentError::InvalidNode)?;
+        if let Some(parent_id) = new_parent {
+            self.validate_node_ref(parent_id)
+                .map_err(ReparentError::InvalidParent)?;
+            if parent_id == node_id || self.is_descendant(parent_id, node_id) {
+                return Err(ReparentError::Cycle);
+            }
+        }
+
+        let old_parent = self
+            .get_node(node_id)
+            .ok_or(ReparentError::InvalidNode(SceneNodeRefError::Vacant))?
+            .parent;
+        if old_parent == new_parent {
+            return Ok(());
+        }
+
+        if let Some(parent_id) = old_parent {
+            if let Some(parent_node) = self.get_node_mut(parent_id) {
+                parent_node.children.retain(|child| *child != node_id);
+            }
+        }
+
+        if let Some(parent_id) = new_parent {
+            if let Some(parent_node) = self.get_node_mut(parent_id) {
+                if !parent_node.children.contains(&node_id) {
+                    parent_node.children.push(node_id);
+                }
+            }
+        }
+
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.parent = new_parent;
+            node.dirty = true;
+        }
+
+        if self.root == Some(node_id) && new_parent.is_some() {
+            self.root = self.find_first_parentless_node();
+        } else if self.root.is_none() && new_parent.is_none() {
+            self.root = Some(node_id);
+        }
+
+        Ok(())
     }
 
     pub(crate) fn update_camera(&mut self, view: Mat4, projection: Mat4, cam_pos: Vec3) {
         self.camera.view = view;
         self.camera.projection = projection;
         self.camera.cam_pos = cam_pos;
+    }
+
+    pub(crate) fn camera_data(&self) -> SceneDataUBO {
+        self.camera
+    }
+
+    /// Ray-pick the scene: iterate all active nodes, compute AABB from
+    /// local transform bounds, and return the closest intersection.
+    pub(crate) fn pick_ray(&self, ray: &Ray) -> Option<SceneNodeId> {
+        let mut closest: Option<(f32, SceneNodeId)> = None;
+
+        for (slot, entry) in self.nodes.iter().enumerate() {
+            let Some(ref node) = entry.node else {
+                continue;
+            };
+
+            let aabb = node_pick_bounds(node);
+
+            if let Some(t) = aabb.intersect_ray(ray) {
+                if closest.map_or(true, |(best_t, _)| t < best_t) {
+                    closest = Some((t, SceneNodeId::new(slot as u32, entry.generation)));
+                }
+            }
+        }
+
+        closest.map(|(_, id)| id)
     }
 
     pub(crate) fn build_submission(&mut self) -> RenderSubmission {
@@ -240,7 +395,17 @@ impl SceneWorld {
         // Parent world transform must be resolved before recursing into children.
         // Children multiply against this exact value, so order is critical.
         self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
-        self.collect_draw_items_recursive(root_id, &mut submission);
+
+        // Frustum culling (off by default — set enable_frustum_culling to true to activate)
+        let frustum = if self.enable_frustum_culling {
+            Some(Frustum::from_view_projection(
+                &(self.camera.projection * self.camera.view),
+            ))
+        } else {
+            None
+        };
+
+        self.collect_draw_items_recursive_culled(root_id, &mut submission, &frustum);
 
         submission
     }
@@ -259,6 +424,24 @@ impl SceneWorld {
             node: Some(node),
         });
         SceneNodeId::new(slot, 0)
+    }
+
+    fn restore_subtree_with_parent(
+        &mut self,
+        snapshot: RestorableSceneSubtree,
+        parent: Option<SceneNodeId>,
+    ) -> SceneNodeId {
+        let RestorableSceneSubtree { mut node, children } = snapshot;
+        node.parent = parent;
+        node.children.clear();
+        node.dirty = true;
+        let restored = self.add_node(parent, node);
+
+        for child in children {
+            self.restore_subtree_with_parent(child, Some(restored));
+        }
+
+        restored
     }
 
     fn remove_node_recursive(&mut self, node_id: SceneNodeId) -> bool {
@@ -297,6 +480,25 @@ impl SceneWorld {
         true
     }
 
+    fn is_descendant(&self, possible_descendant: SceneNodeId, ancestor: SceneNodeId) -> bool {
+        let Some(ancestor_node) = self.get_node(ancestor) else {
+            return false;
+        };
+
+        for child in ancestor_node.children.iter().copied() {
+            if child == possible_descendant || self.is_descendant(possible_descendant, child) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn find_first_parentless_node(&self) -> Option<SceneNodeId> {
+        self.serializable_nodes()
+            .find_map(|(id, node)| node.parent.is_none().then_some(id))
+    }
+
     fn refresh_world_recursive(
         &mut self,
         node_id: SceneNodeId,
@@ -324,14 +526,23 @@ impl SceneWorld {
         }
     }
 
-    fn collect_draw_items_recursive(
+    fn collect_draw_items_recursive_culled(
         &self,
         node_id: SceneNodeId,
         submission: &mut RenderSubmission,
+        frustum: &Option<Frustum>,
     ) {
         let Some(node) = self.get_node(node_id) else {
             return;
         };
+
+        // Cull: skip node if its AABB is outside the frustum
+        if let Some(ref frustum) = frustum {
+            let aabb = node_pick_bounds(node);
+            if !frustum.intersects_aabb(&aabb) {
+                return; // culled — skip node and children
+            }
+        }
 
         for mesh_id in node.meshes.iter().copied() {
             submission.push_draw_item(FrameDrawItem {
@@ -342,7 +553,7 @@ impl SceneWorld {
 
         for child in node.children.iter().copied() {
             if self.is_valid_node_id(child) {
-                self.collect_draw_items_recursive(child, submission);
+                self.collect_draw_items_recursive_culled(child, submission, frustum);
             }
         }
     }
@@ -422,9 +633,53 @@ impl SceneWorld {
     }
 }
 
+fn node_pick_bounds(node: &SceneNode) -> Aabb {
+    // Current renderer draw submissions do not expose mesh CPU bounds here.
+    // Use a transform-aware editor proxy: mesh-backed nodes get one unit of
+    // volume per axis, while empty grouping nodes receive a smaller but still
+    // selectable proxy around their origin.
+    let half_extent = if node.meshes.is_empty() { 0.25 } else { 0.5 };
+    transformed_aabb(
+        Mat4::from_scale(Vec3::splat(half_extent * 2.0)),
+        node.world_transform,
+    )
+}
+
+fn transformed_aabb(local_bounds: Mat4, world_transform: Mat4) -> Aabb {
+    let local_min = local_bounds.transform_point3(Vec3::splat(-0.5));
+    let local_max = local_bounds.transform_point3(Vec3::splat(0.5));
+    let corners = [
+        Vec3::new(local_min.x, local_min.y, local_min.z),
+        Vec3::new(local_min.x, local_min.y, local_max.z),
+        Vec3::new(local_min.x, local_max.y, local_min.z),
+        Vec3::new(local_min.x, local_max.y, local_max.z),
+        Vec3::new(local_max.x, local_min.y, local_min.z),
+        Vec3::new(local_max.x, local_min.y, local_max.z),
+        Vec3::new(local_max.x, local_max.y, local_min.z),
+        Vec3::new(local_max.x, local_max.y, local_max.z),
+    ];
+
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for corner in corners {
+        let world = world_transform.transform_point3(corner);
+        min = min.min(world);
+        max = max.max(world);
+    }
+    Aabb::from_min_max(min, max)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReparentError {
+    InvalidNode(SceneNodeRefError),
+    InvalidParent(SceneNodeRefError),
+    Cycle,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{PointLightRefError, SceneNode, SceneNodeId, SceneWorld};
+    use crate::data::camera::Ray;
     use crate::data::handles::MeshHandle;
     use glam::{Mat4, Vec3};
 
@@ -581,6 +836,32 @@ mod tests {
             moved_submission.draw_items[0].transform,
             Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0))
         );
+    }
+
+    #[test]
+    fn pick_ray_uses_transformed_scaled_proxy_bounds() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            SceneNode {
+                local_transform: Mat4::from_scale_rotation_translation(
+                    Vec3::new(4.0, 1.0, 1.0),
+                    glam::Quat::IDENTITY,
+                    Vec3::new(3.0, 0.0, 0.0),
+                ),
+                meshes: vec![MeshHandle::new(1, 0)],
+                ..SceneNode::default()
+            },
+        );
+        scene.set_root(root);
+        scene.build_submission();
+
+        let ray = Ray {
+            origin: Vec3::new(3.0, 0.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+
+        assert_eq!(scene.pick_ray(&ray), Some(root));
     }
 
     #[test]

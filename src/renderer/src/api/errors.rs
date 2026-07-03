@@ -112,6 +112,11 @@ pub enum SceneError {
     MergeFailed(String),
     InvalidPointLight(String),
     StalePointLight(crate::api::scene::PointLightId),
+    UnsupportedSceneVersion { found: u32, expected: u32 },
+    MissingAssetId(String),
+    BadSerializedParent { node_id: String, parent_id: String },
+    DuplicateSerializedNodeId(String),
+    DisconnectedGraph(String),
 }
 
 impl Display for SceneError {
@@ -140,6 +145,21 @@ impl Display for SceneError {
                 "stale point light handle (slot={}, generation={})",
                 id.slot, id.generation
             ),
+            Self::UnsupportedSceneVersion { found, expected } => write!(
+                f,
+                "unsupported scene format version {found}; expected {expected}"
+            ),
+            Self::MissingAssetId(context) => {
+                write!(f, "missing durable asset id for {context}")
+            }
+            Self::BadSerializedParent { node_id, parent_id } => write!(
+                f,
+                "scene node '{node_id}' references missing parent '{parent_id}'"
+            ),
+            Self::DuplicateSerializedNodeId(id) => {
+                write!(f, "duplicate serialized scene node id '{id}'")
+            }
+            Self::DisconnectedGraph(msg) => write!(f, "disconnected scene graph: {msg}"),
         }
     }
 }

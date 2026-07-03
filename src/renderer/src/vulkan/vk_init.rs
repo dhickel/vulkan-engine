@@ -37,14 +37,13 @@
 
 use ash::vk;
 
-use ash::vk::{CommandBuffer, Extent2D};
+use ash::vk::Extent2D;
 use log::info;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
-use std::{ffi, iter, ptr};
 use vk_mem::Alloc;
 
 use crate::vulkan::vk_types::*;
@@ -67,11 +66,7 @@ pub fn init_entry() -> ash::Entry {
 }
 
 pub fn get_debug_layers() -> Vec<*const c_char> {
-    let layer_names: [&CStr; 1] = unsafe {
-        [CStr::from_bytes_with_nul_unchecked(
-            b"VK_LAYER_KHRONOS_validation\0",
-        )]
-    };
+    let layer_names: [&CStr; 1] = [c"VK_LAYER_KHRONOS_validation"];
 
     let layers_names_raw: Vec<*const c_char> = layer_names
         .iter()
@@ -82,9 +77,14 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
 }
 
 pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
-    ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
-        .unwrap()
-        .to_vec()
+    ash_window::enumerate_required_extensions(
+        window
+            .display_handle()
+            .expect("failed to get window display handle")
+            .as_raw(),
+    )
+    .expect("failed to enumerate required Vulkan extensions")
+    .to_vec()
 }
 
 // pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
@@ -144,7 +144,7 @@ pub fn init_instance(
     let create_info = vk::InstanceCreateInfo::default()
         .application_info(&app_info)
         .enabled_layer_names(&layer_name_ptrs)
-        .enabled_extension_names(&extensions)
+        .enabled_extension_names(extensions)
         .flags(create_flags);
 
     let instance = unsafe {
@@ -169,7 +169,7 @@ pub fn init_instance(
             )
             .pfn_user_callback(Some(vulkan_debug_callback));
 
-        let debug_utils_loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
+        let debug_utils_loader = ash::ext::debug_utils::Instance::new(entry, &instance);
         let debug_call_back: vk::DebugUtilsMessengerEXT = unsafe {
             debug_utils_loader
                 .create_debug_utils_messenger(&debug_info, None)
@@ -225,8 +225,8 @@ pub fn get_window_surface(
 
     let surface = unsafe {
         ash_window::create_surface(
-            &entry,
-            &instance,
+            entry,
+            instance,
             window.display_handle().unwrap().as_raw(),
             window.window_handle().unwrap().as_raw(),
             None,
@@ -234,7 +234,7 @@ pub fn get_window_surface(
         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
     };
 
-    let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
+    let surface_instance = ash::khr::surface::Instance::new(entry, instance);
 
     log::info!("Surface created");
     Ok(VkSurface {
@@ -285,7 +285,7 @@ pub fn get_physical_devices(
 
     let mut devices = Vec::<PhyDevice>::with_capacity(3);
 
-    for (i, device) in physical_devices.iter().enumerate() {
+    for (_i, device) in physical_devices.iter().enumerate() {
         let device_properties = unsafe { instance.get_physical_device_properties(*device) };
 
         let device_name = unsafe { CStr::from_ptr(device_properties.device_name.as_ptr()) }
@@ -311,7 +311,7 @@ pub fn get_physical_devices(
                 .map(|e| e.extension_name_as_c_str().unwrap())
                 .collect();
 
-            if let false = get_basic_device_ext_names()
+            if !get_basic_device_ext_names()
                 .iter()
                 .all(|ext| available_ext_cstr.contains(ext))
             {
@@ -332,7 +332,7 @@ pub fn get_physical_devices(
             log::info!("Device supports swapchain");
         }
 
-        if suitability_check(&instance, device, surface_info) {
+        if suitability_check(instance, device, surface_info) {
             let gpu_device = PhyDevice {
                 name: device_name.to_string(),
                 id: device_id,
@@ -355,7 +355,7 @@ pub fn get_physical_devices(
 pub fn simple_device_suitability(
     instance: &ash::Instance,
     physical_device: &vk::PhysicalDevice,
-    surface_info: Option<&VkSurface>,
+    _surface_info: Option<&VkSurface>,
 ) -> bool {
     let device_properties = unsafe { instance.get_physical_device_properties(*physical_device) };
     let device_features = unsafe { instance.get_physical_device_features(*physical_device) };
@@ -385,7 +385,7 @@ pub fn simple_device_suitability(
         return false;
     }
 
-    return true;
+    true
 }
 
 pub fn create_logical_device(
@@ -397,7 +397,7 @@ pub fn create_logical_device(
     required_extensions: Option<&[*const c_char]>,
 ) -> Result<(ash::Device, VkDeviceQueues), String> {
     log::info!("Creating Logical Device");
-    let queue_family_properties =
+    let _queue_family_properties =
         unsafe { instance.get_physical_device_queue_family_properties(*physical_device) };
 
     log::info!("Logical Device: Selecting queue indices");
@@ -531,7 +531,7 @@ pub fn queue_indices_with_preferences(
         }
     }
 
-    if graphics_present_index == None {
+    if graphics_present_index.is_none() {
         return Err("Failed to find shared graphics and present pool".to_string());
     }
 
@@ -768,7 +768,7 @@ pub fn create_swapchain(
     allow_defaults: bool,
 ) -> Result<VkSwapchain, String> {
     log::info!("Creating swapchain");
-    let swapchain_support = get_swapchain_support(&physical_device.p_device, &surface_info)?;
+    let swapchain_support = get_swapchain_support(&physical_device.p_device, surface_info)?;
 
     log::info!("Swapchain: Setting surface format");
     let surface_format = if let Some(sf) = surface_format {
@@ -1227,7 +1227,7 @@ pub fn create_frame_sync(device: &ash::Device) -> Result<VkFrameSync, String> {
     let semaphore_create_info = vk::SemaphoreCreateInfo::default();
 
     let (swap_semaphore, render_semaphore, render_fence) = unsafe {
-        let s_create_info = vk::SemaphoreCreateInfo::default();
+        let _s_create_info = vk::SemaphoreCreateInfo::default();
         let s = device
             .create_semaphore(&semaphore_create_info, None)
             .map_err(|err| format!("Error creating semaphore: {:?}", err))?;

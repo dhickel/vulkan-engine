@@ -39,10 +39,9 @@ use crate::data::gpu_data::{
     VkModelPushConsts,
 };
 use crate::vulkan::vk_types::*;
-use crate::vulkan::{vk_descriptor, vk_util};
+use crate::vulkan::vk_util;
 use ash::vk;
 use std::ffi::{CStr, CString};
-use std::io::{Read, Seek, SeekFrom};
 
 /// Builder for Vulkan graphics pipelines with dynamic rendering.
 ///
@@ -503,7 +502,7 @@ fn init_brd_flut_pipeline(
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
-    depth_format: vk::Format,
+    _depth_format: vk::Format,
 ) -> VkPipeline {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutVert);
 
@@ -543,15 +542,24 @@ fn init_skybox_pipeline(
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
-    depth_format: vk::Format,
+    _depth_format: vk::Format,
 ) -> VkPipeline {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxFrag);
 
+    let push_const_size = std::mem::size_of::<PushConstSkyBox>() as u32;
+    // Vulkan spec minimum is 128 bytes; desktop GPUs provide ≥256.
+    // See PushConstSkyBox docs in gpu_data.rs for details.
+    debug_assert!(
+        push_const_size <= 256,
+        "PushConstSkyBox size {} exceeds 256 bytes",
+        push_const_size
+    );
+
     let push_constant_range = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
         .offset(0)
-        .size(std::mem::size_of::<PushConstSkyBox>() as u32)];
+        .size(push_const_size)];
 
     let layouts = [desc_layout_cache.get(VkDescType::Skybox)];
 

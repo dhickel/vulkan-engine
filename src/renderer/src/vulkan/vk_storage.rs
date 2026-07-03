@@ -30,21 +30,16 @@
 //! - Want device address tracking for SSBO/bindless usage
 //! - Buffer usage flags differ (STORAGE_BUFFER vs UNIFORM_BUFFER)
 
-use crate::data::gpu_data::AsByteSlice;
 use crate::vulkan::vk_types::{
-    VkBuffer, VkBufferAndDescriptorLimits, VkCmdSubmitInfo, VkDestroyable, VkHostBuffer,
-    VkQueueType, VkSubAlloc, VkSubmitParam,
+    VkBuffer, VkBufferAndDescriptorLimits, VkDestroyable, VkHostBuffer, VkSubAlloc, VkSubmitParam,
 };
 use crate::vulkan::vk_util;
 use ash::vk::DeviceAddress;
 use ash::{vk, Device};
-use log::{debug, info};
-use std::cmp::{max_by, Ordering, PartialEq};
-use std::marker::PhantomData;
-use std::ops::{Add, AddAssign, IndexMut, Sub};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError};
+use log::debug;
+use std::cmp::{Ordering, PartialEq};
+use std::ops::{Add, AddAssign, Sub};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use vk_mem::Allocator;
 
 /// Allocation placement strategy for sub-allocations.
@@ -165,7 +160,7 @@ impl VkSubAllocator {
             memory_usage,
             dst_barrier,
             buffer_size,
-            transfer_buffer.lock().unwrap().buffer.size as u64,
+            transfer_buffer.lock().unwrap().buffer.size,
             0,
         )?;
 
@@ -274,7 +269,7 @@ impl VkSubAllocator {
         let buffer = loop {
             match vk_util::allocate_buffer(&allocator, buffer_size, usage_flags, memory_usage) {
                 Ok(allocation) => break allocation,
-                Err(err) => {
+                Err(_err) => {
                     iter -= 1;
                     if iter < 0 || buffer_size == 0 {
                         return Err(format!("Failed to allocate, likely due to lack of memory | Last allocation Attempt: {} bytes", buffer_size));
@@ -289,7 +284,7 @@ impl VkSubAllocator {
         let buffer_address = unsafe { device.get_buffer_device_address(&buffer_addr_info) };
         Ok(VkStorageBuffer::new(
             buffer_index,
-            buffer_size as u64,
+            buffer_size,
             alignment,
             max_upload_size,
             buffer_address,
@@ -350,7 +345,7 @@ impl VkSubAllocator {
                     self.extra_buffers.len() as u32,
                 ) {
                     Ok(buffer) => buffer,
-                    Err(err) => {
+                    Err(_err) => {
                         return VkAllocResult::Failure {
                             error_msg: "Out if space, Can't alloc more".to_string(),
                             successful_allocs: partial_alloc.fulfilled,
@@ -359,7 +354,7 @@ impl VkSubAllocator {
                 };
 
                 match new_buffer.add_items(
-                    &mut partial_alloc.remaining,
+                    &partial_alloc.remaining,
                     buffer_placement,
                     &self.device,
                     &host_buffer,
@@ -393,7 +388,7 @@ impl VkSubAllocator {
             }
             VkBufferResult::Error {
                 error_msg,
-                successful_allocs,
+                successful_allocs: _,
             } => VkAllocResult::Failure {
                 error_msg: format!("Error encountered during allocation: {:?}", error_msg)
                     .to_string(),
@@ -712,11 +707,11 @@ impl VkStorageBuffer {
             // handle upload if needed, and reset params
             if max_upload_reached || end_buffer_reached {
                 let upload_slice = &item_bytes[start_range..end_range];
-                let upload_offset = self.get_offset_from(curr_address);
+                let _upload_offset = self.get_offset_from(curr_address);
 
                 debug!("Recording upload buffer");
                 if let Err(error_msg) =
-                    self.allocate_data(device, &host_buffer, curr_address, upload_slice)
+                    self.allocate_data(device, host_buffer, curr_address, upload_slice)
                 {
                     return self.partial_error(error_msg, sub_allocations);
                 }
@@ -761,7 +756,7 @@ impl VkStorageBuffer {
             // get new buffer if needed
             if end_buffer_reached {
                 match curr_mem_chunk {
-                    MemChunk::Tail { size, .. } => {
+                    MemChunk::Tail { size: _, .. } => {
                         self.buffer_tail.remove_from_chunk(total_chunk_allot)
                     }
                     MemChunk::FreeChunk { index, .. } => {
@@ -795,10 +790,10 @@ impl VkStorageBuffer {
         // check and upload any remaining data
         if curr_allot > 0 {
             let upload_slice = &item_bytes[start_range..end_range];
-            let upload_offset = self.get_offset_from(curr_address);
+            let _upload_offset = self.get_offset_from(curr_address);
 
             if let Err(error_msg) =
-                self.allocate_data(device, &host_buffer, curr_address, upload_slice)
+                self.allocate_data(device, host_buffer, curr_address, upload_slice)
             {
                 return self.partial_error(error_msg, sub_allocations);
             }
@@ -835,7 +830,7 @@ impl VkStorageBuffer {
             bytes_left -= curr_allot;
 
             match curr_mem_chunk {
-                MemChunk::Tail { size, .. } => {
+                MemChunk::Tail { size: _, .. } => {
                     self.buffer_tail.remove_from_chunk(total_chunk_allot)
                 }
                 MemChunk::FreeChunk { index, .. } => {
@@ -888,7 +883,7 @@ impl FreeChunk {
             amount <= self.size,
             "Cannot remove more than the chunk's size"
         );
-        self.size = self.size - amount;
+        self.size -= amount;
         self.start_addr = self.start_addr.add(amount);
     }
 }
@@ -1004,7 +999,7 @@ impl FreeChunkVec {
             .chunks
             .iter()
             .enumerate()
-            .max_by_key(|(i, chunk)| chunk.size);
+            .max_by_key(|(_i, chunk)| chunk.size);
 
         if let Some((index, chunk)) = chunk {
             Some(MemChunk::FreeChunk {

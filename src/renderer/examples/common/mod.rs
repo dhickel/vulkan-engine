@@ -1,3 +1,5 @@
+// Shared example infrastructure — items here are used by sibling example binaries
+// (demo_pbr.rs, demo_unlit.rs, etc.) but flagged as dead_code within this module.
 #![allow(dead_code)]
 
 use glam::{Mat4, Vec3};
@@ -6,7 +8,7 @@ use renderer::{
     DebugRuntimeMode, FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
 };
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, Event, KeyEvent, WindowEvent};
@@ -43,6 +45,7 @@ impl DemoScenario {
 #[derive(Clone, Debug, Default)]
 pub struct LaunchOptions {
     pub env_path: Option<PathBuf>,
+    pub model_path: Option<PathBuf>,
     pub record_debug_secs: Option<u64>,
     pub record_debug_interval_ms: Option<u64>,
     pub record_debug_path: Option<String>,
@@ -65,6 +68,21 @@ pub fn parse_launch_options() -> Result<LaunchOptions, String> {
 
         if let Some(value) = arg.strip_prefix("--env=") {
             options.env_path = Some(PathBuf::from(value));
+            i += 1;
+            continue;
+        }
+
+        if arg == "--model" {
+            let Some(value) = args.get(i + 1) else {
+                return Err("--model requires a path argument".to_string());
+            };
+            options.model_path = Some(PathBuf::from(value));
+            i += 2;
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--model=") {
+            options.model_path = Some(PathBuf::from(value));
             i += 1;
             continue;
         }
@@ -181,9 +199,11 @@ pub fn run_demo(scenario: DemoScenario) {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut config = RendererConfig::default();
-    config.app_name = scenario.title().to_string();
-    config.shader_debug_mode = scenario.debug_runtime_mode();
+    let config = RendererConfig {
+        app_name: scenario.title().to_string(),
+        shader_debug_mode: scenario.debug_runtime_mode(),
+        ..RendererConfig::default()
+    };
 
     let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()
@@ -224,7 +244,11 @@ pub fn run_demo(scenario: DemoScenario) {
         }
     }
 
-    let mut scene = match initialize_scene(&mut renderer, scenario) {
+    let model_path = launch_options
+        .model_path
+        .as_deref()
+        .unwrap_or(Path::new(FACADE_DEMO_MODEL_PATH));
+    let mut scene = match initialize_scene(&mut renderer, scenario, model_path) {
         Ok(scene) => scene,
         Err(err) => {
             error!("Failed to initialize demo scene: {err}");
@@ -362,16 +386,18 @@ fn handle_fullscreen_toggle(
 fn initialize_scene(
     renderer: &mut Renderer,
     scenario: DemoScenario,
+    model_path: &Path,
 ) -> Result<Scene, RendererError> {
     match scenario {
-        DemoScenario::Pbr => Ok(renderer.take_startup_scene().unwrap_or_else(Scene::new)),
-        DemoScenario::Unlit => Ok(renderer.take_startup_scene().unwrap_or_else(Scene::new)),
-        DemoScenario::ModelLoad => build_model_load_scene(renderer, true),
+        DemoScenario::Pbr => Ok(renderer.take_startup_scene().unwrap_or_default()),
+        DemoScenario::Unlit => Ok(renderer.take_startup_scene().unwrap_or_default()),
+        DemoScenario::ModelLoad => build_model_load_scene(renderer, model_path, true),
     }
 }
 
 fn build_model_load_scene(
     renderer: &mut Renderer,
+    model_path: &Path,
     duplicate_instance: bool,
 ) -> Result<Scene, RendererError> {
     // Force the demo down the public facade asset + scene path.
@@ -380,14 +406,14 @@ fn build_model_load_scene(
     let mut scene = Scene::new();
     let first_fragment = {
         let mut assets = renderer.assets();
-        assets.load_model(FACADE_DEMO_MODEL_PATH)?
+        assets.load_model(model_path)?
     };
     let first_mount = scene.merge_fragment(None, first_fragment)?;
 
     if duplicate_instance {
         let second_fragment = {
             let mut assets = renderer.assets();
-            assets.load_model(FACADE_DEMO_MODEL_PATH)?
+            assets.load_model(model_path)?
         };
         let second_mount = scene.merge_fragment(None, second_fragment)?;
         scene.set_transform(

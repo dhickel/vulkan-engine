@@ -35,41 +35,28 @@
 //! Vulkan's verbose API requires many CreateInfo structs. Centralizing creation
 //! reduces code duplication and ensures consistency (e.g., always using REMAINING_MIP_LEVELS).
 
-use std::cmp::{max, PartialEq};
 use std::ffi::CStr;
 
-use crate::data::gpu_data::{TextureMeta, Vertex, VkCubeMap, VkMeshBuffers};
+use crate::data::gpu_data::{TextureMeta, VkCubeMap};
 use crate::vulkan::vk_types::*;
 use ash::vk;
 use ash::vk::{
-    AccessFlags2, ClearValue, DependencyFlags, DeviceAddress, DeviceSize, Extent2D, Extent3D,
-    ImageAspectFlags, ImageLayout, ImageType, PipelineCache, PipelineLayoutCreateInfo,
-    PipelineStageFlags2, Rect2D, RenderingInfo,
+    DependencyFlags, DeviceSize, Extent2D, Extent3D, ImageLayout, ImageType,
+    PipelineLayoutCreateInfo, Rect2D, RenderingInfo,
 };
-use log::{error, info, warn};
-use std::io::{Bytes, Read, Seek, SeekFrom};
-use std::mem::align_of;
+use log::{info, warn};
+use std::io::{Read, Seek, SeekFrom};
 use std::process::Command;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use vk_mem::{Alloc, Allocator};
 
-use crate::data::data_cache::{
-    LodBias, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerCache,
-    VkSamplerInfo,
-};
-use crate::data::{data_cache, data_util};
-use crate::vulkan::vk_descriptor::{PoolSizeRatio, VkDescriptorAllocator};
-use crate::vulkan::vk_render::VkSingleDescriptor;
-use crate::vulkan::{vk_debug, vk_init, vk_util};
-use ash::prelude::VkResult;
+use crate::data::data_cache::{LodBias, VkSamplerCache, VkSamplerInfo};
+use crate::vulkan::vk_util;
 // use shaderc::{CompileOptions, Compiler, ShaderKind};
-use crate::data::data_util::calc_mips_count;
-use std::fs::metadata;
-use std::ops::{Add, Sub};
+use std::fs;
+use std::ops::Add;
 use std::path::Path;
-use std::{fs, path};
 
 pub fn command_pool_create_info<'a>(
     queue_family_index: u32,
@@ -335,9 +322,9 @@ pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
 }
 
 pub fn find_memory_type(
-    physical_device: vk::PhysicalDevice,
-    type_filter: u32,
-    prop_flags: vk::MemoryPropertyFlags,
+    _physical_device: vk::PhysicalDevice,
+    _type_filter: u32,
+    _prop_flags: vk::MemoryPropertyFlags,
 ) -> u32 {
     todo!()
 }
@@ -625,7 +612,7 @@ pub fn generate_brdf_lut(
     let brd_sampler = unsafe { device.create_sampler(&brd_sampler, None).unwrap() };
 
     let color_attachment_format = vk::Format::R16G16B16A16_SFLOAT;
-    let pipeline_rendering_create_info = vk::PipelineRenderingCreateInfo::default()
+    let _pipeline_rendering_create_info = vk::PipelineRenderingCreateInfo::default()
         .color_attachment_formats(&[color_attachment_format]);
 
     let clear_value = vk::ClearValue {
@@ -794,7 +781,7 @@ pub fn upload_skybox(
         ..Default::default()
     };
 
-    let (allocation, device_memory, alloc_offset) = unsafe {
+    let (allocation, _device_memory, _alloc_offset) = unsafe {
         let alloc = allocator
             .allocate_memory_for_image(image, &alloc_info)
             .unwrap();
@@ -995,7 +982,7 @@ pub fn upload_texture_2d(
         depth: 1,
     };
 
-    let mut image = create_image(
+    let image = create_image(
         device,
         allocator,
         extent,
@@ -1414,7 +1401,7 @@ pub fn record_host_to_image_buffer(
     supports_linear_mip_blit: &[bool],
     alignment: u64,
     ids: &[u32],
-    queue: vk::Queue, // queue is unused in function body, removed from signature? No, keep signature for now.
+    _queue: vk::Queue, // queue is unused in function body, removed from signature? No, keep signature for now.
 ) -> Result<Vec<(VkImageAlloc, vk::Sampler)>, String> {
     if image_meta.len() != ids.len() {
         return Err("Image upload metadata and ids length mismatch".to_string());
@@ -1434,7 +1421,7 @@ pub fn record_host_to_image_buffer(
     let image_offsets: Vec<DeviceSize> = image_meta
         .iter()
         .zip(ids.iter())
-        .map(|(meta, id)| {
+        .map(|(meta, _id)| {
             let bytes = meta.payload.bytes();
             let size = bytes.len().next_multiple_of(alignment as usize);
 
@@ -1494,10 +1481,10 @@ pub fn record_host_to_image_buffer(
     unsafe {
         device
             .begin_command_buffer(transfer_cmd_buffer, &begin_info)
-            .unwrap();
+            .expect("failed to begin transfer command buffer for texture upload");
         device
             .begin_command_buffer(graphics_cmd_buffer, &begin_info)
-            .unwrap();
+            .expect("failed to begin graphics command buffer for texture upload");
     }
 
     // Perform buffer to image copies
@@ -1716,8 +1703,12 @@ pub fn record_host_to_image_buffer(
     }
 
     unsafe {
-        device.end_command_buffer(transfer_cmd_buffer).unwrap();
-        device.end_command_buffer(graphics_cmd_buffer).unwrap();
+        device
+            .end_command_buffer(transfer_cmd_buffer)
+            .expect("failed to end transfer command buffer for texture upload");
+        device
+            .end_command_buffer(graphics_cmd_buffer)
+            .expect("failed to end graphics command buffer for texture upload");
     }
 
     Ok(upload_images)
