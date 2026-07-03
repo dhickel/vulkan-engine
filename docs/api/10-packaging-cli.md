@@ -10,7 +10,11 @@ Packaging flow:
 
 `new-project` or existing project -> `new-package` or existing package -> `scan-assets`/`add-asset` -> validation commands -> `pack` folder output -> editor/root runtime consumption.
 
-The CLI is intentionally backed by the renderer crate validators. It should not become a second schema implementation or the project launcher. The root `engine` binary consumes project/package/scene data with `cargo run -- --project <path>`.
+App-template flow:
+
+`new-app` -> standalone Rust support-crate scaffold -> `cargo check --manifest-path <app>/Cargo.toml` -> app-owned iteration.
+
+The CLI is intentionally backed by the renderer crate validators for project/package/scene data. It should not become a second schema implementation or the project launcher. The root `engine` binary consumes project/package/scene data with `cargo run -- --project <path>`.
 
 ## 3. Command Reference
 
@@ -43,6 +47,15 @@ Create a starter project:
 ```sh
 cargo run -p engine_pack -- new-project /tmp/engine-project --id project.example --name "Example Project"
 ```
+
+Create a standalone Rust app support-crate scaffold without mutating the root workspace:
+
+```sh
+cargo run -p engine_pack -- new-app /tmp/engine-app --id app.example --name "Example App"
+cargo check --manifest-path /tmp/engine-app/Cargo.toml
+```
+
+The generated app depends on public support crates by absolute path: `engine_events`, `input`, and `physics`. It is compile-first and deliberately avoids renderer internals, root `Cargo.toml` edits, dynamic Rust reload, plugin ABI loading, and runtime hot reload. Renderer window-loop integration still belongs in app crates and renderer examples; this template is the minimal off-workspace app-control starting point.
 
 Create a starter package manifest:
 
@@ -136,7 +149,7 @@ The alpha CLI deliberately does not yet provide:
 - scripting runtime;
 - runtime physics scene loading or gameplay collision integration;
 - production audio mixing/spatialization/streaming or editor audio placement;
-- generated Rust app templates;
+- renderer-window generated app templates;
 - broad dogfood migration to project manifests.
 
 Use the runtime launcher for the current alpha project run path:

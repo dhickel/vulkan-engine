@@ -40,6 +40,7 @@ fn run(args: Vec<String>) -> CliResult<String> {
         "validate-package" => validate_package_cmd(rest),
         "validate-project" => validate_project_cmd(rest),
         "validate-scene" => validate_scene_cmd(rest),
+        "new-app" => new_app_cmd(rest),
         "new-project" => new_project_cmd(rest),
         "new-package" => new_package_cmd(rest),
         "scan-assets" => scan_assets_cmd(rest),
@@ -51,6 +52,43 @@ fn run(args: Vec<String>) -> CliResult<String> {
             usage()
         ))),
     }
+}
+
+fn new_app_cmd(args: &[String]) -> CliResult<String> {
+    let mut parser = ArgParser::new(args);
+    let app_id = parser.required_option_value("--id")?;
+    let name = parser.required_option_value("--name")?;
+    let dir = parser.required_path("new-app <dir> --id <app_id> --name <display_name>")?;
+    parser.finish()?;
+
+    if dir.exists() {
+        return Err(CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "app.path_exists",
+                ValidationArea::Project,
+                format!("app target already exists: {}", dir.display()),
+            )
+            .with_path(&dir)
+            .with_durable_id(app_id),
+        )));
+    }
+
+    let engine_root = engine_root_path()?;
+    fs::create_dir_all(dir.join("src")).map_err(|err| io_error("app.io", &dir, err))?;
+
+    let cargo_path = dir.join("Cargo.toml");
+    fs::write(&cargo_path, app_cargo_toml(&app_id, &engine_root))
+        .map_err(|err| io_error("app.io", &cargo_path, err))?;
+
+    let main_path = dir.join("src/main.rs");
+    fs::write(&main_path, app_main_rs(&app_id, &name))
+        .map_err(|err| io_error("app.io", &main_path, err))?;
+
+    let readme_path = dir.join("README.md");
+    fs::write(&readme_path, app_readme_md(&app_id, &name))
+        .map_err(|err| io_error("app.io", &readme_path, err))?;
+
+    Ok(format!("created[app]: {}", cargo_path.display()))
 }
 
 fn validate_package_cmd(args: &[String]) -> CliResult<String> {
@@ -556,8 +594,84 @@ fn display_name(stem: Option<&OsStr>) -> String {
         .replace(['_', '-'], " ")
 }
 
+fn sanitize_crate_name(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' {
+            output.push(ch);
+        } else if !output.ends_with('_') {
+            output.push('_');
+        }
+    }
+    let output = output.trim_matches(['-', '_']).replace("__", "_");
+    if output
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    {
+        output
+    } else if output.is_empty() {
+        "engine_app".to_string()
+    } else {
+        format!("app_{output}")
+    }
+}
+
 fn toml_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn engine_root_path() -> CliResult<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
+                "app.engine_root",
+                ValidationArea::Project,
+                "failed to resolve engine workspace root for app template",
+            )))
+        })
+        .and_then(|path| {
+            path.canonicalize()
+                .map_err(|err| io_error("app.engine_root", path, err))
+        })
+}
+
+fn app_cargo_toml(app_id: &str, engine_root: &Path) -> String {
+    let package_name = sanitize_crate_name(app_id);
+    let events_path = cargo_path_literal(&engine_root.join("src/events"));
+    let input_path = cargo_path_literal(&engine_root.join("src/input"));
+    let physics_path = cargo_path_literal(&engine_root.join("src/physics"));
+    format!(
+        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine_events = {{ path = \"{}\" }}\ninput = {{ path = \"{}\" }}\nphysics = {{ path = \"{}\" }}\n",
+        toml_escape(&package_name),
+        toml_escape(&events_path),
+        toml_escape(&input_path),
+        toml_escape(&physics_path)
+    )
+}
+
+fn cargo_path_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn app_main_rs(app_id: &str, name: &str) -> String {
+    format!(
+        "use engine_events::{{EngineEvent, EventBus, EventStage, LifecycleEvent}};\nuse input::{{ActionId, InputSnapshot}};\nuse physics::PhysicsWorld;\n\nconst APP_ID: &str = \"{}\";\nconst APP_NAME: &str = \"{}\";\n\nfn main() {{\n    let mut events = EventBus::default();\n    events.emit(\n        EventStage::Startup,\n        None,\n        EngineEvent::Lifecycle(LifecycleEvent::AppStarted {{\n            app_name: APP_NAME.to_string(),\n        }}),\n    );\n\n    let input = InputSnapshot::default();\n    let confirm_action = ActionId::new(format!(\"{{APP_ID}}.confirm\"));\n\n    let mut physics = PhysicsWorld::new();\n    physics.set_gravity(0.0, -9.81, 0.0);\n\n    println!(\n        \"{{APP_NAME}} initialized: {{}} pending event(s), confirm={{}}\",\n        events.pending_len(),\n        input.action_value(&confirm_action)\n    );\n}}\n",
+        toml_escape(app_id),
+        toml_escape(name)
+    )
+}
+
+fn app_readme_md(app_id: &str, name: &str) -> String {
+    format!(
+        "# {}\n\nGenerated by `engine_pack new-app`.\n\nRun from this directory with:\n\n```sh\ncargo run\n```\n\nThis scaffold is a standalone Rust app crate that depends on public engine support crates only: `engine_events`, `input`, and `physics`. It does not mutate the engine root workspace and does not implement dynamic Rust reload, plugin ABI loading, or runtime hot reload.\n\nApp ID: `{}`\n",
+        name,
+        app_id
+    )
 }
 
 fn starter_scene_json(project_id: &str) -> String {
@@ -590,6 +704,7 @@ fn usage() -> String {
         "  validate-package <package.toml> [--expected-package-id <id>] [--project-root <path>]",
         "  validate-project <engine.project.toml>",
         "  validate-scene <scene.engine.scene.json> --project <engine.project.toml>",
+        "  new-app <dir> --id <app_id> --name <display_name>",
         "  new-project <dir> --id <project_id> --name <name>",
         "  new-package <path> --id <package_id> --name <display_name>",
         "  scan-assets <asset-root> [--package-id <id>]",
