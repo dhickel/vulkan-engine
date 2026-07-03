@@ -1,10 +1,17 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use ash::vk::Extent2D;
+use engine_events::{
+    ActionPhase, EngineEvent, EventBus, EventRecorder, EventStage, FrameId, InputActionEvent,
+    LifecycleEvent,
+};
 use glam::Mat4;
-use input::{ActionMap, InputSystem, LayerDescriptor, LayerHandle, LayerPriority};
+use input::{
+    ActionId, ActionMap, InputSnapshot, InputSystem, LayerDescriptor, LayerHandle, LayerPriority,
+};
 use log::{error, warn};
 use winit::event::{DeviceEvent, ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -72,6 +79,8 @@ pub struct Renderer {
     startup_scene: Option<Scene>,
     asset_loads: AssetLoadTracker,
     asset_policy: AssetPolicyConfig,
+    event_bus: EventBus,
+    observed_action_values: HashMap<ActionId, f32>,
     pre_render_hook: Option<RenderHook>,
     post_render_hook: Option<RenderHook>,
     frame_capture_scheduler: FrameCaptureScheduler,
@@ -113,6 +122,8 @@ impl Renderer {
             startup_scene: Some(Scene::from_world(scene_world)),
             asset_loads: AssetLoadTracker::new(),
             asset_policy,
+            event_bus: EventBus::new(),
+            observed_action_values: HashMap::new(),
             pre_render_hook: None,
             post_render_hook: None,
             frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
@@ -154,6 +165,8 @@ impl Renderer {
             startup_scene: Some(Scene::from_world(scene_world)),
             asset_loads: AssetLoadTracker::new(),
             asset_policy,
+            event_bus: EventBus::new(),
+            observed_action_values: HashMap::new(),
             pre_render_hook: None,
             post_render_hook: None,
             frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
@@ -205,6 +218,18 @@ impl Renderer {
 
     pub fn input(&self) -> &InputSystem {
         &self.input_system
+    }
+
+    pub fn events(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    pub fn events_mut(&mut self) -> &mut EventBus {
+        &mut self.event_bus
+    }
+
+    pub fn set_event_recorder(&mut self, recorder: Option<EventRecorder>) {
+        self.event_bus.set_recorder(recorder);
     }
 
     /// Thread: Main
@@ -352,13 +377,28 @@ impl Renderer {
         }
 
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
+        self.emit_lifecycle_event(
+            EventStage::PreUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameStarted,
+        );
         let prepare_outcome = self.prepare_frame(window)?;
         if prepare_outcome == FramePrepareOutcome::SkippedResizePending {
+            self.emit_lifecycle_event(
+                EventStage::PostUpdate,
+                Some(FrameId(self.frame_number as u64)),
+                LifecycleEvent::FrameEnded,
+            );
             self.frame_number = self.frame_number.wrapping_add(1);
             return Ok(FrameRenderOutcome::SkippedResizePending);
         }
 
         let outcome = self.render_scene_internal(scene, self.frame_number)?;
+        self.emit_lifecycle_event(
+            EventStage::PostUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameEnded,
+        );
         self.frame_number = self.frame_number.wrapping_add(1);
         Ok(outcome)
     }
@@ -381,8 +421,18 @@ impl Renderer {
         }
 
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
+        self.emit_lifecycle_event(
+            EventStage::PreUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameStarted,
+        );
         self.prepare_frame_headless();
         let outcome = self.render_scene_internal(scene, self.frame_number)?;
+        self.emit_lifecycle_event(
+            EventStage::PostUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameEnded,
+        );
         self.frame_number = self.frame_number.wrapping_add(1);
         Ok(outcome)
     }
@@ -397,6 +447,11 @@ impl Renderer {
         }
 
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
+        self.emit_lifecycle_event(
+            EventStage::PreUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameStarted,
+        );
         let _ = self.prepare_frame(window)?;
         let frame_number = self.frame_number;
         self.open_frame = Some(frame_number);
@@ -445,6 +500,11 @@ impl Renderer {
         }
 
         self.open_frame = None;
+        self.emit_lifecycle_event(
+            EventStage::PostUpdate,
+            Some(FrameId(frame.frame_number as u64)),
+            LifecycleEvent::FrameEnded,
+        );
         self.frame_number = self.frame_number.wrapping_add(1);
         Ok(())
     }
@@ -713,6 +773,13 @@ impl Renderer {
         self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
+        emit_input_action_events_from_snapshot(
+            &mut self.event_bus,
+            &mut self.observed_action_values,
+            self.frame_number as u64,
+            self.input_system.snapshot(),
+        );
+        self.dispatch_events_for_stage(EventStage::Input);
         if !self.imgui_capture_active() {
             if let Some(plugin) = self.fps_plugin.as_mut() {
                 let snapshot = self.input_system.snapshot();
@@ -750,6 +817,13 @@ impl Renderer {
         self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
+        emit_input_action_events_from_snapshot(
+            &mut self.event_bus,
+            &mut self.observed_action_values,
+            self.frame_number as u64,
+            self.input_system.snapshot(),
+        );
+        self.dispatch_events_for_stage(EventStage::Input);
         if let Some(plugin) = self.fps_plugin.as_mut() {
             let snapshot = self.input_system.snapshot();
             plugin
@@ -938,6 +1012,66 @@ impl Renderer {
     pub fn set_camera_position(&mut self, position: glam::Vec3) {
         self.camera.set_position(position);
     }
+
+    fn emit_lifecycle_event(
+        &mut self,
+        stage: EventStage,
+        frame: Option<FrameId>,
+        event: LifecycleEvent,
+    ) {
+        self.event_bus
+            .emit(stage, frame, EngineEvent::Lifecycle(event));
+        self.dispatch_events_for_stage(stage);
+    }
+
+    fn dispatch_events_for_stage(&mut self, stage: EventStage) {
+        let report = self.event_bus.drain_stage(stage);
+        for failure in report.failures {
+            warn!(
+                "event listener {:?} failed for event {:?}: {}",
+                failure.listener, failure.sequence, failure.message
+            );
+        }
+    }
+}
+
+fn emit_input_action_events_from_snapshot(
+    event_bus: &mut EventBus,
+    observed_action_values: &mut HashMap<ActionId, f32>,
+    frame_index: u64,
+    snapshot: &InputSnapshot,
+) {
+    for (action, value) in snapshot.action_values() {
+        let previous = observed_action_values.get(action).copied().unwrap_or(0.0);
+        let phase = if snapshot.action_just_pressed(action) {
+            Some(ActionPhase::Pressed)
+        } else if snapshot.action_just_released(action) {
+            Some(ActionPhase::Released)
+        } else if (previous - value).abs() > f32::EPSILON {
+            Some(ActionPhase::Changed)
+        } else {
+            None
+        };
+
+        if let Some(phase) = phase {
+            event_bus.emit(
+                EventStage::Input,
+                Some(FrameId(frame_index)),
+                EngineEvent::Input(
+                    InputActionEvent::new(
+                        engine_events::ActionId::new(action.as_str()),
+                        phase,
+                        value,
+                    )
+                    .with_source("input_snapshot"),
+                ),
+            );
+        }
+
+        observed_action_values.insert(action.clone(), value);
+    }
+
+    observed_action_values.retain(|action, _| snapshot.action_pressed(action));
 }
 
 fn create_window_state(window: &Window, config: &RendererConfig) -> VkWindowState {
@@ -994,4 +1128,91 @@ fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
         return (*msg).to_string();
     }
     "unknown panic payload".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use engine_events::{ActionPhase, EngineEvent, EventBus, EventStage};
+    use input::{ActionMap, InputEvent, InputSystem, LayerDescriptor, LayerPriority};
+    use winit::event::ElementState;
+    use winit::keyboard::{KeyCode, ModifiersState};
+
+    use super::emit_input_action_events_from_snapshot;
+
+    #[test]
+    fn input_action_bridge_emits_after_snapshot_dispatch() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        input.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+
+        let mut bus = EventBus::new();
+        let mut observed = HashMap::new();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 7, input.snapshot());
+
+        let report = bus.drain_stage(EventStage::Input);
+        assert_eq!(report.dispatched, 1);
+        let recorded = bus.recorder();
+        assert!(recorded.is_none());
+    }
+
+    #[test]
+    fn input_action_bridge_records_press_and_release_order() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        input.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        let mut bus = EventBus::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_listener = std::sync::Arc::clone(&seen);
+        bus.subscribe(move |event| {
+            if let EngineEvent::Input(action) = &event.event {
+                seen_listener.lock().unwrap().push(action.phase);
+            }
+            Ok(())
+        });
+        let mut observed = HashMap::new();
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 1, input.snapshot());
+        bus.drain_stage(EventStage::Input);
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 2, input.snapshot());
+        bus.drain_stage(EventStage::Input);
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [ActionPhase::Pressed, ActionPhase::Released]
+        );
+    }
 }

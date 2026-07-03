@@ -2,11 +2,11 @@
   "sprint": "05",
   "slug": "sprint-05-event-system-lifecycle",
   "branch": "sprint/alpha-05-event-system-lifecycle",
-  "status": "phase_01_validator_passed_committed_pushed_reported",
+  "status": "phase_02_validator_passed_commit_push_report_pending",
   "fully_validated": false,
   "phase_status": {
     "phase_01_core_event_crate_api": "validator_passed_committed_pushed_reported",
-    "phase_02_renderer_runtime_integration": "planned",
+    "phase_02_renderer_runtime_integration": "validator_passed_commit_push_report_pending",
     "phase_03_apps_samples_docs": "planned",
     "phase_04_validation_closeout": "planned",
     "final_quality_review": "planned"
@@ -54,6 +54,66 @@
       "command": "git diff --check",
       "status": "passed_validator_rechecked",
       "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "cargo test -p input",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "cargo test -p engine",
+      "status": "passed_after_shutdown_requested_and_package_failed_remediation_20_tests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "cargo test -p renderer",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "cargo check -p renderer --examples",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "cargo test -p engine_events",
+      "status": "passed_phase_01_still_green",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "rg engine_events facade/runtime ownership scan",
+      "status": "passed_no_vulkan_internal_import",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "git diff --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "initial validator review",
+      "status": "failed_then_remediated_missing_shutdown_requested_and_package_failed_events",
+      "exit_code": 1
+    },
+    {
+      "phase": "phase_02_renderer_runtime_integration",
+      "command": "validator rerun review",
+      "status": "passed_no_blocking_findings",
+      "exit_code": 0
     }
   ],
   "runtime_smoke": {
@@ -72,7 +132,7 @@
   "tooling_constraints": [],
   "residual_risks": [
     "Physics, audio, and scripting event families are planned as typed placeholders in this sprint; real system emission belongs to later roadmap sprints.",
-    "Windowed shutdown completion may be limited by winit event-loop control flow and must be documented if only shutdown-requested is observable."
+    "Windowed shutdown completion may be limited by winit event-loop control flow; Phase 02 emits shutdown-requested intent for close/Escape and keeps completed shutdown deterministic for headless."
   ],
   "last_updated": "2026-07-03"
 }

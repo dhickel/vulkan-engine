@@ -43,6 +43,7 @@ imgui-winit-support = "0.12.0"
 env_logger = "0.10"
 log = "0.4"
 input = { path = "../input" }
+engine_events = { path = "../events" }
 glam = { version = "0.28.0", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.16.0", features = ["derive"] }
 percent-encoding = "2.3.1"
@@ -84,5 +85,4 @@ toml = "0.8"
 
 #game-loop = { version = "*", features = ["winit"] }
 # Web
-
 

@@ -36,6 +36,13 @@ pub use config::{
     FrameCaptureScheduler, FrameCaptureSequence, FrameCaptureSource, FrameCaptureStatus,
     RendererConfig, VisualTuning,
 };
+pub use engine_events::{
+    ActionPhase, AssetEvent, AssetId, AudioClipId, AudioEvent, ColliderId, ContactPhase,
+    EngineEvent, EventBus, EventEnvelope, EventRecorder, EventSequence, EventStage, FrameId,
+    InputActionEvent, LifecycleEvent, ListenerError, ListenerFailure, ListenerId, MaterialId,
+    NodeId, PackageId, PhysicsBodyId, PhysicsEvent, ProjectId, SceneEvent, SceneId, ScriptId,
+    ScriptingEvent,
+};
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };

@@ -2,12 +2,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use engine_events::{
+    AssetEvent, EngineEvent, EventBus, EventEnvelope, EventRecorder, EventStage, LifecycleEvent,
+    PackageId, ProjectId, SceneId,
+};
 use log::{info, warn};
 use renderer::{
     default_capture_run_dir, single_capture_path, AssetManifestMode, AssetPolicyConfig,
     DurableAssetRecord, FrameCaptureRequest, FrameCaptureSequence, FrameCaptureStatus,
-    FrameRenderOutcome, Project, ProjectValidationOptions, Renderer, RendererConfig, Scene,
-    SceneValidationOptions,
+    FrameRenderOutcome, Project, ProjectPackage, ProjectValidationOptions, Renderer,
+    RendererConfig, Scene, SceneValidationOptions,
 };
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -19,6 +23,7 @@ use crate::launch::LaunchOptions;
 
 const FALLBACK_APP_NAME: &str = "engine";
 const DEFAULT_HEADLESS_SMOKE_FRAMES: u32 = 3;
+const RUNTIME_EVENT_RECORDER_CAPACITY: usize = 512;
 
 #[derive(Clone, Debug)]
 struct RuntimeProject {
@@ -35,15 +40,79 @@ struct HeadlessCapturePlan {
     frame_budget: u32,
 }
 
+struct RuntimeEvents {
+    bus: EventBus,
+}
+
+impl RuntimeEvents {
+    fn new() -> Self {
+        Self {
+            bus: EventBus::with_recorder(EventRecorder::bounded(RUNTIME_EVENT_RECORDER_CAPACITY)),
+        }
+    }
+
+    fn emit(&mut self, stage: EventStage, event: EngineEvent) {
+        self.bus.emit(stage, None, event);
+        let report = self.bus.drain_stage(stage);
+        for failure in report.failures {
+            warn!(
+                "runtime event listener {:?} failed for event {:?}: {}",
+                failure.listener, failure.sequence, failure.message
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn recorded(&self) -> Vec<EventEnvelope> {
+        self.bus
+            .recorder()
+            .map(|recorder| recorder.entries().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
 pub fn run(options: LaunchOptions) -> Result<(), String> {
+    let mut runtime_events = RuntimeEvents::new();
+    runtime_events.emit(
+        EventStage::Startup,
+        EngineEvent::Lifecycle(LifecycleEvent::AppStarting {
+            app_name: FALLBACK_APP_NAME.to_string(),
+        }),
+    );
+    runtime_events.emit(
+        EventStage::ProjectLoad,
+        EngineEvent::Lifecycle(LifecycleEvent::ProjectLoading {
+            path: options.project_path.display().to_string(),
+        }),
+    );
+
     let runtime_project = load_runtime_project(&options)?;
     let config = renderer_config(&runtime_project.project, options.headless);
     let capture_run_dir = default_capture_run_dir(config.app_name.as_str());
+    emit_runtime_project_loaded(&mut runtime_events, &runtime_project);
+    runtime_events.emit(
+        EventStage::Startup,
+        EngineEvent::Lifecycle(LifecycleEvent::AppStarted {
+            app_name: config.app_name.clone(),
+        }),
+    );
 
     if options.headless {
-        run_headless(runtime_project, config, options, &capture_run_dir)
+        run_headless(
+            runtime_project,
+            config,
+            options,
+            &capture_run_dir,
+            &mut runtime_events,
+        )
     } else {
-        run_windowed(runtime_project, config, options, &capture_run_dir)
+        run_windowed(
+            runtime_project,
+            config,
+            options,
+            &capture_run_dir,
+            &mut runtime_events,
+        )
     }
 }
 
@@ -160,6 +229,7 @@ fn run_headless(
     config: RendererConfig,
     options: LaunchOptions,
     capture_run_dir: &Path,
+    runtime_events: &mut RuntimeEvents,
 ) -> Result<(), String> {
     let mut renderer = Renderer::new_headless(config)
         .map_err(|err| format!("headless renderer initialization failed: {err}"))?;
@@ -169,14 +239,17 @@ fn run_headless(
     apply_debug_record_launch_options(&mut renderer, &options)
         .map_err(|err| format!("failed to configure debug timing recording: {err}"))?;
 
-    let package_records = load_enabled_project_packages(&mut renderer, &runtime_project)?;
+    let package_records =
+        load_enabled_project_packages(&mut renderer, &runtime_project, runtime_events)?;
     info!(
         "Loaded {} package-backed asset record(s) from {} enabled package(s)",
         package_records.len(),
         runtime_project.enabled_package_count
     );
+    emit_runtime_scene_loading(runtime_events, &runtime_project);
     validate_startup_scene(&runtime_project.startup_scene_path, &package_records)?;
     let mut scene = load_startup_scene(&mut renderer, &runtime_project.startup_scene_path)?;
+    emit_runtime_scene_loaded(runtime_events, &runtime_project);
 
     let plan = headless_capture_plan(&options);
     let mut succeeded_paths = HashSet::new();
@@ -195,6 +268,10 @@ fn run_headless(
                         "Headless runtime capture completed: {} capture(s) written",
                         succeeded_paths.len()
                     );
+                    runtime_events.emit(
+                        EventStage::Shutdown,
+                        EngineEvent::Lifecycle(LifecycleEvent::ShutdownCompleted),
+                    );
                     return Ok(());
                 }
             }
@@ -212,6 +289,10 @@ fn run_headless(
     }
 
     if plan.expected_captures == 0 {
+        runtime_events.emit(
+            EventStage::Shutdown,
+            EngineEvent::Lifecycle(LifecycleEvent::ShutdownCompleted),
+        );
         Ok(())
     } else {
         Err(format!(
@@ -228,6 +309,7 @@ fn run_windowed(
     config: RendererConfig,
     options: LaunchOptions,
     capture_run_dir: &Path,
+    mut runtime_events: &mut RuntimeEvents,
 ) -> Result<(), String> {
     let event_loop =
         EventLoop::new().map_err(|err| format!("failed to create event loop: {err}"))?;
@@ -248,14 +330,17 @@ fn run_windowed(
     apply_debug_record_launch_options(&mut renderer, &options)
         .map_err(|err| format!("failed to configure debug timing recording: {err}"))?;
 
-    let package_records = load_enabled_project_packages(&mut renderer, &runtime_project)?;
+    let package_records =
+        load_enabled_project_packages(&mut renderer, &runtime_project, runtime_events)?;
     info!(
         "Loaded {} package-backed asset record(s) from {} enabled package(s)",
         package_records.len(),
         runtime_project.enabled_package_count
     );
+    emit_runtime_scene_loading(runtime_events, &runtime_project);
     validate_startup_scene(&runtime_project.startup_scene_path, &package_records)?;
     let mut scene = load_startup_scene(&mut renderer, &runtime_project.startup_scene_path)?;
+    emit_runtime_scene_loaded(runtime_events, &runtime_project);
 
     info!(
         "Launching project '{}' from '{}' with scene '{}'",
@@ -281,11 +366,21 @@ fn run_windowed(
             match event {
                 Event::WindowEvent { window_id, event } if window_id == window.id() => {
                     match event {
-                        WindowEvent::CloseRequested => control_flow.exit(),
+                        WindowEvent::CloseRequested => {
+                            emit_runtime_shutdown_requested(
+                                &mut runtime_events,
+                                "window close requested",
+                            );
+                            control_flow.exit();
+                        }
                         WindowEvent::KeyboardInput { event, .. } => {
                             if !event.repeat
                                 && matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
                             {
+                                emit_runtime_shutdown_requested(
+                                    &mut runtime_events,
+                                    "escape key requested shutdown",
+                                );
                                 control_flow.exit();
                             }
                         }
@@ -365,6 +460,7 @@ fn run_windowed(
 fn load_enabled_project_packages(
     renderer: &mut Renderer,
     runtime_project: &RuntimeProject,
+    runtime_events: &mut RuntimeEvents,
 ) -> Result<Vec<DurableAssetRecord>, String> {
     let mut all_records = Vec::new();
     let mut assets = renderer.assets();
@@ -375,18 +471,102 @@ fn load_enabled_project_packages(
         .filter(|package| package.enabled)
     {
         let manifest_path = runtime_project.project_root.join(&package.manifest);
+        runtime_events.emit(
+            EventStage::ProjectLoad,
+            EngineEvent::Asset(AssetEvent::PackageLoading {
+                package: PackageId::new(package.package_id.clone()),
+                path: manifest_path.display().to_string(),
+            }),
+        );
         let records = assets
             .load_package_manifest_with_expected_id(&manifest_path, &package.package_id)
             .map_err(|err| {
-                format!(
+                let message = format!(
                     "failed to load package '{}' from '{}': {err}",
                     package.package_id,
                     manifest_path.display()
-                )
+                );
+                emit_runtime_package_failed(runtime_events, package, message.clone());
+                message
             })?;
+        runtime_events.emit(
+            EventStage::ProjectLoad,
+            EngineEvent::Asset(AssetEvent::PackageLoaded {
+                package: PackageId::new(package.package_id.clone()),
+                path: manifest_path.display().to_string(),
+            }),
+        );
         all_records.extend(records);
     }
     Ok(all_records)
+}
+
+fn emit_runtime_project_loaded(
+    runtime_events: &mut RuntimeEvents,
+    runtime_project: &RuntimeProject,
+) {
+    runtime_events.emit(
+        EventStage::ProjectLoad,
+        EngineEvent::Lifecycle(LifecycleEvent::ProjectLoaded {
+            project: ProjectId::new(runtime_project.project.project_id.clone()),
+            path: runtime_project.project_path.display().to_string(),
+        }),
+    );
+}
+
+fn emit_runtime_scene_loading(
+    runtime_events: &mut RuntimeEvents,
+    runtime_project: &RuntimeProject,
+) {
+    runtime_events.emit(
+        EventStage::SceneLoad,
+        EngineEvent::Lifecycle(LifecycleEvent::SceneLoading {
+            scene: SceneId::new(runtime_scene_id(runtime_project)),
+            path: runtime_project.startup_scene_path.display().to_string(),
+        }),
+    );
+}
+
+fn emit_runtime_scene_loaded(runtime_events: &mut RuntimeEvents, runtime_project: &RuntimeProject) {
+    runtime_events.emit(
+        EventStage::SceneLoad,
+        EngineEvent::Lifecycle(LifecycleEvent::SceneLoaded {
+            scene: SceneId::new(runtime_scene_id(runtime_project)),
+            path: runtime_project.startup_scene_path.display().to_string(),
+        }),
+    );
+}
+
+fn emit_runtime_shutdown_requested(runtime_events: &mut RuntimeEvents, reason: impl Into<String>) {
+    runtime_events.emit(
+        EventStage::Shutdown,
+        EngineEvent::Lifecycle(LifecycleEvent::ShutdownRequested {
+            reason: reason.into(),
+        }),
+    );
+}
+
+fn emit_runtime_package_failed(
+    runtime_events: &mut RuntimeEvents,
+    package: &ProjectPackage,
+    message: impl Into<String>,
+) {
+    runtime_events.emit(
+        EventStage::ProjectLoad,
+        EngineEvent::Asset(AssetEvent::PackageFailed {
+            package: PackageId::new(package.package_id.clone()),
+            message: message.into(),
+        }),
+    );
+}
+
+fn runtime_scene_id(runtime_project: &RuntimeProject) -> String {
+    runtime_project
+        .project
+        .startup_scene
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "startup".to_string())
 }
 
 fn validate_startup_scene(
@@ -678,6 +858,96 @@ vsync = true
 
         assert!(err.contains("project validation failed"));
         assert!(err.contains("package.id_mismatch"));
+    }
+
+    #[test]
+    fn runtime_lifecycle_helpers_record_project_and_scene_order_without_vulkan() {
+        let dir = temp_dir("lifecycle-order");
+        let project_path = write_project_fixture(&dir);
+        let loaded = load_runtime_project(&options(&project_path)).expect("project should load");
+        let mut runtime_events = RuntimeEvents::new();
+
+        runtime_events.emit(
+            EventStage::Startup,
+            EngineEvent::Lifecycle(LifecycleEvent::AppStarting {
+                app_name: FALLBACK_APP_NAME.to_string(),
+            }),
+        );
+        runtime_events.emit(
+            EventStage::ProjectLoad,
+            EngineEvent::Lifecycle(LifecycleEvent::ProjectLoading {
+                path: project_path.display().to_string(),
+            }),
+        );
+        emit_runtime_project_loaded(&mut runtime_events, &loaded);
+        emit_runtime_scene_loading(&mut runtime_events, &loaded);
+        emit_runtime_scene_loaded(&mut runtime_events, &loaded);
+
+        let labels = runtime_events
+            .recorded()
+            .into_iter()
+            .map(|event| match event.event {
+                EngineEvent::Lifecycle(LifecycleEvent::AppStarting { .. }) => "app_starting",
+                EngineEvent::Lifecycle(LifecycleEvent::ProjectLoading { .. }) => "project_loading",
+                EngineEvent::Lifecycle(LifecycleEvent::ProjectLoaded { .. }) => "project_loaded",
+                EngineEvent::Lifecycle(LifecycleEvent::SceneLoading { .. }) => "scene_loading",
+                EngineEvent::Lifecycle(LifecycleEvent::SceneLoaded { .. }) => "scene_loaded",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            [
+                "app_starting",
+                "project_loading",
+                "project_loaded",
+                "scene_loading",
+                "scene_loaded"
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_shutdown_requested_is_recorded_without_vulkan() {
+        let mut runtime_events = RuntimeEvents::new();
+
+        emit_runtime_shutdown_requested(&mut runtime_events, "window close requested");
+
+        let recorded = runtime_events.recorded();
+        assert_eq!(recorded.len(), 1);
+        match &recorded[0].event {
+            EngineEvent::Lifecycle(LifecycleEvent::ShutdownRequested { reason }) => {
+                assert_eq!(reason, "window close requested");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_package_failure_is_recorded_without_vulkan() {
+        let mut runtime_events = RuntimeEvents::new();
+        let package = ProjectPackage {
+            package_id: "sample".to_string(),
+            manifest: PathBuf::from("assets/sample.package.toml"),
+            enabled: true,
+        };
+
+        emit_runtime_package_failed(
+            &mut runtime_events,
+            &package,
+            "failed to load package 'sample'",
+        );
+
+        let recorded = runtime_events.recorded();
+        assert_eq!(recorded.len(), 1);
+        match &recorded[0].event {
+            EngineEvent::Asset(AssetEvent::PackageFailed { package, message }) => {
+                assert_eq!(package.as_str(), "sample");
+                assert_eq!(message, "failed to load package 'sample'");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

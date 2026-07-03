@@ -11,6 +11,7 @@ edition = "2021"
 env_logger = "0.11"
 log = "0.4"
 renderer = { path = "src/renderer" }
+engine_events = { path = "src/events" }
 winit = "0.29"
 
 [patch.crates-io]

@@ -344,6 +344,12 @@ impl InputSnapshot {
     pub fn action_just_released(&self, action: &ActionId) -> bool {
         self.action_just_released.contains(action)
     }
+
+    pub fn action_values(&self) -> impl Iterator<Item = (&ActionId, f32)> {
+        self.action_values
+            .iter()
+            .map(|(action, value)| (action, *value))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1573,6 +1579,31 @@ mod tests {
             loaded.bindings()[0].trigger,
             BindingTrigger::Key(KeyCode::Space)
         );
+    }
+
+    #[test]
+    fn input_snapshot_exposes_action_values_for_observers() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        let values = system.snapshot().action_values().collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].0.as_str(), "jump");
+        assert_eq!(values[0].1, 1.0);
+        assert!(system.snapshot().action_just_pressed(values[0].0));
     }
 
     #[test]
