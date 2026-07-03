@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> Source: [`src/renderer/src/api/config.rs`](../src/renderer/src/api/config.rs) — no legacy docs consulted.
+> Source: [`src/renderer/src/api/config.rs`](../../src/renderer/src/api/config.rs) — no legacy docs consulted.
 
 ## RendererConfig
 
@@ -14,12 +14,12 @@ pub struct RendererConfig {
     pub compile_shaders: bool,       // compile .glsl to .spv at startup, default: false
     pub preload_startup_scene: bool, // preload default PBR scene, default: true
     pub visual_tuning: VisualTuning,
-    pub headless: bool,              // UNSUPPORTED — returns error if true
+    pub headless: bool,              // set by Renderer::new_headless for offscreen validation
     pub asset_policy: AssetPolicyConfig,
 }
 ```
 
-Defined at [`config.rs:127`](../src/renderer/src/api/config.rs:127). Use `RendererConfig::default()` for sensible defaults.
+Defined at [`config.rs:127`](../../src/renderer/src/api/config.rs#L127). Use `RendererConfig::default()` for sensible defaults. Windowed apps should call `Renderer::new(config, window)` with `headless = false`; offscreen validation should call `Renderer::new_headless(config)` and render with `render_scene_headless(...)`.
 
 ### Shader Compilation
 
@@ -39,7 +39,7 @@ pub enum DebugRuntimeMode {
 }
 ```
 
-Defined at [`config.rs:9`](../src/renderer/src/api/config.rs:9). Affects shader variant selection and material evaluation.
+Defined at [`config.rs:9`](../../src/renderer/src/api/config.rs#L9). Affects shader variant selection and material evaluation.
 
 ## VisualTuning
 
@@ -51,7 +51,7 @@ pub struct VisualTuning {
 }
 ```
 
-Defined at [`config.rs:69`](../src/renderer/src/api/config.rs:69). These are passed to the `EnvironmentUBO` each frame — changes take effect immediately.
+Defined at [`config.rs:69`](../../src/renderer/src/api/config.rs#L69). These are passed to the `EnvironmentUBO` each frame — changes take effect immediately.
 
 ## AssetPolicyConfig
 
@@ -69,11 +69,11 @@ pub enum AssetManifestMode {
 }
 ```
 
-Defined at [`config.rs:48`](../src/renderer/src/api/config.rs:48). Manifest files are TOML sidecars (e.g., `model.glb.meta`) that override texture sampling parameters.
+Defined at [`config.rs:48`](../../src/renderer/src/api/config.rs#L48). Manifest files are TOML sidecars (e.g., `model.glb.meta`) that override texture sampling parameters.
 
 ## Resolution Chain for Texture Parameters
 
-When loading a texture, the engine resolves `FilterMode` and `WrapMode` via a priority chain ([`asset_manifest.rs:390`](../src/renderer/src/data/asset_manifest.rs:390)):
+When loading a texture, the engine resolves `FilterMode` and `WrapMode` via a priority chain ([`asset_manifest.rs:390`](../../src/renderer/src/data/asset_manifest.rs#L390)):
 
 1. **API override** — `TextureLoadOptions` passed to the load call
 2. **Manifest sidecar** — `.meta` file if present and `manifest_mode` allows
@@ -84,4 +84,4 @@ When loading a texture, the engine resolves `FilterMode` and `WrapMode` via a pr
 
 - [02-renderer.md](02-renderer.md) — Renderer lifecycle
 - [04-assets.md](04-assets.md) — asset loading and manifests
-- [src/renderer/src/data/asset_manifest.rs](../src/renderer/src/data/asset_manifest.rs) — manifest format
+- [src/renderer/src/data/asset_manifest.rs](../../src/renderer/src/data/asset_manifest.rs) — manifest format

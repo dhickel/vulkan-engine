@@ -16,7 +16,7 @@ Status values:
 
 | Sprint | Status | Target | Primary Gate | Notes |
 |---|---|---|---|---|
-| 01 | executing | Alpha baseline audit and process repair | Current docs/process match live repo, stale reports retired | Plan suite: `sprints/sprint-01-alpha-baseline-audit/`. Execute on `sprint/alpha-01-baseline-audit`. |
+| 01 | blocked | Alpha baseline audit and process repair | Current docs/process match live repo, stale reports retired | Phase 04 compile/test baseline passed and stale headless docs were remediated; closeout is blocked on changelog timing confirmation and parent-owned commit/push/email gates. Plan suite: `sprints/sprint-01-alpha-baseline-audit/`. Execute on `sprint/alpha-01-baseline-audit`. |
 | 02 | proposed | Asset package authoring and validation tools | Rust CLI validates/authors package/project/scene fixtures and sample project | Recommended Rust tool, not Python. |
 | 03 | proposed | Editor packaged-asset placement hardening | Packaged assets place, select, save, reload, and visually prove | Builds on existing `apps/editor`. |
 | 04 | proposed | Runtime project launcher and application dev loop | Sample project runs outside editor through documented app path | Decide root binary/app template/hot loop role. |

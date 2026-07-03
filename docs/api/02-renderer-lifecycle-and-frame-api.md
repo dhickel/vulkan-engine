@@ -26,7 +26,7 @@ Facade lifecycle path:
 - The native editor shell launches with `cargo run -p editor` and accepts
   `--project <path>`, `--scene <path>`, and the standard
   `--record_debug`, `--record_debug_interval`, `--record_debug_path` timing flags.
-- Current alpha limitation: headless mode is not implemented (`Renderer::new` returns unsupported when `config.headless = true`).
+- Headless validation uses `Renderer::new_headless(config)` and `render_scene_headless(...)`; do not set `config.headless = true` on the windowed `Renderer::new(config, window)` path.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
