@@ -13,7 +13,7 @@
     "validation/phase-04-validation-report.md"
   ],
   "phase_status": {
-    "phase_01_runtime_cli": "validator_passed",
+    "phase_01_runtime_cli": "validator_passed_committed_pushed_reported",
     "phase_02_runtime_loading_loop": "pending",
     "phase_03_dev_loop_docs": "pending",
     "phase_04_capture_closeout": "pending"
@@ -68,6 +68,32 @@
       "exit_code": 0
     }
   ],
+  "main_thread_evidence": {
+    "phase_commits": [
+      {
+        "phase": "phase_01_runtime_cli",
+        "hash": "ff8a20fd",
+        "subject": "Sprint 04 phase 01 runtime CLI",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/ff8a20fd"
+      }
+    ],
+    "pushes": [
+      {
+        "phase": "phase_01_runtime_cli",
+        "branch": "sprint/alpha-04-runtime-launcher",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
+        "pushed_through": "ff8a20fd"
+      }
+    ],
+    "email_reports": [
+      {
+        "phase": "phase_01_runtime_cli",
+        "subject": "Sprint 04 Phase 01 Progress Report - Runtime CLI",
+        "message_id": "<0100019f276e74fa-15f79adb-33fd-46e8-8fe5-dc01b14a7ae0-000000@email.amazonses.com>",
+        "thread_id": "6d696e45-f032-4006-99e1-b6251f30529f"
+      }
+    ]
+  },
   "capture_proof": {
     "required": true,
     "status": "pending",
