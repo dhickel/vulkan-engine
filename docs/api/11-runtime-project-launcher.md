@@ -4,7 +4,7 @@
 
 This page documents the root `engine` launcher for alpha data-driven projects. Use it when running a project manifest outside the editor, validating packaged scene data, or producing headless draw-target capture evidence.
 
-For custom Rust gameplay or tool behavior, use an app crate under `apps/<name>` and run it with `cargo run -p <app>`, or generate a standalone support-crate scaffold with `engine_pack new-app`. The root launcher emits alpha lifecycle/package/scene/shutdown events for validation and diagnostics, but it is not dynamic Rust hot reload, scripting runtime execution, runtime physics scene loading, runtime audio playback, renderer-window app generation, or a full gameplay lifecycle framework.
+For custom Rust gameplay or tool behavior, use an app crate under `apps/<name>` and run it with `cargo run -p <app>`, or generate a standalone support-crate scaffold with `engine_pack new-app`. The root launcher emits alpha lifecycle/package/scene/shutdown events for validation and diagnostics, but it is not dynamic Rust hot reload, production scripting runtime scheduling, runtime physics scene loading, runtime audio playback, renderer-window app generation, or a full gameplay lifecycle framework.
 
 ## 2. Basic Launch
 
@@ -103,7 +103,7 @@ cargo run -p engine_pack -- new-app /tmp/engine-app --id app.example --name "Exa
 cargo check --manifest-path /tmp/engine-app/Cargo.toml
 ```
 
-The generated scaffold uses public support crates (`engine_events`, `input`, and `physics`) by absolute path and does not edit the root workspace. Dynamic Rust hot reload, a scripting runtime, automatic scene collision loading, root-runtime audio playback, broad dogfood migration, and renderer-window app generation are later roadmap work, not part of the current root launcher.
+The generated scaffold uses public support crates (`engine_events`, `input`, and `physics`) by absolute path and does not edit the root workspace. Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, automatic scene collision loading, root-runtime audio playback, broad dogfood migration, and renderer-window app generation are later roadmap work, not part of the current root launcher.
 
 ## 7. See Also
 

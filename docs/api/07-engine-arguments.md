@@ -13,7 +13,8 @@ Arguments on this page are parsed at renderer example startup before `Renderer::
 - The current shared parser lives in `src/renderer/examples/common/mod.rs`.
 - The same argument set applies across runtime examples (`demo_pbr`, `demo_unlit`, `demo_model_load`, `demo_async_loading`, `api_test`).
 - Custom Rust behavior belongs in app crates under `apps/<name>` and runs with `cargo run -p <app>`.
-- Dynamic Rust hot reload, scripting runtime, runtime physics scene loading, root-runtime audio playback, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and generated app templates are deferred.
+- For off-workspace app-control scaffolding, use `engine_pack new-app`; it generates a support-crate app and does not add renderer-window integration or runtime reload.
+- Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, runtime physics scene loading, root-runtime audio playback, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and renderer-window generated app templates are deferred.
 - `--record_debug=<seconds>` starts capture immediately at launch.
 - `--record_debug_interval` and `--record_debug_path` can be supplied with or without `--record_debug`.
 - If interval/path are supplied without `--record_debug`, values are configured but capture is not auto-started.

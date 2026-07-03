@@ -140,7 +140,7 @@ The accepted frame 15 PNG shows the block prop on the left and the wall chunk on
 
 ## Current Limitations
 
-The alpha editor placement slice does not yet include binary package archives, asset thumbnails, CSG/brush wall editing, polygon editing, material graph editing, PBR material authoring, packaged audio placement, physics/collision authoring, scripting, dynamic Rust hot reload, generated app templates, or broad dogfood migration to project manifests. Runtime project launch is handled outside the editor by the root `engine` binary:
+The alpha editor placement slice does not yet include binary package archives, asset thumbnails, CSG/brush wall editing, polygon editing, material graph editing, PBR material authoring, packaged audio placement, physics/collision authoring, scripting UI, dynamic Rust hot reload, renderer-window generated app templates, or broad dogfood migration to project manifests. Runtime project launch is handled outside the editor by the root `engine` binary:
 
 ```sh
 cargo run -- --project apps/editor/sample_project/engine.project.toml

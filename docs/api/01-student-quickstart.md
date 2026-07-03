@@ -102,7 +102,7 @@ Frame tick:
 - Handle render outcomes exhaustively and keep the loop alive while resize is pending.
 - Begin with sync model load for correctness, then adopt deferred tickets for larger assets.
 - Keep asset loading code separate from draw submission code so failures are easier to isolate.
-- Keep custom Rust behavior in app crates under `apps/<name>` or start from `engine_pack new-app` for a standalone support-crate scaffold. Dynamic Rust hot reload, scripting runtime, runtime physics scene loading, root-runtime audio playback, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and renderer-window generated app templates are deferred.
+- Keep custom Rust behavior in app crates under `apps/<name>` or start from `engine_pack new-app` for a standalone support-crate scaffold. Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, runtime physics scene loading, root-runtime audio playback, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and renderer-window generated app templates are deferred.
 
 ## 6. Gotchas & Failure Modes
 - Running `cargo run` at workspace root requires `--project <path>` for the launcher.

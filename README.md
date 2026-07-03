@@ -24,5 +24,7 @@ Runtime entrypoints:
   `RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 3 --capture_frame_start 5 --capture_frame_interval 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw`
 - Use renderer examples under `src/renderer/examples/` for renderer diagnostics and facade examples, for example `cargo run -p renderer --example demo_pbr`.
 - Custom Rust applications live under `apps/<name>` and run with `cargo run -p <app>`, for example `cargo run -p dungeon_dogfood`.
-- Dynamic Rust hot reload, scripting runtime, event-system integration, physics integration, audio integration, broad dogfood migration to project manifests, and generated app templates are deferred.
+- `engine_pack new-app` can generate a standalone support-crate Rust app scaffold; renderer-window generated templates remain deferred.
+- The `scripting` crate is experimental and limited to script-ID-aware eval, logging, returned script events, and typed errors. Production scripting runtime scheduling and package-level script assets are deferred.
+- Dynamic Rust hot reload/runtime reload, broad dogfood migration to project manifests, and production-grade physics/audio/editor integration remain deferred.
 - Treat crate/app existence as workspace presence, not alpha readiness. Current residuals are tracked through the alpha readiness baseline and Sprint 01 follow-up artifacts.
