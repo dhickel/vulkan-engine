@@ -1,0 +1,128 @@
+{
+  "format_version": 1,
+  "scene_id": "scene.untitled",
+  "root_nodes": [
+    "node.000001"
+  ],
+  "nodes": [
+    {
+      "id": "node.000001",
+      "parent": null,
+      "name": "Phase 02 Round Trip Root",
+      "transform": {
+        "translation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "asset": null,
+      "material_overrides": {},
+      "visibility": {
+        "visible": true,
+        "locked": false,
+        "layer": "world"
+      },
+      "tags": [
+        "phase-02",
+        "root"
+      ]
+    },
+    {
+      "id": "node.placed.editor_sample_model_block.000001",
+      "parent": "node.000001",
+      "name": "Block Prop",
+      "transform": {
+        "translation": [
+          -1.5,
+          0.0,
+          -2.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.25,
+          1.0,
+          1.25
+        ]
+      },
+      "asset": {
+        "id": "editor_sample.model.block",
+        "path_hint": "models/block_prop.obj"
+      },
+      "material_overrides": {
+        "0": "mat_override.phase02_block"
+      },
+      "visibility": {
+        "visible": true,
+        "locked": false,
+        "layer": "world"
+      },
+      "tags": [
+        "model",
+        "prop",
+        "sample",
+        "phase-02"
+      ]
+    },
+    {
+      "id": "node.placed.editor_sample_wall_stone_2m.000002",
+      "parent": "node.000001",
+      "name": "Stone Wall 2m",
+      "transform": {
+        "translation": [
+          1.5,
+          0.0,
+          -2.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "asset": {
+        "id": "editor_sample.wall.stone_2m",
+        "path_hint": "prefabs/wall_straight_2m.obj"
+      },
+      "material_overrides": {},
+      "visibility": {
+        "visible": true,
+        "locked": false,
+        "layer": "world"
+      },
+      "tags": [
+        "wall",
+        "chunk",
+        "prefab",
+        "sample",
+        "phase-02"
+      ]
+    }
+  ],
+  "lights": [],
+  "environment": null,
+  "materials": {},
+  "editor": {}
+}

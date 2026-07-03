@@ -585,8 +585,7 @@ fn process_editor_actions(
                 match Scene::load(&path, &mut assets) {
                     Ok(loaded) => {
                         *scene = loaded;
-                        *history = CommandHistory::new(COMMAND_HISTORY_DEPTH);
-                        session.borrow_mut().clear_selection();
+                        reset_editor_runtime_after_scene_load(session, history);
                         session
                             .borrow_mut()
                             .mark_clean(format!("Loaded scene {}", path.display()));
@@ -606,6 +605,14 @@ fn process_editor_actions(
         .refresh_scene_nodes(scene.node_summaries());
     cleanup_invalid_selection(session, scene);
     Ok(())
+}
+
+fn reset_editor_runtime_after_scene_load(
+    session: &Rc<RefCell<EditorSession>>,
+    history: &mut CommandHistory,
+) {
+    *history = CommandHistory::new(COMMAND_HISTORY_DEPTH);
+    session.borrow_mut().clear_selection();
 }
 
 fn confirm_asset_placement(
@@ -919,6 +926,7 @@ fn handle_manual_capture_key(renderer: &mut Renderer, key_event: &KeyEvent) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::{Mat4, Vec3};
 
     #[test]
     fn editor_shortcuts_are_suppressed_when_imgui_captures_keyboard() {
@@ -960,6 +968,35 @@ mod tests {
         );
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn scene_load_reset_clears_selection_and_command_history() {
+        let session = Rc::new(RefCell::new(EditorSession::new(None, None)));
+        let mut scene = Scene::new();
+        let node = scene.create_node_default(None).expect("node");
+        scene.set_node_name(node, "Selected Before Load").unwrap();
+        select_node(&session, &scene, node);
+
+        let mut history = CommandHistory::new(COMMAND_HISTORY_DEPTH);
+        scene
+            .execute_command(
+                &mut history,
+                Box::new(SetTransformCommand::new(
+                    node,
+                    Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                )),
+            )
+            .unwrap();
+        assert!(history.can_undo());
+        assert!(session.borrow().selection().is_some());
+
+        reset_editor_runtime_after_scene_load(&session, &mut history);
+
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+        assert!(session.borrow().selection().is_none());
+        assert!(session.borrow().transform_edit().is_none());
     }
 }
 

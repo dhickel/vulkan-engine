@@ -769,7 +769,23 @@ impl Scene {
         path: impl AsRef<std::path::Path>,
         assets: &mut crate::api::assets::AssetManager,
     ) -> Result<Self, crate::api::errors::RendererError> {
-        let json = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+        let serialized = Self::read_serialized_scene(path.as_ref())?;
+        serialized.into_scene(assets)
+    }
+
+    #[cfg(test)]
+    fn load_with_loader(
+        path: impl AsRef<std::path::Path>,
+        loader: &mut impl SceneAssetLoader,
+    ) -> Result<Self, crate::api::errors::RendererError> {
+        let serialized = Self::read_serialized_scene(path.as_ref())?;
+        serialized.into_scene_with_loader(loader)
+    }
+
+    fn read_serialized_scene(
+        path: &std::path::Path,
+    ) -> Result<SerializedScene, crate::api::errors::RendererError> {
+        let json = std::fs::read_to_string(path).map_err(|e| {
             crate::api::errors::RendererError::Init(
                 crate::api::errors::RendererInitError::StartupScene(format!(
                     "failed to read scene file: {e}"
@@ -783,7 +799,7 @@ impl Scene {
                 )),
             )
         })?;
-        serialized.into_scene(assets)
+        Ok(serialized)
     }
 
     pub(crate) fn from_world(world: SceneWorld) -> Self {
@@ -1863,8 +1879,9 @@ mod tests {
     use crate::api::errors::{AssetError, RendererError, SceneError};
     use crate::data::handles::{EnvironmentHandle, MeshHandle};
     use crate::scene::command::{CommandHistory, PlaceAssetCommand};
-    use glam::{Mat4, Vec3};
-    use std::path::PathBuf;
+    use glam::{Mat4, Quat, Vec3};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn stale_handle_rejected() {
@@ -2213,6 +2230,132 @@ mod tests {
     }
 
     #[test]
+    fn editor_packaged_scene_save_copy_round_trips_model_and_wall_chunk() {
+        let saved_scene = phase_02_saved_scene_copy_path();
+        fs::create_dir_all(saved_scene.parent().expect("artifact parent")).unwrap();
+
+        let mut scene = Scene::new();
+        let root = scene.create_node_default(None).unwrap();
+        scene
+            .set_node_name(root, "Phase 02 Round Trip Root")
+            .unwrap();
+        scene
+            .set_node_tags(root, vec!["phase-02".to_string(), "root".to_string()])
+            .unwrap();
+        let mut history = CommandHistory::new(8);
+
+        let model = place_test_asset(
+            &mut scene,
+            &mut history,
+            root,
+            "editor_sample.model.block",
+            "models/block_prop.obj",
+            "Block Prop",
+            &["model", "prop", "sample", "phase-02"],
+            "node.placed.editor_sample_model_block.000001",
+            Mat4::from_scale_rotation_translation(
+                Vec3::new(1.25, 1.0, 1.25),
+                Quat::IDENTITY,
+                Vec3::new(-1.5, 0.0, -2.0),
+            ),
+            MeshHandle::new(21, 0),
+        );
+        scene
+            .set_node_material_override(model, "0", "mat_override.phase02_block")
+            .unwrap();
+
+        let wall = place_test_asset(
+            &mut scene,
+            &mut history,
+            root,
+            "editor_sample.wall.stone_2m",
+            "prefabs/wall_straight_2m.obj",
+            "Stone Wall 2m",
+            &["wall", "chunk", "prefab", "sample", "phase-02"],
+            "node.placed.editor_sample_wall_stone_2m.000002",
+            Mat4::from_translation(Vec3::new(1.5, 0.0, -2.0)),
+            MeshHandle::new(22, 0),
+        );
+
+        scene.save(&saved_scene).unwrap();
+        let json = fs::read_to_string(&saved_scene).unwrap();
+        assert!(json.contains("\"id\": \"editor_sample.model.block\""));
+        assert!(json.contains("\"id\": \"editor_sample.wall.stone_2m\""));
+        assert!(json.contains("\"node.placed.editor_sample_model_block.000001\""));
+        assert!(json.contains("\"node.placed.editor_sample_wall_stone_2m.000002\""));
+        assert!(json.contains("\"mat_override.phase02_block\""));
+        assert!(!json.contains("\"slot\""));
+        assert!(!json.contains("\"generation\""));
+        assert!(!json.contains("mesh_handle"));
+        validate_scene_str_with_options(
+            &json,
+            &SceneValidationOptions::default()
+                .with_known_asset_ids(["editor_sample.model.block", "editor_sample.wall.stone_2m"]),
+        )
+        .unwrap();
+
+        let mut loader = FakeSceneAssetLoader::default();
+        let loaded = Scene::load_with_loader(&saved_scene, &mut loader).unwrap();
+        assert_eq!(
+            loader.loaded_models,
+            vec![
+                SceneAssetReference::new(
+                    "editor_sample.model.block",
+                    Some(PathBuf::from("models/block_prop.obj")),
+                ),
+                SceneAssetReference::new(
+                    "editor_sample.wall.stone_2m",
+                    Some(PathBuf::from("prefabs/wall_straight_2m.obj")),
+                ),
+            ]
+        );
+
+        let model_stable_id = scene.node_stable_id(model).unwrap().unwrap();
+        let wall_stable_id = scene.node_stable_id(wall).unwrap().unwrap();
+        let summaries = loaded.node_summaries();
+        let model_summary = summaries
+            .iter()
+            .find(|node| node.stable_id.as_deref() == Some(model_stable_id.as_str()))
+            .expect("loaded model node");
+        let wall_summary = summaries
+            .iter()
+            .find(|node| node.stable_id.as_deref() == Some(wall_stable_id.as_str()))
+            .expect("loaded wall node");
+
+        assert_eq!(
+            model_summary
+                .asset
+                .as_ref()
+                .map(|asset| (asset.id.as_str(), asset.path_hint.as_deref())),
+            Some((
+                "editor_sample.model.block",
+                Some(Path::new("models/block_prop.obj"))
+            ))
+        );
+        assert_eq!(
+            wall_summary
+                .asset
+                .as_ref()
+                .map(|asset| (asset.id.as_str(), asset.path_hint.as_deref())),
+            Some((
+                "editor_sample.wall.stone_2m",
+                Some(Path::new("prefabs/wall_straight_2m.obj"))
+            ))
+        );
+        assert_eq!(
+            model_summary
+                .material_overrides
+                .get("0")
+                .map(String::as_str),
+            Some("mat_override.phase02_block")
+        );
+        assert!(model_summary.tags.iter().any(|tag| tag == "phase-02"));
+        assert!(wall_summary.tags.iter().any(|tag| tag == "wall"));
+        assert_transform_translation(model_summary.local_transform, Vec3::new(-1.5, 0.0, -2.0));
+        assert_transform_translation(wall_summary.local_transform, Vec3::new(1.5, 0.0, -2.0));
+    }
+
+    #[test]
     fn inspector_metadata_edits_round_trip_name_tags_and_material_override() {
         let mut scene = Scene::new();
         let root = scene.create_node_default(None).unwrap();
@@ -2513,6 +2656,61 @@ mod tests {
             Err(err) => err,
         };
         assert!(predicate(err));
+    }
+
+    fn phase_02_saved_scene_copy_path() -> PathBuf {
+        let renderer_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = renderer_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("renderer crate lives under src/renderer");
+        workspace_root.join(
+            ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn place_test_asset(
+        scene: &mut Scene,
+        history: &mut CommandHistory,
+        parent: crate::scene::SceneNodeId,
+        asset_id: &str,
+        path_hint: &str,
+        display_name: &str,
+        tags: &[&str],
+        stable_id: &str,
+        transform: Mat4,
+        mesh: MeshHandle,
+    ) -> crate::scene::SceneNodeId {
+        let mut fragment = SceneFragment::new();
+        fragment
+            .add_node(None, Mat4::IDENTITY, vec![mesh])
+            .expect("fragment root");
+
+        scene
+            .execute_command(
+                history,
+                Box::new(PlaceAssetCommand::new(
+                    Some(parent),
+                    transform,
+                    fragment,
+                    SceneAssetReference::new(asset_id, Some(PathBuf::from(path_hint))),
+                    display_name,
+                    tags.iter().map(|tag| tag.to_string()).collect(),
+                    stable_id,
+                )),
+            )
+            .unwrap()
+            .created_node
+            .expect("placed node")
+    }
+
+    fn assert_transform_translation(transform: Mat4, expected: Vec3) {
+        let (_, _, translation) = transform.to_scale_rotation_translation();
+        assert!(
+            translation.abs_diff_eq(expected, 0.0001),
+            "translation {translation:?} did not match {expected:?}"
+        );
     }
 
     #[derive(Default)]
