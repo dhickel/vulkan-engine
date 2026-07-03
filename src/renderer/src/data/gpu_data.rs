@@ -8,26 +8,14 @@
 //! ## Key Concepts
 //! - **Vertex layout**: Comprehensive layout with all glTF attributes (position, normal, tangent, UVs, skinning)
 //! - **Push constants**: Per-draw data (model matrix, buffer addresses) avoiding descriptor updates
-use crate::data::data_cache::{
-    CoreShaderType, MeshCache, TextureCache, VkLoadedMaterial, VkSamplerInfo, VkShaderCache,
-};
+use crate::data::data_cache::{TextureCache, VkLoadedMaterial, VkSamplerInfo};
 use crate::data::handles::{MaterialHandle, MeshHandle, TextureHandle};
-use crate::vulkan::vk_descriptor::{
-    DescriptorLayoutBuilder, VkDescWriterType, VkDescriptorWriter, VkDynamicDescriptorAllocator,
-};
-use crate::vulkan::vk_pipeline::PipelineBuilder;
-use crate::vulkan::vk_render::VkRender;
-use crate::vulkan::vk_types::{
-    LogicalDevice, VkBuffer, VkDescriptors, VkImageAlloc, VkPipeline, VkSubAlloc,
-};
-use crate::vulkan::vk_util;
+use crate::vulkan::vk_types::{VkImageAlloc, VkSubAlloc};
 use ash::vk;
-use ash::vk::DescriptorSet;
 use bytemuck::{Pod, Zeroable};
-use glam::{vec4, Mat4, UVec4, Vec2, Vec3, Vec4};
+use glam::{Mat4, UVec4, Vec3, Vec4};
 use std::cmp::PartialEq;
 use std::f32::consts::PI;
-use std::ffi::{CStr, CString};
 
 /// Maximum number of point lights that can be uploaded to GPU per frame.
 pub const MAX_POINT_LIGHTS_GPU: usize = 16;
@@ -633,7 +621,12 @@ impl Default for EnvironmentUBO {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct PushConstSkyBox {
-    pub projection: Mat4, // FIXME this need combined to to stay under 128byte push const
+    // PushConstSkyBox is ~144 bytes (2×Mat4 + DeviceAddress + 2×f32).
+    // Vulkan spec guarantees only 128 bytes for push constants, but all desktop
+    // GPUs (NVIDIA/AMD/Intel) supporting Vulkan 1.3 provide ≥256 bytes.
+    // If this becomes an issue, combine projection+model into a single
+    // view_projection matrix and update skybox.vert / skybox.frag accordingly.
+    pub projection: Mat4,
     pub model: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
     pub exposure: f32,
@@ -801,7 +794,7 @@ const _: () = {
         "GpuPointLight must be exactly 32 bytes"
     );
     assert!(
-        std::mem::size_of::<EnvironmentUBO>() % 16 == 0,
+        std::mem::size_of::<EnvironmentUBO>().is_multiple_of(16),
         "EnvironmentUBO must be 16-byte aligned"
     );
 };

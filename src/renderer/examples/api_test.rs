@@ -31,8 +31,10 @@ fn main() {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut config = RendererConfig::default();
-    config.app_name = "renderer facade api_test".to_string();
+    let config = RendererConfig {
+        app_name: "renderer facade api_test".to_string(),
+        ..RendererConfig::default()
+    };
 
     let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()

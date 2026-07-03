@@ -11,6 +11,9 @@ use crate::api::config::AssetPolicyConfig;
 use crate::api::loading::{LoadStatus, LoadTicket};
 use crate::api::scene::{SceneFragment, SceneFragmentNodeId};
 use crate::data::asset_manifest::{self, TextureLoadOptions};
+use crate::data::asset_registry::{
+    AssetKind, AssetRegistry, AssetRegistryError, DurableAssetRecord,
+};
 use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
     CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
@@ -109,6 +112,7 @@ pub(crate) struct AssetLoadTracker {
     terminal_tickets: VecDeque<LoadTicket>,
     tasks: HashMap<LoadTicket, DeferredLoadTask>,
     max_in_flight_jobs: usize,
+    asset_registry: AssetRegistry,
 }
 
 impl AssetLoadTracker {
@@ -119,6 +123,7 @@ impl AssetLoadTracker {
             terminal_tickets: VecDeque::new(),
             tasks: HashMap::new(),
             max_in_flight_jobs: 4,
+            asset_registry: AssetRegistry::new(),
         }
     }
 
@@ -517,6 +522,14 @@ impl AssetLoadTracker {
     fn record_terminal(&mut self, ticket: LoadTicket) {
         self.terminal_tickets.push_back(ticket);
     }
+
+    pub(crate) fn asset_registry(&self) -> &AssetRegistry {
+        &self.asset_registry
+    }
+
+    pub(crate) fn asset_registry_mut(&mut self) -> &mut AssetRegistry {
+        &mut self.asset_registry
+    }
 }
 
 pub struct AssetManager<'a> {
@@ -556,6 +569,124 @@ impl<'a> AssetManager<'a> {
                 path: Some(path_for_err),
                 message: "model import did not contain any meshes".to_string(),
             })
+    }
+
+    /// Load a package manifest into the durable asset registry.
+    ///
+    /// This only records CPU-side package metadata. It does not import, upload,
+    /// or allocate runtime handles for the listed assets.
+    pub fn load_package_manifest(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<Vec<DurableAssetRecord>, AssetError> {
+        self.load_tracker
+            .asset_registry_mut()
+            .load_package_manifest(path)
+            .map_err(asset_registry_error_to_asset_error)
+    }
+
+    /// Load a package manifest and require that its `package_id` matches the
+    /// project package record that referenced it.
+    pub fn load_package_manifest_with_expected_id(
+        &mut self,
+        path: impl AsRef<Path>,
+        expected_package_id: &str,
+    ) -> Result<Vec<DurableAssetRecord>, AssetError> {
+        self.load_tracker
+            .asset_registry_mut()
+            .load_package_manifest_with_expected_id(path, Some(expected_package_id))
+            .map_err(asset_registry_error_to_asset_error)
+    }
+
+    /// List durable package assets currently known to the facade registry.
+    pub fn list_assets(&self) -> Vec<DurableAssetRecord> {
+        self.load_tracker
+            .asset_registry()
+            .list_assets()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// List durable package assets filtered by kind and text query.
+    ///
+    /// Results keep registry order, which is deterministic by durable asset ID.
+    pub fn list_assets_matching(
+        &self,
+        kind: Option<AssetKind>,
+        search: Option<&str>,
+    ) -> Vec<DurableAssetRecord> {
+        self.load_tracker
+            .asset_registry()
+            .list_assets_matching(kind.as_ref(), search)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Look up a durable asset record by ID.
+    pub fn asset_record(&self, asset_id: &str) -> Option<DurableAssetRecord> {
+        self.load_tracker
+            .asset_registry()
+            .asset_record(asset_id)
+            .cloned()
+    }
+
+    /// Resolve a durable asset ID into its loadable path/kind metadata.
+    pub fn resolve_asset(&self, asset_id: &str) -> Result<DurableAssetRecord, AssetError> {
+        self.load_tracker
+            .asset_registry()
+            .resolve_asset(asset_id)
+            .cloned()
+            .map_err(asset_registry_error_to_asset_error)
+    }
+
+    /// Load a model or prefab by durable asset ID through the existing model
+    /// upload path.
+    ///
+    /// Runtime handles remain return values from the load path; the durable ID
+    /// is only used to resolve CPU-side package metadata.
+    pub fn load_model_asset(&mut self, asset_id: &str) -> Result<SceneFragment, AssetError> {
+        let record = self.resolve_asset(asset_id)?;
+        ensure_asset_kind(
+            &record,
+            &[AssetKind::Model, AssetKind::Prefab, AssetKind::WallChunk],
+        )?;
+        self.load_model(record.source_path)
+    }
+
+    /// Load a texture by durable asset ID through the existing texture upload path.
+    pub fn load_texture_asset(&mut self, asset_id: &str) -> Result<TextureHandle, AssetError> {
+        let record = self.resolve_asset(asset_id)?;
+        ensure_asset_kind(&record, &[AssetKind::Texture])?;
+        self.load_texture(record.source_path)
+    }
+
+    /// Load an environment by durable asset ID through the existing environment path.
+    pub fn load_environment_asset(
+        &mut self,
+        asset_id: &str,
+    ) -> Result<EnvironmentHandle, AssetError> {
+        let record = self.resolve_asset(asset_id)?;
+        ensure_asset_kind(&record, &[AssetKind::Environment])?;
+        self.load_environment(EnvironmentSource::Auto(record.source_path))
+    }
+
+    /// Queue deferred model/prefab loading by durable asset ID.
+    pub fn request_model_asset_load(&mut self, asset_id: &str) -> Result<LoadTicket, AssetError> {
+        let record = self.resolve_asset(asset_id)?;
+        ensure_asset_kind(
+            &record,
+            &[AssetKind::Model, AssetKind::Prefab, AssetKind::WallChunk],
+        )?;
+        self.request_model_load(record.source_path)
+    }
+
+    /// Queue deferred texture loading by durable asset ID.
+    pub fn request_texture_asset_load(&mut self, asset_id: &str) -> Result<LoadTicket, AssetError> {
+        let record = self.resolve_asset(asset_id)?;
+        ensure_asset_kind(&record, &[AssetKind::Texture])?;
+        self.request_texture_load(record.source_path)
     }
 
     /// Thread: Main
@@ -1102,14 +1233,6 @@ fn rollback_model_allocations(
     })
 }
 
-fn load_texture_gpu_ready(
-    path: PathBuf,
-    data_cache: Arc<VkDataCache>,
-) -> Result<TextureHandle, AssetError> {
-    // Default policy: no manifest, no heuristics, no overrides
-    load_texture_gpu_ready_with_policy(path, data_cache, &AssetPolicyConfig::default(), None)
-}
-
 fn load_texture_gpu_ready_with_policy(
     path: PathBuf,
     data_cache: Arc<VkDataCache>,
@@ -1295,13 +1418,6 @@ fn map_texture_path_err(path: &Path, err: ImageError) -> AssetError {
     }
 }
 
-fn map_environment_load_err(path: &Path, message: String) -> AssetError {
-    AssetError::Load {
-        path: Some(path.to_path_buf()),
-        message,
-    }
-}
-
 fn map_cache_err(
     resource: &'static str,
     slot: u32,
@@ -1329,6 +1445,39 @@ fn map_cache_err(
             slot,
             generation,
         },
+    }
+}
+
+fn ensure_asset_kind(record: &DurableAssetRecord, allowed: &[AssetKind]) -> Result<(), AssetError> {
+    if allowed.iter().any(|kind| kind == &record.kind) {
+        return Ok(());
+    }
+
+    let expected = allowed
+        .iter()
+        .map(AssetKind::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(AssetError::Unsupported(format!(
+        "asset '{}' has kind '{}'; expected one of: {}",
+        record.asset_id, record.kind, expected
+    )))
+}
+
+fn asset_registry_error_to_asset_error(err: AssetRegistryError) -> AssetError {
+    match err {
+        AssetRegistryError::Io { path, message } => AssetError::Io { path, message },
+        AssetRegistryError::Parse { path, message } => AssetError::ManifestParse {
+            path: path.unwrap_or_default(),
+            message,
+        },
+        AssetRegistryError::UnsupportedVersion { .. }
+        | AssetRegistryError::PackageIdMismatch { .. }
+        | AssetRegistryError::DuplicateAssetId(_)
+        | AssetRegistryError::InvalidAssetId(_)
+        | AssetRegistryError::InvalidAssetPath { .. }
+        | AssetRegistryError::UnsupportedAssetKind(_)
+        | AssetRegistryError::MissingAssetId(_) => AssetError::Unsupported(err.to_string()),
     }
 }
 
@@ -1463,7 +1612,7 @@ fn validate_procedural_mesh(mesh: &ProceduralMeshData) -> Result<(), AssetError>
     }
 
     // Check index count divisible by 3
-    if mesh.indices.len() % 3 != 0 {
+    if !mesh.indices.len().is_multiple_of(3) {
         return Err(AssetError::Internal(format!(
             "procedural mesh '{}' index count ({}) is not divisible by 3 (incomplete triangles)",
             name,

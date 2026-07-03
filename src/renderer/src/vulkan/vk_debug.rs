@@ -12,7 +12,7 @@ pub fn capture_and_save_image_view(
     command_pool: vk::CommandPool,
     queue: vk::Queue,
     image: vk::Image,
-    format: vk::Format,
+    _format: vk::Format,
     extent: vk::Extent3D,
     path: &str,
 ) {
@@ -99,13 +99,17 @@ pub fn capture_and_save_image_view(
 
     // End and submit command buffer
     unsafe {
-        device.end_command_buffer(command_buffer).unwrap();
+        device
+            .end_command_buffer(command_buffer)
+            .expect("debug: failed to end command buffer");
         let command_buffer = [command_buffer];
         let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffer);
         device
             .queue_submit(queue, &[submit_info], vk::Fence::null())
-            .unwrap();
-        device.queue_wait_idle(queue).unwrap();
+            .expect("debug: failed to submit debug command buffer");
+        device
+            .queue_wait_idle(queue)
+            .expect("debug: failed to wait for queue idle");
     }
 
     // Map memory and create image

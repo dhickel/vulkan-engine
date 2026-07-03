@@ -556,7 +556,11 @@ mod tests {
                     let nx = nx as usize;
                     let ny = ny as usize;
                     if !matches!(level.tile_at_3d(layer, nx, ny), Tile::Wall | Tile::Void) {
-                        stack.push(TileCoord { layer, x: nx, y: ny });
+                        stack.push(TileCoord {
+                            layer,
+                            x: nx,
+                            y: ny,
+                        });
                     }
                 }
             }
@@ -579,5 +583,4 @@ mod tests {
             );
         }
     }
-
 }

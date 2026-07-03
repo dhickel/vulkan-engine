@@ -92,9 +92,15 @@ consume = false
 - Prefer stable action IDs and load/save binding profiles for user rebinding.
 - Keep layer registration in explicit bands:
   - `900-1000`: engine capture/system overlays
-  - `500-899`: UI routing/capture
+  - `500-899`: UI routing/capture (`priority_bands::EDITOR_UI_CAPTURE` is reserved for editor chrome)
   - `100-499`: gameplay
   - `0-99`: debug/fallback
+- The renderer's `register_app_ui(...)` path treats native app chrome as active imgui capture:
+  keyboard, mouse, cursor grab, and built-in FPS camera updates are suppressed while the app UI is
+  registered. This is the editor shell's default so panel/menu interaction does not leak into game
+  controls.
+- Direct `InputSystem` users can install `editor_ui_capture_layer()` when they need the same
+  high-priority editor-consumes-before-gameplay behavior outside the renderer facade.
 
 ## 6. Gotchas & Failure Modes
 - If `dispatch_frame()` never runs (implicitly through renderer frame prep), snapshots will not advance.

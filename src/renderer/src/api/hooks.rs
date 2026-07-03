@@ -1,20 +1,30 @@
 use std::marker::PhantomData;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use crate::data::handles::TextureHandle;
+
 use super::errors::HookError;
 
 pub struct RenderHookContext<'a> {
     pub frame_index: u64,
     pub viewport_size: (u32, u32),
-    // Prevent external construction and preserve room for future internal context data.
+    /// Depth buffer from the current frame, if available.
+    /// Available after PrepareTargetsPass has executed.
+    pub depth_texture: Option<TextureHandle>,
+    // Prevent external construction.
     _private: PhantomData<&'a mut ()>,
 }
 
 impl<'a> RenderHookContext<'a> {
-    pub(crate) fn new(frame_index: u64, viewport_size: (u32, u32)) -> Self {
+    pub(crate) fn new(
+        frame_index: u64,
+        viewport_size: (u32, u32),
+        depth_texture: Option<TextureHandle>,
+    ) -> Self {
         Self {
             frame_index,
             viewport_size,
+            depth_texture,
             _private: PhantomData,
         }
     }
@@ -42,12 +52,13 @@ pub(crate) fn invoke_render_hook(
     stage: RenderHookStage,
     frame_index: u64,
     viewport_size: (u32, u32),
+    depth_texture: Option<TextureHandle>,
 ) -> Result<(), HookError> {
     let Some(hook) = hook.as_mut() else {
         return Ok(());
     };
 
-    let mut context = RenderHookContext::new(frame_index, viewport_size);
+    let mut context = RenderHookContext::new(frame_index, viewport_size, depth_texture);
     let callback_result =
         catch_unwind(AssertUnwindSafe(|| hook(&mut context))).map_err(|panic| {
             HookError::Invocation(format!(
@@ -94,8 +105,22 @@ mod tests {
             Ok(())
         }));
 
-        invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 7, (1280, 720)).unwrap();
-        invoke_render_hook(&mut post_hook, RenderHookStage::PostRender, 7, (1280, 720)).unwrap();
+        invoke_render_hook(
+            &mut pre_hook,
+            RenderHookStage::PreRender,
+            7,
+            (1280, 720),
+            None,
+        )
+        .unwrap();
+        invoke_render_hook(
+            &mut post_hook,
+            RenderHookStage::PostRender,
+            7,
+            (1280, 720),
+            None,
+        )
+        .unwrap();
 
         let order = order.lock().unwrap();
         assert_eq!(order.as_slice(), ["pre", "post"]);
@@ -107,8 +132,8 @@ mod tests {
             Err(HookError::Registration("bad registration".to_string()))
         }));
 
-        let err =
-            invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 1, (1, 1)).unwrap_err();
+        let err = invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 1, (1, 1), None)
+            .unwrap_err();
         match err {
             HookError::Invocation(msg) => {
                 assert!(msg.contains("pre_render hook failed"));
@@ -124,8 +149,14 @@ mod tests {
             panic!("boom");
         }));
 
-        let err = invoke_render_hook(&mut post_hook, RenderHookStage::PostRender, 9, (800, 600))
-            .unwrap_err();
+        let err = invoke_render_hook(
+            &mut post_hook,
+            RenderHookStage::PostRender,
+            9,
+            (800, 600),
+            None,
+        )
+        .unwrap_err();
         match err {
             HookError::Invocation(msg) => {
                 assert!(msg.contains("post_render hook panicked"));
@@ -138,6 +169,6 @@ mod tests {
     #[test]
     fn invoke_render_hook_is_noop_when_unset() {
         let mut hook: Option<RenderHook> = None;
-        invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0)).unwrap();
+        invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None).unwrap();
     }
 }

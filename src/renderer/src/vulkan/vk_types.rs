@@ -25,11 +25,9 @@
 //! - **Command pools are NOT thread-safe**: Each pool is tied to a single queue family
 //! - **Frame resource lifecycle**: Resources deleted via VkDeletable deferred to frame completion
 
-use crate::data::data_cache::{EnvMaps, VkPipelineType};
-use crate::data::data_util::{
-    BinarySemaphore, CountDownDropGuard, CountdownLatch, LatchTimeOutError,
-};
-use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO, VkCubeMap};
+use crate::data::data_cache::EnvMaps;
+use crate::data::data_util::{CountDownDropGuard, CountdownLatch, LatchTimeOutError};
+use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
@@ -37,17 +35,12 @@ use crate::vulkan::vk_util;
 use ash::vk::{DeviceSize, Extent2D};
 use ash::{vk, Device};
 use bytemuck::{Pod, Zeroable};
-use glam::Vec4;
-use log::{debug, error};
-use std::ffi::{CStr, CString};
-use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
-use std::sync::{mpsc, Arc, Mutex};
+use log::debug;
+use std::sync::mpsc::{channel, Receiver, SendError, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::{mem, slice};
-use vk_mem::{Alloc, Allocator};
+use vk_mem::Allocator;
 use winit::dpi::LogicalPosition;
-use winit::event::ElementState::{Pressed, Released};
-use winit::event::Event::WindowEvent;
 
 /// Core RAII trait for all Vulkan resources requiring cleanup.
 ///
@@ -457,7 +450,7 @@ impl VkCmdSubmitInfo {
         device_queues: &VkDeviceQueues,
         fence_queue: &mut VkFenceQueue,
     ) {
-        let cmd_buffer = [self.cmd_buffer];
+        let _cmd_buffer = [self.cmd_buffer];
         let cmd_info = [vk_util::command_buffer_submit_info(self.cmd_buffer)];
         let queue = device_queues.get_queue(self.queue_type);
 
@@ -494,7 +487,7 @@ impl VkCmdSubmitInfo {
 }
 
 impl VkDestroyable for VkCommandPool {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         unsafe {
             device.destroy_command_pool(self.pool, None);
         }
@@ -522,7 +515,7 @@ pub struct VkFrameSync {
 }
 
 impl VkDestroyable for VkFrameSync {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         unsafe {
             device.destroy_semaphore(self.swap_semaphore, None);
             device.destroy_semaphore(self.render_semaphore, None);
@@ -729,11 +722,11 @@ impl VkPresent {
         let present_targets = present_images.clone();
         let frame_data = frame_sync
             .into_iter()
-            .zip(draw_images.into_iter())
-            .zip(depth_images.into_iter())
-            .zip(present_images.into_iter())
-            .zip(command_pools.into_iter())
-            .zip(descriptor_allocators.into_iter())
+            .zip(draw_images)
+            .zip(depth_images)
+            .zip(present_images)
+            .zip(command_pools)
+            .zip(descriptor_allocators)
             .enumerate()
             .map(
                 |(
@@ -970,7 +963,7 @@ impl VkPipeline {
 }
 
 impl VkDestroyable for VkPipeline {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         unsafe {
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_pipeline(self.pipeline, None);
@@ -1164,10 +1157,7 @@ impl VkTransfer {
     }
 
     pub fn query_channel(&self) -> Option<VkCmdSubmitInfo> {
-        match self.receiver.try_recv() {
-            Ok(info) => Some(info),
-            Err(_) => None,
-        }
+        self.receiver.try_recv().ok()
     }
 
     pub fn get_sender(&self) -> Sender<VkCmdSubmitInfo> {
@@ -1230,23 +1220,12 @@ impl VkImgui {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
 pub struct Compute4x4PushConstants {
     pub data_1: glam::Vec4,
     pub data_2: glam::Vec4,
     pub data_3: glam::Vec4,
     pub data_4: glam::Vec4,
-}
-
-impl Default for Compute4x4PushConstants {
-    fn default() -> Self {
-        Self {
-            data_1: Default::default(),
-            data_2: Default::default(),
-            data_3: Default::default(),
-            data_4: Default::default(),
-        }
-    }
 }
 
 impl Compute4x4PushConstants {
@@ -1292,6 +1271,7 @@ impl VkDestroyable for ComputeEffect {
     }
 }
 
+#[derive(Default)]
 pub struct ComputeData {
     pub effects: Vec<ComputeEffect>,
     pub current: u32,
@@ -1311,15 +1291,6 @@ impl VkDestroyable for ComputeData {
     }
 }
 
-impl Default for ComputeData {
-    fn default() -> Self {
-        Self {
-            effects: vec![],
-            current: 0,
-        }
-    }
-}
-
 // TODO make this have a lookup method using an enum?
 #[derive(Clone)]
 pub struct VkDescriptors {
@@ -1329,7 +1300,7 @@ pub struct VkDescriptors {
 }
 
 impl VkDestroyable for VkDescriptors {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         self.allocator.destroy(device);
         unsafe {
             self.descriptor_layouts
@@ -1424,7 +1395,7 @@ impl VkBuffer {
 }
 
 impl VkDestroyable for VkBuffer {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, _device: &Device, allocator: &Allocator) {
         unsafe {
             allocator.destroy_buffer(self.buffer, &mut self.allocation);
         }
@@ -1457,7 +1428,7 @@ pub enum VkDeletable {
 }
 
 impl VkDeletable {
-    pub fn delete(&mut self, device: &ash::Device, allocator: &Allocator) {
+    pub fn delete(&mut self, _device: &ash::Device, allocator: &Allocator) {
         match self {
             VkDeletable::AllocatedBuffer(ref mut buffer) => unsafe {
                 allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation);
@@ -1545,7 +1516,6 @@ impl VkSceneDescriptors {
         let mut env_ptr = env_buffer.alloc_info.mapped_data as *mut u8;
 
         let scene_descriptors: Vec<vk::DescriptorSet> = (0..count)
-            .into_iter()
             .map(|i| {
                 println!("Writing buffers: {}", i);
                 unsafe {
@@ -1566,7 +1536,7 @@ impl VkSceneDescriptors {
                 }
 
                 let desc_set = descriptor_pool
-                    .allocate(&device, &[scene_desc_layout])
+                    .allocate(device, &[scene_desc_layout])
                     .unwrap();
 
                 let mut writer = VkDescriptorWriter::default();

@@ -1,17 +1,12 @@
 use crate::vulkan::vk_render;
 
 /// Startup runtime mode used for controlled render-path validation.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 pub enum DebugRuntimeMode {
+    #[default]
     Default,
     TestPbr,
     TestUnlit,
-}
-
-impl Default for DebugRuntimeMode {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl DebugRuntimeMode {
@@ -44,37 +39,27 @@ impl From<DebugRuntimeMode> for vk_render::DebugRuntimeMode {
 }
 
 /// Controls how the engine handles `.meta` sidecar manifest files for assets.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum AssetManifestMode {
     /// Manifests are ignored even if present.
     Disabled,
     /// Manifests are loaded when found; parse errors log a warning and fall back to defaults.
+    #[default]
     BestEffort,
     /// Manifests are required for assets that have them; parse errors fail the load.
     Strict,
 }
 
-impl Default for AssetManifestMode {
-    fn default() -> Self {
-        Self::BestEffort
-    }
-}
-
 /// Controls texture compression behavior.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub enum TextureCompressionMode {
     /// Compression is disabled; textures remain uncompressed (e.g. R8G8B8A8).
+    #[default]
     Disabled,
     /// Textures are compressed if supported by the format/device, falling back to uncompressed.
     Auto,
     /// Textures must be compressed; failure to compress returns an error.
     Force,
-}
-
-impl Default for TextureCompressionMode {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 /// Configuration for texture compression.

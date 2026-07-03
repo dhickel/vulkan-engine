@@ -14,6 +14,62 @@ request -> decode/import -> cache insert (unloaded) -> GPU transfer -> loaded ca
 - Deferred loads return `LoadTicket`; completion is observable via polling (`LoadStatus`).
 - Template contract reference: `docs/internal/00-index.md` (mandatory 10-section order).
 
+### Asset Identity Resolution Layer
+
+Status: implemented for the editor-roadmap package identity, editor listing, and prefab/wall-chunk placement slice.
+
+Implemented:
+
+- `AssetRegistry` keeps existing path-to-runtime-handle maps and now also stores package records keyed by durable asset ID.
+- Package manifests are TOML with `format_version = 1`, `package_id`, package display/version fields, and `[[assets]]` records.
+- Package loading validates duplicate IDs, invalid or escaping paths, unsupported kinds, mismatched package IDs, and unsupported versions before records are visible.
+- Package-relative paths are normalized deterministically and resolved against the manifest directory or caller-provided package base.
+- `AssetManager` exposes package loading, asset listing, asset record lookup, ID resolution, and ID-based model/prefab/texture/environment load requests.
+- The editor opens project manifests, loads enabled package manifests, lists package records, and places model/prefab/wall chunk records through command-backed scene mutation.
+- `FileWatcher` path invalidation continues to clear path-handle maps and now removes durable records associated with that changed path.
+
+Deferred:
+
+- project creation, package authoring, and project-manifest migration tooling;
+- editor import tooling, thumbnails, and drag-and-drop;
+- material asset document loading beyond manifest metadata and existing runtime material APIs;
+- complete hot reload/reimport after invalidation;
+- shipping package/export behavior.
+
+The editor asset lifecycle has two identity layers:
+
+1. Durable file identity: `project_id`, `package_id`, asset `id`, stable scene node IDs, and material override IDs.
+2. Runtime resolution outputs: `MeshHandle`, `MaterialHandle`, `TextureHandle`, `EnvironmentHandle`, `SceneNodeId`, `PointLightId`, and `LoadTicket`.
+
+The asset registry implementation for the editor must resolve durable IDs into runtime handles without making handles durable. The minimum resolution record is:
+
+| Field | Contract |
+|---|---|
+| `package_id` | Package namespace from the loaded package manifest. |
+| `asset_id` | Durable asset ID. This is the scene/package serialized identity. |
+| `kind` | Validated asset kind that selects the import/load path. |
+| `source_path` | Canonical project/package-relative load path. This is not identity. |
+| `path_hint` | Optional serialized diagnostic/migration hint from scene files. |
+| `metadata` | Kind-specific authored metadata, including wall chunk v1 placement data. |
+| `runtime_state` | In-memory state such as unloaded/loading/loaded and any runtime handles. This must not be serialized as identity. |
+
+Package loading must validate these before assets become visible to the editor:
+
+- project `format_version == 1`;
+- package `format_version == 1`;
+- package record `package_id` matches the loaded package manifest;
+- no duplicate durable asset IDs across enabled packages;
+- every record has `id`, `kind`, and `path`;
+- every path resolves inside the package/project asset root after normalization;
+- unknown asset kinds, unknown newer versions, and missing manifests fail with clear diagnostics;
+- older supported versions must migrate through explicit migration code, not best-effort field guessing.
+
+Wall chunk v1 metadata is stored on prefab asset records and copied into scene placement metadata when placed. It includes dimensions/snap/connectors/category for the editor, plus the durable prefab asset ID. It does not store brush planes, editable vertices, or CSG operations.
+
+The existing `.meta` texture sidecar manifest remains a texture import policy input. It is not the package manifest and must not be used as a durable scene asset identity source.
+
+Current implementation note: path-based handle lookup still exists for current runtime and hot-reload needs. Durable package IDs supplement that behavior for editor scene references; they do not replace runtime slot/generation handles inside caches.
+
 ## 4. Code Walkthrough
 Snippet Type: Real
 ```rust

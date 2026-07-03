@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use ash::vk;
-use image::{DynamicImage, GenericImageView, ImageBuffer, Rgba};
+use image::{DynamicImage, GenericImageView};
 use log::{info, warn};
 
 /// Decoded RGBA32F image in linear space.
@@ -504,6 +504,7 @@ fn make_cubemap_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{ImageBuffer, Rgba};
     use std::collections::HashSet;
 
     // ── Layout Detection ────────────────────────────────────────────────
@@ -697,7 +698,6 @@ mod tests {
 
     #[test]
     fn face_directory_with_temp_dir() {
-        use std::io::Write;
         let tmp = std::env::temp_dir().join("env_import_test_faces");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();

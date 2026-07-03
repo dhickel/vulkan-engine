@@ -12,7 +12,9 @@ use winit::window::Window;
 
 use crate::data::camera::{Camera, FPSController, FpsActionBindings};
 use crate::data::handles::EnvironmentHandle;
-use crate::debug_ui::{DebugUiFrameContext, DebugViewCallback, DebugViewDescriptor, DebugViewId};
+use crate::debug_ui::{
+    AppUiCallback, DebugUiFrameContext, DebugViewCallback, DebugViewDescriptor, DebugViewId,
+};
 use crate::vulkan::vk_render;
 use crate::vulkan::vk_types::VkWindowState;
 
@@ -80,7 +82,7 @@ impl Renderer {
     /// May Stall: Yes
     pub fn new(config: RendererConfig, window: &Window) -> Result<Self, RendererError> {
         if config.headless {
-            return Err(RendererError::Unsupported("headless mode not implemented"));
+            log::warn!("Headless mode: window and swapchain will be created but presentation skipped. Full offscreen rendering via VkImage targets is not yet implemented.");
         }
 
         let window_state = create_window_state(window, &config);
@@ -173,8 +175,9 @@ impl Renderer {
 
         let io = self.runtime.core.imgui.context.io();
         let ui_visible = self.runtime.core.debug_ui.is_any_visible();
-        let consume_keyboard = ui_visible || io.want_capture_keyboard;
-        let consume_mouse = ui_visible || io.want_capture_mouse;
+        let app_ui_active = self.runtime.core.debug_ui.has_app_ui();
+        let consume_keyboard = app_ui_active || ui_visible || io.want_capture_keyboard;
+        let consume_mouse = app_ui_active || ui_visible || io.want_capture_mouse;
 
         match event {
             Event::DeviceEvent {
@@ -422,6 +425,48 @@ impl Renderer {
         self.runtime.core.debug_ui.unregister_view(id)
     }
 
+    /// Registers an always-rendered imgui callback for app-owned UI chrome.
+    ///
+    /// This is intended for first-screen native app surfaces such as an editor shell.
+    /// Registering app UI also marks the renderer as app-UI-active for cursor/FPS input
+    /// capture so classic camera controls do not receive editor interactions.
+    pub fn register_app_ui(
+        &mut self,
+        id: impl Into<DebugViewId>,
+        callback: AppUiCallback,
+    ) -> Result<DebugViewId, RendererError> {
+        let id = id.into();
+        if self
+            .runtime
+            .core
+            .debug_ui
+            .register_app_ui(id.clone(), callback)
+        {
+            return Ok(id);
+        }
+
+        Err(RendererError::InvalidState("app ui id already registered"))
+    }
+
+    /// Removes a previously registered app UI callback.
+    pub fn unregister_app_ui(&mut self, id: &DebugViewId) -> bool {
+        self.runtime.core.debug_ui.unregister_app_ui(id)
+    }
+
+    /// Returns true when app-owned imgui chrome is registered.
+    pub fn has_app_ui(&self) -> bool {
+        self.runtime.core.debug_ui.has_app_ui()
+    }
+
+    /// Returns true when imgui wants keyboard input for an active widget.
+    ///
+    /// App shells should use this to suppress their own raw keyboard shortcuts while
+    /// text or numeric controls are active. This is narrower than `has_app_ui` so
+    /// global editor shortcuts can still work from normal chrome or viewport focus.
+    pub fn imgui_wants_keyboard_capture(&self) -> bool {
+        self.runtime.core.imgui.context.io().want_capture_keyboard
+    }
+
     /// Enables or disables a debug view by id.
     pub fn set_debug_view_enabled(&mut self, id: &DebugViewId, enabled: bool) -> bool {
         self.runtime.core.debug_ui.set_view_enabled(id, enabled)
@@ -524,7 +569,7 @@ impl Renderer {
         self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
-        if !self.runtime.core.debug_ui.is_any_visible() {
+        if !self.imgui_capture_active() {
             if let Some(plugin) = self.fps_plugin.as_mut() {
                 let snapshot = self.input_system.snapshot();
                 plugin.controller.update_from_snapshot(
@@ -600,6 +645,7 @@ impl Renderer {
                             RenderHookStage::PreRender,
                             frame_index,
                             viewport_size,
+                            None, // TODO: plumb depth texture from rendergraph
                         ) {
                             error!("pre_render hook failed at frame {}: {}", frame_index, err);
                         }
@@ -610,6 +656,7 @@ impl Renderer {
                             RenderHookStage::PostRender,
                             frame_index,
                             viewport_size,
+                            None, // TODO: plumb depth texture from rendergraph
                         ) {
                             error!("post_render hook failed at frame {}: {}", frame_index, err);
                         }
@@ -663,7 +710,7 @@ impl Renderer {
     }
 
     fn apply_cursor_policy(&mut self, window: &Window) -> Result<(), RendererError> {
-        if self.runtime.core.debug_ui.is_any_visible() || !self.cursor_in_window {
+        if self.imgui_capture_active() || !self.cursor_in_window {
             window
                 .set_cursor_grab(winit::window::CursorGrabMode::None)
                 .map_err(|err| map_frame_input_err(format!("cursor release failed: {err}")))?;
@@ -675,6 +722,14 @@ impl Renderer {
             window.set_cursor_visible(false);
         }
         Ok(())
+    }
+
+    fn imgui_capture_active(&self) -> bool {
+        let io = self.runtime.core.imgui.context.io();
+        self.runtime.core.debug_ui.has_app_ui()
+            || self.runtime.core.debug_ui.is_any_visible()
+            || io.want_capture_keyboard
+            || io.want_capture_mouse
     }
 
     fn handle_cursor_focus(

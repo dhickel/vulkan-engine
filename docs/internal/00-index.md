@@ -1,95 +1,61 @@
-# Internal Documentation Index
+# Engine Internals Reference
 
-## 1. Purpose & Audience
-This index is for contributors working inside renderer internals (frame loop, synchronization, caches, and pass sequencing). It assumes Rust proficiency and basic graphics familiarity, but explains Vulkan-heavy topics in engine-specific terms.
+> All citations trace to source code. Generated from a fresh codebase audit — no legacy docs consulted.
 
-## 2. Where This Fits in Engine Flow
-These docs map to the internal runtime path:
-`Renderer::render_scene(...)` -> `SceneWorld::build_submission()` -> `VkRender::render_with_hooks(...)` -> rendergraph passes -> submit/present.
+## Audience
 
-## 3. Key Concepts
-- Internal docs explain how and why systems are implemented, not just how to call them.
-- Current state is alpha: docs include known risks and non-hardened behavior.
-- Every chapter follows the same 10-section structure and labels snippet types explicitly.
-- Template contract (exact order): Purpose & Audience; Where This Fits in Engine Flow; Key Concepts; Code Walkthrough; Best Practices; Gotchas & Failure Modes; Debugging Playbook; Cross-Module Links; Standard References; See Also.
+Contributors working inside the renderer internals — Vulkan orchestration, data caches, pass execution, and scene flattening. Assumes Rust proficiency and basic Vulkan familiarity.
 
-## 4. Code Walkthrough
-Snippet Type: Real
-```rust
-// src/renderer/src/rendergraph/mod.rs
-pub fn default_graph() -> Self {
-    Self::new(vec![
-        Box::new(PrepareTargetsPass),
-        Box::new(SkyboxPass),
-        Box::new(GeometryPass),
-        Box::new(PresentCopyPass),
-        Box::new(ImguiPass),
-    ])
-}
+## Architecture at a Glance
+
+```
+Renderer (public API)
+  ├── AssetManager → DataCache (handles, GPU uploads)
+  ├── SceneWorld → RenderSubmission (flattened draw commands)
+  ├── InputSystem (layered event dispatch)
+  ├── Debug UI (imgui)
+  └── VkRender (Vulkan frame loop)
+        └── RenderGraph (pass orchestration)
+              ├── PrepareTargetsPass
+              ├── SkyboxPass
+              ├── GeometryPass
+              ├── PresentCopyPass
+              └── ImguiPass
 ```
 
-Reading order for current `00`-`16` implementation scope:
-1. [`docs/internal/01-rendering-pipeline-mental-model.md`](01-rendering-pipeline-mental-model.md)
-2. [`docs/internal/02-synchronization-and-fencing.md`](02-synchronization-and-fencing.md)
-3. [`docs/internal/03-asset-lifecycle-and-io.md`](03-asset-lifecycle-and-io.md)
-4. [`docs/internal/04-api-to-backend-handoff.md`](04-api-to-backend-handoff.md)
-5. [`docs/internal/05-vulkan-sync-and-frame-lifecycle.md`](05-vulkan-sync-and-frame-lifecycle.md)
-6. [`docs/internal/06-data-suballocation-and-transfer.md`](06-data-suballocation-and-transfer.md)
-7. [`docs/internal/07-rendergraph-dependencies-and-aliasing.md`](07-rendergraph-dependencies-and-aliasing.md)
-8. [`docs/internal/08-scene-flattening-and-culling.md`](08-scene-flattening-and-culling.md)
-9. [`docs/internal/09-input-winit-integration.md`](09-input-winit-integration.md)
+## Reading Order
 
-Verification audit table (phase `16`):
+| Order | Document | What It Covers |
+|-------|----------|----------------|
+| 1 | [01-architecture.md](01-architecture.md) | Module map, data flow, subsystem boundaries |
+| 2 | [02-renderer-internals.md](02-renderer-internals.md) | API→backend handoff, frame lifecycle, synchronization |
+| 3 | [03-asset-pipeline.md](03-asset-pipeline.md) | Disk→GPU asset pipeline, caches, staging |
+| 4 | [04-vulkan-subsystem.md](04-vulkan-subsystem.md) | Vulkan init, descriptors, pipelines, memory |
+| 5 | [05-scene-internals.md](05-scene-internals.md) | Scene flattening, render submission, culling |
+| 6 | [06-input-internals.md](06-input-internals.md) | Input dispatch, priority groups, action resolution |
+| 7 | [07-rendergraph.md](07-rendergraph.md) | Pass traits, dependencies, attachment aliasing |
+| 8 | [08-shaders.md](08-shaders.md) | Shader contracts, compilation, PBR pipeline |
 
-| Audit check | Status | Notes |
-|---|---|---|
-| Mandatory 10-section order in internal docs | Pass | All internal chapters use `1..10` heading order |
-| Snippet markers (`Real`/`Pseudocode`) present | Pass | Each chapter includes labeled snippets |
-| `See Also` section present with >= 2 links | Pass | Validated for all internal chapters |
-| Vulkan + glTF links in `Standard References` | Pass | All internal chapters include both |
-| Root-to-chapter traversal from this index | Pass | Reading-order list uses direct relative links |
+## Key Source Files
 
-Snippet Type: Real
-```markdown
-[Frame Sync](05-vulkan-sync-and-frame-lifecycle.md)
-[Facade Lifecycle](../api/02-renderer-lifecycle-and-frame-api.md)
-```
+| File | Role |
+|------|------|
+| [`src/renderer/src/api/renderer.rs`](../src/renderer/src/api/renderer.rs) | Public API facade |
+| [`src/renderer/src/vulkan/vk_render.rs`](../src/renderer/src/vulkan/vk_render.rs) | Vulkan frame orchestration (~3862 lines) |
+| [`src/renderer/src/data/data_cache.rs`](../src/renderer/src/data/data_cache.rs) | Mesh/texture/material caches (~2475 lines) |
+| [`src/renderer/src/scene/scene_world.rs`](../src/renderer/src/scene/scene_world.rs) | Scene graph and submission builder |
+| [`src/renderer/src/rendergraph/mod.rs`](../src/renderer/src/rendergraph/mod.rs) | Render graph and pass trait |
+| [`src/input/src/lib.rs`](../src/input/src/lib.rs) | Input system (single file) |
 
-## 5. Best Practices
-- Start from frame-level mental model before editing fine-grained barriers.
-- Keep handle validation and generation semantics intact when touching caches.
-- Preserve pass order assumptions unless transitions and ABI contracts are updated together.
+## Distributed Knowledge
 
-## 6. Gotchas & Failure Modes
-- Changing pass order without matching transitions can silently break output.
-- Swapchain rebuild has known cleanup sharp edges.
-- `todo!()` destroy paths still exist in some Vulkan wrappers.
+Module-level guides provide subsystem detail:
+- Vulkan: [`src/renderer/src/vulkan/AGENTS.md`](../src/renderer/src/vulkan/AGENTS.md)
+- Data/caches: [`src/renderer/src/data/AGENTS.md`](../src/renderer/src/data/AGENTS.md)
+- Shaders: [`src/renderer/src/shaders/AGENTS.md`](../src/renderer/src/shaders/AGENTS.md)
+- Renderer: [`src/renderer/AGENTS.md`](../src/renderer/AGENTS.md)
 
-## 7. Debugging Playbook
-- Use `cargo check -p renderer` first.
-- Use headless smoke runs with timeout to verify startup and frame loop stability.
-- Enable validation layers via renderer startup options before reasoning about sync correctness.
+## See Also
 
-## 8. Cross-Module Links
-- Top-level contributor orientation: `AGENTS.md`
-- Renderer package guide: `src/renderer/AGENTS.md`
-- Vulkan deep guide: `src/renderer/src/vulkan/AGENTS.md`
-- Data/cache deep guide: `src/renderer/src/data/AGENTS.md`
-
-## 9. Standard References
-- Vulkan Guide: https://github.khronos.org/Vulkan-Site/guide/latest/
-- Vulkan Spec index: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/index.html
-- glTF 2.0 spec: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html
-- vkguide: https://vkguide.dev/
-- Sascha Willems Vulkan glTF PBR baseline: https://github.com/SaschaWillems/Vulkan-glTF-PBR
-
-## 10. See Also
-- [`docs/internal/02-synchronization-and-fencing.md`](02-synchronization-and-fencing.md)
-- [`docs/internal/03-asset-lifecycle-and-io.md`](03-asset-lifecycle-and-io.md)
-- [`docs/internal/01-rendering-pipeline-mental-model.md`](01-rendering-pipeline-mental-model.md)
-- [`docs/internal/04-api-to-backend-handoff.md`](04-api-to-backend-handoff.md)
-- [`docs/internal/05-vulkan-sync-and-frame-lifecycle.md`](05-vulkan-sync-and-frame-lifecycle.md)
-- [`docs/internal/06-data-suballocation-and-transfer.md`](06-data-suballocation-and-transfer.md)
-- [`docs/internal/07-rendergraph-dependencies-and-aliasing.md`](07-rendergraph-dependencies-and-aliasing.md)
-- [`docs/internal/08-scene-flattening-and-culling.md`](08-scene-flattening-and-culling.md)
-- [`docs/internal/09-input-winit-integration.md`](09-input-winit-integration.md)
+- [API Reference](../api/00-index.md) — public API surface
+- [Gap Report](../gap-report.md) — known limitations

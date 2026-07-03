@@ -29,13 +29,9 @@
 
 use crate::data::data_cache;
 use crate::data::data_cache::VkDescType;
-use crate::vulkan::vk_descriptor;
 use crate::vulkan::vk_types::*;
-use ash::prelude::VkResult;
 use ash::vk::{DescriptorPool, DescriptorSetLayoutCreateFlags};
 use ash::{vk, Device};
-use std::backtrace::Backtrace;
-use std::collections::VecDeque;
 use std::vec;
 use vk_mem::Allocator;
 
@@ -382,7 +378,7 @@ impl VkDynamicDescriptorAllocator {
 
         let new_pool = Self::create_pool(device, max_sets, pool_ratios)?;
 
-        pool.sets_per_pool = (max_sets) as u32;
+        pool.sets_per_pool = max_sets;
         pool.ready_pools.push(new_pool);
         Ok(pool)
     }
@@ -410,7 +406,7 @@ impl VkDynamicDescriptorAllocator {
     }
 
     fn get_pool(&mut self, device: &ash::Device) -> Result<vk::DescriptorPool, String> {
-        if self.ready_pools.len() != 0 {
+        if !self.ready_pools.is_empty() {
             Ok(self.ready_pools.remove(self.ready_pools.len() - 1))
         } else {
             let pool = Self::create_pool(
@@ -487,7 +483,7 @@ impl VkDynamicDescriptorAllocator {
 }
 
 impl VkDestroyable for VkDynamicDescriptorAllocator {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
         unsafe {
             for pool in &self.ready_pools {
                 device.destroy_descriptor_pool(*pool, None);
@@ -513,7 +509,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::COMPUTE,
             DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build compute_draw_image descriptor layout");
 
     let frag_combined_image = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -522,7 +518,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::FRAGMENT,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build frag_combined_image descriptor layout");
 
     let scene_data = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
@@ -535,7 +531,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build scene_data descriptor layout");
 
     let pbr_samplers = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -548,7 +544,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::FRAGMENT,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build pbr_samplers descriptor layout");
 
     let pbr_properties = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::STORAGE_BUFFER)
@@ -557,7 +553,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::FRAGMENT,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build pbr_properties descriptor layout");
 
     let skin_data = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
@@ -566,7 +562,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::VERTEX,
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build skin_data descriptor layout");
 
     let empty = DescriptorLayoutBuilder::default()
         .build(
@@ -574,7 +570,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
             vk::ShaderStageFlags::empty(),
             vk::DescriptorSetLayoutCreateFlags::empty(),
         )
-        .unwrap();
+        .expect("failed to build empty descriptor layout");
 
     let cache = data_cache::VkDescLayoutCache::new(vec![
         (VkDescType::DrawImage, compute_draw_image),

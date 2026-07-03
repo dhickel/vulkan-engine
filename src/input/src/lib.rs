@@ -96,6 +96,7 @@ pub mod priority_bands {
     pub const ENGINE_CAPTURE_MAX: LayerPriority = LayerPriority(1000);
     pub const UI_ROUTING_MIN: LayerPriority = LayerPriority(500);
     pub const UI_ROUTING_MAX: LayerPriority = LayerPriority(899);
+    pub const EDITOR_UI_CAPTURE: LayerPriority = LayerPriority(850);
     pub const GAMEPLAY_MIN: LayerPriority = LayerPriority(100);
     pub const GAMEPLAY_MAX: LayerPriority = LayerPriority(499);
     pub const DEBUG_MIN: LayerPriority = LayerPriority(0);
@@ -1036,16 +1037,15 @@ impl ActionMap {
 
     pub fn load_toml_file(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let content = std::fs::read_to_string(path)?;
-        let map = Self::from_toml_str(&content).map_err(|err| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{err}"))
-        })?;
+        let map = Self::from_toml_str(&content)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
         Ok(map)
     }
 
     pub fn save_toml_file(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
-        let content = self.to_toml_string().map_err(|err| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{err}"))
-        })?;
+        let content = self
+            .to_toml_string()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?;
         std::fs::write(path, content)
     }
 }
@@ -1390,6 +1390,13 @@ impl CaptureLayer {
     }
 }
 
+pub fn editor_ui_capture_layer() -> (LayerDescriptor, CaptureLayer) {
+    (
+        LayerDescriptor::new("editor-ui-capture", priority_bands::EDITOR_UI_CAPTURE),
+        CaptureLayer::new(true, true),
+    )
+}
+
 impl InputLayer for CaptureLayer {
     fn on_event(&mut self, event: &InputEvent, _ctx: &mut InputContext<'_>) -> InputConsume {
         let should_consume = match event {
@@ -1623,6 +1630,39 @@ trigger = { key = "KeyW", mouse_button = "Left" }
         assert_eq!(
             loaded.bindings()[0].trigger,
             BindingTrigger::Key(KeyCode::F35)
+        );
+    }
+
+    #[test]
+    fn editor_ui_capture_layer_uses_ui_priority_and_consumes_devices() {
+        let (descriptor, mut layer) = editor_ui_capture_layer();
+        assert_eq!(descriptor.name, "editor-ui-capture");
+        assert_eq!(descriptor.priority, priority_bands::EDITOR_UI_CAPTURE);
+
+        let mut action_state = ActionStateStore::default();
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+
+        assert_eq!(
+            layer.on_event(
+                &InputEvent::Key {
+                    code: KeyCode::KeyW,
+                    state: ElementState::Pressed,
+                    repeat: false,
+                    modifiers: ModifiersState::empty(),
+                },
+                &mut ctx,
+            ),
+            InputConsume::Consumed
+        );
+        assert_eq!(
+            layer.on_event(&InputEvent::MouseMotion { delta: (1.0, 2.0) }, &mut ctx),
+            InputConsume::Consumed
+        );
+        assert_eq!(
+            layer.on_event(&InputEvent::CursorFocus { entered: true }, &mut ctx,),
+            InputConsume::Ignored
         );
     }
 }

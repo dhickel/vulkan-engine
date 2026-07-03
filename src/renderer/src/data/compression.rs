@@ -219,7 +219,7 @@ pub fn compress_texture(
     for mip in mips {
         let mip_width = mip.width();
         let mip_height = mip.height();
-        let mut rgba_bytes = mip.into_raw();
+        let rgba_bytes = mip.into_raw();
 
         // Metallic-roughness textures are normalized to R=roughness, G=metalness upstream.
         // BC5 encoding simply consumes the RG channels in that canonical layout.

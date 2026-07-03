@@ -57,17 +57,15 @@
 //! - Updates viewport/scissor
 
 use crate::data::data_cache::{
-    EnvMaps, EnvironmentCache, LodBias, MeshCache, TextureCache, VkCache, VkDataCache,
-    VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkSamplerCache, VkSamplerInfo,
-    VkShaderCache,
+    EnvMaps, EnvironmentCache, MeshCache, TextureCache, VkCache, VkDataCache, VkDescType,
+    VkPipelineType, VkSamplerCache, VkShaderCache,
 };
 
 use crate::api::config::VisualTuning;
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
-    AsByteSlice, EnvironmentUBO, GPUSceneData, MaterialPass, MetRoughUniform, PushConstIrradiance,
-    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap,
-    VkGpuTextureBuffer, VkMeshBuffers, VkModelPushConsts,
+    AsByteSlice, EnvironmentUBO, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox,
+    RenderObject, SceneDataUBO, Vertex, VkCubeMap, VkModelPushConsts,
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::{data_cache, data_util, gpu_data};
@@ -76,47 +74,27 @@ use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionRe
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
-use crate::vulkan;
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_types::*;
-use crate::vulkan::vk_util::allocate_buffer;
-use crate::vulkan::{vk_debug, vk_descriptor, vk_init, vk_pipeline, vk_types, vk_util};
-use ash::prelude::VkResult;
+use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_util};
+use ash::vk;
 use ash::vk::{
-    AllocationCallbacks, CommandBufferLevel, DescriptorSet, DescriptorSetLayoutCreateFlags,
-    DescriptorType, DeviceSize, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D, Handle,
-    ImageLayout, PipelineBindPoint, PipelineCache, ShaderStageFlags,
+    CommandBufferLevel, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D, Extent3D,
+    PipelineBindPoint,
 };
-use ash::{vk, Device};
-use data_util::PackUnorm;
-use glam::{vec3, Vec4};
-use gltf::accessor::Dimensions::Mat4;
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
-use log::{debug, error, info, log, warn};
-use std::cell::Ref;
+use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
 use std::f32::consts::FRAC_PI_2;
-use std::ffi::{CStr, CString};
-use std::mem::align_of;
-use std::path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
-use vk_mem::{AllocationCreateFlags, Allocator, AllocatorCreateInfo};
+use vk_mem::{Allocator, AllocatorCreateInfo};
 
+#[derive(Default)]
 pub struct SkyBox {
     pub skybox_consts: PushConstSkyBox,
     pub descriptors: HashMap<EnvironmentHandle, VkSingleDescriptor>,
-}
-
-impl Default for SkyBox {
-    fn default() -> Self {
-        Self {
-            skybox_consts: Default::default(),
-            descriptors: HashMap::new(),
-        }
-    }
 }
 
 pub struct VkSingleDescriptor {
@@ -251,7 +229,7 @@ pub fn init_caches(
         image_desc_layout,
         texture_host_buffer.clone(),
         texture_meta_buffer_size,
-        &limits,
+        limits,
         mesh_host_buffer.lock().unwrap().graphics_pool.clone(),
         device_queues.graphics_queue.1,
     )
@@ -318,14 +296,14 @@ pub fn init_caches(
 pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
     let sizes = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 1.0)];
 
-    let alloc = VkDescriptorAllocator::new(&device, 10, &sizes).unwrap();
+    let alloc = VkDescriptorAllocator::new(device, 10, &sizes).unwrap();
 
     let mut descriptors = VkDescriptors::new(alloc);
     for view in image_views {
         let render_layout = [DescriptorLayoutBuilder::default()
             .add_binding(0, vk::DescriptorType::STORAGE_IMAGE)
             .build(
-                &device,
+                device,
                 vk::ShaderStageFlags::COMPUTE,
                 vk::DescriptorSetLayoutCreateFlags::empty(),
             )
@@ -333,7 +311,7 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
 
         let render_desc = descriptors
             .allocator
-            .allocate(&device, &render_layout)
+            .allocate(device, &render_layout)
             .unwrap();
 
         let image_info = [vk::DescriptorImageInfo::default()
@@ -347,7 +325,7 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&image_info)];
 
-        unsafe { device.update_descriptor_sets(&image_write_desc, &vec![]) }
+        unsafe { device.update_descriptor_sets(&image_write_desc, &[]) }
         descriptors.add_descriptor(render_desc, render_layout[0])
     }
 
@@ -1172,7 +1150,8 @@ impl VkRenderCore {
             self.window_state.update_curr_size(swapchain.extent);
         }
 
-        // FIXME, I think we will need to destory the old images view when we reassign
+        // Old present views are destroyed by replace_present_images (via destroy_present_views)
+        // before the new views are installed.
         let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
 
         self.swapchain = swapchain;
@@ -2078,7 +2057,7 @@ impl VkRenderCore {
                 .swapchain_loader
                 .queue_present(frame.queue, &present_info);
 
-            if let Err(_) = present_result {
+            if present_result.is_err() {
                 self.resize_requested = true;
             }
         }
@@ -2086,7 +2065,7 @@ impl VkRenderCore {
 
     pub fn render_with_hooks<PreRenderHook, PostRenderHook>(
         &mut self,
-        frame_number: u32,
+        _frame_number: u32,
         submission: &RenderSubmission,
         rendergraph: &RenderGraph,
         mut pre_render_hook: PreRenderHook,
@@ -2953,7 +2932,6 @@ impl VkRenderCore {
         visual_tuning: VisualTuning,
     ) -> EnvironmentUBO {
         use crate::data::gpu_data::{GpuPointLight, MAX_POINT_LIGHTS_GPU};
-        use crate::scene::render_submission::MAX_POINT_LIGHTS_GPU as SUBMISSION_MAX;
 
         let mut env = *base;
         env.exposure = visual_tuning.exposure;

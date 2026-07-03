@@ -3,5 +3,9 @@ src/renderer/src/assets/
 debug_textures/
 .internal-dev/*
 apps/*
+!apps/editor/
+!apps/editor/Cargo.toml
+!apps/editor/src/
+!apps/editor/src/**
 CLAUDE.md
 *.jsonl

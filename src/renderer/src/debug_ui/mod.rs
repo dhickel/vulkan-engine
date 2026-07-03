@@ -28,6 +28,7 @@ const DEFAULT_TIMING_RECORD_INTERVAL_MS: u64 = 250;
 const DEFAULT_TIMING_RECORD_DURATION_SECS: u64 = 10;
 
 pub type DebugViewCallback = Box<dyn FnMut(&Ui, &DebugUiFrameContext) + 'static>;
+pub type AppUiCallback = Box<dyn FnMut(&Ui, &DebugUiFrameContext) + 'static>;
 
 #[derive(Clone, Debug, Default)]
 pub struct DebugTimingRow {
@@ -154,6 +155,10 @@ struct DebugViewEntry {
     enabled: bool,
 }
 
+struct AppUiEntry {
+    callback: AppUiCallback,
+}
+
 #[derive(Default)]
 struct TimingWindow {
     cpu: VecDeque<f32>,
@@ -233,6 +238,7 @@ pub struct DebugUiManager {
     console_visible: bool,
     debug_visible: bool,
     views: BTreeMap<DebugViewId, DebugViewEntry>,
+    app_ui: BTreeMap<DebugViewId, AppUiEntry>,
     frame_context: DebugUiFrameContext,
     console_input: String,
     console_history: Vec<String>,
@@ -278,6 +284,7 @@ impl DebugUiManager {
             console_visible: false,
             debug_visible: false,
             views: BTreeMap::new(),
+            app_ui: BTreeMap::new(),
             frame_context: DebugUiFrameContext::default(),
             console_input: String::new(),
             console_history: Vec::new(),
@@ -343,6 +350,24 @@ impl DebugUiManager {
 
     pub fn unregister_view(&mut self, id: &DebugViewId) -> bool {
         self.views.remove(id).is_some()
+    }
+
+    pub fn register_app_ui(&mut self, id: impl Into<DebugViewId>, callback: AppUiCallback) -> bool {
+        let id = id.into();
+        if self.app_ui.contains_key(&id) {
+            return false;
+        }
+
+        self.app_ui.insert(id, AppUiEntry { callback });
+        true
+    }
+
+    pub fn unregister_app_ui(&mut self, id: &DebugViewId) -> bool {
+        self.app_ui.remove(id).is_some()
+    }
+
+    pub fn has_app_ui(&self) -> bool {
+        !self.app_ui.is_empty()
     }
 
     pub fn set_view_enabled(&mut self, id: &DebugViewId, enabled: bool) -> bool {
@@ -453,21 +478,37 @@ impl DebugUiManager {
     }
 
     pub fn render(&mut self, ui: &Ui) {
-        if !self.is_any_visible() {
-            return;
+        if self.has_app_ui() {
+            self.render_app_ui(ui);
         }
 
-        let display_size = ui.io().display_size;
-        let screen_width = display_size[0].max(1.0);
-        let screen_height = display_size[1].max(1.0);
-        let sidebar_width = (screen_width * 0.32).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        if self.is_any_visible() {
+            let display_size = ui.io().display_size;
+            let screen_width = display_size[0].max(1.0);
+            let screen_height = display_size[1].max(1.0);
+            let sidebar_width = (screen_width * 0.32).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
 
-        if self.console_visible {
-            self.render_console_window(ui, sidebar_width, screen_height);
+            if self.console_visible {
+                self.render_console_window(ui, sidebar_width, screen_height);
+            }
+
+            if self.debug_visible {
+                self.render_debug_window(ui, screen_width, screen_height, sidebar_width);
+            }
         }
+    }
 
-        if self.debug_visible {
-            self.render_debug_window(ui, screen_width, screen_height, sidebar_width);
+    fn render_app_ui(&mut self, ui: &Ui) {
+        let context = self.frame_context.clone();
+        for entry in self.app_ui.values_mut() {
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
+                (entry.callback)(ui, &context);
+            })) {
+                error!(
+                    "app ui callback panicked: {}",
+                    panic_payload_to_string(payload)
+                );
+            }
         }
     }
 

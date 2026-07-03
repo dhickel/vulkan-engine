@@ -3,24 +3,14 @@
 //! Shared helpers for image/format math and lightweight synchronization utilities used by
 //! upload workers and Vulkan transfer orchestration.
 
-use crate::data::gpu_data;
-use crate::data::gpu_data::{
-    MaterialMeta, MeshMeta, MetRoughUniform, Sampler, SurfaceMeta, TextureMeta, Vertex,
-    VkGpuTextureBuffer, VkMeshBuffers,
-};
-use crate::vulkan::vk_types::{VkBuffer, VkImageAlloc, VkPipeline};
-use crate::vulkan::vk_util;
+use crate::data::gpu_data::Vertex;
 use ash::vk;
-use glam::{vec4, Vec3, Vec4};
-use half::f16;
-use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
-use std::cell::Cell;
+use glam::{Vec3, Vec4};
+use image::{ImageBuffer, Rgb, Rgba};
 use std::cmp::max;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use vk_mem::Alloc;
 
 pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
     width: 1,
@@ -39,7 +29,7 @@ impl PackUnorm for Vec4 {
         let z = (self.z.clamp(0.0, 1.0) * 255.0).round() as u32;
         let w = (self.w.clamp(0.0, 1.0) * 255.0).round() as u32;
 
-        (x << 0) | (y << 8) | (z << 16) | (w << 24)
+        x | (y << 8) | (z << 16) | (w << 24)
     }
 }
 
