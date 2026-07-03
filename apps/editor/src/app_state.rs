@@ -614,6 +614,45 @@ mod tests {
     }
 
     #[test]
+    fn selection_remaps_by_stable_id_when_runtime_id_changes() {
+        let mut session = EditorSession::new(None, None);
+        let old_runtime = SceneNodeId::new(1, 0);
+        let new_runtime = SceneNodeId::new(7, 2);
+        session.set_selection(Some(EditorSelection {
+            runtime_id: old_runtime,
+            stable_id: Some("node.placed.wall.000001".to_string()),
+            label: "Stone Wall 2m".to_string(),
+        }));
+
+        session.refresh_scene_nodes(vec![SceneNodeSummary {
+            id: new_runtime,
+            parent: None,
+            stable_id: Some("node.placed.wall.000001".to_string()),
+            name: "Stone Wall 2m".to_string(),
+            local_transform: Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0)),
+            asset: Some(SceneAssetReference::new(
+                "editor_sample.wall.stone_2m",
+                Some(PathBuf::from("prefabs/wall_straight_2m.obj")),
+            )),
+            material_overrides: BTreeMap::new(),
+            tags: vec!["wall".to_string(), "chunk".to_string()],
+            child_count: 0,
+            mesh_count: 1,
+        }]);
+
+        let selection = session.selection().expect("selection remapped");
+        assert_eq!(selection.runtime_id, new_runtime);
+        assert_eq!(
+            selection.stable_id.as_deref(),
+            Some("node.placed.wall.000001")
+        );
+        assert_eq!(
+            session.transform_edit().map(|edit| edit.translation),
+            Some([4.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
     fn asset_browser_filters_records_by_kind_tag_and_search() {
         let mut session = EditorSession::new(None, None);
         session.set_assets(vec![
@@ -652,6 +691,24 @@ mod tests {
         session.cancel_placement();
         assert_eq!(session.tool_mode(), ToolMode::Select);
         assert!(session.placement().is_none());
+    }
+
+    #[test]
+    fn active_placement_can_be_confirmed_without_dropping_selected_asset() {
+        let mut session = EditorSession::new(None, None);
+        session.set_assets(vec![test_asset(
+            "sample.wall.stone_2m",
+            AssetKind::WallChunk,
+            "Stone Wall",
+            &["wall", "chunk"],
+        )]);
+        session.start_placement("sample.wall.stone_2m");
+
+        let placement = session.take_placement().expect("active placement");
+
+        assert_eq!(placement.asset_id, "sample.wall.stone_2m");
+        assert_eq!(session.selected_asset_id(), Some("sample.wall.stone_2m"));
+        assert_eq!(session.tool_mode(), ToolMode::Select);
     }
 
     fn test_asset(

@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 03 - Editor packaged-asset placement hardening",
-  "status": "planned_not_executed",
+  "status": "phase_01_passed_pending_commit",
   "branch": "sprint/alpha-03-editor-packaged-placement",
   "based_on": "sprint/alpha-02-packaging-tools tip",
   "capture_decision": "required_visible_editor_runtime_behavior",
@@ -9,7 +9,7 @@
     {
       "phase": "01",
       "name": "State and command hardening",
-      "status": "planned",
+      "status": "passed_pending_commit",
       "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/validation/phase-01-validation-report.md",
       "capture_decision": "not_required_code_state_tests_only"
     },
@@ -36,7 +36,38 @@
       "capture_decision": "reconcile_phase_03_capture"
     }
   ],
-  "commands": [],
+  "commands": [
+    {
+      "phase": "01",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p editor",
+      "result": "passed_with_existing_warnings"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p editor",
+      "result": "passed_16_tests"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p renderer scene",
+      "result": "passed_37_renderer_lib_tests_2_integration_tests"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p renderer asset_registry",
+      "result": "passed_8_renderer_lib_tests"
+    },
+    {
+      "phase": "01",
+      "command": "git diff --check",
+      "result": "passed"
+    }
+  ],
   "capture_artifacts": {
     "status": "pending",
     "directories": [],
@@ -50,7 +81,7 @@
     "final_changelog": null
   },
   "residual_risks": [
-    "Plan is created but implementation and validation have not run.",
+    "Phase 01 passed independent validation and is pending main-thread commit handling.",
     "Editor headless automation capability for deterministic placement is unverified.",
     "Capture proof must not be claimed until actual PNG/sidecar artifacts are inspected."
   ],

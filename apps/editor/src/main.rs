@@ -614,7 +614,7 @@ fn confirm_asset_placement(
     scene: &mut Scene,
     history: &mut CommandHistory,
 ) -> Result<(), SceneError> {
-    let Some(placement) = session.borrow_mut().take_placement() else {
+    let Some(placement) = session.borrow().placement().cloned() else {
         session
             .borrow_mut()
             .push_status("No active placement to confirm");
@@ -636,9 +636,15 @@ fn confirm_asset_placement(
 
     let fragment = {
         let mut assets = renderer.assets();
-        assets
-            .load_model_asset(&record.asset_id)
-            .map_err(|err| SceneError::MergeFailed(format!("asset placement failed: {err}")))?
+        match assets.load_model_asset(&record.asset_id) {
+            Ok(fragment) => fragment,
+            Err(err) => {
+                session
+                    .borrow_mut()
+                    .push_status(format!("Placement failed for {}: {err}", record.asset_id));
+                return Ok(());
+            }
+        }
     };
     let stable_id = session
         .borrow_mut()
@@ -647,7 +653,7 @@ fn confirm_asset_placement(
         record.asset_id.clone(),
         Some(record.package_relative_path.clone()),
     );
-    let result = scene.execute_command(
+    let result = match scene.execute_command(
         history,
         Box::new(PlaceAssetCommand::new(
             scene.root(),
@@ -658,7 +664,17 @@ fn confirm_asset_placement(
             record.tags.clone(),
             stable_id,
         )),
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            session.borrow_mut().push_status(format!(
+                "Placement command failed for {}: {err}",
+                record.asset_id
+            ));
+            return Ok(());
+        }
+    };
+    session.borrow_mut().take_placement();
     if let Some(node) = result.created_node {
         select_node(session, scene, node);
     }
@@ -720,6 +736,9 @@ fn cleanup_invalid_selection(session: &Rc<RefCell<EditorSession>>, scene: &Scene
         }
     }
     session.borrow_mut().clear_selection();
+    session
+        .borrow_mut()
+        .push_status("Selection cleared after command removed the selected node");
 }
 
 fn queue_viewport_pick(session: &Rc<RefCell<EditorSession>>, x: f32, y: f32) {
