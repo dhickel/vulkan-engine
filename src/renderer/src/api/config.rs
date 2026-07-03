@@ -321,6 +321,7 @@ pub struct FrameCaptureScheduler {
     default_manual_output_dir: PathBuf,
     manual_output_dir: PathBuf,
     manual_sequence: u32,
+    next_manual_capture_frame: Option<u32>,
     last_status: Option<FrameCaptureStatus>,
 }
 
@@ -341,6 +342,7 @@ impl FrameCaptureScheduler {
             manual_output_dir: default_manual_output_dir.clone(),
             default_manual_output_dir,
             manual_sequence: 0,
+            next_manual_capture_frame: None,
             last_status: None,
         }
     }
@@ -416,15 +418,19 @@ impl FrameCaptureScheduler {
         )?;
         let manual_index = self.manual_sequence;
         self.manual_sequence = self.manual_sequence.wrapping_add(1);
+        let scheduled_frame = self
+            .next_manual_capture_frame
+            .unwrap_or_else(|| current_frame.wrapping_add(1));
+        self.next_manual_capture_frame = Some(scheduled_frame.wrapping_add(1));
         let output_path = manual_capture_path(
             &self.manual_output_dir,
             &self.app_name,
-            current_frame.wrapping_add(1),
+            scheduled_frame,
             target,
             manual_index,
         );
         self.single_captures.push(ScheduledSingleCapture {
-            frame_number: current_frame.wrapping_add(1),
+            frame_number: scheduled_frame,
             request: FrameCaptureRequest::new(target, output_path),
             source: FrameCaptureSource::Manual,
         });
@@ -447,6 +453,13 @@ impl FrameCaptureScheduler {
             }
         }
         self.single_captures = pending;
+        if !self
+            .single_captures
+            .iter()
+            .any(|capture| capture.source == FrameCaptureSource::Manual)
+        {
+            self.next_manual_capture_frame = None;
+        }
 
         for sequence in self.sequences.iter_mut() {
             if sequence.config.remaining == 0 || frame_number < sequence.config.start_frame {
@@ -736,14 +749,52 @@ mod capture_tests {
             .queue_manual_capture(0, CaptureTarget::Present)
             .unwrap();
 
-        let due = scheduler.due_captures(1);
-        assert_eq!(due.len(), 2);
-        let first_parent = due[0].request.output_path.parent();
-        let second_parent = due[1].request.output_path.parent();
+        let first_due = scheduler.due_captures(1);
+        let second_due = scheduler.due_captures(2);
+        assert_eq!(first_due.len(), 1);
+        assert_eq!(second_due.len(), 1);
+        let first_parent = first_due[0].request.output_path.parent();
+        let second_parent = second_due[0].request.output_path.parent();
         assert_eq!(first_parent, second_parent);
         assert!(first_parent
             .unwrap()
             .starts_with(PathBuf::from(".internal-dev/captures")));
+    }
+
+    #[test]
+    fn rapid_manual_captures_are_staggered_across_future_frames() {
+        let mut scheduler = FrameCaptureScheduler::new("Editor");
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+
+        let first_due = scheduler.due_captures(1);
+        let second_due = scheduler.due_captures(2);
+        let third_due = scheduler.due_captures(3);
+        assert_eq!(first_due.len(), 1);
+        assert_eq!(second_due.len(), 1);
+        assert_eq!(third_due.len(), 1);
+        assert_eq!(first_due[0].frame_number, 1);
+        assert_eq!(second_due[0].frame_number, 2);
+        assert_eq!(third_due[0].frame_number, 3);
+
+        let first_path = &first_due[0].request.output_path;
+        let second_path = &second_due[0].request.output_path;
+        let third_path = &third_due[0].request.output_path;
+        assert_ne!(first_path, second_path);
+        assert_ne!(first_path, third_path);
+        assert_ne!(second_path, third_path);
+        assert_eq!(first_path.parent(), second_path.parent());
+        assert_eq!(first_path.parent(), third_path.parent());
+        assert!(first_path.ends_with(PathBuf::from("editor-frame-1-present-manual-0000.png")));
+        assert!(second_path.ends_with(PathBuf::from("editor-frame-2-present-manual-0001.png")));
+        assert!(third_path.ends_with(PathBuf::from("editor-frame-3-present-manual-0002.png")));
     }
 
     #[test]
