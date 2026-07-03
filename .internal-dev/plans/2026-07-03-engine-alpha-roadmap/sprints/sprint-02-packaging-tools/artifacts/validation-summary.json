@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 02 - Asset package authoring and validation tools",
-  "status": "phase_02_passed_red_team_remediation_committed_pushed_reported",
+  "status": "phase_03_passed_local_validation_pending_commit_push_report",
   "branch": "sprint/alpha-02-packaging-tools",
   "capture_decision": "not_required_cli_schema_only",
   "phases": [
@@ -28,6 +28,20 @@
         "Fixed option-before-path parsing for package and scene validation commands.",
         "Expanded CLI tests to cover exact validation/usage exit codes and flag-order variants.",
         "Clarified in-scope pending sprint evidence versus unrelated dirty state in the phase report."
+      ]
+    },
+    {
+      "phase": "03",
+      "name": "engine_pack authoring and folder pack commands",
+      "status": "passed_local_validation_pending_commit_push_report",
+      "capture_decision": "not_required_cli_schema_only",
+      "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-03-validation-report.md",
+      "validator_agent": "019f26fa-33dc-7e41-9e16-ac28bc159fc0",
+      "remediation": [
+        "Rejected raw parent-traversing package asset paths before pack copy.",
+        "Cleared stale PACK_REPORT.json before validation can abort a repack.",
+        "Added regression tests for unsafe asset paths and stale report cleanup.",
+        "Created sprint-local Phase 03 smoke artifacts and validation report."
       ]
     }
   ],
@@ -101,6 +115,51 @@
       "phase": "02",
       "command": "cargo run -p engine_pack -- validate-scene --project apps/editor/sample_project/engine.project.toml apps/editor/sample_project/scenes/start.engine.scene.json",
       "result": "passed: option-before-path valid[scene]"
+    },
+    {
+      "phase": "03",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "03",
+      "command": "cargo check -p engine_pack --locked",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p engine_pack --locked",
+      "result": "passed: 13 CLI integration tests"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- new-project .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project --id project.engine_pack_smoke --name \"Engine Pack Smoke\"",
+      "result": "passed: created project"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- new-package .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets/smoke.package.toml --id smoke --name \"Smoke Assets\"",
+      "result": "passed: created package"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- add-asset .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets/smoke.package.toml --id smoke.model.smoke --kind model --path models/smoke.obj --tag smoke --tag generated",
+      "result": "passed: added asset and revalidated package"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- scan-assets .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets --package-id smoke",
+      "result": "passed: deterministic TOML suggestion for smoke.model.models.smoke"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml",
+      "result": "passed: valid[project] project.editor_sample"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- pack apps/editor/sample_project/engine.project.toml --out .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed",
+      "result": "passed: PACK_REPORT.json and 5 copied files"
     }
   ],
   "commits": [

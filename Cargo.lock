@@ -914,6 +914,9 @@ name = "engine_pack"
 version = "0.1.0"
 dependencies = [
  "renderer",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
 ]
 
 [[package]]

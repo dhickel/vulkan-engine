@@ -1,0 +1,44 @@
+$ cargo run -p engine_pack -- new-project ...
+created[project]: .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/engine.project.toml
+
+$ cargo run -p engine_pack -- new-package ...
+created[package]: .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets/smoke.package.toml
+
+$ cargo run -p engine_pack -- add-asset ...
+added[asset]: smoke.model.smoke -> .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets/smoke.package.toml
+
+$ cargo run -p engine_pack -- scan-assets ...
+[[assets]]
+id = "smoke.model.models.smoke"
+kind = "model"
+path = "models/smoke.obj"
+display_name = "smoke"
+
+$ cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml
+valid[project]: apps/editor/sample_project/engine.project.toml (project.editor_sample)
+
+$ cargo run -p engine_pack -- pack apps/editor/sample_project/engine.project.toml --out ...
+packed[project]: apps/editor/sample_project/engine.project.toml -> .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed (5 files)
+
+$ find packed files
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed/PACK_REPORT.json
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed/assets/editor_sample.package.toml
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed/assets/models/block_prop.obj
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed/assets/prefabs/wall_straight_2m.obj
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed/engine.project.toml
+.internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed/scenes/start.engine.scene.json
+
+$ PACK_REPORT.json
+{
+  "source_project": "apps/editor/sample_project/engine.project.toml",
+  "copied_files": [
+    "engine.project.toml",
+    "scenes/start.engine.scene.json",
+    "assets/editor_sample.package.toml",
+    "assets/models/block_prop.obj",
+    "assets/prefabs/wall_straight_2m.obj"
+  ],
+  "skipped_disabled_packages": [],
+  "warnings": [],
+  "validation_status": "passed"
+}
