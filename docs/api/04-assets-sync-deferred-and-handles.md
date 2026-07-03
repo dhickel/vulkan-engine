@@ -36,11 +36,15 @@ Implemented:
 - editor project/package loading for enabled project packages;
 - editor asset browser listing and placement of package records.
 
+CLI tooling:
+
+- `engine_pack` is the current Rust CLI for validating project/package/scene files, creating starter project/package manifests, scanning supported asset files, appending asset records, and producing folder-based pack output. See [Packaging CLI](10-packaging-cli.md).
+
 Deferred:
 
 - drag-and-drop imports and thumbnail generation;
 - complete hot-reload/reimport tooling beyond registry/path invalidation;
-- shipping package/export pipeline.
+- binary shipping package/archive pipeline.
 
 `engine.project.toml` is the project entrypoint. It must live at the project root unless a caller explicitly opens another path. Paths are project-relative unless a field explicitly says otherwise.
 

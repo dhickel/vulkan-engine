@@ -23,6 +23,7 @@ The root workspace currently contains `src/input`, `src/renderer`, `src/audio`, 
 | Configuration | [07-config.md](07-config.md) | `RendererConfig`, `VisualTuning`, asset policies |
 | Debug & timing | [08-debug.md](08-debug.md) | Debug UI, timing capture, custom views |
 | Editor placement | [09-editor-asset-browser-and-wall-chunks.md](09-editor-asset-browser-and-wall-chunks.md) | Project package loading, asset browser, wall chunk prefab placement |
+| Packaging CLI | [10-packaging-cli.md](10-packaging-cli.md) | Rust CLI validation, authoring, and folder pack output |
 
 ## Top-Level Re-exports
 

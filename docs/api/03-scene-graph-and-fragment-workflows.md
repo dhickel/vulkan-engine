@@ -96,6 +96,8 @@ Asset references inside a scene must use durable IDs first:
 }
 ```
 
+Use `engine_pack validate-scene <scene.engine.scene.json> --project <engine.project.toml>` to validate scene asset references against the enabled project packages before treating a scene file as editor-ready. The CLI path is documented in [Packaging CLI](10-packaging-cli.md).
+
 Wall chunk v1 is prefab asset placement metadata. It identifies a prefab mesh asset, placement size/snap/connectors, and editor categorization. It must not encode editable polygon, CSG, or brush geometry; true polygon/brush editing is deferred beyond the current package-backed prefab placement and persistence slice.
 
 Sample scene:
