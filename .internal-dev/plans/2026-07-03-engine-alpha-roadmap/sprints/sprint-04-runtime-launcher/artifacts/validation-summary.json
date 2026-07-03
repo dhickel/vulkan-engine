@@ -1,8 +1,8 @@
 {
   "task": "sprint-04-runtime-launcher",
   "plan_root": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher",
-  "status": "implementation_in_progress",
-  "fully_validated": false,
+  "status": "closed",
+  "fully_validated": true,
   "created_at": "2026-07-03",
   "updated_at": "2026-07-03",
   "branch": "sprint/alpha-04-runtime-launcher",
@@ -16,7 +16,7 @@
     "phase_01_runtime_cli": "validator_passed_committed_pushed_reported",
     "phase_02_runtime_loading_loop": "validator_passed_committed_pushed_reported",
     "phase_03_dev_loop_docs": "validator_passed_committed_pushed_reported",
-    "phase_04_capture_closeout": "pending"
+    "phase_04_capture_closeout": "validator_passed_pending_commit_push_report"
   },
   "required_commands": [
     {
@@ -198,6 +198,90 @@
       "command": "independent validator rerun: cargo run -- --help; targeted stale sweep; broader stale wording sweep; python -m json.tool; git diff --check",
       "status": "passed_after_lifecycle_doc_remediation",
       "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check -p renderer --examples",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check -p editor",
+      "status": "passed_with_existing_renderer_and_editor_dead_code_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check -p engine_pack --locked",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo test -p engine",
+      "status": "passed_17_tests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo test -p renderer",
+      "status": "passed_150_lib_17_integration_5_ignored_doctests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo test -p engine_pack --locked",
+      "status": "passed_13_cli_validation_tests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 3 --capture_frame_start 5 --capture_frame_interval 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw",
+      "status": "passed_true_headless_draw_capture",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "RUST_LOG=debug timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 1 --capture_frame_start 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/debug-smoke --record_debug 10 --record_debug_interval 50 --record_debug_path .internal-dev/debug_reports/sprint-04-runtime-launcher/root-runtime-timing.jsonl",
+      "status": "passed_true_headless_draw_capture_and_debug_jsonl",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "jq sidecar predicates plus png existence for final headless-draw and debug-smoke captures",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "representative PNG visual inspection for headless-draw frame 15 and debug-smoke frame 5",
+      "status": "passed_nonblank_sample_scene_visible",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "rg -n \"migration stub|runtime project launcher.*deferred|present-target proof|desktop screenshot|dynamic Rust hot reload implemented|scripting implemented|physics implemented|audio implemented|TODO|not implemented\" README.md docs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher",
+      "status": "passed_with_accepted_historical_planning_and_internal_roadmap_hits",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "independent validator: json parse; git diff --check; sidecar predicates; debug JSONL; stale-reference sweep",
+      "status": "passed",
+      "exit_code": 0
     }
   ],
   "main_thread_evidence": {
@@ -264,13 +348,13 @@
   },
   "capture_proof": {
     "required": true,
-    "status": "phase_02_draw_capture_passed_pending_final_sprint_closeout",
+    "status": "phase_04_final_draw_capture_passed_validator_passed",
     "accepted_target": "draw",
     "required_flags": [
       "--headless",
       "--capture_target draw"
     ],
-    "artifact_directory": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke",
+    "artifact_directory": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw",
     "sidecar_predicates": {
       "status": "succeeded",
       "capture_target": "draw",
@@ -307,12 +391,61 @@
           "width": 1440,
           "height": 900
         }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-10-draw-seq-0001.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-10-draw-seq-0001.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-15-draw-seq-0002.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-15-draw-seq-0002.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/debug-smoke/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/debug-smoke/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
       }
     ]
   },
   "debug_record_evidence": {
-    "status": "pending",
-    "expected_path": ".internal-dev/debug_reports/sprint-04-runtime-launcher/root-runtime-timing.jsonl"
+    "status": "passed_validator_passed",
+    "expected_path": ".internal-dev/debug_reports/sprint-04-runtime-launcher/root-runtime-timing.jsonl",
+    "line_count": 2
   },
   "model_tooling_constraints": [],
   "residual_risks": [
@@ -326,6 +459,9 @@
     "Phase 02 implementation produced true headless draw-target capture proof.",
     "Phase 02 independent validator passed on 2026-07-03.",
     "Phase 03 local validation passed on 2026-07-03.",
-    "Phase 03 independent validator initially found stale lifecycle doc wording; remediation passed revalidation on 2026-07-03."
+    "Phase 03 independent validator initially found stale lifecycle doc wording; remediation passed revalidation on 2026-07-03.",
+    "Phase 04 local validation and true headless draw-target closeout passed on 2026-07-03.",
+    "Phase 04 independent validator passed on 2026-07-03.",
+    "Sprint 04 is fully validated after Phase 01-04 validator passes and final true headless draw-target evidence."
   ]
 }
