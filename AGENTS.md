@@ -27,6 +27,11 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 - Vulkan internals: `src/renderer/src/vulkan/AGENTS.md`
 - Shader internals: `src/renderer/src/shaders/AGENTS.md`
 
+## Project Skills
+
+- Headless capture validation: `.internal-dev/skills/engine-headless-capture-validation/SKILL.md`
+- Use this skill when validating renderer, scene, shader, camera, material, asset, or Vulkan behavior with screenshot evidence. Prefer timeout-bound engine headless captures over desktop screenshots so agents can validate without taking over the user's screen.
+
 ## `.internal-dev` Development Document Store
 
 `.internal-dev/` is the persistent engineering document store for plans, bugs, changelogs, reviews, notes, and reusable knowledge.
@@ -83,6 +88,14 @@ Headless smoke pattern:
 - `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr`
 
 Treat successful startup logs with no fatal errors before timeout as a smoke pass.
+
+Headless capture validation:
+
+- For visual proof, use `.internal-dev/skills/engine-headless-capture-validation/SKILL.md`.
+- Agents may create focused capture test scenes/specs for themselves when needed:
+- source-controlled reusable scenes/examples under `src/renderer/examples/capture_tests/`
+- temporary investigation specs/evidence under `.internal-dev/headless_capture_tests/`
+- capture output under `.internal-dev/captures/`
 
 Debug-record smoke pattern (agent should use this for runtime diagnosis by default):
 
