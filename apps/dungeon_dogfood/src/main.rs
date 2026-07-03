@@ -18,8 +18,8 @@ use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use renderer::{
-    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureRequest, FrameCaptureSequence,
-    FrameCaptureStatus, FrameRenderOutcome, RendererConfig, RendererError,
+    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
+    FrameRenderOutcome, RendererConfig, RendererError,
 };
 use scene_seed::{renderer_visual_tuning, LevelScene};
 use thiserror::Error;
@@ -188,7 +188,7 @@ fn run() -> Result<(), AppError> {
 
     let level_selection = selected_level();
     let loaded_level = load_selected_level(&level_selection)?;
-    let level = loaded_level.level;
+    let level = &loaded_level.level;
 
     log::info!(
         "Selected level '{}': {}",
@@ -221,11 +221,11 @@ fn run() -> Result<(), AppError> {
         log::info!("Dungeon map overview:\n{}", map_overview);
     }
 
-    let collision_world = CollisionWorld::from_level(&level);
+    let collision_world = CollisionWorld::from_level(level);
 
     if headless_opts.enabled {
         return run_headless(
-            &level,
+            level,
             &content_pack,
             &collision_world,
             &loaded_level,
@@ -688,7 +688,7 @@ fn run_headless(
             headless_opts.capture_frame_interval.unwrap_or(1),
             count,
         )
-        .map_err(AppError::RendererInit)?;
+        .map_err(|e| AppError::RendererInit(RendererError::CaptureConfig(e)))?;
 
         let _ = std::fs::create_dir_all(&capture_run_dir);
         renderer
@@ -761,7 +761,7 @@ fn run_headless(
             }) => {
                 log::error!("Headless capture failed at frame {frame_number}: {message}");
                 return Err(AppError::RendererInit(RendererError::InvalidState(
-                    format!("headless capture failed at frame {frame_number}: {message}"),
+                    "headless capture failed",
                 )));
             }
             Some(FrameCaptureStatus::BackendNotImplemented {
@@ -774,10 +774,7 @@ fn run_headless(
                     target.as_label()
                 );
                 return Err(AppError::RendererInit(RendererError::InvalidState(
-                    format!(
-                        "headless capture target '{}' is not implemented",
-                        target.as_label()
-                    ),
+                    "headless capture target not implemented",
                 )));
             }
             _ => {}
@@ -789,9 +786,7 @@ fn run_headless(
         Ok(())
     } else {
         Err(AppError::RendererInit(RendererError::InvalidState(
-            format!(
-                "headless capture incomplete: {succeeded_count}/{expected_captures} captures written"
-            ),
+            "headless capture incomplete",
         )))
     }
 }
