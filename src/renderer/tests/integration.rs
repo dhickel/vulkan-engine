@@ -10,6 +10,64 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn beginner_prelude_import_contract_compiles() {
+    use renderer::prelude::{
+        AssetKind, AssetManager, AssetRegistry, CaptureTarget, FrameCaptureRequest,
+        FrameCaptureScheduler, FrameCaptureSequence, FrameRenderOutcome, LoadStatus, PointLight,
+        Renderer, RendererConfig, RendererError, Scene,
+    };
+
+    let config = RendererConfig::default();
+    assert!(!config.app_name.is_empty());
+
+    let mut scene = Scene::new();
+    let light = PointLight {
+        position: Vec3::new(0.0, 1.0, 0.0),
+        color: Vec3::ONE,
+        intensity: 1.0,
+        range: 4.0,
+    };
+    scene.create_point_light(light).expect("create point light");
+
+    let mut registry = AssetRegistry::new();
+    registry
+        .load_package_manifest_str(
+            r#"
+format_version = 1
+package_id = "core"
+display_name = "Core Assets"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+"#,
+            "packages/core",
+        )
+        .expect("manifest parses through prelude import");
+
+    let request = FrameCaptureRequest::new(CaptureTarget::Present, "frame.png");
+    assert_eq!(request.target, CaptureTarget::Present);
+    let sequence = FrameCaptureSequence::new(CaptureTarget::Draw, "captures", 0, 1, 1)
+        .expect("capture sequence");
+    assert_eq!(sequence.remaining, 1);
+    let scheduler = FrameCaptureScheduler::new("prelude-contract");
+    assert!(scheduler.last_status().is_none());
+
+    let status: LoadStatus<()> = LoadStatus::Cancelled;
+    assert!(matches!(status, LoadStatus::Cancelled));
+    assert!(matches!(
+        FrameRenderOutcome::Rendered,
+        FrameRenderOutcome::Rendered
+    ));
+    assert!(matches!(AssetKind::Model, AssetKind::Model));
+
+    let _asset_manager_type: Option<AssetManager<'_>> = None;
+    let _renderer_type: Option<Renderer> = None;
+    let _renderer_error_type: Option<RendererError> = None;
+}
+
+#[test]
 fn scene_node_create_and_transform() {
     let mut scene = Scene::new();
     let node = scene

@@ -36,13 +36,15 @@ Existing root exports are preserved for compatibility, but the alpha beginner
 path is the small set used by the quickstart, lifecycle, scene, asset, input,
 debug, and runtime-launcher chapters.
 
-`renderer::api` remains the explicit facade namespace. The crate root re-exports
-that facade plus a few older helper groups used by current tests and examples.
-Those root-only helper groups are compatibility public, not beginner-stable API.
+`renderer::prelude` is the supported beginner import path. It is intentionally
+smaller than the crate root. `renderer::api` remains the explicit facade
+namespace, and the crate root re-exports that facade plus a few older helper
+groups used by current tests and examples. Those root-only helper groups are
+compatibility public, not beginner-stable API.
 
 ```rust
 // Alpha beginner facade examples
-pub use api::{Renderer, RendererConfig, RendererError, Scene, ...};
+use renderer::prelude::{Renderer, RendererConfig, RendererError, Scene};
 
 // Handles
 pub use data::handles::{MeshHandle, TextureHandle, MaterialHandle, EnvironmentHandle};
@@ -64,7 +66,7 @@ root-only compatibility exports are listed in
 
 | Tier | Current exposure | Intended use |
 |------|------------------|--------------|
-| Alpha beginner facade | `renderer::{Renderer, RendererConfig, Scene, AssetManager, LoadTicket, InputSystem, FrameCaptureRequest, EventBus, ...}` and the same names under `renderer::api` | Supported alpha path for opening a renderer, creating or loading scenes, loading assets, updating input, rendering frames, and using debug/capture controls. |
+| Alpha beginner facade | `renderer::prelude::{Renderer, RendererConfig, Scene, AssetManager, LoadTicket, InputSystem, FrameCaptureRequest, EventBus, ...}` with the same names still available under `renderer::api` and, for compatibility, the crate root | Supported alpha path for opening a renderer, creating or loading scenes, loading assets, updating input, rendering frames, and using debug/capture controls. |
 | Compatibility public | Root-only helpers such as `AnimationPlayer`, `SceneWorld`, `CommandHistory`, scene commands, `Aabb`, `Frustum`, `Ray`, and camera controllers | Preserved for current users, tests, diagnostics, and editor-style workflows. They are not the beginner contract. |
 | Advanced interop | `renderer::api::advanced` behind the `advanced-interop` feature | Explicit opt-in for lower-level renderer integration. Keep this out of beginner examples unless a chapter labels it advanced. |
 | Internal implementation detail | Private renderer modules and public-looking implementation concepts reached only through compatibility paths | Do not document as new user-facing APIs in beginner docs. |

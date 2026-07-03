@@ -1,7 +1,7 @@
 mod common;
 
 use log::{error, info};
-use renderer::{
+use renderer::prelude::{
     default_capture_run_dir, CaptureTarget, EnvironmentSource, FrameCaptureStatus,
     FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
 };

@@ -1,5 +1,13 @@
 pub mod api;
 
+/// Curated alpha facade imports for quickstart-style renderer applications.
+///
+/// This module is the supported beginner import path. The crate root preserves
+/// additional compatibility exports, but they are not part of this prelude.
+pub mod prelude {
+    pub use crate::api::prelude::*;
+}
+
 pub mod animation;
 mod data;
 mod debug_ui;

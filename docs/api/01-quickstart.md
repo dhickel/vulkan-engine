@@ -13,7 +13,7 @@ winit = "0.30"
 ## 2. Create a Window and Renderer
 
 ```rust
-use renderer::{Renderer, RendererConfig};
+use renderer::prelude::{Renderer, RendererConfig, Scene};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
 use winit::dpi::PhysicalSize;
@@ -97,6 +97,11 @@ Key points:
 ## 5. Full Minimal Example
 
 See [`src/renderer/examples/demo_pbr.rs`](../src/renderer/examples/demo_pbr.rs) for the complete PBR demo. See [`src/renderer/examples/demo_model_load.rs`](../src/renderer/examples/demo_model_load.rs) for a model-loading example that builds its own scene.
+
+The renderer examples use `renderer::prelude` for the alpha beginner facade.
+Root-level compatibility exports still exist, but new quickstart-style code
+should prefer the prelude unless a chapter explicitly labels an API as
+compatibility or advanced.
 
 ## 6. Debug UI
 

@@ -4,7 +4,7 @@
 
 use glam::{Mat4, Vec3};
 use log::{error, info};
-use renderer::{
+use renderer::prelude::{
     default_capture_run_dir, single_capture_path, CaptureTarget, DebugRuntimeMode,
     FrameCaptureRequest, FrameCaptureSequence, FrameCaptureStatus, FrameRenderOutcome, Renderer,
     RendererConfig, RendererError, Scene,

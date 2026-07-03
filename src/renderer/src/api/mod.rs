@@ -3,6 +3,7 @@ pub mod config;
 mod errors;
 mod hooks;
 mod loading;
+pub mod prelude;
 mod renderer;
 pub(crate) mod scene;
 

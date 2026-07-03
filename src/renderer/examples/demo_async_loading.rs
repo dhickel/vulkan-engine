@@ -1,7 +1,7 @@
 mod common;
 
 use log::{error, info, warn};
-use renderer::{
+use renderer::prelude::{
     FrameRenderOutcome, LoadStatus, LoadTicket, Renderer, RendererConfig, RendererError, Scene,
 };
 use std::env;

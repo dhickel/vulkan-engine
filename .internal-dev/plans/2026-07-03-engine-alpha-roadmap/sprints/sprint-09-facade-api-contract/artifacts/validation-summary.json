@@ -12,7 +12,7 @@
     "phase_02": {
       "worker_report": "reports/phase-02-example-contract.md",
       "validator_report": "validation/phase-02-validation-report.md",
-      "status": "not_started"
+      "status": "validated"
     },
     "phase_03": {
       "worker_report": "reports/phase-03-friction-hardening.md",
@@ -49,6 +49,36 @@
       "command": "cargo doc -p renderer --no-deps",
       "result": "not_run",
       "notes": "Skipped because this phase changed Markdown docs and evidence only; rustdoc and re-export organization were not materially changed."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "Passed after formatting the inherited partial worker patch."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 18 integration tests, and 5 ignored doctests passed."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "pass_with_existing_warning",
+      "notes": "Generated docs; existing unresolved intra-doc link warning remains in api/assets.rs material clamp prose."
+    },
+    {
+      "phase": "phase_02",
+      "command": "rg -n \"prelude|stable public surface|advanced-interop|SceneWorld|CommandHistory|AnimationPlayer\" docs/api src/renderer/src src/renderer/examples src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "New prelude references are expected. No stale stable-public-surface phrase returned; compatibility and advanced hits remain labeled or internal."
     }
   ],
   "capture": {
