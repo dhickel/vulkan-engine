@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 02 - Asset package authoring and validation tools",
-  "status": "phase_02_passed_red_team_remediation_committed_pending_push",
+  "status": "phase_02_passed_red_team_remediation_committed_pushed_reported",
   "branch": "sprint/alpha-02-packaging-tools",
   "capture_decision": "not_required_cli_schema_only",
   "phases": [
@@ -117,8 +117,22 @@
       "url": "https://github.com/dhickel/vulkan-engine/commit/4121f5d0cbacfe12e0132a101d442d84e52042f8"
     }
   ],
-  "pushes": [],
-  "agentmail_reports": [],
+  "pushes": [
+    {
+      "phase": "02",
+      "branch": "sprint/alpha-02-packaging-tools",
+      "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools",
+      "pushed_through": "b57d827f"
+    }
+  ],
+  "agentmail_reports": [
+    {
+      "phase": "02",
+      "subject": "Sprint 02 Phase 02 Progress Report - engine_pack Validation CLI",
+      "message_id": "<0100019f26f224e0-3ad7899c-53b8-444f-90aa-aaf70660c426-000000@email.amazonses.com>",
+      "thread_id": "3b73da72-bec0-49c3-8140-62d4c17960cc"
+    }
+  ],
   "residuals": [
     "Sprint 01 remains blocked on changelog timing confirmation and must not be closed by Sprint 02."
   ],
