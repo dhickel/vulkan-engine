@@ -23,7 +23,7 @@ Status values:
 | 05 | closed | Event system and application lifecycle | Apps/tools can subscribe to lifecycle/input/scene/asset/physics/audio events | Closed with event crate, renderer/root runtime integration, app consumers, docs, true headless draw capture, final quality review, pushed evidence commits, and final closeout email. Branch: `sprint/alpha-05-event-system-lifecycle`. |
 | 06 | closed | Physics and collision foundation | Scene/package authored collision and basic queries/events work | Closed with physics crate alpha contract, package/scene collision metadata validation, physics event bridge, dogfood migration debt artifact, docs, changelog, validation reports, final quality review, pushed phase/evidence commits, and phase closeout email. Branch: `sprint/alpha-06-physics-collision-foundation`. |
 | 07 | closed | Audio foundation | Packaged audio can be referenced and played in a sample/dogfood path | Closed with renderer-independent audio facade, package/scene audio validation, `engine_pack` audio scanning/tests, dogfood opt-in audio event proof, docs, changelog, validation reports, final quality review, pushed phase/evidence commits, and final report email. Branch: `sprint/alpha-07-audio-foundation`. Device smoke skipped by design; `cargo test -p dungeon_dogfood` remains blocked by existing renderer test-profile `russimp_sys` binding issue before dogfood tests execute. |
-| 08 | planned | Scripting and hot Rust development strategy | App template and scripting/hot reload boundaries are explicit and tested | Plan suite: `sprints/sprint-08-scripting-hot-rust-strategy/`. Execute on `sprint/alpha-08-scripting-hot-rust-strategy`. Rust app crates first; scripts experimental unless proven. |
+| 08 | closed | Scripting and hot Rust development strategy | App template and scripting/hot reload boundaries are explicit and tested | Closed with `engine_pack new-app` support-crate scaffold, experimental `ScriptId`-aware scripting event/log/error boundary, docs, validation reports, final quality review, pushed phase/evidence commits, and phase closeout email. Branch: `sprint/alpha-08-scripting-hot-rust-strategy`. `fully_validated=false` by design because accepted residuals remain: protected local state, deferred renderer-window templates, deferred package-level script assets, deferred dynamic/runtime Rust reload, and conditional dogfood test not applicable. |
 | 09 | proposed | Facade API alpha contract | Supported beginner API is documented and examples compile | Keep simple path small. |
 | 10 | proposed | Advanced rendering opt-in contract | Advanced APIs feature-gated and misuse risks documented | Avoid raw internals as default surface. |
 | 11 | proposed | Dogfood vertical slice | Real dogfood app uses alpha contracts and visual baseline | Prefer package/project contracts over one-off manifests. |
@@ -32,7 +32,7 @@ Status values:
 
 ## Active Sprint Pointer
 
-Current active sprint: 08 - Scripting and hot Rust development strategy. Next proposed sprint: 09 - Facade API alpha contract.
+Current active sprint: none. Next proposed sprint: 09 - Facade API alpha contract.
 
 When starting a sprint:
 
