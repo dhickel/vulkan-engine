@@ -1218,6 +1218,28 @@ struct SerializedCollisionShape {
     half_height: Option<f32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SerializedAudioClipReference {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path_hint: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SerializedAudioReference {
+    id: String,
+    clip: SerializedAudioClipReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    usage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    volume: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_gain: Option<f32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SerializedScene {
     #[serde(default)]
@@ -1231,6 +1253,8 @@ struct SerializedScene {
     environment: Option<SerializedEnvironment>,
     #[serde(default)]
     materials: BTreeMap<String, SerializedMaterialOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    audio: Vec<SerializedAudioReference>,
     #[serde(default = "default_editor_metadata")]
     editor: serde_json::Value,
 }
@@ -1314,6 +1338,7 @@ impl SerializedScene {
                     asset: SerializedAssetReference::from_scene_ref(asset),
                 }),
             materials: scene.materials.clone(),
+            audio: Vec::new(),
             editor: scene.editor.clone(),
         }
     }
@@ -1587,6 +1612,7 @@ fn validate_scene_content(
         )
     })?;
     collect_scene_collision_diagnostics(&serialized, path, options, &mut diagnostics);
+    collect_scene_audio_diagnostics(&serialized, path, options, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(ValidationError::new(diagnostics));
     }
@@ -1661,6 +1687,10 @@ fn collect_scene_runtime_handle_diagnostics(
 
     if let Some(environment) = raw.get("environment") {
         collect_json_handle_shapes(environment, path, Some("environment"), diagnostics);
+    }
+
+    if let Some(audio) = raw.get("audio") {
+        collect_json_handle_shapes(audio, path, Some("audio"), diagnostics);
     }
 }
 
@@ -1786,6 +1816,126 @@ fn collect_scene_collision_diagnostics(
             }
         }
     }
+}
+
+fn collect_scene_audio_diagnostics(
+    serialized: &SerializedScene,
+    path: Option<&Path>,
+    options: &SceneValidationOptions,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let mut audio_ids = HashSet::new();
+    for audio in &serialized.audio {
+        validate_scene_audio_id(
+            &audio.id,
+            "id",
+            &audio.id,
+            path,
+            &mut audio_ids,
+            diagnostics,
+        );
+        let Some(clip_id) = audio
+            .clip
+            .id
+            .as_ref()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+        else {
+            diagnostics.push(scene_audio_diagnostic(
+                "scene.audio_missing_clip_id",
+                "audio clip reference requires a durable clip id",
+                path,
+                &audio.id,
+            ));
+            continue;
+        };
+        if is_invalid_durable_audio_id(clip_id) {
+            diagnostics.push(scene_audio_diagnostic(
+                "scene.audio_invalid_id",
+                format!("audio clip id '{clip_id}' is not a durable id"),
+                path,
+                &audio.id,
+            ));
+        } else if options
+            .known_asset_ids
+            .as_ref()
+            .is_some_and(|known| !known.contains(clip_id))
+        {
+            diagnostics.push(
+                scene_audio_diagnostic(
+                    "scene.unknown_audio_clip_id",
+                    format!("unknown audio clip id '{clip_id}'"),
+                    path,
+                    &audio.id,
+                )
+                .with_durable_id(clip_id.to_string()),
+            );
+        }
+
+        if let Some(usage) = &audio.usage {
+            match usage.as_str() {
+                "effect" | "music" | "ambient" | "voice" | "ui" => {}
+                _ => diagnostics.push(scene_audio_diagnostic(
+                    "scene.audio_invalid_usage",
+                    "audio usage must be one of effect, music, ambient, voice, or ui",
+                    path,
+                    &audio.id,
+                )),
+            }
+        }
+
+        for (field, value) in [
+            ("volume", audio.volume),
+            ("default_gain", audio.default_gain),
+        ] {
+            if value.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+                diagnostics.push(scene_audio_diagnostic(
+                    "scene.audio_invalid_gain",
+                    format!("audio {field} must be a positive finite number"),
+                    path,
+                    &audio.id,
+                ));
+            }
+        }
+    }
+}
+
+fn validate_scene_audio_id(
+    id: &str,
+    field: &str,
+    durable_id: &str,
+    path: Option<&Path>,
+    audio_ids: &mut HashSet<String>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if is_invalid_durable_audio_id(id) {
+        diagnostics.push(scene_audio_diagnostic(
+            "scene.audio_invalid_id",
+            format!("audio {field} '{id}' is not a durable id"),
+            path,
+            durable_id,
+        ));
+        return;
+    }
+    if !audio_ids.insert(id.to_string()) {
+        diagnostics.push(scene_audio_diagnostic(
+            "scene.duplicate_audio_id",
+            format!("duplicate audio id '{id}'"),
+            path,
+            durable_id,
+        ));
+    }
+}
+
+fn scene_audio_diagnostic(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    path: Option<&Path>,
+    audio_id: &str,
+) -> ValidationDiagnostic {
+    ValidationDiagnostic::new(code, ValidationArea::Scene, message)
+        .with_optional_path(path)
+        .with_durable_id(audio_id.to_string())
 }
 
 fn validate_scene_collision_id(
@@ -1926,10 +2076,16 @@ fn is_json_runtime_handle_shape(value: &serde_json::Value) -> bool {
 }
 
 fn is_invalid_durable_collision_id(id: &str) -> bool {
+    is_invalid_durable_audio_id(id)
+}
+
+fn is_invalid_durable_audio_id(id: &str) -> bool {
     let trimmed = id.trim();
     trimmed.is_empty()
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
+        || trimmed != id
+        || !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         || (trimmed.contains("slot") && trimmed.contains("generation"))
 }
 
@@ -3064,6 +3220,125 @@ mod tests {
         )
         .unwrap_err();
         assert!(runtime_collision_handle
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.runtime_handle_identity"));
+    }
+
+    #[test]
+    fn scene_validation_accepts_audio_references() {
+        let json = r#"{
+            "format_version": 1,
+            "scene_id": "scene.audio",
+            "root_nodes": ["node.root"],
+            "nodes": [
+                {
+                    "id": "node.root",
+                    "parent": null,
+                    "name": "Root",
+                    "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                    "asset": null
+                }
+            ],
+            "lights": [],
+            "environment": null,
+            "materials": {},
+            "audio": [
+                {
+                    "id": "scene.audio.pickup",
+                    "clip": {"id": "core.audio.pickup", "path_hint": "audio/pickup.ogg"},
+                    "trigger": "startup",
+                    "usage": "effect",
+                    "volume": 0.5,
+                    "default_gain": 1.0
+                }
+            ],
+            "editor": {}
+        }"#;
+
+        validate_scene_str_with_options(
+            json,
+            &SceneValidationOptions::default().with_known_asset_ids(["core.audio.pickup"]),
+        )
+        .unwrap();
+
+        let parsed: SerializedScene = serde_json::from_str(json).unwrap();
+        let pretty = serde_json::to_string_pretty(&parsed).unwrap();
+        let round_tripped: SerializedScene = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(
+            round_tripped.audio[0].clip.id.as_deref(),
+            Some("core.audio.pickup")
+        );
+    }
+
+    #[test]
+    fn scene_validation_rejects_invalid_audio_references() {
+        let unknown_clip = validate_scene_str_with_options(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.unknown_audio",
+                "root_nodes": ["node.root"],
+                "nodes": [
+                    {"id":"node.root","parent":null,"name":"Root","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null}
+                ],
+                "lights": [],
+                "environment": null,
+                "audio": [
+                    {"id": "scene.audio.pickup", "clip": {"id": "core.audio.missing"}, "volume": 0.5}
+                ],
+                "editor": {}
+            }"#,
+            &SceneValidationOptions::default().with_known_asset_ids(["core.audio.known"]),
+        )
+        .unwrap_err();
+        assert!(unknown_clip
+            .diagnostics()
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == "scene.unknown_audio_clip_id"
+                    && diagnostic.durable_id.as_deref() == Some("core.audio.missing")
+            ));
+
+        let invalid_gain = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.bad_audio_gain",
+                "root_nodes": ["node.root"],
+                "nodes": [
+                    {"id":"node.root","parent":null,"name":"Root","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null}
+                ],
+                "lights": [],
+                "environment": null,
+                "audio": [
+                    {"id": "scene.audio.pickup", "clip": {"id": "core.audio.pickup"}, "default_gain": 0.0}
+                ],
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(invalid_gain
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "scene.audio_invalid_gain"));
+
+        let runtime_audio_handle = validate_scene_str(
+            r#"{
+                "format_version": 1,
+                "scene_id": "scene.runtime_audio_handle",
+                "root_nodes": ["node.root"],
+                "nodes": [
+                    {"id":"node.root","parent":null,"name":"Root","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null}
+                ],
+                "lights": [],
+                "environment": null,
+                "audio": [
+                    {"id": "scene.audio.handle", "clip": {"id": {"slot": 4, "generation": 2}}}
+                ],
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(runtime_audio_handle
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "scene.runtime_handle_identity"));

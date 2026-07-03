@@ -103,6 +103,35 @@ shape = { kind = "box", half_extents = [0.5, 0.0, 0.5] }
 }
 
 #[test]
+fn validate_package_reports_audio_metadata_failures() {
+    let temp = temp_dir("audio_metadata");
+    let package_path = temp.join("bad_audio.package.toml");
+    fs::write(
+        &package_path,
+        r#"format_version = 1
+package_id = "bad_audio"
+display_name = "Bad Audio"
+
+[[assets]]
+id = "bad_audio.clip.pickup"
+kind = "audio"
+path = "audio/pickup.aiff"
+
+[assets.metadata.audio]
+format = "aiff"
+usage = "effect"
+"#,
+    )
+    .expect("write package");
+
+    let output = engine_pack()
+        .args(["validate-package", path_str(&package_path).as_str()])
+        .output()
+        .expect("run engine_pack");
+    assert_failure_contains(output, "asset.audio_unsupported_format");
+}
+
+#[test]
 fn validate_project_accepts_valid_fixture_and_rejects_missing_scene() {
     let output = engine_pack()
         .args([
@@ -146,6 +175,87 @@ fn validate_scene_resolves_known_assets_from_project() {
         .output()
         .expect("run engine_pack");
     assert_failure_contains(output, "scene.unknown_asset_id");
+}
+
+#[test]
+fn validate_scene_reports_unknown_audio_clip_from_project() {
+    let temp = temp_dir("unknown_audio_clip");
+    let project = temp.join("project");
+    fs::create_dir_all(project.join("assets/audio")).expect("create audio dir");
+    fs::create_dir_all(project.join("scenes")).expect("create scene dir");
+    fs::write(
+        project.join("assets/audio/pickup.ogg"),
+        b"not decoded by validation\n",
+    )
+    .expect("write audio asset");
+    fs::write(
+        project.join("assets/fixture.package.toml"),
+        r#"format_version = 1
+package_id = "fixture"
+display_name = "Fixture"
+
+[[assets]]
+id = "fixture.audio.pickup"
+kind = "audio"
+path = "audio/pickup.ogg"
+
+[assets.metadata.audio]
+format = "ogg"
+usage = "effect"
+"#,
+    )
+    .expect("write package");
+    fs::write(
+        project.join("engine.project.toml"),
+        r#"format_version = 1
+project_id = "project.audio"
+name = "Audio Project"
+project_version = "0.1.0"
+asset_root = "assets"
+
+[[packages]]
+package_id = "fixture"
+manifest = "assets/fixture.package.toml"
+enabled = true
+
+[settings]
+window_width = 800
+window_height = 600
+fullscreen = false
+vsync = true
+"#,
+    )
+    .expect("write project");
+    fs::write(
+        project.join("scenes/start.engine.scene.json"),
+        r#"{
+  "format_version": 1,
+  "scene_id": "scene.audio",
+  "root_nodes": ["node.root"],
+  "nodes": [
+    {"id":"node.root","parent":null,"name":"Root","transform":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},"asset":null}
+  ],
+  "lights": [],
+  "environment": null,
+  "audio": [
+    {"id": "scene.audio.missing", "clip": {"id": "fixture.audio.missing"}}
+  ],
+  "editor": {}
+}
+"#,
+    )
+    .expect("write scene");
+
+    let output = engine_pack()
+        .args([
+            "validate-scene",
+            path_str(&project.join("scenes/start.engine.scene.json")).as_str(),
+            "--project",
+            path_str(&project.join("engine.project.toml")).as_str(),
+        ])
+        .output()
+        .expect("run engine_pack");
+    assert_failure_contains(output, "scene.unknown_audio_clip_id");
 }
 
 #[test]
@@ -257,6 +367,28 @@ fn scan_assets_is_deterministic() {
     assert!(stdout.contains("id = \"fixture.model.models.crate\""));
     assert!(stdout.contains("kind = \"model\""));
     assert!(stdout.contains("path = \"models/crate.obj\""));
+    assert_success_contains(output, "[[assets]]");
+}
+
+#[test]
+fn scan_assets_includes_audio_extensions() {
+    let temp = temp_dir("scan_audio");
+    fs::create_dir_all(temp.join("audio")).expect("create audio dir");
+    fs::write(temp.join("audio/pickup.ogg"), b"fixture").expect("write audio file");
+
+    let output = engine_pack()
+        .args([
+            "scan-assets",
+            path_str(&temp).as_str(),
+            "--package-id",
+            "fixture",
+        ])
+        .output()
+        .expect("run engine_pack");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("id = \"fixture.audio.audio.pickup\""));
+    assert!(stdout.contains("kind = \"audio\""));
+    assert!(stdout.contains("path = \"audio/pickup.ogg\""));
     assert_success_contains(output, "[[assets]]");
 }
 

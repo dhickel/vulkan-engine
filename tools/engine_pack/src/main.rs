@@ -487,6 +487,7 @@ fn classify_asset_kind(path: &Path) -> Option<AssetKind> {
         "gltf" | "glb" | "obj" => Some(AssetKind::Model),
         "png" | "jpg" | "jpeg" | "ktx" | "ktx2" => Some(AssetKind::Texture),
         "hdr" | "exr" => Some(AssetKind::Environment),
+        "wav" | "ogg" | "flac" | "mp3" => Some(AssetKind::Audio),
         _ => None,
     }
 }
@@ -500,6 +501,7 @@ fn parse_asset_kind(value: &str) -> CliResult<AssetKind> {
         "prefab" => Ok(AssetKind::Prefab),
         "wall_chunk" => Ok(AssetKind::WallChunk),
         "scene_fragment" => Ok(AssetKind::SceneFragment),
+        "audio" => Ok(AssetKind::Audio),
         other => Err(CliError::Validation(ValidationError::single(
             ValidationDiagnostic::new(
                 "asset.unsupported_kind",

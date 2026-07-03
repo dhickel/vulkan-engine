@@ -127,6 +127,7 @@ pub enum AssetKind {
     Prefab,
     WallChunk,
     SceneFragment,
+    Audio,
 }
 
 impl Serialize for AssetKind {
@@ -152,6 +153,7 @@ impl<'de> Deserialize<'de> for AssetKind {
             "prefab" => Ok(Self::Prefab),
             "wall_chunk" => Ok(Self::WallChunk),
             "scene_fragment" => Ok(Self::SceneFragment),
+            "audio" => Ok(Self::Audio),
             other => Err(serde::de::Error::custom(
                 AssetRegistryError::UnsupportedAssetKind(other.to_string()).to_string(),
             )),
@@ -169,6 +171,7 @@ impl AssetKind {
             Self::Prefab => "prefab",
             Self::WallChunk => "wall_chunk",
             Self::SceneFragment => "scene_fragment",
+            Self::Audio => "audio",
         }
     }
 }
@@ -491,6 +494,7 @@ fn validate_package_manifest_content(
     }
     collect_package_runtime_handle_diagnostics(&raw, manifest_path, &mut diagnostics);
     collect_package_collision_diagnostics(&raw, manifest_path, &mut diagnostics);
+    collect_package_audio_diagnostics(&raw, manifest_path, &mut diagnostics);
     if !diagnostics.is_empty() {
         return Err(ValidationError::new(diagnostics));
     }
@@ -927,6 +931,144 @@ fn collect_package_collision_diagnostics(
     }
 }
 
+fn collect_package_audio_diagnostics(
+    raw: &toml::Value,
+    manifest_path: Option<&Path>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(assets) = raw.get("assets").and_then(toml::Value::as_array) else {
+        return;
+    };
+    for asset in assets {
+        let Some(table) = asset.as_table() else {
+            continue;
+        };
+        let asset_id = table.get("id").and_then(toml::Value::as_str);
+        let kind = table.get("kind").and_then(toml::Value::as_str);
+        let audio = table
+            .get("metadata")
+            .and_then(toml::Value::as_table)
+            .and_then(|metadata| metadata.get("audio"));
+
+        if kind == Some("audio") {
+            if let Some(id) = asset_id {
+                if is_invalid_durable_audio_id(id) {
+                    diagnostics.push(package_audio_diagnostic(
+                        "asset.audio_invalid_id",
+                        format!("audio asset id '{id}' is not a durable id"),
+                        manifest_path,
+                        asset_id,
+                    ));
+                }
+            }
+        }
+
+        if let Some(audio) = audio {
+            validate_package_audio_value(audio, manifest_path, asset_id, diagnostics);
+        }
+    }
+}
+
+fn validate_package_audio_value(
+    audio: &toml::Value,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    let Some(table) = audio.as_table() else {
+        diagnostics.push(package_audio_diagnostic(
+            "asset.audio_invalid_schema",
+            "audio metadata must be a table",
+            manifest_path,
+            asset_id,
+        ));
+        return;
+    };
+
+    for field in ["id", "clip_id"] {
+        if let Some(value) = table.get(field) {
+            let Some(id) = value.as_str() else {
+                diagnostics.push(package_audio_diagnostic(
+                    "asset.audio_invalid_id",
+                    format!("audio {field} must be a durable string id"),
+                    manifest_path,
+                    asset_id,
+                ));
+                continue;
+            };
+            if is_invalid_durable_audio_id(id) {
+                diagnostics.push(package_audio_diagnostic(
+                    "asset.audio_invalid_id",
+                    format!("audio {field} '{id}' is not a durable id"),
+                    manifest_path,
+                    asset_id,
+                ));
+            }
+        }
+    }
+
+    if let Some(format) = table.get("format") {
+        match format.as_str() {
+            Some("wav" | "ogg" | "flac" | "mp3") => {}
+            _ => diagnostics.push(package_audio_diagnostic(
+                "asset.audio_unsupported_format",
+                "audio format must be one of wav, ogg, flac, or mp3",
+                manifest_path,
+                asset_id,
+            )),
+        }
+    }
+
+    if let Some(usage) = table.get("usage") {
+        match usage.as_str() {
+            Some("effect" | "music" | "ambient" | "voice" | "ui") => {}
+            _ => diagnostics.push(package_audio_diagnostic(
+                "asset.audio_invalid_usage",
+                "audio usage must be one of effect, music, ambient, voice, or ui",
+                manifest_path,
+                asset_id,
+            )),
+        }
+    }
+
+    for field in ["volume", "default_gain"] {
+        if let Some(value) = table.get(field) {
+            validate_toml_positive_audio_scalar(value, field, manifest_path, asset_id, diagnostics);
+        }
+    }
+}
+
+fn validate_toml_positive_audio_scalar(
+    value: &toml::Value,
+    field: &str,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+    diagnostics: &mut Vec<ValidationDiagnostic>,
+) {
+    if !toml_number_as_f64(value).is_some_and(|number| number.is_finite() && number > 0.0) {
+        diagnostics.push(package_audio_diagnostic(
+            "asset.audio_invalid_gain",
+            format!("audio {field} must be a positive finite number"),
+            manifest_path,
+            asset_id,
+        ));
+    }
+}
+
+fn package_audio_diagnostic(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    manifest_path: Option<&Path>,
+    asset_id: Option<&str>,
+) -> ValidationDiagnostic {
+    let mut diagnostic = ValidationDiagnostic::new(code, ValidationArea::Asset, message)
+        .with_optional_path(manifest_path);
+    if let Some(asset_id) = asset_id {
+        diagnostic = diagnostic.with_durable_id(asset_id.to_string());
+    }
+    diagnostic
+}
+
 fn validate_package_collision_value(
     collision: &toml::Value,
     manifest_path: Option<&Path>,
@@ -1161,10 +1303,16 @@ fn package_collision_diagnostic(
 }
 
 fn is_invalid_durable_collision_id(id: &str) -> bool {
+    is_invalid_durable_audio_id(id)
+}
+
+fn is_invalid_durable_audio_id(id: &str) -> bool {
     let trimmed = id.trim();
     trimmed.is_empty()
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
+        || trimmed != id
+        || !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         || (trimmed.contains("slot") && trimmed.contains("generation"))
 }
 
@@ -1470,7 +1618,7 @@ impl Project {
 mod tests {
     use super::{
         validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
-        PackageValidationOptions, ProjectValidationOptions,
+        AssetKind, PackageValidationOptions, ProjectValidationOptions,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1690,6 +1838,97 @@ shape = { kind = "sphere", radius = 0.5 }
         )
         .unwrap_err();
         assert_has_code(&err, "asset.collision_invalid_id");
+    }
+
+    #[test]
+    fn asset_registry_validate_package_accepts_audio_metadata() {
+        let manifest = r#"
+format_version = 1
+package_id = "core"
+display_name = "Core"
+
+[[assets]]
+id = "core.audio.pickup"
+kind = "audio"
+path = "audio/pickup.ogg"
+display_name = "Pickup"
+
+[assets.metadata.audio]
+format = "ogg"
+usage = "effect"
+volume = 0.75
+default_gain = 1.0
+"#;
+
+        let records =
+            validate_package_manifest_str(manifest, ".", &PackageValidationOptions::default())
+                .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AssetKind::Audio);
+        assert!(records[0].metadata.contains_key("audio"));
+    }
+
+    #[test]
+    fn asset_registry_validate_package_rejects_invalid_audio_metadata() {
+        let bad_format = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.audio.pickup"
+kind = "audio"
+path = "audio/pickup.aiff"
+
+[assets.metadata.audio]
+format = "aiff"
+usage = "effect"
+"#;
+        let err =
+            validate_package_manifest_str(bad_format, ".", &PackageValidationOptions::default())
+                .unwrap_err();
+        assert_has_code(&err, "asset.audio_unsupported_format");
+
+        let bad_gain = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.audio.pickup"
+kind = "audio"
+path = "audio/pickup.ogg"
+
+[assets.metadata.audio]
+format = "ogg"
+default_gain = 0.0
+"#;
+        let err =
+            validate_package_manifest_str(bad_gain, ".", &PackageValidationOptions::default())
+                .unwrap_err();
+        assert_has_code(&err, "asset.audio_invalid_gain");
+
+        let runtime_shaped_id = r#"
+format_version = 1
+package_id = "bad"
+display_name = "Bad"
+
+[[assets]]
+id = "bad.audio.pickup"
+kind = "audio"
+path = "audio/pickup.ogg"
+
+[assets.metadata.audio]
+clip_id = "slot:4,generation:2"
+"#;
+        let err = validate_package_manifest_str(
+            runtime_shaped_id,
+            ".",
+            &PackageValidationOptions::default(),
+        )
+        .unwrap_err();
+        assert_has_code(&err, "asset.audio_invalid_id");
     }
 
     #[test]
