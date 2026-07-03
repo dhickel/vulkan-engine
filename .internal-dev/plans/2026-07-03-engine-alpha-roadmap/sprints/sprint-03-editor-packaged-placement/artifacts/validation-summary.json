@@ -1,6 +1,6 @@
 {
   "sprint": "Sprint 03 - Editor packaged-asset placement hardening",
-  "status": "phase_04_passed_final_quality_review_changelogged_pending_final_commit_push_email_evidence",
+  "status": "closed_committed_pushed_reported",
   "branch": "sprint/alpha-03-editor-packaged-placement",
   "based_on": "sprint/alpha-02-packaging-tools tip",
   "capture_decision": "required_visible_editor_runtime_behavior",
@@ -41,7 +41,7 @@
     {
       "phase": "04",
       "name": "Docs final closeout",
-      "status": "passed_final_quality_review_changelogged_pending_final_commit_push_email_evidence",
+      "status": "passed_committed_pushed_reported",
       "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/validation/phase-04-validation-report.md",
       "final_quality_review": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/validation/final-quality-review.md",
       "capture_decision": "phase_03_capture_reconciled_final_review_passed",
@@ -310,6 +310,12 @@
         "hash": "922c5874",
         "subject": "Sprint 03 phase 03 headless capture proof",
         "url": "https://github.com/dhickel/vulkan-engine/commit/922c5874"
+      },
+      {
+        "phase": "04",
+        "hash": "81d3cee2",
+        "subject": "Sprint 03 phase 04 docs closeout",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/81d3cee2"
       }
     ],
     "pushes": [
@@ -330,6 +336,12 @@
         "branch": "sprint/alpha-03-editor-packaged-placement",
         "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-03-editor-packaged-placement",
         "pushed_through": "922c5874"
+      },
+      {
+        "phase": "04",
+        "branch": "sprint/alpha-03-editor-packaged-placement",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-03-editor-packaged-placement",
+        "pushed_through": "81d3cee2"
       }
     ],
     "email_reports": [
@@ -350,6 +362,12 @@
         "subject": "Sprint 03 Phase 03 Progress Report - Headless Capture Proof",
         "message_id": "<0100019f2752aafe-7516786d-159b-436f-9324-59c6ab9d731d-000000@email.amazonses.com>",
         "thread_id": "509bcf9e-a8d0-439b-af0f-9966753ba7a9"
+      },
+      {
+        "phase": "04",
+        "subject": "Sprint 03 Phase 04 Final Report - Docs Closeout",
+        "message_id": "<0100019f275cb3e9-a46d0873-24ea-48a8-b780-df6ba9ce5fa1-000000@email.amazonses.com>",
+        "thread_id": "5e9754c0-7f9d-405b-af49-dfb1af41f6f6"
       }
     ],
     "final_changelog": ".internal-dev/changelogs/2026-07-03-sprint-03-editor-packaged-placement.md",
@@ -363,7 +381,8 @@
   "residual_risks": [
     "Phase 03 passed independent validation and was committed, pushed, and reported.",
     "Existing renderer dead-code warnings still appear during check/test/engine_pack runs and were not changed in this phase.",
-    "Final quality review passed and changelog exists; final commit, push, and final report/email evidence remain main-thread-owned closeout gates."
+    "Sprint 03 closed after final quality review, changelog, pushed Phase 04 closeout commit, final report email, and canonical evidence update.",
+    "Final evidence commit records the Phase 04 report email and closure state."
   ],
   "tooling_constraints": [],
   "unrelated_dirty_state_to_preserve": [

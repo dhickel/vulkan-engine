@@ -18,7 +18,7 @@ Status values:
 |---|---|---|---|---|
 | 01 | blocked | Alpha baseline audit and process repair | Current docs/process match live repo, stale reports retired | Phase 04 compile/test baseline passed and stale headless docs were remediated; closeout is blocked on changelog timing confirmation and parent-owned commit/push/email gates. Plan suite: `sprints/sprint-01-alpha-baseline-audit/`. Execute on `sprint/alpha-01-baseline-audit`. |
 | 02 | closed | Asset package authoring and validation tools | Rust CLI validates/authors package/project/scene fixtures and sample project | Closed with docs, validation reports, final quality review, and changelog. Branch: `sprint/alpha-02-packaging-tools`. Sprint 01 remains blocked on changelog timing confirmation and was not closed by Sprint 02. |
-| 03 | validating | Editor packaged-asset placement hardening | Packaged assets place, select, save, reload, and visually prove | Phase 04 passed local validation and final quality review; changelog exists. Final closeout is pending commit, push, and report evidence. Accepted `--headless --capture_target draw` evidence lives under `.internal-dev/captures/sprint-03-editor-packaged-placement-headless-draw/`. Branch: `sprint/alpha-03-editor-packaged-placement`. Sprint 01 remains blocked and was not closed by Sprint 03. |
+| 03 | closed | Editor packaged-asset placement hardening | Packaged assets place, select, save, reload, and visually prove | Closed with docs, validation reports, final quality review, changelog, pushed closeout/evidence commits, final report email, and accepted `--headless --capture_target draw` evidence under `.internal-dev/captures/sprint-03-editor-packaged-placement-headless-draw/`. Branch: `sprint/alpha-03-editor-packaged-placement`. Sprint 01 remains blocked and was not closed by Sprint 03. |
 | 04 | proposed | Runtime project launcher and application dev loop | Sample project runs outside editor through documented app path | Decide root binary/app template/hot loop role. |
 | 05 | proposed | Event system and application lifecycle | Apps/tools can subscribe to lifecycle/input/scene/asset/physics/audio events | Needed before scripts and gameplay grow. |
 | 06 | proposed | Physics and collision foundation | Scene/package authored collision and basic queries/events work | Dogfood collision migration decision required. |
@@ -32,7 +32,7 @@ Status values:
 
 ## Active Sprint Pointer
 
-Current active sprint: 03 - Editor packaged-asset placement hardening, final closeout evidence in progress.
+Current active sprint: 04 - Runtime project launcher and application dev loop, pending sprint brief and advanced plan.
 
 When starting a sprint:
 
