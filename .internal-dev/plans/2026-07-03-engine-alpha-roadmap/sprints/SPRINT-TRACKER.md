@@ -25,14 +25,14 @@ Status values:
 | 07 | closed | Audio foundation | Packaged audio can be referenced and played in a sample/dogfood path | Closed with renderer-independent audio facade, package/scene audio validation, `engine_pack` audio scanning/tests, dogfood opt-in audio event proof, docs, changelog, validation reports, final quality review, pushed phase/evidence commits, and final report email. Branch: `sprint/alpha-07-audio-foundation`. Device smoke skipped by design; `cargo test -p dungeon_dogfood` remains blocked by existing renderer test-profile `russimp_sys` binding issue before dogfood tests execute. |
 | 08 | closed | Scripting and hot Rust development strategy | App template and scripting/hot reload boundaries are explicit and tested | Closed with `engine_pack new-app` support-crate scaffold, experimental `ScriptId`-aware scripting event/log/error boundary, docs, validation reports, final quality review, pushed phase/evidence commits, and phase closeout email. Branch: `sprint/alpha-08-scripting-hot-rust-strategy`. `fully_validated=false` by design because accepted residuals remain: protected local state, deferred renderer-window templates, deferred package-level script assets, deferred dynamic/runtime Rust reload, and conditional dogfood test not applicable. |
 | 09 | planned | Facade API alpha contract | Supported beginner API is documented and examples compile | Plan suite: `sprints/sprint-09-facade-api-contract/`. Execute on `sprint/alpha-09-facade-api-contract`. Keep simple path small; classify legacy/advanced exports before changing them. |
-| 10 | proposed | Advanced rendering opt-in contract | Advanced APIs feature-gated and misuse risks documented | Avoid raw internals as default surface. |
-| 11 | proposed | Dogfood vertical slice | Real dogfood app uses alpha contracts and visual baseline | Prefer package/project contracts over one-off manifests. |
-| 12 | proposed | Quality, bug debt, and code smell burn-down | Critical residuals closed or accepted with mitigation | May split into multiple burn-down sprints. |
-| 13 | proposed | Alpha release candidate | Fresh-clone style validation and public docs | Produces alpha release notes. |
+| 10 | planned | Advanced rendering opt-in contract | Advanced APIs feature-gated and misuse risks documented | Plan suite: `sprints/sprint-10-advanced-rendering-opt-in-contract/`. Execute on `sprint/alpha-10-advanced-rendering-opt-in-contract`. Avoid raw internals as default surface. |
+| 11 | planned | Dogfood vertical slice | Real dogfood app uses alpha contracts and visual baseline | Plan suite: `sprints/sprint-11-dogfood-vertical-slice/`. Execute on `sprint/alpha-11-dogfood-vertical-slice`. Prefer package/project contracts over one-off manifests. |
+| 12 | planned | Quality, bug debt, and code smell burn-down | Critical residuals closed or accepted with mitigation | Plan suite: `sprints/sprint-12-quality-bug-debt-code-smell-burndown/`. Execute on `sprint/alpha-12-quality-bug-debt-code-smell-burndown`. May split into multiple burn-down sprints if Phase 01 finds too many unrelated defects. |
+| 13 | planned | Alpha release candidate | Fresh-clone style validation and public docs | Plan suite: `sprints/sprint-13-alpha-release-candidate/`. Execute on `sprint/alpha-13-alpha-release-candidate`. Produces alpha release notes and release/no-release gate evidence. |
 
 ## Active Sprint Pointer
 
-Current active sprint: 09 - Facade API alpha contract. Next proposed sprint: 10 - Advanced rendering opt-in contract.
+Current active sprint: 09 - Facade API alpha contract. Next planned sprint: 10 - Advanced rendering opt-in contract.
 
 When starting a sprint:
 

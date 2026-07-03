@@ -1,0 +1,75 @@
+{
+  "plan": "sprint-12-quality-bug-debt-code-smell-burndown",
+  "created": "2026-07-03",
+  "branch": "sprint/alpha-12-quality-bug-debt-code-smell-burndown",
+  "status": "planning_locked",
+  "fully_validated": false,
+  "phase_reports": {
+    "phase_01": {
+      "worker_report": "reports/phase-01-residual-inventory.md",
+      "validator_report": "validation/phase-01-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_02": {
+      "worker_report": "reports/phase-02-vulkan-lifecycle-hardening.md",
+      "validator_report": "validation/phase-02-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_03": {
+      "worker_report": "reports/phase-03-runtime-panic-stall-hardening.md",
+      "validator_report": "validation/phase-03-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_04": {
+      "worker_report": "reports/phase-04-docs-examples-test-drift.md",
+      "validator_report": "validation/phase-04-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_05": {
+      "worker_report": "reports/phase-05-final-residual-acceptance.md",
+      "validator_report": "validation/phase-05-validation-report.md",
+      "status": "not_started"
+    }
+  },
+  "commands": [],
+  "runtime_smoke": {
+    "required": "conditional_on_runtime_or_vulkan_behavior_changes",
+    "status": "not_started",
+    "debug_report_dir": ".internal-dev/debug_reports/",
+    "expected_paths": [
+      ".internal-dev/debug_reports/sprint-12-demo_pbr-timing.jsonl",
+      ".internal-dev/debug_reports/sprint-12-demo_unlit-timing.jsonl",
+      ".internal-dev/debug_reports/sprint-12-demo_model_load-timing.jsonl",
+      ".internal-dev/debug_reports/sprint-12-demo_async_loading-timing.jsonl",
+      ".internal-dev/debug_reports/sprint-12-api_test-timing.jsonl",
+      ".internal-dev/debug_reports/sprint-12-api_test-env-timing.jsonl"
+    ]
+  },
+  "capture": {
+    "required": "conditional_on_visible_renderer_or_editor_behavior_changes",
+    "status": "not_applicable_at_planning",
+    "artifact_dir": ".internal-dev/captures/sprint-12-quality-burndown/",
+    "notes": "Use engine-owned headless capture only; desktop screenshots are not valid proof."
+  },
+  "superseded_artifacts": [],
+  "model_tooling_constraints": [],
+  "residual_risks": [
+    {
+      "id": "planning-residual-inventory-not-yet-validated",
+      "class": "unknown_until_phase_01",
+      "status": "open",
+      "mitigation": "Phase 01 must verify current source, bug records, prior sprint evidence, and docs before implementation."
+    },
+    {
+      "id": "current-sprint-09-dirty-worktree",
+      "class": "execution_blocker_until_reconciled",
+      "status": "open",
+      "mitigation": "Main thread must reconcile Sprint 09 state before Sprint 12 execution branch starts."
+    }
+  ],
+  "final_quality_review": {
+    "required": true,
+    "status": "not_started",
+    "report": "validation/final-quality-review.md"
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "sprint": "13",
+  "slug": "sprint-13-alpha-release-candidate",
+  "plan_root": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-13-alpha-release-candidate",
+  "branch": "sprint/alpha-13-alpha-release-candidate",
+  "created_at": "2026-07-03",
+  "updated_at": "2026-07-03",
+  "status": "not_started",
+  "fully_validated": false,
+  "release_decision": "not_started",
+  "phase_reports": {
+    "phase_01": {
+      "worker_report": "reports/phase-01-release-inventory.md",
+      "validator_report": "validation/phase-01-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_02": {
+      "worker_report": "reports/phase-02-fresh-clone-validation.md",
+      "validator_report": "validation/phase-02-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_03": {
+      "worker_report": "reports/phase-03-sample-editor-runtime-proof.md",
+      "validator_report": "validation/phase-03-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_04": {
+      "worker_report": "reports/phase-04-dogfood-run-visual-proof.md",
+      "validator_report": "validation/phase-04-validation-report.md",
+      "status": "not_started"
+    },
+    "phase_05": {
+      "worker_report": "reports/phase-05-release-notes-known-issues-final.md",
+      "validator_report": "validation/phase-05-validation-report.md",
+      "status": "not_started"
+    }
+  },
+  "required_capture_artifacts": {
+    "sample_runtime": {
+      "required": true,
+      "path": ".internal-dev/captures/sprint-13-alpha-release-candidate/sample-runtime-draw",
+      "status": "not_started"
+    },
+    "editor_sample": {
+      "required": true,
+      "path": ".internal-dev/captures/sprint-13-alpha-release-candidate/editor-sample-draw",
+      "status": "not_started"
+    },
+    "dogfood": {
+      "required": true,
+      "path": ".internal-dev/captures/sprint-13-alpha-release-candidate/dogfood-draw",
+      "status": "not_started"
+    }
+  },
+  "fresh_clone_validation": {
+    "required": true,
+    "mode": "not_selected",
+    "path": ".internal-dev/fresh-clone-validation/sprint-13",
+    "status": "not_started"
+  },
+  "commands": [],
+  "tooling_constraints": [],
+  "superseded_artifacts": [],
+  "known_initial_residuals": [
+    {
+      "id": "predecessor-sprints-not-reconciled",
+      "status": "execution_blocker_until_main_thread_decision",
+      "description": "Sprint tracker currently shows Sprint 09 active/planned and Sprint 10-12 proposed. Sprint 13 execution requires predecessor status reconciliation or explicit user approval."
+    },
+    {
+      "id": "active-local-sprint09-state",
+      "status": "planning_observation_only",
+      "description": "Planning observed dirty Sprint 09-style renderer files plus protected local .idea/.reasonix state. Sprint 13 release validation must use an integrated clean base."
+    },
+    {
+      "id": "dogfood-headless-capture-unverified",
+      "status": "phase_04_gate",
+      "description": "Dogfood full-content true headless draw capture support was not found in current planning scan and must be verified, implemented narrowly, or marked release-blocking."
+    }
+  ],
+  "final_quality_review": {
+    "required": true,
+    "status": "not_started",
+    "report": "validation/final-quality-review.md"
+  }
+}
+

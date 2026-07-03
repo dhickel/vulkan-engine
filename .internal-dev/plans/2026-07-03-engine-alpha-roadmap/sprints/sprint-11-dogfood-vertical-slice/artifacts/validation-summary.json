@@ -1,0 +1,93 @@
+{
+  "sprint": "11",
+  "slug": "sprint-11-dogfood-vertical-slice",
+  "plan_directory": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-11-dogfood-vertical-slice",
+  "intended_branch": "sprint/alpha-11-dogfood-vertical-slice",
+  "top_level_status": "planned_not_executed",
+  "fully_validated": false,
+  "created_at": "2026-07-03",
+  "updated_at": "2026-07-03",
+  "required_models": {
+    "implementation_worker_agent": "gpt-5.3 high reasoning unless user overrides",
+    "phase_validation_redteam_agent": "gpt-5.5 high reasoning unless user overrides",
+    "final_quality_validator": "gpt-5.5 xhigh reasoning unless user overrides",
+    "browser_or_visual_proof_agent": "not Playwright; engine headless capture validation with gpt-5.5 high reasoning unless user overrides"
+  },
+  "tooling_constraints": [],
+  "phase_statuses": [
+    {
+      "phase": "01-current-dogfood-project-audit",
+      "worker_directive": "worker-directives/phase-01-current-dogfood-project-audit.md",
+      "validation_report": "validation/phase-01-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "02-packaged-content-sample-scene",
+      "worker_directive": "worker-directives/phase-02-packaged-content-sample-scene.md",
+      "validation_report": "validation/phase-02-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "03-runtime-gameplay-input-camera",
+      "worker_directive": "worker-directives/phase-03-runtime-gameplay-input-camera.md",
+      "validation_report": "validation/phase-03-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "04-true-headless-visual-baseline",
+      "worker_directive": "worker-directives/phase-04-true-headless-visual-baseline.md",
+      "validation_report": "validation/phase-04-validation-report.md",
+      "status": "pending"
+    },
+    {
+      "phase": "05-docs-final-validation-prep",
+      "worker_directive": "worker-directives/phase-05-docs-final-validation-prep.md",
+      "validation_report": "validation/phase-05-validation-report.md",
+      "status": "pending"
+    }
+  ],
+  "required_commands": [
+    "cargo check",
+    "cargo check -p renderer",
+    "cargo check -p renderer --examples",
+    "cargo check -p input",
+    "cargo test -p input",
+    "cargo check -p engine_pack",
+    "cargo test -p engine_pack",
+    "cargo check -p dungeon_dogfood",
+    "cargo run -p engine_pack -- validate-package apps/dungeon_dogfood/assets/dogfood_dungeon.package.toml --expected-package-id dogfood_dungeon",
+    "cargo run -p engine_pack -- validate-project apps/dungeon_dogfood/engine.project.toml",
+    "cargo run -p engine_pack -- validate-scene apps/dungeon_dogfood/scenes/start.engine.scene.json --project apps/dungeon_dogfood/engine.project.toml"
+  ],
+  "runtime_evidence": {
+    "debug_report_directory": ".internal-dev/debug_reports/sprint-11-dogfood-vertical-slice",
+    "capture_directory": ".internal-dev/captures/sprint-11-dogfood-vertical-slice",
+    "headless_capture_required": true,
+    "required_capture_target": "draw",
+    "desktop_screenshots_allowed": false,
+    "status": "pending"
+  },
+  "residual_risks": [
+    {
+      "id": "sprint09-active-files",
+      "status": "must_verify_before_execution",
+      "description": "Current worktree has active renderer API/example edits likely tied to Sprint 09; Sprint 11 workers must not mutate them until cleared."
+    },
+    {
+      "id": "dogfood-content-pack-transition",
+      "status": "planned_for_phase_01_02_resolution",
+      "description": "Dogfood currently uses app-specific content_pack.toml; Sprint 11 must migrate or document migration debt."
+    },
+    {
+      "id": "dogfood-headless-command-shape",
+      "status": "planned_for_phase_04_resolution",
+      "description": "Exact dogfood --headless --capture_target draw command shape must be implemented or blocked with a debt artifact."
+    }
+  ],
+  "superseded_artifacts": [],
+  "final_quality_review": {
+    "required": true,
+    "report": "validation/final-quality-review.md",
+    "status": "pending"
+  }
+}
