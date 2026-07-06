@@ -13,10 +13,10 @@ Use this guide for audio asset identity, device-backed playback, and alpha audio
 
 ## Public API
 
-- `AudioClipId` -- stable authored identity for an audio clip
-- `AudioClip` -- decoded in-memory audio with metadata
-- `AudioEngine` -- opens host output device, creates playback sinks
-- `AudioError` -- read/decode/device/playback error variants
+- `AudioClipId` — stable authored identity for an audio clip
+- `AudioClip` — decoded in-memory audio with metadata
+- `AudioEngine` — opens host output device, creates playback sinks
+- `AudioError` — read/decode/device/playback error variants
 
 ## Architecture
 
@@ -24,6 +24,7 @@ Use this guide for audio asset identity, device-backed playback, and alpha audio
 - Device-backed playback is explicit through `AudioEngine::play`
 - Volume control is a single master f32 (fixed 1.0 for alpha)
 - Uses `rodio` for decoding and device output
+- Event bridging is external: the audio crate itself has no dependency on `engine_events`; all event bridging lives in `apps/dungeon_dogfood/src/audio_bridge.rs`
 
 ## Current Alpha Status
 
@@ -31,7 +32,7 @@ Use this guide for audio asset identity, device-backed playback, and alpha audio
 - Device behavior and error handling are thin
 - No spatial audio, 3D positioning, or channel groups
 - No editor attachment or asset pipeline integration
-- Track for full audio feature set: Track F (future sprint)
+- Additional audio features deferred to future sprint track
 
 ## Working Rules
 

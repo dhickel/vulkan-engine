@@ -22,7 +22,7 @@ layout (binding = 0) uniform samplerCube samplerEnv;
 
 void main()
 {
-	vec4 color = textureLod(samplerEnv, inUVW, 1);
+	vec4 color = textureLod(samplerEnv, inUVW, 0);
 	vec3 tonemapped = tonemap(color, pc.exposure, pc.gamma).rgb;
 	outColor = vec4(tonemapped * 1.0, 1.0);
 }

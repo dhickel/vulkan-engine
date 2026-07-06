@@ -362,12 +362,79 @@ impl VkSubAllocator {
                     VkBufferResult::Success(mut items) => {
                         items.append(&mut partial_alloc.fulfilled);
                         VkAllocResult::Success(items)
-                    } // TODO, maybe loop and keep creating? This will only trigger on an alloc > new buffer size
+                    }
                     VkBufferResult::OutOfSpace(mut other_partial) => {
                         partial_alloc.fulfilled.append(&mut other_partial.fulfilled);
+                        // Retry with geometrically growing buffer for oversized
+                        // single allocations (e.g., large meshes). Max 3 retries,
+                        // doubling buffer max_upload_bytes each attempt.
+                        const MAX_RETRIES: u32 = 3;
+                        let mut retry_remaining = partial_alloc.remaining.clone();
+                        let mut retry_fulfilled = partial_alloc.fulfilled;
+                        let mut retry_count = 0;
+                        while retry_count < MAX_RETRIES && !retry_remaining.is_empty() {
+                            retry_count += 1;
+                            let oversized_mb = retry_remaining
+                                .iter()
+                                .map(|item| item.len())
+                                .sum::<usize>() / (1024 * 1024);
+                            log::warn!(
+                                "SubAllocator: oversized allocation (~{}MB) exceeds new buffer size. Retry {}/{} with doubled buffer.",
+                                oversized_mb,
+                                retry_count,
+                                MAX_RETRIES
+                            );
+                            match Self::allocate_buffer(
+                                &self.device,
+                                self.allocator.clone(),
+                                self.buffer.alignment,
+                                self.usage_flags,
+                                self.memory_usage,
+                                self.buffer.dst_barrier,
+                                self.buffer.max_size,
+                                self.buffer.max_upload_bytes * (1 << retry_count),
+                                self.extra_buffers.len() as u32 + retry_count,
+                            ) {
+                                Ok(retry_buffer) => {
+                                    self.extra_buffers.push(retry_buffer);
+                                    let retry_buffer = self.extra_buffers.last_mut().unwrap();
+                                    match retry_buffer.add_items(
+                                        &retry_remaining,
+                                        buffer_placement,
+                                        &self.device,
+                                        &host_buffer,
+                                    ) {
+                                        VkBufferResult::Success(mut items) => {
+                                            retry_fulfilled.append(&mut items);
+                                            return VkAllocResult::Success(retry_fulfilled);
+                                        }
+                                        VkBufferResult::OutOfSpace(mut partial) => {
+                                            retry_fulfilled.append(&mut partial.fulfilled);
+                                            retry_remaining = partial.remaining;
+                                        }
+                                        VkBufferResult::Error {
+                                            error_msg,
+                                            mut successful_allocs,
+                                        } => {
+                                            retry_fulfilled.append(&mut successful_allocs);
+                                            return VkAllocResult::Failure {
+                                                error_msg: format!("Out of space on retry buffer: {}", error_msg),
+                                                successful_allocs: retry_fulfilled,
+                                            };
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    break;
+                                }
+                            }
+                        }
                         VkAllocResult::Failure {
-                            error_msg: "Out if space on new buffer".to_string(),
-                            successful_allocs: partial_alloc.fulfilled,
+                            error_msg: format!(
+                                "Out of space on new buffer after {} retries",
+                                retry_count
+                            ),
+                            successful_allocs: retry_fulfilled,
                         }
                     }
                     VkBufferResult::Error {

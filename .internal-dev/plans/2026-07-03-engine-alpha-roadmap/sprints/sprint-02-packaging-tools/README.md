@@ -1,6 +1,6 @@
 # Sprint 02: Asset Package Authoring And Validation Tools
 
-Status: planned
+Status: closed
 
 ## Objective
 

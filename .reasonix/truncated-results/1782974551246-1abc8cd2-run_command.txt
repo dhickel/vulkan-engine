@@ -1,0 +1,913 @@
+$ cargo check -p renderer --examples 2>&1
+[exit 101]
+    Checking renderer v0.1.0 (/home/hickelpickle/Code/Rust/engine/src/renderer)
+warning: method `request_model_load` is never used
+   --> src/renderer/src/api/assets.rs:125:19
+    |
+114 | impl AssetLoadTracker {
+    | --------------------- method in this implementation
+...
+125 |     pub(crate) fn request_model_load(&mut self, path: PathBuf) -> LoadTicket {
+    |                   ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `map_asset_err` is never used
+   --> src/renderer/src/api/errors.rs:344:15
+    |
+344 | pub(crate) fn map_asset_err(err: impl Into<String>) -> RendererError {
+    |               ^^^^^^^^^^^^^
+
+warning: function `map_hook_err` is never used
+   --> src/renderer/src/api/errors.rs:348:15
+    |
+348 | pub(crate) fn map_hook_err(err: impl Into<String>) -> RendererError {
+    |               ^^^^^^^^^^^^
+
+warning: method `raw_core_mut` is never used
+   --> src/renderer/src/api/renderer.rs:689:19
+    |
+ 78 | impl Renderer {
+    | ------------- method in this implementation
+...
+689 |     pub(crate) fn raw_core_mut(&mut self) -> &mut vk_render::VkRenderCore {
+    |                   ^^^^^^^^^^^^
+
+warning: struct `MeshTemp` is never constructed
+    --> src/renderer/src/data/assimp_util.rs:1159:8
+     |
+1159 | struct MeshTemp {
+     |        ^^^^^^^^
+
+warning: constant `AI_MATKEY_COLOR_SPECULAR` is never used
+    --> src/renderer/src/data/assimp_util.rs:1166:7
+     |
+1166 | const AI_MATKEY_COLOR_SPECULAR: *const c_char = b"$clr.specular\0".as_ptr() as *const c_char;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `AI_MATKEY_COLOR_AMBIENT` is never used
+    --> src/renderer/src/data/assimp_util.rs:1167:7
+     |
+1167 | const AI_MATKEY_COLOR_AMBIENT: *const c_char = b"$clr.ambient\0".as_ptr() as *const c_char;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `AI_MATKEY_OPACITY` is never used
+    --> src/renderer/src/data/assimp_util.rs:1173:7
+     |
+1173 | const AI_MATKEY_OPACITY: *const c_char = b"$mat.opacity\0".as_ptr() as *const c_char;
+     |       ^^^^^^^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/renderer/src/data/camera.rs:29:12
+   |
+28 | impl Camera {
+   | ----------- associated function in this implementation
+29 |     pub fn new(position: Vec3) -> Self {
+   |            ^^^
+
+warning: variant `Completed` is never constructed
+   --> src/renderer/src/data/data_cache.rs:108:5
+    |
+106 | pub enum UploadBatchStatus {
+    |          ----------------- variant in this enum
+107 |     WaitingFence,
+108 |     Completed,
+    |     ^^^^^^^^^
+
+warning: field `gfx_pool` is never read
+   --> src/renderer/src/data/data_cache.rs:235:5
+    |
+218 | pub struct TextureCache {
+    |            ------------ field in this struct
+...
+235 |     gfx_pool: VkCommandPool,
+    |     ^^^^^^^^
+
+warning: multiple associated items are never used
+    --> src/renderer/src/data/data_cache.rs:264:15
+     |
+ 243 | impl TextureCache {
+     | ----------------- associated items in this implementation
+...
+ 264 |     pub const DEFAULT_NORMAL_MAP: NormalMap = NormalMap {
+     |               ^^^^^^^^^^^^^^^^^^
+...
+ 269 |     pub const DEFAULT_OCCLUSION_MAP: OcclusionMap = OcclusionMap {
+     |               ^^^^^^^^^^^^^^^^^^^^^
+...
+ 274 |     pub const DEFAULT_EMISSIVE_MAP: EmissiveMap = EmissiveMap {
+     |               ^^^^^^^^^^^^^^^^^^^^
+...
+ 453 |     pub fn is_supported_format(&self, format: vk::Format) -> bool {
+     |            ^^^^^^^^^^^^^^^^^^^
+...
+ 569 |     pub(crate) fn save_debug_image(data: &TextureMeta, bytes: &[u8], filename: String) {
+     |                   ^^^^^^^^^^^^^^^^
+...
+ 603 |     pub fn add_textures(&mut self, data: Vec<TextureMeta>) -> Vec<TextureHandle> {
+     |            ^^^^^^^^^^^^
+...
+1363 |     pub fn deallocate_textures_safe(&mut self, texture_ids: Vec<TextureHandle>) {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1368 |     pub unsafe fn deallocate_textures_unchecked(&mut self, texture_ids: Vec<TextureHandle>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1408 |     pub unsafe fn deallocate_materials_unchecked(&mut self, material_ids: Vec<MaterialHandle>) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `joint_desc_pool` and `default_joint_buffer` are never read
+    --> src/renderer/src/data/data_cache.rs:1462:5
+     |
+1456 | pub struct MeshCache {
+     |            --------- fields in this struct
+...
+1462 |     joint_desc_pool: VkDynamicDescriptorAllocator,
+     |     ^^^^^^^^^^^^^^^
+1463 |     default_joint_desc: vk::DescriptorSet,
+1464 |     default_joint_buffer: VkBuffer,
+     |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `add_and_allocate`, `add_and_allocate_multi`, `get_ids`, `is_id_loaded`, `deallocate_id_unchecked`, and `deallocate_all` are never used
+    --> src/renderer/src/data/data_cache.rs:1570:12
+     |
+1467 | impl MeshCache {
+     | -------------- methods in this implementation
+...
+1570 |     pub fn add_and_allocate(
+     |            ^^^^^^^^^^^^^^^^
+...
+1580 |     pub fn add_and_allocate_multi(
+     |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+1605 |     pub fn get_ids(&self, ids: Vec<MeshHandle>) -> Vec<Result<&CachedMesh, CacheError>> {
+     |            ^^^^^^^
+...
+1609 |     pub fn is_id_loaded(&self, id: MeshHandle) -> bool {
+     |            ^^^^^^^^^^^^
+...
+1833 |     pub unsafe fn deallocate_id_unchecked(&mut self, mesh_id: MeshHandle) {
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^
+...
+1841 |     pub fn deallocate_all(&mut self, _allocator: &vk_mem::Allocator) {
+     |            ^^^^^^^^^^^^^^
+
+warning: method `restore_unloaded_source` is never used
+    --> src/renderer/src/data/data_cache.rs:2246:12
+     |
+2156 | impl EnvironmentCache {
+     | --------------------- method in this implementation
+...
+2246 |     pub fn restore_unloaded_source(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EXTENT3D_ONE` is never used
+  --> src/renderer/src/data/data_util.rs:15:11
+   |
+15 | pub const EXTENT3D_ONE: vk::Extent3D = vk::Extent3D {
+   |           ^^^^^^^^^^^^
+
+warning: trait `PackUnorm` is never used
+  --> src/renderer/src/data/data_util.rs:21:11
+   |
+21 | pub trait PackUnorm {
+   |           ^^^^^^^^^
+
+warning: function `convert_rgb32f_to_rgba32f` is never used
+  --> src/renderer/src/data/data_util.rs:40:8
+   |
+40 | pub fn convert_rgb32f_to_rgba32f(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `bytes_per_pixel` is never used
+  --> src/renderer/src/data/data_util.rs:69:8
+   |
+69 | pub fn bytes_per_pixel(format: vk::Format) -> u32 {
+   |        ^^^^^^^^^^^^^^^
+
+warning: struct `BinarySemaphore` is never constructed
+   --> src/renderer/src/data/data_util.rs:325:12
+    |
+325 | pub struct BinarySemaphore {
+    |            ^^^^^^^^^^^^^^^
+
+warning: associated items `new`, `signal`, `wait`, and `is_signaled` are never used
+   --> src/renderer/src/data/data_util.rs:332:12
+    |
+331 | impl BinarySemaphore {
+    | -------------------- associated items in this implementation
+332 |     pub fn new() -> Arc<Self> {
+    |            ^^^
+...
+340 |     pub fn signal(&self) {
+    |            ^^^^^^
+...
+346 |     pub fn wait(&self) {
+    |            ^^^^
+...
+356 |     pub fn is_signaled(&self) -> bool {
+    |            ^^^^^^^^^^^
+
+warning: methods `count_down` and `await_n` are never used
+   --> src/renderer/src/data/data_util.rs:373:12
+    |
+366 | impl CountdownLatch {
+    | ------------------- methods in this implementation
+...
+373 |     pub fn count_down(&self) {
+    |            ^^^^^^^^^^
+...
+414 |     pub fn await_n(&self, n: usize, timeout: Duration) -> Result<(), LatchTimeOutError> {
+    |            ^^^^^^^
+
+warning: struct `EmissiveMap` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:131:12
+    |
+131 | pub struct EmissiveMap {
+    |            ^^^^^^^^^^^
+
+warning: struct `NormalMap` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:137:12
+    |
+137 | pub struct NormalMap {
+    |            ^^^^^^^^^
+
+warning: struct `OcclusionMap` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:143:12
+    |
+143 | pub struct OcclusionMap {
+    |            ^^^^^^^^^^^^
+
+warning: associated functions `unlit` and `pbr_simple` are never used
+   --> src/renderer/src/data/gpu_data.rs:205:12
+    |
+204 | impl MaterialMeta {
+    | ----------------- associated functions in this implementation
+205 |     pub fn unlit(base_color: Vec4, texture: Option<TextureHandle>) -> Self {
+    |            ^^^^^
+...
+220 |     pub fn pbr_simple(base_color: Vec4, metallic: f32, roughness: f32) -> Self {
+    |            ^^^^^^^^^^
+
+warning: struct `TextureSamplers` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:322:12
+    |
+322 | pub struct TextureSamplers {
+    |            ^^^^^^^^^^^^^^^
+
+warning: enum `Sampler` is never used
+   --> src/renderer/src/data/gpu_data.rs:331:10
+    |
+331 | pub enum Sampler {
+    |          ^^^^^^^
+
+warning: fields `texture_meta`, `full_extent`, `face_extent`, `allocation`, and `image` are never read
+   --> src/renderer/src/data/gpu_data.rs:422:9
+    |
+421 | pub struct VkCubeMap {
+    |            --------- fields in this struct
+422 |     pub texture_meta: Option<TextureMeta>,
+    |         ^^^^^^^^^^^^
+423 |     pub full_extent: vk::Extent3D,
+    |         ^^^^^^^^^^^
+424 |     pub face_extent: vk::Extent3D,
+    |         ^^^^^^^^^^^
+425 |     pub allocation: vk_mem::Allocation,
+    |         ^^^^^^^^^^
+426 |     pub image: vk::Image,
+    |         ^^^^^
+
+warning: struct `SurfaceMeta` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:432:12
+    |
+432 | pub struct SurfaceMeta {
+    |            ^^^^^^^^^^^
+
+warning: associated function `new_anim` is never used
+   --> src/renderer/src/data/gpu_data.rs:541:12
+    |
+524 | impl VkModelPushConsts {
+    | ---------------------- associated function in this implementation
+...
+541 |     pub fn new_anim(
+    |            ^^^^^^^^
+
+warning: fields `cache_id` and `vertex_count` are never read
+   --> src/renderer/src/data/gpu_data.rs:716:9
+    |
+715 | pub struct VkMeshBuffers {
+    |            ------------- fields in this struct
+716 |     pub cache_id: MeshHandle,
+    |         ^^^^^^^^
+717 |     pub index_count: u32,
+718 |     pub vertex_count: u32,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `VkMeshBuffers` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `VkGpuTextureBuffer` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:734:12
+    |
+734 | pub struct VkGpuTextureBuffer {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: struct `VkGpuMetRoughBuffer` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:741:12
+    |
+741 | pub struct VkGpuMetRoughBuffer {
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: struct `VkMetRoughUniforms` is never constructed
+   --> src/renderer/src/data/gpu_data.rs:750:12
+    |
+750 | pub struct VkMetRoughUniforms {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: enum `MaterialPass` is never used
+   --> src/renderer/src/data/gpu_data.rs:787:10
+    |
+787 | pub enum MaterialPass {
+    |          ^^^^^^^^^^^^
+
+warning: fields `layer_mask` and `tags` are never read
+  --> src/renderer/src/scene/scene_world.rs:42:9
+   |
+35 | pub struct SceneNode {
+   |            --------- fields in this struct
+...
+42 |     pub layer_mask: u64,
+   |         ^^^^^^^^^^
+43 |     pub tags: Vec<String>,
+   |         ^^^^
+   |
+   = note: `SceneNode` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `get_active_point_lights` is never used
+   --> src/renderer/src/scene/scene_world.rs:417:19
+    |
+103 | impl SceneWorld {
+    | --------------- method in this implementation
+...
+417 |     pub(crate) fn get_active_point_lights(&self) -> Vec<PointLight> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `capture_and_save_image_view` is never used
+ --> src/renderer/src/vulkan/vk_debug.rs:9:8
+  |
+9 | pub fn capture_and_save_image_view(
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `clear` is never used
+   --> src/renderer/src/vulkan/vk_descriptor.rs:102:12
+    |
+ 66 | impl<'a> DescriptorLayoutBuilder<'a> {
+    | ------------------------------------ method in this implementation
+...
+102 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: method `clear` is never used
+   --> src/renderer/src/vulkan/vk_descriptor.rs:177:12
+    |
+151 | impl VkDescriptorAllocator {
+    | -------------------------- method in this implementation
+...
+177 |     pub fn clear(&mut self, device: &LogicalDevice) -> Result<(), String> {
+    |            ^^^^^
+
+warning: method `clear` is never used
+   --> src/renderer/src/vulkan/vk_descriptor.rs:299:12
+    |
+250 | impl<'a> VkDescriptorWriter<'a> {
+    | ------------------------------- method in this implementation
+...
+299 |     pub fn clear(&mut self) {
+    |            ^^^^^
+
+warning: function `graphics_only_queue_indices` is never used
+   --> src/renderer/src/vulkan/vk_init.rs:469:8
+    |
+469 | pub fn graphics_only_queue_indices(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `clear` and `enable_blending_additive` are never used
+   --> src/renderer/src/vulkan/vk_pipeline.rs:92:12
+    |
+ 91 | impl<'a> PipelineBuilder<'a> {
+    | ---------------------------- methods in this implementation
+ 92 |     pub fn clear(&mut self) {
+    |            ^^^^^
+...
+233 |     pub fn enable_blending_additive(mut self) -> Self {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `desc_alloc` is never read
+   --> src/renderer/src/vulkan/vk_render.rs:102:9
+    |
+101 | pub struct VkSingleDescriptor {
+    |            ------------------ field in this struct
+102 |     pub desc_alloc: VkDescriptorAllocator,
+    |         ^^^^^^^^^^
+
+warning: method `get_raw_descriptor` is never used
+   --> src/renderer/src/vulkan/vk_render.rs:114:12
+    |
+106 | impl VkSingleDescriptor {
+    | ----------------------- method in this implementation
+...
+114 |     pub fn get_raw_descriptor(&self) -> vk::DescriptorSet {
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: fields `entry` and `supported_image_formats` are never read
+   --> src/renderer/src/vulkan/vk_render.rs:122:9
+    |
+119 | pub struct VkRenderCore {
+    |            ------------ fields in this struct
+...
+122 |     pub entry: ash::Entry,
+    |         ^^^^^
+...
+131 |     pub supported_image_formats: HashSet<vk::Format>,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `from_label` is never used
+   --> src/renderer/src/vulkan/vk_render.rs:174:12
+    |
+173 | impl DebugRuntimeMode {
+    | --------------------- associated function in this implementation
+174 |     pub fn from_label(value: &str) -> Option<Self> {
+    |            ^^^^^^^^^^
+
+warning: method `destroy` is never used
+   --> src/renderer/src/vulkan/vk_render.rs:531:8
+    |
+429 | impl VkRenderCore {
+    | ----------------- method in this implementation
+...
+531 |     fn destroy(&mut self) {}
+    |        ^^^^^^^
+
+warning: associated function `new_uniform_buffer` is never used
+   --> src/renderer/src/vulkan/vk_storage.rs:216:12
+    |
+144 | impl VkSubAllocator {
+    | ------------------- associated function in this implementation
+...
+216 |     pub fn new_uniform_buffer(
+    |            ^^^^^^^^^^^^^^^^^^
+
+warning: fields `curr_size` and `buffer_end_addr` are never read
+   --> src/renderer/src/vulkan/vk_storage.rs:444:5
+    |
+441 | struct VkStorageBuffer {
+    |        --------------- fields in this struct
+...
+444 |     curr_size: u64,
+    |     ^^^^^^^^^
+...
+449 |     buffer_end_addr: DeviceAddress,
+    |     ^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> src/renderer/src/vulkan/vk_types.rs:64:13
+   |
+64 |     Present(String),
+   |     ------- ^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `VkError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+64 -     Present(String),
+64 +     Present(()),
+   |
+
+warning: fields `resize_requested` and `render_scale` are never read
+  --> src/renderer/src/vulkan/vk_types.rs:83:9
+   |
+82 | pub struct VkWindowState {
+   |            ------------- fields in this struct
+83 |     pub resize_requested: bool,
+   |         ^^^^^^^^^^^^^^^^
+...
+87 |     pub render_scale: f32,
+   |         ^^^^^^^^^^^^
+
+warning: methods `update_window_scale`, `get_curr_width`, `get_curr_height`, `ensure_max_extent_at_least`, and `center_cursor` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:122:12
+    |
+ 92 | impl VkWindowState {
+    | ------------------ methods in this implementation
+...
+122 |     pub fn update_window_scale(&mut self, new_scalar: Option<f32>) {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+154 |     pub fn get_curr_width(&self) -> u32 {
+    |            ^^^^^^^^^^^^^^
+...
+158 |     pub fn get_curr_height(&self) -> u32 {
+    |            ^^^^^^^^^^^^^^^
+...
+174 |     pub fn ensure_max_extent_at_least(&mut self, extent: vk::Extent2D) -> bool {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+193 |     pub fn center_cursor(&self, window: &winit::window::Window) {
+    |            ^^^^^^^^^^^^^
+
+warning: fields `name` and `id` are never read
+   --> src/renderer/src/vulkan/vk_types.rs:228:9
+    |
+227 | pub struct PhyDevice {
+    |            --------- fields in this struct
+228 |     pub name: String,
+    |         ^^^^
+229 |     pub id: u32,
+    |         ^^
+
+warning: struct `LogicalDevice` is never constructed
+   --> src/renderer/src/vulkan/vk_types.rs:233:12
+    |
+233 | pub struct LogicalDevice {
+    |            ^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> src/renderer/src/vulkan/vk_types.rs:256:9
+    |
+254 | pub struct VkBufferAndDescriptorLimits {
+    |            --------------------------- fields in this struct
+255 |     // Buffer limits
+256 |     pub max_storage_buffer_range: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+257 |     pub max_uniform_buffer_range: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+258 |     pub max_push_constants_size: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+...
+262 |     pub min_storage_buffer_offset_alignment: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+263 |     pub min_texel_buffer_offset_alignment: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+264 |     pub buffer_image_granularity: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+265 |     pub optimal_buffer_copy_offset_alignment: vk::DeviceSize,
+266 |     pub non_coherent_atom_size: vk::DeviceSize,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+...
+269 |     pub max_bound_descriptor_sets: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+270 |     pub max_per_stage_descriptor_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+271 |     pub max_per_stage_descriptor_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+272 |     pub max_descriptor_set_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+273 |     pub max_descriptor_set_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+274 |     pub max_descriptor_set_storage_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+275 |     pub max_descriptor_set_uniform_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+278 |     pub max_update_after_bind_descriptors_in_all_pools: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+279 |     pub max_per_stage_descriptor_update_after_bind_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+280 |     pub max_per_stage_descriptor_update_after_bind_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+281 |     pub max_descriptor_set_update_after_bind_storage_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+282 |     pub max_descriptor_set_update_after_bind_uniform_buffers: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+283 |     pub max_descriptor_set_update_after_bind_storage_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+284 |     pub max_descriptor_set_update_after_bind_uniform_buffers_dynamic: u32,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `ALL_QUEUE_TYPES` and `iter` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:322:11
+    |
+320 | impl VkQueueType {
+    | ---------------- associated items in this implementation
+321 |     // Define an array of all the enum variants
+322 |     const ALL_QUEUE_TYPES: [VkQueueType; 4] = [
+    |           ^^^^^^^^^^^^^^^
+...
+329 |     pub fn iter() -> std::slice::Iter<'static, VkQueueType> {
+    |            ^^^^
+
+warning: fields `queue_index` and `queue_type` are never read
+   --> src/renderer/src/vulkan/vk_types.rs:404:9
+    |
+403 | pub struct VkCommandPool {
+    |            ------------- fields in this struct
+404 |     pub queue_index: u32,
+    |         ^^^^^^^^^^^
+405 |     pub queue_type: VkQueueType,
+    |         ^^^^^^^^^^
+    |
+    = note: `VkCommandPool` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: type alias `VkSubmitFn` is never used
+   --> src/renderer/src/vulkan/vk_types.rs:410:10
+    |
+410 | pub type VkSubmitFn = Box<
+    |          ^^^^^^^^^^
+
+warning: methods `destroy_for_rebuild` and `add_deletion` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:628:12
+    |
+604 | impl VkFrame {
+    | ------------ methods in this implementation
+...
+628 |     pub fn destroy_for_rebuild(
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+640 |     pub fn add_deletion(&mut self, deletion: VkDeletable) {
+    |            ^^^^^^^^^^^^
+
+warning: methods `get_curr_frame_count`, `get_curr_frame`, `add_deletion_to_curr_frame`, `replace_draw_depth_images`, and `destroy_for_rebuild` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:779:12
+    |
+699 | impl VkPresent {
+    | -------------- methods in this implementation
+...
+779 |     pub fn get_curr_frame_count(&self) -> u32 {
+    |            ^^^^^^^^^^^^^^^^^^^^
+...
+788 |     pub fn get_curr_frame(&self) -> &VkFrame {
+    |            ^^^^^^^^^^^^^^
+...
+793 |     pub fn add_deletion_to_curr_frame(&mut self, deletion: VkDeletable) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+826 |     pub fn replace_draw_depth_images(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+868 |     pub fn destroy_for_rebuild(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `get_queue_by_index` and `has_queue_type` are never used
+   --> src/renderer/src/vulkan/vk_types.rs:920:12
+    |
+902 | impl VkDeviceQueues {
+    | ------------------- methods in this implementation
+...
+920 |     pub fn get_queue_by_index(&self, index: u32) -> Option<(u32, vk::Queue)> {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+934 |     pub fn has_queue_type(&self, typ: VkQueueType) -> bool {
+    |            ^^^^^^^^^^^^^^
+
+warning: struct `VkImmediate` is never constructed
+   --> src/renderer/src/vulkan/vk_types.rs:976:12
+    |
+976 | pub struct VkImmediate {
+    |            ^^^^^^^^^^^
+
+warning: associated function `new` is never used
+   --> src/renderer/src/vulkan/vk_types.rs:982:12
+    |
+981 | impl VkImmediate {
+    | ---------------- associated function in this implementation
+982 |     pub fn new(command_pool: VkCommandPool, fence: vk::Fence) -> Self {
+    |            ^^^
+
+warning: method `send_to_self` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1169:12
+     |
+1150 | impl VkTransfer {
+     | --------------- method in this implementation
+...
+1169 |     pub fn send_to_self(&self, info: VkCmdSubmitInfo) -> Result<(), SendError<VkCmdSubmitInfo>> {
+     |            ^^^^^^^^^^^^
+
+warning: field `opened` is never read
+    --> src/renderer/src/vulkan/vk_types.rs:1191:9
+     |
+1187 | pub struct VkImgui {
+     |            ------- field in this struct
+...
+1191 |     pub opened: bool,
+     |         ^^^^^^
+
+warning: method `prepare_frame` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1208:12
+     |
+1194 | impl VkImgui {
+     | ------------ method in this implementation
+...
+1208 |     pub fn prepare_frame(&mut self, window: &winit::window::Window) {
+     |            ^^^^^^^^^^^^^
+
+warning: methods `set_data_1`, `set_data_2`, `set_data_3`, and `set_data_4` are never used
+    --> src/renderer/src/vulkan/vk_types.rs:1236:12
+     |
+1235 | impl Compute4x4PushConstants {
+     | ---------------------------- methods in this implementation
+1236 |     pub fn set_data_1(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+...
+1240 |     pub fn set_data_2(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+...
+1244 |     pub fn set_data_3(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+...
+1248 |     pub fn set_data_4(mut self, data: glam::Vec4) -> Self {
+     |            ^^^^^^^^^^
+
+warning: method `as_byte_slice` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1255:12
+     |
+1254 | impl Compute4x4PushConstants {
+     | ---------------------------- method in this implementation
+1255 |     pub fn as_byte_slice(&self) -> &[u8] {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `ComputeEffect` is never constructed
+    --> src/renderer/src/vulkan/vk_types.rs:1260:12
+     |
+1260 | pub struct ComputeEffect {
+     |            ^^^^^^^^^^^^^
+
+warning: struct `ComputeData` is never constructed
+    --> src/renderer/src/vulkan/vk_types.rs:1279:12
+     |
+1279 | pub struct ComputeData {
+     |            ^^^^^^^^^^^
+
+warning: method `get_current_effect` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1285:12
+     |
+1284 | impl ComputeData {
+     | ---------------- method in this implementation
+1285 |     pub fn get_current_effect(&self) -> &ComputeEffect {
+     |            ^^^^^^^^^^^^^^^^^^
+
+warning: field `extent` is never read
+    --> src/renderer/src/vulkan/vk_types.rs:1383:9
+     |
+1380 | pub struct VkBrdfLut {
+     |            --------- field in this struct
+...
+1383 |     pub extent: Extent2D,
+     |         ^^^^^^
+
+warning: associated function `new` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1387:12
+     |
+1386 | impl VkBuffer {
+     | ------------- associated function in this implementation
+1387 |     pub fn new(
+     |            ^^^
+
+warning: variant `AllocatedBuffer` is never constructed
+    --> src/renderer/src/vulkan/vk_types.rs:1432:5
+     |
+1431 | pub enum VkDeletable {
+     |          ----------- variant in this enum
+1432 |     AllocatedBuffer(VkBuffer),
+     |     ^^^^^^^^^^^^^^^
+
+warning: field `descriptor_pool` is never read
+    --> src/renderer/src/vulkan/vk_types.rs:1470:5
+     |
+1469 | pub struct VkSceneDescriptors {
+     |            ------------------ field in this struct
+1470 |     descriptor_pool: VkDynamicDescriptorAllocator,
+     |     ^^^^^^^^^^^^^^^
+
+warning: methods `update_scene_uniform` and `get_scene_descriptor` are never used
+    --> src/renderer/src/vulkan/vk_types.rs:1602:12
+     |
+1477 | impl VkSceneDescriptors {
+     | ----------------------- methods in this implementation
+...
+1602 |     pub fn update_scene_uniform(
+     |            ^^^^^^^^^^^^^^^^^^^^
+...
+1688 |     pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
+     |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `pending_count` is never used
+    --> src/renderer/src/vulkan/vk_types.rs:1723:12
+     |
+1716 | impl VkFenceQueue {
+     | ----------------- method in this implementation
+...
+1723 |     pub fn pending_count(&self) -> usize {
+     |            ^^^^^^^^^^^^^
+
+warning: function `command_pool_create_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:63:8
+   |
+63 | pub fn command_pool_create_info<'a>(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `command_buffer_allocate_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:72:8
+   |
+72 | pub fn command_buffer_allocate_info<'a>(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fence_create_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:83:8
+   |
+83 | pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `semaphore_create_info` is never used
+  --> src/renderer/src/vulkan/vk_util.rs:87:8
+   |
+87 | pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `render_pass_begin_info` is never used
+   --> src/renderer/src/vulkan/vk_util.rs:150:8
+    |
+150 | pub fn render_pass_begin_info<'a>(
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_memory_type` is never used
+   --> src/renderer/src/vulkan/vk_util.rs:326:8
+    |
+326 | pub fn find_memory_type(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: function `create_buffer_image_copy` is never used
+    --> src/renderer/src/vulkan/vk_util.rs:1068:4
+     |
+1068 | fn create_buffer_image_copy(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `renderer` (lib) generated 86 warnings
+error[E0308]: mismatched types
+    --> src/renderer/examples/common/mod.rs:250:20
+     |
+ 250 |         .unwrap_or(FACADE_DEMO_MODEL_PATH);
+     |          --------- ^^^^^^^^^^^^^^^^^^^^^^ expected `&Path`, found `&str`
+     |          |
+     |          arguments to this method are incorrect
+     |
+     = note: expected reference `&Path`
+                found reference `&'static str`
+help: the return type of this call is `&'static str` due to the type of the argument passed
+    --> src/renderer/examples/common/mod.rs:247:22
+     |
+ 247 |       let model_path = launch_options
+     |  ______________________^
+ 248 | |         .model_path
+ 249 | |         .as_deref()
+ 250 | |         .unwrap_or(FACADE_DEMO_MODEL_PATH);
+     | |____________________----------------------^
+     |                      |
+     |                      this argument influences the return type of `unwrap_or`
+note: method defined here
+    --> /home/hickelpickle/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/option.rs:1038:18
+     |
+1038 |     pub const fn unwrap_or(self, default: T) -> T
+     |                  ^^^^^^^^^
+
+error[E0308]: mismatched types
+   --> src/renderer/examples/common/mod.rs:251:69
+    |
+251 |     let mut scene = match initialize_scene(&mut renderer, scenario, model_path) {
+    |                           ----------------                          ^^^^^^^^^^ expected `&str`, found `&Path`
+    |                           |
+    |                           arguments to this function are incorrect
+    |
+    = note: expected reference `&str`
+               found reference `&Path`
+note: function defined here
+   --> src/renderer/examples/common/mod.rs:386:4
+    |
+386 | fn initialize_scene(
+    |    ^^^^^^^^^^^^^^^^
+...
+389 |     model_path: &str,
+    |     ----------------
+
+error[E0308]: mismatched types
+    --> src/renderer/examples/demo_async_loading.rs:87:20
+     |
+  87 |         .unwrap_or(DEFAULT_MODEL_PATH);
+     |          --------- ^^^^^^^^^^^^^^^^^^ expected `&Path`, found `&str`
+     |          |
+     |          arguments to this method are incorrect
+     |
+     = note: expected reference `&Path`
+                found reference `&'static str`
+help: the return type of this call is `&'static str` due to the type of the argument passed
+    --> src/renderer/examples/demo_async_loading.rs:84:22
+     |
+  84 |       let model_path = launch_options
+     |  ______________________^
+  85 | |         .model_path
+  86 | |         .as_deref()
+  87 | |         .unwrap_or(DEFAULT_MODEL_PATH);
+     | |____________________------------------^
+     |                      |
+     |                      this argument influence
+
+[… truncated 848 chars …]

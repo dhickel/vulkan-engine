@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-pub use renderer::CaptureTarget;
+pub use renderer::prelude::CaptureTarget;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchOptions {
@@ -315,64 +315,27 @@ fn inline_value<'a>(arg: &'a str, flag: &str) -> Result<&'a str, LaunchError> {
 }
 
 fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, LaunchError> {
-    let parsed = value.parse::<u64>().map_err(|_| {
-        LaunchError::Usage(format!("{flag} expects a positive integer, got '{value}'"))
-    })?;
-    if parsed == 0 {
-        return Err(LaunchError::Usage(format!(
-            "{flag} expects a value >= 1, got '{value}'"
-        )));
-    }
-    Ok(parsed)
+    launch_shared::parse_positive_u64(flag, value).map_err(LaunchError::Usage)
 }
 
 fn parse_positive_u32(flag: &str, value: &str) -> Result<u32, LaunchError> {
-    let parsed = value.parse::<u32>().map_err(|_| {
-        LaunchError::Usage(format!("{flag} expects a positive integer, got '{value}'"))
-    })?;
-    if parsed == 0 {
-        return Err(LaunchError::Usage(format!(
-            "{flag} expects a value >= 1, got '{value}'"
-        )));
-    }
-    Ok(parsed)
+    launch_shared::parse_positive_u32(flag, value).map_err(LaunchError::Usage)
 }
 
 fn parse_capture_target(value: &str) -> Result<CaptureTarget, LaunchError> {
-    CaptureTarget::parse(value).ok_or_else(|| {
-        LaunchError::Usage(format!(
-            "--capture_target expects accepted values 'present' or 'draw', got '{value}'"
-        ))
-    })
+    launch_shared::parse_capture_target(value).map_err(LaunchError::Usage)
 }
 
 fn validate_capture_options(options: &PartialLaunchOptions) -> Result<(), LaunchError> {
-    if options.capture_frame.is_some() && options.capture_frames.is_some() {
-        return Err(LaunchError::Usage(
-            "--capture_frame and --capture_frames cannot be used together".to_string(),
-        ));
-    }
-    if options.capture_frame_path.is_some() && options.capture_frame.is_none() {
-        return Err(LaunchError::Usage(
-            "--capture_frame_path requires --capture_frame".to_string(),
-        ));
-    }
-    if options.capture_dir.is_some() && options.capture_frames.is_none() {
-        return Err(LaunchError::Usage(
-            "--capture_dir requires --capture_frames".to_string(),
-        ));
-    }
-    if options.capture_frame_start.is_some() && options.capture_frames.is_none() {
-        return Err(LaunchError::Usage(
-            "--capture_frame_start requires --capture_frames".to_string(),
-        ));
-    }
-    if options.capture_frame_interval.is_some() && options.capture_frames.is_none() {
-        return Err(LaunchError::Usage(
-            "--capture_frame_interval requires --capture_frames".to_string(),
-        ));
-    }
-    Ok(())
+    launch_shared::validate_capture_options(
+        options.capture_frame,
+        options.capture_frame_path.as_deref(),
+        options.capture_frames,
+        options.capture_frame_start,
+        options.capture_frame_interval,
+        options.capture_dir.as_deref(),
+    )
+    .map_err(LaunchError::Usage)
 }
 
 pub fn usage() -> &'static str {

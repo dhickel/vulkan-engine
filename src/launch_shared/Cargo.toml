@@ -1,0 +1,7 @@
+[package]
+name = "launch_shared"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+renderer = { path = "../renderer" }

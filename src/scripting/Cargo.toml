@@ -7,3 +7,4 @@ edition = "2021"
 engine_events = { path = "../events" }
 rhai = "1"
 log = "0.4"
+serde_json = "1"

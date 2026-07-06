@@ -3,21 +3,16 @@
 
 use glam::{Mat4, Vec3};
 use renderer::{
-    Aabb, AssetError, AssetKind, AssetRegistry, CaptureTarget, CommandHistory,
-    FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureSequence, Frustum, MeshHandle,
-    OrbitCamera, PointLight, Ray, RendererError, Scene, SceneError, SceneWorld,
-    SetTransformCommand,
+    Aabb, AssetError, AssetKind, CommandHistory, Frustum, MeshHandle, OrbitCamera, PointLight, Ray,
+    RendererError, Scene, SceneError, SceneWorld, SetTransformCommand,
 };
+use renderer::prelude::{AssetRegistry, CaptureTarget, FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureSequence};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn beginner_prelude_import_contract_compiles() {
-    use renderer::prelude::{
-        AssetKind, AssetManager, AssetRegistry, CaptureTarget, FrameCaptureRequest,
-        FrameCaptureScheduler, FrameCaptureSequence, FrameRenderOutcome, LoadStatus, PointLight,
-        Renderer, RendererConfig, RendererError, Scene,
-    };
+    use renderer::prelude::*;
 
     let config = RendererConfig::default();
     assert!(!config.app_name.is_empty());
@@ -56,19 +51,95 @@ path = "models/crate.glb"
     let scheduler = FrameCaptureScheduler::new("prelude-contract");
     assert!(scheduler.last_status().is_none());
 
-    let status: LoadStatus<()> = LoadStatus::Cancelled;
-    assert!(matches!(status, LoadStatus::Cancelled));
-    assert!(matches!(
-        FrameRenderOutcome::Rendered,
-        FrameRenderOutcome::Rendered
-    ));
+    assert!(matches!(LoadStatus::<()>::Cancelled, LoadStatus::Cancelled));
+    assert!(matches!(FrameRenderOutcome::Rendered, FrameRenderOutcome::Rendered));
     assert!(matches!(AssetKind::Model, AssetKind::Model));
 
-    let _asset_manager_type: Option<AssetManager<'_>> = None;
-    let _renderer_type: Option<Renderer> = None;
-    let _renderer_error_type: Option<RendererError> = None;
-}
+    // ── Type existence (compile-time contract covering all prelude re-exports) ──
+    let _: Option<AssetManager<'_>> = None;
+    let _: Option<Renderer> = None;
+    let _: Option<RendererError> = None;
+    let _: Option<RendererInitError> = None;
+    let _: Option<RendererFrameError> = None;
+    let _: Option<AssetRegistryError> = None;
+    let _: Option<SceneError> = None;
+    let _: Option<SceneFragment> = None;
+    let _: Option<SceneFragmentMount> = None;
+    let _: Option<SceneFragmentNode> = None;
+    let _: Option<SceneFragmentNodeId> = None;
+    let _: Option<SceneNodeId> = None;
+    let _: Option<SceneNodeSummary> = None;
+    let _: Option<AssetId> = None;
+    let _: Option<ActionId> = None;
+    let _: Option<PointLightId> = None;
+    let _: Option<MaterialHandle> = None;
+    let _: Option<MeshHandle> = None;
+    let _: Option<TextureHandle> = None;
+    let _: Option<EnvironmentHandle> = None;
+    let _: Option<ActionMap> = None;
+    let _: Option<ActionMapLayer> = None;
+    let _: Option<ActionBinding> = None;
+    let _: Option<BindingModifiers> = None;
+    let _: Option<BindingTrigger> = None;
+    let _: Option<InputSystem> = None;
+    let _: Option<InputRuntime> = None;
+    let _: Option<InputSnapshot> = None;
+    let _: Option<InputEvent> = None;
+    let _: Option<InputActionEvent> = None;
+    let _: Option<InputDebugFrame> = None;
+    let _: Option<InputDebugSnapshot> = None;
+    let _: Option<InputChord> = None;
+    let _: Option<FrameInputSnapshot> = None;
+    let _: Option<LayerDescriptor> = None;
+    let _: Option<LayerHandle> = None;
+    let _: Option<LayerId> = None;
+    let _: Option<LayerPriority> = None;
+    let _: Option<LayerSpec> = None;
+    let _: Option<Project> = None;
+    let _: Option<ProjectPackage> = None;
+    let _: Option<ProjectSettings> = None;
+    let _: Option<ProjectValidationOptions> = None;
+    let _: Option<PackageManifest> = None;
+    let _: Option<PackageValidationOptions> = None;
+    let _: Option<PackageAssetRecord> = None;
+    let _: Option<DurableAssetRecord> = None;
+    let _: Option<SceneAssetReference> = None;
+    let _: Option<SceneValidationOptions> = None;
+    let _: Option<EventBus> = None;
+    let _: Option<EventEnvelope> = None;
+    let _: Option<EventRecorder> = None;
+    let _: Option<EventSequence> = None;
+    let _: Option<EventStage> = None;
+    let _: Option<EngineEvent> = None;
+    let _: Option<DebugTimingSnapshot> = None;
+    let _: Option<DebugTimingRow> = None;
+    let _: Option<DueFrameCapture> = None;
+    let _: Option<FrameCaptureConfigError> = None;
+    let _: Option<FrameContext> = None;
+    let _: Option<VisualTuning> = None;
+    let _: Option<AssetManifestMode> = None;
+    let _: Option<AssetPolicyConfig> = None;
+    let _: Option<PbrMaterialDesc> = None;
+    let _: Option<ProceduralMeshData> = None;
+    let _: Option<ProceduralVertex> = None;
+    let _: Option<LoadTicket> = None;
+    let _: Option<SamplerOverride> = None;
+    let _: Option<ResolvedTexturePolicy> = None;
+    let _: Option<TextureLoadOptions> = None;
+    let _: Option<ValidationArea> = None;
+    let _: Option<ValidationDiagnostic> = None;
+    let _: Option<ValidationError> = None;
+    let _: Option<AssetEvent> = None;
+    let _: Option<FrameCaptureScheduler> = None;
+    let _: Option<FrameCaptureStatus> = None;
+    let _: Option<FrameCaptureRequest> = None;
+    let _: Option<FilterMode> = None;
+    let _: Option<WrapMode> = None;
+    let _: Option<FacePattern> = None;
 
+    // ── Free functions (compile-time existence) ──
+    let _ = default_capture_root();
+}
 #[test]
 fn beginner_error_display_contract_is_actionable() {
     let scene_err = RendererError::from(SceneError::MissingAssetId("node asset".to_string()));

@@ -4,10 +4,12 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use renderer::{
-    validate_package_manifest_file, validate_project_file, validate_scene_file_with_options,
-    AssetKind, PackageManifest, PackageValidationOptions, Project, ProjectValidationOptions,
-    SceneValidationOptions, ValidationArea, ValidationDiagnostic, ValidationError,
+use renderer::AssetKind;
+use renderer::prelude::{
+    validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
+    validate_scene_file_with_options, PackageManifest, PackageValidationOptions, Project,
+    ProjectValidationOptions, SceneValidationOptions, ValidationArea, ValidationDiagnostic,
+    ValidationError,
 };
 use serde::Serialize;
 
@@ -110,13 +112,13 @@ fn validate_package_cmd(args: &[String]) -> CliResult<String> {
             CliError::Validation(ValidationError::single(
                 ValidationDiagnostic::new(
                     "package.io",
-                    renderer::ValidationArea::Package,
+                    ValidationArea::Package,
                     format!("failed to read package manifest: {err}"),
                 )
                 .with_path(&path),
             ))
         })?;
-        renderer::validate_package_manifest_str(&content, project_root, &options)?
+        validate_package_manifest_str(&content, project_root, &options)?
     } else {
         validate_package_manifest_file(&path, &options)?
     };

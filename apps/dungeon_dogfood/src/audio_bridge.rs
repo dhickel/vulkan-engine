@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use audio::{AudioClip, AudioEngine, PlaybackOptions};
-use renderer::{AudioClipId, AudioEvent, EngineEvent, EventBus, EventStage, Renderer};
+use renderer::{EngineEvent, EventBus, Renderer};
+use renderer::prelude::{AudioClipId, AudioEvent, EventStage};
 
 use crate::content::{resolve_content_path, AudioClipSpec, ContentPack};
 
@@ -209,7 +210,8 @@ fn log_audio_report(report: &AudioBridgeReport) {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use renderer::{AudioEvent, EngineEvent, EventBus};
+    use renderer::{EngineEvent, EventBus};
+    use renderer::prelude::AudioEvent;
 
     use super::*;
 

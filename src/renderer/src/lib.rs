@@ -36,32 +36,30 @@ pub mod rendergraph;
 mod scene;
 mod vulkan;
 
+// Crate-root canonical re-exports. For a broader quickstart import, use
+// `use renderer::prelude::*` which re-exports ~60 types for common workflows.
+pub use api::event_logging::install_app_event_logger;
 pub use api::{
-    default_capture_root, default_capture_run_dir, default_manual_capture_dir,
-    default_single_capture_path, editor_ui_capture_layer, parse_package_manifest,
-    single_capture_path, validate_package_manifest_file, validate_package_manifest_str,
-    validate_project_file, validate_project_str, validate_scene_file,
-    validate_scene_file_with_options, validate_scene_str, validate_scene_str_with_options,
-    ActionPhase, AppUiCallback, AssetError, AssetEvent, AssetId, AssetKind, AssetManager,
-    AssetManifestMode, AssetPolicyConfig, AssetRegistry, AssetRegistryError, AudioClipId,
-    AudioEvent, CaptureLayer, CaptureTarget, ColliderId, ContactPhase, DebugRuntimeMode,
-    DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,
-    DebugViewDescriptor, DebugViewId, DueFrameCapture, DurableAssetRecord, EngineEvent,
-    EnvironmentHandle, EnvironmentRuntimeStatus, EnvironmentSource, EnvironmentState, EventBus,
-    EventEnvelope, EventRecorder, EventSequence, EventStage, FacePattern, FilterMode,
-    FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureScheduler, FrameCaptureSequence,
-    FrameCaptureSource, FrameCaptureStatus, FrameContext, FrameId, FrameRenderOutcome, HookError,
-    InputActionEvent, LifecycleEvent, ListenerError, ListenerFailure, ListenerId, LoadStatus,
-    LoadTicket, MaterialHandle, MaterialId, MeshHandle, NodeId, PackageAssetRecord, PackageId,
-    PackageManifest, PackageValidationOptions, PbrMaterialDesc, PhysicsBodyId, PhysicsEvent,
-    PointLight, PointLightId, ProceduralMeshData, ProceduralVertex, Project, ProjectId,
-    ProjectPackage, ProjectSettings, ProjectValidationOptions, RenderHook, RenderHookContext,
-    Renderer, RendererConfig, RendererError, RendererFrameError, RendererInitError,
-    ResolvedTexturePolicy, SamplerOverride, Scene, SceneAssetReference, SceneError, SceneFragment,
-    SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneId, SceneNodeId,
-    SceneNodeSummary, SceneValidationOptions, ScriptId, ScriptingEvent, TextureHandle,
-    TextureLoadOptions, ValidationArea, ValidationDiagnostic, ValidationError, VisualTuning,
-    WrapMode,
+    // Core runtime
+    Renderer, RendererConfig,
+    // Scene API
+    Scene, SceneNodeId, SceneError,
+    // Error root
+    RendererError, AssetError,
+    // Asset API
+    AssetManager, AssetKind,
+    // Handles (widely used)
+    MaterialHandle, MeshHandle, TextureHandle,
+    // Event API
+    EventBus, EngineEvent,
+    // Hooks
+    RenderHook, BoxedRenderHook, RenderHookContext, boxed_render_hook,
+    // Lighting
+    PointLight, PointLightId,
+    // Frame API
+    FrameContext, FrameRenderOutcome,
+    // Debug
+    DebugRuntimeMode, VisualTuning,
 };
 
 pub use animation::AnimationPlayer;

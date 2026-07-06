@@ -8,6 +8,7 @@ mod layout;
 mod player;
 mod scene_seed;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -17,10 +18,8 @@ use generator::{generate_dungeon, GeneratedDungeon, ProceduralLevelConfig, GENER
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
-use renderer::{
-    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
-    FrameRenderOutcome, RendererConfig, RendererError,
-};
+use renderer::{FrameRenderOutcome, RendererConfig, RendererError};
+use renderer::prelude::{AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus};
 use scene_seed::{renderer_visual_tuning, LevelScene};
 use thiserror::Error;
 use winit::event::{Event, WindowEvent};
@@ -563,7 +562,7 @@ fn render_frame(
             player.position
         );
         return Err(RendererError::InvalidState(
-            "player position must remain finite before camera write-back",
+            "player position must remain finite before camera write-back".to_string(),
         ));
     }
     renderer.set_camera_position(player.position);
@@ -721,7 +720,7 @@ fn run_headless(
                 .saturating_mul(headless_opts.capture_frames.unwrap_or(1).saturating_sub(1));
         last_frame.saturating_add(120).max(180)
     };
-    let mut succeeded_count = 0usize;
+    let mut succeeded_paths = HashSet::new();
 
     for frame_num in 0..frame_budget {
         if let Err(err) = renderer.render_scene_headless(&mut scene) {
@@ -738,7 +737,10 @@ fn run_headless(
                 height,
                 ..
             }) => {
-                succeeded_count += 1;
+                if !record_unique_capture_success(&mut succeeded_paths, output_path) {
+                    continue;
+                }
+                let succeeded_count = succeeded_paths.len();
                 log::info!(
                     "Capture #{succeeded_count} at frame {frame_num}: target={} size={}x{} path={} sidecar={:?}",
                     target.as_label(),
@@ -761,7 +763,7 @@ fn run_headless(
             }) => {
                 log::error!("Headless capture failed at frame {frame_number}: {message}");
                 return Err(AppError::RendererInit(RendererError::InvalidState(
-                    "headless capture failed",
+                    "headless capture failed".to_string(),
                 )));
             }
             Some(FrameCaptureStatus::BackendNotImplemented {
@@ -774,7 +776,7 @@ fn run_headless(
                     target.as_label()
                 );
                 return Err(AppError::RendererInit(RendererError::InvalidState(
-                    "headless capture target not implemented",
+                    "headless capture target not implemented".to_string(),
                 )));
             }
             _ => {}
@@ -786,9 +788,16 @@ fn run_headless(
         Ok(())
     } else {
         Err(AppError::RendererInit(RendererError::InvalidState(
-            "headless capture incomplete",
+            "headless capture incomplete".to_string(),
         )))
     }
+}
+
+fn record_unique_capture_success(
+    succeeded_paths: &mut HashSet<PathBuf>,
+    output_path: &std::path::Path,
+) -> bool {
+    succeeded_paths.insert(output_path.to_path_buf())
 }
 
 fn env_flag(var_name: &str) -> bool {
@@ -832,6 +841,23 @@ fn env_u64(var_name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_success_counter_ignores_repeated_output_path() {
+        let mut succeeded_paths = HashSet::new();
+        let output_path =
+            PathBuf::from(".internal-dev/captures/example/dungeon-dogfood-frame-60.png");
+
+        assert!(record_unique_capture_success(
+            &mut succeeded_paths,
+            &output_path
+        ));
+        assert!(!record_unique_capture_success(
+            &mut succeeded_paths,
+            &output_path
+        ));
+        assert_eq!(succeeded_paths.len(), 1);
+    }
 
     #[test]
     fn resolve_builtin_level_id() {

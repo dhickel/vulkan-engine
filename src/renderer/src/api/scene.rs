@@ -305,7 +305,14 @@ pub struct Scene {
     next_stable_node_id: u64,
     skybox_asset: Option<SceneAssetReference>,
     materials: BTreeMap<String, SerializedMaterialOverride>,
-    editor: serde_json::Value,
+    /// Editor-specific metadata blob.
+    ///
+    /// This field is preserved for serialization compatibility but is not
+    /// part of the stable public API. Use [`Scene::editor_metadata`] and
+    /// [`Scene::set_editor_metadata`] to access this data.
+    #[deprecated(since = "0.13.0", note = "use editor_metadata() / set_editor_metadata() accessors")]
+    #[doc(hidden)]
+    pub editor: serde_json::Value,
 }
 
 impl Default for Scene {
@@ -317,6 +324,7 @@ impl Default for Scene {
 impl Scene {
     /// Thread: Any
     /// May Stall: No
+    #[allow(deprecated)]
     pub fn new() -> Self {
         Self {
             world: SceneWorld::new(),
@@ -326,6 +334,20 @@ impl Scene {
             skybox_asset: None,
             materials: BTreeMap::new(),
             editor: serde_json::json!({}),
+        }
+    }
+
+    /// Returns a reference to the editor metadata blob.
+    pub fn editor_metadata(&self) -> &serde_json::Value {
+        #[allow(deprecated)]
+        &self.editor
+    }
+
+    /// Sets the editor metadata blob.
+    pub fn set_editor_metadata(&mut self, metadata: serde_json::Value) {
+        #[allow(deprecated)]
+        {
+            self.editor = metadata;
         }
     }
 
@@ -442,6 +464,37 @@ impl Scene {
         };
         node_ref.asset = None;
         Ok(())
+    }
+
+    /// Returns the material parameters stored in scene-level materials for the given override ID.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn material_parameters(
+        &self,
+        override_id: &str,
+    ) -> Option<&BTreeMap<String, serde_json::Value>> {
+        self.materials
+            .get(override_id)
+            .map(|entry| &entry.parameters)
+    }
+
+    /// Sets material parameters for a given override ID in the scene-level materials map.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn set_material_parameters(
+        &mut self,
+        override_id: String,
+        parameters: BTreeMap<String, serde_json::Value>,
+    ) {
+        self.materials
+            .entry(override_id)
+            .or_insert_with(|| SerializedMaterialOverride {
+                base: None,
+                parameters: BTreeMap::new(),
+            })
+            .parameters = parameters;
     }
 
     /// Thread: Any
@@ -610,6 +663,12 @@ impl Scene {
     /// May Stall: No
     pub fn set_camera(&mut self, view: Mat4, projection: Mat4, position: Vec3) {
         self.world.update_camera(view, projection, position);
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn has_skybox(&self) -> bool {
+        self.world.skybox_env_id() != EnvironmentHandle::new(0, 0)
     }
 
     /// Thread: Any
@@ -802,6 +861,7 @@ impl Scene {
         Ok(serialized)
     }
 
+    #[allow(deprecated)]
     pub(crate) fn from_world(world: SceneWorld) -> Self {
         Self {
             world,
@@ -849,6 +909,15 @@ impl Scene {
     /// scene graph does not own CPU mesh bounds. Mesh-backed nodes use a
     /// one-unit local proxy and empty group nodes use a smaller origin proxy.
     ///
+    /// Returns the last camera view and projection matrices set by the renderer.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn camera_view_projection(&self) -> (glam::Mat4, glam::Mat4) {
+        let camera = self.world.camera_data();
+        (camera.view, camera.projection)
+    }
+
     /// Thread: Any
     /// May Stall: No
     pub fn pick_last_camera(
@@ -1339,7 +1408,7 @@ impl SerializedScene {
                 }),
             materials: scene.materials.clone(),
             audio: Vec::new(),
-            editor: scene.editor.clone(),
+            editor: scene.editor_metadata().clone(),
         }
     }
 
@@ -1359,7 +1428,7 @@ impl SerializedScene {
         scene.scene_id = self.scene_id.clone();
         scene.display_name = self.display_name.clone();
         scene.materials = self.materials.clone();
-        scene.editor = self.editor.clone();
+        scene.set_editor_metadata(self.editor.clone());
 
         let mut id_map: HashMap<String, SceneNodeId> = HashMap::new();
 

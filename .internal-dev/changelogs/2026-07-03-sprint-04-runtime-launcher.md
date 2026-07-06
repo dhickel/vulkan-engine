@@ -52,3 +52,10 @@ Closed Sprint 04 by turning the root `engine` binary into the alpha data-driven 
 - Existing renderer dead-code warnings remain visible.
 - Existing editor `set_active_scene_text` dead-code warning remains visible.
 - Event system, physics/collision, audio gameplay integration, scripting/hot reload, generated app templates, and dogfood project-manifest migration remain future sprints.
+
+## Amendment (2026-07-03 — Gate Review Remediation, AGR-037)
+
+The following files were identified by the gate review as within sprint 04 scope but not listed in the original changelog:
+
+- Renderer API doctest files repaired during this sprint (see Changes section: "Repaired renderer doctest fences")
+- `src/launch.rs` — root runtime launcher CLI parsing (listed in sprint 02 changelog but primarily developed in sprint 04)

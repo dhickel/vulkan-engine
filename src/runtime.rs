@@ -9,11 +9,15 @@ use engine_events::{
     ProjectId, SceneId,
 };
 use log::{info, warn};
-use renderer::{
+use renderer::{FrameRenderOutcome, Renderer, RendererConfig, Scene};
+use renderer::prelude::{
     default_capture_run_dir, single_capture_path, AssetManifestMode, AssetPolicyConfig,
     DurableAssetRecord, FrameCaptureRequest, FrameCaptureSequence, FrameCaptureStatus,
-    FrameRenderOutcome, Project, ProjectPackage, ProjectValidationOptions, Renderer,
-    RendererConfig, Scene, SceneValidationOptions,
+    PackageManifest, PackageValidationOptions, Project, ProjectPackage,
+    ProjectValidationOptions, SceneValidationOptions, validate_package_manifest_file,
+    validate_package_manifest_str, validate_project_file,
+    validate_scene_file, validate_scene_file_with_options, validate_scene_str,
+    validate_scene_str_with_options, ValidationArea, ValidationDiagnostic, ValidationError,
 };
 use winit::dpi::PhysicalSize;
 use winit::event::{Event, WindowEvent};
@@ -133,7 +137,7 @@ fn load_runtime_project(options: &LaunchOptions) -> Result<RuntimeProject, Strin
         ));
     }
 
-    let project = renderer::validate_project_file(
+    let project = validate_project_file(
         &project_path,
         &ProjectValidationOptions::default().check_files(true),
     )
@@ -579,7 +583,7 @@ fn validate_startup_scene(
         .iter()
         .map(|record| record.asset_id.clone())
         .collect::<Vec<_>>();
-    renderer::validate_scene_file_with_options(
+    validate_scene_file_with_options(
         scene_path,
         &SceneValidationOptions::default().with_known_asset_ids(known_asset_ids),
     )
@@ -709,7 +713,7 @@ fn headless_capture_plan(options: &LaunchOptions) -> HeadlessCapturePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use renderer::CaptureTarget;
+    use renderer::prelude::CaptureTarget;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 

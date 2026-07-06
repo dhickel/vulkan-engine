@@ -91,3 +91,27 @@ toml = "0.8"
 #game-loop = { version = "*", features = ["winit"] }
 # Web
 
+[[example]]
+name = "capture_material_pbr"
+path = "examples/capture_tests/capture_material_pbr.rs"
+
+[[example]]
+name = "capture_lighting"
+path = "examples/capture_tests/capture_lighting.rs"
+
+[[example]]
+name = "capture_geometry"
+path = "examples/capture_tests/capture_geometry.rs"
+
+[[example]]
+name = "capture_environment"
+path = "examples/capture_tests/capture_environment.rs"
+
+[[example]]
+name = "capture_model_load"
+path = "examples/capture_tests/capture_model_load.rs"
+
+[[example]]
+name = "capture_transform"
+path = "examples/capture_tests/capture_transform.rs"
+

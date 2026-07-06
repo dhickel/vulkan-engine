@@ -5,52 +5,16 @@
 //! deprecated compatibility helpers kept for the original smoke tests.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use engine_events::{
-    ColliderId as EventColliderId, ContactPhase as EventContactPhase, EngineEvent, EventBus,
-    EventStage, PhysicsBodyId as EventPhysicsBodyId, PhysicsEvent,
+    ContactPhase as EventContactPhase, EngineEvent, EventBus, EventStage, PhysicsEvent,
 };
 use rapier3d::na;
 use rapier3d::prelude::*;
 
-macro_rules! string_id {
-    ($name:ident) => {
-        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self::new(value)
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self::new(value)
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.fmt(f)
-            }
-        }
-    };
-}
-
-string_id!(PhysicsBodyId);
-string_id!(PhysicsColliderId);
+// Re-export unified ID types from the canonical engine_events crate.
+pub use engine_events::PhysicsBodyId;
+pub use engine_events::ColliderId as PhysicsColliderId;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BodyKind {
@@ -76,11 +40,15 @@ impl BodyDescriptor {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ColliderShape {
     Cuboid { half_extents: [f32; 3] },
     Sphere { radius: f32 },
     CapsuleY { half_height: f32, radius: f32 },
+    TriMeshStatic {
+        vertices: Vec<[f32; 3]>,
+        indices: Vec<[u32; 3]>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +95,11 @@ pub enum PhysicsError {
     NonPositiveDimension { field: &'static str },
     NonPositiveDeltaTime,
     ZeroDirection,
+    TrimeshNonFiniteVertex { index: usize },
+    TrimeshIndexOutOfBounds { index: usize, vertex_count: usize },
+    TrimeshEmpty,
+    TrimeshDegenerateTriangle { index: usize },
+    TrimeshOnDynamicBody,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -158,8 +131,8 @@ pub struct RayHit {
 impl RayHit {
     pub fn to_engine_event(&self) -> EngineEvent {
         EngineEvent::Physics(PhysicsEvent::QueryHit {
-            body: EventPhysicsBodyId::new(self.body.as_str()),
-            collider: EventColliderId::new(self.collider.as_str()),
+            body: self.body.clone(),
+            collider: self.collider.clone(),
         })
     }
 }
@@ -195,13 +168,13 @@ impl PhysicsContactRecord {
         match self.kind {
             PhysicsContactKind::Collision => EngineEvent::Physics(PhysicsEvent::Collision {
                 phase,
-                a: EventColliderId::new(self.a.as_str()),
-                b: EventColliderId::new(self.b.as_str()),
+                a: self.a.clone(),
+                b: self.b.clone(),
             }),
             PhysicsContactKind::Trigger => EngineEvent::Physics(PhysicsEvent::Trigger {
                 phase,
-                trigger: EventColliderId::new(self.a.as_str()),
-                other: EventColliderId::new(self.b.as_str()),
+                trigger: self.a.clone(),
+                other: self.b.clone(),
             }),
         }
     }
@@ -309,10 +282,19 @@ impl PhysicsWorld {
         if self.collider_handles.contains_key(&descriptor.id) {
             return Err(PhysicsError::DuplicateColliderId(descriptor.id));
         }
-        let body = *self
+        let body_handle = *self
             .body_handles
             .get(&descriptor.parent_body)
             .ok_or_else(|| PhysicsError::MissingBody(descriptor.parent_body.clone()))?;
+
+        // TriMeshStatic is only allowed on static (fixed) bodies.
+        if matches!(descriptor.shape, ColliderShape::TriMeshStatic { .. }) {
+            if let Some(body) = self.bodies.get(body_handle) {
+                if !body.is_fixed() {
+                    return Err(PhysicsError::TrimeshOnDynamicBody);
+                }
+            }
+        }
 
         let mut builder = shape_builder(descriptor.shape)?
             .sensor(descriptor.is_trigger)
@@ -322,7 +304,7 @@ impl PhysicsWorld {
         let id = descriptor.id;
         let handle = self
             .colliders
-            .insert_with_parent(builder.build(), body, &mut self.bodies);
+            .insert_with_parent(builder.build(), body_handle, &mut self.bodies);
         self.collider_handles.insert(id.clone(), handle);
         self.collider_ids.push((handle, id.clone()));
         self.query_pipeline.update(&self.colliders);
@@ -394,43 +376,6 @@ impl PhysicsWorld {
 
     pub fn last_contact_records(&self) -> &[PhysicsContactRecord] {
         &self.last_contacts
-    }
-
-    #[deprecated(note = "use create_body with BodyDescriptor instead")]
-    pub fn create_dynamic_body(&mut self, x: f32, y: f32, z: f32) -> RigidBodyHandle {
-        let body = RigidBodyBuilder::dynamic()
-            .translation(na::Vector3::new(x, y, z))
-            .build();
-        self.bodies.insert(body)
-    }
-
-    #[deprecated(note = "use create_body with BodyDescriptor instead")]
-    pub fn create_static_body(&mut self, x: f32, y: f32, z: f32) -> RigidBodyHandle {
-        let body = RigidBodyBuilder::fixed()
-            .translation(na::Vector3::new(x, y, z))
-            .build();
-        self.bodies.insert(body)
-    }
-
-    #[deprecated(note = "use create_collider with ColliderDescriptor instead")]
-    pub fn attach_cuboid(
-        &mut self,
-        body: RigidBodyHandle,
-        hx: f32,
-        hy: f32,
-        hz: f32,
-    ) -> ColliderHandle {
-        let collider = ColliderBuilder::cuboid(hx, hy, hz).build();
-        let handle = self
-            .colliders
-            .insert_with_parent(collider, body, &mut self.bodies);
-        self.query_pipeline.update(&self.colliders);
-        handle
-    }
-
-    #[deprecated(note = "use body_position_by_id with PhysicsBodyId instead")]
-    pub fn body_position(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
-        self.body_position_for_handle(handle)
     }
 
     fn body_position_for_handle(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
@@ -571,7 +516,43 @@ fn shape_builder(shape: ColliderShape) -> Result<ColliderBuilder, PhysicsError> 
             validate_positive("capsule.radius", radius)?;
             Ok(ColliderBuilder::capsule_y(half_height, radius))
         }
+        ColliderShape::TriMeshStatic { vertices, indices } => {
+            validate_trimesh(&vertices, &indices)?;
+            let points: Vec<na::Point3<f32>> = vertices
+                .into_iter()
+                .map(|v| na::Point3::new(v[0], v[1], v[2]))
+                .collect();
+            Ok(ColliderBuilder::trimesh(points, indices))
+        }
     }
+}
+
+fn validate_trimesh(
+    vertices: &[[f32; 3]],
+    indices: &[[u32; 3]],
+) -> Result<(), PhysicsError> {
+    if vertices.is_empty() || indices.is_empty() {
+        return Err(PhysicsError::TrimeshEmpty);
+    }
+    let vertex_count = vertices.len();
+    for (i, v) in vertices.iter().enumerate() {
+        if v.iter().any(|c| !c.is_finite()) {
+            return Err(PhysicsError::TrimeshNonFiniteVertex { index: i });
+        }
+    }
+    for (i, tri) in indices.iter().enumerate() {
+        let [a, b, c] = *tri;
+        if a >= vertex_count as u32 || b >= vertex_count as u32 || c >= vertex_count as u32 {
+            return Err(PhysicsError::TrimeshIndexOutOfBounds {
+                index: i,
+                vertex_count,
+            });
+        }
+        if a == b || b == c || a == c {
+            return Err(PhysicsError::TrimeshDegenerateTriangle { index: i });
+        }
+    }
+    Ok(())
 }
 
 fn validate_vec3(field: &'static str, value: [f32; 3]) -> Result<(), PhysicsError> {
@@ -857,8 +838,8 @@ mod tests {
             record.to_engine_event(),
             EngineEvent::Physics(PhysicsEvent::Collision {
                 phase: EventContactPhase::Enter,
-                a: EventColliderId::new("collider.a"),
-                b: EventColliderId::new("collider.b"),
+                a: PhysicsColliderId::new("collider.a"),
+                b: PhysicsColliderId::new("collider.b"),
             })
         );
     }
@@ -876,8 +857,8 @@ mod tests {
             record.to_engine_event(),
             EngineEvent::Physics(PhysicsEvent::Trigger {
                 phase: EventContactPhase::Stay,
-                trigger: EventColliderId::new("collider.sensor"),
-                other: EventColliderId::new("collider.player"),
+                trigger: PhysicsColliderId::new("collider.sensor"),
+                other: PhysicsColliderId::new("collider.player"),
             })
         );
     }
@@ -893,8 +874,8 @@ mod tests {
         assert_eq!(
             hit.to_engine_event(),
             EngineEvent::Physics(PhysicsEvent::QueryHit {
-                body: EventPhysicsBodyId::new("body.target"),
-                collider: EventColliderId::new("collider.target"),
+                body: PhysicsBodyId::new("body.target"),
+                collider: PhysicsColliderId::new("collider.target"),
             })
         );
         assert_eq!(hit.time_of_impact, 4.5);
@@ -928,5 +909,379 @@ mod tests {
         bus.emit(EventStage::PostUpdate, None, hit.to_engine_event());
         assert_eq!(bus.pending_len(), 1);
         assert_eq!(bus.dispatch_pending().dispatched, 1);
+    }
+
+    // --- TriMeshStatic tests ---
+
+    fn simple_triangle_mesh() -> ColliderShape {
+        ColliderShape::TriMeshStatic {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            indices: vec![[0, 1, 2], [1, 3, 2]],
+        }
+    }
+
+    #[test]
+    fn trimesh_static_body_accepted() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let result = world.create_collider(ColliderDescriptor::new(
+            "collider.floor",
+            "body.floor",
+            simple_triangle_mesh(),
+        ));
+        assert!(result.is_ok(), "static trimesh should be accepted");
+    }
+
+    #[test]
+    fn trimesh_dynamic_body_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.player",
+                BodyKind::Dynamic,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.player",
+                simple_triangle_mesh(),
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::TrimeshOnDynamicBody);
+    }
+
+    #[test]
+    fn trimesh_kinematic_body_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.kin",
+                BodyKind::Kinematic,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.kin",
+                simple_triangle_mesh(),
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::TrimeshOnDynamicBody);
+    }
+
+    #[test]
+    fn trimesh_non_finite_vertices_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![[0.0, 0.0, 0.0], [1.0, f32::NAN, 0.0]],
+                    indices: vec![[0, 1, 0]], // degenerate, but non-finite should fire first
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::TrimeshNonFiniteVertex { index: 1 });
+    }
+
+    #[test]
+    fn trimesh_infinity_vertices_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, f32::INFINITY, 0.0],
+                    ],
+                    indices: vec![[0, 1, 2]],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::TrimeshNonFiniteVertex { index: 2 });
+    }
+
+    #[test]
+    fn trimesh_out_of_bounds_indices_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    indices: vec![[0, 1, 5]],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PhysicsError::TrimeshIndexOutOfBounds {
+                index: 0,
+                vertex_count: 3
+            }
+        );
+    }
+
+    #[test]
+    fn trimesh_empty_mesh_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![],
+                    indices: vec![],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::TrimeshEmpty);
+
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad2",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    indices: vec![],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::TrimeshEmpty);
+    }
+
+    #[test]
+    fn trimesh_degenerate_triangle_all_same_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    indices: vec![[0, 0, 0]],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PhysicsError::TrimeshDegenerateTriangle { index: 0 }
+        );
+    }
+
+    #[test]
+    fn trimesh_degenerate_triangle_two_same_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    indices: vec![[0, 1, 0]],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PhysicsError::TrimeshDegenerateTriangle { index: 0 }
+        );
+    }
+
+    #[test]
+    fn trimesh_ray_query() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let collider = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.floor",
+                "body.floor",
+                simple_triangle_mesh(),
+            ))
+            .unwrap();
+
+        // Ray from above should hit the mesh
+        let hit = world
+            .cast_ray(RayQuery::new([0.5, 0.5, -5.0], [0.0, 0.0, 1.0], 10.0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.collider, collider);
+    }
+
+    #[test]
+    fn existing_shapes_still_work_with_trimesh_added() {
+        let mut world = PhysicsWorld::new();
+
+        // Cuboid
+        world
+            .create_body(BodyDescriptor::new(
+                "body.a",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        assert!(world
+            .create_collider(ColliderDescriptor::new(
+                "collider.a",
+                "body.a",
+                ColliderShape::Cuboid {
+                    half_extents: [1.0, 1.0, 1.0],
+                },
+            ))
+            .is_ok());
+
+        // Sphere
+        world
+            .create_body(BodyDescriptor::new(
+                "body.b",
+                BodyKind::Dynamic,
+                [0.0, 5.0, 0.0],
+            ))
+            .unwrap();
+        assert!(world
+            .create_collider(ColliderDescriptor::new(
+                "collider.b",
+                "body.b",
+                ColliderShape::Sphere { radius: 0.5 },
+            ))
+            .is_ok());
+
+        // CapsuleY
+        world
+            .create_body(BodyDescriptor::new(
+                "body.c",
+                BodyKind::Dynamic,
+                [2.0, 5.0, 0.0],
+            ))
+            .unwrap();
+        assert!(world
+            .create_collider(ColliderDescriptor::new(
+                "collider.c",
+                "body.c",
+                ColliderShape::CapsuleY {
+                    half_height: 1.0,
+                    radius: 0.5,
+                },
+            ))
+            .is_ok());
+    }
+
+    #[test]
+    fn trimesh_contact_with_dynamic_body() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(0.0, -10.0, 0.0);
+
+        // Static trimesh floor
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.floor",
+                "body.floor",
+                ColliderShape::TriMeshStatic {
+                    vertices: vec![
+                        [-5.0, 0.0, -5.0],
+                        [5.0, 0.0, -5.0],
+                        [-5.0, 0.0, 5.0],
+                        [5.0, 0.0, 5.0],
+                    ],
+                    indices: vec![[0, 1, 2], [1, 3, 2]],
+                },
+            ))
+            .unwrap();
+
+        // Dynamic sphere above the floor
+        world
+            .create_body(BodyDescriptor::new(
+                "body.ball",
+                BodyKind::Dynamic,
+                [0.0, 2.0, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.ball",
+                "body.ball",
+                ColliderShape::Sphere { radius: 0.5 },
+            ))
+            .unwrap();
+
+        world.step(1.0 / 60.0).unwrap();
+        // Ball should be above floor (contact has started)
+        let pos = world.body_position_by_id(&PhysicsBodyId::new("body.ball")).unwrap();
+        assert!(pos[1] < 2.0, "ball should fall toward floor");
     }
 }

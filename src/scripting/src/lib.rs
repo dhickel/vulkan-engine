@@ -91,18 +91,17 @@ impl ScriptEngine {
             emit_script_event(&event_context, name, None);
         });
         let event_context = Arc::clone(&context);
-        engine.register_fn("emit_event", move |name: &str, payload: &str| {
-            emit_script_event(&event_context, name, Some(payload.to_string()));
+        engine.register_fn("emit_event", move |name: &str, payload: rhai::Dynamic| {
+            emit_script_event(&event_context, name, Some(payload));
         });
 
         Self { engine, context }
     }
 
     /// Evaluate a Rhai script string.
-    pub fn eval(&self, script: &str) -> Result<rhai::Dynamic, String> {
+    pub fn eval(&self, script: &str) -> Result<rhai::Dynamic, ScriptError> {
         self.eval_for_script("legacy.eval", script)
             .map(|report| report.value)
-            .map_err(|error| error.to_string())
     }
 
     /// Evaluate a script with a pre-populated scope.
@@ -110,17 +109,15 @@ impl ScriptEngine {
         &self,
         script: &str,
         scope: &mut Scope<'_>,
-    ) -> Result<rhai::Dynamic, String> {
+    ) -> Result<rhai::Dynamic, ScriptError> {
         self.eval_with_scope_for_script("legacy.eval_with_scope", script, scope)
             .map(|report| report.value)
-            .map_err(|error| error.to_string())
     }
 
     /// Load and evaluate a script file.
-    pub fn eval_file(&self, path: impl AsRef<Path>) -> Result<rhai::Dynamic, String> {
+    pub fn eval_file(&self, path: impl AsRef<Path>) -> Result<rhai::Dynamic, ScriptError> {
         self.eval_file_for_script("legacy.eval_file", path)
             .map(|report| report.value)
-            .map_err(|error| error.to_string())
     }
 
     /// Evaluate a Rhai script string with durable script identity.
@@ -226,17 +223,62 @@ fn log_script_message(context: &Arc<Mutex<ScriptContext>>, level: log::Level, me
     log::log!(level, "{prefix} {message}");
 }
 
-fn emit_script_event(context: &Arc<Mutex<ScriptContext>>, name: &str, payload: Option<String>) {
+fn emit_script_event(
+    context: &Arc<Mutex<ScriptContext>>,
+    name: &str,
+    payload: Option<rhai::Dynamic>,
+) {
     let mut context = context.lock().expect("script context poisoned");
     let script = context
         .current_script
         .clone()
         .unwrap_or_else(|| ScriptId::new("unknown"));
+    let json_payload = payload.and_then(rhai_dynamic_to_json);
     context.events.push(ScriptingEvent::ScriptEmitted {
         script,
         name: name.to_string(),
-        payload,
+        payload: json_payload,
     });
+}
+
+/// Convert a `rhai::Dynamic` value to `serde_json::Value`.
+///
+/// Handles the common Rhai types: integers, floats, booleans, strings,
+/// arrays, and maps. Unrecognised types fall back to their string
+/// representation.
+fn rhai_dynamic_to_json(d: rhai::Dynamic) -> Option<serde_json::Value> {
+    if d.is::<i64>() {
+        d.as_int().ok().and_then(|n| {
+            serde_json::Number::from_f64(n as f64).map(serde_json::Value::Number)
+        })
+    } else if d.is::<f64>() {
+        d.as_float().ok().and_then(|n| {
+            serde_json::Number::from_f64(n).map(serde_json::Value::Number)
+        })
+    } else if d.is::<bool>() {
+        d.as_bool().ok().map(serde_json::Value::Bool)
+    } else if d.is::<String>() {
+        d.into_string().ok().map(serde_json::Value::String)
+    } else if d.is::<rhai::Array>() {
+        d.into_array().ok().map(|arr| {
+            serde_json::Value::Array(
+                arr.into_iter()
+                    .filter_map(rhai_dynamic_to_json)
+                    .collect(),
+            )
+        })
+    } else if d.is::<rhai::Map>() {
+        let map: rhai::Map = d.cast();
+        let obj: serde_json::Map<String, serde_json::Value> = map
+            .into_iter()
+            .filter_map(|(k, v)| {
+                rhai_dynamic_to_json(v).map(|val| (k.to_string(), val))
+            })
+            .collect();
+        Some(serde_json::Value::Object(obj))
+    } else {
+        Some(serde_json::Value::String(d.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -301,7 +343,7 @@ mod tests {
             vec![ScriptingEvent::ScriptEmitted {
                 script: ScriptId::new("scripts.door"),
                 name: "door.opened".to_string(),
-                payload: Some("east".to_string()),
+                payload: Some(serde_json::json!("east")),
             }]
         );
     }
@@ -387,7 +429,7 @@ mod tests {
             vec![ScriptingEvent::ScriptEmitted {
                 script: ScriptId::new("scripts.file"),
                 name: "loaded".to_string(),
-                payload: Some("file".to_string()),
+                payload: Some(serde_json::json!("file")),
             }]
         );
     }

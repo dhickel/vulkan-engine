@@ -283,7 +283,7 @@ fn poll_async_load(
         LoadStatus::Cancelled => {
             warn!("Async model load ticket was cancelled");
             Err(RendererError::InvalidState(
-                "async model load ticket cancelled before upload completed",
+                "async model load ticket cancelled before upload completed".to_string(),
             ))
         }
     }

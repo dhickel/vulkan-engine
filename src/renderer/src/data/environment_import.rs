@@ -609,8 +609,13 @@ mod tests {
         assert_eq!(faces.rgba32f.len(), 6 * 4 * 4); // 6 faces * 2*2 pixels * 4 floats
 
         // Check face 3 (+Y = face index 3), pixel (1, 0) => row=1, col=0
+        // Audit (2026-07-03, AGR-009): convert_strip_to_face_major outputs
+        // face-major, row-major order. For a 2×2 face, face 3 starts at
+        // 3 * (face_size² * 4) = 3 * 16 = 48. Pixel (row=1, col=0) within
+        // face 3 is at offset 48 + 1*(2*4) + 0 = 56. Verified correct.
+        // The old `0 * 4` term was dead arithmetic (always zero); removed.
         let face3_offset = 3 * (4 * 4); // 3 faces * 4 pixels * 4 floats
-        let pixel_offset = face3_offset + 1 * (2 * 4) + 0 * 4; // row=1, col=0 // FIXME getting warning here operation will always equal zero for the offet also why the pointless 0?
+        let pixel_offset = face3_offset + 1 * (2 * 4); // row=1 offset (1 * face_width * 4 floats) + col=0
         assert_eq!(faces.rgba32f[pixel_offset], 3.0); // face_idx
         assert_eq!(faces.rgba32f[pixel_offset + 1], 1.0); // row
         assert_eq!(faces.rgba32f[pixel_offset + 2], 0.0); // local_col

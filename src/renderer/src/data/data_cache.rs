@@ -165,15 +165,33 @@ pub struct DescriptorManager {
 }
 
 impl DescriptorManager {
-    pub fn alloc_image_desc(&mut self, device: &ash::Device) -> vk::DescriptorSet {
+    pub fn alloc_image_desc(
+        &mut self,
+        device: &ash::Device,
+    ) -> Result<vk::DescriptorSet, String> {
+        // TODO(alpha): Implement pool growth + retry on exhaustion instead of
+        // propagating the error. When the pool is exhausted, create a new larger
+        // pool, re-allocate, and replace the old pool. AGR-023 tracks full recovery.
         self.image_desc_allocator
             .allocate(device, &[self.image_desc_layout])
-            .expect("descriptor pool exhausted during image descriptor allocation")
+            .map_err(|e| format!("descriptor pool exhausted during image descriptor allocation: {e}"))
     }
 }
 
+// SAFETY: MeshCache is safe to send across threads because:
+// - All internal types (BTreeMap, Vec, NonNull<Mesh>) are Send.
+// - NonNull<Mesh> points to Vulkan device-local or host-visible memory owned
+//   exclusively by the cache; no aliasing occurs across threads.
+// - MeshCache is only accessed through Mutex<MeshCache> (VkDataCache field),
+//   which enforces mutual exclusion and prevents data races.
 unsafe impl Send for MeshCache {}
 
+// SAFETY: TextureCache is safe to send across threads because:
+// - All internal types (BTreeMap, Vec, NonNull<Texture>) are Send.
+// - NonNull<Texture> points to Vulkan device-local or host-visible memory owned
+//   exclusively by the cache; no aliasing occurs across threads.
+// - TextureCache is only accessed through Mutex<TextureCache> (VkDataCache field),
+//   which enforces mutual exclusion and prevents data races.
 unsafe impl Send for TextureCache {}
 
 pub struct VkDataCache {
@@ -206,7 +224,7 @@ impl VkDestroyable for VkCache {
 
 impl VkDataCache {
     pub fn destroy(&self, device: &Device, allocator: &Allocator) {
-        self.mesh_cache.lock().unwrap().destroy(device, allocator);
+        self.mesh_cache.lock().expect("mesh_cache lock poisoned during destroy").destroy(device, allocator);
         self.texture_cache
             .lock()
             .unwrap()
@@ -458,7 +476,7 @@ impl TextureCache {
     }
 
     fn supports_linear_mip_blit(&self, format: vk::Format) -> bool {
-        let mut cache = self.linear_blit_support.lock().unwrap();
+        let mut cache = self.linear_blit_support.lock().expect("linear_blit_support lock poisoned");
         if let Some(supported) = cache.get(&format) {
             return *supported;
         }
@@ -718,7 +736,7 @@ impl TextureCache {
         }
 
         for (image_alloc, _) in image_allocs.into_iter() {
-            let allocator = self.allocator.lock().unwrap();
+            let allocator = self.allocator.lock().expect("allocator lock poisoned");
             vk_util::destroy_image(&allocator, image_alloc);
         }
     }
@@ -788,7 +806,7 @@ impl TextureCache {
         &mut self,
         texture_ids: &[TextureHandle],
     ) -> Result<Option<u64>, String> {
-        let host_buffer = self.host_buffer.lock().unwrap();
+        let host_buffer = self.host_buffer.lock().expect("host_buffer lock poisoned");
         let max_upload_bytes = host_buffer.buffer.size;
 
         // A staging upload is already in flight; poll/finalize first, then submit again.
@@ -963,7 +981,7 @@ impl TextureCache {
             return 0;
         }
 
-        let host_buffer = self.host_buffer.lock().unwrap();
+        let host_buffer = self.host_buffer.lock().expect("host_buffer lock poisoned");
         let latch_count = host_buffer.countdown_latch.get_count();
 
         if latch_count != 0 {
@@ -1201,7 +1219,11 @@ impl TextureCache {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
 
-        let image_descriptor = self.desc_manager.alloc_image_desc(&self.device);
+        let image_descriptor = self.desc_manager.alloc_image_desc(&self.device)
+            .map_err(|e| {
+                error!("{}", e);
+                CacheError::DescriptorAllocation(e)
+            })?;
 
         writer.update_set(&self.device, image_descriptor);
 
@@ -1345,7 +1367,7 @@ impl TextureCache {
             if let Some(slot) = self.cached_textures.get_mut(slot_idx) {
                 let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
                 if let CachedTexture::Loaded(tex) = old_tex {
-                    let allocator = self.allocator.lock().unwrap();
+                    let allocator = self.allocator.lock().expect("allocator lock poisoned");
                     vk_util::destroy_image(&allocator, tex.alloc)
                 }
                 self.texture_generations[slot_idx] =

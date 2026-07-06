@@ -1,6 +1,6 @@
 # Sprint 04: Runtime Project Launcher And Application Dev Loop
 
-Status: ironing-out
+Status: closed
 
 ## Objective
 

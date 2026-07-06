@@ -321,36 +321,6 @@ pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
     vk::PipelineLayoutCreateInfo::default()
 }
 
-/// Query physical device for a memory type index matching the given filter and property flags.
-///
-/// ## Status
-/// Unimplemented stub. There are no active callers as of Sprint 12; when a path needs
-/// custom memory-type selection, implement this using `vkGetPhysicalDeviceMemoryProperties`.
-/// Returns `u32::MAX` as a sentinel "not found".
-///
-/// Intended usage (not implemented):
-/// ```ignore
-/// let mem_props = unsafe {
-///     instance.get_physical_device_memory_properties(physical_device)
-/// };
-/// for i in 0..mem_props.memory_type_count {
-///     if (type_filter & (1 << i)) != 0
-///         && (mem_props.memory_types[i as usize].property_flags & prop_flags) == prop_flags
-///     {
-///         return i;
-///     }
-/// }
-/// u32::MAX
-/// ```
-pub fn find_memory_type(
-    _physical_device: vk::PhysicalDevice,
-    _type_filter: u32,
-    _prop_flags: vk::MemoryPropertyFlags,
-) -> u32 {
-    log::warn!("find_memory_type is an unimplemented stub; returning u32::MAX sentinel");
-    u32::MAX
-}
-
 pub fn blit_copy_image_to_image(
     device: &ash::Device,
     cmd: vk::CommandBuffer,

@@ -13,8 +13,8 @@ pub enum RendererError {
     Asset(AssetError),
     Hook(HookError),
     CaptureConfig(FrameCaptureConfigError),
-    Unsupported(&'static str),
-    InvalidState(&'static str),
+    Unsupported(String),
+    InvalidState(String),
 }
 
 impl Display for RendererError {
@@ -32,7 +32,20 @@ impl Display for RendererError {
     }
 }
 
-impl Error for RendererError {}
+impl Error for RendererError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Init(err) => Some(err),
+            Self::Frame(err) => Some(err),
+            Self::Scene(err) => Some(err),
+            Self::Asset(err) => Some(err),
+            Self::Hook(err) => Some(err),
+            Self::CaptureConfig(err) => Some(err),
+            Self::Unsupported(_) => None,
+            Self::InvalidState(_) => None,
+        }
+    }
+}
 
 impl From<RendererInitError> for RendererError {
     fn from(value: RendererInitError) -> Self {
@@ -70,6 +83,18 @@ impl From<FrameCaptureConfigError> for RendererError {
     }
 }
 
+impl From<Box<dyn std::error::Error>> for RendererError {
+    fn from(error: Box<dyn std::error::Error>) -> Self {
+        RendererError::InvalidState(error.to_string())
+    }
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for RendererError {
+    fn from(error: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        RendererError::InvalidState(error.to_string())
+    }
+}
+
 #[derive(Debug)]
 pub enum RendererInitError {
     Vulkan(String),
@@ -89,7 +114,11 @@ impl Display for RendererInitError {
     }
 }
 
-impl Error for RendererInitError {}
+impl Error for RendererInitError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
 
 #[derive(Debug)]
 pub enum RendererFrameError {
@@ -110,7 +139,11 @@ impl Display for RendererFrameError {
     }
 }
 
-impl Error for RendererFrameError {}
+impl Error for RendererFrameError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
 
 #[derive(Debug)]
 pub enum SceneError {
@@ -173,7 +206,11 @@ impl Display for SceneError {
     }
 }
 
-impl Error for SceneError {}
+impl Error for SceneError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AssetError {
@@ -306,7 +343,11 @@ impl Display for AssetError {
     }
 }
 
-impl Error for AssetError {}
+impl Error for AssetError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
 
 impl From<crate::data::assimp_util::AssimpImportError> for AssetError {
     fn from(err: crate::data::assimp_util::AssimpImportError) -> Self {
@@ -352,7 +393,11 @@ impl Display for HookError {
     }
 }
 
-impl Error for HookError {}
+impl Error for HookError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
 
 pub(crate) fn map_init_err(err: impl Into<String>) -> RendererError {
     RendererInitError::Vulkan(err.into()).into()

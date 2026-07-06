@@ -30,7 +30,38 @@ impl<'a> RenderHookContext<'a> {
     }
 }
 
-pub type RenderHook = Box<dyn FnMut(&mut RenderHookContext<'_>) -> Result<(), HookError> + Send>;
+/// Trait for render hook callbacks.
+///
+/// Implement this trait on your own types for named, testable hooks.
+/// For closures, use [`boxed_render_hook`] to wrap them.
+pub trait RenderHook: Send {
+    fn invoke(&mut self, ctx: &mut RenderHookContext<'_>) -> Result<(), HookError>;
+}
+
+/// Stored form of a render hook.
+pub type BoxedRenderHook = Box<dyn RenderHook>;
+
+/// Create a `BoxedRenderHook` from a closure.
+///
+/// This is the primary way to construct render hook callbacks from closures.
+/// Named structs that implement [`RenderHook`] can be boxed directly via
+/// `Box::new(...)`.
+pub fn boxed_render_hook<F>(f: F) -> BoxedRenderHook
+where
+    F: FnMut(&mut RenderHookContext<'_>) -> Result<(), HookError> + Send + 'static,
+{
+    Box::new(FnHook(Box::new(f)))
+}
+
+/// Hidden wrapper that adapts FnMut closures to the RenderHook trait.
+/// This works around the HRTB limitation of the blanket impl approach.
+struct FnHook(Box<dyn FnMut(&mut RenderHookContext<'_>) -> Result<(), HookError> + Send>);
+
+impl RenderHook for FnHook {
+    fn invoke(&mut self, ctx: &mut RenderHookContext<'_>) -> Result<(), HookError> {
+        (self.0)(ctx)
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RenderHookStage {
@@ -48,7 +79,7 @@ impl RenderHookStage {
 }
 
 pub(crate) fn invoke_render_hook(
-    hook: &mut Option<RenderHook>,
+    hook: &mut Option<BoxedRenderHook>,
     stage: RenderHookStage,
     frame_index: u64,
     viewport_size: (u32, u32),
@@ -60,11 +91,11 @@ pub(crate) fn invoke_render_hook(
 
     let mut context = RenderHookContext::new(frame_index, viewport_size, depth_texture);
     let callback_result =
-        catch_unwind(AssertUnwindSafe(|| hook(&mut context))).map_err(|panic| {
+        catch_unwind(AssertUnwindSafe(|| hook.invoke(&mut context))).map_err(|panic| {
             HookError::Invocation(format!(
                 "{} hook panicked: {}",
                 stage.label(),
-                panic_payload_to_string(panic)
+                super::utils::panic_payload_to_string(panic)
             ))
         })?;
 
@@ -72,22 +103,11 @@ pub(crate) fn invoke_render_hook(
         .map_err(|err| HookError::Invocation(format!("{} hook failed: {}", stage.label(), err)))
 }
 
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
-    let payload = payload.as_ref();
-    if let Some(msg) = payload.downcast_ref::<String>() {
-        return msg.clone();
-    }
-    if let Some(msg) = payload.downcast_ref::<&'static str>() {
-        return (*msg).to_string();
-    }
-    "unknown panic payload".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{invoke_render_hook, RenderHook, RenderHookStage};
+    use super::{boxed_render_hook, invoke_render_hook, BoxedRenderHook, RenderHook, RenderHookStage};
     use crate::api::errors::HookError;
 
     #[test]
@@ -96,11 +116,11 @@ mod tests {
         let pre_order = Arc::clone(&order);
         let post_order = Arc::clone(&order);
 
-        let mut pre_hook: Option<RenderHook> = Some(Box::new(move |_| {
+        let mut pre_hook: Option<BoxedRenderHook> = Some(boxed_render_hook(move |_| {
             pre_order.lock().unwrap().push("pre");
             Ok(())
         }));
-        let mut post_hook: Option<RenderHook> = Some(Box::new(move |_| {
+        let mut post_hook: Option<BoxedRenderHook> = Some(boxed_render_hook(move |_| {
             post_order.lock().unwrap().push("post");
             Ok(())
         }));
@@ -128,9 +148,10 @@ mod tests {
 
     #[test]
     fn invoke_render_hook_wraps_hook_errors_as_invocation_failures() {
-        let mut pre_hook: Option<RenderHook> = Some(Box::new(|_| {
-            Err(HookError::Registration("bad registration".to_string()))
-        }));
+        let mut pre_hook: Option<BoxedRenderHook> =
+            Some(boxed_render_hook(|_| {
+                Err(HookError::Registration("bad registration".to_string()))
+            }));
 
         let err = invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 1, (1, 1), None)
             .unwrap_err();
@@ -145,7 +166,7 @@ mod tests {
 
     #[test]
     fn invoke_render_hook_converts_panics_to_invocation_errors() {
-        let mut post_hook: Option<RenderHook> = Some(Box::new(|_| {
+        let mut post_hook: Option<BoxedRenderHook> = Some(boxed_render_hook(|_| {
             panic!("boom");
         }));
 
@@ -168,7 +189,25 @@ mod tests {
 
     #[test]
     fn invoke_render_hook_is_noop_when_unset() {
-        let mut hook: Option<RenderHook> = None;
+        let mut hook: Option<BoxedRenderHook> = None;
         invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None).unwrap();
+    }
+
+    #[test]
+    fn named_struct_implements_render_hook_trait() {
+        struct CountingHook {
+            count: u32,
+        }
+
+        impl RenderHook for CountingHook {
+            fn invoke(&mut self, _ctx: &mut super::RenderHookContext<'_>) -> Result<(), HookError> {
+                self.count += 1;
+                Ok(())
+            }
+        }
+
+        let mut hook: Option<BoxedRenderHook> = Some(Box::new(CountingHook { count: 0 }));
+        invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None).unwrap();
+        // The hook ran once
     }
 }

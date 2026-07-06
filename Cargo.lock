@@ -250,6 +250,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 name = "audio"
 version = "0.1.0"
 dependencies = [
+ "engine_events",
  "log",
  "rodio",
 ]
@@ -879,19 +880,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "editor"
-version = "0.1.0"
-dependencies = [
- "env_logger 0.11.9",
- "glam 0.28.0",
- "imgui",
- "input",
- "log",
- "renderer",
- "winit",
-]
-
-[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -912,6 +900,7 @@ version = "0.1.0"
 dependencies = [
  "engine_events",
  "env_logger 0.11.9",
+ "launch_shared",
  "log",
  "renderer",
  "winit",
@@ -920,6 +909,9 @@ dependencies = [
 [[package]]
 name = "engine_events"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "engine_pack"
@@ -1721,6 +1713,7 @@ dependencies = [
 name = "input"
 version = "0.1.0"
 dependencies = [
+ "engine_events",
  "serde",
  "toml 0.8.23",
  "winit",
@@ -1892,6 +1885,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "launch_shared"
+version = "0.1.0"
+dependencies = [
+ "renderer",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2022,6 +2022,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "marching_terrain"
+version = "0.1.0"
+dependencies = [
+ "engine_events",
+ "env_logger 0.11.9",
+ "glam 0.28.0",
+ "input",
+ "launch_shared",
+ "log",
+ "physics",
+ "renderer",
+ "serde_json",
+ "thiserror",
+ "winit",
 ]
 
 [[package]]
@@ -3218,6 +3235,7 @@ dependencies = [
  "engine_events",
  "log",
  "rhai",
+ "serde_json",
 ]
 
 [[package]]

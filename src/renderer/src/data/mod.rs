@@ -3,6 +3,7 @@
 //! CPU-side asset, scene, and cache systems that feed render submissions and Vulkan upload paths.
 
 pub mod asset_manifest;
+pub(crate) mod thread_pool;
 pub mod asset_registry;
 pub mod assimp_util;
 pub mod camera;

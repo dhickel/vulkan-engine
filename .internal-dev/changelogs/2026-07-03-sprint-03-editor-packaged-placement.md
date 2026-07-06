@@ -41,3 +41,10 @@ Sprint 03 hardened editor package-backed placement from selection through persis
 
 - Sprint 04 should define the runtime project launcher and application development loop so package/project scenes can run outside the editor.
 - Future editor sprints should add richer placement ergonomics, thumbnails/previews, and eventually collision/material/audio authoring once those alpha contracts exist.
+
+## Amendment (2026-07-03 — Gate Review Remediation, AGR-037)
+
+The following files were identified by the gate review as within sprint 03 scope but not listed in the original changelog Files section:
+
+- `apps/editor/src/panels.rs` — editor UI panel management
+- `apps/editor/src/launch.rs` — editor CLI argument parsing

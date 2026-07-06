@@ -153,6 +153,10 @@ impl SceneWorld {
         }
     }
 
+    pub(crate) fn skybox_env_id(&self) -> EnvironmentHandle {
+        self.skybox_env_id
+    }
+
     pub(crate) fn set_skybox_env_id(&mut self, env_id: EnvironmentHandle) {
         self.skybox_env_id = env_id;
     }

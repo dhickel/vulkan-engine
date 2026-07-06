@@ -13,15 +13,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Stable authored identity for an audio clip.
+///
+/// Wraps the canonical `engine_events::AudioClipId` with validation that
+/// ensures the ID is non-empty and contains only allowed characters.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct AudioClipId(String);
+pub struct AudioClipId(engine_events::AudioClipId);
 
 impl AudioClipId {
     /// Create a durable clip ID such as `dogfood.audio.pickup`.
     pub fn new(id: impl Into<String>) -> Result<Self, AudioError> {
         let id = id.into();
         if is_valid_clip_id(&id) {
-            Ok(Self(id))
+            Ok(Self(engine_events::AudioClipId::new(id)))
         } else {
             Err(AudioError::InvalidClipId { id })
         }
@@ -29,13 +32,19 @@ impl AudioClipId {
 
     /// Borrow the durable ID as a string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for AudioClipId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        self.0.fmt(f)
+    }
+}
+
+impl From<AudioClipId> for engine_events::AudioClipId {
+    fn from(id: AudioClipId) -> Self {
+        id.0
     }
 }
 
@@ -204,6 +213,7 @@ impl Default for PlaybackOptions {
 pub struct AudioEngine {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
+    master_volume: f32,
 }
 
 impl AudioEngine {
@@ -216,6 +226,7 @@ impl AudioEngine {
         Ok(Self {
             _stream: stream,
             stream_handle,
+            master_volume: 1.0,
         })
     }
 
@@ -240,9 +251,14 @@ impl AudioEngine {
         Ok(PlaybackHandle { sink })
     }
 
-    /// Current facade-level master volume placeholder.
+    /// Current master volume, clamped to `0.0..=1.0`.
     pub fn master_volume(&self) -> f32 {
-        1.0
+        self.master_volume
+    }
+
+    /// Set the master volume, clamped to `0.0..=1.0`.
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.master_volume = clamp_volume(volume);
     }
 }
 
@@ -373,6 +389,20 @@ mod tests {
         assert_eq!(PlaybackOptions::new(0.25).volume(), 0.25);
         assert_eq!(PlaybackOptions::new(3.0).volume(), 1.0);
         assert_eq!(PlaybackOptions::new(f32::NAN).volume(), 1.0);
+    }
+
+    #[test]
+    fn master_volume_setter_getter_round_trip() {
+        let mut engine = AudioEngine::new().unwrap();
+        assert_eq!(engine.master_volume(), 1.0);
+        engine.set_master_volume(0.5);
+        assert_eq!(engine.master_volume(), 0.5);
+        engine.set_master_volume(-1.0);
+        assert_eq!(engine.master_volume(), 0.0);
+        engine.set_master_volume(3.0);
+        assert_eq!(engine.master_volume(), 1.0);
+        engine.set_master_volume(f32::NAN);
+        assert_eq!(engine.master_volume(), 1.0);
     }
 
     #[test]

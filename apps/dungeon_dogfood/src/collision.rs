@@ -258,7 +258,9 @@ pub fn is_penetrating_wall(pos: Vec3, radius: f32, wall: &WallCollider) -> bool 
     let capsule_min = pos.y - PLAYER_EYE_HEIGHT;
     let capsule_max = capsule_min + 1.8;
 
-    if capsule_max < wall.min.y || capsule_min > wall.max.y {
+    if capsule_max <= wall.min.y + COLLISION_EPSILON
+        || capsule_min >= wall.max.y - COLLISION_EPSILON
+    {
         return false;
     }
 
@@ -330,10 +332,14 @@ mod tests {
     use super::*;
 
     fn parsed_level(width: usize, height: usize, tiles: Vec<Tile>) -> ParsedLevel {
+        parsed_level_layers(width, height, vec![tiles])
+    }
+
+    fn parsed_level_layers(width: usize, height: usize, layers: Vec<Vec<Tile>>) -> ParsedLevel {
         ParsedLevel {
             width,
             height,
-            layers: vec![tiles],
+            layers,
             spawn: crate::layout::TileCoord {
                 layer: 0,
                 x: 0,
@@ -444,5 +450,23 @@ mod tests {
                 wall.tile
             );
         }
+    }
+
+    #[test]
+    fn second_floor_player_does_not_collide_with_lower_wall_touching_base_height() {
+        let level = parsed_level_layers(1, 1, vec![vec![Tile::Wall], vec![Tile::Floor]]);
+        let world = CollisionWorld::from_level(&level);
+        let player_pos = Vec3::new(0.5, WALL_HEIGHT + PLAYER_EYE_HEIGHT, -0.5);
+
+        let lower_wall = world
+            .walls
+            .iter()
+            .find(|wall| (wall.min.y - 0.0).abs() <= COLLISION_EPSILON)
+            .expect("lower wall collider should exist");
+
+        assert!(
+            !is_penetrating_wall(player_pos, PLAYER_RADIUS, lower_wall),
+            "lower floor wall top should not collide with a second-floor player"
+        );
     }
 }

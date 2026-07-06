@@ -42,3 +42,13 @@ Sprint 02 added a Rust `engine_pack` tooling path for alpha project/package/scen
 - Sprint 03: harden packaged-asset placement in the editor with save/reload and headless capture proof.
 - Sprint 04: define the runtime project launcher and application development loop.
 - Sprint 01: resolve its independent changelog timing and closeout gate.
+
+## Amendment (2026-07-03 — Gate Review Remediation, AGR-030)
+
+The `new-app` subcommand in `engine_pack` (with `--id` and `--name` flags) was pre-built during Sprint 02 as part of the packaging tool infrastructure, alongside `new-project` and `new-package`. This was not recorded in the original changelog. The feature-level changelog entry was deferred to Sprint 08. Test coverage exists in `tools/engine_pack/tests/cli_validation.rs`.
+
+## Amendment (2026-07-03 — Gate Review Remediation, AGR-037)
+
+The following files were identified by the gate review as within sprint 02 scope but not listed in the original changelog Files section:
+
+- `src/renderer/src/data/asset_registry.rs` — shared asset validation logic used by engine_pack

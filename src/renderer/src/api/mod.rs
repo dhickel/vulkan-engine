@@ -1,11 +1,13 @@
 mod assets;
 pub mod config;
 mod errors;
+pub mod event_logging;
 mod hooks;
 mod loading;
 pub mod prelude;
 mod renderer;
 pub(crate) mod scene;
+mod utils;
 
 #[cfg(feature = "advanced-interop")]
 pub mod advanced;
@@ -47,7 +49,7 @@ pub use engine_events::{
 pub use errors::{
     AssetError, HookError, RendererError, RendererFrameError, RendererInitError, SceneError,
 };
-pub use hooks::{RenderHook, RenderHookContext};
+pub use hooks::{boxed_render_hook, BoxedRenderHook, RenderHook, RenderHookContext};
 pub use input::{
     editor_ui_capture_layer, priority_bands, ActionBinding, ActionId, ActionMap, ActionMapLayer,
     BindingModifiers, BindingTrigger, CaptureLayer, FrameInputSnapshot, InputChord, InputConsume,

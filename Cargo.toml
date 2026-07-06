@@ -1,4 +1,4 @@
-workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "apps/dungeon_dogfood", "apps/editor", "tools/engine_pack"] }
+workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "src/launch_shared", "apps/dungeon_dogfood", "apps/marching_terrain", "tools/engine_pack"] }
 
 [package]
 name = "engine"
@@ -12,6 +12,7 @@ env_logger = "0.11"
 log = "0.4"
 renderer = { path = "src/renderer" }
 engine_events = { path = "src/events" }
+launch_shared = { path = "src/launch_shared" }
 winit = "0.29"
 
 [patch.crates-io]

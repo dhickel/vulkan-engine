@@ -1,6 +1,6 @@
 # Sprint 03: Editor Packaged Asset Placement Hardening
 
-Status: planned
+Status: closed
 
 ## Objective
 

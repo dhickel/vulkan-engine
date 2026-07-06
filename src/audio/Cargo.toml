@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 rodio = "0.19"
 log = "0.4"
+engine_events = { path = "../events" }
