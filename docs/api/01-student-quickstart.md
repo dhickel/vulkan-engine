@@ -4,11 +4,12 @@
 This guide is for students, hobbyists, and indie developers who are comfortable with Rust but new to engine and rendering workflows. The goal is to get from clone to first rendered frame, then to first model load, in under 30 minutes.
 
 ## 2. Where This Fits in Engine Flow
-Renderer-facade quickstart path:
+
+> **renderer compatibility path** (good for demos, examples, and smoke testing):
 choose example binary -> create `EventLoop` and window -> `Renderer::new(...)` -> `take_startup_scene()` (or build your own `Scene`) -> per-event `update_input(...)` -> per-frame `render_scene(...)` or explicit frame API.
 
-App-owned quickstart path:
-custom app crate -> root `engine` facade helpers -> `Renderer::route_platform_input(...)` -> app-owned input/events/camera/frame update -> caller-provided `CameraView` render API.
+> **current app-owned path** (recommended for custom apps):
+custom app crate -> root `engine` facade helpers -> `Renderer::route_platform_input(...)` -> app-owned input/events/camera/frame update -> caller-provided `CameraView` render API. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 Project quickstart path:
 author/validate project package data -> run the root launcher with `cargo run -- --project <path>` -> use `--headless --capture_target draw` for validation captures.
@@ -22,9 +23,10 @@ author/validate project package data -> run the root launcher with `cargo run --
   - App-owned loops can own input dispatch, lifecycle events, frame clock, and camera state.
   - `Scene` owns runtime graph content to draw.
   - `AssetManager` loads models/textures/environments.
-- Two frame styles:
+- Two frame styles (renderer compatibility path):
   - one-call: `render_scene(...)`
   - explicit: `begin_frame(...)` -> `render_scene_in_frame(...)` -> `end_frame(...)`
+- App-owned render path: `render_scene_with_view(...)` or `render_scene_headless_with_view(...)` with a caller-provided `CameraView`
 - Frame outcomes are explicit:
   - `FrameRenderOutcome::Rendered`
   - `FrameRenderOutcome::SkippedResizePending`
@@ -62,7 +64,7 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -- \
 cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr
 ```
 
-Snippet Type: Real
+Snippet Type: Real (renderer compatibility path)
 ```rust
 // Minimal explicit-frame loop shape (from src/renderer/examples/api_test.rs)
 let mut renderer = Renderer::new(config.clone(), &window)?;
@@ -93,13 +95,13 @@ Custom app structure idea:
     src/game_state.rs  // gameplay/editor state
     src/scene_setup.rs // initial scene + model loads
 
-Renderer-owned example frame tick:
+Renderer compatibility path frame tick:
   1) ingest OS events
   2) renderer.update_input(...)
   3) mutate game/scene state
   4) render exactly one frame
 
-App-owned frame tick:
+Current app-owned frame tick (recommended for custom apps):
   1) renderer.route_platform_input(...)
   2) queue uncaptured input into app InputSystem
   3) dispatch app input and emit app lifecycle/events

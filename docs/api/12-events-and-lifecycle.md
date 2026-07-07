@@ -8,11 +8,11 @@ Use events for logging, lightweight telemetry, validation recorders, editor tool
 
 ## 2. Where This Fits in Engine Flow
 
-Renderer path:
+> **renderer compatibility path** (demos, examples, smoke testing):
 `winit` event loop -> `Renderer::update_input(...)` -> `Renderer::render_scene(...)` or explicit frame API -> input dispatch -> input events -> frame lifecycle events -> render.
 
-App-owned facade path (recommended for custom apps that own gameplay/input/camera state):
-`winit` event loop -> `engine::input::route_platform_input_to_app(...)` -> `engine::frame::begin_app_frame(...)` -> app update -> renderer `render_scene_with_view(...)` -> `engine::frame::end_app_frame(...)`.
+> **current app-owned path** (recommended for custom apps that own gameplay/input/camera state):
+`winit` event loop -> `engine::input::route_platform_input_to_app(...)` -> `engine::frame::begin_app_frame(...)` -> app update -> renderer `render_scene_with_view(...)` -> `engine::frame::end_app_frame(...)`. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 Root runtime path:
 launcher startup -> project load -> package load -> scene load -> headless/windowed run -> shutdown.
@@ -53,10 +53,12 @@ Typed but deferred until later system sprints:
 
 ## 4. Code Walkthrough
 
-Snippet Type: Real
+Snippet Type: Real (renderer compatibility path)
 ```rust
 use renderer::{ActionPhase, EngineEvent, EventEnvelope, EventRecorder, LifecycleEvent, Renderer};
 
+// Compatibility: subscribes to renderer-owned EventBus via renderer.events_mut().
+// For app-owned paths, use engine::events::runtime_event_bus() and subscribe on the caller-owned bus.
 fn install_event_logging(renderer: &mut Renderer) {
     renderer.set_event_recorder(Some(EventRecorder::bounded(128)));
     renderer.events_mut().subscribe(|event: &EventEnvelope| {

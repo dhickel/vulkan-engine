@@ -4,18 +4,19 @@
 This chapter is for students, hobbyists, and indie developers using the facade renderer API. It explains how to initialize `Renderer`, drive per-frame rendering, and handle frame outcomes safely.
 
 ## 2. Where This Fits in Engine Flow
-Facade lifecycle path:
+
+> **renderer compatibility path** (good for demos, examples, and smoke testing):
 `Renderer::new(...)` -> `take_startup_scene()` -> event loop `update_input(...)` -> `render_scene(...)` or explicit `begin_frame(...)` -> `render_scene_in_frame(...)` -> `end_frame(...)`.
 
-App-owned view path:
-`Renderer::new(...)` -> event loop `route_platform_input(...)` -> app update/camera -> `render_scene_with_view(...)`.
+> **current app-owned path** (recommended for custom apps):
+`Renderer::new(...)` -> event loop `route_platform_input(...)` -> app update/camera -> `render_scene_with_view(...)`. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ## 3. Key Concepts
 - `Renderer::new(config, window)` is the canonical initialization entrypoint.
 - Data-driven projects run through the root launcher: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml`.
 - Renderer examples remain facade lifecycle diagnostics: `cargo run -p renderer --example api_test`.
 - Custom Rust apps run through their app crate: `cargo run -p <app>`.
-- Two frame APIs exist:
+- Two frame APIs exist (renderer compatibility path):
   - single-call path: `render_scene(...)`
   - explicit frame path: `begin_frame(...)`, `render_scene_in_frame(...)`, `end_frame(...)`
 - App-owned camera/render paths can use `render_scene_with_view(...)` or
@@ -64,7 +65,7 @@ match outcome {
 }
 ```
 
-Snippet Type: Real
+Snippet Type: Real (renderer compatibility path)
 ```rust
 // Single-call API (src/renderer/src/api/renderer.rs)
 let outcome = renderer.render_scene(&window, &mut scene)?;

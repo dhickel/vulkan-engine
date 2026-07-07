@@ -21,7 +21,9 @@ Defined at [`renderer.rs:80`](../src/renderer/src/api/renderer.rs:80). Initializ
 
 ## Frame Loop: Two APIs
 
-### Convenience: `render_scene()`
+### Convenience: `render_scene()` — renderer compatibility path
+
+> **Compatibility note:** `render_scene` is the **renderer compatibility path** convenience method. For custom apps, prefer `render_scene_with_view` with a caller-provided `CameraView`. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ```rust
 pub fn render_scene(&mut self, window: &Window, scene: &mut Scene)
@@ -69,7 +71,9 @@ pub fn resize_requested(&self) -> bool
 
 Defined at [`renderer.rs:124`](../src/renderer/src/api/renderer.rs:124). Rebuilds the swapchain. Fails if an explicit frame is open. `resize_requested()` polls whether the Vulkan runtime has flagged a pending resize (from `VK_ERROR_OUT_OF_DATE_KHR`).
 
-## Input Integration
+## Input Integration — renderer compatibility path
+
+> **Compatibility note:** These methods use renderer-owned `InputSystem` and camera state. For custom apps, prefer the **current app-owned path**: `route_platform_input_to_app` for platform routing, app-owned `InputSystem` with `InputActionEventEmitter`, and app-owned `FPSController` for camera. See [15-app-owned-loop.md](15-app-owned-loop.md) and [06-input-polling-and-listeners.md](06-input-polling-and-listeners.md).
 
 ```rust
 pub fn update_input(&mut self, window: &Window, event: &Event<()>) -> Result<(), RendererError>
@@ -90,7 +94,9 @@ pub fn set_post_render_hook(&mut self, hook: Option<RenderHook>)
 
 Defined at [`renderer.rs:237-240`](../src/renderer/src/api/renderer.rs:237). Pre-hook fires before rendergraph execution; post-hook fires after. `RenderHook` is `Box<dyn FnMut(&mut RenderHookContext) -> Result<(), HookError> + Send>`. See [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md).
 
-## Camera Access
+## Camera Access — renderer compatibility path
+
+> **Compatibility note:** These methods read/write the renderer-owned camera. Still used by capture tests and marching_terrain compatibility path. For custom apps, manage camera state app-side and pass a `CameraView` via `render_scene_with_view`. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ```rust
 pub fn camera_position(&self) -> Vec3

@@ -60,7 +60,7 @@ Use existing `AudioEvent` variants unless a future plan proves the vocabulary is
 EngineEvent::Audio(AudioEvent::ClipStarted { clip })
 ```
 
-The dogfood bridge emits through `renderer.events_mut()` because dogfood already owns the renderer facade. Do not make `engine_events` aware of `rodio`, `AudioEngine`, `PlaybackHandle`, or dogfood content types.
+> **Compatibility note:** The dogfood bridge emits through `renderer.events_mut()` because dogfood already owns the renderer facade. This uses the **renderer compatibility path** `EventBus`. For app-owned paths, prefer emitting into a caller-owned `EventBus` via `engine::events::runtime_event_bus()`. Do not make `engine_events` aware of `rodio`, `AudioEngine`, `PlaybackHandle`, or dogfood content types.
 
 ## 7. Validation Commands
 

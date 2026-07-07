@@ -41,12 +41,12 @@ app-owned runtime path
 
 Renderer facade:
 
-- `Renderer::events()` exposes read-only bus inspection.
-- `Renderer::events_mut()` allows subscription/unsubscription.
-- `Renderer::set_event_recorder(...)` installs or clears an optional recorder.
-- Legacy frame APIs `render_scene`, `render_scene_headless`, `begin_frame`, and `end_frame` emit renderer-owned `FrameStarted`/`FrameEnded`.
-- Render-only/view APIs used by the new app-owned path do not emit app lifecycle events.
-- `prepare_frame` and `prepare_frame_headless` dispatch input, emit action events from the refreshed snapshot, and drain `EventStage::Input`.
+- `Renderer::events()` — **renderer compatibility path**: exposes read-only bus inspection on the renderer-owned `EventBus`.
+- `Renderer::events_mut()` — **renderer compatibility path**: allows subscription/unsubscription on the renderer-owned `EventBus`. For app-owned paths, use `engine::events::runtime_event_bus()` and subscribe on the caller-owned bus.
+- `Renderer::set_event_recorder(...)` — **renderer compatibility path**: installs or clears an optional recorder on the renderer-owned bus.
+- Legacy frame APIs `render_scene`, `render_scene_headless`, `begin_frame`, and `end_frame` emit renderer-owned `FrameStarted`/`FrameEnded` (renderer compatibility path).
+- Render-only/view APIs used by the new **current app-owned path** do not emit app lifecycle events.
+- `prepare_frame` and `prepare_frame_headless` dispatch input, emit action events from the refreshed snapshot, and drain `EventStage::Input` (internal renderer behavior, used by both paths).
 
 Root runtime:
 
@@ -59,12 +59,12 @@ Root runtime:
 
 Apps:
 
-- App-owned loops should use one caller-owned `EventBus` for lifecycle, input, audio, physics, scripting, and diagnostics.
+- App-owned loops should use one caller-owned `EventBus` for lifecycle, input, audio, physics, scripting, and diagnostics. This is the **current app-owned path**.
 - `begin_app_frame` ticks `FrameClock`, dispatches app input, emits snapshot-derived action events, drains input, and emits/drains `FrameStarted` in that order.
 - `end_app_frame` emits/drains `FrameEnded` for the frame index returned by `begin_app_frame`.
 - `RuntimeEventDispatcher::frame_started`, `drain_input`, and `frame_ended` remain the lower-level lifecycle helper path.
 - `apps/dungeon_dogfood/src/events.rs` installs an app-side recorder/logger over a dogfood-owned
-  bus; dogfood audio, input, and frame lifecycle events no longer require `Renderer::events_mut()`.
+  bus; dogfood audio, input, and frame lifecycle events no longer require `Renderer::events_mut()` (they use the **current app-owned path**).
 - These modules are examples of public facade consumption, not product UI event browsers.
 
 ## 5. Ordering Rules

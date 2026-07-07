@@ -7,6 +7,8 @@ This chapter is for students, hobbyists, and indie developers using the facade A
 Hook flow in the current facade path:
 `Renderer::set_pre_render_hook(...)` / `Renderer::set_post_render_hook(...)` -> `Renderer::render_scene(...)` (or explicit frame API) -> `Renderer::render_scene_internal(...)` -> `VkRender::render_with_hooks(...)` -> `VkRenderCore::render_with_hooks(...)`.
 
+> **App-owned path note:** `render_scene_with_view()` triggers the same pre/post render hooks. The hook flow is identical regardless of whether the renderer or the app owns the camera view — both paths converge at `render_scene_internal()`.
+
 ## 3. Key Concepts
 - Public, safe extension surface:
   - `Renderer::set_pre_render_hook(Option<RenderHook>)`

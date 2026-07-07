@@ -55,6 +55,8 @@ scene.merge_fragment(None, fragment)?;
 
 ## 4. The Render Loop
 
+> **Compatibility note:** This section describes the **renderer compatibility path** — `update_input`, `install_default_fps_input`, and `render_scene` use renderer-owned input/camera/frame state. For custom apps, prefer the **current app-owned path**: use `route_platform_input_to_app` for input, app-owned `InputSystem` + `FPSController` for camera, and `render_scene_with_view` with a caller-provided `CameraView`. See [15-app-owned-loop.md](15-app-owned-loop.md) for the full app-owned loop guide.
+
 Feed window events to the renderer, then render each frame:
 
 ```rust
@@ -98,14 +100,11 @@ Key points:
 
 See [`src/renderer/examples/demo_pbr.rs`](../src/renderer/examples/demo_pbr.rs) for the complete PBR demo. See [`src/renderer/examples/demo_model_load.rs`](../src/renderer/examples/demo_model_load.rs) for a model-loading example that builds its own scene.
 
-The renderer examples use `renderer::prelude` for the alpha beginner facade.
-Root-level compatibility exports still exist, but new quickstart-style code
-should prefer the prelude unless a chapter explicitly labels an API as
-compatibility or advanced.
+The renderer examples use `renderer::prelude` for the alpha beginner facade and follow the **renderer compatibility path**. Root-level re-exports for app-owned helpers (`route_platform_input_to_app`, `camera_view_for_size`, `render_scene_with_view`) are available through the `engine` facade for custom apps. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ## 6. Debug UI
 
-Press **F1** to toggle the debug UI overlay (performance graphs, timing). Press **F2** to toggle the in-engine console. These are registered by `update_input()` — if you bypass it, debug toggles won't work.
+Press **F1** to toggle the debug UI overlay (performance graphs, timing). Press **F2** to toggle the in-engine console. On the renderer compatibility path these are registered by `update_input()` — if you bypass it, debug toggles won't work. On the **current app-owned path**, `route_platform_input` handles the same debug toggles (F1/F2) through the renderer's platform side effects, so app-owned input routing does not lose debug UI support.
 
 ## See Also
 

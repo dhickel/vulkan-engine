@@ -14,7 +14,7 @@ The engine includes an imgui-based debug UI with built-in panels for performance
 | Console | F2 | In-engine console window |
 | Debug overlay | (API only) | Performance overlay (FPS counter, frame time) |
 
-These toggles are handled by `Renderer::update_input()` — if you bypass it for custom input handling, they won't work.
+These toggles are handled by `Renderer::update_input()` — if you bypass it for custom input handling, they won't work. However, on the **app-owned path**, `route_platform_input_to_app` also processes the same F1/F2 debug toggles through the renderer's platform side effects, so app-owned input routing does not lose debug UI support.
 
 ## Global Visibility Control
 

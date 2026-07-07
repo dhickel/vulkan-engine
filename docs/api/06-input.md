@@ -36,9 +36,11 @@ if snapshot.key_down(KeyCode::KeyW) { ... }
 
 Defined at [`lib.rs`](../src/input/src/lib.rs).
 
-### Integration with Renderer
+### Integration with Renderer — renderer compatibility path
 
-The `Renderer` owns an `InputSystem` internally. Use `renderer.update_input()` to auto-feed winit events. Access the system directly via `renderer.input()`/`renderer.input_mut()`.
+> **Compatibility note:** The `Renderer` owns an `InputSystem` internally for the **renderer compatibility path**. Use `renderer.update_input()` to auto-feed winit events and access the system via `renderer.input()`/`renderer.input_mut()`.
+>
+> For custom apps, prefer the **current app-owned path**: create your own `InputSystem`, route platform events with `engine::input::route_platform_input_to_app`, queue uncaptured input with `engine::input::queue_routed_input_event`, and emit action events with `InputActionEventEmitter`. See [06-input-polling-and-listeners.md](06-input-polling-and-listeners.md) and [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ## Layers & Priority
 

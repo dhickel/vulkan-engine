@@ -104,6 +104,8 @@ Renderer examples remain useful diagnostics and API references. Custom Rust appl
 
 ## Canonical Renderer Example
 
+> **Compatibility note:** This section describes the **renderer compatibility path** (renderer-owned input/camera/frame state). For custom apps, prefer the **current app-owned path** (app-owned `InputSystem`, `FPSController`, and `render_scene_with_view`). See [15-app-owned-loop.md](15-app-owned-loop.md) for the full app-owned loop guide.
+
 Every renderer-owned demo follows the same compatibility pattern (see [`src/renderer/examples/common/mod.rs`](../../src/renderer/examples/common/mod.rs)):
 
 1. Create a `winit` event loop + window

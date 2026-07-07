@@ -4,14 +4,15 @@
 This chapter is for students, hobbyists, and indie developers using the public renderer/input APIs. It explains how to ingest events, configure layers, and read per-frame input state safely.
 
 ## 2. Where This Fits in Engine Flow
-Runtime flow:
+
+> **renderer compatibility path** (demos, examples, smoke testing):
 `winit` event loop -> `Renderer::update_input(...)` (queue raw input) -> `Renderer::begin_frame(...)` / `render_scene(...)` -> `InputSystem::dispatch_frame()` -> gameplay updates.
 
 Direct crate flow:
 `winit` events -> `InputSystem::queue_*` -> `InputSystem::dispatch_frame()` -> read `InputSnapshot`.
 
-App-owned facade flow:
-`winit` event loop -> `Renderer::route_platform_input(...)` -> `engine::input::queue_routed_input_event(...)` -> app-owned `InputSystem::dispatch_frame()` -> `InputActionEventEmitter::emit_from_snapshot(...)` -> app-owned `EventBus` stage drain.
+> **current app-owned path** (recommended for custom apps):
+`winit` event loop -> `Renderer::route_platform_input(...)` -> `engine::input::queue_routed_input_event(...)` -> app-owned `InputSystem::dispatch_frame()` -> `InputActionEventEmitter::emit_from_snapshot(...)` -> app-owned `EventBus` stage drain. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ## 3. Key Concepts
 - Frame-buffered model: events are queued then dispatched once per frame.
@@ -26,10 +27,10 @@ App-owned facade flow:
   frame lifecycle events on the same caller-owned `EventBus`.
 - Action mapping: bind semantic actions (`"move.forward"`) to chords (keys/buttons + modifiers).
 - Input profiles: `ActionMap` load/save uses strict `version = 1` TOML with `trigger` + `modifiers`.
-- Camera controls: `Renderer::install_default_fps_input()` installs the built-in WASD/mouse-look layer for compatibility/demo paths. Apps that own input can install an action layer in their own `InputSystem`, update a root `Camera` with `FPSController`, collision-correct app state, then pass a `CameraView` into the renderer.
+- Camera controls: `Renderer::install_default_fps_input()` installs the built-in WASD/mouse-look layer for the **renderer compatibility path**. Apps that own input should install an action layer in their own `InputSystem`, update a root `Camera` with `FPSController`, collision-correct app state, then pass a `CameraView` into the renderer. See [15-app-owned-loop.md](15-app-owned-loop.md).
 
 ## 4. Code Walkthrough
-Snippet Type: Real
+Snippet Type: Real (renderer compatibility path)
 ```rust
 use renderer::{
     ActionMap, LayerDescriptor, LayerPriority, Renderer,
@@ -38,10 +39,10 @@ use winit::keyboard::KeyCode;
 
 let mut renderer = Renderer::new(config, &window)?;
 
-// Optional built-in classic FPS controls.
+// Optional built-in classic FPS controls (renderer compatibility path).
 renderer.install_default_fps_input();
 
-// Custom action map layer.
+// Custom action map layer (uses renderer-owned InputSystem).
 let mut actions = ActionMap::new();
 actions.bind_key("game.interact", KeyCode::KeyE);
 actions.bind_key("game.jump", KeyCode::Space);
@@ -54,7 +55,7 @@ renderer.input_mut().add_layer(
 
 The default FPS input layer uses `W`, `A`, `S`, `D`, `Space`, `ShiftLeft`, and mouse motion. It updates the renderer-owned camera during frame preparation. Apps that only need a moving camera can install it and avoid the lower-level camera helper types. Apps that need app-owned camera/collision behavior should wire their own `InputSystem` and controller, as `dungeon_dogfood` does.
 
-Snippet Type: Real
+Snippet Type: Real (renderer compatibility path)
 ```rust
 event_loop.run(move |event, elwt| {
     renderer.update_input(&window, &event)?;
@@ -62,7 +63,7 @@ event_loop.run(move |event, elwt| {
     if let Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } = event {
         let mut frame = renderer.begin_frame(&window)?;
 
-        // Read the latest frame snapshot.
+        // Read the latest frame snapshot from renderer-owned InputSystem.
         let snapshot = renderer.input().snapshot();
         let jump = snapshot.action_pressed(&"game.jump".into());
         let look_delta = snapshot.mouse_delta();
