@@ -3433,7 +3433,7 @@ mod tests {
             .and_then(Path::parent)
             .expect("renderer crate lives under src/renderer");
         workspace_root.join(
-            ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json",
+            "../../../../.internal-dev/plans/.archive/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json",
         )
     }
 
