@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "plan": "deprecated-renderer-api-migration",
+  "status": "phase_00_inventory_ready_for_validation",
+  "created": "2026-07-07",
+  "related_issue": {
+    "number": 39,
+    "url": "https://github.com/dhickel/vulkan-engine/issues/39",
+    "state_at_planning": "OPEN"
+  },
+  "queued_after": ".internal-dev/plans/core-app-workflow-primitives/",
+  "browser_validation": {
+    "applies": false,
+    "reason": "Renderer/API/docs migration plan; use headless capture validation for renderer-visible behavior unless a later UI surface changes."
+  },
+  "required_phase_reports": [
+    ".internal-dev/plans/deprecated-renderer-api-migration/validation/phase-00-validation-report.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/validation/phase-01-validation-report.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/validation/phase-02-validation-report.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/validation/phase-03-validation-report.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/validation/final-quality-review.md"
+  ],
+  "phase_status": {
+    "phase_00_inventory_classification": "complete",
+    "phase_01_docs_spec_compatibility_labeling": "not_started",
+    "phase_02_selective_app_migration": "not_started",
+    "phase_03_conditional_deprecation_removal": "not_started",
+    "final_quality_review": "not_started"
+  },
+  "planning_inputs_checked": [
+    "AGENTS.md",
+    ".internal-dev/specifications/AGENTS.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/00-ironed-out-brief.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/01-inventory-matrix-template.md",
+    ".internal-dev/plans/deprecated-renderer-api-migration/validation/ironout-senior-signoff.md",
+    ".internal-dev/plans/core-app-workflow-primitives/queued-deprecation-removal-workflow.md",
+    ".internal-dev/plans/core-app-workflow-primitives/validation/advanced-plan-senior-signoff.md",
+    "GitHub issue #39"
+  ],
+  "phase_00_evidence": {
+    "inventory_matrix": ".internal-dev/plans/deprecated-renderer-api-migration/02-inventory-matrix.md",
+    "discovery_grep_command": "rg -n \"update_input\\(|\\.input\\(\\)|\\.input_mut\\(\\)|\\.events\\(\\)|\\.events_mut\\(\\)|render_scene\\(|set_camera_position|set_camera_look_at|install_default_fps_input|uninstall_default_fps_input|FPSController|route_platform_input|queue_routed_input_event|render_scene_with_view|render_scene_headless_with_view|CameraView\" src apps tests docs .internal-dev/specifications",
+    "files_read_for_context": [
+      "AGENTS.md",
+      ".internal-dev/plans/deprecated-renderer-api-migration/00-specification-lock.md",
+      ".internal-dev/plans/deprecated-renderer-api-migration/01-inventory-matrix-template.md",
+      ".internal-dev/plans/deprecated-renderer-api-migration/02-target-design.md",
+      ".internal-dev/plans/deprecated-renderer-api-migration/01-current-state-analysis.md",
+      "src/runtime.rs",
+      "apps/dungeon_dogfood/src/main.rs",
+      "apps/marching_terrain/src/main.rs",
+      "apps/marching_terrain/src/capture.rs",
+      "src/renderer/examples/demo_async_loading.rs",
+      "src/renderer/examples/api_test.rs",
+      "src/renderer/examples/common/mod.rs",
+      "src/renderer/examples/capture_tests/common.rs",
+      "src/renderer/src/api/renderer.rs",
+      "src/renderer/src/api/event_logging.rs",
+      "src/input.rs",
+      "src/render.rs",
+      "src/renderer/tests/integration.rs",
+      "docs/internal/12-audio-foundation.md"
+    ],
+    "total_detail_rows": 124,
+    "senior_decisions_required": 8,
+    "completeness": "all_grep_matches_classified",
+    "dependency_boundary_verified": true,
+    "dogfood_app_owned_path_verified": true
+  },
+  "commands_run_during_planning": [
+    "find .internal-dev/knowledge -maxdepth 2 -type f | sort",
+    "gh issue view 39 --repo dhickel/vulkan-engine --json number,title,state,url,body,labels,comments",
+    "rg -n \"update_input\\\\(|\\\\.input\\\\(\\\\)|\\\\.input_mut\\\\(\\\\)|\\\\.events\\\\(\\\\)|\\\\.events_mut\\\\(\\\\)|render_scene\\\\(|set_camera_position|set_camera_look_at|install_default_fps_input|uninstall_default_fps_input|FPSController|route_platform_input|queue_routed_input_event|render_scene_with_view|render_scene_headless_with_view|CameraView\" src apps tests docs .internal-dev/specifications",
+    "cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | .name' | sort"
+  ],
+  "canonical_evidence_directories": {
+    "plan": ".internal-dev/plans/deprecated-renderer-api-migration/",
+    "validation": ".internal-dev/plans/deprecated-renderer-api-migration/validation/",
+    "captures_if_needed": ".internal-dev/captures/",
+    "debug_reports_if_needed": ".internal-dev/debug_reports/"
+  },
+  "model_or_tooling_constraints": [],
+  "residual_planning_risks": [
+    "The authoritative per-use inventory is intentionally deferred to Phase 00 and must not be inferred from the orientation grep snapshot.",
+    "Phase 02 migration targets depend on senior decisions after inventory, especially for src/runtime.rs and apps/marching_terrain.",
+    "Phase 03 deprecation/removal may be skipped entirely if compatibility coverage or warning policy is not accepted."
+  ],
+  "final_status_requirements": {
+    "may_mark_fully_validated_only_after": [
+      "all required phase validation reports pass",
+      "final quality review passes",
+      "stale-reference sweep completes",
+      "dependency audits show no forbidden edges",
+      "renderer example smoke coverage is preserved or replacement coverage is accepted",
+      "docs/spec/changelog closeout is complete"
+    ]
+  }
+}

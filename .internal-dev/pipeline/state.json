@@ -1,0 +1,83 @@
+{
+  "stage": "orchestrating",
+  "topic": "Deprecated Renderer API Migration",
+  "cwd": "/home/hickelpickle/Code/Rust/engine",
+  "startedAt": "2026-07-07T00:00:00.000Z",
+  "updatedAt": "2026-07-07T00:00:00.000Z",
+  "planSuite": {
+    "taskSlug": "deprecated-renderer-api-migration",
+    "classification": "medium",
+    "planSuitePath": ".internal-dev/plans/deprecated-renderer-api-migration",
+    "phaseCount": 4,
+    "phaseDirectives": [
+      "worker-directives/phase-00-inventory-classification.md",
+      "worker-directives/phase-01-docs-spec-compatibility-labeling.md",
+      "worker-directives/phase-02-selective-app-migration.md",
+      "worker-directives/phase-03-conditional-deprecation-removal.md"
+    ],
+    "createdAt": "2026-07-07T00:00:00.000Z",
+    "handoffSource": ".internal-dev/plans/deprecated-renderer-api-migration/00-ironed-out-brief.md"
+  },
+  "review": {
+    "reviewArtifactPath": ".internal-dev/plans/deprecated-renderer-api-migration/validation/advanced-plan-senior-signoff.md",
+    "rounds": [
+      {
+        "round": 1,
+        "timestamp": "2026-07-07T00:00:00.000Z",
+        "changesRequested": [],
+        "reasoning": [],
+        "signedOff": true,
+        "assessment": "Plan is execution-ready. Phase 00 is inventory-first and non-mutating."
+      }
+    ],
+    "signedOff": true,
+    "signedOffAt": "2026-07-07T00:00:00.000Z"
+  },
+  "orchestration": {
+    "planSuitePath": ".internal-dev/plans/deprecated-renderer-api-migration",
+    "taskSlug": "deprecated-renderer-api-migration",
+    "currentPhaseIndex": 0,
+    "phases": [
+      {
+        "phaseIndex": 0,
+        "phaseDirectivePath": ".internal-dev/plans/deprecated-renderer-api-migration/worker-directives/phase-00-inventory-classification.md",
+        "status": "pending",
+        "remediationAttempts": 0,
+        "corrections": [],
+        "wasCorrected": false,
+        "correctionSourceId": null
+      },
+      {
+        "phaseIndex": 1,
+        "phaseDirectivePath": ".internal-dev/plans/deprecated-renderer-api-migration/worker-directives/phase-01-docs-spec-compatibility-labeling.md",
+        "status": "pending",
+        "remediationAttempts": 0,
+        "corrections": [],
+        "wasCorrected": false,
+        "correctionSourceId": null
+      },
+      {
+        "phaseIndex": 2,
+        "phaseDirectivePath": ".internal-dev/plans/deprecated-renderer-api-migration/worker-directives/phase-02-selective-app-migration.md",
+        "status": "pending",
+        "remediationAttempts": 0,
+        "corrections": [],
+        "wasCorrected": false,
+        "correctionSourceId": null
+      },
+      {
+        "phaseIndex": 3,
+        "phaseDirectivePath": ".internal-dev/plans/deprecated-renderer-api-migration/worker-directives/phase-03-conditional-deprecation-removal.md",
+        "status": "pending",
+        "remediationAttempts": 0,
+        "corrections": [],
+        "wasCorrected": false,
+        "correctionSourceId": null
+      }
+    ],
+    "startedAt": "2026-07-07T00:00:00.000Z",
+    "correctionQueue": [],
+    "activeCorrection": null,
+    "pausedForCorrection": false
+  }
+}
