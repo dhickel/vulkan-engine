@@ -27,9 +27,6 @@ cargo run -p engine_pack -- <command>
 Validate a package manifest:
 
 ```sh
-# Editor sample package
-cargo run -p engine_pack -- validate-package apps/editor/sample_project/assets/editor_sample.package.toml --expected-package-id editor_sample
-
 # Dogfood dungeon package (10 assets: models, textures, environment, audio)
 cargo run -p engine_pack -- validate-package apps/dungeon_dogfood/assets/dogfood_dungeon.package.toml --expected-package-id dogfood_dungeon
 ```
@@ -37,13 +34,13 @@ cargo run -p engine_pack -- validate-package apps/dungeon_dogfood/assets/dogfood
 Validate a project and its enabled package/source files:
 
 ```sh
-cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml
+cargo run -p engine_pack -- validate-project apps/dungeon_dogfood/engine.project.toml
 ```
 
 Validate a scene against a project asset registry:
 
 ```sh
-cargo run -p engine_pack -- validate-scene apps/editor/sample_project/scenes/start.engine.scene.json --project apps/editor/sample_project/engine.project.toml
+cargo run -p engine_pack -- validate-scene apps/dungeon_dogfood/scenes/start.engine.scene.json --project apps/dungeon_dogfood/engine.project.toml
 ```
 
 Create a starter project:
@@ -82,14 +79,14 @@ cargo run -p engine_pack -- add-asset /tmp/engine-project/assets/example.package
 Create a validated folder pack:
 
 ```sh
-cargo run -p engine_pack -- pack apps/editor/sample_project/engine.project.toml --out /tmp/editor-sample-pack
+cargo run -p engine_pack -- pack apps/dungeon_dogfood/engine.project.toml --out /tmp/dogfood-pack
 ```
 
 The pack command writes a folder tree plus `PACK_REPORT.json`. It does not create a binary archive, thumbnail cache, import database, or editor placement transaction. Runtime launch is handled by the root `engine` binary after project/package/scene validation.
 
 ## 4. Durable Identity Rules
 
-The CLI follows the same durable identity rules as the renderer facade and editor scene formats:
+The CLI follows the same durable identity rules as the renderer facade and scene formats:
 
 - project IDs, package IDs, asset IDs, scene IDs, node IDs, and light IDs are authored identity;
 - paths are load locations and diagnostics, not identity;
@@ -110,14 +107,14 @@ The CLI follows the same durable identity rules as the renderer facade and edito
 
 ## 5. Pack Output Shape
 
-Folder packs preserve project-relative paths. A successful pack of the sample editor project contains:
+Folder packs preserve project-relative paths. A successful pack of the dogfood project contains:
 
 ```text
 PACK_REPORT.json
 engine.project.toml
-assets/editor_sample.package.toml
-assets/models/block_prop.obj
-assets/prefabs/wall_straight_2m.obj
+assets/dogfood_dungeon.package.toml
+assets/models/crate_a.obj
+assets/models/torch_sconce.obj
 scenes/start.engine.scene.json
 ```
 
@@ -160,5 +157,5 @@ The alpha CLI deliberately does not yet provide:
 Use the runtime launcher for the current alpha project run path:
 
 ```sh
-cargo run -- --project apps/editor/sample_project/engine.project.toml
+cargo run -- --project apps/dungeon_dogfood/engine.project.toml
 ```

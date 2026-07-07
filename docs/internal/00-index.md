@@ -8,7 +8,7 @@ Contributors working inside the renderer internals — Vulkan orchestration, dat
 
 ## Workspace Context
 
-Root `Cargo.toml` currently declares `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/editor`. These internals docs primarily cover the renderer/input path; support crates and apps should not be inferred production-ready from workspace membership alone.
+Root `Cargo.toml` currently declares `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/marching_terrain`. These internals docs primarily cover the renderer/input path; support crates and apps should not be inferred production-ready from workspace membership alone.
 
 ## Architecture at a Glance
 

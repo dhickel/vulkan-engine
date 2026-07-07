@@ -11,7 +11,7 @@ For custom Rust gameplay or tool behavior, use an app crate under `apps/<name>` 
 Run commands from the workspace root:
 
 ```sh
-cargo run -- --project apps/editor/sample_project/engine.project.toml
+cargo run -- --project apps/dungeon_dogfood/engine.project.toml
 ```
 
 The `--project` argument is required. The launcher validates the project, enabled package manifests, and startup scene before rendering.
@@ -20,8 +20,8 @@ To override the project startup scene:
 
 ```sh
 cargo run -- \
-  --project apps/editor/sample_project/engine.project.toml \
-  --scene apps/editor/sample_project/scenes/start.engine.scene.json
+  --project apps/dungeon_dogfood/engine.project.toml \
+  --scene apps/dungeon_dogfood/scenes/start.engine.scene.json
 ```
 
 ## 3. Headless Draw Capture
@@ -30,7 +30,7 @@ Visual validation must use the true headless draw-target path:
 
 ```sh
 RUST_LOG=info timeout --signal=INT 60s cargo run -- \
-  --project apps/editor/sample_project/engine.project.toml \
+  --project apps/dungeon_dogfood/engine.project.toml \
   --headless \
   --capture_target draw \
   --capture_frames 3 \

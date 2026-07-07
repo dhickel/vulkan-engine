@@ -17,13 +17,16 @@ pub mod prelude {
     pub use crate::events::{
         runtime_event_bus, EngineEvent, EventBus, EventStage, FrameId, RuntimeEventDispatcher,
     };
-    pub use crate::frame::{FrameClock, FrameInfo};
+    pub use crate::frame::{
+        begin_app_frame, end_app_frame, AppFrameBeginReport, AppFrameEndReport, FixedStepClock,
+        FixedStepConfig, FixedStepUpdate, FrameClock, FrameInfo,
+    };
     pub use crate::input::{
-        queue_routed_input_event, ActionId, InputActionEventEmitter, InputEvent, InputSnapshot,
-        InputSystem,
+        queue_routed_input_event, route_platform_input_to_app, ActionId, InputActionEventEmitter,
+        InputEvent, InputSnapshot, InputSystem,
     };
     pub use crate::render::{
-        CameraView, FrameContext, FrameRenderOutcome, Renderer, RendererConfig,
-        RendererInputRouting, RendererInputSuppression, Scene, SceneNodeId,
+        camera_view_for_size, CameraView, FrameContext, FrameRenderOutcome, Renderer,
+        RendererConfig, RendererInputRouting, RendererInputSuppression, Scene, SceneNodeId,
     };
 }

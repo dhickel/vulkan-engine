@@ -11,7 +11,7 @@ This page is for contributors changing event contracts, renderer/runtime emissio
 Boundary map:
 
 ```text
-apps/editor, apps/dungeon_dogfood
+apps/dungeon_dogfood
   -> renderer facade reexports
       -> src/renderer/src/api/renderer.rs
           -> InputSystem snapshots
@@ -33,7 +33,7 @@ app-owned runtime path
 - `EventBus::emit` records and queues events; stage drain is explicit.
 - `Renderer` drains input/pre/post update stages at controlled frame boundaries.
 - Root runtime emits startup, project, package, scene, and shutdown events while validating/loading the data-driven project path.
-- Root `engine::events` helpers provide app-owned lifecycle emission over a caller-owned bus.
+- Root `engine::frame::begin_app_frame`/`end_app_frame` provide the preferred app-owned lifecycle ordering over a caller-owned `EventBus`; lower-level `engine::events` helpers remain available.
 - App crates consume events through `renderer::{EventBus, EventRecorder, EngineEvent, ...}` reexports.
 - Listener callbacks receive immutable event envelopes and must not hold renderer internals.
 
@@ -60,9 +60,10 @@ Root runtime:
 Apps:
 
 - App-owned loops should use one caller-owned `EventBus` for lifecycle, input, audio, physics, scripting, and diagnostics.
-- `RuntimeEventDispatcher::frame_started`, `drain_input`, and `frame_ended` provide the thin lifecycle helper path.
-- `apps/editor/src/events.rs` installs a recorder and selected event logger.
-- `apps/dungeon_dogfood/src/events.rs` installs the same style of app-side logger over a dogfood-owned
+- `begin_app_frame` ticks `FrameClock`, dispatches app input, emits snapshot-derived action events, drains input, and emits/drains `FrameStarted` in that order.
+- `end_app_frame` emits/drains `FrameEnded` for the frame index returned by `begin_app_frame`.
+- `RuntimeEventDispatcher::frame_started`, `drain_input`, and `frame_ended` remain the lower-level lifecycle helper path.
+- `apps/dungeon_dogfood/src/events.rs` installs an app-side recorder/logger over a dogfood-owned
   bus; dogfood audio, input, and frame lifecycle events no longer require `Renderer::events_mut()`.
 - These modules are examples of public facade consumption, not product UI event browsers.
 
@@ -77,9 +78,20 @@ FrameStarted -> input dispatch -> InputActionEvent drain -> app/FPS updates -> r
 App-owned frame:
 
 ```text
-route platform input -> app InputSystem dispatch -> app InputActionEvent drain
-  -> app FrameStarted -> app update -> renderer render-only/view call -> app FrameEnded
+route_platform_input_to_app for platform events
+  -> begin_app_frame:
+       FrameClock tick
+       app InputSystem dispatch exactly once
+       InputActionEventEmitter emit from refreshed snapshot
+       EventStage::Input drain
+       FrameStarted emit/drain at PreUpdate
+  -> app update / simulation / camera correction
+  -> renderer render-only/view call
+  -> end_app_frame:
+       FrameEnded emit/drain at PostUpdate
 ```
+
+Ordering guarantees: input action listeners observe the refreshed snapshot's frame index before `FrameStarted`; app update runs after `FrameStarted`; `FrameEnded` is emitted only when the caller invokes `end_app_frame`, so apps must call it after rendering or after deliberately skipping rendering.
 
 Root runtime:
 
@@ -117,7 +129,7 @@ rg -n "engine_events" src/renderer/src/vulkan src/renderer/src/data src/renderer
 rg -n "EventBus|FrameStarted|FrameEnded|events_mut\\(|drain_stage|dispatch_pending" src apps tests
 ```
 
-Use true headless draw-target capture only when the event change also affects visible rendering. Event contract/doc/app-consumption changes usually need compile/test evidence, not image evidence.
+Use true headless draw-target capture only when the event change also affects visible rendering. Event contract/doc/app-consumption changes usually need compile/test evidence, not image evidence. Adopting `begin_app_frame`/`end_app_frame` without camera/render behavior changes does not by itself require capture evidence.
 
 ## 8. Cross-Module Links
 

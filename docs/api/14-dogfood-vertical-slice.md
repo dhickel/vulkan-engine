@@ -78,15 +78,16 @@ main.rs
   │     ├── Model props (optional)
   │     └── Custom environment (optional)
   └── Run event loop (windowed) or headless capture loop
-        ├── Renderer platform routing → app-owned input dispatch
-        ├── Input action events + frame lifecycle on the app EventBus
+        ├── engine::input::route_platform_input_to_app → app-owned input queue
+        ├── engine::frame::begin_app_frame → input dispatch, action events, FrameStarted
         ├── FPS camera intent → player collision (player.rs, collision.rs)
-        ├── Build CameraView from the corrected app-owned camera
+        ├── engine::render::camera_view_for_size from the corrected app-owned camera
         ├── Render scene frame through render_scene_with_view / render_scene_headless_with_view
+        ├── engine::frame::end_app_frame → FrameEnded
         └── Log captured frames (headless)
 ```
 
-The active dogfood path does not use renderer-owned gameplay camera state, renderer-owned input dispatch, or `Renderer::events_mut()` for app lifecycle/audio telemetry. The renderer still owns Vulkan frame submission, assets, capture output, debug UI platform side effects, and resize handling.
+The active dogfood path now uses `engine::input::route_platform_input_to_app`, `engine::frame::begin_app_frame`, `engine::frame::end_app_frame`, and `engine::render::camera_view_for_size` from the root `engine` facade. It does not use renderer-owned gameplay camera state, renderer-owned input dispatch, or `Renderer::events_mut()` for app lifecycle/audio telemetry. The renderer still owns Vulkan frame submission, assets, capture output, debug UI platform side effects, and resize handling.
 
 ## Controls (Windowed)
 
@@ -119,6 +120,8 @@ Capture options:
 - `--capture_frame_start <n>` -- frame to start capturing
 - `--capture_frame_interval <n>` -- frames between captures
 - `--capture_dir <dir>` -- output directory
+
+Known/quarantined drift: the dogfood parser accepts space-form capture flags (for example `--capture_frames 3`) while the older baseline command above still shows equals-form for several sequence flags. This sprint documents the drift but does not change parser behavior.
 
 Current issue #35-#37 validation proof:
 

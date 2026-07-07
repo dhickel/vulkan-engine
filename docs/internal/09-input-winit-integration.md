@@ -8,7 +8,7 @@ Current runtime path:
 `winit` event loop -> `Renderer::update_input(...)` -> `InputSystem` queue -> `Renderer::prepare_frame(...)` -> `InputSystem::dispatch_frame()` -> optional FPS plugin updates camera.
 
 App-owned input path:
-`winit` event loop -> `Renderer::route_platform_input(...)` -> `engine::input::queue_routed_input_event(...)` -> app `InputSystem::dispatch_frame()` at the app frame boundary -> `InputActionEventEmitter::emit_from_snapshot(...)`.
+`winit` event loop -> `engine::input::route_platform_input_to_app(...)` -> renderer platform side effects via `Renderer::route_platform_input(...)` -> `engine::input::queue_routed_input_event(...)` for uncaptured events -> app frame boundary via `engine::frame::begin_app_frame(...)`.
 
 ## 3. Key Concepts
 - Ingestion is per-event (`update_input`).
@@ -20,8 +20,10 @@ App-owned input path:
 - Layer dispatch model uses priority groups with same-priority peer execution.
 - Snapshot state is read-only to consumers after dispatch.
 - Renderer event emission for input actions reads the refreshed snapshot after `dispatch_frame()`.
+- App-owned input routing should use `route_platform_input_to_app` when the app wants one call that preserves renderer side effects and queues uncaptured input into its own `InputSystem`.
+- `queue_routed_input_event` remains the lower-level app-owned queueing surface when callers already have a `RendererInputRouting` result.
 - App-owned input event emission uses `InputActionEventEmitter`, which owns the observed action-value
-  map for one app input stream and emits into the caller-owned `EventBus`.
+  map for one app input stream and emits into the caller-owned `EventBus` through `begin_app_frame` or direct calls.
 - Action profile parsing (`ActionMap::from_toml_str`) is strict `version = 1` with validated triggers.
 
 ## 4. Code Walkthrough
@@ -73,17 +75,16 @@ fn prepare_frame(&mut self, window: &Window) -> Result<FramePrepareOutcome, Rend
 Snippet Type: Pseudocode
 ```text
 for event in os_events:
-  routing = renderer.route_platform_input(event)
-  if routing.queue_input:
-    queue_routed_input_event(app_input, routing, event)
+  route_platform_input_to_app(renderer, window, app_input, event)
+  # lower-level equivalent: renderer.route_platform_input + queue_routed_input_event
 
 once per frame:
-  app_input.dispatch_frame()
-  app_action_events.emit_from_snapshot(app_input.snapshot(), app_event_bus)
+  begin_app_frame(app_input, app_action_events, app_event_bus, frame_clock)
   gameplay systems read snapshot/action states
   controller updates app camera intent
   collision corrects app/player state
   app builds CameraView and calls renderer render-only/view API
+  end_app_frame(app_event_bus, frame_index)
 ```
 
 Priority band guidance:
@@ -94,7 +95,7 @@ Priority band guidance:
 
 ## 5. Best Practices
 - Keep renderer platform side effects in `Renderer::route_platform_input`.
-- Keep caller-owned input queueing in `queue_routed_input_event` for app-owned input paths.
+- Prefer `route_platform_input_to_app` for app-owned input paths; use `queue_routed_input_event` directly only when code already has a routing result.
 - Preserve one dispatch boundary per frame.
 - On the app-owned path, do not also call renderer frame APIs that dispatch renderer-owned input in
   the same app frame.
@@ -109,7 +110,7 @@ Priority band guidance:
 - Profile reload failures should be surfaced to logs/UX; never silently drop invalid bindings.
 
 ## 7. Debugging Playbook
-- Step 1: verify `update_input` is called before event-specific branching in examples/apps.
+- Step 1: on renderer-owned compatibility paths, verify `update_input` is called before event-specific branching; on app-owned paths, verify `route_platform_input_to_app` (or `route_platform_input` + `queue_routed_input_event`) runs before app-frame dispatch.
 - Step 2: inspect `input_system.debug_snapshot()` each frame.
 - Step 3: log layer priorities and enabled states.
 - Step 4: validate ImGui capture flags against observed behavior.

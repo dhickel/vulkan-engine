@@ -20,6 +20,10 @@ created: 2026-07-03
 | SVC-20260707-04 | Root engine binary | Root engine library and support crates | active | The binary launcher may use the root library helpers and renderer facade to run project/package/scene data. | The binary is a launcher, not a required app runtime object. Support crates must not depend on it. | `cargo check`, root runtime smoke when required. | `DECISION-20260707-03` |
 | SVC-20260707-05 | Renderer facade | Caller app/root facade | active | Renderer consumes caller-provided `CameraView` values but never calls back into root `engine` for app-owned state. | The render DTO dependency direction is app/root -> renderer API type -> renderer internals; no renderer -> root edge. | `cargo check -p renderer`, `cargo test -p renderer`, `cargo test -p engine`. | `DECISION-20260707-04` |
 
+## Phase 03 Dependency Audit Note
+
+Phase 01 audits for the core app-owned workflow primitives confirmed no new dependency direction is required beyond the existing root-facade-to-support-crates edges above. Renderer and support crates must not depend on the root `engine` facade.
+
 ## Drift Records
 
 | id | spec | status | observed_drift | impact | routing | source | review_after |

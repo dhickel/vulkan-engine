@@ -11,8 +11,8 @@ Use events for logging, lightweight telemetry, validation recorders, editor tool
 Renderer path:
 `winit` event loop -> `Renderer::update_input(...)` -> `Renderer::render_scene(...)` or explicit frame API -> input dispatch -> input events -> frame lifecycle events -> render.
 
-App-owned facade path:
-`winit` event loop -> renderer platform routing -> app `InputSystem` dispatch -> app `EventBus` input/lifecycle stages -> app update -> renderer `render_scene_with_view(...)`.
+App-owned facade path (recommended for custom apps that own gameplay/input/camera state):
+`winit` event loop -> `engine::input::route_platform_input_to_app(...)` -> `engine::frame::begin_app_frame(...)` -> app update -> renderer `render_scene_with_view(...)` -> `engine::frame::end_app_frame(...)`.
 
 Root runtime path:
 launcher startup -> project load -> package load -> scene load -> headless/windowed run -> shutdown.
@@ -28,7 +28,8 @@ The event vocabulary lives in the standalone `engine_events` crate and is re-exp
 - `EventRecorder::bounded(capacity)` stores emitted envelopes for diagnostics and validation.
 - `Renderer::events()` and `Renderer::events_mut()` expose the bus through the public facade.
 - `engine::events::runtime_event_bus()` creates a caller-owned bus with bounded recording enabled.
-- `engine::events::RuntimeEventDispatcher` emits and drains lifecycle stages against a caller-owned bus without hiding raw `EventBus` access.
+- `engine::frame::begin_app_frame(...)` and `engine::frame::end_app_frame(...)` are the recommended app-owned frame lifecycle helpers.
+- `engine::events::RuntimeEventDispatcher` remains the lower-level lifecycle emitter/drainer behind those helpers and is still available for direct use.
 - Listener callbacks receive `&EventEnvelope`, not `&mut Renderer`. Mutate app state you own, then perform renderer/scene mutations from your normal app loop.
 
 Currently emitted by renderer/runtime:
@@ -37,7 +38,7 @@ Currently emitted by renderer/runtime:
 |---|---|
 | Legacy renderer frame APIs: `Renderer::render_scene`, `render_scene_headless`, `begin_frame`, `end_frame` | Renderer-owned `LifecycleEvent::FrameStarted`, `LifecycleEvent::FrameEnded` |
 | Renderer input bridge | `InputActionEvent` with `Pressed`, `Released`, or `Changed` after `InputSystem::dispatch_frame()` |
-| Root app-owned lifecycle helper | Caller-owned `FrameStarted`/`FrameEnded` through `RuntimeEventDispatcher::frame_started` and `frame_ended` |
+| Root app-owned frame helpers: `begin_app_frame`, `end_app_frame` | Caller-owned input action events plus `FrameStarted`/`FrameEnded`; internally use `RuntimeEventDispatcher` over the caller-owned bus |
 | Root `engine` runtime | app/project/package/scene lifecycle, package load success/failure, headless shutdown completion, windowed shutdown-requested intent |
 
 Typed but deferred until later system sprints:
@@ -81,10 +82,9 @@ fn install_event_logging(renderer: &mut Renderer) {
 
 Apps in this repository demonstrate the same pattern:
 
-- `apps/editor/src/events.rs`
 - `apps/dungeon_dogfood/src/events.rs`
 
-`apps/dungeon_dogfood` owns one app `EventBus` for input actions, frame lifecycle, and startup audio telemetry. Its audio bridge accepts `&mut EventBus` directly, and its render loop drains input/lifecycle stages through `RuntimeEventDispatcher` before and after rendering with a caller-provided `CameraView`.
+`apps/dungeon_dogfood` owns one app `EventBus` for input actions, frame lifecycle, and startup audio telemetry. Its audio bridge accepts `&mut EventBus` directly, and its render loop uses `begin_app_frame`/`end_app_frame` before and after rendering with a caller-provided `CameraView`.
 
 The standalone `physics` crate demonstrates the physics event bridge through `RayHit::to_engine_event`, `PhysicsContactRecord::to_engine_event`, `contact_records_to_engine_events`, and `emit_contact_records`. `apps/dungeon_dogfood/src/audio_bridge.rs` demonstrates the audio bridge by mapping app-owned audio outcomes into `EngineEvent::Audio`. These helpers preserve the event crate boundary: `engine_events` does not depend on `physics` or `audio`, while app code can opt in to event emission.
 
@@ -92,15 +92,18 @@ The experimental `scripting` crate follows the same boundary. `ScriptEngine::eva
 
 Snippet Type: Real
 ```rust
-use engine::events::{runtime_event_bus, RuntimeEventDispatcher};
+use engine::events::runtime_event_bus;
+use engine::frame::{begin_app_frame, end_app_frame, FrameClock};
+use engine::input::{InputActionEventEmitter, InputSystem};
 
 let mut events = runtime_event_bus();
-let frame_index = 0;
+let mut input = InputSystem::new();
+let mut action_events = InputActionEventEmitter::new();
+let mut frame_clock = FrameClock::new();
 
-RuntimeEventDispatcher::frame_started(&mut events, frame_index);
-RuntimeEventDispatcher::drain_input(&mut events);
-// update app-owned game state here
-RuntimeEventDispatcher::frame_ended(&mut events, frame_index);
+let begin = begin_app_frame(&mut input, &mut action_events, &mut events, &mut frame_clock);
+// update app-owned game state and render here
+end_app_frame(&mut events, begin.frame.index);
 ```
 
 ## 5. Ordering Rules
@@ -153,8 +156,8 @@ Root runtime startup ordering:
 - Step 1: install a bounded recorder with `Renderer::set_event_recorder` for legacy renderer-owned events, or use `engine::events::runtime_event_bus()` for app-owned events.
 - Step 2: subscribe before the event loop starts.
 - Step 3: log only selected event families or stages to avoid frame spam.
-- Step 4: confirm `renderer.update_input(...)` is called for every `winit` event.
-- Step 5: confirm `render_scene`, `render_scene_headless`, or explicit `begin_frame`/`end_frame` runs once per frame.
+- Step 4: on renderer-owned compatibility paths, confirm `renderer.update_input(...)` is called for every `winit` event; on app-owned paths, confirm `route_platform_input_to_app(...)` runs for platform input and `begin_app_frame(...)` runs once per app frame.
+- Step 5: confirm the matching render path runs once per frame: `render_scene`/`render_scene_headless` for renderer-owned compatibility, or `render_scene_with_view`/`render_scene_headless_with_view` bracketed by `begin_app_frame`/`end_app_frame` for app-owned loops.
 
 ## 8. Cross-Module Links
 
@@ -163,7 +166,6 @@ Root runtime startup ordering:
 - Renderer facade integration: `src/renderer/src/api/renderer.rs`
 - Input action bridge: `src/input/src/lib.rs`
 - Root runtime lifecycle: `src/runtime.rs`
-- Editor consumer: `apps/editor/src/events.rs`
 - Dogfood consumer: `apps/dungeon_dogfood/src/events.rs`
 
 ## 9. Standard References
@@ -175,4 +177,5 @@ Root runtime startup ordering:
 
 - [Input Polling and Layered Dispatch](06-input-polling-and-listeners.md)
 - [Runtime Project Launcher](11-runtime-project-launcher.md)
+- [App-Owned Loop](15-app-owned-loop.md)
 - [Internal Event System and Lifecycle](../internal/10-event-system-and-lifecycle.md)

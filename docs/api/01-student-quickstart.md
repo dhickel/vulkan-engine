@@ -14,7 +14,7 @@ Project quickstart path:
 author/validate project package data -> run the root launcher with `cargo run -- --project <path>` -> use `--headless --capture_target draw` for validation captures.
 
 ## 3. Key Concepts
-- Use the root launcher for data-driven projects: `cargo run -- --project apps/editor/sample_project/engine.project.toml`.
+- Use the root launcher for data-driven projects: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml`.
 - Use example binaries from the `renderer` crate to learn the facade and diagnose renderer behavior.
 - Use app crates under `apps/<name>` for custom Rust application behavior. App crates may use `engine::prelude` when they want to own input, events, frame clock, and camera state.
 - Facade-first API boundary:
@@ -42,7 +42,7 @@ cargo run -p renderer --example demo_model_load
 cargo run -p renderer --example demo_async_loading
 
 # Run the sample project through the root launcher:
-cargo run -- --project apps/editor/sample_project/engine.project.toml
+cargo run -- --project apps/dungeon_dogfood/engine.project.toml
 
 # Generate a standalone Rust support-crate app scaffold:
 cargo run -p engine_pack -- new-app /tmp/engine-app --id app.example --name "Example App"
@@ -50,7 +50,7 @@ cargo check --manifest-path /tmp/engine-app/Cargo.toml
 
 # Produce true headless draw-target validation evidence:
 RUST_LOG=info timeout --signal=INT 60s cargo run -- \
-  --project apps/editor/sample_project/engine.project.toml \
+  --project apps/dungeon_dogfood/engine.project.toml \
   --headless \
   --capture_target draw \
   --capture_frames 3 \
@@ -126,7 +126,7 @@ App-owned frame tick:
 
 ## 7. Debugging Playbook
 - If the app does not launch rendering:
-  - Check command target first: `cargo run -- --project apps/editor/sample_project/engine.project.toml` for the project launcher, or `cargo run -p renderer --example api_test` for renderer diagnostics.
+  - Check command target first: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml` for the project launcher, or `cargo run -p renderer --example api_test` for renderer diagnostics.
 - If initialization fails immediately:
   - Check Vulkan runtime/driver setup and then re-run with logs:
   - `RUST_LOG=debug cargo run -p renderer --example api_test`

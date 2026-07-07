@@ -14,7 +14,9 @@ Dogfood now has canonical project/package/scene contracts validated through `eng
 cargo run -p dungeon_dogfood -- --level generated_sprawl
 ```
 
-Use the root `engine` launcher for data-driven project manifests such as the editor sample project. Use app crates under `apps/<name>` when custom Rust behavior is required.
+Dogfood is also the real-app proof for the root `engine` app-owned loop helpers: it uses `engine::input::route_platform_input_to_app`, `engine::frame::begin_app_frame`, `engine::frame::end_app_frame`, and `engine::render::camera_view_for_size` while keeping gameplay, collision, camera, input dispatch, and events app-owned.
+
+Use the root `engine` launcher for data-driven project manifests. Use app crates under `apps/<name>` when custom Rust behavior is required.
 
 ## Package and Project Validation
 
@@ -94,6 +96,8 @@ Headless capture options:
 - `--capture_frame_start <n>` -- frame to start capturing (default: 0)
 - `--capture_frame_interval <n>` -- frames between captures (default: 1)
 - `--capture_dir <dir>` -- output directory for captures
+
+Known/quarantined capture flag drift: dogfood's local parser currently accepts the space-form capture flags shown above (for example `--capture_frames 3`), while the example command still shows equals-form for sequence/count flags. This is documented debt and was not changed by the app-owned loop helper adoption.
 
 ## Audio Smoke
 

@@ -12,7 +12,7 @@ App-owned view path:
 
 ## 3. Key Concepts
 - `Renderer::new(config, window)` is the canonical initialization entrypoint.
-- Data-driven projects run through the root launcher: `cargo run -- --project apps/editor/sample_project/engine.project.toml`.
+- Data-driven projects run through the root launcher: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml`.
 - Renderer examples remain facade lifecycle diagnostics: `cargo run -p renderer --example api_test`.
 - Custom Rust apps run through their app crate: `cargo run -p <app>`.
 - Two frame APIs exist:
@@ -34,12 +34,9 @@ App-owned view path:
   queues into renderer-owned input. Apps that own input dispatch can call `route_platform_input(...)`
   and then `engine::input::queue_routed_input_event(...)` for uncaptured gameplay/app input.
 - Legacy renderer frame APIs emit renderer-owned lifecycle events. Apps using app-owned input/camera
-  and `render_scene_with_view(...)` should emit `FrameStarted`/`FrameEnded` through their own
-  `engine::events::RuntimeEventDispatcher` instead of relying on renderer-owned lifecycle state.
+  and `render_scene_with_view(...)` should prefer `engine::frame::begin_app_frame(...)` and
+  `engine::frame::end_app_frame(...)` over relying on renderer-owned lifecycle state.
 - Default runtime toggle for debug UI visibility is backquote (`\``) in `update_input(...)`.
-- The native editor shell launches with `cargo run -p editor` and accepts
-  `--project <path>`, `--scene <path>`, and the standard
-  `--record_debug`, `--record_debug_interval`, `--record_debug_path` timing flags.
 - Headless validation uses `Renderer::new_headless(config)` and `render_scene_headless(...)`; do not set `config.headless = true` on the windowed `Renderer::new(config, window)` path.
 
 ## 4. Code Walkthrough
@@ -116,7 +113,7 @@ Every loop tick:
 - Handle `FrameRenderOutcome` with a full `match`; do not assume every frame renders.
 - Use one frame style per loop (`render_scene` or explicit frame API), not both in the same tick.
 - For custom game/app loops that own camera, input, and lifecycle events, prefer the caller-view
-  render APIs and emit app lifecycle events through the app-owned bus.
+  render APIs plus `begin_app_frame`/`end_app_frame` on the app-owned bus.
 - Keep render and load orchestration separate in your app architecture.
 - Use `register_app_ui(...)` for always-present app chrome; use debug views for optional runtime
   diagnostics.
@@ -131,7 +128,7 @@ Every loop tick:
   built-in FPS-controller suppression.
 
 ## 7. Debugging Playbook
-- Step 1: choose the right runtime path: `cargo run -- --project apps/editor/sample_project/engine.project.toml` for project launcher issues, or `cargo run -p renderer --example api_test` for renderer facade diagnostics.
+- Step 1: choose the right runtime path: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml` for project launcher issues, or `cargo run -p renderer --example api_test` for renderer facade diagnostics.
 - Step 2: verify call order (`begin_frame` -> `render_scene_in_frame` -> `end_frame`) if using explicit API.
 - Step 3: inspect resize path; check whether frames are intentionally skipped due to `resize_requested`.
 - Step 4: if init fails and shader compile is enabled, verify shader toolchain availability (`glslc` or `glslangValidator`).

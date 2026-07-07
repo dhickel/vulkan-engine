@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use engine_events::{ActionPhase, EngineEvent, EventBus, EventStage, FrameId, InputActionEvent};
-use renderer::RendererInputRouting;
+use renderer::{Renderer, RendererError, RendererInputRouting};
 use winit::event::{DeviceEvent, Event, MouseScrollDelta, WindowEvent};
+use winit::window::Window;
 
 pub use input::priority_bands;
 pub use input::{
@@ -106,6 +107,22 @@ fn emit_action_event(
             InputActionEvent::new(action, phase, value).with_source("input_snapshot"),
         ),
     );
+}
+
+/// Routes a platform input event through the renderer and mirrors queued app
+/// input into an app-owned [`InputSystem`].
+///
+/// This helper preserves renderer-owned platform side effects/capture routing
+/// while deliberately avoiding [`Renderer::update_input`].
+pub fn route_platform_input_to_app(
+    renderer: &mut Renderer,
+    window: &Window,
+    input: &mut InputSystem,
+    event: &Event<()>,
+) -> Result<RendererInputRouting, RendererError> {
+    let routing = renderer.route_platform_input(window, event)?;
+    queue_routed_input_event(input, routing, event);
+    Ok(routing)
 }
 
 /// Queues a renderer-routed winit event into an app-owned [`InputSystem`].

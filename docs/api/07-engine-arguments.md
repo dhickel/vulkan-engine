@@ -68,7 +68,7 @@ Root project launcher visual validation:
 
 ```sh
 RUST_LOG=info timeout --signal=INT 60s cargo run -- \
-  --project apps/editor/sample_project/engine.project.toml \
+  --project apps/dungeon_dogfood/engine.project.toml \
   --headless \
   --capture_target draw \
   --capture_frames 3 \

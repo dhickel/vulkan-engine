@@ -14,13 +14,11 @@ use std::path::PathBuf;
 use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
 use engine::camera::{Camera, FPSController};
-use engine::events::{runtime_event_bus, DispatchReport, EventBus, RuntimeEventDispatcher};
+use engine::events::{runtime_event_bus, DispatchReport, EventBus};
 use engine::frame::FrameClock;
 use engine::input::{
-    queue_routed_input_event, ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor,
-    LayerPriority,
+    ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
 };
-use engine::render::CameraView;
 use generator::{generate_dungeon, GeneratedDungeon, ProceduralLevelConfig, GENERATED_LEVEL_ID};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
@@ -317,7 +315,12 @@ fn run() -> Result<(), AppError> {
         .run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Poll);
 
-            let routing = match renderer.route_platform_input(&window, &event) {
+            let _routing = match engine::input::route_platform_input_to_app(
+                &mut renderer,
+                &window,
+                &mut app_input,
+                &event,
+            ) {
                 Ok(routing) => routing,
                 Err(e) => {
                     log::error!("Platform input routing failed: {}", e);
@@ -325,7 +328,6 @@ fn run() -> Result<(), AppError> {
                     return;
                 }
             };
-            queue_routed_input_event(&mut app_input, routing, &event);
 
             match event {
                 Event::WindowEvent { event, window_id } if window_id == window.id() => {
@@ -448,15 +450,6 @@ fn log_dispatch_failures(report: DispatchReport, context: &str) {
     }
 }
 
-fn camera_view(camera: &Camera, width: u32, height: u32) -> CameraView {
-    let aspect_ratio = if height == 0 {
-        1.0
-    } else {
-        (width.max(1) as f32) / (height as f32)
-    };
-    CameraView::from_camera(camera, aspect_ratio)
-}
-
 fn render_frame(
     renderer: &mut renderer::Renderer,
     scene: &mut renderer::Scene,
@@ -472,18 +465,12 @@ fn render_frame(
     viewport_height: u32,
     headless: bool,
 ) -> Result<renderer::FrameRenderOutcome, RendererError> {
-    let frame = frame_clock.tick();
+    let begin_report = engine::frame::begin_app_frame(input, action_events, events, frame_clock);
+    log_dispatch_failures(begin_report.input_dispatch, "dogfood input");
+    log_dispatch_failures(begin_report.frame_started, "dogfood lifecycle");
 
-    input.dispatch_frame();
-    action_events.emit_from_snapshot(events, input.snapshot(), frame.index);
-    log_dispatch_failures(RuntimeEventDispatcher::drain_input(events), "dogfood input");
-    log_dispatch_failures(
-        RuntimeEventDispatcher::frame_started(events, frame.index),
-        "dogfood lifecycle",
-    );
-
-    fps_controller.update_from_snapshot(input.snapshot(), frame.delta_seconds, camera);
-    match player.ingest_camera_intent(camera.get_position(), frame.delta_seconds) {
+    fps_controller.update_from_snapshot(input.snapshot(), begin_report.frame.delta_seconds, camera);
+    match player.ingest_camera_intent(camera.get_position(), begin_report.frame.delta_seconds) {
         CameraIntentGuard::Accepted => {}
         CameraIntentGuard::Clamped {
             attempted_displacement,
@@ -501,7 +488,7 @@ fn render_frame(
             );
         }
     }
-    collision::resolve_player_step(player, collision_world, frame.delta_seconds);
+    collision::resolve_player_step(player, collision_world, begin_report.frame.delta_seconds);
     if !player.has_finite_position() {
         log::error!(
             "Player position became non-finite after collision resolution: {:?}",
@@ -514,16 +501,14 @@ fn render_frame(
     camera.set_position(player.position);
 
     renderer.pump_asset_tasks(32)?;
-    let view = camera_view(camera, viewport_width, viewport_height);
+    let view = engine::render::camera_view_for_size(camera, viewport_width, viewport_height);
     let outcome = if headless {
         renderer.render_scene_headless_with_view(scene, view)?
     } else {
         renderer.render_scene_with_view(scene, view)?
     };
-    log_dispatch_failures(
-        RuntimeEventDispatcher::frame_ended(events, frame.index),
-        "dogfood lifecycle",
-    );
+    let end_report = engine::frame::end_app_frame(events, begin_report.frame.index);
+    log_dispatch_failures(end_report.frame_ended, "dogfood lifecycle");
 
     Ok(outcome)
 }

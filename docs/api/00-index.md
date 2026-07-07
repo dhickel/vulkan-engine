@@ -8,7 +8,7 @@ Rust developers building applications on this Vulkan rendering engine. Familiari
 
 ## Workspace Context
 
-The root workspace currently contains `engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/editor`. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
+The root workspace currently contains `engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, `apps/marching_terrain`, and `tools/engine_pack`. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
 
 ## Quick Navigation
 
@@ -28,6 +28,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Events and lifecycle | [12-events-and-lifecycle.md](12-events-and-lifecycle.md) | `EventBus`, lifecycle/action events, recorder usage, safe mutation rules |
 | Audio foundation | [13-audio-foundation.md](13-audio-foundation.md) | Packaged audio metadata, device-independent clips, opt-in playback, audio events |
 | Dogfood vertical slice | [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md) | Alpha demo app walkthrough, headless capture, package/project contracts |
+| App-owned loop | [15-app-owned-loop.md](15-app-owned-loop.md) | Root `engine` input/frame/render helpers for custom app-owned loops |
 
 ## Public API Contract
 
@@ -83,14 +84,14 @@ root-only compatibility exports are listed in
 Data-driven projects run through the root `engine` launcher:
 
 ```sh
-cargo run -- --project apps/editor/sample_project/engine.project.toml
+cargo run -- --project apps/dungeon_dogfood/engine.project.toml
 ```
 
 Headless visual validation uses the offscreen draw target:
 
 ```sh
 RUST_LOG=info timeout --signal=INT 60s cargo run -- \
-  --project apps/editor/sample_project/engine.project.toml \
+  --project apps/dungeon_dogfood/engine.project.toml \
   --headless \
   --capture_target draw \
   --capture_frames 3 \
