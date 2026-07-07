@@ -63,10 +63,13 @@ path = "models/crate.glb"
 
     // ── Type existence (compile-time contract covering all prelude re-exports) ──
     let _: Option<AssetManager<'_>> = None;
+    let _: Option<CameraView> = None;
     let _: Option<Renderer> = None;
     let _: Option<RendererError> = None;
     let _: Option<RendererInitError> = None;
     let _: Option<RendererFrameError> = None;
+    let _: Option<RendererInputRouting> = None;
+    let _: Option<RendererInputSuppression> = None;
     let _: Option<AssetRegistryError> = None;
     let _: Option<SceneError> = None;
     let _: Option<SceneFragment> = None;
@@ -146,6 +149,23 @@ path = "models/crate.glb"
     // ── Free functions (compile-time existence) ──
     let _ = default_capture_root();
 }
+
+#[test]
+fn renderer_input_routing_result_is_public_and_explicit() {
+    use renderer::prelude::*;
+
+    let queued = RendererInputRouting::queue();
+    assert!(queued.queue_input);
+    assert_eq!(queued.suppression, RendererInputSuppression::None);
+
+    let suppressed = RendererInputRouting::suppress(RendererInputSuppression::UiMouseCapture);
+    assert!(!suppressed.queue_input);
+    assert_eq!(
+        suppressed.suppression,
+        RendererInputSuppression::UiMouseCapture
+    );
+}
+
 #[test]
 fn beginner_error_display_contract_is_actionable() {
     let scene_err = RendererError::from(SceneError::MissingAssetId("node asset".to_string()));

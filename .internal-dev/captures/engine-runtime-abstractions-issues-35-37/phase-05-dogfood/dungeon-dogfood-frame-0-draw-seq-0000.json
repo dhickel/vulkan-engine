@@ -1,0 +1,58 @@
+{
+  "capture_target": "draw",
+  "captured_at_unix_ms": 1783399545207,
+  "color_conversion": "rgba16f-linear-clamped-to-rgba8",
+  "extent": {
+    "height": 720,
+    "width": 1280
+  },
+  "format": "R16G16B16A16_SFLOAT",
+  "frame_number": 0,
+  "legacy_renderer_camera_path": {
+    "compatibility_path_available": true,
+    "used_for_capture": false,
+    "unused_calls": [
+      "Renderer::render_scene_headless",
+      "Renderer::render_scene",
+      "Renderer::camera_position",
+      "Renderer::set_camera_position"
+    ]
+  },
+  "metadata_reconciliation": {
+    "basis": "Capture artifact plus source validation for the dogfood headless path.",
+    "recorded_after_capture": true,
+    "source_paths": [
+      "apps/dungeon_dogfood/src/main.rs",
+      "src/renderer/src/api/renderer.rs"
+    ]
+  },
+  "png_path": ".internal-dev/captures/engine-runtime-abstractions-issues-35-37/phase-05-dogfood/dungeon-dogfood-frame-0-draw-seq-0000.png",
+  "requested_camera_view": {
+    "aspect_ratio": 1.7777778,
+    "camera_owner": "dungeon_dogfood app",
+    "construction": "CameraView::from_camera(&app_camera, aspect_ratio)",
+    "frame_state": "render_frame ticks FrameClock, dispatches app input, emits app events, updates FPSController from app InputSystem snapshot, resolves PlayerState collision, then sets app_camera position before CameraView construction.",
+    "projection_source": "app-owned Camera::get_projection_matrix(aspect_ratio)",
+    "view_source": "app-owned Camera::get_view_matrix()",
+    "viewport": {
+      "height": 720,
+      "width": 1280
+    }
+  },
+  "residual_risks": [
+    "Windowed runtime smokes logged swapchain acquire retry warnings near timeout; this headless draw capture completed successfully.",
+    "Known renderer and dogfood warning noise remains outside this capture evidence scope.",
+    "The renderer-owned camera path remains available as a compatibility API but was not used for this capture."
+  ],
+  "row_layout": "vkCmdCopyImageToBuffer tightly packed (buffer_row_length=0)",
+  "sequence_index": 0,
+  "source": "Sequence",
+  "submitted_camera_view_path": {
+    "camera_view_type": "renderer::CameraView",
+    "render_call": "Renderer::render_scene_headless_with_view(scene, view)",
+    "renderer_internal_application": "Renderer::render_scene_internal_with_view forwards the caller-provided CameraView to scene submission.",
+    "runtime_mode": "headless",
+    "uses_caller_provided_view": true
+  },
+  "status": "succeeded"
+}

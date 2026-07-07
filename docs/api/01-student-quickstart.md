@@ -7,15 +7,19 @@ This guide is for students, hobbyists, and indie developers who are comfortable 
 Renderer-facade quickstart path:
 choose example binary -> create `EventLoop` and window -> `Renderer::new(...)` -> `take_startup_scene()` (or build your own `Scene`) -> per-event `update_input(...)` -> per-frame `render_scene(...)` or explicit frame API.
 
+App-owned quickstart path:
+custom app crate -> root `engine` facade helpers -> `Renderer::route_platform_input(...)` -> app-owned input/events/camera/frame update -> caller-provided `CameraView` render API.
+
 Project quickstart path:
 author/validate project package data -> run the root launcher with `cargo run -- --project <path>` -> use `--headless --capture_target draw` for validation captures.
 
 ## 3. Key Concepts
 - Use the root launcher for data-driven projects: `cargo run -- --project apps/editor/sample_project/engine.project.toml`.
 - Use example binaries from the `renderer` crate to learn the facade and diagnose renderer behavior.
-- Use app crates under `apps/<name>` for custom Rust application behavior.
+- Use app crates under `apps/<name>` for custom Rust application behavior. App crates may use `engine::prelude` when they want to own input, events, frame clock, and camera state.
 - Facade-first API boundary:
-  - `Renderer` owns rendering runtime and input integration.
+  - `Renderer` owns rendering runtime, assets, capture, resize, and platform/UI side effects.
+  - App-owned loops can own input dispatch, lifecycle events, frame clock, and camera state.
   - `Scene` owns runtime graph content to draw.
   - `AssetManager` loads models/textures/environments.
 - Two frame styles:
@@ -89,11 +93,18 @@ Custom app structure idea:
     src/game_state.rs  // gameplay/editor state
     src/scene_setup.rs // initial scene + model loads
 
-Frame tick:
+Renderer-owned example frame tick:
   1) ingest OS events
   2) renderer.update_input(...)
   3) mutate game/scene state
   4) render exactly one frame
+
+App-owned frame tick:
+  1) renderer.route_platform_input(...)
+  2) queue uncaptured input into app InputSystem
+  3) dispatch app input and emit app lifecycle/events
+  4) update app camera/player state
+  5) render with CameraView
 ```
 
 ## 5. Best Practices
@@ -103,6 +114,7 @@ Frame tick:
 - Begin with sync model load for correctness, then adopt deferred tickets for larger assets.
 - Keep asset loading code separate from draw submission code so failures are easier to isolate.
 - Keep custom Rust behavior in app crates under `apps/<name>` or start from `engine_pack new-app` for a standalone support-crate scaffold. Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, runtime physics scene loading, root-runtime audio playback, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and renderer-window generated app templates are deferred.
+- For app-owned gameplay/camera loops, follow the `dungeon_dogfood` ownership shape before introducing a larger runtime abstraction.
 
 ## 6. Gotchas & Failure Modes
 - Running `cargo run` at workspace root requires `--project <path>` for the launcher.

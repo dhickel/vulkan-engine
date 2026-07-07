@@ -4,19 +4,13 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use engine_events::EventEnvelope;
-use engine_events::{
-    AssetEvent, EngineEvent, EventBus, EventRecorder, EventStage, LifecycleEvent, PackageId,
-    ProjectId, SceneId,
-};
+use engine_events::{AssetEvent, PackageId, ProjectId, SceneId};
 use log::{info, warn};
 use renderer::prelude::{
-    default_capture_run_dir, single_capture_path, validate_package_manifest_file,
-    validate_package_manifest_str, validate_project_file, validate_scene_file,
-    validate_scene_file_with_options, validate_scene_str, validate_scene_str_with_options,
-    AssetManifestMode, AssetPolicyConfig, DurableAssetRecord, FrameCaptureRequest,
-    FrameCaptureSequence, FrameCaptureStatus, PackageManifest, PackageValidationOptions, Project,
-    ProjectPackage, ProjectValidationOptions, SceneValidationOptions, ValidationArea,
-    ValidationDiagnostic, ValidationError,
+    default_capture_run_dir, single_capture_path, validate_project_file,
+    validate_scene_file_with_options, AssetManifestMode, AssetPolicyConfig, DurableAssetRecord,
+    FrameCaptureRequest, FrameCaptureSequence, FrameCaptureStatus, Project, ProjectPackage,
+    ProjectValidationOptions, SceneValidationOptions,
 };
 use renderer::{FrameRenderOutcome, Renderer, RendererConfig, Scene};
 use winit::dpi::PhysicalSize;
@@ -25,12 +19,13 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowBuilder;
 
+use crate::events::{
+    runtime_event_bus, EngineEvent, EventBus, EventStage, LifecycleEvent, RuntimeEventDispatcher,
+};
 use crate::launch::LaunchOptions;
 
 const FALLBACK_APP_NAME: &str = "engine";
 const DEFAULT_HEADLESS_SMOKE_FRAMES: u32 = 3;
-const RUNTIME_EVENT_RECORDER_CAPACITY: usize = 512;
-
 #[derive(Clone, Debug)]
 struct RuntimeProject {
     project_path: PathBuf,
@@ -53,13 +48,12 @@ struct RuntimeEvents {
 impl RuntimeEvents {
     fn new() -> Self {
         Self {
-            bus: EventBus::with_recorder(EventRecorder::bounded(RUNTIME_EVENT_RECORDER_CAPACITY)),
+            bus: runtime_event_bus(),
         }
     }
 
     fn emit(&mut self, stage: EventStage, event: EngineEvent) {
-        self.bus.emit(stage, None, event);
-        let report = self.bus.drain_stage(stage);
+        let report = RuntimeEventDispatcher::emit_and_drain(&mut self.bus, stage, None, event);
         for failure in report.failures {
             warn!(
                 "runtime event listener {:?} failed for event {:?}: {}",

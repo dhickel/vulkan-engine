@@ -1,0 +1,168 @@
+{
+  "status": "fully_validated",
+  "date": "2026-07-07",
+  "scope": "Engine runtime abstraction split for GitHub issues 35-37: root engine facade, caller-owned camera/view rendering, app-owned input, app-owned event dispatch, and dogfood migration proof.",
+  "phase_reports": [
+    {
+      "phase": "00-preflight-drift",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-00-validation-report.md",
+      "summary": "Baseline drift was repaired or classified before implementation, including camera look-at compatibility and stale render target cleanup."
+    },
+    {
+      "phase": "01-root-facade",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-01-validation-report.md",
+      "summary": "The root engine crate now exposes a thin facade, prelude, raw primitive reexports, and FrameClock while preserving launcher behavior."
+    },
+    {
+      "phase": "02-renderer-view-path",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-02-validation-report.md",
+      "summary": "Renderer caller-view APIs accept CameraView and support no-dispatch rendering without forcing renderer-owned camera/input/event state."
+    },
+    {
+      "phase": "03-app-owned-input",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-03-validation-report.md",
+      "summary": "Input routing and InputActionEventEmitter support one app-owned dispatch per frame while preserving raw input primitives."
+    },
+    {
+      "phase": "04-app-owned-events",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-04-validation-report.md",
+      "summary": "RuntimeEventDispatcher and runtime_event_bus provide app-owned lifecycle/input stages with raw EventBus access still available."
+    },
+    {
+      "phase": "05-dogfood-migration",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-05-validation-report.md",
+      "summary": "dungeon_dogfood migrated to app-owned input/events/camera/frame state and caller-provided CameraView rendering."
+    },
+    {
+      "phase": "06-compat-docs-closeout",
+      "status": "passed",
+      "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/phase-06-validation-report.md",
+      "summary": "Specs, docs, knowledge, changelog, stale-reference classification, final command suite, and final review were completed."
+    }
+  ],
+  "commands": [
+    {
+      "command": "cargo fmt --check",
+      "status": "passed"
+    },
+    {
+      "command": "cargo check -p input --quiet",
+      "status": "passed"
+    },
+    {
+      "command": "cargo test -p input --quiet",
+      "status": "passed",
+      "summary": "10 tests passed."
+    },
+    {
+      "command": "cargo check -p engine_events --quiet",
+      "status": "passed"
+    },
+    {
+      "command": "cargo test -p engine_events --quiet",
+      "status": "passed",
+      "summary": "18 tests passed; 1 doctest ignored."
+    },
+    {
+      "command": "cargo check -p renderer --quiet",
+      "status": "passed",
+      "summary": "Passed with known renderer dead-code warning noise."
+    },
+    {
+      "command": "cargo test -p renderer --quiet",
+      "status": "passed",
+      "summary": "167 unit tests and 21 integration tests passed; 5 doctests ignored; known warnings remain."
+    },
+    {
+      "command": "cargo check -p renderer --examples --quiet",
+      "status": "passed",
+      "summary": "Passed with known warning noise."
+    },
+    {
+      "command": "cargo check -p dungeon_dogfood --quiet",
+      "status": "passed",
+      "summary": "Passed with known renderer and dogfood warning noise."
+    },
+    {
+      "command": "cargo check -p marching_terrain --quiet",
+      "status": "passed",
+      "summary": "Passed with known renderer and marching terrain warning noise."
+    },
+    {
+      "command": "cargo check --quiet",
+      "status": "passed",
+      "summary": "Workspace check passed with known renderer warning noise."
+    },
+    {
+      "command": "rg -n \"pending|planned|not implemented|TODO|/tmp|renderer-owned camera|renderer\\.events_mut|camera_position\\(|set_camera_position\\(|set_camera_look_at|engine_core|engine_runtime\" docs .internal-dev src apps",
+      "status": "passed",
+      "summary": "No stale active-contract hits requiring repair were left by the exact directive sweep."
+    },
+    {
+      "command": "rg -n \"renderer::prelude|engine::prelude|compatibility export|compatibility exports|root facade|beginner path|quickstart\" docs .internal-dev src apps",
+      "status": "passed",
+      "summary": "Hits were classified as updated intended contract, expected imports, compatibility labeling, or historical archived/debug artifacts."
+    }
+  ],
+  "runtime_smokes": [
+    {
+      "command": "RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test",
+      "status": "passed_with_residual_warnings",
+      "summary": "Startup reached Vulkan/device/swapchain/environment/material setup and ran until the timeout signal without fatal errors.",
+      "residual": "Repeated swapchain acquire retry warnings appeared near timeout in this environment."
+    },
+    {
+      "command": "RUST_LOG=debug timeout --signal=INT 60s cargo run -p dungeon_dogfood",
+      "status": "passed_with_residual_warnings",
+      "summary": "Startup reached audio bridge, scene seeding, and 'Dungeon dogfood initialized, starting event loop' before running until timeout.",
+      "residual": "Repeated swapchain acquire retry warnings appeared near timeout in this environment."
+    }
+  ],
+  "headless_captures": [
+    {
+      "status": "passed",
+      "png": ".internal-dev/captures/engine-runtime-abstractions-issues-35-37/phase-05-dogfood/dungeon-dogfood-frame-0-draw-seq-0000.png",
+      "json": ".internal-dev/captures/engine-runtime-abstractions-issues-35-37/phase-05-dogfood/dungeon-dogfood-frame-0-draw-seq-0000.json",
+      "summary": "Headless dogfood draw capture succeeded at 1280x720 and visual inspection showed a nonblank dungeon corridor. The sidecar records post-capture validation metadata for the requested app-owned CameraView, submitted render_scene_headless_with_view path, unused legacy renderer camera path, and residual risks."
+    }
+  ],
+  "tooling_constraints": [
+    "Runtime smokes are timeout-bound by repository policy; exit code 124 after successful startup is treated as expected for long-running event loops.",
+    "Known dead-code warning noise remains in renderer, dogfood, and marching terrain checks. It is outside this refactor's behavioral contract.",
+    "Windowed runtime validation in this environment logs swapchain acquire retry warnings near timeout. Headless capture provides nonblank visual proof for the migrated caller-view dogfood path."
+  ],
+  "superseded_artifacts": [
+    {
+      "artifact": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/",
+      "classification": "historical planning artifact; not active contract for the new root engine facade."
+    },
+    {
+      "artifact": ".internal-dev/debug_reports/",
+      "classification": "historical debug evidence; paths and older beginner-path wording are not canonical closeout evidence."
+    },
+    {
+      "artifact": ".internal-dev/changelogs/2026-07-07-engine-runtime-abstractions-phase-03-app-owned-input.md",
+      "classification": "phase changelog retained as historical record; Phase 06 docs/specs supersede its future-cleanup language."
+    },
+    {
+      "artifact": ".internal-dev/changelogs/2026-07-07-engine-runtime-abstractions-phase-04-app-owned-events.md",
+      "classification": "phase changelog retained as historical record; Phase 06 docs/specs supersede its future-cleanup language."
+    }
+  ],
+  "residual_risks": [
+    "Legacy renderer-owned lifecycle/input/camera APIs remain by design for compatibility and examples; future changes should label rather than remove them unless a separate migration plan accepts the break.",
+    "The root engine facade is intentionally thin. Higher-level engine orchestration should be added only after more dogfood pressure proves the shape.",
+    "Swapchain acquire retry warnings remain a runtime/environment residual and should be investigated separately if they reproduce outside timeout-bound validation."
+  ],
+  "final_quality_review": {
+    "status": "passed",
+    "path": ".internal-dev/plans/engine-runtime-abstractions-issues-35-37/validation/final-quality-review.md",
+    "summary": "Final review found one evidence metadata gap, which was remediated by enriching the canonical capture sidecar with caller-view path metadata and then revalidated."
+  }
+}

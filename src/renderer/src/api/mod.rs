@@ -57,7 +57,10 @@ pub use input::{
     InputSystem, LayerDescriptor, LayerHandle, LayerId, LayerPriority, LayerSpec,
 };
 pub use loading::{LoadStatus, LoadTicket};
-pub use renderer::{EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer};
+pub use renderer::{
+    CameraView, EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer,
+    RendererInputRouting, RendererInputSuppression,
+};
 pub use scene::{
     validate_scene_file, validate_scene_file_with_options, validate_scene_str,
     validate_scene_str_with_options, PointLight, PointLightId, Scene, SceneAssetReference,

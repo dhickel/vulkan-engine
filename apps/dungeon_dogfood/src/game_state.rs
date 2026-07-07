@@ -24,6 +24,6 @@ impl GameState {
         // - Read input movement intent
         // - Run collision solver
         // - Update player_position with resolved movement
-        // - Update camera position via renderer.set_camera_position()
+        // - Update app-owned camera before building a renderer CameraView
     }
 }

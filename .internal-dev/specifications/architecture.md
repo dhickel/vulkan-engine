@@ -1,0 +1,26 @@
+---
+schema_version: 1
+document_type: architecture-specification
+status: active
+owner: architecture
+created: 2026-07-03
+---
+
+# Architecture Specification
+
+## Active Contracts
+
+| id | area | status | intended_contract | observed_anchors | drift_gaps | validation | related_decisions | related_knowledge |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ARCH-20260703-01 | Workspace layout | active | Root `engine` is a migration stub; canonical renderer runtime entrypoints live under `src/renderer/examples/`; support crates and apps remain separate workspace members. | `Cargo.toml`, `src/main.rs`, root `AGENTS.md` | None currently recorded. | `cargo check`, crate-specific checks, and example checks for touched areas. | none | none |
+| ARCH-20260703-02 | Renderer visual evidence | active | Renderer, scene, shader, camera, material, asset, and Vulkan behavior that claims visual proof uses headless capture evidence instead of desktop screenshots by default. | `.internal-dev/skills/engine-headless-capture-validation/SKILL.md` | None currently recorded. | Timeout-bound headless captures with PNG and JSON sidecars. | none | none |
+| ARCH-20260707-01 | App-owned input routing | active | Root/app runtime paths may own `InputSystem` dispatch and action-event emission while the renderer owns platform/UI/debug/capture side effects and returns an input routing decision. Legacy renderer-owned input remains compatibility behavior. | `src/input.rs`, `src/renderer/src/api/renderer.rs`, `apps/dungeon_dogfood/src/main.rs`, `docs/internal/09-input-winit-integration.md` | Renderer examples still use the legacy compatibility path by design. | `cargo test -p engine`, `cargo test -p renderer`, `cargo check -p dungeon_dogfood`, legacy-call grep for migrated apps. | `DECISION-20260707-01` | none |
+| ARCH-20260707-02 | App-owned event lifecycle | active | Root/app runtime paths may own one `EventBus` for lifecycle, input, and subsystem events. `RuntimeEventDispatcher` emits/drains lifecycle stages against a caller-owned bus; renderer-owned lifecycle events remain compatibility behavior for legacy renderer frame APIs. | `src/events.rs`, `src/runtime.rs`, `tests/runtime_event_dispatcher.rs`, `apps/dungeon_dogfood/src/main.rs`, `docs/api/12-events-and-lifecycle.md` | Renderer legacy frame APIs still emit renderer-owned lifecycle events for compatibility. | `cargo test -p engine`, `cargo test -p engine_events`, `cargo test -p renderer`, grep for `FrameStarted`/`FrameEnded`. | `DECISION-20260707-02` | none |
+| ARCH-20260707-03 | Dogfood runtime ownership proof | active | `dungeon_dogfood` is the real-app proof that input, lifecycle events, camera/player update, and audio telemetry can be app-owned while renderer performs render/capture work from supplied scene/view data. | `apps/dungeon_dogfood/src/main.rs`, `apps/dungeon_dogfood/src/audio_bridge.rs`, `apps/dungeon_dogfood/src/events.rs`, `.internal-dev/captures/engine-runtime-abstractions-issues-35-37/phase-05-dogfood/` | Windowed smoke currently shows swapchain acquire retry warnings in this environment; headless draw capture succeeds. | `cargo check -p dungeon_dogfood`, `cargo test -p dungeon_dogfood`, `cargo check`, windowed smoke, headless draw capture. | `DECISION-20260707-01`, `DECISION-20260707-02` | none |
+| ARCH-20260707-04 | Root launcher and app facade crate shape | active | The root `engine` crate intentionally has both a binary launcher and library facade. The binary remains the data-driven project launcher; the library remains a thin app-facing reexport/helper layer over support crates. | `Cargo.toml`, `src/main.rs`, `src/lib.rs`, `src/runtime.rs`, `src/launch.rs` | Root facade must not become a monolithic engine runtime or introduce reverse dependencies from support crates. | `cargo check`, `cargo test -p engine`, facade import tests. | `DECISION-20260707-03` | none |
+| ARCH-20260707-05 | Render view boundary | active | App-owned camera state crosses into renderer through `CameraView`, a renderer facade DTO re-exported by root `engine::render` and `engine::prelude`. | `src/renderer/src/api/renderer.rs`, `src/render.rs`, `apps/dungeon_dogfood/src/main.rs`, `docs/internal/04-api-to-backend-handoff.md` | `CameraView` must stay Vulkan-opaque and should not expand into a broad runtime abstraction. | `cargo test -p renderer`, `cargo test -p engine`, dogfood headless capture. | `DECISION-20260707-04` | none |
+
+## Drift Records
+
+| id | spec | status | observed_drift | impact | routing | source | review_after |
+| --- | --- | --- | --- | --- | --- | --- | --- |

@@ -1,0 +1,26 @@
+---
+schema_version: 1
+document_type: services-specification
+status: active
+owner: subsystems
+created: 2026-07-03
+---
+
+# Services Specification
+
+## Active Contracts
+
+| id | service_area | status | intended_contract | observed_anchors | ownership_boundary | drift_gaps | validation | related_decisions | related_knowledge |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SVC-20260703-03 | Renderer runtime | active | Renderer owns Vulkan-backed frame submission, scene data upload, camera state used for rendering, and capture/debug output. | `src/renderer/`, renderer examples, capture skill | Renderer APIs expose stable behavior; Vulkan internals own backend details. | None currently recorded. | `cargo check -p renderer --examples`, targeted tests, headless captures when visible behavior changes. | none | none |
+| SVC-20260703-04 | Support crates | active | Input, events, audio, physics, scripting, pack, editor, and dogfood crates remain independently checkable workspace members. | Workspace `Cargo.toml`, crate `AGENTS.md` files | Each crate owns its local conventions and validation commands. | None currently recorded. | Package-specific `cargo check`/`cargo test` from root AGENTS. | none | none |
+| SVC-20260707-01 | App-owned input service | active | App-owned runtime paths dispatch caller-owned input exactly once per app frame, then use `InputActionEventEmitter` to emit snapshot-derived `InputActionEvent`s once into the caller-owned `EventBus`. Renderer platform routing can suppress UI-captured gameplay input without owning app input dispatch. | `src/input.rs`, `src/renderer/src/api/renderer.rs`, `tests/input_action_events.rs` | Root facade owns app helper behavior; input crate `dispatch_frame` semantics remain unchanged. | `cargo test -p engine`, `cargo test -p input`, `cargo test -p renderer`. | `DECISION-20260707-01` | none |
+| SVC-20260707-02 | App-owned lifecycle event service | active | App-owned runtime paths use one caller-owned `EventBus` for frame lifecycle and input/subsystem events. `RuntimeEventDispatcher` emits and drains `FrameStarted`/`FrameEnded` on that bus while preserving raw `EventBus` access for direct users. | `src/events.rs`, `src/runtime.rs`, `tests/runtime_event_dispatcher.rs` | Root facade owns app helper behavior; `engine_events` owns vocabulary/dispatch mechanics; renderer-owned events remain compatibility state for renderer legacy frame APIs. | `cargo test -p engine`, `cargo test -p engine_events`, `cargo test -p renderer`. | `DECISION-20260707-02` | none |
+| SVC-20260707-03 | Dogfood runtime integration service | active | Dogfood wires app-owned input, event lifecycle, frame clock, camera/controller, audio telemetry, collision correction, and renderer caller-view submission into one real runtime loop. | `apps/dungeon_dogfood/src/main.rs`, `apps/dungeon_dogfood/src/audio_bridge.rs`, `apps/dungeon_dogfood/src/events.rs` | Dogfood owns gameplay/runtime state; renderer owns rendering, assets, capture, resize, and platform side effects. | `cargo check -p dungeon_dogfood`, `cargo test -p dungeon_dogfood`, `cargo check`, windowed smoke, headless draw capture. | `DECISION-20260707-01`, `DECISION-20260707-02` | none |
+| SVC-20260707-04 | Root facade service | active | Root `engine` library modules provide light app-facing imports and helpers while preserving direct raw support-crate access. | `src/lib.rs`, `src/camera.rs`, `src/events.rs`, `src/frame.rs`, `src/input.rs`, `src/render.rs`, `tests/facade_imports.rs` | Root facade must remain thin and must not own support-crate internals. | `cargo test -p engine`, `cargo check`. | `DECISION-20260707-03` | none |
+| SVC-20260707-05 | Renderer caller-view service | active | Renderer accepts `CameraView` for render-only app-owned paths and applies that view to scene submission without dispatching renderer-owned app lifecycle/input/camera state. | `src/renderer/src/api/renderer.rs`, `src/renderer/tests/integration.rs`, `apps/dungeon_dogfood/src/main.rs` | Renderer still owns Vulkan submission and capture; apps own the camera state used to build the view. | `cargo test -p renderer`, dogfood headless draw capture. | `DECISION-20260707-04` | none |
+
+## Drift Records
+
+| id | spec | status | observed_drift | impact | routing | source | review_after |
+| --- | --- | --- | --- | --- | --- | --- | --- |

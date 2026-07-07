@@ -10,10 +10,17 @@ mod scene_seed;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
+use engine::camera::{Camera, FPSController};
+use engine::events::{runtime_event_bus, DispatchReport, EventBus, RuntimeEventDispatcher};
+use engine::frame::FrameClock;
+use engine::input::{
+    queue_routed_input_event, ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor,
+    LayerPriority,
+};
+use engine::render::CameraView;
 use generator::{generate_dungeon, GeneratedDungeon, ProceduralLevelConfig, GENERATED_LEVEL_ID};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
@@ -26,6 +33,7 @@ use scene_seed::{renderer_visual_tuning, LevelScene};
 use thiserror::Error;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::KeyCode;
 use winit::window::WindowBuilder;
 
 const APP_WINDOW_TITLE: &str = "Dungeon Dogfood - Phase 07";
@@ -261,9 +269,10 @@ fn run() -> Result<(), AppError> {
     };
 
     let mut renderer = renderer::Renderer::new(config, &window).map_err(AppError::RendererInit)?;
-    events::install_dogfood_event_logger(&mut renderer);
+    let mut app_events = runtime_event_bus();
+    events::install_dogfood_event_logger(&mut app_events);
     let audio_report = audio_bridge::run_startup_audio_probe(
-        &mut renderer,
+        &mut app_events,
         &content_pack,
         audio_bridge::audio_smoke_requested(),
     );
@@ -272,7 +281,6 @@ fn run() -> Result<(), AppError> {
         audio_report.clip_id,
         audio_report.device_smoke_status
     );
-    renderer.install_default_fps_input();
 
     let mut scene = renderer::Scene::new();
     {
@@ -293,11 +301,14 @@ fn run() -> Result<(), AppError> {
             -0.5,
         );
     let mut player = PlayerState::new(spawn_position);
-    renderer.set_camera_position(spawn_position);
+    let mut app_camera = Camera::new(spawn_position);
+    let mut app_input = InputSystem::new();
+    let mut fps_controller = install_app_fps_input(&mut app_input);
+    let mut action_events = InputActionEventEmitter::new();
+    let mut frame_clock = FrameClock::new();
 
     log::info!("Dungeon dogfood initialized, starting event loop");
 
-    let mut last_frame = Instant::now();
     let mut last_window_size = window.inner_size();
     let mut resize_pending = false;
     window.request_redraw();
@@ -306,11 +317,15 @@ fn run() -> Result<(), AppError> {
         .run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Poll);
 
-            if let Err(e) = renderer.update_input(&window, &event) {
-                log::error!("Input update failed: {}", e);
-                elwt.exit();
-                return;
-            }
+            let routing = match renderer.route_platform_input(&window, &event) {
+                Ok(routing) => routing,
+                Err(e) => {
+                    log::error!("Platform input routing failed: {}", e);
+                    elwt.exit();
+                    return;
+                }
+            };
+            queue_routed_input_event(&mut app_input, routing, &event);
 
             match event {
                 Event::WindowEvent { event, window_id } if window_id == window.id() => {
@@ -356,17 +371,20 @@ fn run() -> Result<(), AppError> {
                                 }
                             }
 
-                            let now = Instant::now();
-                            let delta_seconds = now.duration_since(last_frame).as_secs_f32();
-                            last_frame = now;
-
                             match render_frame(
                                 &mut renderer,
-                                &window,
                                 &mut scene,
                                 &collision_world,
                                 &mut player,
-                                delta_seconds,
+                                &mut app_camera,
+                                &mut fps_controller,
+                                &mut app_input,
+                                &mut action_events,
+                                &mut app_events,
+                                &mut frame_clock,
+                                current_size.width,
+                                current_size.height,
+                                false,
                             ) {
                                 Ok(FrameRenderOutcome::Rendered) => {
                                     if resize_pending {
@@ -400,6 +418,114 @@ fn run() -> Result<(), AppError> {
         .map_err(AppError::EventLoop)?;
 
     Ok(())
+}
+
+fn install_app_fps_input(input: &mut InputSystem) -> FPSController {
+    let mut map = ActionMap::new();
+    map.bind_key("move.forward", KeyCode::KeyW);
+    map.bind_key("move.backward", KeyCode::KeyS);
+    map.bind_key("move.left", KeyCode::KeyA);
+    map.bind_key("move.right", KeyCode::KeyD);
+    map.bind_key("move.up", KeyCode::Space);
+    map.bind_key("move.down", KeyCode::ShiftLeft);
+
+    input.add_layer(
+        LayerDescriptor::new("dogfood-fps-actions", LayerPriority(10)),
+        map.into_layer(),
+    );
+
+    FPSController::new(0.002, 1.0)
+}
+
+fn log_dispatch_failures(report: DispatchReport, context: &str) {
+    for failure in report.failures {
+        log::warn!(
+            "{context} listener {:?} failed for event {:?}: {}",
+            failure.listener,
+            failure.sequence,
+            failure.message
+        );
+    }
+}
+
+fn camera_view(camera: &Camera, width: u32, height: u32) -> CameraView {
+    let aspect_ratio = if height == 0 {
+        1.0
+    } else {
+        (width.max(1) as f32) / (height as f32)
+    };
+    CameraView::from_camera(camera, aspect_ratio)
+}
+
+fn render_frame(
+    renderer: &mut renderer::Renderer,
+    scene: &mut renderer::Scene,
+    collision_world: &CollisionWorld,
+    player: &mut PlayerState,
+    camera: &mut Camera,
+    fps_controller: &mut FPSController,
+    input: &mut InputSystem,
+    action_events: &mut InputActionEventEmitter,
+    events: &mut EventBus,
+    frame_clock: &mut FrameClock,
+    viewport_width: u32,
+    viewport_height: u32,
+    headless: bool,
+) -> Result<renderer::FrameRenderOutcome, RendererError> {
+    let frame = frame_clock.tick();
+
+    input.dispatch_frame();
+    action_events.emit_from_snapshot(events, input.snapshot(), frame.index);
+    log_dispatch_failures(RuntimeEventDispatcher::drain_input(events), "dogfood input");
+    log_dispatch_failures(
+        RuntimeEventDispatcher::frame_started(events, frame.index),
+        "dogfood lifecycle",
+    );
+
+    fps_controller.update_from_snapshot(input.snapshot(), frame.delta_seconds, camera);
+    match player.ingest_camera_intent(camera.get_position(), frame.delta_seconds) {
+        CameraIntentGuard::Accepted => {}
+        CameraIntentGuard::Clamped {
+            attempted_displacement,
+            applied_displacement,
+        } => {
+            log::warn!(
+                "Clamped player movement from {:.3}m to {:.3}m for this frame.",
+                attempted_displacement,
+                applied_displacement
+            );
+        }
+        CameraIntentGuard::RejectedNonFinite => {
+            log::error!(
+                "Rejected non-finite camera intent before collision resolution; keeping previous player position."
+            );
+        }
+    }
+    collision::resolve_player_step(player, collision_world, frame.delta_seconds);
+    if !player.has_finite_position() {
+        log::error!(
+            "Player position became non-finite after collision resolution: {:?}",
+            player.position
+        );
+        return Err(RendererError::InvalidState(
+            "player position must remain finite before camera view construction".to_string(),
+        ));
+    }
+    camera.set_position(player.position);
+
+    renderer.pump_asset_tasks(32)?;
+    let view = camera_view(camera, viewport_width, viewport_height);
+    let outcome = if headless {
+        renderer.render_scene_headless_with_view(scene, view)?
+    } else {
+        renderer.render_scene_with_view(scene, view)?
+    };
+    log_dispatch_failures(
+        RuntimeEventDispatcher::frame_ended(events, frame.index),
+        "dogfood lifecycle",
+    );
+
+    Ok(outcome)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,57 +650,6 @@ fn parse_level_arg() -> Option<String> {
     None
 }
 
-fn render_frame(
-    renderer: &mut renderer::Renderer,
-    window: &winit::window::Window,
-    scene: &mut renderer::Scene,
-    collision_world: &CollisionWorld,
-    player: &mut PlayerState,
-    delta_seconds: f32,
-) -> Result<renderer::FrameRenderOutcome, RendererError> {
-    renderer.pump_asset_tasks(32)?;
-
-    let mut frame = renderer.begin_frame(window)?;
-
-    // begin_frame() advances the internal FPS controller from input state.
-    // Read that intended movement, resolve collisions, and push corrected eye position back.
-    let camera_pos = renderer.camera_position();
-    match player.ingest_camera_intent(camera_pos, delta_seconds) {
-        CameraIntentGuard::Accepted => {}
-        CameraIntentGuard::Clamped {
-            attempted_displacement,
-            applied_displacement,
-        } => {
-            log::warn!(
-                "Clamped player movement from {:.3}m to {:.3}m for this frame.",
-                attempted_displacement,
-                applied_displacement
-            );
-        }
-        CameraIntentGuard::RejectedNonFinite => {
-            log::error!(
-                "Rejected non-finite camera intent before collision resolution; keeping previous player position."
-            );
-        }
-    }
-    collision::resolve_player_step(player, collision_world, delta_seconds);
-    if !player.has_finite_position() {
-        log::error!(
-            "Player position became non-finite after collision resolution: {:?}",
-            player.position
-        );
-        return Err(RendererError::InvalidState(
-            "player position must remain finite before camera write-back".to_string(),
-        ));
-    }
-    renderer.set_camera_position(player.position);
-
-    let outcome = renderer.render_scene_in_frame(&mut frame, scene)?;
-    renderer.end_frame(frame)?;
-
-    Ok(outcome)
-}
-
 fn print_level_load_help() {
     eprintln!();
     eprintln!("Built-in level selectors:");
@@ -615,7 +690,7 @@ fn run_headless(
     level: &ParsedLevel,
     content_pack: &content::ContentPack,
     collision_world: &CollisionWorld,
-    loaded_level: &LoadedLevel,
+    _loaded_level: &LoadedLevel,
     headless_opts: &HeadlessOptions,
 ) -> Result<(), AppError> {
     log::info!("Starting dogfood headless capture run");
@@ -641,9 +716,10 @@ fn run_headless(
     };
 
     let mut renderer = renderer::Renderer::new_headless(config).map_err(AppError::RendererInit)?;
-    events::install_dogfood_event_logger(&mut renderer);
+    let mut app_events = runtime_event_bus();
+    events::install_dogfood_event_logger(&mut app_events);
     let audio_report = audio_bridge::run_startup_audio_probe(
-        &mut renderer,
+        &mut app_events,
         content_pack,
         audio_bridge::audio_smoke_requested(),
     );
@@ -652,7 +728,6 @@ fn run_headless(
         audio_report.clip_id,
         audio_report.device_smoke_status
     );
-    renderer.install_default_fps_input();
 
     let mut scene = renderer::Scene::new();
     {
@@ -673,7 +748,11 @@ fn run_headless(
             -0.5,
         );
     let mut player = PlayerState::new(spawn_position);
-    renderer.set_camera_position(spawn_position);
+    let mut app_camera = Camera::new(spawn_position);
+    let mut app_input = InputSystem::new();
+    let mut fps_controller = install_app_fps_input(&mut app_input);
+    let mut action_events = InputActionEventEmitter::new();
+    let mut frame_clock = FrameClock::new();
 
     // Configure frame capture if requested
     let capture_target = headless_opts.capture_target;
@@ -725,9 +804,26 @@ fn run_headless(
     let mut succeeded_paths = HashSet::new();
 
     for frame_num in 0..frame_budget {
-        if let Err(err) = renderer.render_scene_headless(&mut scene) {
-            log::error!("Headless render failed at frame {frame_num}: {err}");
-            return Err(AppError::RendererInit(err));
+        match render_frame(
+            &mut renderer,
+            &mut scene,
+            collision_world,
+            &mut player,
+            &mut app_camera,
+            &mut fps_controller,
+            &mut app_input,
+            &mut action_events,
+            &mut app_events,
+            &mut frame_clock,
+            1280,
+            720,
+            true,
+        ) {
+            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Err(err) => {
+                log::error!("Headless render failed at frame {frame_num}: {err}");
+                return Err(AppError::RendererInit(err));
+            }
         }
 
         match renderer.last_frame_capture_status() {

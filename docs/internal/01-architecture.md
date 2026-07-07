@@ -6,7 +6,8 @@
 
 | Module | Path | Role | Key Dependencies |
 |--------|------|------|-----------------|
-| `api` | `src/renderer/src/api/` | Public facade: `Renderer`, `AssetManager`, `Scene`, hooks, config | `data`, `vulkan`, `scene`, `input` |
+| root `engine` facade | `src/` | App-owned runtime helpers and data-driven launcher: camera, events, frame, input, render reexports | `renderer`, `input`, `engine_events` |
+| `api` | `src/renderer/src/api/` | Public renderer facade: `Renderer`, `AssetManager`, `Scene`, hooks, config | `data`, `vulkan`, `scene`, `input` |
 | `data` | `src/renderer/src/data/` | CPU-side caches, handles, GPU data structs, model/texture ingest | `vulkan::vk_types`, `vulkan::vk_storage`, `vulkan::vk_descriptor` |
 | `vulkan` | `src/renderer/src/vulkan/` | Vulkan init, frame loop, descriptors, pipelines, memory | `data::*`, `ash` |
 | `scene` | `src/renderer/src/scene/` | Scene graph hierarchy, render submission flattening | `data::handles`, `data::gpu_data` |
@@ -15,7 +16,7 @@
 | `texture` | `src/renderer/src/texture.rs` | **Legacy stub** — single comment line, retained for experimentation | — |
 | `input` | `src/input/src/lib.rs` | Layered input dispatch, action maps, polling snapshots | `winit` |
 
-The workspace also includes `apps/dungeon_dogfood/` — a dogfood application that exercises the engine with level loading, collision, and marker-based content.
+The workspace also includes `apps/dungeon_dogfood/` — a dogfood application that exercises the engine with level loading, collision, marker-based content, app-owned runtime primitives, and caller-view rendering.
 
 ## Data Flow: Init → Per-Frame → Shutdown
 
@@ -25,13 +26,15 @@ The workspace also includes `apps/dungeon_dogfood/` — a dogfood application th
    - Creates winit window
    - `VkRenderCore::new()` → Vulkan instance, device, swapchain, allocators, command pools
    - `AssetManager::new()` → handle allocators, default textures (white, blue normal, black, pink error)
-   - `InputSystem::new()` → empty layer registry
+   - `InputSystem::new()` → empty renderer-owned layer registry for compatibility/example paths
    - Debug UI (imgui context, font atlas)
    - Optional: loads startup scene (default PBR environment + test geometry)
 
 ### Per-Frame
 
-2. **`update_input()`** → feeds winit events to imgui + `InputSystem::queue_winit_window_event()`
+2. **Input routing**:
+   - Compatibility renderer-owned path: `update_input()` feeds winit events to imgui + renderer-owned `InputSystem`
+   - App-owned path: `route_platform_input()` handles platform/UI side effects and returns routing data for app-owned `InputSystem`
 3. **`render_scene()`** (or explicit frame trio):
    - Pumps async asset tasks (transfers, load completions)
    - `begin_frame()`: acquires swapchain image, waits on fence, resets command pool
@@ -44,6 +47,9 @@ The workspace also includes `apps/dungeon_dogfood/` — a dogfood application th
      - `vkQueueSubmit2` with fence + semaphores
      - `vkQueuePresentKHR`
    - `end_frame()`: advances frame counter, processes deferred deletions
+
+App-owned custom loops can instead build a `CameraView` from app camera/gameplay state and call
+`render_scene_with_view(...)` or `render_scene_headless_with_view(...)`. That path avoids renderer-owned input/camera/lifecycle dispatch for app state while keeping Vulkan submission inside the renderer.
 
 ### Shutdown
 

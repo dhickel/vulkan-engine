@@ -1,0 +1,24 @@
+---
+schema_version: 1
+document_type: decisions-specification
+status: active
+owner: internal-dev
+created: 2026-07-03
+---
+
+# Decisions
+
+## Active Decisions
+
+| id | decision | status | owner | source | decided_on | justification | alternatives_or_tradeoffs | caveats | affected_specs | knowledge_ref | review_after |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| DECISION-20260703-01 | Use specifications as the living intended-truth store for engine internal-dev workflow. | active | internal-dev | user request | 2026-07-03 | Magenta2's upgraded workflow made specifications more precise than catch-all focus or notes files. | Keeping notes/focus as active destinations was simpler but caused weaker routing and stale guidance. | Existing legacy artifacts remain historical evidence until deliberately migrated or archived. | `workflow.md`, `architecture.md`, `api.md`, `web.md` | none | 2026-08-03 |
+| DECISION-20260707-01 | Split renderer platform input handling from app-owned input dispatch. | active | runtime architecture | Phase 03 engine runtime abstractions implementation | 2026-07-07 | Apps need to dispatch caller-owned input and emit action events once per app frame without losing renderer-owned ImGui/debug/capture/cursor side effects. | Keeping all queueing inside `Renderer::update_input` preserves compatibility but prevents app-owned input streams; moving platform handling into root would invert the dependency boundary. | Renderer examples and legacy paths may keep `Renderer::update_input`; dogfood is now the migrated real-app proof. | `architecture.md`, `service-graph.md`, `services.md`, `api.md` | none | 2026-08-07 |
+| DECISION-20260707-02 | Keep app lifecycle dispatch in root helpers over a caller-owned `EventBus`. | active | runtime architecture | Phase 04 engine runtime abstractions implementation | 2026-07-07 | The migrated app path needs one bus for lifecycle, input, and subsystem events without routing app mutation through renderer-owned state. | Wrapping the bus in a required runtime object would hide raw primitives; keeping lifecycle events in renderer APIs would duplicate app-owned `FrameStarted`/`FrameEnded` on the new path. | Renderer legacy frame APIs continue to emit renderer-owned lifecycle events for compatibility; dogfood now emits app-owned lifecycle/audio/input telemetry. | `architecture.md`, `service-graph.md`, `services.md`, `api.md` | none | 2026-08-07 |
+| DECISION-20260707-03 | Keep root `engine` as both launcher binary and thin library facade. | active | runtime architecture | Phase 06 closeout | 2026-07-07 | The workspace needs a data-driven launcher and a convenient app-facing import surface, but support crates must remain directly usable and independently checkable. | Creating a heavier runtime crate or required app object would over-abstract the hobbyist engine; keeping only raw crates would make app-owned loops more repetitive. | The root facade may grow only as thin helpers/reexports; support crates and renderer must not depend on root `engine`. | `architecture.md`, `service-graph.md`, `services.md`, `api.md` | none | 2026-08-07 |
+| DECISION-20260707-04 | Keep `CameraView` in the renderer facade and re-export it through root `engine`. | active | renderer architecture | Phase 02 and Phase 06 closeout | 2026-07-07 | The renderer consumes view/projection data at the render submission boundary, while apps need a simple DTO to pass app-owned camera state without giving renderer ownership of gameplay camera. | Putting the DTO only in root would create a bad renderer-to-root pressure; hiding it behind a broad runtime object would over-abstract the app loop. | `CameraView` must stay Vulkan-opaque and narrow. Future view/projection additions should be validated against dogfood and renderer examples. | `architecture.md`, `service-graph.md`, `services.md`, `api.md` | none | 2026-08-07 |
+
+## Superseded Decisions
+
+| id | decision | status | owner | source | decided_on | superseded_on | superseded_by | knowledge_ref | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

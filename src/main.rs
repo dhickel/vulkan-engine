@@ -1,10 +1,7 @@
 use std::env;
 use std::process;
 
-mod launch;
-mod runtime;
-
-use launch::{LaunchCommand, LaunchError, LaunchOptions};
+use engine::launch::{self, LaunchCommand, LaunchError, LaunchOptions};
 
 fn main() {
     init_logging();
@@ -22,7 +19,7 @@ fn main() {
 }
 
 fn run(options: LaunchOptions) -> Result<(), LaunchError> {
-    runtime::run(options).map_err(LaunchError::Runtime)
+    engine::runtime::run(options).map_err(LaunchError::Runtime)
 }
 
 fn exit_with_error(err: LaunchError) -> ! {

@@ -12,6 +12,7 @@ env_logger = "0.11"
 log = "0.4"
 renderer = { path = "src/renderer" }
 engine_events = { path = "src/events" }
+input = { path = "src/input" }
 launch_shared = { path = "src/launch_shared" }
 winit = "0.29"
 

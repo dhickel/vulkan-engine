@@ -94,7 +94,7 @@ Use an app crate when the project needs custom Rust behavior:
 cargo run -p dungeon_dogfood
 ```
 
-App crates can depend on `renderer`, `input`, `physics`, `audio`, and other workspace support crates directly. They own their Rust control flow and may choose whether to consume project/package/scene data. `apps/dungeon_dogfood` is the current custom app path with canonical project/package/scene contracts and its own headless draw capture support (see [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md)). App crates can consume renderer events through the public facade, physics crates can translate ray/contact records into `engine_events` payloads for app-owned dispatch, and app-owned audio bridges can emit `AudioEvent` values.
+App crates can depend on the root `engine` facade, `renderer`, `input`, `physics`, `audio`, and other workspace support crates directly. They own their Rust control flow and may choose whether to consume project/package/scene data. `apps/dungeon_dogfood` is the current custom app path with canonical project/package/scene contracts, app-owned input/event/camera/frame state, caller-view renderer submission, and its own headless draw capture support (see [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md)). App crates can consume renderer events through the public facade on legacy renderer-owned paths, or use a caller-owned `EventBus` through the root facade for app-owned dispatch. Physics crates can translate ray/contact records into `engine_events` payloads, and app-owned audio bridges can emit `AudioEvent` values.
 
 For an off-workspace compile-first starting point:
 
@@ -103,7 +103,7 @@ cargo run -p engine_pack -- new-app /tmp/engine-app --id app.example --name "Exa
 cargo check --manifest-path /tmp/engine-app/Cargo.toml
 ```
 
-The generated scaffold uses public support crates (`engine_events`, `input`, and `physics`) by absolute path and does not edit the root workspace. Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, automatic scene collision loading, root-runtime audio playback, broad dogfood migration, and renderer-window app generation are later roadmap work, not part of the current root launcher.
+The generated scaffold uses public support crates (`engine_events`, `input`, and `physics`) by absolute path and does not edit the root workspace. Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, automatic scene collision loading, root-runtime audio playback, and renderer-window app generation are later roadmap work, not part of the current root launcher.
 
 ## 7. See Also
 

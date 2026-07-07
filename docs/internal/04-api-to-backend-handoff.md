@@ -7,8 +7,12 @@ This chapter is for contributors changing how scene-facing API state becomes Vul
 Current handoff path:
 `Renderer::render_scene(...)` -> `Renderer::render_scene_internal(...)` -> `Scene::build_submission()` -> `VkRender::render_with_hooks(...)` -> `VkRenderCore::render_with_hooks(...)` -> rendergraph passes.
 
+Caller-view handoff path:
+app/root facade camera state -> `CameraView` -> `Renderer::render_scene_with_view(...)` -> `Scene::build_submission()` -> `VkRender::render_with_hooks(...)`.
+
 ## 3. Key Concepts
 - `RenderSubmission` is the immutable frame snapshot boundary between scene data and backend execution.
+- `CameraView` is the caller-provided camera/view DTO for app-owned runtime paths.
 - `DebugUiFrameContext` is a facade-to-backend telemetry snapshot boundary for debug UI composition.
 - Event envelopes are facade/runtime telemetry boundaries; they must not carry backend-owned Vulkan state.
 - Scene-facing types stay Vulkan-opaque: they emit handles (`MeshHandle`, `EnvironmentHandle`) and transforms, not Vulkan objects.
@@ -29,6 +33,13 @@ runtime.core.debug_ui.update_frame_context(DebugUiFrameContext {
     // ...
 });
 runtime.render_with_hooks(frame_number, &submission, || { /* pre */ }, || { /* post */ });
+```
+
+Snippet Type: Real
+```rust
+// App-owned path shape
+let view = CameraView::from_camera(&app_camera, aspect_ratio);
+let outcome = renderer.render_scene_with_view(&mut scene, view)?;
 ```
 
 Snippet Type: Real
@@ -76,6 +87,7 @@ Submission ownership boundary table:
 | Layer | Owns | Does not own |
 |---|---|---|
 | API/Scene (`api`, `scene`) | scene graph, camera, handles, transforms | Vulkan descriptors, command buffers, GPU pipeline objects |
+| Caller view (`CameraView`) | app-owned camera/view/projection values for one render | renderer-owned input dispatch, app lifecycle events |
 | Submission (`RenderSubmission`) | frame-local copy of draw intent | persistent cache storage, backend mutable state |
 | Debug UI context (`DebugUiFrameContext`) | frame-local UI telemetry and runtime status | scene graph mutation, Vulkan handles |
 | Backend (`vulkan`) | handle resolution, rendergraph execution, queue submit/present | scene graph mutation API |

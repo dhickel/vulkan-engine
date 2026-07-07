@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use audio::{AudioClip, AudioEngine, PlaybackOptions};
-use renderer::prelude::{AudioClipId, AudioEvent, EventStage};
-use renderer::{EngineEvent, EventBus, Renderer};
+use engine::events::{AudioClipId, AudioEvent, EngineEvent, EventBus, EventStage};
 
 use crate::content::{resolve_content_path, AudioClipSpec, ContentPack};
 
@@ -56,7 +55,7 @@ pub fn audio_smoke_requested() -> bool {
 }
 
 pub fn run_startup_audio_probe(
-    renderer: &mut Renderer,
+    events: &mut EventBus,
     content_pack: &ContentPack,
     device_smoke_enabled: bool,
 ) -> AudioBridgeReport {
@@ -72,7 +71,7 @@ pub fn run_startup_audio_probe(
         return report;
     };
 
-    let report = run_clip_probe(renderer.events_mut(), clip_spec, device_smoke_enabled);
+    let report = run_clip_probe(events, clip_spec, device_smoke_enabled);
     log_audio_report(&report);
     report
 }
@@ -210,8 +209,7 @@ fn log_audio_report(report: &AudioBridgeReport) {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use renderer::prelude::AudioEvent;
-    use renderer::{EngineEvent, EventBus};
+    use engine::events::{AudioEvent, EngineEvent, EventBus};
 
     use super::*;
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+engine = { path = "../.." }
 renderer = { path = "../../src/renderer" }
 input = { path = "../../src/input" }
 audio = { path = "../../src/audio" }

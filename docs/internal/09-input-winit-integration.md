@@ -7,6 +7,9 @@ This chapter is for contributors modifying renderer-input integration and the `i
 Current runtime path:
 `winit` event loop -> `Renderer::update_input(...)` -> `InputSystem` queue -> `Renderer::prepare_frame(...)` -> `InputSystem::dispatch_frame()` -> optional FPS plugin updates camera.
 
+App-owned input path:
+`winit` event loop -> `Renderer::route_platform_input(...)` -> `engine::input::queue_routed_input_event(...)` -> app `InputSystem::dispatch_frame()` at the app frame boundary -> `InputActionEventEmitter::emit_from_snapshot(...)`.
+
 ## 3. Key Concepts
 - Ingestion is per-event (`update_input`).
 - Dispatch is per-frame (`dispatch_frame`).
@@ -17,13 +20,15 @@ Current runtime path:
 - Layer dispatch model uses priority groups with same-priority peer execution.
 - Snapshot state is read-only to consumers after dispatch.
 - Renderer event emission for input actions reads the refreshed snapshot after `dispatch_frame()`.
+- App-owned input event emission uses `InputActionEventEmitter`, which owns the observed action-value
+  map for one app input stream and emits into the caller-owned `EventBus`.
 - Action profile parsing (`ActionMap::from_toml_str`) is strict `version = 1` with validated triggers.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
 ```rust
 // src/renderer/src/api/renderer.rs
-pub fn update_input(&mut self, window: &Window, event: &winit::event::Event<()>) -> Result<(), RendererError> {
+pub fn route_platform_input(&mut self, window: &Window, event: &winit::event::Event<()>) -> Result<RendererInputRouting, RendererError> {
     self.runtime.core.imgui.handle_event(window, event);
 
     let io = self.runtime.core.imgui.context.io();
@@ -33,9 +38,7 @@ pub fn update_input(&mut self, window: &Window, event: &winit::event::Event<()>)
 
     match event {
         Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-            if !consume_mouse {
-                self.input_system.queue_mouse_motion(*delta);
-            }
+            return Ok(if consume_mouse { RendererInputRouting::suppress(UiMouseCapture) } else { RendererInputRouting::queue() });
         }
         Event::WindowEvent { window_id, event } if *window_id == window.id() => {
             // F1/F2 toggle overlay panels.
@@ -70,12 +73,17 @@ fn prepare_frame(&mut self, window: &Window) -> Result<FramePrepareOutcome, Rend
 Snippet Type: Pseudocode
 ```text
 for event in os_events:
-  renderer.update_input(event)
+  routing = renderer.route_platform_input(event)
+  if routing.queue_input:
+    queue_routed_input_event(app_input, routing, event)
 
 once per frame:
-  input.dispatch_frame()
-  emit input action events from refreshed snapshot
+  app_input.dispatch_frame()
+  app_action_events.emit_from_snapshot(app_input.snapshot(), app_event_bus)
   gameplay systems read snapshot/action states
+  controller updates app camera intent
+  collision corrects app/player state
+  app builds CameraView and calls renderer render-only/view API
 ```
 
 Priority band guidance:
@@ -85,8 +93,11 @@ Priority band guidance:
 - `0-99`: debug/fallback
 
 ## 5. Best Practices
-- Keep all winit-to-input translation in `Renderer::update_input`.
+- Keep renderer platform side effects in `Renderer::route_platform_input`.
+- Keep caller-owned input queueing in `queue_routed_input_event` for app-owned input paths.
 - Preserve one dispatch boundary per frame.
+- On the app-owned path, do not also call renderer frame APIs that dispatch renderer-owned input in
+  the same app frame.
 - Keep `InputSystem` hot path free of avoidable allocations.
 - Keep layer priorities explicit and documented for runtime modules.
 
@@ -103,7 +114,8 @@ Priority band guidance:
 - Step 3: log layer priorities and enabled states.
 - Step 4: validate ImGui capture flags against observed behavior.
 - Step 5: validate action map bindings when gameplay input appears dead.
-- Step 6: subscribe through `Renderer::events_mut()` to verify action event timing without changing layer consumption.
+- Step 6: subscribe through `Renderer::events_mut()` on legacy renderer-owned paths, or through the
+  app-owned `EventBus` when validating `InputActionEventEmitter`.
 
 ## 8. Cross-Module Links
 - Renderer integration: `src/renderer/src/api/renderer.rs`

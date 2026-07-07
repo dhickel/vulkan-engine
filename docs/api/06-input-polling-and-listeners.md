@@ -10,15 +10,23 @@ Runtime flow:
 Direct crate flow:
 `winit` events -> `InputSystem::queue_*` -> `InputSystem::dispatch_frame()` -> read `InputSnapshot`.
 
+App-owned facade flow:
+`winit` event loop -> `Renderer::route_platform_input(...)` -> `engine::input::queue_routed_input_event(...)` -> app-owned `InputSystem::dispatch_frame()` -> `InputActionEventEmitter::emit_from_snapshot(...)` -> app-owned `EventBus` stage drain.
+
 ## 3. Key Concepts
 - Frame-buffered model: events are queued then dispatched once per frame.
 - Layered dispatch: input handlers are grouped by priority.
 - Consumption rule: all same-priority handlers run; if any consume, lower priorities do not run.
 - Polling snapshot: gameplay can query held/just-pressed keys, mouse delta, scroll, and action values.
 - Event bridge: the renderer emits `InputActionEvent` after `InputSystem::dispatch_frame()` from the refreshed snapshot.
+- App-owned event bridge: `InputActionEventEmitter` emits `InputActionEvent` from a caller-provided
+  `InputSnapshot` into a caller-owned `EventBus`, using its own observed action-value map per app
+  input stream.
+- App-owned lifecycle bridge: `engine::events::RuntimeEventDispatcher` can drain input and emit
+  frame lifecycle events on the same caller-owned `EventBus`.
 - Action mapping: bind semantic actions (`"move.forward"`) to chords (keys/buttons + modifiers).
 - Input profiles: `ActionMap` load/save uses strict `version = 1` TOML with `trigger` + `modifiers`.
-- Camera controls: `Renderer::install_default_fps_input()` installs the built-in WASD/mouse-look layer; root-level `Camera`, `FPSController`, `OrbitCamera`, `Frustum`, `Ray`, and `Aabb` are compatibility math helpers, not the beginner app camera architecture.
+- Camera controls: `Renderer::install_default_fps_input()` installs the built-in WASD/mouse-look layer for compatibility/demo paths. Apps that own input can install an action layer in their own `InputSystem`, update a root `Camera` with `FPSController`, collision-correct app state, then pass a `CameraView` into the renderer.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -44,7 +52,7 @@ renderer.input_mut().add_layer(
 );
 ```
 
-The default FPS input layer uses `W`, `A`, `S`, `D`, `Space`, `ShiftLeft`, and mouse motion. It updates the renderer-owned camera during frame preparation. Apps that only need a moving camera can install it and avoid the lower-level camera helper types. Apps that need editor orbit controls or picking math may still use the root-level compatibility helpers, but those helpers are outside `renderer::prelude`.
+The default FPS input layer uses `W`, `A`, `S`, `D`, `Space`, `ShiftLeft`, and mouse motion. It updates the renderer-owned camera during frame preparation. Apps that only need a moving camera can install it and avoid the lower-level camera helper types. Apps that need app-owned camera/collision behavior should wire their own `InputSystem` and controller, as `dungeon_dogfood` does.
 
 Snippet Type: Real
 ```rust
@@ -90,7 +98,15 @@ consume = false
 
 ## 5. Best Practices
 - Call `update_input(...)` for every event.
+- Apps that own their own `InputSystem` should call `route_platform_input(...)` for every event and
+  queue only uncaptured events with `queue_routed_input_event(...)`.
+- For app-owned camera paths, update the camera from the dispatched snapshot before building the
+  `CameraView`; collision and gameplay correction should happen before the view DTO is submitted.
 - Keep exactly one frame boundary (`begin_frame` or `render_scene`) per rendered frame.
+- For app-owned input, keep exactly one `InputSystem::dispatch_frame()` call per app frame. Resize
+  skipped render frames should not skip this app input dispatch; render skipping is independent.
+- Use one caller-owned `EventBus` for app input and app lifecycle events. Do not mirror app lifecycle
+  through `Renderer::events_mut()` on the no-dispatch render path.
 - Use action names for gameplay logic; avoid hardcoding key codes in systems.
 - Keep UI/input-capture layers at higher priority than gameplay layers.
 - Prefer stable action IDs and load/save binding profiles for user rebinding.
@@ -119,7 +135,8 @@ consume = false
 - Step 2: inspect `renderer.input().debug_snapshot()` for queued event count and active layers.
 - Step 3: confirm layer priorities and consumption behavior.
 - Step 4: log action values from `snapshot.action_value(...)` to verify mappings.
-- Step 5: subscribe through `Renderer::events_mut()` when you need typed action event telemetry.
+- Step 5: subscribe through `Renderer::events_mut()` for legacy renderer-owned paths, or through the
+  app-owned `EventBus` when using `InputActionEventEmitter`.
 - Step 6: reproduce with `cargo run -p renderer --example api_test`.
 
 ## 8. Cross-Module Links

@@ -7,6 +7,9 @@ This chapter is for students, hobbyists, and indie developers using the facade r
 Facade lifecycle path:
 `Renderer::new(...)` -> `take_startup_scene()` -> event loop `update_input(...)` -> `render_scene(...)` or explicit `begin_frame(...)` -> `render_scene_in_frame(...)` -> `end_frame(...)`.
 
+App-owned view path:
+`Renderer::new(...)` -> event loop `route_platform_input(...)` -> app update/camera -> `render_scene_with_view(...)`.
+
 ## 3. Key Concepts
 - `Renderer::new(config, window)` is the canonical initialization entrypoint.
 - Data-driven projects run through the root launcher: `cargo run -- --project apps/editor/sample_project/engine.project.toml`.
@@ -15,6 +18,9 @@ Facade lifecycle path:
 - Two frame APIs exist:
   - single-call path: `render_scene(...)`
   - explicit frame path: `begin_frame(...)`, `render_scene_in_frame(...)`, `end_frame(...)`
+- App-owned camera/render paths can use `render_scene_with_view(...)` or
+  `render_scene_headless_with_view(...)` to render with a caller-provided `CameraView` without
+  dispatching renderer-owned input/camera/lifecycle state.
 - `FrameRenderOutcome` must be handled exhaustively:
   - `Rendered`
   - `SkippedResizePending`
@@ -24,6 +30,12 @@ Facade lifecycle path:
   - `register_debug_view(...)`, `unregister_debug_view(...)`, `set_debug_view_enabled(...)`
 - App-owned imgui chrome can be registered with `register_app_ui(...)` for native tools that
   need always-visible panels instead of optional debug windows.
+- `update_input(...)` remains the compatibility path that handles renderer platform side effects and
+  queues into renderer-owned input. Apps that own input dispatch can call `route_platform_input(...)`
+  and then `engine::input::queue_routed_input_event(...)` for uncaptured gameplay/app input.
+- Legacy renderer frame APIs emit renderer-owned lifecycle events. Apps using app-owned input/camera
+  and `render_scene_with_view(...)` should emit `FrameStarted`/`FrameEnded` through their own
+  `engine::events::RuntimeEventDispatcher` instead of relying on renderer-owned lifecycle state.
 - Default runtime toggle for debug UI visibility is backquote (`\``) in `update_input(...)`.
 - The native editor shell launches with `cargo run -p editor` and accepts
   `--project <path>`, `--scene <path>`, and the standard
@@ -93,8 +105,9 @@ Snippet Type: Pseudocode
 App owns Window + Renderer + Scene.
 Every loop tick:
   pass winit events into update_input
+  or route_platform_input + queue_routed_input_event for app-owned input
   if resize event: call renderer.resize
-  render one frame (single-call or explicit API)
+  render one frame (single-call, explicit API, or caller-view API)
   handle Rendered vs SkippedResizePending
 ```
 
@@ -102,6 +115,8 @@ Every loop tick:
 - Start from `src/renderer/examples/api_test.rs` for canonical ownership and loop structure.
 - Handle `FrameRenderOutcome` with a full `match`; do not assume every frame renders.
 - Use one frame style per loop (`render_scene` or explicit frame API), not both in the same tick.
+- For custom game/app loops that own camera, input, and lifecycle events, prefer the caller-view
+  render APIs and emit app lifecycle events through the app-owned bus.
 - Keep render and load orchestration separate in your app architecture.
 - Use `register_app_ui(...)` for always-present app chrome; use debug views for optional runtime
   diagnostics.

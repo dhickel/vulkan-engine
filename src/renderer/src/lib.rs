@@ -46,6 +46,7 @@ pub use api::{
     // Asset API
     AssetManager,
     BoxedRenderHook,
+    CameraView,
     // Debug
     DebugRuntimeMode,
     EngineEvent,
@@ -68,6 +69,8 @@ pub use api::{
     RendererConfig,
     // Error root
     RendererError,
+    RendererInputRouting,
+    RendererInputSuppression,
     // Scene API
     Scene,
     SceneError,

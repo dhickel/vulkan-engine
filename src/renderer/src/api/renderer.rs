@@ -7,9 +7,10 @@ use engine_events::{
     ActionPhase, EngineEvent, EventBus, EventRecorder, EventStage, FrameId, InputActionEvent,
     LifecycleEvent,
 };
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use input::{
-    ActionId, ActionMap, InputSnapshot, InputSystem, LayerDescriptor, LayerHandle, LayerPriority,
+    ActionId, ActionMap, InputDebugSnapshot, InputSnapshot, InputSystem, LayerDescriptor,
+    LayerHandle, LayerPriority,
 };
 use log::{error, warn};
 use winit::event::{DeviceEvent, ElementState, Event, MouseScrollDelta, WindowEvent};
@@ -49,6 +50,85 @@ pub struct EnvironmentRuntimeStatus {
 pub enum FrameRenderOutcome {
     Rendered,
     SkippedResizePending,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RendererInputSuppression {
+    None,
+    UiKeyboardCapture,
+    UiMouseCapture,
+    PlatformShortcut,
+    OtherWindow,
+    UnsupportedEvent,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RendererInputRouting {
+    pub queue_input: bool,
+    pub suppression: RendererInputSuppression,
+}
+
+impl RendererInputRouting {
+    pub const fn queue() -> Self {
+        Self {
+            queue_input: true,
+            suppression: RendererInputSuppression::None,
+        }
+    }
+
+    pub const fn suppress(suppression: RendererInputSuppression) -> Self {
+        Self {
+            queue_input: false,
+            suppression,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct CameraView {
+    pub view: Mat4,
+    pub projection: Mat4,
+    pub position: Vec3,
+}
+
+impl CameraView {
+    pub fn new(view: Mat4, projection: Mat4, position: Vec3) -> Self {
+        Self {
+            view,
+            projection,
+            position,
+        }
+    }
+
+    pub fn from_matrices(view: Mat4, projection: Mat4, position: Vec3) -> Self {
+        Self::new(view, projection, position)
+    }
+
+    pub fn perspective(
+        view: Mat4,
+        position: Vec3,
+        fovy_radians: f32,
+        aspect_ratio: f32,
+        near: f32,
+        far: f32,
+    ) -> Self {
+        Self {
+            view,
+            projection: Mat4::perspective_rh(fovy_radians, aspect_ratio, near, far),
+            position,
+        }
+    }
+
+    pub fn from_camera(camera: &Camera, aspect_ratio: f32) -> Self {
+        Self::perspective(
+            camera.get_view_matrix(),
+            camera.get_position(),
+            70_f32.to_radians(),
+            aspect_ratio,
+            0.1,
+            10_000.0,
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -246,6 +326,24 @@ impl Renderer {
         window: &Window,
         event: &winit::event::Event<()>,
     ) -> Result<(), RendererError> {
+        let routing = self.route_platform_input(window, event)?;
+        self.queue_renderer_owned_input(routing, event);
+        Ok(())
+    }
+
+    /// Applies renderer-owned platform/UI/debug/capture side effects and
+    /// returns whether uncaptured input should be queued by the caller.
+    ///
+    /// New app-owned input paths call this during the winit event pump, then
+    /// queue only `routing.queue_input` events into their own [`InputSystem`].
+    /// The app remains responsible for dispatching that input exactly once at
+    /// its own frame boundary, even when the renderer later skips a resize
+    /// pending frame.
+    pub fn route_platform_input(
+        &mut self,
+        window: &Window,
+        event: &winit::event::Event<()>,
+    ) -> Result<RendererInputRouting, RendererError> {
         if let Some(imgui) = self.runtime.core.imgui.as_mut() {
             imgui.handle_event(window, event);
         }
@@ -268,32 +366,37 @@ impl Renderer {
                 event: DeviceEvent::MouseMotion { delta },
                 ..
             } => {
-                if !consume_mouse {
-                    self.input_system.queue_mouse_motion(*delta);
+                let _ = delta;
+                if consume_mouse {
+                    return Ok(RendererInputRouting::suppress(
+                        RendererInputSuppression::UiMouseCapture,
+                    ));
                 }
+                return Ok(RendererInputRouting::queue());
             }
             Event::DeviceEvent {
-                event:
-                    DeviceEvent::MouseWheel {
-                        delta: MouseScrollDelta::LineDelta(delta, ..),
-                    },
+                event: DeviceEvent::MouseWheel { delta },
                 ..
             } => {
-                if !consume_mouse {
-                    self.input_system.queue_scroll_lines(*delta);
+                let _ = delta;
+                if consume_mouse {
+                    return Ok(RendererInputRouting::suppress(
+                        RendererInputSuppression::UiMouseCapture,
+                    ));
                 }
+                return Ok(RendererInputRouting::queue());
             }
             Event::WindowEvent { window_id, event } if *window_id == window.id() => match event {
                 WindowEvent::CursorEntered { .. } => {
                     self.handle_cursor_focus(window, true)?;
-                    self.input_system.queue_winit_window_event(event);
+                    return Ok(RendererInputRouting::queue());
                 }
                 WindowEvent::CursorLeft { .. } => {
                     self.handle_cursor_focus(window, false)?;
-                    self.input_system.queue_winit_window_event(event);
+                    return Ok(RendererInputRouting::queue());
                 }
                 WindowEvent::ModifiersChanged(_) => {
-                    self.input_system.queue_winit_window_event(event);
+                    return Ok(RendererInputRouting::queue());
                 }
                 WindowEvent::KeyboardInput {
                     event: key_event, ..
@@ -304,7 +407,9 @@ impl Renderer {
                     {
                         self.toggle_console_ui();
                         self.apply_cursor_policy(window)?;
-                        return Ok(());
+                        return Ok(RendererInputRouting::suppress(
+                            RendererInputSuppression::PlatformShortcut,
+                        ));
                     }
 
                     if !key_event.repeat
@@ -313,7 +418,9 @@ impl Renderer {
                     {
                         self.toggle_debug_overlay_ui();
                         self.apply_cursor_policy(window)?;
-                        return Ok(());
+                        return Ok(RendererInputRouting::suppress(
+                            RendererInputSuppression::PlatformShortcut,
+                        ));
                     }
 
                     if !key_event.repeat
@@ -323,24 +430,81 @@ impl Renderer {
                         if let Err(err) = self.queue_manual_frame_capture(CaptureTarget::Present) {
                             warn!("manual frame capture request rejected: {err}");
                         }
-                        return Ok(());
+                        return Ok(RendererInputRouting::suppress(
+                            RendererInputSuppression::PlatformShortcut,
+                        ));
                     }
 
-                    if !consume_keyboard {
-                        self.input_system.queue_winit_window_event(event);
+                    if consume_keyboard {
+                        return Ok(RendererInputRouting::suppress(
+                            RendererInputSuppression::UiKeyboardCapture,
+                        ));
                     }
+                    return Ok(RendererInputRouting::queue());
                 }
                 WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => {
-                    if !consume_mouse {
-                        self.input_system.queue_winit_window_event(event);
+                    if consume_mouse {
+                        return Ok(RendererInputRouting::suppress(
+                            RendererInputSuppression::UiMouseCapture,
+                        ));
                     }
+                    return Ok(RendererInputRouting::queue());
                 }
                 _ => {}
             },
+            Event::WindowEvent { .. } => {
+                return Ok(RendererInputRouting::suppress(
+                    RendererInputSuppression::OtherWindow,
+                ));
+            }
             _ => {}
         }
 
-        Ok(())
+        Ok(RendererInputRouting::suppress(
+            RendererInputSuppression::UnsupportedEvent,
+        ))
+    }
+
+    fn queue_renderer_owned_input(
+        &mut self,
+        routing: RendererInputRouting,
+        event: &winit::event::Event<()>,
+    ) -> bool {
+        if !routing.queue_input {
+            return false;
+        }
+
+        match event {
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseMotion { delta },
+                ..
+            } => {
+                self.input_system.queue_mouse_motion(*delta);
+                true
+            }
+            Event::DeviceEvent {
+                event: DeviceEvent::MouseWheel { delta },
+                ..
+            } => {
+                self.input_system
+                    .queue_scroll_lines(scroll_delta_to_lines(delta));
+                true
+            }
+            Event::WindowEvent {
+                event:
+                    window_event @ (WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorLeft { .. }
+                    | WindowEvent::ModifiersChanged(_)
+                    | WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }),
+                ..
+            } => {
+                self.input_system.queue_winit_window_event(window_event);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Thread: Main
@@ -405,6 +569,47 @@ impl Renderer {
             slf.prepare_frame_headless();
             Ok(FramePrepareOutcome::Ready)
         })
+    }
+
+    /// Thread: Main
+    /// May Stall: Yes
+    pub fn render_scene_with_view(
+        &mut self,
+        scene: &mut Scene,
+        view: CameraView,
+    ) -> Result<FrameRenderOutcome, RendererError> {
+        if self.open_frame.is_some() {
+            return Err(RendererError::InvalidState(
+                "render_scene_with_view cannot run while an explicit frame is open".to_string(),
+            ));
+        }
+
+        self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
+        let frame_number = self.frame_number;
+        let outcome = self.render_scene_internal_with_view(
+            scene,
+            frame_number,
+            view,
+            InputDebugSnapshot::default(),
+        )?;
+        self.frame_number = self.frame_number.wrapping_add(1);
+        Ok(outcome)
+    }
+
+    /// Thread: Main
+    /// May Stall: Yes
+    pub fn render_scene_headless_with_view(
+        &mut self,
+        scene: &mut Scene,
+        view: CameraView,
+    ) -> Result<FrameRenderOutcome, RendererError> {
+        if !self.runtime.is_headless() {
+            return Err(RendererError::InvalidState(
+                "render_scene_headless_with_view requires a headless renderer".to_string(),
+            ));
+        }
+
+        self.render_scene_with_view(scene, view)
     }
 
     /// Shared frame lifecycle for one-shot render paths.
@@ -634,7 +839,9 @@ impl Renderer {
             return Ok(id);
         }
 
-        Err(RendererError::InvalidState("app ui id already registered".to_string()))
+        Err(RendererError::InvalidState(
+            "app ui id already registered".to_string(),
+        ))
     }
 
     /// Removes a previously registered app UI callback.
@@ -881,23 +1088,26 @@ impl Renderer {
         scene: &mut Scene,
         frame_number: u32,
     ) -> Result<FrameRenderOutcome, RendererError> {
+        let aspect_ratio = self.runtime.core.window_state.get_aspect_ratio();
+        let view = CameraView::from_camera(&self.camera, aspect_ratio);
+        let input_debug = self.input_system.debug_snapshot().clone();
+        self.render_scene_internal_with_view(scene, frame_number, view, input_debug)
+    }
+
+    fn render_scene_internal_with_view(
+        &mut self,
+        scene: &mut Scene,
+        frame_number: u32,
+        view: CameraView,
+        input_debug: InputDebugSnapshot,
+    ) -> Result<FrameRenderOutcome, RendererError> {
         if self.runtime.resize_requested() {
             self.enter_resize_skip_state();
             return Ok(FrameRenderOutcome::SkippedResizePending);
         }
 
         self.clear_resize_skip_state();
-        let camera_view = self.camera.get_view_matrix();
-        let camera_pos = self.camera.get_position();
-
-        let fovy = 70_f32.to_radians();
-        let aspect_ratio = self.runtime.core.window_state.get_aspect_ratio();
-        let near = 0.1;
-        let far = 10_000.0;
-        let proj = Mat4::perspective_rh(fovy, aspect_ratio, near, far);
-
-        scene.update_camera(camera_view, proj, camera_pos);
-        let submission = scene.build_submission();
+        let submission = build_submission_with_camera_view(scene, view);
         let viewport_size = self.viewport_size();
         let frame_index = frame_number as u64;
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
@@ -974,7 +1184,7 @@ impl Renderer {
                 draw_geometry: submission.flags.draw_geometry,
                 draw_imgui: submission.flags.draw_imgui,
                 asset_tasks_pumped_last: self.last_asset_pump_steps,
-                input_debug: self.input_system.debug_snapshot().clone(),
+                input_debug,
                 timings: self.runtime.frame_timing_snapshot(),
             });
 
@@ -1056,6 +1266,21 @@ impl Renderer {
         self.camera.set_position(position);
     }
 
+    /// Set camera position and orientation from a right-handed look-at target.
+    ///
+    /// Thread: Main
+    /// May Stall: No
+    pub fn set_camera_look_at(
+        &mut self,
+        eye: Vec3,
+        target: Vec3,
+        up: Vec3,
+    ) -> Result<(), RendererError> {
+        self.camera
+            .look_at(eye, target, up)
+            .map_err(|err| RendererError::InvalidState(err.message().to_string()))
+    }
+
     /// Emit a lifecycle event into the bus. Does NOT drain — the caller must
     /// explicitly drain at the correct boundary via `drain_events` or
     /// `dispatch_events_for_stage`.
@@ -1080,6 +1305,27 @@ impl Renderer {
     }
 }
 
+fn build_submission_with_camera_view(
+    scene: &mut Scene,
+    view: CameraView,
+) -> crate::scene::render_submission::RenderSubmission {
+    scene.update_camera(view.view, view.projection, view.position);
+    scene.build_submission()
+}
+
+fn scroll_delta_to_lines(delta: &MouseScrollDelta) -> f32 {
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) => {
+            if y.abs() > x.abs() {
+                *y
+            } else {
+                *x
+            }
+        }
+        MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 120.0,
+    }
+}
+
 fn emit_input_action_events_from_snapshot(
     event_bus: &mut EventBus,
     observed_action_values: &mut HashMap<ActionId, f32>,
@@ -1088,27 +1334,36 @@ fn emit_input_action_events_from_snapshot(
 ) {
     for (action, value) in snapshot.action_values() {
         let previous = observed_action_values.get(action).copied().unwrap_or(0.0);
-        let phase = if snapshot.action_just_pressed(action) {
-            Some(ActionPhase::Pressed)
-        } else if snapshot.action_just_released(action) {
-            Some(ActionPhase::Released)
-        } else if (previous - value).abs() > f32::EPSILON {
-            Some(ActionPhase::Changed)
-        } else {
-            None
-        };
+        let just_pressed = snapshot.action_just_pressed(action);
+        let just_released = snapshot.action_just_released(action);
 
-        if let Some(phase) = phase {
+        if just_pressed {
             event_bus.emit(
                 EventStage::Input,
                 Some(FrameId(frame_index)),
                 EngineEvent::Input(
-                    InputActionEvent::new(
-                        action.clone(),
-                        phase,
-                        value,
-                    )
-                    .with_source("input_snapshot"),
+                    InputActionEvent::new(action.clone(), ActionPhase::Pressed, value)
+                        .with_source("input_snapshot"),
+                ),
+            );
+        }
+
+        if just_released {
+            event_bus.emit(
+                EventStage::Input,
+                Some(FrameId(frame_index)),
+                EngineEvent::Input(
+                    InputActionEvent::new(action.clone(), ActionPhase::Released, value)
+                        .with_source("input_snapshot"),
+                ),
+            );
+        } else if !just_pressed && (previous - value).abs() > f32::EPSILON {
+            event_bus.emit(
+                EventStage::Input,
+                Some(FrameId(frame_index)),
+                EngineEvent::Input(
+                    InputActionEvent::new(action.clone(), ActionPhase::Changed, value)
+                        .with_source("input_snapshot"),
                 ),
             );
         }
@@ -1164,17 +1419,21 @@ fn map_vk_init_err(err: String, compile_shaders: bool) -> RendererError {
     map_init_err(err)
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use engine_events::{ActionPhase, EngineEvent, EventBus, EventStage};
+    use glam::{Mat4, Vec3};
     use input::{ActionMap, InputEvent, InputSystem, LayerDescriptor, LayerPriority};
     use winit::event::ElementState;
     use winit::keyboard::{KeyCode, ModifiersState};
 
-    use super::emit_input_action_events_from_snapshot;
+    use crate::api::Scene;
+
+    use super::{
+        build_submission_with_camera_view, emit_input_action_events_from_snapshot, CameraView,
+    };
 
     #[test]
     fn input_action_bridge_emits_after_snapshot_dispatch() {
@@ -1249,5 +1508,64 @@ mod tests {
             seen.lock().unwrap().as_slice(),
             [ActionPhase::Pressed, ActionPhase::Released]
         );
+    }
+
+    #[test]
+    fn input_action_bridge_emits_same_frame_press_and_release() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        input.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        let mut bus = EventBus::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_listener = std::sync::Arc::clone(&seen);
+        bus.subscribe(move |event| {
+            if let EngineEvent::Input(action) = &event.event {
+                seen_listener.lock().unwrap().push(action.phase);
+            }
+            Ok(())
+        });
+        let mut observed = HashMap::new();
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 1, input.snapshot());
+        bus.drain_stage(EventStage::Input);
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [ActionPhase::Pressed, ActionPhase::Released]
+        );
+    }
+
+    #[test]
+    fn camera_view_reaches_scene_submission() {
+        let mut scene = Scene::new();
+        let view = Mat4::look_at_rh(Vec3::new(2.0, 3.0, 4.0), Vec3::ZERO, Vec3::Y);
+        let projection = Mat4::perspective_rh(1.0, 16.0 / 9.0, 0.1, 250.0);
+        let position = Vec3::new(2.0, 3.0, 4.0);
+        let camera_view = CameraView::from_matrices(view, projection, position);
+
+        let submission = build_submission_with_camera_view(&mut scene, camera_view);
+
+        assert_eq!(submission.camera.view, view);
+        assert_eq!(submission.camera.projection, projection);
+        assert_eq!(submission.camera.cam_pos, position);
+        assert_eq!(scene.camera_view_projection(), (view, projection));
     }
 }

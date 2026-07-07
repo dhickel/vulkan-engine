@@ -1,12 +1,13 @@
 # Dogfood Vertical Slice (Alpha)
 
-`dungeon_dogfood` is the alpha vertical slice demo for the engine renderer facade. It demonstrates the end-to-end path from engine data contracts through custom Rust gameplay to headless visual capture.
+`dungeon_dogfood` is the alpha vertical slice demo for the engine facade. It demonstrates the end-to-end path from engine data contracts through custom Rust gameplay, app-owned runtime primitives, renderer view submission, and headless visual capture.
 
 ## What Dogfood Is
 
 - A custom Rust app crate under `apps/dungeon_dogfood`
 - A procedural dungeon explorer with input, camera, PBR materials, point lights, model props, and environment
 - A validation target for engine project/package/scene contracts
+- The integration proof for the app-owned input/event/camera path in the root `engine` facade
 - A headless draw capture source for engine-owned visual evidence
 
 ## What Dogfood Is Not
@@ -69,6 +70,7 @@ main.rs
   ├── Load content_pack.toml (content.rs)
   ├── Select level (generator.rs / layout.rs)
   ├── Create Renderer (windowed or headless)
+  ├── Create app-owned EventBus, InputSystem, FrameClock, Camera, and FPSController
   ├── Build Scene via LevelScene::from_level() (scene_seed.rs)
   │     ├── PBR materials from content pack
   │     ├── Chunked dungeon mesh (geometry.rs)
@@ -76,10 +78,15 @@ main.rs
   │     ├── Model props (optional)
   │     └── Custom environment (optional)
   └── Run event loop (windowed) or headless capture loop
-        ├── Input update → camera intent → collision (player.rs, collision.rs)
-        ├── Render scene frame
+        ├── Renderer platform routing → app-owned input dispatch
+        ├── Input action events + frame lifecycle on the app EventBus
+        ├── FPS camera intent → player collision (player.rs, collision.rs)
+        ├── Build CameraView from the corrected app-owned camera
+        ├── Render scene frame through render_scene_with_view / render_scene_headless_with_view
         └── Log captured frames (headless)
 ```
+
+The active dogfood path does not use renderer-owned gameplay camera state, renderer-owned input dispatch, or `Renderer::events_mut()` for app lifecycle/audio telemetry. The renderer still owns Vulkan frame submission, assets, capture output, debug UI platform side effects, and resize handling.
 
 ## Controls (Windowed)
 
@@ -112,6 +119,19 @@ Capture options:
 - `--capture_frame_start <n>` -- frame to start capturing
 - `--capture_frame_interval <n>` -- frames between captures
 - `--capture_dir <dir>` -- output directory
+
+Current issue #35-#37 validation proof:
+
+```bash
+RUST_LOG=debug timeout --signal=INT 60s cargo run -p dungeon_dogfood
+RUST_LOG=debug timeout --signal=INT 60s cargo run -p dungeon_dogfood -- \
+  --headless \
+  --capture_target draw \
+  --capture_frames 1 \
+  --capture_dir .internal-dev/captures/engine-runtime-abstractions-issues-35-37/phase-05-dogfood
+```
+
+The headless proof writes a draw-target PNG plus JSON sidecar for the app-owned camera/view path.
 
 ## Visual Baseline
 
