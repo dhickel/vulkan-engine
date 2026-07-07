@@ -22,7 +22,7 @@
   ],
   "phase_status": {
     "phase_00_inventory_classification": "complete",
-    "phase_01_docs_spec_compatibility_labeling": "not_started",
+    "phase_01_docs_spec_compatibility_labeling": "complete",
     "phase_02_selective_app_migration": "complete",
     "phase_03_conditional_deprecation_removal": "complete",
     "final_quality_review": "not_started"
