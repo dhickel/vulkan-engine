@@ -42,7 +42,7 @@ use vk_mem::Allocator;
 /// then creates VkDescriptorSetLayout.
 ///
 /// ## Usage Pattern
-/// ```rust
+/// ```ignore
 /// let layout = DescriptorLayoutBuilder::default()
 ///     .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
 ///     .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -110,7 +110,7 @@ impl<'a> DescriptorLayoutBuilder<'a> {
 /// Specifies how many descriptors of each type a pool should hold, as a ratio of max_sets.
 ///
 /// ## Example
-/// ```rust
+/// ```ignore
 /// PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0)
 /// // For max_sets=10: pool will have 10*2.0 = 20 uniform buffer descriptors
 /// ```
@@ -217,7 +217,7 @@ pub enum VkDescWriterType {
 /// vkUpdateDescriptorSets. More efficient than individual updates.
 ///
 /// ## Usage Pattern
-/// ```rust
+/// ```ignore
 /// let mut writer = VkDescriptorWriter::default();
 /// writer.write_buffer(0, buffer, size, offset, vk::DescriptorType::UNIFORM_BUFFER);
 /// writer.write_image(1, image_view, sampler, layout, vk::DescriptorType::COMBINED_IMAGE_SAMPLER);

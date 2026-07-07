@@ -1,0 +1,132 @@
+{
+  "plan": "sprint-12-quality-bug-debt-code-smell-burndown",
+  "created": "2026-07-03",
+  "completed": "2026-07-03",
+  "branch": "sprint/alpha-12-quality-bug-debt-code-smell-burndown",
+  "status": "final_quality_review_passed_with_residuals",
+  "fully_validated": false,
+  "blocker": "TOOLING_CONSTRAINT: russimp-sys/clang-sys incompatibility prevents renderer crate compilation, tests, and runtime smokes",
+  "phase_reports": {
+    "phase_01": {
+      "worker_report": "reports/phase-01-residual-inventory.md",
+      "validator_report": "validation/phase-01-validation-report.md",
+      "status": "validated",
+      "summary": "9 critical+high findings, 6 medium, stop-and-split gate PASSED"
+    },
+    "phase_02": {
+      "worker_report": "reports/phase-02-vulkan-lifecycle-hardening.md",
+      "validator_report": "validation/phase-02-validation-report.md",
+      "status": "validated_source_review_only",
+      "summary": "4 code fixes, 5 docs updated; build blocked, source review only"
+    },
+    "phase_03": {
+      "worker_report": "reports/phase-03-runtime-panic-stall-hardening.md",
+      "validator_report": "validation/phase-03-validation-report.md",
+      "status": "validated_classification_only",
+      "summary": "150+ unwrap/expect/panic classified; depth limitation documented; stall risks analyzed"
+    },
+    "phase_04": {
+      "worker_report": "reports/phase-04-docs-examples-test-drift.md",
+      "validator_report": "validation/phase-04-validation-report.md",
+      "status": "validated",
+      "summary": "4 AGENTS.md created, 5 stale docs fixed, 44 tests passing, fmt clean"
+    },
+    "phase_05": {
+      "worker_report": "reports/phase-05-final-residual-acceptance.md",
+      "validator_report": "validation/phase-05-validation-report.md",
+      "status": "validated",
+      "summary": "Full validation matrix run; 14 resolved, 7 accepted-with-mitigation, 1 TOOLING_CONSTRAINT"
+    }
+  },
+  "final_quality_review": {
+    "required": true,
+    "status": "passed_with_residuals",
+    "report": "validation/final-quality-review.md",
+    "summary": "Sprint achieves core goals within build constraint; no overclaiming; all plan criteria met or residual-classified"
+  },
+  "commands": [
+    {"command": "cargo fmt --check", "result": "PASS"},
+    {"command": "cargo check", "result": "FAIL (russimp-sys blocks renderer)"},
+    {"command": "cargo check -p renderer", "result": "FAIL (russimp-sys)"},
+    {"command": "cargo check -p renderer --examples", "result": "FAIL (russimp-sys blocks lib)"},
+    {"command": "cargo check -p input", "result": "PASS"},
+    {"command": "cargo check -p engine_events", "result": "PASS"},
+    {"command": "cargo check -p audio", "result": "PASS"},
+    {"command": "cargo check -p physics", "result": "PASS"},
+    {"command": "cargo check -p scripting", "result": "PASS"},
+    {"command": "cargo test -p input", "result": "PASS (10/10)"},
+    {"command": "cargo test -p engine_events", "result": "PASS (7/7)"},
+    {"command": "cargo test -p physics", "result": "PASS (11/11)"},
+    {"command": "cargo test -p audio", "result": "PASS (7/7, 1 ignored)"},
+    {"command": "cargo test -p scripting", "result": "PASS (9/9)"},
+    {"command": "cargo test -p renderer", "result": "BLOCKED (russimp-sys)"},
+    {"command": "cargo test -p engine_pack", "result": "BLOCKED (depends on renderer)"},
+    {"command": "cargo test -p editor", "result": "BLOCKED (depends on renderer)"},
+    {"command": "cargo test -p dungeon_dogfood", "result": "BLOCKED (depends on renderer)"}
+  ],
+  "runtime_smoke": {
+    "required": "conditional_on_runtime_or_vulkan_behavior_changes",
+    "status": "blocked_by_russimp_sys",
+    "blocked_by": "TOOLING_CONSTRAINT: russimp-sys/clang-sys incompatibility"
+  },
+  "capture": {
+    "required": "conditional_on_visible_renderer_or_editor_behavior_changes",
+    "status": "not_applicable",
+    "reason": "No visible renderer behavior changed"
+  },
+  "superseded_artifacts": [],
+  "model_tooling_constraints": [
+    {
+      "id": "TOOLING_CONSTRAINT-russimp-sys",
+      "description": "russimp-sys/clang-sys incompatibility blocks all renderer crate compilation, tests, and runtime smokes",
+      "impact": "Cannot compile-verify Vulkan code changes; cannot run renderer tests or runtime smokes",
+      "workaround": "Support crates compile and test cleanly; source-level review performed for renderer changes",
+      "status": "open",
+      "recommendation": "Prioritize fix as next action; blocks all renderer verification"
+    }
+  ],
+  "residual_risks": [
+    {
+      "id": "RES-01",
+      "class": "high_alpha_risk_accepted",
+      "title": "Double-free on shutdown (archived bug) -- root cause unknown",
+      "mitigation": "ManuallyDrop usage confirmed correct; recommend Vulkan validation layer diagnosis",
+      "followup": "Future sprint with runtime access"
+    },
+    {
+      "id": "RES-02",
+      "class": "high_alpha_risk_accepted",
+      "title": "~15 unwrap/expect sites in Vulkan/data code should be Result",
+      "mitigation": "Classified and documented; most are invariants",
+      "followup": "Track H: error hardening sprint"
+    },
+    {
+      "id": "RES-03",
+      "class": "high_alpha_risk_accepted",
+      "title": "Environment generation blocks render thread",
+      "mitigation": "Preload environment before scene start; known 50-200ms stall",
+      "followup": "Track H: async pipeline sprint"
+    },
+    {
+      "id": "RES-04",
+      "class": "medium_accepted",
+      "title": "Depth texture not plumbed through render hooks",
+      "mitigation": "Documented limitation; workaround via advanced-interop",
+      "followup": "Track H: rendergraph output API"
+    },
+    {
+      "id": "RES-05",
+      "class": "medium_accepted",
+      "title": "VkStorageBuffer allocation TODO (no retry on OOS)",
+      "mitigation": "Only triggers on alloc > buffer size; buffer sizing handles expected workloads",
+      "followup": "Track H: suballocator sprint"
+    },
+    {
+      "id": "RES-06",
+      "class": "low_accepted",
+      "title": "Examples don't use input system",
+      "mitigation": "Winit direct input works for examples",
+      "followup": "Track D: input integration"
+    }
+  ]
+}

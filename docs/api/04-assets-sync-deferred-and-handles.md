@@ -33,14 +33,20 @@ Implemented:
 - facade-level package loading, asset listing, record lookup, and durable ID resolution through `AssetManager`;
 - deterministic kind/search listing through `AssetManager::list_assets_matching`;
 - ID-based model/prefab/wall chunk, texture, and environment load entrypoints that call the existing runtime loaders after resolving metadata;
+- collision metadata validation for package records, including durable collision IDs and primitive shape dimensions;
 - editor project/package loading for enabled project packages;
 - editor asset browser listing and placement of package records.
+
+CLI tooling:
+
+- `engine_pack` is the current Rust CLI for validating project/package/scene files, creating starter project/package manifests, scanning supported asset files, appending asset records, and producing folder-based pack output. See [Packaging CLI](10-packaging-cli.md).
+- The root runtime emits package lifecycle events (`PackageLoading`, `PackageLoaded`, `PackageFailed`) while loading enabled project packages. Broader per-asset load/ready/failure events are typed but deferred. See [Events and Lifecycle](12-events-and-lifecycle.md).
 
 Deferred:
 
 - drag-and-drop imports and thumbnail generation;
 - complete hot-reload/reimport tooling beyond registry/path invalidation;
-- shipping package/export pipeline.
+- binary shipping package/archive pipeline.
 
 `engine.project.toml` is the project entrypoint. It must live at the project root unless a caller explicitly opens another path. Paths are project-relative unless a field explicitly says otherwise.
 
@@ -120,6 +126,16 @@ Required asset record fields:
 | `material` / `materials` | string or array | optional | Durable material IDs applied by default. |
 | `metadata` | table | optional | Kind-specific placement/import metadata. |
 
+Optional collision metadata:
+
+| Field | Type | Required | Contract |
+|---|---|---:|---|
+| `metadata.collision.body_id` | string | optional | Durable physics body ID. Authored values must be stable IDs, not runtime handles. |
+| `metadata.collision.collider_id` | string | optional | Durable physics collider ID. Must be unique across loaded collision metadata when present. |
+| `metadata.collision.body_kind` | string | optional | `static`, `dynamic`, or `kinematic`. |
+| `metadata.collision.trigger` | boolean | optional | Marks the authored collider as a trigger/sensor. |
+| `metadata.collision.shape` | table | yes when `collision` exists | Primitive shape descriptor: `box`/`cuboid` with `half_extents`, `sphere` with `radius`, or `capsule`/`capsule_y` with `half_height` and `radius`. Dimensions must be positive finite numbers. |
+
 Sample package manifest:
 
 ```toml
@@ -141,6 +157,13 @@ grid_size = [2.0, 2.0, 0.25]
 connectors = ["north", "south"]
 snap_grid = 0.5
 snap_rotation_degrees = 90.0
+
+[assets.metadata.collision]
+body_id = "body.wall_stone_2m"
+collider_id = "collider.wall_stone_2m"
+body_kind = "static"
+trigger = false
+shape = { kind = "box", half_extents = [1.0, 1.0, 0.125] }
 
 [[assets]]
 id = "core.env.indoor_4k"
@@ -165,6 +188,7 @@ Stable asset ID rules:
 - Paths are load locations and diagnostics. A `path_hint` may be serialized next to an ID to improve error messages or import migration, but it must not be the only identity.
 - The resolver must report duplicate IDs, missing package manifests, unknown package versions, unknown asset kinds, and missing asset paths before the editor presents assets as placeable.
 - Runtime handles are resolution outputs. `MeshHandle`, `MaterialHandle`, `TextureHandle`, `EnvironmentHandle`, `SceneNodeId`, `PointLightId`, and `LoadTicket` must never be written as durable project, package, or scene identity.
+- Collision metadata follows the same rule. Package manifests may define durable collision IDs and primitive shape descriptors for assets, but they must not serialize Rapier handles, renderer handles, or path-only IDs. This metadata is validated and carried with asset records; automatic scene-to-physics instantiation is a later runtime integration step.
 
 Current facade APIs:
 
@@ -183,6 +207,7 @@ Material/settings persistence:
 
 - Package material assets should define reusable defaults by durable material ID.
 - Scene `materials` should store overrides keyed by stable override ID and refer back to a durable base material ID when one exists.
+- Node-level material override entries are string metadata preserved by `Scene::set_node_material_override`, scene save/load, and `SceneNodeSummary`. They are not live GPU material edits.
 - Editor/project settings belong in `engine.project.toml` when they are workspace defaults, and in scene `editor` metadata only when they are authored scene/editor state.
 - Renderer-only cache settings and runtime upload state must not be persisted as authored material/settings data.
 
@@ -287,6 +312,7 @@ The load service can run each tick but should remain logically separate from dra
 - `cancel_load` rejects tickets that are already running or completed.
 - Unloading reserved/default resources can fail (`ReservedHandle`).
 - Using stale handles after resource lifecycle changes produces stale/invalid errors.
+- Package manifest parse errors should be fixed at the TOML source. The facade keeps the manifest path in the error so beginners can distinguish schema mistakes from runtime upload failures.
 
 ## 7. Debugging Playbook
 - Step 1: print ticket IDs and status transitions with timestamps.

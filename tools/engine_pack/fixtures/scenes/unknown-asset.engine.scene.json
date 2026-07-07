@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "scene_id": "scene.fixture.unknown_asset",
+  "root_nodes": ["node.fixture.root"],
+  "nodes": [
+    {
+      "id": "node.fixture.root",
+      "parent": null,
+      "name": "Root",
+      "transform": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "asset": {
+        "id": "fixture.model.missing",
+        "path_hint": "models/missing.obj"
+      }
+    }
+  ],
+  "lights": [],
+  "environment": null,
+  "editor": {}
+}

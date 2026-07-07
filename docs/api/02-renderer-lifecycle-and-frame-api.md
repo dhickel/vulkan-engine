@@ -9,7 +9,9 @@ Facade lifecycle path:
 
 ## 3. Key Concepts
 - `Renderer::new(config, window)` is the canonical initialization entrypoint.
-- Root `cargo run` does not start runtime rendering; use `cargo run -p renderer --example ...`.
+- Data-driven projects run through the root launcher: `cargo run -- --project apps/editor/sample_project/engine.project.toml`.
+- Renderer examples remain facade lifecycle diagnostics: `cargo run -p renderer --example api_test`.
+- Custom Rust apps run through their app crate: `cargo run -p <app>`.
 - Two frame APIs exist:
   - single-call path: `render_scene(...)`
   - explicit frame path: `begin_frame(...)`, `render_scene_in_frame(...)`, `end_frame(...)`
@@ -26,7 +28,7 @@ Facade lifecycle path:
 - The native editor shell launches with `cargo run -p editor` and accepts
   `--project <path>`, `--scene <path>`, and the standard
   `--record_debug`, `--record_debug_interval`, `--record_debug_path` timing flags.
-- Current alpha limitation: headless mode is not implemented (`Renderer::new` returns unsupported when `config.headless = true`).
+- Headless validation uses `Renderer::new_headless(config)` and `render_scene_headless(...)`; do not set `config.headless = true` on the windowed `Renderer::new(config, window)` path.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -109,12 +111,12 @@ Every loop tick:
 - Calling `begin_frame(...)` twice without `end_frame(...)` returns invalid state.
 - Calling `render_scene_in_frame(...)` twice for one `FrameContext` is invalid.
 - Resize flow can produce repeated `SkippedResizePending` outcomes until resize is serviced.
-- Expecting runtime output from root `cargo run` is a common migration trap.
+- Running the wrong target is a common startup trap: use root `cargo run -- --project ...` for project manifests, renderer examples for facade diagnostics, and app crates for custom Rust behavior.
 - Registering app UI marks imgui/app chrome as active for input capture, cursor release, and
   built-in FPS-controller suppression.
 
 ## 7. Debugging Playbook
-- Step 1: reproduce with `cargo run -p renderer --example api_test`.
+- Step 1: choose the right runtime path: `cargo run -- --project apps/editor/sample_project/engine.project.toml` for project launcher issues, or `cargo run -p renderer --example api_test` for renderer facade diagnostics.
 - Step 2: verify call order (`begin_frame` -> `render_scene_in_frame` -> `end_frame`) if using explicit API.
 - Step 3: inspect resize path; check whether frames are intentionally skipped due to `resize_requested`.
 - Step 4: if init fails and shader compile is enabled, verify shader toolchain availability (`glslc` or `glslangValidator`).
@@ -124,7 +126,8 @@ Every loop tick:
 - Facade API surface: `src/renderer/src/api/mod.rs`
 - Renderer lifecycle implementation: `src/renderer/src/api/renderer.rs`
 - Debug UI manager internals: `src/renderer/src/debug_ui/mod.rs`
-- Canonical runtime usage: `src/renderer/examples/api_test.rs`
+- Renderer facade diagnostic example: `src/renderer/examples/api_test.rs`
+- Runtime launcher docs: `docs/api/11-runtime-project-launcher.md`
 - Internal render path mental model: `docs/internal/01-rendering-pipeline-mental-model.md`
 
 ## 9. Standard References

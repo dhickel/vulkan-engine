@@ -1,0 +1,10 @@
+format_version = 1
+package_id = "smoke"
+display_name = "Smoke Assets"
+package_version = "0.1.0"
+
+[[assets]]
+id = "smoke.model.smoke"
+kind = "model"
+path = "models/smoke.obj"
+tags = ["smoke", "generated"]

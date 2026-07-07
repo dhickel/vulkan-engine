@@ -16,6 +16,7 @@ Current runtime path:
 - When either panel is visible, cursor grab is released and FPS camera-look updates are paused.
 - Layer dispatch model uses priority groups with same-priority peer execution.
 - Snapshot state is read-only to consumers after dispatch.
+- Renderer event emission for input actions reads the refreshed snapshot after `dispatch_frame()`.
 - Action profile parsing (`ActionMap::from_toml_str`) is strict `version = 1` with validated triggers.
 
 ## 4. Code Walkthrough
@@ -73,6 +74,7 @@ for event in os_events:
 
 once per frame:
   input.dispatch_frame()
+  emit input action events from refreshed snapshot
   gameplay systems read snapshot/action states
 ```
 
@@ -101,12 +103,14 @@ Priority band guidance:
 - Step 3: log layer priorities and enabled states.
 - Step 4: validate ImGui capture flags against observed behavior.
 - Step 5: validate action map bindings when gameplay input appears dead.
+- Step 6: subscribe through `Renderer::events_mut()` to verify action event timing without changing layer consumption.
 
 ## 8. Cross-Module Links
 - Renderer integration: `src/renderer/src/api/renderer.rs`
 - Input core: `src/input/src/lib.rs`
 - Camera/plugin consumer: `src/renderer/src/data/camera.rs`
 - Runtime loops: `src/renderer/examples/api_test.rs`, `apps/dungeon_dogfood/src/main.rs`
+- Event lifecycle internals: `docs/internal/10-event-system-and-lifecycle.md`
 
 ## 9. Standard References
 - winit event model: https://docs.rs/winit/latest/winit/event/index.html
@@ -116,6 +120,7 @@ Priority band guidance:
 ## 10. See Also
 - `docs/api/06-input-polling-and-listeners.md`
 - `docs/internal/04-api-to-backend-handoff.md`
+- `docs/api/12-events-and-lifecycle.md`
 - `src/input/AGENTS.md`
 
 ## 11. Future Considerations

@@ -42,3 +42,5 @@ External conceptual baseline:
 
 - `cargo check -p renderer`
 - Run targeted example smoke when shader behavior changes.
+- For shader visual changes, use `.internal-dev/skills/engine-headless-capture-validation/SKILL.md` to capture deterministic headless frames from fixed scene/camera setups.
+- Agents may add small focused validation scenes under `src/renderer/examples/capture_tests/` when an existing example does not isolate the shader behavior.

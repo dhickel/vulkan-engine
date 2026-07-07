@@ -1,0 +1,291 @@
+{
+  "plan": "sprint-09-facade-api-contract",
+  "created": "2026-07-03",
+  "branch": "sprint/alpha-09-facade-api-contract",
+  "status": "final_quality_review_passed_with_residuals",
+  "phase_reports": {
+    "phase_01": {
+      "worker_report": "reports/phase-01-export-audit.md",
+      "validator_report": "validation/phase-01-validation-report.md",
+      "status": "validated"
+    },
+    "phase_02": {
+      "worker_report": "reports/phase-02-example-contract.md",
+      "validator_report": "validation/phase-02-validation-report.md",
+      "status": "validated"
+    },
+    "phase_03": {
+      "worker_report": "reports/phase-03-friction-hardening.md",
+      "validator_report": "validation/phase-03-validation-report.md",
+      "status": "validated"
+    },
+    "phase_04": {
+      "worker_report": "reports/phase-04-final-docs-validation.md",
+      "validator_report": "validation/phase-04-validation-report.md",
+      "status": "validated"
+    }
+  },
+  "commands": [
+    {
+      "phase": "phase_01",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "No formatting changes required."
+    },
+    {
+      "phase": "phase_01",
+      "command": "cargo check -p renderer",
+      "result": "pass",
+      "notes": "Completed with existing dead-code warnings in renderer internals."
+    },
+    {
+      "phase": "phase_01",
+      "command": "rg -n \"stable public surface|Everything below api|advanced-interop|AnimationPlayer|SceneWorld|CommandHistory\" docs/api src/renderer/src src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "Stale overpromise phrases were removed. Remaining hits are expected advanced-interop and compatibility-symbol references."
+    },
+    {
+      "phase": "phase_01",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "not_run",
+      "notes": "Skipped because this phase changed Markdown docs and evidence only; rustdoc and re-export organization were not materially changed."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "Passed after formatting the inherited partial worker patch."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 18 integration tests, and 5 ignored doctests passed."
+    },
+    {
+      "phase": "phase_02",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "pass_with_existing_warning",
+      "notes": "Generated docs; existing unresolved intra-doc link warning remains in api/assets.rs material clamp prose."
+    },
+    {
+      "phase": "phase_02",
+      "command": "rg -n \"prelude|stable public surface|advanced-interop|SceneWorld|CommandHistory|AnimationPlayer\" docs/api src/renderer/src src/renderer/examples src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "New prelude references are expected. No stale stable-public-surface phrase returned; compatibility and advanced hits remain labeled or internal."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "Passed after running cargo fmt for new integration test formatting."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 20 integration tests, and 5 ignored doctests passed."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_03",
+      "command": "rg -n \"TODO|pending|planned|not implemented|material override|input profile|capture_target|desktop screenshot|advanced-interop\" docs/api src/renderer/src src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "Expected hits include new material/input/capture wording, existing internal pending names, existing TODO comments in renderer internals, and existing advanced-interop docs/gates."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo test -p input",
+      "result": "pass",
+      "notes": "Conditional input-profile validation passed: 10 unit tests and 0 doctests."
+    },
+    {
+      "phase": "phase_03",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "not_run",
+      "notes": "Skipped because no rustdoc or public re-export organization changed."
+    },
+    {
+      "phase": "phase_04",
+      "command": "cargo fmt --check",
+      "result": "pass",
+      "notes": "Re-run after docs-only capture path patch; no formatting changes required."
+    },
+    {
+      "phase": "phase_04",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_04",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "160 unit tests, 20 integration tests, and 5 ignored doctests passed."
+    },
+    {
+      "phase": "phase_04",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Completed with existing renderer dead-code warnings."
+    },
+    {
+      "phase": "phase_04",
+      "command": "cargo test -p input",
+      "result": "pass",
+      "notes": "Conditional input validation passed: 10 unit tests and 0 doctests."
+    },
+    {
+      "phase": "phase_04",
+      "command": "rg -n \"sprint-04|sprint-03\" docs/api",
+      "result": "pass_for_phase_intent",
+      "notes": "No prior-sprint capture output paths remain. Remaining Sprint 03 references are provenance links to accepted editor placement evidence."
+    },
+    {
+      "phase": "phase_04",
+      "command": "rg -n \"TODO|pending|planned|not implemented|/tmp|sprint-08|Sprint 08|sprint-04|headless-draw\" docs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-09-facade-api-contract",
+      "result": "pass_for_phase_intent",
+      "notes": "Remaining hits are accepted residual records, scan command text, legitimate /tmp CLI examples, current headless-draw output paths, and existing internal-doc future-state prose."
+    },
+    {
+      "phase": "phase_04",
+      "command": "rg -n \"stable public surface|Everything below api|advanced-interop|prelude|SceneWorld|CommandHistory|AnimationPlayer\" docs/api src/renderer/src src/renderer/examples src/renderer/tests",
+      "result": "pass_for_phase_intent",
+      "notes": "No stale stable-public-surface or Everything-below-api claims. Remaining hits are intended prelude usage, compatibility exports, tests, and advanced-interop gates."
+    },
+    {
+      "phase": "phase_04",
+      "command": "cargo doc -p renderer --no-deps",
+      "result": "not_run",
+      "notes": "Skipped because Phase 04 changed Markdown docs/evidence only and did not change rustdoc or re-export organization. Existing Phase 02 rustdoc warning remains recorded."
+    },
+    {
+      "phase": "phase_04",
+      "command": "headless draw capture",
+      "result": "not_required",
+      "notes": "Docs/evidence-only phase; no visible renderer/editor behavior changed."
+    }
+  ],
+  "capture": {
+    "required": false,
+    "reason": "Planning scope expects docs/API/examples/testing only. Require true engine-owned headless draw capture if visible renderer/editor behavior changes.",
+    "artifact_dir": null,
+    "status": "not_applicable"
+  },
+  "email_reports": [
+    {
+      "phase": "planning",
+      "status": "sent",
+      "report": "reports/planning-email.md"
+    },
+    {
+      "phase": "phase_01",
+      "status": "sent",
+      "report": "reports/phase-01-email-evidence.md",
+      "message_id": "<0100019f28bf6221-bddf7929-0fcd-4a3d-b34e-a4e89d97742d-000000@email.amazonses.com>",
+      "thread_id": "63eb15e7-e4da-4c7b-b19c-52ebf096372b"
+    },
+    {
+      "phase": "phase_02",
+      "status": "sent",
+      "report": "reports/phase-02-email-evidence.md",
+      "message_id": "<0100019f28d591a2-2be7475c-d5a2-4995-ad78-fecffaf4aa46-000000@email.amazonses.com>",
+      "thread_id": "ee506f01-41ec-4e40-a224-af2a2852b3f3"
+    },
+    {
+      "phase": "phase_03",
+      "status": "sent",
+      "report": "reports/phase-03-email-evidence.md",
+      "message_id": "<0100019f28df2eb7-4840e6bf-d599-4ccf-ad27-762ff659c5c9-000000@email.amazonses.com>",
+      "thread_id": "143ea60b-ddb6-4f04-b759-ab48cded5626"
+    },
+    {
+      "phase": "phase_04",
+      "status": "sent",
+      "report": "reports/phase-04-email-evidence.md",
+      "message_id": "<0100019f28e9d447-331b41c2-3fd9-48a9-ad6d-5ca1a73e3967-000000@email.amazonses.com>",
+      "thread_id": "7c7a768a-6556-48c9-ad77-653a3cda2c99"
+    }
+  ],
+  "branch_pushes": [
+    {
+      "phase": "phase_01",
+      "commit": "786958b2",
+      "description": "Document sprint 09 facade surface audit"
+    },
+    {
+      "phase": "phase_01_email",
+      "commit": "039e2a27",
+      "description": "Record sprint 09 phase 01 email evidence"
+    },
+    {
+      "phase": "phase_02",
+      "commit": "b56f027a",
+      "description": "Add sprint 09 beginner prelude contract"
+    },
+    {
+      "phase": "phase_02_email",
+      "commit": "e59bb764",
+      "description": "Record sprint 09 phase 02 email evidence"
+    },
+    {
+      "phase": "phase_03",
+      "commit": "7f38c1f0",
+      "description": "Harden sprint 09 facade friction docs"
+    },
+    {
+      "phase": "phase_03_email",
+      "commit": "57a7f255",
+      "description": "Record sprint 09 phase 03 email evidence"
+    },
+    {
+      "phase": "future_sprint_plans",
+      "commit": "1be254fb",
+      "description": "Plan remaining alpha roadmap sprints"
+    },
+    {
+      "phase": "phase_04",
+      "commit": "f4728912",
+      "description": "Finalize sprint 09 docs validation"
+    },
+    {
+      "phase": "phase_04",
+      "commit": "f4728912",
+      "description": "Finalize sprint 09 docs validation"
+    },
+    {
+      "phase": "closeout",
+      "commit": "51c1a810",
+      "description": "Close sprint 09 facade API contract"
+    }
+  ],
+  "superseded_artifacts": [],
+  "model_tooling_constraints": [],
+  "residual_risks": [
+    "Sprint 08 accepted residuals remain out of scope unless re-opened by implementation findings.",
+    "Existing root-level compatibility exports may remain public but not beginner-supported.",
+    "Renderer doctest/prose failures, if pre-existing, must be separated from Sprint 09 regressions."
+  ],
+  "final_quality_review": {
+    "required": true,
+    "status": "passed_with_residuals",
+    "report": "validation/final-quality-review.md"
+  }
+}

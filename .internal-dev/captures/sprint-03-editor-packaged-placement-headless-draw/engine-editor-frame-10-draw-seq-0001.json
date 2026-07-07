@@ -1,0 +1,16 @@
+{
+  "capture_target": "draw",
+  "captured_at_unix_ms": 1783070706296,
+  "color_conversion": "rgba16f-linear-clamped-to-rgba8",
+  "extent": {
+    "height": 900,
+    "width": 1440
+  },
+  "format": "R16G16B16A16_SFLOAT",
+  "frame_number": 10,
+  "png_path": ".internal-dev/captures/sprint-03-editor-packaged-placement-headless-draw/engine-editor-frame-10-draw-seq-0001.png",
+  "row_layout": "vkCmdCopyImageToBuffer tightly packed (buffer_row_length=0)",
+  "sequence_index": 1,
+  "source": "Sequence",
+  "status": "succeeded"
+}

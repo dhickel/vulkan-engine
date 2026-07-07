@@ -1,73 +1,42 @@
 # Render Hooks & Extension Points
 
-> Source: [`src/renderer/src/api/hooks.rs`](../src/renderer/src/api/hooks.rs) — no legacy docs consulted.
+> **This page has been superseded.** The canonical hook and extension-point documentation is at
+> [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md).
+> This page is kept as a compatibility redirect. The old content claimed hooks could record custom Vulkan
+> commands, listed obsolete `HookError` variants, and misrepresented error propagation behavior.
+> Those claims were incorrect — see the canonical page for the live-code-accurate contract.
 
-## Overview
+## Quick Summary (Live Code)
 
-Render hooks let you inject custom logic before and after the rendergraph executes. They're the primary extension mechanism for users who need to run custom Vulkan commands, update GPU data, or perform post-processing without modifying engine internals.
+- `Renderer::set_pre_render_hook(Option<RenderHook>)` and `set_post_render_hook(Option<RenderHook>)` accept safe, API-level callbacks.
+- `RenderHookContext` exposes `frame_index: u64`, `viewport_size: (u32, u32)`, and `depth_texture: Option<TextureHandle>`.
+- Hooks do **not** expose command buffers, descriptor sets, rendergraph state, or any raw Vulkan handles.
+- `HookError` variants: `Unsupported(String)`, `Registration(String)`, `Invocation(String)` — see [`src/renderer/src/api/errors.rs`](../src/renderer/src/api/errors.rs).
+- Hook errors are **logged** and the frame continues; they are **not** escalated to `RendererError`.
+- Panics inside hooks are caught and converted to `HookError::Invocation`.
+- Pre-hook fires before rendergraph execution; post-hook fires after successful rendergraph execution.
 
-## Hook Types
+## Extension Points Beyond Hooks
 
-```rust
-pub type RenderHook = Box<dyn FnMut(&mut RenderHookContext<'_>) -> Result<(), HookError> + Send>;
+- **Debug views:** `Renderer::register_debug_view(...)` — custom imgui panels rendered by the engine UI manager. See [08-debug.md](08-debug.md).
+- **App UI:** `Renderer::register_app_ui(...)` — always-rendered imgui chrome for editor shells.
+- **Frame capture:** `Renderer::request_frame_capture(...)` — present-target or draw-target frame captures through the facade.
+- **Timing capture:** `Renderer::configure_debug_timing_recording(...)` — JSONL timing reports for offline analysis.
+- **Events:** `EventBus`, `EventRecorder` — lifecycle and input observation without renderer mutation. See [12-events-and-lifecycle.md](12-events-and-lifecycle.md).
 
-pub struct RenderHookContext<'a> {
-    pub frame_index: u64,
-    pub viewport_size: (u32, u32),
-}
-```
+## Advanced Interop (Feature-Gated)
 
-Defined at [`hooks.rs:11-15`](../src/renderer/src/api/hooks.rs:11).
+For internal-engine experiments and expert diagnostics, the `advanced-interop` Cargo feature (opt-in, **alpha/unstable**) exposes:
 
-### Pre-Render Hook
+- `renderer::api::advanced::renderer_core_mut()` — `unsafe` access to `&mut VkRenderCore`. Bypasses all facade invariants. Misuse can break synchronization, descriptor lifecycle, or swapchain safety.
+- `renderer::rendergraph` — the pass graph and `RenderPassNode` trait become public. Custom pass registration has no resource/synchronization validation and is **not stable**. See [07-rendergraph-dependencies-and-aliasing.md](../internal/07-rendergraph-dependencies-and-aliasing.md).
 
-Fires **after** the Vulkan frame is prepared (command buffer acquired, descriptor pool reset) but **before** the rendergraph executes. Use for: updating per-frame uniforms, dispatching compute work, recording custom commands into the frame's command buffer.
-
-```rust
-renderer.set_pre_render_hook(Some(Box::new(|ctx: &mut RenderHookContext| {
-    // ctx.frame_index, ctx.viewport_size available
-    Ok(())
-})));
-```
-
-### Post-Render Hook
-
-Fires **after** the rendergraph completes (all passes executed, frame submitted) but **before** the renderer advances the frame counter. Use for: reading back GPU data, screenshot capture, custom present logic.
-
-```rust
-renderer.set_post_render_hook(Some(Box::new(|ctx: &mut RenderHookContext| {
-    Ok(())
-})));
-```
-
-## Removing Hooks
-
-Pass `None` to clear a hook:
-
-```rust
-renderer.set_pre_render_hook(None);
-renderer.set_post_render_hook(None);
-```
-
-## Error Handling
-
-```rust
-pub enum HookError {
-    Fatal(String),
-    Transient(String),
-}
-```
-
-Defined at [`hooks.rs`](../src/renderer/src/api/hooks.rs). `Fatal` errors propagate up through `render_scene()` as `RendererError::Hook(...)`. `Transient` errors are logged but don't abort the frame.
-
-## Limitations
-
-- The `RenderHookContext` exposes only `frame_index` and `viewport_size` — no access to the Vulkan command buffer, descriptor sets, or rendergraph state
-- For deeper integration, use the `advanced-interop` feature gate at [`api/advanced.rs`](../src/renderer/src/api/advanced.rs), which exposes `raw_core_mut()` (documented as unsafe, internal-use-only)
-- Hooks run synchronously on the render thread; long-running hooks will block rendering
+These paths are not beginner-stable and do not imply API compatibility across alpha sprints.
 
 ## See Also
 
-- [02-renderer.md](02-renderer.md) — where hooks fit in the frame lifecycle
-- [Internal: API-to-backend handoff](../internal/02-renderer-internals.md)
-- [src/renderer/src/api/hooks.rs](../src/renderer/src/api/hooks.rs) — implementation
+- [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md) — canonical documentation
+- [02-renderer.md](02-renderer.md) — frame lifecycle
+- [08-debug.md](08-debug.md) — debug views and timing capture
+- [12-events-and-lifecycle.md](12-events-and-lifecycle.md) — event observation
+- [Internal: Rendergraph Dependencies](../internal/07-rendergraph-dependencies-and-aliasing.md) — pass ordering and resource contracts

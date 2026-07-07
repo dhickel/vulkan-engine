@@ -1,0 +1,13 @@
+format_version = 1
+package_id = "fixture"
+display_name = "Fixture Assets"
+
+[[assets]]
+id = "fixture.model.crate"
+kind = "model"
+path = "models/crate.obj"
+
+[[assets]]
+id = "fixture.model.crate"
+kind = "model"
+path = "models/crate-copy.obj"

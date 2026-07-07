@@ -6,6 +6,8 @@
 use glam::{Mat4, Quat, Vec3, Vec4};
 use input::{ActionId, InputConsume, InputContext, InputEvent, InputLayer, InputSnapshot};
 
+const LOOK_AT_EPSILON: f32 = 1.0e-6;
+
 /// A ray in world space, defined by an origin and a direction.
 #[derive(Copy, Clone, Debug)]
 pub struct Ray {
@@ -186,6 +188,25 @@ pub struct Camera {
     yaw: f32,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CameraLookAtError {
+    NonFiniteInput,
+    DegenerateDirection,
+    DegenerateUp,
+    CollinearUp,
+}
+
+impl CameraLookAtError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::NonFiniteInput => "camera look-at requires finite eye, target, and up vectors",
+            Self::DegenerateDirection => "camera look-at requires distinct eye and target points",
+            Self::DegenerateUp => "camera look-at requires a non-zero up vector",
+            Self::CollinearUp => "camera look-at up vector cannot be collinear with view direction",
+        }
+    }
+}
+
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -219,6 +240,47 @@ impl Camera {
         self.position = position;
     }
 
+    pub(crate) fn look_at(
+        &mut self,
+        eye: Vec3,
+        target: Vec3,
+        up: Vec3,
+    ) -> Result<(), CameraLookAtError> {
+        if !eye.is_finite() || !target.is_finite() || !up.is_finite() {
+            return Err(CameraLookAtError::NonFiniteInput);
+        }
+
+        let view_direction = target - eye;
+        let direction_length_squared = view_direction.length_squared();
+        if direction_length_squared <= LOOK_AT_EPSILON {
+            return Err(CameraLookAtError::DegenerateDirection);
+        }
+
+        let up_length_squared = up.length_squared();
+        if up_length_squared <= LOOK_AT_EPSILON {
+            return Err(CameraLookAtError::DegenerateUp);
+        }
+
+        let forward = view_direction / direction_length_squared.sqrt();
+        let up_normalized = up / up_length_squared.sqrt();
+        if forward.cross(up_normalized).length_squared() <= LOOK_AT_EPSILON {
+            return Err(CameraLookAtError::CollinearUp);
+        }
+
+        let view = Mat4::look_at_rh(eye, target, up);
+        let (_, orientation, _) = view.inverse().to_scale_rotation_translation();
+
+        self.position = eye;
+        self.orientation = orientation.normalize();
+        self.pitch = forward.y.clamp(-1.0, 1.0).asin().clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.01,
+            std::f32::consts::FRAC_PI_2 - 0.01,
+        );
+        self.yaw = (-forward.x).atan2(-forward.z);
+
+        Ok(())
+    }
+
     pub fn update_rotation(&mut self, delta_x: f32, delta_y: f32) {
         self.yaw += delta_x;
         self.pitch += delta_y;
@@ -237,6 +299,89 @@ impl Camera {
         let yaw_rotation = Quat::from_rotation_y(self.yaw);
         let velocity = yaw_rotation * direction * amount;
         self.position += velocity;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Camera, CameraLookAtError};
+    use glam::{Mat4, Vec3};
+
+    const ASSERT_EPSILON: f32 = 1.0e-4;
+
+    fn assert_matrix_approx_eq(actual: Mat4, expected: Mat4) {
+        let actual = actual.to_cols_array();
+        let expected = expected.to_cols_array();
+        for (index, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() <= ASSERT_EPSILON,
+                "matrix element {index} differed: actual={actual}, expected={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn look_at_matches_glam_view_matrix() {
+        let eye = Vec3::new(3.0, 2.0, 5.0);
+        let target = Vec3::new(-1.0, 0.5, 0.25);
+        let up = Vec3::Y;
+        let mut camera = Camera::default();
+
+        camera.look_at(eye, target, up).unwrap();
+
+        assert_eq!(camera.get_position(), eye);
+        assert_matrix_approx_eq(camera.get_view_matrix(), Mat4::look_at_rh(eye, target, up));
+    }
+
+    #[test]
+    fn look_at_rejects_degenerate_vectors_without_mutating_camera() {
+        let mut camera = Camera::new(Vec3::new(1.0, 2.0, 3.0));
+        let original_view = camera.get_view_matrix();
+        let original_position = camera.get_position();
+
+        assert_eq!(
+            camera.look_at(original_position, original_position, Vec3::Y),
+            Err(CameraLookAtError::DegenerateDirection)
+        );
+        assert_eq!(
+            camera.look_at(Vec3::ZERO, Vec3::NEG_Z, Vec3::ZERO),
+            Err(CameraLookAtError::DegenerateUp)
+        );
+        assert_eq!(
+            camera.look_at(Vec3::ZERO, Vec3::NEG_Z, Vec3::NEG_Z),
+            Err(CameraLookAtError::CollinearUp)
+        );
+
+        assert_eq!(camera.get_position(), original_position);
+        assert_matrix_approx_eq(camera.get_view_matrix(), original_view);
+    }
+
+    #[test]
+    fn set_position_preserves_current_orientation() {
+        let eye = Vec3::new(3.0, 2.0, 5.0);
+        let target = Vec3::new(-1.0, 0.5, 0.25);
+        let next_eye = Vec3::new(-2.0, 4.0, 8.0);
+        let mut camera = Camera::default();
+        camera.look_at(eye, target, Vec3::Y).unwrap();
+        let orientation = camera.orientation;
+
+        camera.set_position(next_eye);
+
+        assert_eq!(camera.get_position(), next_eye);
+        assert_eq!(camera.orientation, orientation);
+    }
+
+    #[test]
+    fn fps_rotation_after_look_at_uses_current_yaw_pitch() {
+        let eye = Vec3::new(0.0, 0.0, 3.0);
+        let target = Vec3::ZERO;
+        let mut camera = Camera::default();
+        camera.look_at(eye, target, Vec3::Y).unwrap();
+        let view_before = camera.get_view_matrix();
+
+        camera.update_rotation(0.0, 0.0);
+
+        assert_matrix_approx_eq(camera.get_view_matrix(), view_before);
     }
 }
 

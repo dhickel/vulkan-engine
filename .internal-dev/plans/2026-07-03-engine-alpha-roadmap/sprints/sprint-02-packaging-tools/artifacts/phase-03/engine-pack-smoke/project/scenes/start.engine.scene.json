@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "scene_id": "project.engine_pack_smoke.start",
+  "root_nodes": ["node.root"],
+  "nodes": [
+    {
+      "id": "node.root",
+      "parent": null,
+      "name": "Root",
+      "transform": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "asset": null
+    }
+  ],
+  "lights": [],
+  "environment": null,
+  "editor": {}
+}

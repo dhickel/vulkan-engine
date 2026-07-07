@@ -1,0 +1,485 @@
+{
+  "task": "sprint-04-runtime-launcher",
+  "plan_root": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher",
+  "status": "closed",
+  "fully_validated": true,
+  "created_at": "2026-07-03",
+  "updated_at": "2026-07-03",
+  "branch": "sprint/alpha-04-runtime-launcher",
+  "required_validation_reports": [
+    "validation/phase-01-validation-report.md",
+    "validation/phase-02-validation-report.md",
+    "validation/phase-03-validation-report.md",
+    "validation/phase-04-validation-report.md"
+  ],
+  "phase_status": {
+    "phase_01_runtime_cli": "validator_passed_committed_pushed_reported",
+    "phase_02_runtime_loading_loop": "validator_passed_committed_pushed_reported",
+    "phase_03_dev_loop_docs": "validator_passed_committed_pushed_reported",
+    "phase_04_capture_closeout": "validator_passed_committed_pushed_reported"
+  },
+  "required_commands": [
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo check -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo test -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo run -- --help",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo run -- --project apps/editor/sample_project/engine.project.toml --capture_target swapchain",
+      "status": "passed_expected_controlled_usage_error",
+      "exit_code": 2
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "cargo run --",
+      "status": "passed_expected_controlled_usage_error",
+      "exit_code": 2
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "git diff --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_01_runtime_cli",
+      "command": "jq empty .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo test -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo test -p renderer",
+      "status": "passed_after_doctest_fence_repair",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -p engine_pack -- validate-scene apps/editor/sample_project/scenes/start.engine.scene.json --project apps/editor/sample_project/engine.project.toml",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 1 --capture_frame_start 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke",
+      "status": "passed_true_headless_draw_capture",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 1 --capture_frame_start 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke-rerun",
+      "status": "passed_true_headless_draw_capture_after_doctest_fence_repair",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -- --project .internal-dev/does-not-exist/engine.project.toml",
+      "status": "passed_expected_controlled_runtime_error",
+      "exit_code": 1
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "cargo run -- --project apps/editor/sample_project/engine.project.toml --capture_target swapchain",
+      "status": "passed_expected_controlled_usage_error",
+      "exit_code": 2
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "jq sidecar predicate plus png existence check for .internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke/*.json and phase-02-smoke-rerun/*.json",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "git diff --check",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_02_runtime_loading_loop",
+      "command": "jq empty .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json",
+      "status": "passed_validator_rechecked",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo check -p engine",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo check -p editor",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo check -p engine_pack --locked",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "cargo run -- --help",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "git diff --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "rg -n 'migration stub|runtime project launcher.*deferred|renderer examples.*only runtime|cargo run` prints|dynamic Rust hot reload|scripting implemented|physics implemented|audio implemented|prints migration guidance' README.md docs apps/dungeon_dogfood",
+      "status": "passed_with_accepted_deferred_feature_hits",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher/artifacts/validation-summary.json >/dev/null",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_03_dev_loop_docs",
+      "command": "independent validator rerun: cargo run -- --help; targeted stale sweep; broader stale wording sweep; python -m json.tool; git diff --check",
+      "status": "passed_after_lifecycle_doc_remediation",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check -p renderer --examples",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check -p editor",
+      "status": "passed_with_existing_renderer_and_editor_dead_code_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo check -p engine_pack --locked",
+      "status": "passed_with_existing_renderer_warnings",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo test -p engine",
+      "status": "passed_17_tests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo test -p renderer",
+      "status": "passed_150_lib_17_integration_5_ignored_doctests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "cargo test -p engine_pack --locked",
+      "status": "passed_13_cli_validation_tests",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "RUST_LOG=info timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 3 --capture_frame_start 5 --capture_frame_interval 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/headless-draw",
+      "status": "passed_true_headless_draw_capture",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "RUST_LOG=debug timeout --signal=INT 60s cargo run -- --project apps/editor/sample_project/engine.project.toml --headless --capture_target draw --capture_frames 1 --capture_frame_start 5 --capture_dir .internal-dev/captures/sprint-04-runtime-launcher/debug-smoke --record_debug 10 --record_debug_interval 50 --record_debug_path .internal-dev/debug_reports/sprint-04-runtime-launcher/root-runtime-timing.jsonl",
+      "status": "passed_true_headless_draw_capture_and_debug_jsonl",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "jq sidecar predicates plus png existence for final headless-draw and debug-smoke captures",
+      "status": "passed",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "representative PNG visual inspection for headless-draw frame 15 and debug-smoke frame 5",
+      "status": "passed_nonblank_sample_scene_visible",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "rg -n \"migration stub|runtime project launcher.*deferred|present-target proof|desktop screenshot|dynamic Rust hot reload implemented|scripting implemented|physics implemented|audio implemented|TODO|not implemented\" README.md docs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-04-runtime-launcher",
+      "status": "passed_with_accepted_historical_planning_and_internal_roadmap_hits",
+      "exit_code": 0
+    },
+    {
+      "phase": "phase_04_capture_closeout",
+      "command": "independent validator: json parse; git diff --check; sidecar predicates; debug JSONL; stale-reference sweep",
+      "status": "passed",
+      "exit_code": 0
+    }
+  ],
+  "main_thread_evidence": {
+    "phase_commits": [
+      {
+        "phase": "phase_01_runtime_cli",
+        "hash": "ff8a20fd",
+        "subject": "Sprint 04 phase 01 runtime CLI",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/ff8a20fd"
+      },
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "hash": "57f2ad37",
+        "subject": "Sprint 04 phase 02 runtime loading loop",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/57f2ad37"
+      },
+      {
+        "phase": "phase_03_dev_loop_docs",
+        "hash": "127994ae",
+        "subject": "Sprint 04 phase 03 dev loop docs",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/127994ae"
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "hash": "1b8ebd7c",
+        "subject": "Sprint 04 phase 04 capture closeout",
+        "url": "https://github.com/dhickel/vulkan-engine/commit/1b8ebd7c"
+      }
+    ],
+    "pushes": [
+      {
+        "phase": "phase_01_runtime_cli",
+        "branch": "sprint/alpha-04-runtime-launcher",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
+        "pushed_through": "ff8a20fd"
+      },
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "branch": "sprint/alpha-04-runtime-launcher",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
+        "pushed_through": "57f2ad37"
+      },
+      {
+        "phase": "phase_03_dev_loop_docs",
+        "branch": "sprint/alpha-04-runtime-launcher",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
+        "pushed_through": "127994ae"
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "branch": "sprint/alpha-04-runtime-launcher",
+        "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-04-runtime-launcher",
+        "pushed_through": "1b8ebd7c"
+      }
+    ],
+    "email_reports": [
+      {
+        "phase": "phase_01_runtime_cli",
+        "subject": "Sprint 04 Phase 01 Progress Report - Runtime CLI",
+        "message_id": "<0100019f276e74fa-15f79adb-33fd-46e8-8fe5-dc01b14a7ae0-000000@email.amazonses.com>",
+        "thread_id": "6d696e45-f032-4006-99e1-b6251f30529f"
+      },
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "subject": "Sprint 04 Phase 02 Progress Report - Runtime Loading Loop",
+        "message_id": "<0100019f277bccf5-cd50c23a-dfbb-4954-b4ad-c2269bcf2466-000000@email.amazonses.com>",
+        "thread_id": "6ca73dad-9e79-476f-aafe-babc7a6f3a93"
+      },
+      {
+        "phase": "phase_03_dev_loop_docs",
+        "subject": "Sprint 04 Phase 03 Progress Report - Dev Loop Docs",
+        "message_id": "<0100019f2786b0c3-5c37f71e-edfc-47fa-b5fb-eae970c5e246-000000@email.amazonses.com>",
+        "thread_id": "16b22b17-c74f-452b-847d-9fecbd6e63ae"
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "subject": "Sprint 04 Phase 04 Final Report - Capture Closeout",
+        "message_id": "<0100019f278dedf8-0aa6f2b7-d646-494f-9c4f-fbd81961c8c8-000000@email.amazonses.com>",
+        "thread_id": "3f426dad-75c4-4c86-9550-76b6244ee923"
+      }
+    ]
+  },
+  "capture_proof": {
+    "required": true,
+    "status": "phase_04_final_draw_capture_passed_validator_passed",
+    "accepted_target": "draw",
+    "required_flags": [
+      "--headless",
+      "--capture_target draw"
+    ],
+    "artifact_directory": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw",
+    "sidecar_predicates": {
+      "status": "succeeded",
+      "capture_target": "draw",
+      "format": "draw-target format, expected R16G16B16A16_SFLOAT unless current code documents otherwise",
+      "extent": "positive width and height",
+      "png_path": "exists and non-empty"
+    },
+    "rejected_proof": [
+      "desktop screenshots",
+      "compositor screenshots",
+      "present-target captures"
+    ],
+    "sidecars": [
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_02_runtime_loading_loop",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke-rerun/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/phase-02-smoke-rerun/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-10-draw-seq-0001.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-10-draw-seq-0001.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-15-draw-seq-0002.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/headless-draw/editor-sample-project-frame-15-draw-seq-0002.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      },
+      {
+        "phase": "phase_04_capture_closeout",
+        "path": ".internal-dev/captures/sprint-04-runtime-launcher/debug-smoke/editor-sample-project-frame-5-draw-seq-0000.json",
+        "png_path": ".internal-dev/captures/sprint-04-runtime-launcher/debug-smoke/editor-sample-project-frame-5-draw-seq-0000.png",
+        "status": "succeeded",
+        "capture_target": "draw",
+        "format": "R16G16B16A16_SFLOAT",
+        "extent": {
+          "width": 1440,
+          "height": 900
+        }
+      }
+    ]
+  },
+  "debug_record_evidence": {
+    "status": "passed_validator_passed",
+    "expected_path": ".internal-dev/debug_reports/sprint-04-runtime-launcher/root-runtime-timing.jsonl",
+    "line_count": 2
+  },
+  "model_tooling_constraints": [],
+  "residual_risks": [
+    "Renderer doctest/prose snippet failures were repaired by marking diagrams as text and illustrative snippets as ignored doctests; existing renderer dead-code warnings remain.",
+    "Existing editor dead-code warning for set_active_scene_text remains visible during cargo check -p editor."
+  ],
+  "superseded_artifacts": [],
+  "notes": [
+    "This index remains conservative and must not be promoted to fully_validated until all phase validators and draw-target capture proof pass.",
+    "Phase 01 validator passed for parser/options/help/error behavior only.",
+    "Phase 02 implementation produced true headless draw-target capture proof.",
+    "Phase 02 independent validator passed on 2026-07-03.",
+    "Phase 03 local validation passed on 2026-07-03.",
+    "Phase 03 independent validator initially found stale lifecycle doc wording; remediation passed revalidation on 2026-07-03.",
+    "Phase 04 local validation and true headless draw-target closeout passed on 2026-07-03.",
+    "Phase 04 independent validator passed on 2026-07-03.",
+    "Sprint 04 is fully validated after Phase 01-04 validator passes and final true headless draw-target evidence."
+  ]
+}

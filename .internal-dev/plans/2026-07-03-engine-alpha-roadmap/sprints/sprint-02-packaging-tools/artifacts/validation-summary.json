@@ -1,0 +1,312 @@
+{
+  "sprint": "Sprint 02 - Asset package authoring and validation tools",
+  "status": "sprint_02_closed_committed_pushed_reported",
+  "branch": "sprint/alpha-02-packaging-tools",
+  "capture_decision": "not_required_cli_schema_only",
+  "phases": [
+    {
+      "phase": "01",
+      "name": "Shared validation contract and schema hardening",
+      "status": "passed_local_validation_pending_commit",
+      "capture_decision": "not_required_cli_schema_only",
+      "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-01-validation-report.md",
+      "validator_agent": "019f26e0-1880-7b10-8e44-bf39a0002151",
+      "remediation": [
+        "Added recursive package runtime-handle detection.",
+        "Expanded package/project invalid-case tests."
+      ]
+    },
+    {
+      "phase": "02",
+      "name": "engine_pack read-only validation CLI",
+      "status": "passed_red_team_remediation_pending_commit",
+      "capture_decision": "not_required_cli_schema_only",
+      "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-02-validation-report.md",
+      "validator_agent": "019f26ec-d3e4-76d0-82f4-36964a0bf300",
+      "remediation": [
+        "Made standalone valid package fixture self-contained.",
+        "Fixed option-before-path parsing for package and scene validation commands.",
+        "Expanded CLI tests to cover exact validation/usage exit codes and flag-order variants.",
+        "Clarified in-scope pending sprint evidence versus unrelated dirty state in the phase report."
+      ]
+    },
+    {
+      "phase": "03",
+      "name": "engine_pack authoring and folder pack commands",
+      "status": "passed_red_team_remediation_committed_pushed_reported",
+      "capture_decision": "not_required_cli_schema_only",
+      "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-03-validation-report.md",
+      "validator_agent": "019f26fa-33dc-7e41-9e16-ac28bc159fc0",
+      "remediation": [
+        "Rejected raw parent-traversing package asset paths before pack copy.",
+        "Cleared stale PACK_REPORT.json before validation can abort a repack.",
+        "Added regression tests for unsafe asset paths and stale report cleanup.",
+        "Created sprint-local Phase 03 smoke artifacts and validation report."
+      ]
+    },
+    {
+      "phase": "04",
+      "name": "API docs, final validation, and closeout",
+      "status": "passed_committed_pushed_reported",
+      "capture_decision": "not_required_cli_schema_only",
+      "report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/phase-04-validation-report.md",
+      "final_quality_review": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/validation/final-quality-review.md",
+      "changelog": ".internal-dev/changelogs/2026-07-03-sprint-02-packaging-tools.md",
+      "remediation": [
+        "Added API docs for engine_pack validation, authoring, and folder pack commands.",
+        "Linked package-backed scene validation into scene workflow docs.",
+        "Clarified implemented folder pack output versus deferred binary archive/thumbnail/import/editor placement work.",
+        "Ran final workspace, renderer, input, engine_pack, and sample project validation commands."
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "phase": "01",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p renderer asset_registry",
+      "result": "passed: 8 renderer asset registry tests"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p renderer scene",
+      "result": "passed: 36 lib scene-filtered tests and 2 integration scene-filtered tests"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p renderer",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p renderer --examples",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "02",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "02",
+      "command": "cargo check -p engine_pack",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "02",
+      "command": "cargo test -p engine_pack",
+      "result": "passed: 6 CLI integration tests"
+    },
+    {
+      "phase": "02",
+      "command": "cargo run -p engine_pack -- validate-package apps/editor/sample_project/assets/editor_sample.package.toml --expected-package-id editor_sample",
+      "result": "passed: valid[package] with 2 assets"
+    },
+    {
+      "phase": "02",
+      "command": "cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml",
+      "result": "passed: valid[project] project.editor_sample"
+    },
+    {
+      "phase": "02",
+      "command": "cargo run -p engine_pack -- validate-scene apps/editor/sample_project/scenes/start.engine.scene.json --project apps/editor/sample_project/engine.project.toml",
+      "result": "passed: valid[scene]"
+    },
+    {
+      "phase": "02",
+      "command": "cargo run -p engine_pack -- validate-package tools/engine_pack/fixtures/packages/valid.package.toml --project-root tools/engine_pack/fixtures/packages --expected-package-id fixture",
+      "result": "passed: valid[package] with 1 asset"
+    },
+    {
+      "phase": "02",
+      "command": "cargo run -p engine_pack -- validate-package --expected-package-id editor_sample apps/editor/sample_project/assets/editor_sample.package.toml",
+      "result": "passed: option-before-path valid[package]"
+    },
+    {
+      "phase": "02",
+      "command": "cargo run -p engine_pack -- validate-scene --project apps/editor/sample_project/engine.project.toml apps/editor/sample_project/scenes/start.engine.scene.json",
+      "result": "passed: option-before-path valid[scene]"
+    },
+    {
+      "phase": "03",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "03",
+      "command": "cargo check -p engine_pack --locked",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p engine_pack --locked",
+      "result": "passed: 13 CLI integration tests"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- new-project .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project --id project.engine_pack_smoke --name \"Engine Pack Smoke\"",
+      "result": "passed: created project"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- new-package .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets/smoke.package.toml --id smoke --name \"Smoke Assets\"",
+      "result": "passed: created package"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- add-asset .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets/smoke.package.toml --id smoke.model.smoke --kind model --path models/smoke.obj --tag smoke --tag generated",
+      "result": "passed: added asset and revalidated package"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- scan-assets .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/project/assets --package-id smoke",
+      "result": "passed: deterministic TOML suggestion for smoke.model.models.smoke"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml",
+      "result": "passed: valid[project] project.editor_sample"
+    },
+    {
+      "phase": "03",
+      "command": "cargo run -p engine_pack -- pack apps/editor/sample_project/engine.project.toml --out .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-02-packaging-tools/artifacts/phase-03/engine-pack-smoke/packed",
+      "result": "passed: PACK_REPORT.json and 5 copied files"
+    },
+    {
+      "phase": "04",
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "phase": "04",
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p renderer",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p renderer --examples",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p input",
+      "result": "passed"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p engine_pack --locked",
+      "result": "passed with existing renderer warnings"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p engine_pack --locked",
+      "result": "passed: 13 CLI integration tests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo run -q -p engine_pack -- validate-package apps/editor/sample_project/assets/editor_sample.package.toml --expected-package-id editor_sample",
+      "result": "passed: valid[package] with 2 assets"
+    },
+    {
+      "phase": "04",
+      "command": "cargo run -q -p engine_pack -- validate-project apps/editor/sample_project/engine.project.toml",
+      "result": "passed: valid[project] project.editor_sample"
+    },
+    {
+      "phase": "04",
+      "command": "cargo run -q -p engine_pack -- validate-scene apps/editor/sample_project/scenes/start.engine.scene.json --project apps/editor/sample_project/engine.project.toml",
+      "result": "passed: valid[scene]"
+    }
+  ],
+  "commits": [
+    {
+      "phase": "01",
+      "hash": "fa7abc33ea76c7f81edd3b04518a37d680bf695a",
+      "subject": "Sprint 02 phase 01 shared validation contract",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/fa7abc33ea76c7f81edd3b04518a37d680bf695a"
+    },
+    {
+      "phase": "02",
+      "hash": "4121f5d0cbacfe12e0132a101d442d84e52042f8",
+      "subject": "Sprint 02 phase 02 engine_pack validation CLI",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/4121f5d0cbacfe12e0132a101d442d84e52042f8"
+    },
+    {
+      "phase": "03",
+      "hash": "e7f5557412c05dd7b851e04ba5fdaf9cffc08c49",
+      "subject": "Sprint 02 phase 03 engine_pack authoring tools",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/e7f5557412c05dd7b851e04ba5fdaf9cffc08c49"
+    },
+    {
+      "phase": "04",
+      "hash": "1e7253be",
+      "subject": "Sprint 02 phase 04 docs and closeout",
+      "url": "https://github.com/dhickel/vulkan-engine/commit/1e7253be"
+    }
+  ],
+  "pushes": [
+    {
+      "phase": "02",
+      "branch": "sprint/alpha-02-packaging-tools",
+      "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools",
+      "pushed_through": "b57d827f"
+    },
+    {
+      "phase": "03",
+      "branch": "sprint/alpha-02-packaging-tools",
+      "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools",
+      "pushed_through": "e7f55574"
+    },
+    {
+      "phase": "04",
+      "branch": "sprint/alpha-02-packaging-tools",
+      "url": "https://github.com/dhickel/vulkan-engine/tree/sprint/alpha-02-packaging-tools",
+      "pushed_through": "1e7253be"
+    }
+  ],
+  "agentmail_reports": [
+    {
+      "phase": "02",
+      "subject": "Sprint 02 Phase 02 Progress Report - engine_pack Validation CLI",
+      "message_id": "<0100019f26f224e0-3ad7899c-53b8-444f-90aa-aaf70660c426-000000@email.amazonses.com>",
+      "thread_id": "3b73da72-bec0-49c3-8140-62d4c17960cc"
+    },
+    {
+      "phase": "03",
+      "subject": "Sprint 02 Phase 03 Progress Report - engine_pack Authoring and Pack Commands",
+      "message_id": "<0100019f27038188-d508add9-cf7d-428e-af91-0ee7bab12ea5-000000@email.amazonses.com>",
+      "thread_id": "c8825a7f-bf67-44a3-b62a-d33ad333932d"
+    },
+    {
+      "phase": "04",
+      "subject": "Sprint 02 Phase 04 Progress Report - Docs and Final Validation",
+      "message_id": "<0100019f27098886-e6ad9102-1877-49aa-a880-a6be68146758-000000@email.amazonses.com>",
+      "thread_id": "bb9fff77-9b55-4012-926d-ffd9f8081112"
+    },
+    {
+      "phase": "final",
+      "subject": "Sprint 02 Final Quality Report - Packaging Tools Closed",
+      "message_id": "<0100019f2709dd2d-0043082d-5312-44d9-99c9-d67653072430-000000@email.amazonses.com>",
+      "thread_id": "dc297777-b576-4fd9-9a42-ffe770d0fe85"
+    }
+  ],
+  "residuals": [
+    "Sprint 01 remains blocked on changelog timing confirmation and must not be closed by Sprint 02."
+  ],
+  "tooling_constraints": [],
+  "final_status_rule": "Do not set fully_validated unless all required validators, checks, pushes, emails, and capture decisions pass with no residuals."
+}

@@ -14,7 +14,7 @@
 //! ## Design Pattern
 //! Most functions return Vk...CreateInfo structs with .default() fields, allowing
 //! caller to override specific fields via builder pattern. Example:
-//! ```rust
+//! ```ignore
 //! let info = vk_util::image_create_info(format, usage, extent, type, samples, mips)
 //!     .sharing_mode(vk::SharingMode::CONCURRENT)  // Override default EXCLUSIVE
 //!     .queue_family_indices(&indices);
@@ -319,14 +319,6 @@ pub fn pipeline_shader_stage_create_info(
 
 pub fn pipeline_layout_create_info<'a>() -> PipelineLayoutCreateInfo<'a> {
     vk::PipelineLayoutCreateInfo::default()
-}
-
-pub fn find_memory_type(
-    _physical_device: vk::PhysicalDevice,
-    _type_filter: u32,
-    _prop_flags: vk::MemoryPropertyFlags,
-) -> u32 {
-    todo!()
 }
 
 pub fn blit_copy_image_to_image(

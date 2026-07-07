@@ -1,0 +1,225 @@
+{
+  "sprint": "06",
+  "slug": "sprint-06-physics-collision-foundation",
+  "branch": "sprint/alpha-06-physics-collision-foundation",
+  "status": "fully_validated",
+  "fully_validated": true,
+  "phase_status": {
+    "phase_01_physics_crate_alpha_contract": "validated",
+    "phase_02_package_scene_collision_metadata": "validated",
+    "phase_03_event_bridge_dogfood_proof": "validated",
+    "phase_04_docs_final_validation": "validated",
+    "final_quality_review": "passed"
+  },
+  "required_reports": {
+    "phase_01": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/phase-01-validation-report.md",
+    "phase_02": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/phase-02-validation-report.md",
+    "phase_03": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/phase-03-validation-report.md",
+    "phase_04": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/phase-04-validation-report.md",
+    "final_quality": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/validation/final-quality-review.md"
+  },
+  "command_results": [
+    {
+      "phase": "01",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "01",
+      "command": "cargo test -p physics",
+      "result": "pass",
+      "notes": "7 unit tests pass"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check -p physics",
+      "result": "pass"
+    },
+    {
+      "phase": "01",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer dead-code warning noise remains"
+    },
+    {
+      "phase": "01",
+      "command": "rg -n \"renderer|ash|vulkan|winit|imgui|dungeon_dogfood|editor\" src/physics",
+      "result": "pass",
+      "notes": "No matches; rg_exit=1 means clean dependency scan"
+    },
+    {
+      "phase": "01",
+      "command": "cargo tree -p physics",
+      "result": "pass",
+      "notes": "Physics roots at rapier3d; no renderer/window/editor/app dependency"
+    },
+    {
+      "phase": "02",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "02",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "156 lib tests, 17 integration tests, 5 ignored doc tests"
+    },
+    {
+      "phase": "02",
+      "command": "cargo test -p engine_pack",
+      "result": "pass",
+      "notes": "14 CLI tests"
+    },
+    {
+      "phase": "02",
+      "command": "cargo check -p engine_pack",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "02",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p physics",
+      "result": "pass",
+      "notes": "11 unit tests"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p engine_events",
+      "result": "pass",
+      "notes": "7 unit tests"
+    },
+    {
+      "phase": "03",
+      "command": "cargo check -p dungeon_dogfood",
+      "result": "pass",
+      "notes": "Existing renderer/dogfood warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo check -p editor",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "03",
+      "command": "cargo tree -p engine_events",
+      "result": "pass",
+      "notes": "engine_events has no physics dependency"
+    },
+    {
+      "phase": "03",
+      "command": "cargo test -p dungeon_dogfood",
+      "result": "pass",
+      "notes": "40 tests; behavior baseline run because migration was deferred"
+    },
+    {
+      "phase": "04",
+      "command": "cargo fmt --check",
+      "result": "pass"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check",
+      "result": "pass",
+      "notes": "Existing renderer dead-code warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p physics",
+      "result": "pass",
+      "notes": "11 unit tests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p engine_events",
+      "result": "pass",
+      "notes": "7 unit tests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p renderer",
+      "result": "pass",
+      "notes": "156 lib tests, 17 integration tests, 5 ignored doc tests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p engine_pack",
+      "result": "pass",
+      "notes": "14 CLI tests"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p physics",
+      "result": "pass"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p renderer --examples",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p editor",
+      "result": "pass",
+      "notes": "Existing renderer/editor warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p dungeon_dogfood",
+      "result": "pass",
+      "notes": "Existing renderer/dogfood warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo check -p engine_pack",
+      "result": "pass",
+      "notes": "Existing renderer warning noise remains"
+    },
+    {
+      "phase": "04",
+      "command": "cargo test -p dungeon_dogfood",
+      "result": "pass",
+      "notes": "40 tests; extra closeout coverage"
+    },
+    {
+      "phase": "04",
+      "command": "rg -n \"/tmp|desktop screenshot|screenshot|TODO|pending|planned|not implemented|agent id|fully_validated|TOOLING_CONSTRAINT\" docs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation",
+      "result": "pass",
+      "notes": "Hits triaged as intentional policy/history, CLI examples, existing unrelated docs, or pre-closeout validation-summary state; no stale Sprint 06 implementation claim found"
+    }
+  ],
+  "browser_or_capture": {
+    "required_by_plan": false,
+    "reason": "Pure physics, metadata, event, docs, and dogfood decision-gate work do not require visual proof unless implementation changes visible renderer/editor behavior.",
+    "authoritative_artifact_dir": null
+  },
+  "dogfood_gate": {
+    "required": true,
+    "status": "deferred_with_debt_artifact",
+    "expected_artifact_if_deferred": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-06-physics-collision-foundation/reports/dogfood-physics-migration-debt.md"
+  },
+  "superseded_artifacts": [],
+  "tooling_constraints": [],
+  "residual_risks": [
+    "Dogfood gameplay migration is deferred with an explicit debt artifact; current custom solver remains in use.",
+    "Collision metadata is validated and persisted, but editor UI authoring and runtime physics wiring are deferred to later phases."
+  ]
+}

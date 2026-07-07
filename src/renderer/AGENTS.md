@@ -61,6 +61,14 @@ Module guides:
 - `cargo run -p renderer --example demo_model_load`
 - `cargo run -p renderer --example demo_async_loading`
 
+## Headless Capture Validation
+
+- Use the project skill `.internal-dev/skills/engine-headless-capture-validation/SKILL.md` for renderer changes that need visual proof.
+- Prefer timeout-bound `--headless` frame captures over desktop screenshots; agents do not fully control the user's windowing environment.
+- Agents may create focused validation scenes or examples under `src/renderer/examples/capture_tests/` when existing examples are too ambiguous.
+- Use `.internal-dev/headless_capture_tests/` for temporary scene specs, notes, and investigation artifacts.
+- Use `.internal-dev/captures/` for generated PNG/JSON capture evidence.
+
 ## Runtime Debug Capture
 
 - Use launch recording flags to capture timing JSONL without opening the debug menu.

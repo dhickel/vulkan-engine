@@ -1,10 +1,16 @@
-use std::any::Any;
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use ash::vk::Extent2D;
+use engine_events::{
+    ActionPhase, EngineEvent, EventBus, EventRecorder, EventStage, FrameId, InputActionEvent,
+    LifecycleEvent,
+};
 use glam::Mat4;
-use input::{ActionMap, InputSystem, LayerDescriptor, LayerHandle, LayerPriority};
+use input::{
+    ActionId, ActionMap, InputSnapshot, InputSystem, LayerDescriptor, LayerHandle, LayerPriority,
+};
 use log::{error, warn};
 use winit::event::{DeviceEvent, ElementState, Event, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -27,7 +33,7 @@ use super::errors::{
     map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, RendererError,
     RendererInitError,
 };
-use super::hooks::{invoke_render_hook, RenderHook, RenderHookStage};
+use super::hooks::{invoke_render_hook, BoxedRenderHook, RenderHookStage};
 use super::scene::Scene;
 
 const DEFAULT_ASSET_PUMP_STEPS: usize = 32;
@@ -72,8 +78,10 @@ pub struct Renderer {
     startup_scene: Option<Scene>,
     asset_loads: AssetLoadTracker,
     asset_policy: AssetPolicyConfig,
-    pre_render_hook: Option<RenderHook>,
-    post_render_hook: Option<RenderHook>,
+    event_bus: EventBus,
+    observed_action_values: HashMap<ActionId, f32>,
+    pre_render_hook: Option<BoxedRenderHook>,
+    post_render_hook: Option<BoxedRenderHook>,
     frame_capture_scheduler: FrameCaptureScheduler,
     resize_skip_state_logged: bool,
     camera: Camera,
@@ -113,6 +121,8 @@ impl Renderer {
             startup_scene: Some(Scene::from_world(scene_world)),
             asset_loads: AssetLoadTracker::new(),
             asset_policy,
+            event_bus: EventBus::new(),
+            observed_action_values: HashMap::new(),
             pre_render_hook: None,
             post_render_hook: None,
             frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
@@ -154,6 +164,8 @@ impl Renderer {
             startup_scene: Some(Scene::from_world(scene_world)),
             asset_loads: AssetLoadTracker::new(),
             asset_policy,
+            event_bus: EventBus::new(),
+            observed_action_values: HashMap::new(),
             pre_render_hook: None,
             post_render_hook: None,
             frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
@@ -205,6 +217,26 @@ impl Renderer {
 
     pub fn input(&self) -> &InputSystem {
         &self.input_system
+    }
+
+    pub fn events(&self) -> &EventBus {
+        &self.event_bus
+    }
+
+    pub fn events_mut(&mut self) -> &mut EventBus {
+        &mut self.event_bus
+    }
+
+    pub fn set_event_recorder(&mut self, recorder: Option<EventRecorder>) {
+        self.event_bus.set_recorder(recorder);
+    }
+
+    /// Drain all pending events for a specific stage.
+    ///
+    /// Typically called after `begin_frame` (for PreUpdate events) and
+    /// at frame boundaries (for PostUpdate events). Failures are logged.
+    pub fn drain_events(&mut self, stage: EventStage) {
+        self.dispatch_events_for_stage(stage);
     }
 
     /// Thread: Main
@@ -316,7 +348,7 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RendererError> {
         if self.open_frame.is_some() {
             return Err(RendererError::InvalidState(
-                "cannot resize while an explicit frame is open",
+                "cannot resize while an explicit frame is open".to_string(),
             ));
         }
 
@@ -332,7 +364,7 @@ impl Renderer {
         .map_err(|panic| {
             map_frame_resize_err(format!(
                 "swapchain rebuild panicked: {}",
-                panic_payload_to_string(panic)
+                super::utils::panic_payload_to_string(panic)
             ))
         })?;
         Ok(())
@@ -347,20 +379,10 @@ impl Renderer {
     ) -> Result<FrameRenderOutcome, RendererError> {
         if self.open_frame.is_some() {
             return Err(RendererError::InvalidState(
-                "render_scene cannot run while an explicit frame is open",
+                "render_scene cannot run while an explicit frame is open".to_string(),
             ));
         }
-
-        self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
-        let prepare_outcome = self.prepare_frame(window)?;
-        if prepare_outcome == FramePrepareOutcome::SkippedResizePending {
-            self.frame_number = self.frame_number.wrapping_add(1);
-            return Ok(FrameRenderOutcome::SkippedResizePending);
-        }
-
-        let outcome = self.render_scene_internal(scene, self.frame_number)?;
-        self.frame_number = self.frame_number.wrapping_add(1);
-        Ok(outcome)
+        self.execute_frame_lifecycle(scene, |slf| slf.prepare_frame(window))
     }
 
     /// Thread: Main
@@ -371,18 +393,57 @@ impl Renderer {
     ) -> Result<FrameRenderOutcome, RendererError> {
         if self.open_frame.is_some() {
             return Err(RendererError::InvalidState(
-                "render_scene_headless cannot run while an explicit frame is open",
+                "render_scene_headless cannot run while an explicit frame is open".to_string(),
             ));
         }
         if !self.runtime.is_headless() {
             return Err(RendererError::InvalidState(
-                "render_scene_headless requires a headless renderer",
+                "render_scene_headless requires a headless renderer".to_string(),
             ));
         }
+        self.execute_frame_lifecycle(scene, |slf| {
+            slf.prepare_frame_headless();
+            Ok(FramePrepareOutcome::Ready)
+        })
+    }
 
+    /// Shared frame lifecycle for one-shot render paths.
+    ///
+    /// Handles asset pumping, lifecycle event emission, frame preparation,
+    /// resize-skip logic, and the render_scene_internal call. The `prepare`
+    /// closure handles window- or headless-specific frame setup.
+    fn execute_frame_lifecycle(
+        &mut self,
+        scene: &mut Scene,
+        prepare: impl FnOnce(&mut Self) -> Result<FramePrepareOutcome, RendererError>,
+    ) -> Result<FrameRenderOutcome, RendererError> {
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
-        self.prepare_frame_headless();
+        self.emit_lifecycle_event(
+            EventStage::PreUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameStarted,
+        );
+        self.dispatch_events_for_stage(EventStage::PreUpdate);
+
+        let prepare_outcome = prepare(self)?;
+        if prepare_outcome == FramePrepareOutcome::SkippedResizePending {
+            self.emit_lifecycle_event(
+                EventStage::PostUpdate,
+                Some(FrameId(self.frame_number as u64)),
+                LifecycleEvent::FrameEnded,
+            );
+            self.dispatch_events_for_stage(EventStage::PostUpdate);
+            self.frame_number = self.frame_number.wrapping_add(1);
+            return Ok(FrameRenderOutcome::SkippedResizePending);
+        }
+
         let outcome = self.render_scene_internal(scene, self.frame_number)?;
+        self.emit_lifecycle_event(
+            EventStage::PostUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameEnded,
+        );
+        self.dispatch_events_for_stage(EventStage::PostUpdate);
         self.frame_number = self.frame_number.wrapping_add(1);
         Ok(outcome)
     }
@@ -392,11 +453,16 @@ impl Renderer {
     pub fn begin_frame(&mut self, window: &Window) -> Result<FrameContext, RendererError> {
         if self.open_frame.is_some() {
             return Err(RendererError::InvalidState(
-                "begin_frame called while another frame is open",
+                "begin_frame called while another frame is open".to_string(),
             ));
         }
 
         self.pump_asset_tasks(DEFAULT_ASSET_PUMP_STEPS)?;
+        self.emit_lifecycle_event(
+            EventStage::PreUpdate,
+            Some(FrameId(self.frame_number as u64)),
+            LifecycleEvent::FrameStarted,
+        );
         let _ = self.prepare_frame(window)?;
         let frame_number = self.frame_number;
         self.open_frame = Some(frame_number);
@@ -424,7 +490,7 @@ impl Renderer {
 
         if frame.render_attempted {
             return Err(RendererError::InvalidState(
-                "render_scene_in_frame was already called for this frame",
+                "render_scene_in_frame was already called for this frame".to_string(),
             ));
         }
 
@@ -445,8 +511,45 @@ impl Renderer {
         }
 
         self.open_frame = None;
+        self.emit_lifecycle_event(
+            EventStage::PostUpdate,
+            Some(FrameId(frame.frame_number as u64)),
+            LifecycleEvent::FrameEnded,
+        );
+        self.dispatch_events_for_stage(EventStage::PostUpdate);
         self.frame_number = self.frame_number.wrapping_add(1);
         Ok(())
+    }
+
+    /// Execute rendering within a managed frame lifecycle.
+    ///
+    /// This is the recommended API for most rendering loops. It calls
+    /// `begin_frame`, invokes the closure, and automatically calls `end_frame`.
+    ///
+    /// If the closure returns an `Err`, the frame is still properly ended.
+    pub fn with_frame(
+        &mut self,
+        window: &Window,
+        scene: &mut Scene,
+        f: impl FnOnce(&mut FrameContext, &mut Scene) -> Result<(), RendererError>,
+    ) -> Result<FrameRenderOutcome, RendererError> {
+        let mut frame = self.begin_frame(window)?;
+        // Drain PreUpdate events that were emitted by begin_frame.
+        self.dispatch_events_for_stage(EventStage::PreUpdate);
+        let result = f(&mut frame, scene);
+        // End the frame regardless of closure result. The closure's error
+        // takes precedence; end_frame errors are logged but not returned
+        // because the frame state is already cleaned up.
+        if let Err(end_err) = self.end_frame(frame) {
+            warn!("end_frame failed after with_frame closure: {end_err}");
+        }
+        result?;
+        // After successful closure, return the frame outcome.
+        if self.runtime.resize_requested() {
+            Ok(FrameRenderOutcome::SkippedResizePending)
+        } else {
+            Ok(FrameRenderOutcome::Rendered)
+        }
     }
 
     /// Thread: Main
@@ -475,13 +578,13 @@ impl Renderer {
 
     /// Thread: Main
     /// May Stall: No
-    pub fn set_pre_render_hook(&mut self, hook: Option<RenderHook>) {
+    pub fn set_pre_render_hook(&mut self, hook: Option<BoxedRenderHook>) {
         self.pre_render_hook = hook;
     }
 
     /// Thread: Main
     /// May Stall: No
-    pub fn set_post_render_hook(&mut self, hook: Option<RenderHook>) {
+    pub fn set_post_render_hook(&mut self, hook: Option<BoxedRenderHook>) {
         self.post_render_hook = hook;
     }
 
@@ -502,7 +605,7 @@ impl Renderer {
         }
 
         Err(RendererError::InvalidState(
-            "debug view id already registered",
+            "debug view id already registered".to_string(),
         ))
     }
 
@@ -531,7 +634,7 @@ impl Renderer {
             return Ok(id);
         }
 
-        Err(RendererError::InvalidState("app ui id already registered"))
+        Err(RendererError::InvalidState("app ui id already registered".to_string()))
     }
 
     /// Removes a previously registered app UI callback.
@@ -713,6 +816,13 @@ impl Renderer {
         self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
+        emit_input_action_events_from_snapshot(
+            &mut self.event_bus,
+            &mut self.observed_action_values,
+            self.frame_number as u64,
+            self.input_system.snapshot(),
+        );
+        self.dispatch_events_for_stage(EventStage::Input);
         if !self.imgui_capture_active() {
             if let Some(plugin) = self.fps_plugin.as_mut() {
                 let snapshot = self.input_system.snapshot();
@@ -750,6 +860,13 @@ impl Renderer {
         self.last_frame_delta_seconds = delta.as_secs_f32();
 
         self.input_system.dispatch_frame();
+        emit_input_action_events_from_snapshot(
+            &mut self.event_bus,
+            &mut self.observed_action_values,
+            self.frame_number as u64,
+            self.input_system.snapshot(),
+        );
+        self.dispatch_events_for_stage(EventStage::Input);
         if let Some(plugin) = self.fps_plugin.as_mut() {
             let snapshot = self.input_system.snapshot();
             plugin
@@ -775,9 +892,9 @@ impl Renderer {
 
         let fovy = 70_f32.to_radians();
         let aspect_ratio = self.runtime.core.window_state.get_aspect_ratio();
-        let far = 0.1;
-        let near = 10_000.0;
-        let proj = Mat4::perspective_rh(fovy, aspect_ratio, far, near);
+        let near = 0.1;
+        let far = 10_000.0;
+        let proj = Mat4::perspective_rh(fovy, aspect_ratio, near, far);
 
         scene.update_camera(camera_view, proj, camera_pos);
         let submission = scene.build_submission();
@@ -827,7 +944,7 @@ impl Renderer {
         .map_err(|panic| {
             map_frame_render_err(format!(
                 "render panicked: {}",
-                panic_payload_to_string(panic)
+                super::utils::panic_payload_to_string(panic)
             ))
         })?;
 
@@ -938,6 +1055,68 @@ impl Renderer {
     pub fn set_camera_position(&mut self, position: glam::Vec3) {
         self.camera.set_position(position);
     }
+
+    /// Emit a lifecycle event into the bus. Does NOT drain — the caller must
+    /// explicitly drain at the correct boundary via `drain_events` or
+    /// `dispatch_events_for_stage`.
+    fn emit_lifecycle_event(
+        &mut self,
+        stage: EventStage,
+        frame: Option<FrameId>,
+        event: LifecycleEvent,
+    ) {
+        self.event_bus
+            .emit(stage, frame, EngineEvent::Lifecycle(event));
+    }
+
+    fn dispatch_events_for_stage(&mut self, stage: EventStage) {
+        let report = self.event_bus.drain_stage(stage);
+        for failure in report.failures {
+            warn!(
+                "event listener {:?} failed for event {:?}: {}",
+                failure.listener, failure.sequence, failure.message
+            );
+        }
+    }
+}
+
+fn emit_input_action_events_from_snapshot(
+    event_bus: &mut EventBus,
+    observed_action_values: &mut HashMap<ActionId, f32>,
+    frame_index: u64,
+    snapshot: &InputSnapshot,
+) {
+    for (action, value) in snapshot.action_values() {
+        let previous = observed_action_values.get(action).copied().unwrap_or(0.0);
+        let phase = if snapshot.action_just_pressed(action) {
+            Some(ActionPhase::Pressed)
+        } else if snapshot.action_just_released(action) {
+            Some(ActionPhase::Released)
+        } else if (previous - value).abs() > f32::EPSILON {
+            Some(ActionPhase::Changed)
+        } else {
+            None
+        };
+
+        if let Some(phase) = phase {
+            event_bus.emit(
+                EventStage::Input,
+                Some(FrameId(frame_index)),
+                EngineEvent::Input(
+                    InputActionEvent::new(
+                        action.clone(),
+                        phase,
+                        value,
+                    )
+                    .with_source("input_snapshot"),
+                ),
+            );
+        }
+
+        observed_action_values.insert(action.clone(), value);
+    }
+
+    observed_action_values.retain(|action, _| snapshot.action_pressed(action));
 }
 
 fn create_window_state(window: &Window, config: &RendererConfig) -> VkWindowState {
@@ -985,13 +1164,90 @@ fn map_vk_init_err(err: String, compile_shaders: bool) -> RendererError {
     map_init_err(err)
 }
 
-fn panic_payload_to_string(payload: Box<dyn Any + Send>) -> String {
-    let payload = payload.as_ref();
-    if let Some(msg) = payload.downcast_ref::<String>() {
-        return msg.clone();
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use engine_events::{ActionPhase, EngineEvent, EventBus, EventStage};
+    use input::{ActionMap, InputEvent, InputSystem, LayerDescriptor, LayerPriority};
+    use winit::event::ElementState;
+    use winit::keyboard::{KeyCode, ModifiersState};
+
+    use super::emit_input_action_events_from_snapshot;
+
+    #[test]
+    fn input_action_bridge_emits_after_snapshot_dispatch() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        input.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+
+        let mut bus = EventBus::new();
+        let mut observed = HashMap::new();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 7, input.snapshot());
+
+        let report = bus.drain_stage(EventStage::Input);
+        assert_eq!(report.dispatched, 1);
+        let recorded = bus.recorder();
+        assert!(recorded.is_none());
     }
-    if let Some(msg) = payload.downcast_ref::<&'static str>() {
-        return (*msg).to_string();
+
+    #[test]
+    fn input_action_bridge_records_press_and_release_order() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        input.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        let mut bus = EventBus::new();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_listener = std::sync::Arc::clone(&seen);
+        bus.subscribe(move |event| {
+            if let EngineEvent::Input(action) = &event.event {
+                seen_listener.lock().unwrap().push(action.phase);
+            }
+            Ok(())
+        });
+        let mut observed = HashMap::new();
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 1, input.snapshot());
+        bus.drain_stage(EventStage::Input);
+
+        input.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        input.dispatch_frame();
+        emit_input_action_events_from_snapshot(&mut bus, &mut observed, 2, input.snapshot());
+        bus.drain_stage(EventStage::Input);
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [ActionPhase::Pressed, ActionPhase::Released]
+        );
     }
-    "unknown panic payload".to_string()
 }

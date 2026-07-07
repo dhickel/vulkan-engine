@@ -1,0 +1,485 @@
+{
+  "sprint": "sprint-01-alpha-baseline-audit",
+  "branch": "sprint/alpha-01-baseline-audit",
+  "status": "closed",
+  "phase_01": {
+    "status": "passed",
+    "validated_at": "2026-07-03",
+    "scope": "process baseline audit",
+    "head_at_start": "ce43008098fb19bad0cce8fd965f908870d8b988",
+    "validated_commit": "e993e72f562deec9a93accbc5762d7c2d255b908",
+    "commit_subject": "Plan alpha baseline audit sprint",
+    "commit_note": "Prompt supplied e993e72f2dc3f147c3d989b2d0957ad1e51bdd92, but local branch and origin ref resolve to e993e72f562deec9a93accbc5762d7c2d255b908.",
+    "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+    "remote_evidence": {
+      "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+      "result": "e993e72f562deec9a93accbc5762d7c2d255b908 refs/heads/sprint/alpha-01-baseline-audit",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit",
+      "commit_url_corrected": "https://github.com/dhickel/vulkan-engine/commit/e993e72f562deec9a93accbc5762d7c2d255b908"
+    },
+    "email_report": {
+      "status": "parent_thread_reported_sent_not_independently_inspected",
+      "message_id": "<0100019f2660b232-0cefbb17-a4c7-4e29-9dd5-62169ec4a15f-000000@email.amazonses.com>",
+      "thread_id": "93d82759-27fb-44e5-8960-f68ab6986651"
+    },
+    "changed_files": [
+      ".internal-dev/AGENTS.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/advanced-planner-handoff.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TEMPLATE.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/SPRINT-TRACKER.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/00-specification-lock.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/01-current-state-analysis.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/02-target-design.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/baseline-inventory.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/email-report-template.html",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/final-orchestration-plan.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/implementation-notes.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/validation-matrix.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/phase-01-validation-report.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/work-units/README.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-01-process-baseline-audit.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-02-docs-gap-report-repair.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-03-residual-register-validation-matrix.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/worker-directives/phase-04-final-baseline-validation-closeout.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/tracks/DEEP-TRACKS.md"
+    ],
+    "changed_file_scope": "All changed files in the pushed commit are under .internal-dev. No product code or public product docs changed.",
+    "preserved_unrelated_dirty": [
+      ".idea/engine.iml",
+      ".reasonix/"
+    ],
+    "commands": [
+      {
+        "command": "git status --short --branch",
+        "result": "pass",
+        "summary": "On sprint/alpha-01-baseline-audit tracking origin/sprint/alpha-01-baseline-audit with only preserved .idea/engine.iml and .reasonix/ dirty state visible."
+      },
+      {
+        "command": "git show --stat --oneline --name-only e993e72f2dc3f147c3d989b2d0957ad1e51bdd92",
+        "result": "fail_expected_due_to_bad_supplied_hash",
+        "summary": "fatal: bad object e993e72f2dc3f147c3d989b2d0957ad1e51bdd92"
+      },
+      {
+        "command": "git show --stat --oneline --name-only e993e72f562deec9a93accbc5762d7c2d255b908",
+        "result": "pass",
+        "summary": "Resolved branch HEAD commit; 23 files changed, 2108 insertions, all under .internal-dev."
+      },
+      {
+        "command": "git diff --name-only codex/frame-capture-plan..sprint/alpha-01-baseline-audit -- ':!/.internal-dev'",
+        "result": "pass",
+        "summary": "No files outside .internal-dev changed in the branch diff."
+      },
+      {
+        "command": "test -f .internal-dev/AGENTS.md",
+        "result": "pass",
+        "summary": "Active internal-dev guide exists."
+      },
+      {
+        "command": "rg -n \"Source-of-Truth|Access Discipline|Directory Contract|Workflow Rules\" .internal-dev/AGENTS.md",
+        "result": "pass",
+        "summary": "Required process headings found at lines 11, 18, 25, and 37."
+      },
+      {
+        "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json >/dev/null",
+        "result": "pass",
+        "summary": "Evidence index is valid JSON before validator update."
+      }
+    ],
+    "capture_validation": {
+      "required": false,
+      "ran": false,
+      "status": "not_required_docs_process_only",
+      "reason": "Phase 01 changed process documentation and sprint artifacts only; no visual rendering behavior changed."
+    }
+  },
+  "phase_02": {
+    "status": "passed",
+    "validated_at": "2026-07-03",
+    "independent_validated_at": "2026-07-03",
+    "scope": "docs gap report repair",
+    "head_at_start": "5165722c47d5ac6f073f8183c37018c688e6ef49",
+    "validated_commit": "639dffd420ff5962327e0c15b5885c9034283ab5",
+    "validation_remediation_commit": "4294788d6cd24ca25eba742f6fff9728767144f5",
+    "commit_subject": "Repair alpha baseline docs",
+    "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+    "remote_evidence": {
+      "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+      "result": "639dffd420ff5962327e0c15b5885c9034283ab5 refs/heads/sprint/alpha-01-baseline-audit",
+      "commit_url": "https://github.com/dhickel/vulkan-engine/commit/639dffd420ff5962327e0c15b5885c9034283ab5",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit"
+    },
+    "email_report": {
+      "status": "parent_thread_reported_sent_not_independently_inspected",
+      "message_id": "<0100019f266c04c1-4bbeda92-fc8f-41da-a5af-a97e465c769b-000000@email.amazonses.com>",
+      "thread_id": "3a3a4ea5-d07b-4fdd-983e-d265926872ad"
+    },
+    "phase_01_evidence": {
+      "implementation_commit": "e993e72f562deec9a93accbc5762d7c2d255b908",
+      "validator_correction_commit": "5165722c47d5ac6f073f8183c37018c688e6ef49",
+      "correction_email_thread": "abb24614-dbbe-424b-8eac-bca49648b31f"
+    },
+    "changed_files": [
+      "AGENTS.md",
+      "README.md",
+      "docs/api/00-index.md",
+      "docs/internal/00-index.md",
+      "docs/internal/04-vulkan-subsystem.md",
+      "docs/gap-report.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/docs-drift-audit.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/phase-02-validation-report.md"
+    ],
+    "changed_file_scope": "Documentation and sprint evidence artifacts only. No Rust source changed.",
+    "validator_self_remediation": {
+      "status": "committed_and_pushed_by_validation_remediation",
+      "file": "docs/internal/04-vulkan-subsystem.md",
+      "summary": "Converted four modified source-code Markdown links from colon line suffixes to #L anchors so modified-doc link inspection passes.",
+      "validation": "Modified Markdown relative link inspection, rg stale-doc sweep, rg workspace-member sweep, and git diff --check passed after the edit."
+    },
+    "preserved_unrelated_dirty": [
+      ".idea/engine.iml",
+      ".reasonix/"
+    ],
+    "commands": [
+      {
+        "command": "git status --short --branch",
+        "result": "pass",
+        "summary": "On sprint/alpha-01-baseline-audit tracking origin/sprint/alpha-01-baseline-audit; preserved .idea/engine.iml and .reasonix/ remain dirty alongside in-scope Phase 02 docs/artifacts."
+      },
+      {
+        "command": "rg -n \"gap-report|known limitations|No audio|No physics|No scripting|No project system|No scene serialization|headless\" README.md AGENTS.md docs",
+        "result": "pass_with_expected_references",
+        "summary": "No stale current-truth No audio/No physics/No scripting/No project system/No scene serialization claims remain. Remaining hits are the rewritten gap-report path/baseline and legitimate headless references."
+      },
+      {
+        "command": "rg -n \"src/audio|src/physics|src/scripting|apps/editor|apps/dungeon_dogfood\" AGENTS.md README.md docs/api/00-index.md docs/internal/00-index.md docs/gap-report.md",
+        "result": "pass",
+        "summary": "All live support crates/apps are mentioned in root docs, indexes, and the current alpha readiness baseline."
+      },
+      {
+        "command": "find . -maxdepth 3 \\( -iname '*markdownlint*' -o -iname '*markdown-link*' -o -iname '*lychee*' -o -iname '.markdownlint*' \\) -print",
+        "result": "pass",
+        "summary": "No local markdown link-check tooling found."
+      },
+      {
+        "command": "python read-only modified-file Markdown link inspection",
+        "result": "pass",
+        "summary": "Initial validation found four non-resolving colon-line links in docs/internal/04-vulkan-subsystem.md; validator self-remediation converted them to #L anchors and the rerun passed."
+      },
+      {
+        "command": "git show --stat --oneline --name-only 639dffd420ff5962327e0c15b5885c9034283ab5",
+        "result": "pass",
+        "summary": "Pushed commit touched 9 documentation/evidence files and no Rust source files."
+      },
+      {
+        "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+        "result": "pass",
+        "summary": "Remote branch resolves to 639dffd420ff5962327e0c15b5885c9034283ab5."
+      },
+      {
+        "command": "git diff --name-only 5165722c47d5ac6f073f8183c37018c688e6ef49..639dffd420ff5962327e0c15b5885c9034283ab5",
+        "result": "pass",
+        "summary": "Phase 02 commit changed only public docs and sprint evidence artifacts."
+      },
+      {
+        "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json >/dev/null",
+        "result": "pass",
+        "summary": "Evidence index JSON parsed before validator update."
+      },
+      {
+        "command": "git diff --check",
+        "result": "pass",
+        "summary": "No whitespace errors after validator self-remediation."
+      }
+    ],
+    "capture_validation": {
+      "required": false,
+      "ran": false,
+      "status": "not_required_docs_only",
+      "reason": "Phase 02 changed documentation and sprint evidence only; no visual renderer behavior changed."
+    },
+    "commit_push_email": {
+      "status": "observed_from_parent_thread_evidence_and_remote_ref",
+      "docs_commit": "639dffd420ff5962327e0c15b5885c9034283ab5",
+      "validation_remediation_commit": "4294788d6cd24ca25eba742f6fff9728767144f5",
+      "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+      "email_message_id": "<0100019f266c04c1-4bbeda92-fc8f-41da-a5af-a97e465c769b-000000@email.amazonses.com>",
+      "email_thread_id": "f909ab8f-7047-4e80-955b-7d8e62aada7d",
+      "note": "Email content was reported by the parent thread and not independently inspected through AgentMail in this validation pass."
+    }
+  },
+  "phase_03": {
+    "status": "passed",
+    "validated_at": "2026-07-03",
+    "scope": "residual register and validation matrix",
+    "head_at_start": "4294788d6cd24ca25eba742f6fff9728767144f5",
+    "validated_commit": "60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+    "commit_subject": "Register alpha baseline residuals",
+    "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+    "remote_evidence": {
+      "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+      "result": "60720fa1689fafc99794d4b0b1185e459ff7f7d6 refs/heads/sprint/alpha-01-baseline-audit",
+      "commit_url": "https://github.com/dhickel/vulkan-engine/commit/60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit"
+    },
+    "email_report": {
+      "status": "parent_thread_reported_sent_not_independently_inspected",
+      "message_id": "<0100019f2676f499-47dc80cd-bca7-4a62-8ebd-eb3a6bd673f9-000000@email.amazonses.com>",
+      "thread_id": "2f3334b3-338d-41f1-84c5-bc4deade90b1"
+    },
+    "changed_files": [
+      ".internal-dev/reviews/2026-07-03-alpha-baseline-register.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/validation-matrix.md",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json",
+      ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/phase-03-validation-report.md"
+    ],
+    "changed_file_scope": "Internal review and sprint validation artifacts only. No Rust source changed.",
+    "register": {
+      "path": ".internal-dev/reviews/2026-07-03-alpha-baseline-register.md",
+      "status_counts": {
+        "verified_current": 1,
+        "stale_resolved": 4,
+        "unknown_needs_audit": 11,
+        "accepted_alpha_debt": 5,
+        "blocked_validation": 1
+      },
+      "summary": "Classified stale historical gap-report candidates separately from verified current issues, accepted alpha debt, unknown audit work, and a worker-gated validation limitation."
+    },
+    "validation_matrix": {
+      "path": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/validation-matrix.md",
+      "summary": "Refined future alpha sprint gates for residual classification, Markdown/path integrity, evidence index updates, parent-owned commit/push/email gates, runtime smoke, and capture readiness."
+    },
+    "commands": [
+      {
+        "command": "git status --short --branch",
+        "result": "pass",
+        "summary": "On sprint/alpha-01-baseline-audit tracking origin/sprint/alpha-01-baseline-audit; preserved .idea/engine.iml and .reasonix/ remain dirty alongside in-scope Phase 03 artifacts."
+      },
+      {
+        "command": "test -f .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/shared/validation-matrix.md",
+        "result": "pass",
+        "summary": "Validation matrix exists."
+      },
+      {
+        "command": "test -f .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json",
+        "result": "pass",
+        "summary": "Evidence index exists."
+      },
+      {
+        "command": "rg -n \"verified_current|stale_resolved|unknown_needs_audit|accepted_alpha_debt|blocked_validation\" .internal-dev/reviews .internal-dev/bugs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit",
+        "result": "pass",
+        "summary": "Required classification statuses found in the register and sprint artifacts."
+      },
+      {
+        "command": "find . -maxdepth 3 \\( -iname '*markdownlint*' -o -iname '*markdown-link*' -o -iname '*lychee*' -o -iname '.markdownlint*' \\) -print",
+        "result": "pass",
+        "summary": "No local markdown link/path tooling found."
+      },
+      {
+        "command": "manual modified Markdown link/path inspection",
+        "result": "pass",
+        "summary": "Modified Phase 03 Markdown links are path references to existing files or non-clickable evidence paths; no new public Markdown links were added."
+      },
+      {
+        "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json >/dev/null",
+        "result": "pass",
+        "summary": "Evidence index JSON parsed after update."
+      },
+      {
+        "command": "git diff --check",
+        "result": "pass",
+        "summary": "No whitespace errors in Phase 03 changes."
+      },
+      {
+        "command": "git show --stat --oneline --name-only 60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+        "result": "pass",
+        "summary": "Pushed commit changed four internal review/validation artifacts and no product Rust source."
+      },
+      {
+        "command": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit",
+        "result": "pass",
+        "summary": "Remote branch resolves to 60720fa1689fafc99794d4b0b1185e459ff7f7d6."
+      },
+      {
+        "command": "git diff --name-only 4294788d6cd24ca25eba742f6fff9728767144f5..60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+        "result": "pass",
+        "summary": "Phase 03 commit changed only the register, shared validation matrix, evidence index, and phase validation report."
+      }
+    ],
+    "capture_validation": {
+      "required": false,
+      "ran": false,
+      "status": "not_required_docs_process_only",
+      "reason": "Phase 03 changed internal review and validation artifacts only; no renderer, scene, shader, camera, material, asset, or Vulkan visual behavior changed."
+    },
+    "commit_push_email": {
+      "status": "observed_from_parent_thread_evidence_and_remote_ref",
+      "commit": "60720fa1689fafc99794d4b0b1185e459ff7f7d6",
+      "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+      "email_message_id": "<0100019f2676f499-47dc80cd-bca7-4a62-8ebd-eb3a6bd673f9-000000@email.amazonses.com>",
+      "email_thread_id": "2f3334b3-338d-41f1-84c5-bc4deade90b1",
+      "note": "Email content was reported by the parent thread and not independently inspected through AgentMail in this validation pass."
+    },
+    "residual_risks": [
+      "Several historical gap-report candidates are classified unknown_needs_audit until targeted source/runtime validation runs.",
+      "Phase 04 compile/test/runtime checks remain pending."
+    ]
+  },
+  "phase_04": {
+    "status": "closed_changelog_confirmed",
+    "validated_at": "2026-07-03",
+    "scope": "final baseline validation and closeout reconciliation",
+    "head_at_start": "f669555783171b76d2c8ce4bce4acbc312c0ea8f",
+    "head_at_validation": "b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+    "pushed_ref_at_start": "origin/sprint/alpha-01-baseline-audit f669555783171b76d2c8ce4bce4acbc312c0ea8f",
+    "validated_commit": "b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+    "commit_subject": "Validate alpha baseline closeout",
+    "pushed_ref_at_validation": "origin/sprint/alpha-01-baseline-audit b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+    "changed_file_scope": "Closeout artifacts and scoped public API docs remediation only. No Rust source changed.",
+    "preserved_unrelated_dirty": [
+      ".idea/engine.iml",
+      ".reasonix/"
+    ],
+    "compile_and_test_baseline": {
+      "status": "passed_with_warnings",
+      "summary": "All required cargo check/test commands exited 0. Renderer, audio, scripting, editor, and dungeon_dogfood emitted warning-only residuals."
+    },
+    "commands": [
+      {
+        "command": "cargo check",
+        "exit_status": 0,
+        "result": "pass",
+        "summary": "Workspace root check finished successfully."
+      },
+      {
+        "command": "cargo check -p renderer",
+        "exit_status": 0,
+        "result": "pass_with_warnings",
+        "summary": "Renderer library check passed with existing dead-code style warnings."
+      },
+      {
+        "command": "cargo check -p renderer --examples",
+        "exit_status": 0,
+        "result": "pass_with_warnings",
+        "summary": "Renderer examples compiled with the same renderer library warnings."
+      },
+      {
+        "command": "cargo check -p input",
+        "exit_status": 0,
+        "result": "pass",
+        "summary": "Input crate check passed."
+      },
+      {
+        "command": "cargo test -p input",
+        "exit_status": 0,
+        "result": "pass",
+        "summary": "9 input unit tests passed; doc-tests ran 0 tests and passed."
+      },
+      {
+        "command": "cargo check -p audio",
+        "exit_status": 0,
+        "result": "pass_with_warnings",
+        "summary": "Audio crate check passed with three unused-import warnings."
+      },
+      {
+        "command": "cargo check -p physics",
+        "exit_status": 0,
+        "result": "pass",
+        "summary": "Physics crate check passed."
+      },
+      {
+        "command": "cargo check -p scripting",
+        "exit_status": 0,
+        "result": "pass_with_warnings",
+        "summary": "Scripting crate check passed with one mismatched lifetime syntax warning."
+      },
+      {
+        "command": "cargo check -p editor",
+        "exit_status": 0,
+        "result": "pass_with_warnings",
+        "summary": "Editor app check passed with renderer warnings and one unused editor method warning."
+      },
+      {
+        "command": "cargo check -p dungeon_dogfood",
+        "exit_status": 0,
+        "result": "pass_with_warnings",
+        "summary": "Dungeon dogfood app check passed with renderer warnings and five app dead-code warnings."
+      },
+      {
+        "command": "rg -n \"gap-report|known limitations|not implemented|pending|planned|TODO|/tmp|agent id|stale|fully_validated\" AGENTS.md README.md docs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit",
+        "exit_status": 0,
+        "result": "blocked_stale_reference_found_before_remediation",
+        "summary": "Initial sweep found mostly expected historical/superseded references plus a current public API claim that headless mode is not implemented. Parent/main thread remediated that claim."
+      },
+      {
+        "command": "rg -n \"gap-report|known limitations|not implemented|pending|planned|TODO|/tmp|agent id|stale|fully_validated|UNSUPPORTED|returns unsupported\" AGENTS.md README.md docs .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit",
+        "exit_status": 0,
+        "result": "pass_after_headless_doc_remediation",
+        "summary": "Remaining hits are expected historical/process references, current alpha readiness routing, legitimate technical uses, or conservative status language."
+      },
+      {
+        "command": "modified headless-doc Markdown link inspection",
+        "exit_status": 0,
+        "result": "pass_after_link_remediation",
+        "summary": "Touched links in docs/api/02-renderer-lifecycle-and-frame-api.md and docs/api/07-config.md resolve after converting docs/api/07-config.md source links to ../../src paths and #L anchors."
+      },
+      {
+        "command": "python -m json.tool .internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/artifacts/validation-summary.json >/dev/null",
+        "exit_status": 0,
+        "result": "pass_before_update",
+        "summary": "Evidence index parsed before Phase 04 update."
+      }
+    ],
+    "runtime_debug_smoke": {
+      "required": false,
+      "ran": false,
+      "status": "not_required_docs_process_only",
+      "reason": "Sprint 01 changed docs/process artifacts only. Phase 04 found no new runtime-readiness claim requiring timeout-bound debug smoke."
+    },
+    "capture_validation": {
+      "required": false,
+      "ran": false,
+      "status": "not_required_docs_process_only",
+      "reason": "No renderer, scene, shader, camera, material, asset, or Vulkan visual behavior changed in this sprint."
+    },
+    "stale_reference_sweep": {
+      "status": "passed_after_scoped_remediation",
+      "remediated_references": [
+        "docs/api/02-renderer-lifecycle-and-frame-api.md:29 previously said headless mode is not implemented, while live source exposes Renderer::new_headless and render_scene_headless.",
+        "docs/api/07-config.md previously described RendererConfig.headless as unsupported."
+      ],
+      "supporting_source_evidence": [
+        "src/renderer/src/api/renderer.rs:128",
+        "src/renderer/src/api/renderer.rs:368"
+      ],
+      "notes": [
+        "Parent/main thread remediated the stale public API headless docs after Phase 04 worker reported the blocker.",
+        "README.md and docs/gap-report.md references are treated as expected current alpha-readiness baseline references.",
+        "AGENTS.md /tmp debug path is an intentional optional override example."
+      ]
+    },
+    "closeout_blockers": [],
+    "closeout_note": "Changelog created and sprint closed 2026-07-03 after user confirmation.",
+    "commit_push_email": {
+      "status": "observed_from_main_thread_evidence_and_remote_ref",
+      "commit": "b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+      "commit_url": "https://github.com/dhickel/vulkan-engine/commit/b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3",
+      "compare_url": "https://github.com/dhickel/vulkan-engine/compare/codex/frame-capture-plan...sprint/alpha-01-baseline-audit",
+      "pushed_ref": "origin/sprint/alpha-01-baseline-audit",
+      "remote_evidence": "git ls-remote origin refs/heads/sprint/alpha-01-baseline-audit returned b40ca47ff710d8e9793529e0ffbca1d2c9d74ca3.",
+      "email_message_id": "<0100019f2682c4be-97751f1a-2219-45f5-8b46-2bc9e563d2a4-000000@email.amazonses.com>",
+      "email_thread_id": "5725f402-9a88-4ee3-9dbd-7672ebda402a",
+      "note": "Email content was reported by the main thread and not independently inspected through AgentMail in this validation pass."
+    },
+    "final_quality_review": {
+      "path": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/final-quality-review.md",
+      "status": "closed_changelog_confirmed"
+    },
+    "phase_report": ".internal-dev/plans/2026-07-03-engine-alpha-roadmap/sprints/sprint-01-alpha-baseline-audit/validation/phase-04-validation-report.md"
+  },
+  "fully_validated": true
+}

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use std::{collections::HashMap, collections::VecDeque};
 
 use image::ImageError;
@@ -23,6 +23,7 @@ use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, TextureSemantic
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
+use crate::data::thread_pool::BoundedThreadPool;
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
 use crate::vulkan::vk_render::VkRenderCore;
 use crate::vulkan::vk_storage::BufferPlacement;
@@ -113,6 +114,7 @@ pub(crate) struct AssetLoadTracker {
     tasks: HashMap<LoadTicket, DeferredLoadTask>,
     max_in_flight_jobs: usize,
     asset_registry: AssetRegistry,
+    thread_pool: BoundedThreadPool,
 }
 
 impl AssetLoadTracker {
@@ -124,6 +126,7 @@ impl AssetLoadTracker {
             tasks: HashMap::new(),
             max_in_flight_jobs: 4,
             asset_registry: AssetRegistry::new(),
+            thread_pool: BoundedThreadPool::new(4),
         }
     }
 
@@ -451,7 +454,7 @@ impl AssetLoadTracker {
 
                     let (sender, receiver) = mpsc::channel();
                     let task_cache = data_cache.clone();
-                    std::thread::spawn(move || {
+                    self.thread_pool.execute(move || {
                         let result = load_model_gpu_ready(path, task_cache, &policy_cfg)
                             .and_then(|loaded| scene_world_to_fragment(loaded.scene_world));
                         let _ = sender.send(result);
@@ -473,7 +476,7 @@ impl AssetLoadTracker {
 
                     let (sender, receiver) = mpsc::channel();
                     let task_cache = data_cache.clone();
-                    std::thread::spawn(move || {
+                    self.thread_pool.execute(move || {
                         let result =
                             load_texture_gpu_ready_with_policy(path, task_cache, &policy_cfg, opts);
                         let _ = sender.send(result);
@@ -998,17 +1001,26 @@ impl<'a> AssetManager<'a> {
         F: FnOnce(Arc<VkDataCache>) -> Result<T, AssetError> + Send + 'static,
     {
         let data_cache = Arc::clone(&self.core.data_cache);
-        let worker = std::thread::spawn(move || task(data_cache));
+        let (sender, receiver) = mpsc::channel();
 
-        while !worker.is_finished() {
+        self.load_tracker.thread_pool.execute(move || {
+            let result = task(data_cache);
+            let _ = sender.send(result);
+        });
+
+        // Wait for completion while pumping transfer submissions.
+        loop {
             self.pump_transfer_submissions();
-            std::thread::sleep(Duration::from_millis(1));
+            match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(AssetError::Sync(
+                        "asset upload worker thread disconnected".to_string(),
+                    ));
+                }
+            }
         }
-
-        self.pump_transfer_submissions();
-        worker
-            .join()
-            .map_err(|_| AssetError::Sync("asset upload worker thread panicked".to_string()))?
     }
 
     fn pump_transfer_submissions(&mut self) {
@@ -1445,6 +1457,9 @@ fn map_cache_err(
             slot,
             generation,
         },
+        CacheError::DescriptorAllocation(msg) => AssetError::Internal(format!(
+            "descriptor allocation failed for {resource} slot {slot}: {msg}"
+        )),
     }
 }
 
@@ -1965,7 +1980,9 @@ mod tests {
         // Manually create InFlight tasks to simulate running loads
         let t1 = tracker.request_model_load(PathBuf::from("/fake/a.glb"));
         let t2 = tracker.request_model_load(PathBuf::from("/fake/b.glb"));
-        let t3 = tracker.request_model_load(PathBuf::from("/fake/c.glb"));
+        // Request a third task to verify the tracker correctly queues it
+        // when max_in_flight_jobs (2) is already saturated.
+        let _t3 = tracker.request_model_load(PathBuf::from("/fake/c.glb"));
 
         // Simulate two tasks becoming InFlight by creating fake receivers
         let (_, rx1) = mpsc::channel::<Result<SceneFragment, AssetError>>();

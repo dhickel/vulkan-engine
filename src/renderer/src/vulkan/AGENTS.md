@@ -36,7 +36,7 @@ This module owns:
 
 ## Current Risks
 
-- Some destroy paths remain incomplete (`todo!()`).
+- `VkDestroyable` trait is implemented for all active resource types.
 - Geometry pass and pipeline binding order are correctness-sensitive.
 - Swapchain rebuild still has explicit cleanup FIXME areas.
 - Queue usage assumptions should be revisited if family strategy changes.
@@ -53,3 +53,4 @@ This module owns:
 - `cargo check -p renderer`
 - `cargo check -p renderer --examples`
 - Optional headless smoke: `RUST_LOG=debug timeout --signal=INT 45s cargo run -p renderer --example api_test`
+- For frame output, synchronization, rendergraph, or readback changes that need visual proof, use `.internal-dev/skills/engine-headless-capture-validation/SKILL.md` and prefer timeout-bound headless captures under `.internal-dev/captures/`.

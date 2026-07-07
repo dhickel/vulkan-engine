@@ -4,4 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+engine_events = { path = "../events" }
 rapier3d = "0.21"

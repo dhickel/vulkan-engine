@@ -131,7 +131,7 @@ map.bind_mouse_button("fire", MouseButton::Left);
 map.bind(ActionBinding::key("sprint_forward", KeyCode::KeyW)
     .with_modifiers(BindingModifiers { shift: true, ..Default::default() }));
 
-// From TOML file
+// From TOML text
 let map = ActionMap::from_toml_str(&std::fs::read_to_string("input.toml")?)?;
 
 // Convert to layer
@@ -160,6 +160,12 @@ modifiers = {}
 scale = 1.0
 consume = false
 ```
+
+The profile parser lives on `ActionMap`. The renderer does not automatically
+discover or load an input profile file; apps choose when to read TOML text,
+call `ActionMap::from_toml_str`, and install the resulting layer with
+`renderer.input_mut().add_layer(...)`. `ActionMap::save_toml_file` and
+`ActionMap::load_toml_file` are available when the app wants direct file I/O.
 
 #### Schema Reference
 

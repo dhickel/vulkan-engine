@@ -1,8 +1,8 @@
 use crate::vulkan::vk_render;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_CAPTURE_ROOT: &str = ".internal-dev/debug_reports";
-const DEFAULT_MANUAL_CAPTURE_DIR: &str = ".internal-dev/debug_reports/manual-captures";
+const DEFAULT_CAPTURE_ROOT: &str = ".internal-dev/captures";
 
 /// Startup runtime mode used for controlled render-path validation.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
@@ -318,8 +318,10 @@ pub struct FrameCaptureScheduler {
     app_name: String,
     single_captures: Vec<ScheduledSingleCapture>,
     sequences: Vec<ActiveCaptureSequence>,
+    default_manual_output_dir: PathBuf,
     manual_output_dir: PathBuf,
     manual_sequence: u32,
+    next_manual_capture_frame: Option<u32>,
     last_status: Option<FrameCaptureStatus>,
 }
 
@@ -331,25 +333,35 @@ impl Default for FrameCaptureScheduler {
 
 impl FrameCaptureScheduler {
     pub fn new(app_name: impl Into<String>) -> Self {
+        let app_name = app_name.into();
+        let default_manual_output_dir = default_capture_run_dir(&app_name);
         Self {
-            app_name: app_name.into(),
+            app_name,
             single_captures: Vec::new(),
             sequences: Vec::new(),
-            manual_output_dir: default_manual_capture_dir(),
+            manual_output_dir: default_manual_output_dir.clone(),
+            default_manual_output_dir,
             manual_sequence: 0,
+            next_manual_capture_frame: None,
             last_status: None,
         }
     }
 
     pub fn set_app_name(&mut self, app_name: impl Into<String>) {
-        self.app_name = app_name.into();
+        let app_name = app_name.into();
+        let was_using_default_manual_dir = self.manual_output_dir == self.default_manual_output_dir;
+        self.default_manual_output_dir = default_capture_run_dir(&app_name);
+        if was_using_default_manual_dir {
+            self.manual_output_dir = self.default_manual_output_dir.clone();
+        }
+        self.app_name = app_name;
     }
 
     pub fn configure_manual_output_dir(
         &mut self,
         output_dir: Option<PathBuf>,
     ) -> Result<(), FrameCaptureConfigError> {
-        let output_dir = output_dir.unwrap_or_else(default_manual_capture_dir);
+        let output_dir = output_dir.unwrap_or_else(|| self.default_manual_output_dir.clone());
         ensure_non_empty_path(&output_dir, FrameCaptureConfigError::EmptyOutputDir)?;
         self.manual_output_dir = output_dir;
         Ok(())
@@ -406,15 +418,19 @@ impl FrameCaptureScheduler {
         )?;
         let manual_index = self.manual_sequence;
         self.manual_sequence = self.manual_sequence.wrapping_add(1);
+        let scheduled_frame = self
+            .next_manual_capture_frame
+            .unwrap_or_else(|| current_frame.wrapping_add(1));
+        self.next_manual_capture_frame = Some(scheduled_frame.wrapping_add(1));
         let output_path = manual_capture_path(
             &self.manual_output_dir,
             &self.app_name,
-            current_frame.wrapping_add(1),
+            scheduled_frame,
             target,
             manual_index,
         );
         self.single_captures.push(ScheduledSingleCapture {
-            frame_number: current_frame.wrapping_add(1),
+            frame_number: scheduled_frame,
             request: FrameCaptureRequest::new(target, output_path),
             source: FrameCaptureSource::Manual,
         });
@@ -437,6 +453,13 @@ impl FrameCaptureScheduler {
             }
         }
         self.single_captures = pending;
+        if !self
+            .single_captures
+            .iter()
+            .any(|capture| capture.source == FrameCaptureSource::Manual)
+        {
+            self.next_manual_capture_frame = None;
+        }
 
         for sequence in self.sequences.iter_mut() {
             if sequence.config.remaining == 0 || frame_number < sequence.config.start_frame {
@@ -494,7 +517,16 @@ pub fn default_capture_root() -> PathBuf {
 }
 
 pub fn default_manual_capture_dir() -> PathBuf {
-    PathBuf::from(DEFAULT_MANUAL_CAPTURE_DIR)
+    default_capture_run_dir("engine")
+}
+
+pub fn default_capture_run_dir(app_name: &str) -> PathBuf {
+    default_capture_root().join(format!(
+        "{}-{}-pid{}",
+        sanitize_capture_name(app_name),
+        current_capture_timestamp(),
+        std::process::id()
+    ))
 }
 
 pub fn default_single_capture_path(
@@ -502,7 +534,21 @@ pub fn default_single_capture_path(
     frame_number: u32,
     target: CaptureTarget,
 ) -> PathBuf {
-    default_capture_root().join(format!(
+    single_capture_path(
+        default_capture_run_dir(app_name),
+        app_name,
+        frame_number,
+        target,
+    )
+}
+
+pub fn single_capture_path(
+    output_dir: impl AsRef<Path>,
+    app_name: &str,
+    frame_number: u32,
+    target: CaptureTarget,
+) -> PathBuf {
+    output_dir.as_ref().join(format!(
         "{}-frame-{}-{}.png",
         sanitize_capture_name(app_name),
         frame_number,
@@ -551,7 +597,46 @@ fn sanitize_capture_name(app_name: &str) -> String {
             sanitized.push('-');
         }
     }
-    sanitized.trim_matches('-').to_string()
+    let sanitized = sanitized.trim_matches('-').to_string();
+    if sanitized.is_empty() {
+        "engine".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn current_capture_timestamp() -> String {
+    let millis_since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i128;
+    capture_timestamp_from_unix_millis(millis_since_epoch)
+}
+
+fn capture_timestamp_from_unix_millis(millis_since_epoch: i128) -> String {
+    let seconds = millis_since_epoch.div_euclid(1_000);
+    let millis = millis_since_epoch.rem_euclid(1_000);
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days as i64);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}-{millis:03}")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
 
 fn ensure_non_empty_path(
@@ -610,6 +695,9 @@ mod capture_tests {
     fn manual_capture_uses_default_dir_and_next_frame() {
         let mut scheduler = FrameCaptureScheduler::new("Engine Editor");
         scheduler
+            .configure_manual_output_dir(Some(PathBuf::from("captures/run")))
+            .unwrap();
+        scheduler
             .queue_manual_capture(9, CaptureTarget::Present)
             .unwrap();
 
@@ -619,7 +707,126 @@ mod capture_tests {
         assert_eq!(due[0].source, FrameCaptureSource::Manual);
         assert_eq!(
             due[0].request.output_path,
-            PathBuf::from(".internal-dev/debug_reports/manual-captures/engine-editor-frame-10-present-manual-0000.png")
+            PathBuf::from("captures/run/engine-editor-frame-10-present-manual-0000.png")
+        );
+    }
+
+    #[test]
+    fn default_capture_root_uses_internal_captures() {
+        assert_eq!(
+            default_capture_root(),
+            PathBuf::from(".internal-dev/captures")
+        );
+    }
+
+    #[test]
+    fn run_dir_includes_sanitized_app_timestamp_and_pid() {
+        let run_dir = default_capture_run_dir("Renderer Facade API Test!");
+        let root = default_capture_root();
+        assert!(run_dir.starts_with(&root));
+
+        let folder = run_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("run folder should be utf-8");
+        assert!(folder.starts_with("renderer-facade-api-test-"));
+        assert!(folder.ends_with(&format!("-pid{}", std::process::id())));
+    }
+
+    #[test]
+    fn empty_sanitized_capture_name_falls_back_to_engine() {
+        let path = single_capture_path("captures/run", " --- ", 7, CaptureTarget::Draw);
+        assert_eq!(path, PathBuf::from("captures/run/engine-frame-7-draw.png"));
+    }
+
+    #[test]
+    fn scheduler_reuses_one_default_manual_run_dir() {
+        let mut scheduler = FrameCaptureScheduler::new("Editor");
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+
+        let first_due = scheduler.due_captures(1);
+        let second_due = scheduler.due_captures(2);
+        assert_eq!(first_due.len(), 1);
+        assert_eq!(second_due.len(), 1);
+        let first_parent = first_due[0].request.output_path.parent();
+        let second_parent = second_due[0].request.output_path.parent();
+        assert_eq!(first_parent, second_parent);
+        assert!(first_parent
+            .unwrap()
+            .starts_with(PathBuf::from(".internal-dev/captures")));
+    }
+
+    #[test]
+    fn rapid_manual_captures_are_staggered_across_future_frames() {
+        let mut scheduler = FrameCaptureScheduler::new("Editor");
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+
+        let first_due = scheduler.due_captures(1);
+        let second_due = scheduler.due_captures(2);
+        let third_due = scheduler.due_captures(3);
+        assert_eq!(first_due.len(), 1);
+        assert_eq!(second_due.len(), 1);
+        assert_eq!(third_due.len(), 1);
+        assert_eq!(first_due[0].frame_number, 1);
+        assert_eq!(second_due[0].frame_number, 2);
+        assert_eq!(third_due[0].frame_number, 3);
+
+        let first_path = &first_due[0].request.output_path;
+        let second_path = &second_due[0].request.output_path;
+        let third_path = &third_due[0].request.output_path;
+        assert_ne!(first_path, second_path);
+        assert_ne!(first_path, third_path);
+        assert_ne!(second_path, third_path);
+        assert_eq!(first_path.parent(), second_path.parent());
+        assert_eq!(first_path.parent(), third_path.parent());
+        assert!(first_path.ends_with(PathBuf::from("editor-frame-1-present-manual-0000.png")));
+        assert!(second_path.ends_with(PathBuf::from("editor-frame-2-present-manual-0001.png")));
+        assert!(third_path.ends_with(PathBuf::from("editor-frame-3-present-manual-0002.png")));
+    }
+
+    #[test]
+    fn set_app_name_refreshes_default_manual_run_dir() {
+        let mut scheduler = FrameCaptureScheduler::new("Editor");
+        scheduler.set_app_name("API Test");
+        scheduler
+            .queue_manual_capture(0, CaptureTarget::Present)
+            .unwrap();
+
+        let due = scheduler.due_captures(1);
+        assert_eq!(due.len(), 1);
+        let run_folder = due[0]
+            .request
+            .output_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .expect("manual capture should have a run folder");
+        assert!(run_folder.starts_with("api-test-"));
+        assert!(due[0]
+            .request
+            .output_path
+            .ends_with(PathBuf::from("api-test-frame-1-present-manual-0000.png")));
+    }
+
+    #[test]
+    fn unix_millis_timestamp_uses_locked_shape() {
+        assert_eq!(capture_timestamp_from_unix_millis(0), "19700101-000000-000");
+        assert_eq!(
+            capture_timestamp_from_unix_millis(1_700_000_000_123),
+            "20231114-221320-123"
         );
     }
 

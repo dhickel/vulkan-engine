@@ -9,44 +9,14 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
-/// Stable typed action identifier.
-#[derive(Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
-pub struct ActionId(String);
-
-impl ActionId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for ActionId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<String> for ActionId {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl fmt::Display for ActionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+/// Stable typed action identifier. Re-exported from the canonical engine_events crate.
+pub use engine_events::ActionId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct LayerHandle(u64);
@@ -343,6 +313,12 @@ impl InputSnapshot {
 
     pub fn action_just_released(&self, action: &ActionId) -> bool {
         self.action_just_released.contains(action)
+    }
+
+    pub fn action_values(&self) -> impl Iterator<Item = (&ActionId, f32)> {
+        self.action_values
+            .iter()
+            .map(|(action, value)| (action, *value))
     }
 }
 
@@ -1573,6 +1549,31 @@ mod tests {
             loaded.bindings()[0].trigger,
             BindingTrigger::Key(KeyCode::Space)
         );
+    }
+
+    #[test]
+    fn input_snapshot_exposes_action_values_for_observers() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        let values = system.snapshot().action_values().collect::<Vec<_>>();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].0.as_str(), "jump");
+        assert_eq!(values[0].1, 1.0);
+        assert!(system.snapshot().action_just_pressed(values[0].0));
     }
 
     #[test]

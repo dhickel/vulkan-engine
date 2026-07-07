@@ -1,9 +1,9 @@
 mod common;
 
 use log::{error, info};
-use renderer::{
-    EnvironmentSource, FrameCaptureStatus, FrameRenderOutcome, Renderer, RendererConfig,
-    RendererError, Scene,
+use renderer::prelude::{
+    default_capture_run_dir, CaptureTarget, EnvironmentSource, FrameCaptureStatus,
+    FrameRenderOutcome, Renderer, RendererConfig, RendererError, Scene,
 };
 use std::collections::HashSet;
 use std::env;
@@ -31,8 +31,9 @@ fn main() {
     };
 
     let app_name = config.app_name.clone();
+    let capture_run_dir = default_capture_run_dir(&app_name);
     if launch_options.headless {
-        run_headless_api_test(config, launch_options, &app_name);
+        run_headless_api_test(config, launch_options, &app_name, &capture_run_dir);
         return;
     }
 
@@ -68,9 +69,12 @@ fn main() {
         }
     };
     renderer.install_default_fps_input();
-    if let Err(err) =
-        common::apply_frame_capture_launch_options(&mut renderer, &launch_options, &app_name)
-    {
+    if let Err(err) = common::apply_frame_capture_launch_options_with_run_dir(
+        &mut renderer,
+        &launch_options,
+        &app_name,
+        &capture_run_dir,
+    ) {
         error!("Failed to configure frame capture: {err}");
         return;
     }
@@ -132,6 +136,9 @@ fn main() {
                             event: key_event, ..
                         } => {
                             if handle_fullscreen_toggle(&window, &key_event, modifiers) {
+                                return;
+                            }
+                            if handle_manual_capture_key(&mut renderer, &key_event) {
                                 return;
                             }
                             if key_event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
@@ -215,6 +222,7 @@ fn run_headless_api_test(
     config: RendererConfig,
     launch_options: common::LaunchOptions,
     app_name: &str,
+    capture_run_dir: &std::path::Path,
 ) {
     let mut renderer = match Renderer::new_headless(config.clone()) {
         Ok(renderer) => renderer,
@@ -227,9 +235,12 @@ fn run_headless_api_test(
         }
     };
 
-    if let Err(err) =
-        common::apply_frame_capture_launch_options(&mut renderer, &launch_options, app_name)
-    {
+    if let Err(err) = common::apply_frame_capture_launch_options_with_run_dir(
+        &mut renderer,
+        &launch_options,
+        app_name,
+        capture_run_dir,
+    ) {
         error!("Failed to configure frame capture: {err}");
         return;
     }
@@ -344,6 +355,21 @@ fn handle_fullscreen_toggle(
         Some(Fullscreen::Borderless(window.current_monitor()))
     };
     window.set_fullscreen(next_mode);
+    true
+}
+
+fn handle_manual_capture_key(renderer: &mut Renderer, key_event: &KeyEvent) -> bool {
+    if key_event.state != ElementState::Pressed || key_event.repeat {
+        return false;
+    }
+
+    if key_event.physical_key != PhysicalKey::Code(KeyCode::F10) {
+        return false;
+    }
+
+    if let Err(err) = renderer.queue_manual_frame_capture(CaptureTarget::Present) {
+        error!("Manual frame capture request rejected: {err}");
+    }
     true
 }
 

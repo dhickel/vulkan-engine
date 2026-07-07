@@ -1,0 +1,114 @@
+{
+  "plan": "sprint-10-advanced-rendering-opt-in-contract",
+  "top_level_status": "partially_validated_with_accepted_residuals",
+  "fully_validated": false,
+  "created_at": "2026-07-03",
+  "intended_branch": "sprint/alpha-10-advanced-rendering-opt-in-contract",
+  "phase_reports": [
+    {
+      "phase": "01",
+      "name": "contract-audit",
+      "worker_directive": "worker-directives/phase-01-contract-audit.md",
+      "report": "reports/phase-01-advanced-api-audit.md",
+      "validation_report": "validation/phase-01-validation-report.md",
+      "status": "passed",
+      "notes": "Audit complete. Found critical docs drift in 05-hooks.md (wrong HookError variants, false command-buffer claims). Examples clean. Phase 03 recommends deferring custom pass registration."
+    },
+    {
+      "phase": "02",
+      "name": "feature-gate-docs",
+      "worker_directive": "worker-directives/phase-02-feature-gate-docs.md",
+      "report": "reports/phase-02-feature-gate-docs.md",
+      "validation_report": "validation/phase-02-validation-report.md",
+      "status": "passed",
+      "notes": "05-hooks.md rewritten as compatibility redirect. lib.rs, advanced.rs, rendergraph/mod.rs, Cargo.toml all documented with feature-gate/alpha-unstable warnings. All 4 compile modes pass."
+    },
+    {
+      "phase": "03",
+      "name": "named-advanced-surface-or-defer",
+      "worker_directive": "worker-directives/phase-03-named-advanced-surface.md",
+      "report": "reports/phase-03-advanced-surface-defer.md",
+      "validation_report": "validation/phase-03-validation-report.md",
+      "status": "deferred",
+      "notes": "Deliberate deferral. Safe diagnostics already cover read-only frame data via DebugTimingSnapshot. Custom pass registration requires resource declaration, sync validation, and ordering contracts before it can ship — deferred to future sprint."
+    },
+    {
+      "phase": "04",
+      "name": "final-validation-closeout",
+      "worker_directive": "worker-directives/phase-04-final-validation-closeout.md",
+      "report": "reports/final-closeout-notes.md",
+      "validation_report": "validation/phase-04-validation-report.md",
+      "status": "passed",
+      "notes": "Final closeout complete. Full compile matrix (6 commands) pass. 180 tests pass. Runtime smoke: 196 timing lines. Stale-reference sweep clean. All residuals documented."
+    }
+  ],
+  "required_commands": [
+    {
+      "command": "cargo check",
+      "status": "passed",
+      "notes": "Phase 04: PASS, 84 pre-existing warnings"
+    },
+    {
+      "command": "cargo check -p renderer",
+      "status": "passed",
+      "notes": "Phase 02/04: PASS, 84 pre-existing warnings"
+    },
+    {
+      "command": "cargo check -p renderer --examples",
+      "status": "passed",
+      "notes": "Phase 02/04: PASS, 84 pre-existing warnings"
+    },
+    {
+      "command": "cargo check -p renderer --features advanced-interop",
+      "status": "passed",
+      "notes": "Phase 02/04: PASS, 49 pre-existing warnings"
+    },
+    {
+      "command": "cargo check -p renderer --examples --features advanced-interop",
+      "status": "passed",
+      "notes": "Phase 02/04: PASS, 49 pre-existing warnings"
+    }
+  ],
+  "additional_validation": [
+    {
+      "command": "cargo fmt --check",
+      "status": "passed",
+      "notes": "Phase 04: Clean, no formatting issues"
+    },
+    {
+      "command": "cargo test -p renderer",
+      "status": "passed",
+      "notes": "Phase 04: 180 passed, 5 doctests ignored (require Vulkan)"
+    }
+  ],
+  "runtime_smoke": {
+    "required": "conditional",
+    "status": "passed",
+    "command": "RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test -- --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/sprint-10-api-test-timing.jsonl",
+    "artifact": ".internal-dev/debug_reports/sprint-10-api-test-timing.jsonl",
+    "exit_code": 130,
+    "notes": "Exit 130 = timeout kill (expected after 60s). 196 timing JSONL lines, no fatal errors before timeout."
+  },
+  "headless_capture": {
+    "required": "only_if_visible_renderer_or_capture_readback_behavior_changes",
+    "status": "not_run",
+    "notes": "Correctly omitted — Sprint 10 made no visible renderer or capture/readback behavior changes.",
+    "artifact_dir": ".internal-dev/captures/sprint-10-advanced-rendering-opt-in-contract/headless-draw",
+    "desktop_screenshots_allowed": false
+  },
+  "browser_validation": {
+    "applies": false,
+    "status": "not_applicable"
+  },
+  "tooling_constraints": [],
+  "superseded_artifacts": [],
+  "residual_risks": [
+    "Rendergraph custom pass registration is deferred. Requires: pass resource declaration types, insertion point validation, synchronization validation, integration tests, and documented examples before it can ship.",
+    "RenderGraphContext.renderer exposes &mut VkRenderCore under advanced-interop. While documented as unsafe/unstable, users who enable the feature gate can access raw backend state.",
+    "05-hooks.md kept as a compatibility redirect file. External links to the old doc will land on a page that directs readers to the canonical 05-render-hooks-and-extension-points.md."
+  ],
+  "cross_field_consistency": {
+    "checked": true,
+    "notes": "All phase statuses, command results, and report paths consistent. Phase 03 deferral is an accepted architectural decision, not a validation failure. No spurious fully_validated claim."
+  }
+}

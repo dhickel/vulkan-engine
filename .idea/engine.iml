@@ -8,6 +8,16 @@
       <sourceFolder url="file://$MODULE_DIR$/src/glfw/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/renderer/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/apps/dungeon_dogfood/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/editor/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/audio/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/physics/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/renderer/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/scripting/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/engine_pack/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/engine_pack/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/marching_terrain/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/events/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/launch_shared/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

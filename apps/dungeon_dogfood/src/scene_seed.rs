@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use glam::Mat4;
-use renderer::{
-    AssetManager, EnvironmentSource, MeshHandle, PbrMaterialDesc, PointLight, PointLightId, Scene,
-    SceneNodeId, TextureHandle, TextureLoadOptions,
+use renderer::prelude::{
+    EnvironmentSource, MeshHandle, PbrMaterialDesc, TextureHandle, TextureLoadOptions,
 };
+use renderer::{AssetManager, PointLight, PointLightId, Scene, SceneNodeId};
 use thiserror::Error;
 
 use crate::collision::WALL_HEIGHT;

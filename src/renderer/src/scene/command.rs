@@ -650,16 +650,40 @@ mod tests {
         assert_eq!(placed_node.parent, Some(root));
         assert_eq!(placed_node.name, "Stone Wall 2m");
         assert_eq!(
+            placed_node.stable_id.as_deref(),
+            Some("node.placed.wall.000001")
+        );
+        assert_eq!(
+            placed_node.local_transform,
+            Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0))
+        );
+        assert_eq!(
             placed_node.asset.as_ref().map(|asset| asset.id.as_str()),
             Some("editor_sample.wall.stone_2m")
         );
+        assert_eq!(
+            placed_node
+                .asset
+                .as_ref()
+                .and_then(|asset| asset.path_hint.as_deref()),
+            Some(std::path::Path::new("prefabs/wall_straight_2m.obj"))
+        );
+        assert_eq!(
+            placed_node.tags,
+            vec!["wall".to_string(), "chunk".to_string()]
+        );
 
-        history.undo(&mut world).expect("undo placement");
+        let undo = history.undo(&mut world).expect("undo placement");
+        assert_eq!(undo.created_node, None);
         assert!(!world.is_valid_node_id(placed));
 
         let redo = history.redo(&mut world).expect("redo placement");
         let redone = redo.created_node.expect("redo returns new node");
         assert_ne!(redone, placed);
+        assert_eq!(
+            world.get_node(redone).unwrap().stable_id.as_deref(),
+            Some("node.placed.wall.000001")
+        );
         assert_eq!(
             world
                 .get_node(redone)
@@ -667,5 +691,36 @@ mod tests {
                 .map(|asset| asset.id.as_str()),
             Some("editor_sample.wall.stone_2m")
         );
+    }
+
+    #[test]
+    fn executing_new_command_after_undo_clears_redo_stack() {
+        let mut world = SceneWorld::new();
+        let node = world.add_node(None, SceneNode::default());
+        let mut history = CommandHistory::new(8);
+
+        history
+            .execute(
+                Box::new(SetTransformCommand::new(
+                    node,
+                    Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                )),
+                &mut world,
+            )
+            .unwrap();
+        history.undo(&mut world).unwrap();
+        assert!(history.can_redo());
+
+        history
+            .execute(
+                Box::new(SetTransformCommand::new(
+                    node,
+                    Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+                )),
+                &mut world,
+            )
+            .unwrap();
+
+        assert!(!history.can_redo());
     }
 }

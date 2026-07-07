@@ -10,6 +10,7 @@ Current handoff path:
 ## 3. Key Concepts
 - `RenderSubmission` is the immutable frame snapshot boundary between scene data and backend execution.
 - `DebugUiFrameContext` is a facade-to-backend telemetry snapshot boundary for debug UI composition.
+- Event envelopes are facade/runtime telemetry boundaries; they must not carry backend-owned Vulkan state.
 - Scene-facing types stay Vulkan-opaque: they emit handles (`MeshHandle`, `EnvironmentHandle`) and transforms, not Vulkan objects.
 - Backend code resolves handles to loaded cache data at draw time (`get_loaded_id`, `get_loaded_material_ptr`).
 - Flattening scene graph data into `Vec<FrameDrawItem>` avoids cross-layer borrow/ownership coupling.
@@ -115,6 +116,7 @@ Why this helps:
 - Scene flattening: `src/renderer/src/scene/scene_world.rs`
 - Submission payload contract: `src/renderer/src/scene/render_submission.rs`
 - Debug UI context + manager: `src/renderer/src/debug_ui/mod.rs`
+- Event lifecycle internals: `docs/internal/10-event-system-and-lifecycle.md`
 - Backend frame execution: `src/renderer/src/vulkan/vk_render.rs`
 - High-level frame mental model: `docs/internal/01-rendering-pipeline-mental-model.md`
 

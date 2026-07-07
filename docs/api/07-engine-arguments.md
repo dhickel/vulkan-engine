@@ -3,13 +3,18 @@
 ## 1. Purpose & Audience
 This page is the launch-argument reference for renderer runtime examples. Use it when running diagnostics, automation smoke runs, or reproducing rendering issues from the command line.
 
+For the root project launcher, see [11-runtime-project-launcher.md](11-runtime-project-launcher.md). The root launcher runs data-driven projects with `cargo run -- --project <path>` and owns the alpha headless draw capture path. Renderer examples remain examples/diagnostics, not the primary alpha app runtime path.
+
 ## 2. Where This Fits in Engine Flow
-Arguments are parsed at example startup before `Renderer::new(...)` enters the per-frame loop. Debug-record arguments configure/trigger the same timing recorder used by the in-engine debug UI.
+Arguments on this page are parsed at renderer example startup before `Renderer::new(...)` enters the per-frame loop. Debug-record arguments configure/trigger the same timing recorder used by the in-engine debug UI.
 
 ## 3. Key Concepts
 - Pass example arguments after `--` when using Cargo.
 - The current shared parser lives in `src/renderer/examples/common/mod.rs`.
 - The same argument set applies across runtime examples (`demo_pbr`, `demo_unlit`, `demo_model_load`, `demo_async_loading`, `api_test`).
+- Custom Rust behavior belongs in app crates under `apps/<name>` and runs with `cargo run -p <app>`.
+- For off-workspace app-control scaffolding, use `engine_pack new-app`; it generates a support-crate app and does not add renderer-window integration or runtime reload.
+- Dynamic Rust hot reload, production scripting runtime scheduling, package-level script assets, runtime physics scene loading, root-runtime audio playback, production audio mixing/spatialization/streaming, broad dogfood migration to project manifests, and renderer-window generated app templates are deferred.
 - `--record_debug=<seconds>` starts capture immediately at launch.
 - `--record_debug_interval` and `--record_debug_path` can be supplied with or without `--record_debug`.
 - If interval/path are supplied without `--record_debug`, values are configured but capture is not auto-started.
@@ -58,6 +63,23 @@ Argument reference:
 - `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example demo_pbr -- --record_debug=10 --record_debug_interval=50 --record_debug_path=.internal-dev/debug_reports/demo_pbr-timing.jsonl`
 - `api_test` with custom environment:
 - `RUST_LOG=debug timeout --signal=INT 60s cargo run -p renderer --example api_test -- --env src/renderer/src/assets/sky_maps/indoor_4k.exr --record_debug=10 --record_debug_interval=50`
+
+Root project launcher visual validation:
+
+```sh
+RUST_LOG=info timeout --signal=INT 60s cargo run -- \
+  --project apps/editor/sample_project/engine.project.toml \
+  --headless \
+  --capture_target draw \
+  --capture_frames 3 \
+  --capture_frame_start 5 \
+  --capture_frame_interval 5 \
+  --capture_dir .internal-dev/captures/runtime-launcher/headless-draw
+```
+
+This command is intentionally rooted at `cargo run --`, not `cargo run -p renderer --example ...`, because the root binary is the data-driven project launcher.
+
+Use `--capture_target draw` for validation evidence when a change affects rendered output. Desktop screenshot capture does not count because it records the compositor/windowing environment rather than the renderer-owned draw target.
 
 ## 8. Cross-Module Links
 - Shared argument parser: `src/renderer/examples/common/mod.rs`

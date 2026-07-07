@@ -2,12 +2,192 @@
 //! These test the public API surface without requiring a GPU.
 
 use glam::{Mat4, Vec3};
+use renderer::prelude::{
+    AssetRegistry, CaptureTarget, FrameCaptureConfigError, FrameCaptureRequest,
+    FrameCaptureSequence,
+};
 use renderer::{
-    Aabb, AssetKind, AssetRegistry, CommandHistory, Frustum, MeshHandle, OrbitCamera, PointLight,
-    Ray, Scene, SceneWorld, SetTransformCommand,
+    Aabb, AssetError, AssetKind, CommandHistory, Frustum, MeshHandle, OrbitCamera, PointLight, Ray,
+    RendererError, Scene, SceneError, SceneWorld, SetTransformCommand,
 };
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn beginner_prelude_import_contract_compiles() {
+    use renderer::prelude::*;
+
+    let config = RendererConfig::default();
+    assert!(!config.app_name.is_empty());
+
+    let mut scene = Scene::new();
+    let light = PointLight {
+        position: Vec3::new(0.0, 1.0, 0.0),
+        color: Vec3::ONE,
+        intensity: 1.0,
+        range: 4.0,
+    };
+    scene.create_point_light(light).expect("create point light");
+
+    let mut registry = AssetRegistry::new();
+    registry
+        .load_package_manifest_str(
+            r#"
+format_version = 1
+package_id = "core"
+display_name = "Core Assets"
+
+[[assets]]
+id = "core.model.crate"
+kind = "model"
+path = "models/crate.glb"
+"#,
+            "packages/core",
+        )
+        .expect("manifest parses through prelude import");
+
+    let request = FrameCaptureRequest::new(CaptureTarget::Present, "frame.png");
+    assert_eq!(request.target, CaptureTarget::Present);
+    let sequence = FrameCaptureSequence::new(CaptureTarget::Draw, "captures", 0, 1, 1)
+        .expect("capture sequence");
+    assert_eq!(sequence.remaining, 1);
+    let scheduler = FrameCaptureScheduler::new("prelude-contract");
+    assert!(scheduler.last_status().is_none());
+
+    assert!(matches!(LoadStatus::<()>::Cancelled, LoadStatus::Cancelled));
+    assert!(matches!(
+        FrameRenderOutcome::Rendered,
+        FrameRenderOutcome::Rendered
+    ));
+    assert!(matches!(AssetKind::Model, AssetKind::Model));
+
+    // ── Type existence (compile-time contract covering all prelude re-exports) ──
+    let _: Option<AssetManager<'_>> = None;
+    let _: Option<Renderer> = None;
+    let _: Option<RendererError> = None;
+    let _: Option<RendererInitError> = None;
+    let _: Option<RendererFrameError> = None;
+    let _: Option<AssetRegistryError> = None;
+    let _: Option<SceneError> = None;
+    let _: Option<SceneFragment> = None;
+    let _: Option<SceneFragmentMount> = None;
+    let _: Option<SceneFragmentNode> = None;
+    let _: Option<SceneFragmentNodeId> = None;
+    let _: Option<SceneNodeId> = None;
+    let _: Option<SceneNodeSummary> = None;
+    let _: Option<AssetId> = None;
+    let _: Option<ActionId> = None;
+    let _: Option<PointLightId> = None;
+    let _: Option<MaterialHandle> = None;
+    let _: Option<MeshHandle> = None;
+    let _: Option<TextureHandle> = None;
+    let _: Option<EnvironmentHandle> = None;
+    let _: Option<ActionMap> = None;
+    let _: Option<ActionMapLayer> = None;
+    let _: Option<ActionBinding> = None;
+    let _: Option<BindingModifiers> = None;
+    let _: Option<BindingTrigger> = None;
+    let _: Option<InputSystem> = None;
+    let _: Option<InputRuntime> = None;
+    let _: Option<InputSnapshot> = None;
+    let _: Option<InputEvent> = None;
+    let _: Option<InputActionEvent> = None;
+    let _: Option<InputDebugFrame> = None;
+    let _: Option<InputDebugSnapshot> = None;
+    let _: Option<InputChord> = None;
+    let _: Option<FrameInputSnapshot> = None;
+    let _: Option<LayerDescriptor> = None;
+    let _: Option<LayerHandle> = None;
+    let _: Option<LayerId> = None;
+    let _: Option<LayerPriority> = None;
+    let _: Option<LayerSpec> = None;
+    let _: Option<Project> = None;
+    let _: Option<ProjectPackage> = None;
+    let _: Option<ProjectSettings> = None;
+    let _: Option<ProjectValidationOptions> = None;
+    let _: Option<PackageManifest> = None;
+    let _: Option<PackageValidationOptions> = None;
+    let _: Option<PackageAssetRecord> = None;
+    let _: Option<DurableAssetRecord> = None;
+    let _: Option<SceneAssetReference> = None;
+    let _: Option<SceneValidationOptions> = None;
+    let _: Option<EventBus> = None;
+    let _: Option<EventEnvelope> = None;
+    let _: Option<EventRecorder> = None;
+    let _: Option<EventSequence> = None;
+    let _: Option<EventStage> = None;
+    let _: Option<EngineEvent> = None;
+    let _: Option<DebugTimingSnapshot> = None;
+    let _: Option<DebugTimingRow> = None;
+    let _: Option<DueFrameCapture> = None;
+    let _: Option<FrameCaptureConfigError> = None;
+    let _: Option<FrameContext> = None;
+    let _: Option<VisualTuning> = None;
+    let _: Option<AssetManifestMode> = None;
+    let _: Option<AssetPolicyConfig> = None;
+    let _: Option<PbrMaterialDesc> = None;
+    let _: Option<ProceduralMeshData> = None;
+    let _: Option<ProceduralVertex> = None;
+    let _: Option<LoadTicket> = None;
+    let _: Option<SamplerOverride> = None;
+    let _: Option<ResolvedTexturePolicy> = None;
+    let _: Option<TextureLoadOptions> = None;
+    let _: Option<ValidationArea> = None;
+    let _: Option<ValidationDiagnostic> = None;
+    let _: Option<ValidationError> = None;
+    let _: Option<AssetEvent> = None;
+    let _: Option<FrameCaptureScheduler> = None;
+    let _: Option<FrameCaptureStatus> = None;
+    let _: Option<FrameCaptureRequest> = None;
+    let _: Option<FilterMode> = None;
+    let _: Option<WrapMode> = None;
+    let _: Option<FacePattern> = None;
+
+    // ── Free functions (compile-time existence) ──
+    let _ = default_capture_root();
+}
+#[test]
+fn beginner_error_display_contract_is_actionable() {
+    let scene_err = RendererError::from(SceneError::MissingAssetId("node asset".to_string()));
+    assert_eq!(
+        scene_err.to_string(),
+        "scene error: missing durable asset id for node asset"
+    );
+
+    let asset_err = RendererError::from(AssetError::ManifestParse {
+        path: PathBuf::from("assets/core.package.toml"),
+        message: "missing field `format_version`".to_string(),
+    });
+    assert!(asset_err
+        .to_string()
+        .contains("asset error: manifest parse error for 'assets/core.package.toml'"));
+    assert!(asset_err.to_string().contains("format_version"));
+}
+
+#[test]
+fn capture_target_and_sequence_config_contracts_are_strict() {
+    assert_eq!(CaptureTarget::parse("draw"), Some(CaptureTarget::Draw));
+    assert_eq!(
+        CaptureTarget::parse("present"),
+        Some(CaptureTarget::Present)
+    );
+    assert_eq!(CaptureTarget::parse("desktop screenshot"), None);
+
+    let request = FrameCaptureRequest::new(CaptureTarget::Draw, "captures/frame.png");
+    assert_eq!(request.target, CaptureTarget::Draw);
+    assert_eq!(request.output_path, PathBuf::from("captures/frame.png"));
+
+    assert_eq!(
+        FrameCaptureSequence::new(CaptureTarget::Draw, "captures", 0, 0, 1)
+            .expect_err("zero interval is invalid"),
+        FrameCaptureConfigError::InvalidInterval
+    );
+    assert_eq!(
+        FrameCaptureSequence::new(CaptureTarget::Draw, "captures", 0, 1, 0)
+            .expect_err("zero count is invalid"),
+        FrameCaptureConfigError::InvalidCount
+    );
+}
 
 #[test]
 fn scene_node_create_and_transform() {

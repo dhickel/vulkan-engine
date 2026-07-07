@@ -1,8 +1,10 @@
-use renderer::{MaterialHandle, ProceduralMeshData, ProceduralVertex};
+use renderer::prelude::{MaterialHandle, ProceduralMeshData, ProceduralVertex};
 
-use crate::collision::{CEILING_HEIGHT, CHUNK_SIZE, RAMP_RISE, TILE_SIZE, WALL_HEIGHT};
+use crate::collision::{ramp_height, CEILING_HEIGHT, CHUNK_SIZE, TILE_SIZE, WALL_HEIGHT};
 use crate::layout::{tile_to_world, ParsedLevel, Tile};
 use glam::{Vec2, Vec3, Vec4};
+
+const MULTILAYER_SURFACE_GAP: f32 = 0.01;
 
 pub struct ChunkBuild {
     pub name: String,
@@ -187,17 +189,9 @@ fn emit_tile(
                     tile,
                     Tile::RampNorth(_) | Tile::RampEast(_) | Tile::RampSouth(_) | Tile::RampWest(_)
                 ) {
-                    emit_ramp_caps(x, y, y_offset, tile, verts, inds);
+                    emit_ramp_caps(level, layer_idx, x, y, y_offset, tile, verts, inds);
                 } else {
-                    let opens_above = if layer_idx + 1 < level.layer_count() {
-                        tile_opens_ceiling(level.tile_at_3d(layer_idx + 1, x, y))
-                    } else {
-                        false
-                    };
-
-                    if !opens_above {
-                        emit_ceiling(x, y, y_offset, verts, inds);
-                    }
+                    emit_ceiling_for_tile(level, layer_idx, x, y, y_offset, verts, inds);
                 }
             }
 
@@ -220,7 +214,7 @@ fn emit_tile(
             }
 
             // Top cap for walls
-            emit_ceiling(x, y, y_offset, verts, inds);
+            emit_ceiling_for_tile(level, layer_idx, x, y, y_offset, verts, inds);
         }
     }
 }
@@ -240,15 +234,25 @@ fn is_walkable(tile: Tile) -> bool {
     )
 }
 
-fn tile_opens_ceiling(tile: Tile) -> bool {
-    matches!(
-        tile,
-        Tile::Void
-            | Tile::RampNorth(_)
-            | Tile::RampEast(_)
-            | Tile::RampSouth(_)
-            | Tile::RampWest(_)
-    )
+fn has_layer_above(level: &ParsedLevel, layer_idx: usize) -> bool {
+    layer_idx + 1 < level.layer_count()
+}
+
+fn emit_ceiling_for_tile(
+    level: &ParsedLevel,
+    layer_idx: usize,
+    x: usize,
+    y: usize,
+    y_offset: f32,
+    verts: &mut Vec<ProceduralVertex>,
+    inds: &mut Vec<u32>,
+) {
+    let height = if has_layer_above(level, layer_idx) {
+        y_offset + CEILING_HEIGHT - MULTILAYER_SURFACE_GAP
+    } else {
+        y_offset + CEILING_HEIGHT
+    };
+    emit_ceiling_at_height(x, y, height, verts, inds);
 }
 
 fn neighbor_open(level: &ParsedLevel, layer_idx: usize, x: isize, y: isize) -> bool {
@@ -258,17 +262,64 @@ fn neighbor_open(level: &ParsedLevel, layer_idx: usize, x: isize, y: isize) -> b
     !is_solid(level.tile_at_3d(layer_idx, x as usize, y as usize))
 }
 
+fn should_emit_wall_face_toward(
+    level: &ParsedLevel,
+    layer_idx: usize,
+    x: usize,
+    y: usize,
+    dx: isize,
+    dy: isize,
+) -> bool {
+    let nx = x as isize + dx;
+    let ny = y as isize + dy;
+    if !neighbor_open(level, layer_idx, nx, ny) {
+        return false;
+    }
+
+    !upper_layer_shaft_face_hangs_over_lower_space(level, layer_idx, x, y, nx, ny)
+}
+
+fn upper_layer_shaft_face_hangs_over_lower_space(
+    level: &ParsedLevel,
+    layer_idx: usize,
+    x: usize,
+    y: usize,
+    nx: isize,
+    ny: isize,
+) -> bool {
+    if layer_idx == 0
+        || nx < 0
+        || ny < 0
+        || nx >= level.width as isize
+        || ny >= level.height as isize
+    {
+        return false;
+    }
+
+    if level.tile_at_3d(layer_idx, nx as usize, ny as usize) != Tile::Void {
+        return false;
+    }
+
+    let lower_layer = layer_idx - 1;
+    lower_tile_is_open_space(level.tile_at_3d(lower_layer, nx as usize, ny as usize))
+        || lower_tile_is_open_space(level.tile_at_3d(lower_layer, x, y))
+}
+
+fn lower_tile_is_open_space(tile: Tile) -> bool {
+    is_walkable(tile) || matches!(tile, Tile::Void)
+}
+
 fn should_emit_north_face(level: &ParsedLevel, layer_idx: usize, x: usize, y: usize) -> bool {
-    neighbor_open(level, layer_idx, x as isize, y as isize - 1)
+    should_emit_wall_face_toward(level, layer_idx, x, y, 0, 1)
 }
 fn should_emit_south_face(level: &ParsedLevel, layer_idx: usize, x: usize, y: usize) -> bool {
-    neighbor_open(level, layer_idx, x as isize, y as isize + 1)
+    should_emit_wall_face_toward(level, layer_idx, x, y, 0, -1)
 }
 fn should_emit_east_face(level: &ParsedLevel, layer_idx: usize, x: usize, y: usize) -> bool {
-    neighbor_open(level, layer_idx, x as isize + 1, y as isize)
+    should_emit_wall_face_toward(level, layer_idx, x, y, 1, 0)
 }
 fn should_emit_west_face(level: &ParsedLevel, layer_idx: usize, x: usize, y: usize) -> bool {
-    neighbor_open(level, layer_idx, x as isize - 1, y as isize)
+    should_emit_wall_face_toward(level, layer_idx, x, y, -1, 0)
 }
 
 fn push_quad(
@@ -350,10 +401,10 @@ fn emit_floor(
     );
 }
 
-fn emit_ceiling(
+fn emit_ceiling_at_height(
     x: usize,
     y: usize,
-    y_offset: f32,
+    ceiling_y: f32,
     verts: &mut Vec<ProceduralVertex>,
     inds: &mut Vec<u32>,
 ) {
@@ -370,25 +421,25 @@ fn emit_ceiling(
         verts,
         inds,
         make_vertex(
-            Vec3::new(x0, y_offset + CEILING_HEIGHT, z0),
+            Vec3::new(x0, ceiling_y, z0),
             normal,
             tangent,
             Vec2::new(0.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x0, y_offset + CEILING_HEIGHT, z1),
+            Vec3::new(x0, ceiling_y, z1),
             normal,
             tangent,
             Vec2::new(1.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x1, y_offset + CEILING_HEIGHT, z1),
+            Vec3::new(x1, ceiling_y, z1),
             normal,
             tangent,
             Vec2::new(1.0, 1.0),
         ),
         make_vertex(
-            Vec3::new(x1, y_offset + CEILING_HEIGHT, z0),
+            Vec3::new(x1, ceiling_y, z0),
             normal,
             tangent,
             Vec2::new(0.0, 1.0),
@@ -415,25 +466,25 @@ fn emit_wall_north(
         verts,
         inds,
         make_vertex(
-            Vec3::new(x0, y_offset, z),
+            Vec3::new(x1, y_offset, z),
             normal,
             tangent,
             Vec2::new(0.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x1, y_offset, z),
+            Vec3::new(x0, y_offset, z),
             normal,
             tangent,
             Vec2::new(1.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x1, y_offset + WALL_HEIGHT, z),
+            Vec3::new(x0, y_offset + WALL_HEIGHT, z),
             normal,
             tangent,
             Vec2::new(1.0, WALL_HEIGHT),
         ),
         make_vertex(
-            Vec3::new(x0, y_offset + WALL_HEIGHT, z),
+            Vec3::new(x1, y_offset + WALL_HEIGHT, z),
             normal,
             tangent,
             Vec2::new(0.0, WALL_HEIGHT),
@@ -460,25 +511,25 @@ fn emit_wall_south(
         verts,
         inds,
         make_vertex(
-            Vec3::new(x1, y_offset, z),
+            Vec3::new(x0, y_offset, z),
             normal,
             tangent,
             Vec2::new(0.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x0, y_offset, z),
+            Vec3::new(x1, y_offset, z),
             normal,
             tangent,
             Vec2::new(1.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x0, y_offset + WALL_HEIGHT, z),
+            Vec3::new(x1, y_offset + WALL_HEIGHT, z),
             normal,
             tangent,
             Vec2::new(1.0, WALL_HEIGHT),
         ),
         make_vertex(
-            Vec3::new(x1, y_offset + WALL_HEIGHT, z),
+            Vec3::new(x0, y_offset + WALL_HEIGHT, z),
             normal,
             tangent,
             Vec2::new(0.0, WALL_HEIGHT),
@@ -590,42 +641,40 @@ fn emit_ramp_top(
     let z0 = origin.z;
     let z1 = origin.z - TILE_SIZE;
 
-    let (h_nw, h_ne, h_sw, h_se) = ramp_corner_heights(tile);
-    let h_nw = h_nw + y_offset;
-    let h_ne = h_ne + y_offset;
-    let h_sw = h_sw + y_offset;
-    let h_se = h_se + y_offset;
+    let corners = ramp_corner_heights(tile, y_offset);
 
-    // Normal calculation for the ramp plane
-    let p0 = Vec3::new(x0, h_nw, z1);
-    let p1 = Vec3::new(x1, h_ne, z1);
-    let p2 = Vec3::new(x0, h_sw, z0);
-    let normal = (p1 - p0).cross(p2 - p0).normalize();
+    let p0 = Vec3::new(x0, corners.x0_z0, z0);
+    let p1 = Vec3::new(x1, corners.x1_z0, z0);
+    let p2 = Vec3::new(x1, corners.x1_z1, z1);
+    let mut normal = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+    if normal.y < 0.0 {
+        normal = -normal;
+    }
     let tangent = Vec4::new(1.0, 0.0, 0.0, 1.0);
 
     push_quad(
         verts,
         inds,
         make_vertex(
-            Vec3::new(x0, h_sw, z0),
+            Vec3::new(x0, corners.x0_z0, z0),
             normal,
             tangent,
             Vec2::new(0.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x1, h_se, z0),
+            Vec3::new(x1, corners.x1_z0, z0),
             normal,
             tangent,
             Vec2::new(1.0, 0.0),
         ),
         make_vertex(
-            Vec3::new(x1, h_ne, z1),
+            Vec3::new(x1, corners.x1_z1, z1),
             normal,
             tangent,
             Vec2::new(1.0, 1.0),
         ),
         make_vertex(
-            Vec3::new(x0, h_nw, z1),
+            Vec3::new(x0, corners.x0_z1, z1),
             normal,
             tangent,
             Vec2::new(0.0, 1.0),
@@ -634,6 +683,8 @@ fn emit_ramp_top(
 }
 
 fn emit_ramp_caps(
+    level: &ParsedLevel,
+    layer_idx: usize,
     x: usize,
     y: usize,
     y_offset: f32,
@@ -647,15 +698,10 @@ fn emit_ramp_caps(
     let z0 = origin.z;
     let z1 = origin.z - TILE_SIZE;
 
-    let (h_nw, h_ne, h_sw, h_se) = ramp_corner_heights(tile);
-    let h_nw = h_nw + y_offset;
-    let h_ne = h_ne + y_offset;
-    let h_sw = h_sw + y_offset;
-    let h_se = h_se + y_offset;
+    let corners = ramp_corner_heights(tile, y_offset);
 
-    // We emit side caps for the ramp so it isn't "paper thin" from the side
     // West face
-    if h_nw > 0.0 || h_sw > 0.0 {
+    if should_emit_ramp_cap(level, layer_idx, x, y, tile, y_offset, RampEdge::West) {
         let normal = -Vec3::X;
         let tangent = Vec4::new(0.0, 0.0, 1.0, 1.0);
         push_quad(
@@ -674,22 +720,22 @@ fn emit_ramp_caps(
                 Vec2::new(1.0, 0.0),
             ),
             make_vertex(
-                Vec3::new(x0, h_sw, z0),
+                Vec3::new(x0, corners.x0_z0, z0),
                 normal,
                 tangent,
-                Vec2::new(1.0, h_sw - y_offset),
+                Vec2::new(1.0, corners.x0_z0 - y_offset),
             ),
             make_vertex(
-                Vec3::new(x0, h_nw, z1),
+                Vec3::new(x0, corners.x0_z1, z1),
                 normal,
                 tangent,
-                Vec2::new(0.0, h_nw - y_offset),
+                Vec2::new(0.0, corners.x0_z1 - y_offset),
             ),
         );
     }
 
     // East face
-    if h_ne > 0.0 || h_se > 0.0 {
+    if should_emit_ramp_cap(level, layer_idx, x, y, tile, y_offset, RampEdge::East) {
         let normal = Vec3::X;
         let tangent = Vec4::new(0.0, 0.0, -1.0, 1.0);
         push_quad(
@@ -708,22 +754,30 @@ fn emit_ramp_caps(
                 Vec2::new(1.0, 0.0),
             ),
             make_vertex(
-                Vec3::new(x1, h_ne, z1),
+                Vec3::new(x1, corners.x1_z1, z1),
                 normal,
                 tangent,
-                Vec2::new(1.0, h_ne - y_offset),
+                Vec2::new(1.0, corners.x1_z1 - y_offset),
             ),
             make_vertex(
-                Vec3::new(x1, h_se, z0),
+                Vec3::new(x1, corners.x1_z0, z0),
                 normal,
                 tangent,
-                Vec2::new(0.0, h_se - y_offset),
+                Vec2::new(0.0, corners.x1_z0 - y_offset),
             ),
         );
     }
 
-    // North face
-    if h_nw > 0.0 || h_ne > 0.0 {
+    // Row +Y edge: world -Z.
+    if should_emit_ramp_cap(
+        level,
+        layer_idx,
+        x,
+        y,
+        tile,
+        y_offset,
+        RampEdge::RowPositive,
+    ) {
         let normal = -Vec3::Z;
         let tangent = Vec4::new(1.0, 0.0, 0.0, 1.0);
         push_quad(
@@ -742,22 +796,30 @@ fn emit_ramp_caps(
                 Vec2::new(1.0, 0.0),
             ),
             make_vertex(
-                Vec3::new(x1, h_ne, z1),
+                Vec3::new(x1, corners.x1_z1, z1),
                 normal,
                 tangent,
-                Vec2::new(1.0, h_ne - y_offset),
+                Vec2::new(1.0, corners.x1_z1 - y_offset),
             ),
             make_vertex(
-                Vec3::new(x0, h_nw, z1),
+                Vec3::new(x0, corners.x0_z1, z1),
                 normal,
                 tangent,
-                Vec2::new(0.0, h_nw - y_offset),
+                Vec2::new(0.0, corners.x0_z1 - y_offset),
             ),
         );
     }
 
-    // South face
-    if h_sw > 0.0 || h_se > 0.0 {
+    // Row -Y edge: world +Z.
+    if should_emit_ramp_cap(
+        level,
+        layer_idx,
+        x,
+        y,
+        tile,
+        y_offset,
+        RampEdge::RowNegative,
+    ) {
         let normal = Vec3::Z;
         let tangent = Vec4::new(-1.0, 0.0, 0.0, 1.0);
         push_quad(
@@ -776,45 +838,114 @@ fn emit_ramp_caps(
                 Vec2::new(1.0, 0.0),
             ),
             make_vertex(
-                Vec3::new(x0, h_sw, z0),
+                Vec3::new(x0, corners.x0_z0, z0),
                 normal,
                 tangent,
-                Vec2::new(1.0, h_sw - y_offset),
+                Vec2::new(1.0, corners.x0_z0 - y_offset),
             ),
             make_vertex(
-                Vec3::new(x1, h_se, z0),
+                Vec3::new(x1, corners.x1_z0, z0),
                 normal,
                 tangent,
-                Vec2::new(0.0, h_se - y_offset),
+                Vec2::new(0.0, corners.x1_z0 - y_offset),
             ),
         );
     }
 }
 
-fn ramp_corner_heights(tile: Tile) -> (f32, f32, f32, f32) {
-    match tile {
-        Tile::RampNorth(lvl) => {
-            let h0 = lvl as f32 * RAMP_RISE;
-            let h1 = (lvl as f32 + 1.0) * RAMP_RISE;
-            (h1, h1, h0, h0)
-        }
-        Tile::RampSouth(lvl) => {
-            let h0 = lvl as f32 * RAMP_RISE;
-            let h1 = (lvl as f32 + 1.0) * RAMP_RISE;
-            (h0, h0, h1, h1)
-        }
-        Tile::RampEast(lvl) => {
-            let h0 = lvl as f32 * RAMP_RISE;
-            let h1 = (lvl as f32 + 1.0) * RAMP_RISE;
-            (h0, h1, h0, h1)
-        }
-        Tile::RampWest(lvl) => {
-            let h0 = lvl as f32 * RAMP_RISE;
-            let h1 = (lvl as f32 + 1.0) * RAMP_RISE;
-            (h1, h0, h1, h0)
-        }
-        _ => (0.0, 0.0, 0.0, 0.0),
+#[derive(Clone, Copy, Debug)]
+struct RampCorners {
+    x0_z0: f32,
+    x1_z0: f32,
+    x0_z1: f32,
+    x1_z1: f32,
+}
+
+fn ramp_corner_heights(tile: Tile, y_offset: f32) -> RampCorners {
+    RampCorners {
+        x0_z0: ramp_height(tile, 0.0, 0.0, y_offset).unwrap_or(y_offset),
+        x1_z0: ramp_height(tile, 1.0, 0.0, y_offset).unwrap_or(y_offset),
+        x0_z1: ramp_height(tile, 0.0, 1.0, y_offset).unwrap_or(y_offset),
+        x1_z1: ramp_height(tile, 1.0, 1.0, y_offset).unwrap_or(y_offset),
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RampEdge {
+    RowNegative,
+    RowPositive,
+    East,
+    West,
+}
+
+impl RampEdge {
+    fn neighbor_offset(self) -> (isize, isize) {
+        match self {
+            Self::RowNegative => (0, -1),
+            Self::RowPositive => (0, 1),
+            Self::East => (1, 0),
+            Self::West => (-1, 0),
+        }
+    }
+
+    fn opposite(self) -> Self {
+        match self {
+            Self::RowNegative => Self::RowPositive,
+            Self::RowPositive => Self::RowNegative,
+            Self::East => Self::West,
+            Self::West => Self::East,
+        }
+    }
+}
+
+fn should_emit_ramp_cap(
+    level: &ParsedLevel,
+    layer_idx: usize,
+    x: usize,
+    y: usize,
+    tile: Tile,
+    y_offset: f32,
+    edge: RampEdge,
+) -> bool {
+    let this_edge = surface_edge_heights(tile, y_offset, edge);
+    if edge_at_base(this_edge, y_offset) {
+        return false;
+    }
+
+    let (dx, dy) = edge.neighbor_offset();
+    let nx = x as isize + dx;
+    let ny = y as isize + dy;
+    if nx < 0 || ny < 0 || nx >= level.width as isize || ny >= level.height as isize {
+        return true;
+    }
+
+    let neighbor = level.tile_at_3d(layer_idx, nx as usize, ny as usize);
+    if !is_walkable(neighbor) {
+        return true;
+    }
+
+    let neighbor_edge = surface_edge_heights(neighbor, y_offset, edge.opposite());
+    !height_pair_matches(this_edge, neighbor_edge)
+}
+
+fn surface_edge_heights(tile: Tile, y_offset: f32, edge: RampEdge) -> (f32, f32) {
+    let corners = ramp_corner_heights(tile, y_offset);
+    match edge {
+        RampEdge::RowNegative => (corners.x0_z0, corners.x1_z0),
+        RampEdge::RowPositive => (corners.x0_z1, corners.x1_z1),
+        RampEdge::East => (corners.x1_z0, corners.x1_z1),
+        RampEdge::West => (corners.x0_z0, corners.x0_z1),
+    }
+}
+
+fn height_pair_matches(a: (f32, f32), b: (f32, f32)) -> bool {
+    const EPSILON: f32 = 1e-4;
+    (a.0 - b.0).abs() <= EPSILON && (a.1 - b.1).abs() <= EPSILON
+}
+
+fn edge_at_base(edge: (f32, f32), y_offset: f32) -> bool {
+    const EPSILON: f32 = 1e-4;
+    (edge.0 - y_offset).abs() <= EPSILON && (edge.1 - y_offset).abs() <= EPSILON
 }
 
 #[cfg(test)]
@@ -822,10 +953,14 @@ mod tests {
     use super::*;
 
     fn parsed_level(width: usize, height: usize, tiles: Vec<Tile>) -> ParsedLevel {
+        parsed_level_layers(width, height, vec![tiles])
+    }
+
+    fn parsed_level_layers(width: usize, height: usize, layers: Vec<Vec<Tile>>) -> ParsedLevel {
         ParsedLevel {
             width,
             height,
-            layers: vec![tiles],
+            layers,
             spawn: crate::layout::TileCoord {
                 layer: 0,
                 x: 0,
@@ -838,6 +973,49 @@ mod tests {
 
     fn fake_material() -> renderer::MaterialHandle {
         renderer::MaterialHandle::new(0, 0)
+    }
+
+    fn emit_structure_tile(
+        level: &ParsedLevel,
+        layer_idx: usize,
+        x: usize,
+        y: usize,
+    ) -> Vec<ProceduralVertex> {
+        let mut verts = Vec::new();
+        let mut inds = Vec::new();
+        emit_tile(
+            level,
+            layer_idx,
+            x,
+            y,
+            SubLayer::Structure,
+            &mut verts,
+            &mut inds,
+        );
+        verts
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1e-4,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn assert_quad_winding_matches_normal(quad: &[ProceduralVertex]) {
+        let tri_normal = (quad[1].position - quad[0].position)
+            .cross(quad[2].position - quad[0].position)
+            .normalize_or_zero();
+        assert!(
+            tri_normal.dot(quad[0].normal) > 0.999,
+            "triangle normal {:?} does not match stored normal {:?}",
+            tri_normal,
+            quad[0].normal
+        );
+    }
+
+    fn quad_all(quad: &[ProceduralVertex], predicate: impl Fn(&ProceduralVertex) -> bool) -> bool {
+        quad.iter().all(predicate)
     }
 
     #[test]
@@ -896,11 +1074,187 @@ mod tests {
     }
 
     #[test]
-    fn ramp_orientation_geometry_correctness() {
-        let (nw, ne, sw, se) = ramp_corner_heights(Tile::RampNorth(0));
-        assert!((nw - RAMP_RISE).abs() < 1e-4);
-        assert!((ne - RAMP_RISE).abs() < 1e-4);
-        assert!(sw.abs() < 1e-4);
-        assert!(se.abs() < 1e-4);
+    fn wall_faces_match_physical_edges_normals_and_winding() {
+        let level = parsed_level(
+            3,
+            3,
+            vec![
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Wall,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+                Tile::Floor,
+            ],
+        );
+
+        let verts = emit_structure_tile(&level, 0, 1, 1);
+        assert_eq!(verts.len(), 20);
+
+        let row_positive = &verts[0..4];
+        assert!(quad_all(row_positive, |v| {
+            (v.position.z + 2.0).abs() <= 1e-4 && v.normal == -Vec3::Z
+        }));
+        assert_quad_winding_matches_normal(row_positive);
+
+        let row_negative = &verts[4..8];
+        assert!(quad_all(row_negative, |v| {
+            (v.position.z + 1.0).abs() <= 1e-4 && v.normal == Vec3::Z
+        }));
+        assert_quad_winding_matches_normal(row_negative);
+
+        let east = &verts[8..12];
+        assert!(quad_all(east, |v| {
+            (v.position.x - 2.0).abs() <= 1e-4 && v.normal == Vec3::X
+        }));
+        assert_quad_winding_matches_normal(east);
+
+        let west = &verts[12..16];
+        assert!(quad_all(west, |v| {
+            (v.position.x - 1.0).abs() <= 1e-4 && v.normal == -Vec3::X
+        }));
+        assert_quad_winding_matches_normal(west);
+    }
+
+    #[test]
+    fn ramp_top_corner_heights_match_collision_for_all_directions() {
+        for tile in [
+            Tile::RampNorth(0),
+            Tile::RampEast(0),
+            Tile::RampSouth(0),
+            Tile::RampWest(0),
+        ] {
+            let mut verts = Vec::new();
+            let mut inds = Vec::new();
+            emit_ramp_top(2, 3, WALL_HEIGHT, tile, &mut verts, &mut inds);
+
+            assert_eq!(verts.len(), 4);
+            assert_eq!(inds.len(), 6);
+            for vertex in &verts {
+                assert!(vertex.normal.is_finite());
+                assert!(vertex.normal.y > 0.0);
+
+                let origin = tile_to_world(2, 3);
+                let local_x = ((vertex.position.x - origin.x) / TILE_SIZE).clamp(0.0, 1.0);
+                let local_z = ((origin.z - vertex.position.z) / TILE_SIZE).clamp(0.0, 1.0);
+                let expected = ramp_height(tile, local_x, local_z, WALL_HEIGHT).unwrap();
+                assert_close(vertex.position.y, expected);
+            }
+
+            for tri in inds.chunks_exact(3) {
+                let p0 = verts[tri[0] as usize].position;
+                let p1 = verts[tri[1] as usize].position;
+                let p2 = verts[tri[2] as usize].position;
+                assert!((p1 - p0).cross(p2 - p0).length() > 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn ramp_caps_suppress_compatible_shared_edge_and_preserve_exterior_caps() {
+        let level = parsed_level(2, 1, vec![Tile::RampEast(0), Tile::RampEast(1)]);
+        let mut verts = Vec::new();
+        let mut inds = Vec::new();
+        emit_tile(&level, 0, 0, 0, SubLayer::Structure, &mut verts, &mut inds);
+        emit_tile(&level, 0, 1, 0, SubLayer::Structure, &mut verts, &mut inds);
+
+        let quads: Vec<&[ProceduralVertex]> = verts.chunks_exact(4).collect();
+        assert!(!quads.iter().any(|quad| {
+            quad_all(quad, |v| (v.position.x - 1.0).abs() <= 1e-4) && quad[0].normal.x.abs() > 0.999
+        }));
+        assert!(quads.iter().any(|quad| {
+            quad_all(quad, |v| (v.position.x - 2.0).abs() <= 1e-4) && quad[0].normal == Vec3::X
+        }));
+        assert!(quads.iter().any(|quad| {
+            quad_all(quad, |v| (v.position.z - 0.0).abs() <= 1e-4) && quad[0].normal == Vec3::Z
+        }));
+    }
+
+    #[test]
+    fn lower_layer_ceiling_offset_is_uniform_under_next_layer() {
+        let level = parsed_level_layers(
+            2,
+            1,
+            vec![
+                vec![Tile::Floor, Tile::Floor],
+                vec![Tile::Floor, Tile::Void],
+            ],
+        );
+
+        let overlapped = emit_structure_tile(&level, 0, 0, 0);
+        assert_eq!(overlapped.len(), 4);
+        assert!(quad_all(&overlapped, |v| {
+            (v.position.y - (CEILING_HEIGHT - MULTILAYER_SURFACE_GAP)).abs() <= 1e-4
+                && v.normal == -Vec3::Y
+        }));
+        assert_quad_winding_matches_normal(&overlapped);
+
+        let exposed = emit_structure_tile(&level, 0, 1, 0);
+        assert_eq!(exposed.len(), 4);
+        assert!(quad_all(&exposed, |v| {
+            (v.position.y - (CEILING_HEIGHT - MULTILAYER_SURFACE_GAP)).abs() <= 1e-4
+                && v.normal == -Vec3::Y
+        }));
+        assert_quad_winding_matches_normal(&exposed);
+    }
+
+    #[test]
+    fn upper_layer_shaft_adjacent_wall_faces_over_lower_ramps_are_suppressed() {
+        let level = parsed_level_layers(
+            3,
+            1,
+            vec![
+                vec![Tile::Floor, Tile::RampEast(1), Tile::Floor],
+                vec![Tile::Wall, Tile::Void, Tile::Wall],
+            ],
+        );
+
+        let left_wall = emit_structure_tile(&level, 1, 0, 0);
+        assert!(
+            !left_wall.chunks_exact(4).any(|quad| {
+                quad_all(quad, |v| (v.position.x - 1.0).abs() <= 1e-4) && quad[0].normal == Vec3::X
+            }),
+            "upper wall east face should not hang over the lower ramp shaft"
+        );
+        assert!(
+            left_wall.chunks_exact(4).any(|quad| {
+                quad_all(quad, |v| (v.position.x - 0.0).abs() <= 1e-4) && quad[0].normal == -Vec3::X
+            }),
+            "ordinary outer wall face should remain"
+        );
+
+        let right_wall = emit_structure_tile(&level, 1, 2, 0);
+        assert!(
+            !right_wall.chunks_exact(4).any(|quad| {
+                quad_all(quad, |v| (v.position.x - 2.0).abs() <= 1e-4) && quad[0].normal == -Vec3::X
+            }),
+            "upper wall west face should not hang over the lower ramp shaft"
+        );
+        assert!(
+            right_wall.chunks_exact(4).any(|quad| {
+                quad_all(quad, |v| (v.position.x - 3.0).abs() <= 1e-4) && quad[0].normal == Vec3::X
+            }),
+            "ordinary outer wall face should remain"
+        );
+    }
+
+    #[test]
+    fn upper_layer_void_boundary_walls_emit_when_no_lower_open_space_is_exposed() {
+        let level = parsed_level_layers(
+            2,
+            1,
+            vec![vec![Tile::Wall, Tile::Wall], vec![Tile::Wall, Tile::Void]],
+        );
+
+        let wall = emit_structure_tile(&level, 1, 0, 0);
+        assert!(
+            wall.chunks_exact(4).any(|quad| {
+                quad_all(quad, |v| (v.position.x - 1.0).abs() <= 1e-4) && quad[0].normal == Vec3::X
+            }),
+            "upper same-layer boundary wall should emit when it is not over lower open space"
+        );
     }
 }

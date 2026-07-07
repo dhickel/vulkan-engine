@@ -65,10 +65,11 @@ impl EnvironmentHandle {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CacheError {
     InvalidHandle,
     StaleHandle,
     NotLoaded,
     OutOfBounds,
+    DescriptorAllocation(String),
 }

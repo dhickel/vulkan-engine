@@ -7,6 +7,8 @@ This chapter explains how facade users build, mutate, and extend scene content w
 Scene authoring path:
 asset load (`AssetManager`) -> scene creation/mutation (`Scene`) -> optional fragment merge (`Scene::merge_fragment`) -> renderer submission (`Renderer::render_scene*`).
 
+The event crate defines typed scene event contracts, but broad scene mutation emission is deferred. Current scene mutation APIs remain direct facade calls and command-history transactions.
+
 ## 3. Key Concepts
 - `Scene` is the runtime-owned mutable graph used for rendering.
 - `SceneNodeId` and `PointLightId` are slot+generation handles; they can become stale.
@@ -27,6 +29,15 @@ Asset-backed editor nodes should record durable identity with `Scene::set_node_a
 Environment persistence follows the same rule. Use `Scene::set_skybox_asset_reference` when the skybox was resolved from a durable package asset; `Scene::set_skybox` only sets the runtime environment handle.
 
 Supported material/settings persistence for this phase is scene-local material override IDs attached to node material slots via `Scene::set_node_material_override`, plus node names and tag lists through the scene facade. The editor inspector currently exposes material slot `0` as an override ID string because that is the durable metadata the renderer can persist without mutating GPU material cache state. PBR factor editing, texture assignment, shader graphs, and material asset documents remain deferred.
+
+Current material override limits:
+
+- `Scene::set_node_material_override` validates that the slot and override ID are non-empty strings, then stores the mapping on the node.
+- `Scene::clear_node_material_override` removes one stored slot mapping.
+- `SceneNodeSummary::material_overrides` and scene save/load preserve those strings as durable metadata.
+- The renderer does not yet resolve these strings into live GPU material mutations. Treat them as editor/package identity that later material tooling can interpret.
+
+Common scene error messages are intentionally beginner-readable. A stale or invalid `SceneNodeId` names the slot and generation so callers can find old handles. Missing durable asset references report the context, for example `missing durable asset id for node asset`. Unsupported scene files report the found and expected format versions. Package/project/asset failures that happen while resolving scene content surface as `RendererError::Asset(...)`; scene graph shape failures surface as `RendererError::Scene(...)`.
 
 Required top-level fields:
 
@@ -55,6 +66,7 @@ Required node fields:
 | `visibility` | object | recommended | Authoring visibility, layer, and lock metadata. Missing object defaults to visible, unlocked, and runtime default layer. |
 | `tags` | array of string | recommended | Editor/game tags. Missing array defaults to empty. |
 | `prefab` | object | optional | Placement metadata for prefab-backed nodes, including wall chunk v1 records. |
+| `collision` | object | optional | Durable collision metadata for future runtime physics loading. Validation is implemented; editor UI authoring and live physics binding are deferred. |
 
 Asset references inside a scene must use durable IDs first:
 
@@ -81,6 +93,21 @@ Asset references inside a scene must use durable IDs first:
     "layer": "world"
   },
   "tags": ["wall", "chunk"],
+  "collision": {
+    "body": {
+      "id": "body.wall_north_001",
+      "kind": "static"
+    },
+    "colliders": [
+      {
+        "id": "collider.wall_north_001",
+        "shape": { "kind": "box", "half_extents": [1.0, 1.0, 0.125] },
+        "trigger": false,
+        "asset": "core.collision.wall",
+        "offset": [0.0, 0.0, 0.0]
+      }
+    ]
+  },
   "prefab": {
     "kind": "wall_chunk",
     "version": 1,
@@ -96,7 +123,11 @@ Asset references inside a scene must use durable IDs first:
 }
 ```
 
+Use `engine_pack validate-scene <scene.engine.scene.json> --project <engine.project.toml>` to validate scene asset references against the enabled project packages before treating a scene file as editor-ready. The CLI path is documented in [Packaging CLI](10-packaging-cli.md).
+
 Wall chunk v1 is prefab asset placement metadata. It identifies a prefab mesh asset, placement size/snap/connectors, and editor categorization. It must not encode editable polygon, CSG, or brush geometry; true polygon/brush editing is deferred beyond the current package-backed prefab placement and persistence slice.
+
+Collision metadata is a durable authoring contract, not a live physics binding yet. Scene validation accepts `collision.body.kind` values `static`, `dynamic`, and `kinematic`; collider shape kinds `box`/`cuboid`, `sphere`, `capsule`, and `capsule_y`; finite offsets; positive shape dimensions; unique durable body/collider IDs; and optional durable collision asset IDs known to the project registry. Validators reject serialized runtime handles, duplicate collision IDs, invalid dimensions, missing colliders, path-only IDs, and unknown collision asset references. The current alpha does not automatically instantiate a `physics::PhysicsWorld` from scene collision metadata.
 
 Sample scene:
 
@@ -134,6 +165,18 @@ Sample scene:
       "material_overrides": { "0": "mat_override.damp_stone" },
       "visibility": { "visible": true, "locked": false, "layer": "world" },
       "tags": ["wall", "chunk"],
+      "collision": {
+        "body": { "id": "body.wall_north_001", "kind": "static" },
+        "colliders": [
+          {
+            "id": "collider.wall_north_001",
+            "shape": { "kind": "box", "half_extents": [1.0, 1.0, 0.125] },
+            "trigger": false,
+            "asset": "core.collision.wall",
+            "offset": [0.0, 0.0, 0.0]
+          }
+        ]
+      },
       "prefab": {
         "kind": "wall_chunk",
         "version": 1,
@@ -315,6 +358,7 @@ Avoid mutating and removing the same node handle in unrelated systems without ow
 - Scene node IDs and world internals: `src/renderer/src/scene/scene_world.rs`
 - API usage entrypoint: `src/renderer/examples/api_test.rs`
 - Internal scene flattening notes: `docs/internal/01-rendering-pipeline-mental-model.md`
+- Event lifecycle contract: `docs/api/12-events-and-lifecycle.md`
 
 ## 9. Standard References
 - glTF node transform model: https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#nodes-and-hierarchy
@@ -324,4 +368,5 @@ Avoid mutating and removing the same node handle in unrelated systems without ow
 ## 10. See Also
 - `docs/api/02-renderer-lifecycle-and-frame-api.md`
 - `docs/api/04-assets-sync-deferred-and-handles.md`
+- `docs/api/12-events-and-lifecycle.md`
 - `docs/internal/01-rendering-pipeline-mental-model.md`

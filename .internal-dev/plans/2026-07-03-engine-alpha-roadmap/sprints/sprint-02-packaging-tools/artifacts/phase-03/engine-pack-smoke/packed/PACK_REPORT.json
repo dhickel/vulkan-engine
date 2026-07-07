@@ -1,0 +1,13 @@
+{
+  "source_project": "apps/editor/sample_project/engine.project.toml",
+  "copied_files": [
+    "engine.project.toml",
+    "scenes/start.engine.scene.json",
+    "assets/editor_sample.package.toml",
+    "assets/models/block_prop.obj",
+    "assets/prefabs/wall_straight_2m.obj"
+  ],
+  "skipped_disabled_packages": [],
+  "warnings": [],
+  "validation_status": "passed"
+}

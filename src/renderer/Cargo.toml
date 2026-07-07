@@ -10,6 +10,11 @@ edition = "2021"
 
 [features]
 default = []
+# Opt-in feature gate for alpha/unstable advanced rendering interop.
+# When enabled, exposes:
+#   - renderer::api::advanced (unsafe renderer_core_mut for raw backend access)
+#   - renderer::rendergraph (custom pass registration, no safety validation)
+# These APIs may change across alpha sprints without notice.
 advanced-interop = []
 
 
@@ -43,6 +48,7 @@ imgui-winit-support = "0.12.0"
 env_logger = "0.10"
 log = "0.4"
 input = { path = "../input" }
+engine_events = { path = "../events" }
 glam = { version = "0.28.0", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1.16.0", features = ["derive"] }
 percent-encoding = "2.3.1"
@@ -85,4 +91,27 @@ toml = "0.8"
 #game-loop = { version = "*", features = ["winit"] }
 # Web
 
+[[example]]
+name = "capture_material_pbr"
+path = "examples/capture_tests/capture_material_pbr.rs"
+
+[[example]]
+name = "capture_lighting"
+path = "examples/capture_tests/capture_lighting.rs"
+
+[[example]]
+name = "capture_geometry"
+path = "examples/capture_tests/capture_geometry.rs"
+
+[[example]]
+name = "capture_environment"
+path = "examples/capture_tests/capture_environment.rs"
+
+[[example]]
+name = "capture_model_load"
+path = "examples/capture_tests/capture_model_load.rs"
+
+[[example]]
+name = "capture_transform"
+path = "examples/capture_tests/capture_transform.rs"
 

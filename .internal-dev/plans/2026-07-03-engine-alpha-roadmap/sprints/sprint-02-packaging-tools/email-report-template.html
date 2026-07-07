@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <body>
+    <h1>Engine Alpha Sprint 02 Progress Report</h1>
+    <p><strong>Sprint target:</strong> Asset package authoring and validation tools</p>
+    <p><strong>Phase:</strong> {{phase_name}}</p>
+    <p><strong>Status:</strong> {{phase_status}}</p>
+    <p><strong>Branch:</strong> sprint/alpha-02-packaging-tools</p>
+
+    <h2>Files And Line Counts</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Change</th>
+          <th>Added</th>
+          <th>Removed</th>
+          <th>Commit</th>
+          <th>GitHub Link</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{files_matrix_rows}}
+      </tbody>
+    </table>
+
+    <h2>Commands Run</h2>
+    <pre>{{commands_run}}</pre>
+
+    <h2>Evidence</h2>
+    <ul>
+      <li>Validation report: {{validation_report_path}}</li>
+      <li>Capture decision/evidence: {{capture_evidence}}</li>
+      <li>Commit hash: {{commit_hash}}</li>
+      <li>Pushed ref: {{pushed_ref}}</li>
+      <li>Commit link: {{commit_link}}</li>
+      <li>Compare link: {{compare_link}}</li>
+    </ul>
+
+    <h2>Residuals Or Blockers</h2>
+    <pre>{{residuals}}</pre>
+  </body>
+</html>

@@ -54,3 +54,4 @@ Related runtime files:
 
 - `cargo check -p renderer`
 - `cargo check -p renderer --examples`
+- For asset, material, environment, or scene-cache changes with visible render impact, use `.internal-dev/skills/engine-headless-capture-validation/SKILL.md` and validate with deterministic headless captures when practical.
