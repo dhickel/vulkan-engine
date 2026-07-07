@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plan": "deprecated-renderer-api-migration",
-  "status": "phase_00_inventory_ready_for_validation",
+  "status": "phase_03_ready_for_validation",
   "created": "2026-07-07",
   "related_issue": {
     "number": 39,
@@ -23,8 +23,8 @@
   "phase_status": {
     "phase_00_inventory_classification": "complete",
     "phase_01_docs_spec_compatibility_labeling": "not_started",
-    "phase_02_selective_app_migration": "not_started",
-    "phase_03_conditional_deprecation_removal": "not_started",
+    "phase_02_selective_app_migration": "complete",
+    "phase_03_conditional_deprecation_removal": "complete",
     "final_quality_review": "not_started"
   },
   "planning_inputs_checked": [
@@ -80,10 +80,47 @@
     "debug_reports_if_needed": ".internal-dev/debug_reports/"
   },
   "model_or_tooling_constraints": [],
+  "phase_02_evidence": {
+    "worker": "worker-p2-app-migration",
+    "type": "no-op documentation phase",
+    "code_changes": 0,
+    "senior_decisions_accepted": 8,
+    "worker_report": ".internal-dev/plans/deprecated-renderer-api-migration/validation/phase-02-worker-report.md",
+    "verification_commands": {
+      "cargo_check": "PASS (0 errors, 83 pre-existing renderer warnings)",
+      "cargo_tree_engine_deps": "PASS (engine \u2192 dungeon_dogfood only, no forbidden edges)",
+      "cargo_check_renderer_examples": "PASS (0 errors, examples compile unchanged)"
+    },
+    "key_finding": "0 not_yet_migrated_app_code sites. No migration targets exist. Dogfood remains app-owned proof. Renderer examples, root launcher, marching_terrain remain intentional compatibility coverage."
+  },
+  "phase_03_evidence": {
+    "worker": "worker-p3-deprecation",
+    "type": "conditional no-op documentation phase",
+    "senior_decision": "SD-03 (accepted): No #[deprecated] annotations added. Warning policy not yet established.",
+    "code_changes": 0,
+    "forbidden_changes_verified": true,
+    "worker_report": ".internal-dev/plans/deprecated-renderer-api-migration/validation/phase-03-worker-report.md",
+    "inventory_matrix_updated": true,
+    "verification_commands": {
+      "cargo_check_renderer_examples": "PASS (0 errors, 83 pre-existing renderer warnings)",
+      "cargo_check_dungeon_dogfood": "PASS (0 errors, 5 pre-existing dogfood warnings)",
+      "cargo_tree_engine_deps": "PASS (engine → dungeon_dogfood only, no forbidden edges)"
+    },
+    "api_status": {
+      "deprecated_added": 0,
+      "removed": 0,
+      "retained_as_is": "All compatibility APIs (update_input, input/input_mut, events/events_mut, render_scene, set_camera_position/set_camera_look_at, install_default_fps_input/uninstall_default_fps_input, FPSController, CameraView, route_platform_input/queue_routed_input_event, render_scene_with_view/render_scene_headless_with_view)"
+    },
+    "deprecation_preconditions": [
+      "Warning policy must be accepted before adding #[deprecated] annotations",
+      "Replacement paths must be proven for root launcher and marching_terrain",
+      "not_yet_migrated_app_code count must be validated",
+      "Docs/specs must reflect final API status"
+    ],
+    "key_finding": "Deprecation deferred per SD-03. All compatibility APIs retained as-is. Phase 03 is documented no-op. Plan ready for final quality review."
+  },
   "residual_planning_risks": [
-    "The authoritative per-use inventory is intentionally deferred to Phase 00 and must not be inferred from the orientation grep snapshot.",
-    "Phase 02 migration targets depend on senior decisions after inventory, especially for src/runtime.rs and apps/marching_terrain.",
-    "Phase 03 deprecation/removal may be skipped entirely if compatibility coverage or warning policy is not accepted."
+    "Phase 03 deprecation/removal completed as documented conditional no-op per SD-03."
   ],
   "final_status_requirements": {
     "may_mark_fully_validated_only_after": [

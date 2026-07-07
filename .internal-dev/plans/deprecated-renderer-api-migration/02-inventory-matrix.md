@@ -1,9 +1,10 @@
 ---
 schema_version: 1
 document_type: inventory-matrix
-status: phase_00_complete
+status: phase_03_complete
 owner: deprecated-renderer-api-migration
 created: 2026-07-07
+updated: 2026-07-07
 related_issue:
   - https://github.com/dhickel/vulkan-engine/issues/39
 ---
@@ -304,16 +305,16 @@ related_issue:
 
 ## Senior Decision Table
 
-| # | item | context | affected surfaces | risk if deferred | recommendation |
-| --- | --- | --- | --- | --- | --- |
-| SD-01 | Root launcher (`src/runtime.rs`) migration scope | Launcher uses `install_default_fps_input`, `update_input`, and `render_scene`. It is the generic project runner. Migration would mean launcher owns `InputSystem`, `EventBus`, `Camera`, `FrameClock`, and uses app-owned helpers. | `src/runtime.rs`, any project-manifest-driven launch paths | Low. Launcher can remain compatibility indefinitely; migration is a product decision. | Keep as `intentional_compatibility_coverage` unless app-owned launcher is a product requirement. |
-| SD-02 | Marching terrain migration scope | Marching terrain uses renderer-owned input, camera setters, and `render_scene` in both windowed and capture modes. Migration could blend API cleanup with terrain/capture correctness risks. | `apps/marching_terrain/src/main.rs`, `apps/marching_terrain/src/capture.rs` | Medium. Terrain has known bugs; migration may compound. | Defer to separate workflow unless senior explicitly includes in this plan. |
-| SD-03 | Renderer example deprecation warning policy | If `update_input` / `install_default_fps_input` / `render_scene` are marked `#[deprecated]`, all renderer examples will emit warnings, creating noise in `cargo check -p renderer --examples`. | All renderer examples (`demo_pbr`, `demo_unlit`, `demo_model_load`, `api_test`, `demo_async_loading`), common module | High. Warning noise could mask real issues. | Do NOT deprecate yet. Keep as `intentional_compatibility_coverage` with clear docs labeling. Only deprecate after warning suppression policy is accepted. |
-| SD-04 | `set_camera_position` / `set_camera_look_at` status | These APIs are used by marching_terrain (compatibility), capture_tests (active renderer tooling), and internally for compatibility render path. Are they active capture tools or compatibility? | `renderer.rs:1265-1273`, `capture_tests/common.rs:283`, `marching_terrain` | Medium. Removing would break capture tests and marching_terrain. | Keep as active capture/demo tooling. Label in docs as "capture/compatibility camera setters". |
-| SD-05 | `CameraView::from_camera` internal usage at renderer.rs:1092 | Used in renderer's compatibility `render_scene` path to build a `CameraView` from renderer-owned camera. If renderer-owned camera is removed, this call goes away. | `renderer.rs:1092` | Low. Internal implementation detail. | Remove only if renderer-owned camera path is removed. No action needed now. |
-| SD-06 | `events_mut()` in `event_logging.rs` | Internal renderer debugging helper subscribes to renderer-owned event bus. Is this active tooling or compatibility? | `event_logging.rs:15` | Low. Internal-only. | Keep as active internal renderer tooling. Not a migration concern. |
-| SD-07 | Spec vs code mismatch: `api.md` labels `set_camera_look_at` as active facade | The spec says `set_camera_look_at` is active; this matrix classifies it as `internal_compatibility_implementation`. Which is correct? | `api.md:19`, `renderer.rs:1273` | Low. Spec may need update. | Align spec with matrix: `set_camera_look_at` is active capture/compatibility tooling, not primary app path. |
-| SD-08 | Doc split: which quickstart stays compatibility vs gets app-owned update? | `01-quickstart.md` and `01-student-quickstart.md` both present compatibility path as primary. Phase 01 should add compatibility labels and app-owned quickstart references. | `docs/api/01-quickstart.md`, `docs/api/01-student-quickstart.md`, `docs/api/00-index.md` | Medium. New users may follow stale guidance. | Phase 01 should: (1) label existing quickstarts as "compatibility quickstart", (2) ensure app-owned loop doc (`15-app-owned-loop.md`) is prominently linked, (3) update index to lead with app-owned path. |
+| # | item | context | affected surfaces | risk if deferred | recommendation | phase_02_disposition |
+| --- | --- | --- | --- | --- | --- | --- |
+| SD-01 | Root launcher (`src/runtime.rs`) migration scope | Launcher uses `install_default_fps_input`, `update_input`, and `render_scene`. It is the generic project runner. Migration would mean launcher owns `InputSystem`, `EventBus`, `Camera`, `FrameClock`, and uses app-owned helpers. | `src/runtime.rs`, any project-manifest-driven launch paths | Low. Launcher can remain compatibility indefinitely; migration is a product decision. | Keep as `intentional_compatibility_coverage` unless app-owned launcher is a product requirement. | **ACCEPTED: no migration.** Root launcher stays `intentional_compatibility_coverage`. |
+| SD-02 | Marching terrain migration scope | Marching terrain uses renderer-owned input, camera setters, and `render_scene` in both windowed and capture modes. Migration could blend API cleanup with terrain/capture correctness risks. | `apps/marching_terrain/src/main.rs`, `apps/marching_terrain/src/capture.rs` | Medium. Terrain has known bugs; migration may compound. | Defer to separate workflow unless senior explicitly includes in this plan. | **ACCEPTED: deferred.** Marching terrain excluded from this migration plan. No code changes. |
+| SD-03 | Renderer example deprecation warning policy | If `update_input` / `install_default_fps_input` / `render_scene` are marked `#[deprecated]`, all renderer examples will emit warnings, creating noise in `cargo check -p renderer --examples`. | All renderer examples (`demo_pbr`, `demo_unlit`, `demo_model_load`, `api_test`, `demo_async_loading`), common module | High. Warning noise could mask real issues. | Do NOT deprecate yet. Keep as `intentional_compatibility_coverage` with clear docs labeling. Only deprecate after warning suppression policy is accepted. | **ACCEPTED: deprecation deferred.** Phase 03 will be conditional no-op. No `#[deprecated]` attributes added. |
+| SD-04 | `set_camera_position` / `set_camera_look_at` status | These APIs are used by marching_terrain (compatibility), capture_tests (active renderer tooling), and internally for compatibility render path. Are they active capture tools or compatibility? | `renderer.rs:1265-1273`, `capture_tests/common.rs:283`, `marching_terrain` | Medium. Removing would break capture tests and marching_terrain. | Keep as active capture/demo tooling. Label in docs as "capture/compatibility camera setters". | **ACCEPTED: keep as active capture/demo tooling.** No code changes; docs labeling handled in Phase 01. |
+| SD-05 | `CameraView::from_camera` internal usage at renderer.rs:1092 | Used in renderer's compatibility `render_scene` path to build a `CameraView` from renderer-owned camera. If renderer-owned camera is removed, this call goes away. | `renderer.rs:1092` | Low. Internal implementation detail. | Remove only if renderer-owned camera path is removed. No action needed now. | **ACCEPTED: no action.** Internal implementation detail. |
+| SD-06 | `events_mut()` in `event_logging.rs` | Internal renderer debugging helper subscribes to renderer-owned event bus. Is this active tooling or compatibility? | `event_logging.rs:15` | Low. Internal-only. | Keep as active internal renderer tooling. Not a migration concern. | **ACCEPTED: no action.** Active internal tooling, not a migration target. |
+| SD-07 | Spec vs code mismatch: `api.md` labels `set_camera_look_at` as active facade | The spec says `set_camera_look_at` is active; this matrix classifies it as `internal_compatibility_implementation`. Which is correct? | `api.md:19`, `renderer.rs:1273` | Low. Spec may need update. | Align spec with matrix: `set_camera_look_at` is active capture/compatibility tooling, not primary app path. | **ACCEPTED: spec aligned.** Addressed in Phase 01 docs/spec update. |
+| SD-08 | Doc split: which quickstart stays compatibility vs gets app-owned update? | `01-quickstart.md` and `01-student-quickstart.md` both present compatibility path as primary. Phase 01 should add compatibility labels and app-owned quickstart references. | `docs/api/01-quickstart.md`, `docs/api/01-student-quickstart.md`, `docs/api/00-index.md` | Medium. New users may follow stale guidance. | Phase 01 should: (1) label existing quickstarts as "compatibility quickstart", (2) ensure app-owned loop doc (`15-app-owned-loop.md`) is prominently linked, (3) update index to lead with app-owned path. | **ACCEPTED: doc split addressed.** Handled in Phase 01. |
 
 ---
 
@@ -353,6 +354,52 @@ No forbidden edges found:
 
 ---
 
+## Phase 02 Disposition: No-Op (2026-07-07)
+
+### Decision Summary
+
+Phase 02 is a **no-op documentation phase**. The inventory found **0 `not_yet_migrated_app_code`** sites — there are no code surfaces requiring migration. All app code is either:
+
+- `active_current_path` (dogfood proof, root helpers, tests, specs)
+- `intentional_compatibility_coverage` (renderer examples, root launcher, marching_terrain)
+
+### Senior Decision Acceptance
+
+All 8 senior decisions are **accepted as recommended**:
+
+| decision | disposition | code changes |
+| --- | --- | --- |
+| SD-01 | Root launcher stays `intentional_compatibility_coverage` | None |
+| SD-02 | Marching terrain deferred to separate workflow | None |
+| SD-03 | Deprecation deferred; Phase 03 will be conditional no-op | None |
+| SD-04 | Camera setters kept as active capture/demo tooling | None |
+| SD-05 | Internal `CameraView::from_camera` — no action | None |
+| SD-06 | Internal `events_mut()` logging — no action | None |
+| SD-07 | Spec aligned with matrix (done in Phase 01) | None (Phase 01) |
+| SD-08 | Doc split addressed (done in Phase 01) | None (Phase 01) |
+
+### Verification Gate
+
+```bash
+cargo check                          # PASS (0 errors, 83 pre-existing renderer warnings)
+cargo tree -i engine --workspace     # PASS: engine → dungeon_dogfood only (no forbidden edges)
+cargo check -p renderer --examples   # PASS (0 errors, examples compile unchanged)
+```
+
+- **0 `.rs` files edited.** No API deprecations, no renderer example changes.
+- Dogfood remains app-owned proof (`cargo check -p dungeon_dogfood` passes).
+- Renderer examples remain intentional compatibility coverage.
+- Root launcher and marching_terrain remain compatibility paths.
+- Dependency boundary verified: renderer/support crates do not depend on root `engine`.
+
+### Phase 02 Artifacts
+
+- Updated inventory matrix (this file): status → `phase_02_complete`, senior decisions marked accepted
+- Worker report: `.internal-dev/plans/deprecated-renderer-api-migration/validation/phase-02-worker-report.md`
+- `validation-summary.json`: status → `phase_02_ready_for_validation`
+
+---
+
 ## Review Gate
 
 ### Inventory Completeness
@@ -380,3 +427,73 @@ The inventory matrix is complete and ready for senior review. All concrete grep 
 3. Internal compatibility implementation (renderer API definitions) — blue
 4. Stale documentation needing labeling — orange
 5. Senior decisions requiring explicit approval — red
+
+---
+
+## Phase 03 Disposition: Deprecation Deferral (2026-07-07)
+
+### Decision Summary
+
+Phase 03 is a **conditional no-op documentation phase**. Per **SD-03 (accepted)**, no deprecation or removal is performed at this time. The deprecation warning policy has not yet been established, and adding `#[deprecated]` annotations would create unacceptable noise in `cargo check -p renderer --examples` since all renderer examples intentionally cover compatibility APIs.
+
+### Senior Decision Implementation
+
+| decision | disposition | implementation |
+| --- | --- | --- |
+| **SD-03** | Deprecation deferred. No `#[deprecated]` attributes added. | Conditional no-op. Deprecation awaits warning policy acceptance and replacement path proof. |
+
+### API Status After Phase 03
+
+All compatibility APIs retained as-is:
+
+| API family | status | reason |
+| --- | --- | --- |
+| `Renderer::update_input(...)` | Retained (compatibility) | Root launcher + marching_terrain + examples use it. |
+| `Renderer::input()` / `Renderer::input_mut()` | Retained (compatibility) | Used by marching_terrain compatibility path and renderer internals. |
+| `Renderer::events()` / `Renderer::events_mut()` | Retained (compatibility) | Used by internal event_logging.rs and docs. |
+| `Renderer::render_scene(...)` | Retained (compatibility) | Root launcher + examples + marching_terrain use it. |
+| `Renderer::set_camera_position` / `Renderer::set_camera_look_at` | Retained (active capture/demo tooling) | Capture tests + marching_terrain + internal compatibility render path. |
+| `Renderer::install_default_fps_input` / `Renderer::uninstall_default_fps_input` | Retained (compatibility) | Renderer examples + root launcher + marching_terrain use it. |
+| `FPSController` type | Retained (active current) | Used by both renderer internally and app-owned dogfood path. |
+| `CameraView` struct | Retained (active current) | Active API; dogfood, docs, specs, tests all use/prove this path. |
+| `route_platform_input` / `queue_routed_input_event` | Retained (active current) | App-owned path APIs. Active in dogfood, root helpers, tests. |
+| `render_scene_with_view` / `render_scene_headless_with_view` | Retained (active current) | Active replacement APIs. Used by dogfood. |
+
+### Deprecation Preconditions (Not Yet Met)
+
+Phase 03 deprecation/removal will be revisited when ALL of the following are satisfied:
+
+1. **Warning policy accepted** — A warning suppression policy must be established for `cargo check -p renderer --examples` so that intentional compatibility coverage does not produce unacceptable noise.
+2. **Replacement paths proven** — All callers of compatibility APIs must have proven, working replacement paths:
+   - Root launcher (`src/runtime.rs`) — launcher migration scope decided
+   - Marching terrain (`apps/marching_terrain/`) — migration scope decided (separate workflow)
+   - Renderer examples — replacement or intentional compatibility retention decided
+3. **`not_yet_migrated_app_code` validated** — Any sites that should migrate must be migrated and validated.
+4. **Docs/specs updated** — All documentation and specifications must reflect final API status after deprecation/removal.
+
+### Forbidden Changes Verified
+
+- ✅ No `#[deprecated]` annotations added
+- ✅ No APIs removed
+- ✅ No `.rs` files changed anywhere in the workspace
+- ✅ Renderer examples compile unchanged (`cargo check -p renderer --examples` passes)
+- ✅ Dogfood app-owned path intact (`cargo check -p dungeon_dogfood` passes)
+- ✅ Dependency boundary unchanged (`engine → dungeon_dogfood` only)
+
+### Verification Gate
+
+```bash
+cargo check -p renderer --examples  # PASS: 0 errors, 83 pre-existing renderer warnings
+cargo check -p dungeon_dogfood      # PASS: 0 errors, 5 pre-existing dogfood warnings
+cargo tree -i engine --workspace --edges normal  # PASS: engine → dungeon_dogfood only
+```
+
+### Phase 03 Artifacts
+
+- Updated inventory matrix (this file): status → `phase_03_complete`, Phase 03 Disposition section added
+- Worker report: `.internal-dev/plans/deprecated-renderer-api-migration/validation/phase-03-worker-report.md`
+- `validation-summary.json`: status → `phase_03_ready_for_validation`, phase_03 evidence block added
+
+### Handoff to Final Quality Review
+
+All three implementation phases (01=docs labeling, 02=migration, 03=deprecation) are complete. Phase 03 is a documented no-op per SD-03. The plan is ready for final quality review.
