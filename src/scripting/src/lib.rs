@@ -248,32 +248,26 @@ fn emit_script_event(
 /// representation.
 fn rhai_dynamic_to_json(d: rhai::Dynamic) -> Option<serde_json::Value> {
     if d.is::<i64>() {
-        d.as_int().ok().and_then(|n| {
-            serde_json::Number::from_f64(n as f64).map(serde_json::Value::Number)
-        })
+        d.as_int()
+            .ok()
+            .and_then(|n| serde_json::Number::from_f64(n as f64).map(serde_json::Value::Number))
     } else if d.is::<f64>() {
-        d.as_float().ok().and_then(|n| {
-            serde_json::Number::from_f64(n).map(serde_json::Value::Number)
-        })
+        d.as_float()
+            .ok()
+            .and_then(|n| serde_json::Number::from_f64(n).map(serde_json::Value::Number))
     } else if d.is::<bool>() {
         d.as_bool().ok().map(serde_json::Value::Bool)
     } else if d.is::<String>() {
         d.into_string().ok().map(serde_json::Value::String)
     } else if d.is::<rhai::Array>() {
         d.into_array().ok().map(|arr| {
-            serde_json::Value::Array(
-                arr.into_iter()
-                    .filter_map(rhai_dynamic_to_json)
-                    .collect(),
-            )
+            serde_json::Value::Array(arr.into_iter().filter_map(rhai_dynamic_to_json).collect())
         })
     } else if d.is::<rhai::Map>() {
         let map: rhai::Map = d.cast();
         let obj: serde_json::Map<String, serde_json::Value> = map
             .into_iter()
-            .filter_map(|(k, v)| {
-                rhai_dynamic_to_json(v).map(|val| (k.to_string(), val))
-            })
+            .filter_map(|(k, v)| rhai_dynamic_to_json(v).map(|val| (k.to_string(), val)))
             .collect();
         Some(serde_json::Value::Object(obj))
     } else {

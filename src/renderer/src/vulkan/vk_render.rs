@@ -243,7 +243,11 @@ pub fn init_caches(
         texture_host_buffer.clone(),
         texture_meta_buffer_size,
         limits,
-        mesh_host_buffer.lock().expect("mesh_host_buffer lock poisoned").graphics_pool.clone(),
+        mesh_host_buffer
+            .lock()
+            .expect("mesh_host_buffer lock poisoned")
+            .graphics_pool
+            .clone(),
         device_queues.graphics_queue.1,
     )
     .unwrap();
@@ -406,31 +410,45 @@ impl Drop for VkRenderCore {
                 imgui.renderer.destroy();
             }
 
-            self.transfer
-                .destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+            self.transfer.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
 
             for slot in self.gpu_timing.slots.iter() {
                 self.device.destroy_query_pool(slot.query_pool, None);
             }
 
-            self.presentation
-                .destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+            self.presentation.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
 
             self.scene_descriptors.values_mut().for_each(|descriptors| {
-                descriptors.destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"))
+                descriptors.destroy(
+                    &self.device,
+                    &self.allocator.lock().expect("allocator lock poisoned"),
+                )
             });
             self.scene_descriptors.clear();
 
-            self.data_cache
-                .destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+            self.data_cache.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
             ManuallyDrop::drop(&mut self.data_cache);
 
-            self.brdf_lut
-                .destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+            self.brdf_lut.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
 
-            self.main_deletion_queue
-                .iter_mut()
-                .for_each(|del| del.delete(&self.device, &self.allocator.lock().expect("allocator lock poisoned")));
+            self.main_deletion_queue.iter_mut().for_each(|del| {
+                del.delete(
+                    &self.device,
+                    &self.allocator.lock().expect("allocator lock poisoned"),
+                )
+            });
 
             if let Some(swapchain) = &self.swapchain {
                 swapchain
@@ -976,7 +994,11 @@ impl VkRenderCore {
         semaphore: vk::Semaphore,
     ) -> Arc<Mutex<VkHostBuffer>> {
         let host_buffer = VkHostBuffer {
-            buffer: vk_util::allocate_host_buffer(&allocator.lock().expect("allocator lock poisoned"), size_bytes).unwrap(),
+            buffer: vk_util::allocate_host_buffer(
+                &allocator.lock().expect("allocator lock poisoned"),
+                size_bytes,
+            )
+            .unwrap(),
             render_sender: transfer.get_sender(),
             transfer_pool: host_buffer_pools.pop().unwrap(),
             graphics_pool: host_graphic_pools.pop().unwrap(),
@@ -1899,7 +1921,11 @@ impl VkRenderCore {
             let target = capture.target;
             let output_path = capture.output_path.clone();
             let source = capture.source;
-            match finalize_frame_capture(&self.device, &self.allocator.lock().expect("allocator lock poisoned"), capture) {
+            match finalize_frame_capture(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+                capture,
+            ) {
                 Ok(report) => {
                     info!(
                         "Frame capture saved for frame {} target {} -> {}",
@@ -2368,7 +2394,10 @@ impl VkRenderCore {
     /// Release per-frame deferred resources and reset dynamic descriptor pools.
     unsafe fn cleanup_curr_frame_resources(&mut self) {
         let curr_frame = self.presentation.get_curr_frame_mut();
-        curr_frame.process_deletions(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+        curr_frame.process_deletions(
+            &self.device,
+            &self.allocator.lock().expect("allocator lock poisoned"),
+        );
         curr_frame.descriptors.clear_pools(&self.device).unwrap();
     }
 
@@ -2757,7 +2786,11 @@ impl VkRenderCore {
         use crate::data::environment_import::PendingSkyboxSource;
 
         let pending_source = {
-            let mut env_cache = self.data_cache.environment_cache.lock().expect("environment_cache lock poisoned");
+            let mut env_cache = self
+                .data_cache
+                .environment_cache
+                .lock()
+                .expect("environment_cache lock poisoned");
             env_cache.take_unloaded_source(env_id).map_err(|err| {
                 format!(
                     "Failed to query skybox cubemap state for env {:?}: {:?}",
@@ -2819,7 +2852,10 @@ impl VkRenderCore {
                     self.device.destroy_sampler(src_sampler, None);
                 }
                 let mut src_img = src_image;
-                src_img.destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+                src_img.destroy(
+                    &self.device,
+                    &self.allocator.lock().expect("allocator lock poisoned"),
+                );
 
                 result.map_err(|e| format!("Equirect-to-cubemap conversion failed: {}", e))?
             }
@@ -2843,7 +2879,11 @@ impl VkRenderCore {
     /// Generate irradiance/prefilter environment maps only when cache does not already contain them.
     fn generate_env_maps_if_missing(&mut self, env_id: EnvironmentHandle) -> Result<(), String> {
         let env_maps_missing = {
-            let env_cache = self.data_cache.environment_cache.lock().expect("environment_cache lock poisoned");
+            let env_cache = self
+                .data_cache
+                .environment_cache
+                .lock()
+                .expect("environment_cache lock poisoned");
             env_cache
                 .get_env_map(env_id)
                 .map_err(|err| format!("Failed to query env maps for {:?}: {:?}", env_id, err))?
@@ -2855,7 +2895,11 @@ impl VkRenderCore {
         }
 
         let (skybox_view, skybox_sampler) = {
-            let env_cache = self.data_cache.environment_cache.lock().expect("environment_cache lock poisoned");
+            let env_cache = self
+                .data_cache
+                .environment_cache
+                .lock()
+                .expect("environment_cache lock poisoned");
             env_cache
                 .get_loaded_cube_map_handles(env_id)
                 .map_err(|err| format!("Failed to query skybox env {:?}: {:?}", env_id, err))?
@@ -2879,7 +2923,11 @@ impl VkRenderCore {
         }
 
         let (image_view, sampler) = {
-            let env_cache = self.data_cache.environment_cache.lock().expect("environment_cache lock poisoned");
+            let env_cache = self
+                .data_cache
+                .environment_cache
+                .lock()
+                .expect("environment_cache lock poisoned");
             env_cache
                 .get_loaded_cube_map_handles(env_id)
                 .map_err(|err| format!("Failed to fetch skybox env {:?}: {:?}", env_id, err))?
@@ -2927,7 +2975,11 @@ impl VkRenderCore {
         }
 
         let scene_descriptors = {
-            let env_cache = self.data_cache.environment_cache.lock().expect("environment_cache lock poisoned");
+            let env_cache = self
+                .data_cache
+                .environment_cache
+                .lock()
+                .expect("environment_cache lock poisoned");
             let env_maps = env_cache
                 .get_env_map(env_id)
                 .map_err(|err| format!("Failed to fetch env maps for {:?}: {:?}", env_id, err))?
@@ -3360,8 +3412,16 @@ impl VkRenderCore {
                 .try_into()
                 .unwrap();
 
-        let mesh_cache = self.data_cache.mesh_cache.lock().expect("mesh_cache lock poisoned");
-        let tex_cache = self.data_cache.texture_cache.lock().expect("texture_cache lock poisoned");
+        let mesh_cache = self
+            .data_cache
+            .mesh_cache
+            .lock()
+            .expect("mesh_cache lock poisoned");
+        let tex_cache = self
+            .data_cache
+            .texture_cache
+            .lock()
+            .expect("texture_cache lock poisoned");
 
         for draw_item in submission.draw_items.iter().copied() {
             let mesh = match mesh_cache.get_loaded_id(draw_item.mesh_id) {
@@ -3383,7 +3443,10 @@ impl VkRenderCore {
             let material = unsafe { *material_ptr };
 
             if material.requires_uv1 && !mesh.has_uv1 {
-                let mut warnings = self.uv_fallback_warnings.lock().expect("uv_fallback_warnings lock poisoned");
+                let mut warnings = self
+                    .uv_fallback_warnings
+                    .lock()
+                    .expect("uv_fallback_warnings lock poisoned");
                 if warnings.insert((draw_item.mesh_id, mesh.material_id)) {
                     log::warn!(
                         "Material {:?} requires UV1 but mesh {:?} (slot {}) only has UV0. Falling back to UV0 path in shader.",
@@ -4088,7 +4151,10 @@ impl VkRenderCore {
             Ok((final_cubemap, prefilter_mips_count))
         })();
 
-        offscreen_image.destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+        offscreen_image.destroy(
+            &self.device,
+            &self.allocator.lock().expect("allocator lock poisoned"),
+        );
 
         let target_end = SystemTime::now()
             .duration_since(target_start)
@@ -4334,7 +4400,10 @@ impl VkRenderCore {
             })
         })();
 
-        offscreen_image.destroy(&self.device, &self.allocator.lock().expect("allocator lock poisoned"));
+        offscreen_image.destroy(
+            &self.device,
+            &self.allocator.lock().expect("allocator lock poisoned"),
+        );
         desc_pool.destroy(&self.device);
 
         generation_result

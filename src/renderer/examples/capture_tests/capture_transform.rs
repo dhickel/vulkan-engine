@@ -22,16 +22,12 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
 
     // ── Camera ──────────────────────────────────────────────────────────
     let eye = Vec3::new(3.0, 2.5, 7.0);
-    set_default_camera(
-        renderer,
-        &mut scene,
-        eye,
-        Vec3::new(0.5, 0.5, 0.0),
-        55.0,
-    );
+    set_default_camera(renderer, &mut scene, eye, Vec3::new(0.5, 0.5, 0.0), 55.0);
 
     let root = scene.create_node_default(None).expect("capture root");
-    scene.set_node_name(root, "Capture Root").expect("root name");
+    scene
+        .set_node_name(root, "Capture Root")
+        .expect("root name");
 
     let mut assets = renderer.assets();
 
@@ -110,7 +106,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
             ),
         )
         .expect("platform");
-    scene.add_mesh(platform, platform_handle).expect("add platform");
+    scene
+        .add_mesh(platform, platform_handle)
+        .expect("add platform");
 
     // ── Child 1: rotated cube offset from platform ──────────────────────
     let mut child1_mesh = cube_mesh.clone();

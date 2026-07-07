@@ -4,13 +4,13 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use renderer::AssetKind;
 use renderer::prelude::{
     validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
     validate_scene_file_with_options, PackageManifest, PackageValidationOptions, Project,
     ProjectValidationOptions, SceneValidationOptions, ValidationArea, ValidationDiagnostic,
     ValidationError,
 };
+use renderer::AssetKind;
 use serde::Serialize;
 
 type CliResult<T> = Result<T, CliError>;

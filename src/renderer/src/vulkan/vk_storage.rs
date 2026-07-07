@@ -374,10 +374,9 @@ impl VkSubAllocator {
                         let mut retry_count = 0;
                         while retry_count < MAX_RETRIES && !retry_remaining.is_empty() {
                             retry_count += 1;
-                            let oversized_mb = retry_remaining
-                                .iter()
-                                .map(|item| item.len())
-                                .sum::<usize>() / (1024 * 1024);
+                            let oversized_mb =
+                                retry_remaining.iter().map(|item| item.len()).sum::<usize>()
+                                    / (1024 * 1024);
                             log::warn!(
                                 "SubAllocator: oversized allocation (~{}MB) exceeds new buffer size. Retry {}/{} with doubled buffer.",
                                 oversized_mb,
@@ -418,7 +417,10 @@ impl VkSubAllocator {
                                         } => {
                                             retry_fulfilled.append(&mut successful_allocs);
                                             return VkAllocResult::Failure {
-                                                error_msg: format!("Out of space on retry buffer: {}", error_msg),
+                                                error_msg: format!(
+                                                    "Out of space on retry buffer: {}",
+                                                    error_msg
+                                                ),
                                                 successful_allocs: retry_fulfilled,
                                             };
                                         }

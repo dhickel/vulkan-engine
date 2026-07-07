@@ -28,7 +28,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     set_default_camera(renderer, &mut scene, eye, Vec3::ZERO, 50.0);
 
     let root = scene.create_node_default(None).expect("capture root");
-    scene.set_node_name(root, "Capture Root").expect("root name");
+    scene
+        .set_node_name(root, "Capture Root")
+        .expect("root name");
 
     // ── Lighting ────────────────────────────────────────────────────────
     scene
@@ -102,9 +104,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
             "emissive",
             vec![
                 (Vec3::new(2.0, 0.1, 0.1), 1.0),   // bright red
-                (Vec3::new(0.3, 0.05, 0.05), 0.5),  // dim red
-                (Vec3::new(0.1, 0.1, 3.0), 1.0),    // bright blue
-                (Vec3::new(0.05, 0.05, 0.4), 0.5),   // dim blue
+                (Vec3::new(0.3, 0.05, 0.05), 0.5), // dim red
+                (Vec3::new(0.1, 0.1, 3.0), 1.0),   // bright blue
+                (Vec3::new(0.05, 0.05, 0.4), 0.5), // dim blue
             ]
             .into_iter()
             .map(|(factor, strength)| PbrMaterialDesc {
@@ -130,16 +132,10 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
             let y = start_y - row_idx as f32 * spacing;
 
             let node = scene
-                .create_node(
-                    Some(root),
-                    Mat4::from_translation(Vec3::new(x, y, 0.0)),
-                )
+                .create_node(Some(root), Mat4::from_translation(Vec3::new(x, y, 0.0)))
                 .expect("node");
 
-            let mut mesh_data = build_sphere_mesh(
-                &format!("sphere_r{}_c{}", row_idx, col_idx),
-                32,
-            );
+            let mut mesh_data = build_sphere_mesh(&format!("sphere_r{}_c{}", row_idx, col_idx), 32);
             mesh_data.material = Some(mat);
             let mesh_handle = assets.upload_procedural_mesh(mesh_data).expect("mesh");
             scene.add_mesh(node, mesh_handle).expect("add mesh");

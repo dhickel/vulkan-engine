@@ -14,8 +14,8 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 use log::{error, info};
 use renderer::prelude::{
     default_capture_run_dir, CaptureTarget, FrameCaptureRequest, FrameCaptureSequence,
-    FrameCaptureStatus, FrameRenderOutcome,
-    ProceduralMeshData, ProceduralVertex, Renderer, RendererConfig, Scene,
+    FrameCaptureStatus, FrameRenderOutcome, ProceduralMeshData, ProceduralVertex, Renderer,
+    RendererConfig, Scene,
 };
 use std::collections::HashSet;
 use std::env;
@@ -296,7 +296,7 @@ pub fn set_default_camera(
 /// Each face gets its own vertices for correct face normals.
 pub fn build_cube_mesh(name: &str) -> ProceduralMeshData {
     let s = 0.5; // half-size
-    // 6 faces × 4 vertices = 24 vertices for correct face normals
+                 // 6 faces × 4 vertices = 24 vertices for correct face normals
     let vertices = vec![
         // +X face (normal = +X)
         vtx([s, -s, s], [1.0, 0.0, 0.0], [0.0, 0.0]),

@@ -18,8 +18,10 @@ use generator::{generate_dungeon, GeneratedDungeon, ProceduralLevelConfig, GENER
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
+use renderer::prelude::{
+    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
+};
 use renderer::{FrameRenderOutcome, RendererConfig, RendererError};
-use renderer::prelude::{AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus};
 use scene_seed::{renderer_visual_tuning, LevelScene};
 use thiserror::Error;
 use winit::event::{Event, WindowEvent};

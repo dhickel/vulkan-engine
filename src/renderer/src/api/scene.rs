@@ -310,7 +310,10 @@ pub struct Scene {
     /// This field is preserved for serialization compatibility but is not
     /// part of the stable public API. Use [`Scene::editor_metadata`] and
     /// [`Scene::set_editor_metadata`] to access this data.
-    #[deprecated(since = "0.13.0", note = "use editor_metadata() / set_editor_metadata() accessors")]
+    #[deprecated(
+        since = "0.13.0",
+        note = "use editor_metadata() / set_editor_metadata() accessors"
+    )]
     #[doc(hidden)]
     pub editor: serde_json::Value,
 }

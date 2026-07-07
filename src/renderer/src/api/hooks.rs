@@ -107,7 +107,9 @@ pub(crate) fn invoke_render_hook(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{boxed_render_hook, invoke_render_hook, BoxedRenderHook, RenderHook, RenderHookStage};
+    use super::{
+        boxed_render_hook, invoke_render_hook, BoxedRenderHook, RenderHook, RenderHookStage,
+    };
     use crate::api::errors::HookError;
 
     #[test]
@@ -148,10 +150,9 @@ mod tests {
 
     #[test]
     fn invoke_render_hook_wraps_hook_errors_as_invocation_failures() {
-        let mut pre_hook: Option<BoxedRenderHook> =
-            Some(boxed_render_hook(|_| {
-                Err(HookError::Registration("bad registration".to_string()))
-            }));
+        let mut pre_hook: Option<BoxedRenderHook> = Some(boxed_render_hook(|_| {
+            Err(HookError::Registration("bad registration".to_string()))
+        }));
 
         let err = invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 1, (1, 1), None)
             .unwrap_err();

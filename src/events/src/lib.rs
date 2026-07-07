@@ -487,11 +487,7 @@ impl EventBus {
     ///
     /// Combines the filtering of [`subscribe_to`] with the ordering of
     /// [`subscribe_with_priority`].
-    pub fn subscribe_to_with_priority<T, F>(
-        &mut self,
-        mut callback: F,
-        priority: i32,
-    ) -> ListenerId
+    pub fn subscribe_to_with_priority<T, F>(&mut self, mut callback: F, priority: i32) -> ListenerId
     where
         T: EventFamily + 'static,
         F: FnMut(&T) -> Result<(), ListenerError> + Send + 'static,
@@ -605,9 +601,7 @@ impl EventBus {
                     continue; // Skip panicked listeners
                 }
 
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    (listener.callback)(envelope)
-                }));
+                let result = catch_unwind(AssertUnwindSafe(|| (listener.callback)(envelope)));
 
                 match result {
                     Ok(Ok(())) => {
@@ -931,7 +925,7 @@ mod tests {
 
         // Only the counter listener should have received the second event
         assert_eq!(*call_count.lock().unwrap(), 2); // 2 calls: one per event
-        // No new failures because the panicking listener was skipped
+                                                    // No new failures because the panicking listener was skipped
         assert!(report.failures.is_empty());
     }
 
@@ -946,10 +940,7 @@ mod tests {
         let lifecycle_listener = Arc::clone(&lifecycle_events);
 
         bus.subscribe_to::<InputActionEvent, _>(move |event| {
-            input_listener
-                .lock()
-                .unwrap()
-                .push(event.action.clone());
+            input_listener.lock().unwrap().push(event.action.clone());
             Ok(())
         });
         bus.subscribe_to::<LifecycleEvent, _>(move |event| {
@@ -994,10 +985,7 @@ mod tests {
 
         // Subscribe only to Physics events
         bus.subscribe_to::<PhysicsEvent, _>(move |event| {
-            seen_listener
-                .lock()
-                .unwrap()
-                .push(format!("{:?}", event));
+            seen_listener.lock().unwrap().push(format!("{:?}", event));
             Ok(())
         });
 
@@ -1211,9 +1199,6 @@ mod tests {
         // seq 0: consumed, so only a sees it
         // seq 1: not consumed, both see it
         // seq 2: consumed, so only a sees it
-        assert_eq!(
-            seen.as_slice(),
-            &["a:0", "a:1", "b:1", "a:2"]
-        );
+        assert_eq!(seen.as_slice(), &["a:0", "a:1", "b:1", "a:2"]);
     }
 }

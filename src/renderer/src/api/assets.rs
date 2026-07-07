@@ -8,7 +8,6 @@ use image::ImageError;
 use log::debug;
 
 use crate::api::config::AssetPolicyConfig;
-use crate::data::thread_pool::BoundedThreadPool;
 use crate::api::loading::{LoadStatus, LoadTicket};
 use crate::api::scene::{SceneFragment, SceneFragmentNodeId};
 use crate::data::asset_manifest::{self, TextureLoadOptions};
@@ -24,6 +23,7 @@ use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, TextureSemantic
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
+use crate::data::thread_pool::BoundedThreadPool;
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
 use crate::vulkan::vk_render::VkRenderCore;
 use crate::vulkan::vk_storage::BufferPlacement;
@@ -1457,9 +1457,9 @@ fn map_cache_err(
             slot,
             generation,
         },
-        CacheError::DescriptorAllocation(msg) => AssetError::Internal(
-            format!("descriptor allocation failed for {resource} slot {slot}: {msg}"),
-        ),
+        CacheError::DescriptorAllocation(msg) => AssetError::Internal(format!(
+            "descriptor allocation failed for {resource} slot {slot}: {msg}"
+        )),
     }
 }
 

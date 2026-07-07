@@ -22,16 +22,12 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
 
     // ── Camera ──────────────────────────────────────────────────────────
     let eye = Vec3::new(0.0, 5.0, 10.0);
-    set_default_camera(
-        renderer,
-        &mut scene,
-        eye,
-        Vec3::new(0.0, 0.0, -2.0),
-        55.0,
-    );
+    set_default_camera(renderer, &mut scene, eye, Vec3::new(0.0, 0.0, -2.0), 55.0);
 
     let root = scene.create_node_default(None).expect("capture root");
-    scene.set_node_name(root, "Capture Root").expect("root name");
+    scene
+        .set_node_name(root, "Capture Root")
+        .expect("root name");
 
     let mut assets = renderer.assets();
 

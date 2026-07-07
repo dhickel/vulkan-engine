@@ -13,8 +13,8 @@ use rapier3d::na;
 use rapier3d::prelude::*;
 
 // Re-export unified ID types from the canonical engine_events crate.
-pub use engine_events::PhysicsBodyId;
 pub use engine_events::ColliderId as PhysicsColliderId;
+pub use engine_events::PhysicsBodyId;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BodyKind {
@@ -42,9 +42,16 @@ impl BodyDescriptor {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColliderShape {
-    Cuboid { half_extents: [f32; 3] },
-    Sphere { radius: f32 },
-    CapsuleY { half_height: f32, radius: f32 },
+    Cuboid {
+        half_extents: [f32; 3],
+    },
+    Sphere {
+        radius: f32,
+    },
+    CapsuleY {
+        half_height: f32,
+        radius: f32,
+    },
     TriMeshStatic {
         vertices: Vec<[f32; 3]>,
         indices: Vec<[u32; 3]>,
@@ -302,9 +309,9 @@ impl PhysicsWorld {
         builder = builder.active_events(ActiveEvents::COLLISION_EVENTS);
 
         let id = descriptor.id;
-        let handle = self
-            .colliders
-            .insert_with_parent(builder.build(), body_handle, &mut self.bodies);
+        let handle =
+            self.colliders
+                .insert_with_parent(builder.build(), body_handle, &mut self.bodies);
         self.collider_handles.insert(id.clone(), handle);
         self.collider_ids.push((handle, id.clone()));
         self.query_pipeline.update(&self.colliders);
@@ -527,10 +534,7 @@ fn shape_builder(shape: ColliderShape) -> Result<ColliderBuilder, PhysicsError> 
     }
 }
 
-fn validate_trimesh(
-    vertices: &[[f32; 3]],
-    indices: &[[u32; 3]],
-) -> Result<(), PhysicsError> {
+fn validate_trimesh(vertices: &[[f32; 3]], indices: &[[u32; 3]]) -> Result<(), PhysicsError> {
     if vertices.is_empty() || indices.is_empty() {
         return Err(PhysicsError::TrimeshEmpty);
     }
@@ -1021,11 +1025,7 @@ mod tests {
                 "collider.bad",
                 "body.floor",
                 ColliderShape::TriMeshStatic {
-                    vertices: vec![
-                        [0.0, 0.0, 0.0],
-                        [1.0, 0.0, 0.0],
-                        [0.0, f32::INFINITY, 0.0],
-                    ],
+                    vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, f32::INFINITY, 0.0]],
                     indices: vec![[0, 1, 2]],
                 },
             ))
@@ -1118,10 +1118,7 @@ mod tests {
                 },
             ))
             .unwrap_err();
-        assert_eq!(
-            err,
-            PhysicsError::TrimeshDegenerateTriangle { index: 0 }
-        );
+        assert_eq!(err, PhysicsError::TrimeshDegenerateTriangle { index: 0 });
     }
 
     #[test]
@@ -1144,10 +1141,7 @@ mod tests {
                 },
             ))
             .unwrap_err();
-        assert_eq!(
-            err,
-            PhysicsError::TrimeshDegenerateTriangle { index: 0 }
-        );
+        assert_eq!(err, PhysicsError::TrimeshDegenerateTriangle { index: 0 });
     }
 
     #[test]
@@ -1281,7 +1275,9 @@ mod tests {
 
         world.step(1.0 / 60.0).unwrap();
         // Ball should be above floor (contact has started)
-        let pos = world.body_position_by_id(&PhysicsBodyId::new("body.ball")).unwrap();
+        let pos = world
+            .body_position_by_id(&PhysicsBodyId::new("body.ball"))
+            .unwrap();
         assert!(pos[1] < 2.0, "ball should fall toward floor");
     }
 }

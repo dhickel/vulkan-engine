@@ -165,16 +165,15 @@ pub struct DescriptorManager {
 }
 
 impl DescriptorManager {
-    pub fn alloc_image_desc(
-        &mut self,
-        device: &ash::Device,
-    ) -> Result<vk::DescriptorSet, String> {
+    pub fn alloc_image_desc(&mut self, device: &ash::Device) -> Result<vk::DescriptorSet, String> {
         // TODO(alpha): Implement pool growth + retry on exhaustion instead of
         // propagating the error. When the pool is exhausted, create a new larger
         // pool, re-allocate, and replace the old pool. AGR-023 tracks full recovery.
         self.image_desc_allocator
             .allocate(device, &[self.image_desc_layout])
-            .map_err(|e| format!("descriptor pool exhausted during image descriptor allocation: {e}"))
+            .map_err(|e| {
+                format!("descriptor pool exhausted during image descriptor allocation: {e}")
+            })
     }
 }
 
@@ -224,7 +223,10 @@ impl VkDestroyable for VkCache {
 
 impl VkDataCache {
     pub fn destroy(&self, device: &Device, allocator: &Allocator) {
-        self.mesh_cache.lock().expect("mesh_cache lock poisoned during destroy").destroy(device, allocator);
+        self.mesh_cache
+            .lock()
+            .expect("mesh_cache lock poisoned during destroy")
+            .destroy(device, allocator);
         self.texture_cache
             .lock()
             .unwrap()
@@ -476,7 +478,10 @@ impl TextureCache {
     }
 
     fn supports_linear_mip_blit(&self, format: vk::Format) -> bool {
-        let mut cache = self.linear_blit_support.lock().expect("linear_blit_support lock poisoned");
+        let mut cache = self
+            .linear_blit_support
+            .lock()
+            .expect("linear_blit_support lock poisoned");
         if let Some(supported) = cache.get(&format) {
             return *supported;
         }
@@ -1219,7 +1224,9 @@ impl TextureCache {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         );
 
-        let image_descriptor = self.desc_manager.alloc_image_desc(&self.device)
+        let image_descriptor = self
+            .desc_manager
+            .alloc_image_desc(&self.device)
             .map_err(|e| {
                 error!("{}", e);
                 CacheError::DescriptorAllocation(e)

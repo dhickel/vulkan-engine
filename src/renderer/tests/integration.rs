@@ -2,11 +2,14 @@
 //! These test the public API surface without requiring a GPU.
 
 use glam::{Mat4, Vec3};
+use renderer::prelude::{
+    AssetRegistry, CaptureTarget, FrameCaptureConfigError, FrameCaptureRequest,
+    FrameCaptureSequence,
+};
 use renderer::{
     Aabb, AssetError, AssetKind, CommandHistory, Frustum, MeshHandle, OrbitCamera, PointLight, Ray,
     RendererError, Scene, SceneError, SceneWorld, SetTransformCommand,
 };
-use renderer::prelude::{AssetRegistry, CaptureTarget, FrameCaptureConfigError, FrameCaptureRequest, FrameCaptureSequence};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,7 +55,10 @@ path = "models/crate.glb"
     assert!(scheduler.last_status().is_none());
 
     assert!(matches!(LoadStatus::<()>::Cancelled, LoadStatus::Cancelled));
-    assert!(matches!(FrameRenderOutcome::Rendered, FrameRenderOutcome::Rendered));
+    assert!(matches!(
+        FrameRenderOutcome::Rendered,
+        FrameRenderOutcome::Rendered
+    ));
     assert!(matches!(AssetKind::Model, AssetKind::Model));
 
     // ── Type existence (compile-time contract covering all prelude re-exports) ──

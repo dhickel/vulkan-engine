@@ -40,26 +40,40 @@ mod vulkan;
 // `use renderer::prelude::*` which re-exports ~60 types for common workflows.
 pub use api::event_logging::install_app_event_logger;
 pub use api::{
-    // Core runtime
-    Renderer, RendererConfig,
-    // Scene API
-    Scene, SceneNodeId, SceneError,
-    // Error root
-    RendererError, AssetError,
+    boxed_render_hook,
+    AssetError,
+    AssetKind,
     // Asset API
-    AssetManager, AssetKind,
-    // Handles (widely used)
-    MaterialHandle, MeshHandle, TextureHandle,
-    // Event API
-    EventBus, EngineEvent,
-    // Hooks
-    RenderHook, BoxedRenderHook, RenderHookContext, boxed_render_hook,
-    // Lighting
-    PointLight, PointLightId,
-    // Frame API
-    FrameContext, FrameRenderOutcome,
+    AssetManager,
+    BoxedRenderHook,
     // Debug
-    DebugRuntimeMode, VisualTuning,
+    DebugRuntimeMode,
+    EngineEvent,
+    // Event API
+    EventBus,
+    // Frame API
+    FrameContext,
+    FrameRenderOutcome,
+    // Handles (widely used)
+    MaterialHandle,
+    MeshHandle,
+    // Lighting
+    PointLight,
+    PointLightId,
+    // Hooks
+    RenderHook,
+    RenderHookContext,
+    // Core runtime
+    Renderer,
+    RendererConfig,
+    // Error root
+    RendererError,
+    // Scene API
+    Scene,
+    SceneError,
+    SceneNodeId,
+    TextureHandle,
+    VisualTuning,
 };
 
 pub use animation::AnimationPlayer;

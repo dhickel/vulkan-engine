@@ -55,9 +55,7 @@ pub fn validate_capture_options(
     capture_dir: Option<&std::path::Path>,
 ) -> Result<(), String> {
     if capture_frame.is_some() && capture_frames.is_some() {
-        return Err(
-            "--capture_frame and --capture_frames cannot be used together".to_string(),
-        );
+        return Err("--capture_frame and --capture_frames cannot be used together".to_string());
     }
     if capture_frame_path.is_some() && capture_frame.is_none() {
         return Err("--capture_frame_path requires --capture_frame".to_string());

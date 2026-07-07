@@ -24,9 +24,7 @@ impl BoundedThreadPool {
             let receiver = std::sync::Arc::clone(&receiver);
             workers.push(thread::spawn(move || loop {
                 let job = {
-                    let receiver = receiver
-                        .lock()
-                        .expect("thread pool mutex poisoned");
+                    let receiver = receiver.lock().expect("thread pool mutex poisoned");
                     match receiver.recv() {
                         Ok(job) => job,
                         Err(_) => return, // Channel closed, exit
