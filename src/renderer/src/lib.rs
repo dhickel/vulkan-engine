@@ -60,7 +60,10 @@ pub use api::{
     FrameRenderOutcome,
     // Handles (widely used)
     MaterialHandle,
+    MeshDeformation,
+    MeshGeometryDto,
     MeshHandle,
+    MeshLocalAabb,
     PointLight,
     PointLightId,
     // Hooks

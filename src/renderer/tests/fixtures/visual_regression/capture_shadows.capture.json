@@ -1,0 +1,14 @@
+{
+  "target": "draw",
+  "extent": [1920, 1080],
+  "frame": 5,
+  "scene_preset": "capture_shadows",
+  "declared_regions": [
+    {
+      "name": "full-frame shadow scene",
+      "bounds": [0, 0, 1920, 1080],
+      "expected_content": "reviewed capture_shadows scene output with casters and receiver"
+    }
+  ],
+  "notes": "Phase 01 retained headless draw capture"
+}

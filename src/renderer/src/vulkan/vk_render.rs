@@ -69,6 +69,7 @@ use crate::data::gpu_data::{
     VkModelPushConsts,
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
+use crate::data::mesh_geometry::MeshGeometryStore;
 use crate::data::{data_cache, data_util, gpu_data};
 use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot, DebugUiManager};
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
@@ -374,6 +375,7 @@ pub fn init_caches(
         mesh_cache: Mutex::new(mesh_cache),
         texture_cache: Mutex::new(texture_cache),
         environment_cache: Mutex::new(environment_cache),
+        mesh_geometry_store: Mutex::new(MeshGeometryStore::new()),
         supported_image_formats: supported_formats,
     };
 
@@ -931,9 +933,13 @@ impl VkRenderCore {
         ];
 
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..swapchain_image_count)
-            .map(|_| VkDynamicDescriptorAllocator::new(device, 1000, &pool_ratios))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to create descriptor allocators: {}", e))?;
+            .map(|i| -> Result<VkDynamicDescriptorAllocator, String> {
+                let mut alloc = VkDynamicDescriptorAllocator::new(device, 1000, &pool_ratios)?;
+                alloc.set_frame_slot_index(i);
+                Ok(alloc)
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(|e: String| format!("Failed to create descriptor allocators: {e}"))?;
 
         let imgui_pool = present_pools
             .first()
@@ -2135,14 +2141,18 @@ impl VkRenderCore {
         }
     }
 
-    fn finalize_pending_frame_captures(&mut self, frame_sync: VkFrameSync) -> Result<(), String> {
+    fn finalize_pending_frame_captures(
+        &mut self,
+        frame_sync: VkFrameSync,
+        frame_slot_index: u32,
+    ) -> Result<(), String> {
         if self.pending_frame_captures.is_empty() {
             return Ok(());
         }
 
-        unsafe {
-            self.wait_for_frame_fence(frame_sync)?;
-        }
+        // Wait for the just-submitted fence to complete so we can read back captures.
+        // The completion token is dropped — we don't need descriptor reset authorization here.
+        let _token = unsafe { self.wait_for_frame_fence(frame_sync, frame_slot_index)? };
 
         let pending = std::mem::take(&mut self.pending_frame_captures);
         for capture in pending {
@@ -2538,10 +2548,13 @@ impl VkRenderCore {
             })
             .collect();
 
+        let descriptor_stats = Some(self.aggregate_descriptor_stats());
+
         DebugTimingSnapshot {
             gpu_supported,
             frame_cpu_ms: elapsed_ms(frame_start),
             frame_gpu_ms,
+            descriptor_stats,
             stage_timings: vec![
                 DebugTimingRow {
                     label: "transfer_prepare",
@@ -2613,15 +2626,45 @@ impl VkRenderCore {
         self.prepare_submission_environment(submission)
     }
 
+    /// Aggregate descriptor allocator statistics across all frame slots.
+    fn aggregate_descriptor_stats(&self) -> DescriptorAllocatorStats {
+        let mut agg = DescriptorAllocatorStats::default();
+        for frame in &self.presentation.frame_data {
+            let snap = frame.descriptors.stats_snapshot();
+            agg.allocation_attempts += snap.allocation_attempts;
+            agg.successful_allocations += snap.successful_allocations;
+            agg.pool_count += snap.pool_count;
+            agg.pools_created += snap.pools_created;
+            agg.pool_growth_events += snap.pool_growth_events;
+            agg.out_of_pool_events += snap.out_of_pool_events;
+            agg.fragmented_pool_events += snap.fragmented_pool_events;
+            agg.reset_count += snap.reset_count;
+            agg.reset_rejections += snap.reset_rejections;
+            agg.peak_allocated_sets = agg.peak_allocated_sets.max(snap.peak_allocated_sets);
+            if snap.peak_utilization_ratio > agg.peak_utilization_ratio {
+                agg.peak_utilization_ratio = snap.peak_utilization_ratio;
+            }
+            agg.last_reset_epoch = agg.last_reset_epoch.max(snap.last_reset_epoch);
+        }
+        agg
+    }
+
     /// Wait for GPU completion of this frame slot before reusing per-frame resources.
+    /// On success returns a `CompletedFrameSlot` token authorizing descriptor reset.
     /// Returns an error if the device is lost or the fence wait fails.
-    unsafe fn wait_for_frame_fence(&self, frame_sync: VkFrameSync) -> Result<(), String> {
+    unsafe fn wait_for_frame_fence(
+        &self,
+        frame_sync: VkFrameSync,
+        slot_index: u32,
+    ) -> Result<CompletedFrameSlot, String> {
         let fence = [frame_sync.render_fence];
         let result = self.device.wait_for_fences(&fence, true, u64::MAX);
         if let Err(vk::Result::ERROR_DEVICE_LOST) = result {
             return Err("Vulkan device lost during fence wait".to_string());
         }
-        result.map_err(|e| format!("wait_for_fences failed: {:?}", e))
+        result.map_err(|e| format!("wait_for_fences failed: {:?}", e))?;
+        let epoch = self.presentation.frame_epoch();
+        Ok(CompletedFrameSlot::new(slot_index, epoch))
     }
 
     /// Reset frame fence immediately before submitting work that will signal it again.
@@ -2634,12 +2677,17 @@ impl VkRenderCore {
     }
 
     /// Reset per-frame dynamic descriptor pools after the frame fence signals.
-    unsafe fn cleanup_curr_frame_resources(&mut self) -> Result<(), String> {
+    /// Consumes the `CompletedFrameSlot` token; the allocator rejects stale or
+    /// already-consumed tokens.
+    unsafe fn cleanup_curr_frame_resources(
+        &mut self,
+        token: &mut CompletedFrameSlot,
+    ) -> Result<(), String> {
         let curr_frame = self.presentation.get_curr_frame_mut();
         curr_frame
             .descriptors
-            .clear_pools(&self.device)
-            .map_err(|e| format!("descriptor clear_pools failed: {:?}", e))
+            .clear_pools(&self.device, token)
+            .map_err(|e| format!("descriptor clear_pools failed: {e}"))
     }
 
     /// Acquire the next swapchain image index for this frame slot.
@@ -2680,21 +2728,33 @@ impl VkRenderCore {
     /// Reserve frame resources, synchronize CPU/GPU ownership, and bind acquired present target.
     /// Returns Ok(Some(FrameAcquire)) on success, Ok(None) on retry/skip, Err on terminal failure.
     fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
-        let frame_data = self.presentation.get_next_frame();
-        let frame_slot_index = frame_data.index as usize;
+        let frame_index = {
+            let frame_data = self.presentation.get_next_frame();
+            frame_data.index
+        };
+        // Re-borrow to get the remaining frame data after get_next_frame's
+        // mutable borrow is released.
+        let frame_data = &self.presentation.frame_data[frame_index as usize];
+        let frame_slot_index = frame_index as usize;
         let frame_sync = frame_data.sync;
         let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
         let queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         let fence_wait_start = Instant::now();
-        unsafe { self.wait_for_frame_fence(frame_sync)? };
+        let mut completion_token =
+            unsafe { self.wait_for_frame_fence(frame_sync, frame_index)? };
         let frame_fence_wait_ms = elapsed_ms(fence_wait_start);
         warn_if_acquire_stage_spike("frame_fence_wait", frame_fence_wait_ms);
 
         let cleanup_start = Instant::now();
-        unsafe { self.cleanup_curr_frame_resources()? };
+        unsafe { self.cleanup_curr_frame_resources(&mut completion_token)? };
         let frame_cleanup_ms = elapsed_ms(cleanup_start);
+        // Token is consumed by cleanup; assert for safety.
+        debug_assert!(
+            completion_token.is_consumed(),
+            "descriptor cleanup must consume the completion token"
+        );
         warn_if_acquire_stage_spike("frame_cleanup", frame_cleanup_ms);
 
         self.resolve_gpu_timing_for_slot(frame_slot_index);
@@ -2944,6 +3004,7 @@ impl VkRenderCore {
                 gpu_supported: self.gpu_timing.supported,
                 frame_cpu_ms: elapsed_ms(frame_start),
                 frame_gpu_ms: self.gpu_timing.latest_frame_gpu_ms,
+                descriptor_stats: Some(self.aggregate_descriptor_stats()),
                 stage_timings: vec![
                     DebugTimingRow {
                         label: "transfer_prepare",
@@ -3038,6 +3099,7 @@ impl VkRenderCore {
                     gpu_supported: self.gpu_timing.supported,
                     frame_cpu_ms: elapsed_ms(frame_start),
                     frame_gpu_ms: self.gpu_timing.latest_frame_gpu_ms,
+                    descriptor_stats: Some(self.aggregate_descriptor_stats()),
                     stage_timings: vec![
                         DebugTimingRow {
                             label: "transfer_prepare",
@@ -3112,7 +3174,7 @@ impl VkRenderCore {
             !self.surface_mode.is_headless() && !present_succeeded
         );
         let present_ms = elapsed_ms(present_start);
-        self.finalize_pending_frame_captures(frame.frame_sync)?;
+        self.finalize_pending_frame_captures(frame.frame_sync, frame.frame_slot_index as u32)?;
 
         self.frame_timing_snapshot = self.build_frame_timing_snapshot(
             frame_start,

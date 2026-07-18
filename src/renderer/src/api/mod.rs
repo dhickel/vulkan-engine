@@ -22,6 +22,7 @@ pub use crate::data::asset_registry::{
     ProjectPackage, ProjectSettings, ProjectValidationOptions,
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
+pub use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto, MeshLocalAabb};
 pub use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 pub use crate::debug_ui::{
     AppUiCallback, DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,

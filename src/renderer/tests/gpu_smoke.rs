@@ -9,8 +9,9 @@ use std::process::Command;
 
 use glam::{Vec3, Vec4};
 use renderer::prelude::{
-    CaptureTarget, FrameCaptureRequest, FrameCaptureStatus, FrameRenderOutcome, PbrMaterialDesc,
-    PointLight, ProceduralMeshData, ProceduralVertex, Renderer, RendererConfig, Scene,
+    AssetError, CaptureTarget, FrameCaptureRequest, FrameCaptureStatus, FrameRenderOutcome,
+    LoadStatus, MeshDeformation, PbrMaterialDesc, PointLight, ProceduralMeshData, ProceduralVertex,
+    Renderer, RendererConfig, Scene, SceneFragmentNodeId,
 };
 /// Build a unit cube (1×1×1, centered at origin) as procedural mesh data.
 fn build_cube_mesh() -> ProceduralMeshData {
@@ -132,6 +133,42 @@ fn renderer_headless_capture_worker() {
         }
     };
 
+    // Exercise deferred model completion and prove every returned fragment mesh has a DTO.
+    let ticket = renderer
+        .assets()
+        .request_model_load("src/renderer/src/assets/DamagedHelmet.glb")
+        .expect("queue deferred model");
+    let fragment = loop {
+        renderer
+            .pump_asset_tasks(usize::MAX)
+            .expect("pump deferred model");
+        match renderer.assets().poll_model_load(ticket) {
+            LoadStatus::Pending { .. } => std::thread::sleep(std::time::Duration::from_millis(1)),
+            LoadStatus::Uploaded { value } => break value,
+            LoadStatus::Failed { error } => panic!("deferred model failed: {error}"),
+            LoadStatus::Cancelled => panic!("deferred model was unexpectedly cancelled"),
+        }
+    };
+    let fragment_meshes: Vec<_> = (0..fragment.node_count())
+        .flat_map(|index| {
+            fragment
+                .node(SceneFragmentNodeId::new(index as u32))
+                .expect("fragment node")
+                .meshes
+                .iter()
+                .copied()
+        })
+        .collect();
+    assert!(!fragment_meshes.is_empty());
+    for mesh in fragment_meshes {
+        let dto = renderer
+            .assets()
+            .mesh_geometry(mesh)
+            .expect("deferred fragment geometry DTO");
+        assert_eq!(dto.deformation, MeshDeformation::Unknown);
+        assert!(dto.local_aabb.is_none());
+    }
+
     // Position the camera looking at origin.
     renderer
         .set_camera_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y)
@@ -163,6 +200,32 @@ fn renderer_headless_capture_worker() {
             .upload_procedural_mesh(mesh)
             .expect("upload procedural mesh")
     };
+
+    let geometry = renderer
+        .assets()
+        .mesh_geometry(mesh_handle)
+        .expect("synchronous procedural geometry DTO");
+    assert_eq!(geometry.deformation, MeshDeformation::Rigid);
+    assert_eq!(geometry.positions.len(), 24);
+    assert!(geometry.local_aabb.is_some());
+
+    // Unload a separate never-submitted mesh and prove stale/double-unload behavior.
+    let unload_handle = renderer
+        .assets()
+        .upload_procedural_mesh(build_cube_mesh())
+        .expect("upload unload proof mesh");
+    renderer
+        .assets()
+        .unload_mesh(unload_handle)
+        .expect("first mesh unload");
+    assert!(matches!(
+        renderer.assets().mesh_geometry(unload_handle),
+        Err(AssetError::StaleHandle { .. })
+    ));
+    assert!(matches!(
+        renderer.assets().unload_mesh(unload_handle),
+        Err(AssetError::StaleHandle { .. })
+    ));
 
     // Place cube at origin.
     let root = scene.create_node_default(None).expect("create root node");

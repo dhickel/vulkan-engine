@@ -46,6 +46,9 @@ Renderer (public API)
 | 10 | [10-event-system-and-lifecycle.md](10-event-system-and-lifecycle.md) | Event ownership boundaries, emission ordering, validation |
 | 11 | [11-physics-and-collision.md](11-physics-and-collision.md) | Physics crate boundaries, collision metadata validation, event bridge |
 | 12 | [12-audio-foundation.md](12-audio-foundation.md) | Audio crate boundaries, package/scene validation, event bridge |
+| 13 | [13-engine-integration-contracts.md](13-engine-integration-contracts.md) | Phase 0 contracts: frame/swapchain/descriptor state machines, compatibility map, CSM camera proof, evidence index |
+| 14 | [14-renderer-descriptor-abi.md](14-renderer-descriptor-abi.md) | Descriptor ABI manifest: every set, binding, type, size, stage, pipeline consumer, and shader pair |
+| 15 | [15-visual-regression.md](15-visual-regression.md) | Decoded-pixel visual-regression harness, per-test tolerances, baseline-update workflow |
 
 ## Key Source Files
 

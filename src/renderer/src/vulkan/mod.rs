@@ -5,6 +5,8 @@
 
 pub mod vk_debug;
 pub mod vk_descriptor;
+#[allow(dead_code)]
+mod vk_device_budget;
 pub mod vk_init;
 pub mod vk_pipeline;
 pub mod vk_render;

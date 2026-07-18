@@ -654,3 +654,116 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         .as_nanos();
     std::env::temp_dir().join(format!("renderer-{label}-{}-{nanos}", std::process::id()))
 }
+
+// ---------------------------------------------------------------------------
+// Mesh geometry DTO integration proofs (Step 8)
+// ---------------------------------------------------------------------------
+
+mod mesh_geometry_proof {
+    use std::sync::Arc;
+
+    use renderer::{MeshDeformation, MeshGeometryDto, MeshHandle, MeshLocalAabb};
+
+    fn make_handle(slot: u32, gen: u32) -> MeshHandle {
+        MeshHandle::new(slot, gen)
+    }
+
+    fn make_triangle_dto(slot: u32, gen: u32) -> MeshGeometryDto {
+        let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let aabb = MeshLocalAabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 0.0]);
+        MeshGeometryDto {
+            mesh: make_handle(slot, gen),
+            positions: Arc::from(positions.into_boxed_slice()),
+            indices: Arc::from(vec![0u32, 1, 2].into_boxed_slice()),
+            local_aabb: Some(aabb),
+            deformation: MeshDeformation::Rigid,
+        }
+    }
+
+    // ── Public DTO construction and field access ──
+
+    #[test]
+    fn dto_fields_accessible() {
+        let dto = make_triangle_dto(100, 0);
+        assert_eq!(dto.mesh.slot, 100);
+        assert_eq!(dto.mesh.generation, 0);
+        assert_eq!(dto.positions.len(), 3);
+        assert_eq!(dto.indices.len(), 3);
+        assert!(dto.local_aabb.is_some());
+        assert_eq!(dto.deformation, MeshDeformation::Rigid);
+    }
+
+    // ── MeshLocalAabb operations ──
+
+    #[test]
+    fn local_aabb_valid_and_invalid() {
+        let valid = MeshLocalAabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(valid.is_valid());
+
+        let nan = MeshLocalAabb::new([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(!nan.is_valid());
+
+        let inf = MeshLocalAabb::new([0.0, 0.0, 0.0], [f32::INFINITY, 1.0, 1.0]);
+        assert!(!inf.is_valid());
+    }
+
+    #[test]
+    fn local_aabb_union() {
+        let a = MeshLocalAabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let b = MeshLocalAabb::new([2.0, 2.0, 2.0], [3.0, 3.0, 3.0]);
+        let u = a.union(&b).unwrap();
+        assert_eq!(u.min, [0.0, 0.0, 0.0]);
+        assert_eq!(u.max, [3.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn local_aabb_union_rejects_invalid() {
+        let a = MeshLocalAabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let b = MeshLocalAabb::new([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(a.union(&b).is_none());
+    }
+
+    #[test]
+    fn local_aabb_ordering() {
+        let aabb = MeshLocalAabb::new([3.0, 2.0, 1.0], [0.0, 1.0, 2.0]);
+        assert_eq!(aabb.min, [0.0, 1.0, 1.0]);
+        assert_eq!(aabb.max, [3.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn local_aabb_extend() {
+        let mut a = MeshLocalAabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let b = MeshLocalAabb::new([-1.0, -1.0, -1.0], [2.0, 2.0, 2.0]);
+        assert!(a.extend_to_enclose(&b));
+        assert_eq!(a.min, [-1.0, -1.0, -1.0]);
+        assert_eq!(a.max, [2.0, 2.0, 2.0]);
+    }
+
+    // ── MeshDeformation enum ──
+
+    #[test]
+    fn deformation_variants() {
+        assert_eq!(MeshDeformation::Rigid as u8, MeshDeformation::Rigid as u8);
+        assert_ne!(MeshDeformation::Rigid, MeshDeformation::Skinned);
+        assert_ne!(MeshDeformation::Skinned, MeshDeformation::Deformed);
+        assert_ne!(MeshDeformation::Deformed, MeshDeformation::Unknown);
+    }
+
+    // ── Arc-based DTO sharing ──
+
+    #[test]
+    fn dto_arc_positions_shareable() {
+        let positions: Arc<[[f32; 3]]> = Arc::from(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]].into_boxed_slice());
+        let p2 = Arc::clone(&positions);
+        assert_eq!(positions.len(), p2.len());
+        assert_eq!(positions[0], p2[0]);
+    }
+
+    #[test]
+    fn dto_arc_indices_shareable() {
+        let indices: Arc<[u32]> = Arc::from(vec![0u32, 1, 2].into_boxed_slice());
+        let i2 = Arc::clone(&indices);
+        assert_eq!(indices.len(), i2.len());
+        assert_eq!(indices[0], i2[0]);
+    }
+}

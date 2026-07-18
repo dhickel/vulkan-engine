@@ -42,8 +42,11 @@ fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
     let frame = self.presentation.get_next_frame();
     let frame_sync = frame.sync;
 
-    unsafe { self.wait_for_frame_fence(frame_sync)?; }
-    unsafe { self.cleanup_curr_frame_resources()?; }
+    // Wait for the frame-slot fence and create a completion token.
+    let mut token = unsafe { self.wait_for_frame_fence(frame_sync, frame.index)?; }
+    // Descriptor cleanup consumes the token; rejects stale/duplicate tokens.
+    unsafe { self.cleanup_curr_frame_resources(&mut token)?; }
+    debug_assert!(token.is_consumed());
 
     let acquired = /* acquire/bind swapchain image, or choose headless slot */;
     let Some(acquired) = acquired else {
@@ -74,13 +77,22 @@ fn submit_frame(&self, frame: FrameAcquire) -> Result<(), String> {
 Snippet Type: Real
 ```rust
 // src/renderer/src/vulkan/vk_descriptor.rs
-pub fn clear_pools(&mut self, device: &ash::Device) -> Result<(), String> {
-    for &pool in &self.ready_pools { unsafe { device.reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())?; } }
-    for &pool in &self.full_pools {
-        unsafe { device.reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())?; }
-        self.ready_pools.push(pool);
+pub fn clear_pools(&mut self, device: &ash::Device, token: &mut CompletedFrameSlot) -> Result<(), DescriptorAllocError> {
+    // Token validation before any Vulkan call.
+    let (slot_index, epoch) = token.take()
+        .ok_or_else(|| DescriptorAllocError::ResetRejected("token already consumed".into()))?;
+    if slot_index != self.frame_slot_index || epoch <= self.last_reset_epoch {
+        return Err(DescriptorAllocError::ResetRejected("slot/epoch mismatch".into()));
     }
-    self.full_pools.clear();
+    // Reset every unique pool exactly once.
+    for handle in unique_handles(&self.ready_pools, &self.full_pools) {
+        self.adapter.reset_pool(device, handle)?;
+    }
+    // All Vulkan resets succeeded; update state.
+    for record in self.ready_pools.iter_mut() { record.allocated_sets = 0; }
+    for record in self.full_pools.drain(..) { self.ready_pools.push(record); }
+    self.last_reset_epoch = epoch;
+    self.stats.reset_count += 1;
     Ok(())
 }
 ```
@@ -129,6 +141,8 @@ else:
   - Too broad (`ALL_COMMANDS`) may hide performance issues.
   - Too narrow can create intermittent hazards across GPUs/drivers.
 - Descriptor pool exhaustion and churn if `clear_pools` no longer runs on frame-slot reuse.
+- Descriptor reset without a valid `CompletedFrameSlot` token is rejected. The token must be created by the fence-wait path and is single-use. Duplicate or mismatched tokens produce `ResetRejected`.
+- Fragmentation metric means observed `ERROR_FRAGMENTED_POOL` events and affected pool counts, not an unsupported claim about driver-internal fragmentation percentage.
 - Swapchain rebuild lifecycle: `rebuild_swapchain` calls `replace_present_images` which invokes `destroy_present_views` before rebinding. This edge was addressed; monitor for regressions around frame slot desync on resize.
 - `VkPresent::get_next_frame`/`get_curr_frame_mut` ring semantics depend on counter ordering; changing this can silently desync acquired image binding.
 

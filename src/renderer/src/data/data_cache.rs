@@ -66,6 +66,7 @@ use crate::data::gpu_data::{
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
+use crate::data::mesh_geometry::MeshGeometryStore;
 use crate::data::{data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorWriter, VkDynamicDescriptorAllocator,
@@ -197,6 +198,7 @@ pub struct VkDataCache {
     pub mesh_cache: Mutex<MeshCache>,
     pub texture_cache: Mutex<TextureCache>,
     pub environment_cache: Mutex<EnvironmentCache>,
+    pub(crate) mesh_geometry_store: Mutex<MeshGeometryStore>,
     pub supported_image_formats: HashSet<vk::Format>,
 }
 
@@ -1451,7 +1453,9 @@ impl MeshCache {
             &[PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 1.0)],
         )?;
 
-        let default_joint_desc = joint_desc_pool.allocate(device, &[joint_desc_layout])?;
+        let default_joint_desc = joint_desc_pool
+            .allocate(device, &[joint_desc_layout])
+            .map_err(|e| format!("failed to allocate joint descriptor set: {e}"))?;
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_buffer(

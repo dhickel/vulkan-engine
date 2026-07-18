@@ -17,6 +17,13 @@ default = []
 # These APIs may change across alpha sprints without notice.
 advanced-interop = []
 
+# Feature gates for engine-integration sprint rendering paths.
+# All excluded from `default`. Compile-only in Phase 01; runtime activation
+# is added when each track's evidence branch passes.
+csm = []
+instancing = []
+scene-bvh = []
+
 
 [dependencies]
 cfg-if = "1"

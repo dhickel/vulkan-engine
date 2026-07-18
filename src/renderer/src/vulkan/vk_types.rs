@@ -42,6 +42,66 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vk_mem::Allocator;
 
+/// Proof that a frame-slot fence has completed.
+///
+/// ## Purpose
+/// Created only by the frame-fence wait path after a successful `wait_for_fences`. The token
+/// authorizes exactly one descriptor-pool reset. It is consumed during `clear_pools` so one
+/// fence observation cannot authorize two frame epochs.
+///
+/// ## Why Not a Boolean
+/// A bare `bool` can be inadvertently reused or ignored. This type/value must be explicitly
+/// constructed in the fence-wait path and explicitly consumed by the descriptor reset path.
+///
+/// ## Single-Use Contract
+/// `take()` returns `Some(...)` exactly once; subsequent calls return `None`. The allocator
+/// rejects reset when `take()` returns `None`.
+#[derive(Debug)]
+pub struct CompletedFrameSlot {
+    slot_index: u32,
+    submitted_serial: u64,
+    consumed: bool,
+}
+
+impl CompletedFrameSlot {
+    /// Create a completion token. Only the frame-fence wait path may call this.
+    pub(crate) fn new(slot_index: u32, submitted_serial: u64) -> Self {
+        Self {
+            slot_index,
+            submitted_serial,
+            consumed: false,
+        }
+    }
+
+    /// The physical frame-slot index this token authorizes.
+    #[allow(dead_code, reason = "public API consumed by descriptor allocator")]
+    pub fn slot_index(&self) -> u32 {
+        self.slot_index
+    }
+
+    /// The frame epoch serial captured when the fence was waited.
+    #[allow(dead_code, reason = "public API consumed by descriptor allocator")]
+    pub fn submitted_serial(&self) -> u64 {
+        self.submitted_serial
+    }
+
+    /// Consume the token and return the verified slot/serial pair.
+    /// Returns `None` if the token was already consumed.
+    pub fn take(&mut self) -> Option<(u32, u64)> {
+        if self.consumed {
+            None
+        } else {
+            self.consumed = true;
+            Some((self.slot_index, self.submitted_serial))
+        }
+    }
+
+    /// Returns `true` if the token has not yet been consumed.
+    pub fn is_consumed(&self) -> bool {
+        self.consumed
+    }
+}
+
 /// Core RAII trait for all Vulkan resources requiring cleanup.
 ///
 /// ## Purpose
@@ -625,6 +685,9 @@ pub struct VkPresent {
     present_targets: Vec<(vk::Image, vk::ImageView)>,
     curr_frame_count: u32,
     max_frames_active: u32,
+    /// Monotonically increasing frame epoch. Incremented each `get_next_frame`.
+    /// Captured into `CompletedFrameSlot` and validated by descriptor reset.
+    frame_epoch: u64,
 }
 
 impl VkDestroyable for VkPresent {
@@ -712,6 +775,7 @@ impl VkPresent {
             present_targets,
             curr_frame_count: 0,
             max_frames_active: data_len as u32,
+            frame_epoch: 0,
         })
     }
 
@@ -721,7 +785,13 @@ impl VkPresent {
         // index is always in bounds.
         let frame = &self.frame_data[index as usize];
         self.curr_frame_count += 1;
+        self.frame_epoch += 1;
         frame
+    }
+
+    /// Current frame epoch. Use to stamp `CompletedFrameSlot` tokens.
+    pub fn frame_epoch(&self) -> u64 {
+        self.frame_epoch
     }
 
     /// Roll back one frame reservation when acquire/record paths early-return.
@@ -768,6 +838,7 @@ impl VkPresent {
             self.frame_data[x].present_image_view = images[x].1;
         }
         self.curr_frame_count = 0;
+        self.frame_epoch = 0;
     }
 
     pub fn bind_acquired_present_target(&mut self, image_index: u32) -> Result<(), VkError> {

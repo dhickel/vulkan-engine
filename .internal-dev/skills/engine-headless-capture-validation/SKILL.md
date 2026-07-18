@@ -56,6 +56,9 @@ Captures land by default under:
 3. If the existing examples are ambiguous, create a small deterministic test scene or capture-focused example under `src/renderer/examples/capture_tests/`.
 4. Run a timeout-bound headless capture command.
 5. Inspect the PNG and sidecar JSON in `.internal-dev/captures/`.
+   - If the current model supports image input, inspect the PNG directly.
+   - If the current model is known not to support image input, load and follow the available `image-viewing` skill, passing it the local PNG path and the concrete visual pass/fail criteria.
+   - Do not invoke `image-viewing` merely because image capability is uncertain; follow its mandatory trigger gate.
 6. Record evidence paths and note whether the result is a strict pass, a visual regression, or inconclusive.
 
 ## Scene And Camera Guidance

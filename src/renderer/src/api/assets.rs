@@ -16,12 +16,16 @@ use crate::data::asset_registry::{
 };
 use crate::data::assimp_util::{self, ModelMeta};
 use crate::data::data_cache::{
-    CachedEnvironment, LoadResult, MeshCache, TextureCache, VkDataCache,
+    CachedEnvironment, CachedMesh, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
 use crate::data::data_util::resolve_texture_mip_count;
 use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, TextureSemantic, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
+};
+use crate::data::mesh_geometry::{
+    compute_local_aabb, validate_triangle_indices, MeshDeformation, MeshGeometryDto,
+    MeshLocalAabb,
 };
 use crate::data::thread_pool::BoundedThreadPool;
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
@@ -917,7 +921,17 @@ impl<'a> AssetManager<'a> {
             });
         }
 
+        // Acquire both stores before mutating either. Geometry registration never holds these
+        // locks together, so this ordering cannot deadlock with ingestion.
+        let mut geo_store = self
+            .core
+            .data_cache
+            .mesh_geometry_store
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_geometry_store"))?;
         mesh_cache.deallocate_id(mesh);
+        geo_store.remove(mesh);
+
         Ok(())
     }
 
@@ -971,6 +985,66 @@ impl<'a> AssetManager<'a> {
 
         texture_cache.deallocate_texture(texture);
         Ok(())
+    }
+
+    /// Query the Vulkan-free mesh geometry DTO for a loaded mesh.
+    ///
+    /// Returns [`MeshGeometryDto`] containing model-space positions, triangle indices,
+    /// a conservative local AABB, and deformation classification.
+    /// The handle generation is validated; stale or invalid handles return an error.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn mesh_geometry(&self, mesh: MeshHandle) -> Result<MeshGeometryDto, AssetError> {
+        let mesh_cache = self
+            .core
+            .data_cache
+            .mesh_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+        mesh_cache
+            .get_loaded_id(mesh)
+            .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
+        let geo_store = self
+            .core
+            .data_cache
+            .mesh_geometry_store
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_geometry_store"))?;
+        geo_store
+            .get(mesh)
+            .map_err(|err| map_cache_err("mesh_geometry", mesh.slot, mesh.generation, err))
+    }
+
+    /// Query only the conservative local AABB for a loaded mesh.
+    ///
+    /// Returns `None` when the DTO was stored with a conservative-none AABB
+    /// (empty positions, non-finite components, or unknown deformation).
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn mesh_local_aabb(
+        &self,
+        mesh: MeshHandle,
+    ) -> Result<Option<MeshLocalAabb>, AssetError> {
+        let mesh_cache = self
+            .core
+            .data_cache
+            .mesh_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+        mesh_cache
+            .get_loaded_id(mesh)
+            .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
+        let geo_store = self
+            .core
+            .data_cache
+            .mesh_geometry_store
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_geometry_store"))?;
+        geo_store
+            .get_aabb(mesh)
+            .map_err(|err| map_cache_err("mesh_local_aabb", mesh.slot, mesh.generation, err))
     }
 
     /// Create a PBR material from runtime-generated parameters.
@@ -1058,6 +1132,26 @@ fn load_model_gpu_ready(
     let loaded_model = assimp_util::load_model(path_str, data_cache.clone(), false, policy_config)
         .map_err(AssetError::from)?;
 
+    // Capture and register every DTO as one transaction before GPU promotion.
+    // MeshMeta does not retain trustworthy skin/morph classification, so imported geometry
+    // remains conservatively unknown until importer metadata proves it rigid.
+    let dtos = collect_mesh_geometry_dtos(
+        &data_cache,
+        &loaded_model.mesh_ids,
+        MeshDeformation::Unknown,
+    );
+    let registration_result = dtos.and_then(|dtos| register_mesh_geometry_dtos(&data_cache, dtos));
+    if let Err(err) = registration_result {
+        let _ = rollback_model_allocations(
+            &data_cache,
+            &loaded_model.mesh_ids,
+            &loaded_model.material_ids,
+        );
+        return Err(AssetError::Internal(format!(
+            "mesh geometry DTO registration failed: {err}"
+        )));
+    }
+
     let upload_result = promote_model_gpu_allocations(&path, &data_cache, &loaded_model);
     if upload_result.is_err() {
         let _ = rollback_model_allocations(
@@ -1065,6 +1159,8 @@ fn load_model_gpu_ready(
             &loaded_model.mesh_ids,
             &loaded_model.material_ids,
         );
+        // Roll back any DTOs registered before promotion.
+        let _ = rollback_mesh_geometry_dtos(&data_cache, &loaded_model.mesh_ids);
     }
     upload_result?;
 
@@ -1176,6 +1272,22 @@ fn upload_procedural_mesh_gpu_ready(
         mesh_cache.add(mesh_meta)
     };
 
+    // Register the neutral geometry DTO before GPU promotion. Registration failure rolls
+    // back the handle allocation rather than leaving an unloaded orphan in the cache.
+    let registration_result =
+        collect_mesh_geometry_dtos(&data_cache, &[mesh_id], MeshDeformation::Rigid)
+            .and_then(|dtos| register_mesh_geometry_dtos(&data_cache, dtos));
+    if let Err(err) = registration_result {
+        let mut mesh_cache = data_cache
+            .mesh_cache
+            .lock()
+            .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+        mesh_cache.deallocate_id(mesh_id);
+        return Err(AssetError::Internal(format!(
+            "mesh geometry DTO registration failed: {err}"
+        )));
+    }
+
     let allocation_result = {
         let mut mesh_cache = data_cache
             .mesh_cache
@@ -1192,6 +1304,8 @@ fn upload_procedural_mesh_gpu_ready(
                 .lock()
                 .map_err(|_| poisoned_lock_err("mesh_cache"))?;
             mesh_cache.deallocate_id(mesh_id);
+            // Roll back DTO registration.
+            let _ = rollback_mesh_geometry_dtos(&data_cache, &[mesh_id]);
             Err(AssetError::Internal(
                 "mesh GPU allocation failed".to_string(),
             ))
@@ -1257,6 +1371,87 @@ fn rollback_model_allocations(
     with_mesh_texture_cache_locks(data_cache, |mesh_cache, texture_cache| {
         texture_cache.deallocate_materials(material_ids.to_vec());
         mesh_cache.deallocate_ids(mesh_ids);
+    })
+}
+
+/// Build DTOs while the meshes are still CPU-ready. The mesh lock is released before the
+/// geometry store is acquired, keeping ingestion out of unload's two-lock critical section.
+fn collect_mesh_geometry_dtos(
+    data_cache: &Arc<VkDataCache>,
+    mesh_ids: &[MeshHandle],
+    deformation: MeshDeformation,
+) -> Result<Vec<MeshGeometryDto>, String> {
+    let mesh_cache = data_cache
+        .mesh_cache
+        .lock()
+        .map_err(|_| "mesh_cache lock poisoned".to_string())?;
+
+    mesh_ids
+        .iter()
+        .copied()
+        .map(|mesh_id| {
+            let cached = mesh_cache
+                .get_id(mesh_id)
+                .map_err(|e| format!("mesh {mesh_id:?}: {e:?}"))?;
+            match cached {
+                CachedMesh::Unloaded(meta) => mesh_meta_to_dto(mesh_id, meta, deformation),
+                CachedMesh::Loaded(_) => Err(format!(
+                    "mesh {mesh_id:?} was promoted before geometry capture"
+                )),
+                CachedMesh::_NULL => Err(format!(
+                    "mesh {mesh_id:?} was invalidated before geometry capture"
+                )),
+            }
+        })
+        .collect()
+}
+
+fn register_mesh_geometry_dtos(
+    data_cache: &Arc<VkDataCache>,
+    dtos: Vec<MeshGeometryDto>,
+) -> Result<(), String> {
+    let mut geo_store = data_cache
+        .mesh_geometry_store
+        .lock()
+        .map_err(|_| "mesh_geometry_store lock poisoned".to_string())?;
+    geo_store
+        .insert_batch(dtos)
+        .map_err(|e| format!("geometry batch rejected: {e}"))
+}
+
+/// Remove DTO registrations for `mesh_ids` (used on GPU promotion failure).
+fn rollback_mesh_geometry_dtos(
+    data_cache: &Arc<VkDataCache>,
+    mesh_ids: &[MeshHandle],
+) -> Result<(), AssetError> {
+    let mut geo_store = data_cache
+        .mesh_geometry_store
+        .lock()
+        .map_err(|_| poisoned_lock_err("mesh_geometry_store"))?;
+    geo_store.remove_batch(mesh_ids);
+    Ok(())
+}
+
+/// Build a [`MeshGeometryDto`] from an unloaded [`MeshMeta`].
+fn mesh_meta_to_dto(
+    mesh_id: MeshHandle,
+    meta: &MeshMeta,
+    deformation: MeshDeformation,
+) -> Result<MeshGeometryDto, String> {
+    validate_triangle_indices(&meta.indices, meta.vertices.len())
+        .map_err(|e| format!("invalid indices for {:?}: {e}", mesh_id))?;
+
+    let positions: Vec<[f32; 3]> = meta.vertices.iter().map(|v| v.position.to_array()).collect();
+    let local_aabb = (deformation == MeshDeformation::Rigid)
+        .then(|| compute_local_aabb(&positions))
+        .flatten();
+
+    Ok(MeshGeometryDto {
+        mesh: mesh_id,
+        positions: std::sync::Arc::from(positions.into_boxed_slice()),
+        indices: std::sync::Arc::from(meta.indices.clone().into_boxed_slice()),
+        local_aabb,
+        deformation,
     })
 }
 
@@ -2020,8 +2215,9 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_of_queued_ticket_succeeds() {
+    fn mesh_geometry_queued_cancellation_starts_no_import_and_registers_no_dto() {
         let mut tracker = AssetLoadTracker::new();
+        let geometry_store = crate::data::mesh_geometry::MeshGeometryStore::new();
         let ticket = tracker.request_model_load(PathBuf::from("/fake/model.glb"));
 
         // Cancel while still queued
@@ -2040,5 +2236,7 @@ mod tests {
             tracker.poll_model_load(ticket),
             LoadStatus::Cancelled
         ));
+        assert_eq!(tracker.in_flight_count(), 0);
+        assert!(geometry_store.is_empty());
     }
 }

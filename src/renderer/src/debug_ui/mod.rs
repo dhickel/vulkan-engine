@@ -12,6 +12,7 @@ use input::InputDebugSnapshot;
 use log::error;
 
 use crate::data::handles::EnvironmentHandle;
+use crate::vulkan::vk_descriptor::DescriptorAllocatorStats;
 
 const MAX_CONSOLE_HISTORY: usize = 128;
 const MAX_CONSOLE_OUTPUT_LINES: usize = 256;
@@ -44,6 +45,8 @@ pub struct DebugTimingSnapshot {
     pub frame_gpu_ms: Option<f32>,
     pub stage_timings: Vec<DebugTimingRow>,
     pub pass_timings: Vec<DebugTimingRow>,
+    /// Aggregated descriptor allocator statistics across all frame slots.
+    pub descriptor_stats: Option<DescriptorAllocatorStats>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -811,6 +814,33 @@ impl DebugUiManager {
                 ));
             }
         }
+
+        // ── Descriptor allocator statistics ──────────────────────────
+        if let Some(ref ds) = timings.descriptor_stats {
+            ui.separator();
+            ui.text("Descriptor Allocator (all slots)");
+            ui.text(format!(
+                "Allocs: {} attempts / {} successful",
+                ds.allocation_attempts, ds.successful_allocations
+            ));
+            ui.text(format!(
+                "Pools: {} current / {} created / {} growth events",
+                ds.pool_count, ds.pools_created, ds.pool_growth_events
+            ));
+            ui.text(format!(
+                "Peak: {} sets / {:.1}% util",
+                ds.peak_allocated_sets,
+                ds.peak_utilization_ratio * 100.0
+            ));
+            ui.text(format!(
+                "Failures: {} out-of-pool / {} fragmented",
+                ds.out_of_pool_events, ds.fragmented_pool_events
+            ));
+            ui.text(format!(
+                "Resets: {} / {} rejections",
+                ds.reset_count, ds.reset_rejections
+            ));
+        }
     }
 
     fn render_performance_graph_tab(&self, ui: &Ui) {
@@ -1248,6 +1278,23 @@ impl DebugUiManager {
             ));
         }
         fields.push(format!("\"cause_table\":[{}]", cause_rows.join(",")));
+
+        if let Some(ref ds) = timings.descriptor_stats {
+            fields.push(format!(
+                "\"descriptor_stats\":{{\"allocation_attempts\":{},\"successful_allocations\":{},\"pool_count\":{},\"pools_created\":{},\"pool_growth_events\":{},\"peak_allocated_sets\":{},\"peak_utilization_ratio\":{:.4},\"out_of_pool_events\":{},\"fragmented_pool_events\":{},\"reset_count\":{},\"reset_rejections\":{}}}",
+                ds.allocation_attempts,
+                ds.successful_allocations,
+                ds.pool_count,
+                ds.pools_created,
+                ds.pool_growth_events,
+                ds.peak_allocated_sets,
+                ds.peak_utilization_ratio,
+                ds.out_of_pool_events,
+                ds.fragmented_pool_events,
+                ds.reset_count,
+                ds.reset_rejections,
+            ));
+        }
 
         format!("{{{}}}", fields.join(","))
     }
