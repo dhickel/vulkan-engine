@@ -20,6 +20,7 @@ Current flow:
   - Each mesh handle in a node emits one draw item with the node's `world_transform`.
 - Light extraction constraints:
   - `RenderSubmission` stores `Vec<FramePointLight>` but clamps to `MAX_POINT_LIGHTS_GPU` (16) for GPU upload contract compatibility.
+  - It also carries at most one `FrameDirectionalLight` for PBR direct lighting and the directional shadow pass.
   - Collection uses active entries, not raw slot order assumptions, so sparse slot churn still yields active lights.
 - Culling status:
   - Frustum culling is enabled by default in `SceneWorld::build_submission`; occlusion culling is not implemented.
@@ -147,6 +148,7 @@ pub struct RenderSubmission {
     pub skybox_mesh_id: MeshHandle,
     pub skybox_env_id: EnvironmentHandle,
     pub point_lights: Vec<FramePointLight>,
+    pub directional_light: Option<FrameDirectionalLight>,
 }
 ```
 

@@ -20,8 +20,10 @@ Per-frame backend flow:
 - Semaphore stage masks are centralized in `vk_util` helpers:
   - frame submit: `frame_acquire_wait_stage_mask()`, `frame_render_complete_signal_stage_mask()`
   - async upload submit: `async_transfer_signal_stage_mask()`, `async_texture_upload_wait_stage_mask()`, `async_buffer_upload_wait_stage_mask()`
-- Frame timing now records `frame_fence_wait` so CPU await spikes are isolated from broader `acquire_frame`.
-- Rendergraph pass order is explicit and semantic: `PrepareTargets -> Skybox -> Geometry -> PresentCopy -> Imgui`.
+- Frame timing records `frame_fence_wait` so CPU await spikes are isolated from broader `acquire_frame`.
+- Frame acquisition waits and cleans the slot first, acquires/binds an image, and resets the fence only after acquisition succeeds.
+- Once the fence is reset, a recording failure uses a drain transaction: replace partial commands, submit to signal the fence, and, for windowed acquisition, present to consume/release the semaphore and image state.
+- Rendergraph pass order is explicit and semantic: `PrepareTargets -> Shadow -> Skybox -> Geometry -> PresentCopy -> Imgui -> DebugCapture -> TerminalPresent`.
 
 Synchronization primitive role table:
 
@@ -29,62 +31,43 @@ Synchronization primitive role table:
 |---|---|---|---|---|
 | `swap_semaphore` | `acquire_next_image2` | `queue_submit2` wait list | `acquire_swapchain_image_index`, `submit_frame` | Prevent rendering until swapchain image is available |
 | `render_semaphore` | `queue_submit2` signal list | `queue_present` wait list | `submit_frame`, `present_frame` | Prevent present before rendering completes |
-| `render_fence` | `queue_submit2` | CPU (`wait_for_fences`) | `submit_frame`, `wait_and_reset_frame_fence` | Prevent CPU frame-slot reuse while GPU still owns slot resources |
+| `render_fence` | `queue_submit2` | CPU (`wait_for_fences`) | `submit_frame`, `wait_for_frame_fence`, `reset_frame_fence` | Prevent CPU frame-slot reuse while GPU still owns slot resources |
 | transfer fences (`VkFenceQueue`) | async transfer submits | render thread polling | `pump_transfer_submissions`, `service_async_transfers` | Avoid consuming incomplete async uploads |
 
 ## 4. Code Walkthrough
-Snippet Type: Real
+Snippet Type: Pseudocode
 ```rust
-// src/renderer/src/vulkan/vk_render.rs
-fn acquire_frame_slot(&mut self) -> Option<FrameAcquire> {
-    let frame_data = self.presentation.get_next_frame();
-    let frame_sync = frame_data.sync;
-    let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
-    let queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
+// Simplified from src/renderer/src/vulkan/vk_render.rs
+fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
+    let frame = self.presentation.get_next_frame();
+    let frame_sync = frame.sync;
 
-    unsafe {
-        self.wait_and_reset_frame_fence(frame_sync);
-        self.cleanup_curr_frame_resources(); // includes curr_frame.descriptors.clear_pools(...)
-    }
+    unsafe { self.wait_for_frame_fence(frame_sync)?; }
+    unsafe { self.cleanup_curr_frame_resources()?; }
 
-    let image_index = unsafe { self.acquire_swapchain_image_index(frame_sync) };
-    let Some(image_index) = image_index else {
+    let acquired = /* acquire/bind swapchain image, or choose headless slot */;
+    let Some(acquired) = acquired else {
+        self.presentation.rewind_frame();
         self.resize_requested = true;
-        return None;
+        return Ok(None); // fence remains signaled
     };
 
-    if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
-        error!(
-            "Failed to bind acquired present target {}: {:?}",
-            image_index, err
-        );
-        self.resize_requested = true;
-        return None;
-    }
-    Some(FrameAcquire { queue, cmd_buffer, frame_sync, image_index })
+    unsafe { self.reset_frame_fence(frame_sync)?; }
+    Ok(Some(acquired))
 }
 ```
 
-Snippet Type: Real
+Snippet Type: Pseudocode
 ```rust
-// src/renderer/src/vulkan/vk_render.rs
+// Simplified from src/renderer/src/vulkan/vk_render.rs
 fn submit_frame(&self, frame: FrameAcquire) -> Result<(), String> {
-    let cmd_info = [vk_util::command_buffer_submit_info(frame.cmd_buffer)];
-    let wait_info = [vk_util::semaphore_submit_info(
-        vk_util::frame_acquire_wait_stage_mask(),
-        frame.frame_sync.swap_semaphore,
-    )];
-    let signal_info = [vk_util::semaphore_submit_info(
-        vk_util::frame_render_complete_signal_stage_mask(),
-        frame.frame_sync.render_semaphore,
-    )];
-    let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
-    unsafe {
-        self.device
-            .queue_submit2(frame.queue, &submit, frame.frame_sync.render_fence)
-            .map_err(|err| format!("queue_submit2 failed: {err:?}"))
+    // Windowed: wait swap semaphore, signal render semaphore, signal frame fence.
+    // Headless: no binary semaphores; the queue submission still signals the fence.
+    let result = unsafe { self.device.queue_submit2(/* ... */, frame.frame_sync.render_fence) };
+    if let Err(vk::Result::ERROR_DEVICE_LOST) = result {
+        return Err("Vulkan device lost during frame submission".into());
     }
+    result.map_err(|err| format!("queue_submit2 failed: {err:?}"))
 }
 ```
 
@@ -108,6 +91,7 @@ Barrier transition cookbook (current engine patterns):
 |---|---|---|---|---|
 | Color target prep | `UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL` (via `GENERAL` in draw path) | `ALL_COMMANDS -> ALL_COMMANDS` (`transition_image`) | `MEMORY_WRITE -> MEMORY_WRITE|MEMORY_READ` (`transition_image`) | `prepare_draw_targets`, `copy_draw_to_present` |
 | Depth target prep | `UNDEFINED -> DEPTH_ATTACHMENT_OPTIMAL` | `ALL_COMMANDS -> ALL_COMMANDS` (`transition_image`) | `MEMORY_WRITE -> MEMORY_WRITE|MEMORY_READ` (`transition_image`) | `prepare_draw_targets` |
+| Directional shadow write/read | `UNDEFINED -> DEPTH_ATTACHMENT_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL` | top-of-pipe → early/late fragment tests → fragment shader | none → depth write → sampled read | `ShadowPass` |
 | Transfer upload/mip finalization | `TRANSFER_SRC_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL` | `TRANSFER -> FRAGMENT_SHADER` | `TRANSFER_READ -> SHADER_READ` | `record_mip_maps_generation`, compressed texture upload path |
 | Transfer queue ownership handoff | `TRANSFER_DST_OPTIMAL -> TRANSFER_SRC_OPTIMAL` | `TRANSFER -> TRANSFER` | `TRANSFER_WRITE -> TRANSFER_READ` + queue family indices | `upload_texture` transfer->graphics ownership barrier |
 
@@ -115,27 +99,32 @@ Snippet Type: Pseudocode
 ```text
 frame_slot = presentation.get_next_frame()
 wait(frame_slot.render_fence)
-reset(frame_slot.render_fence)
 process_deferred_deletes(frame_slot)
 reset_dynamic_descriptor_pools(frame_slot)
 
 acquired = acquire_next_image(signal=swap_semaphore)
+if no_image: rewind_slot_and_leave_fence_signaled()
 bind_acquired_present_target(acquired.index)
-record_rendergraph_passes_in_fixed_order()
+reset(frame_slot.render_fence)
 
-submit(wait=swap_semaphore, signal=render_semaphore, fence=render_fence)
-present(wait=render_semaphore, image_index=acquired.index)
+if record_rendergraph_passes_in_fixed_order() fails:
+  replace_partial_commands_with_drain()
+  submit(wait=swap_semaphore, signal=render_semaphore, fence=render_fence)
+  present_to_retire_windowed_image_and_semaphores()
+else:
+  submit(wait=swap_semaphore, signal=render_semaphore, fence=render_fence)
+  present(wait=render_semaphore, image_index=acquired.index)
 ```
 
 ## 5. Best Practices
 - Keep acquire -> record -> submit -> present order explicit; avoid hidden side effects between steps.
-- Wait and reset the frame fence before any frame-local resource reuse (descriptor pools, deferred deletion queue, command buffer reset).
+- Wait for the frame fence before frame-local resource reuse. Reset it only after acquisition/binding succeeds and immediately before entering the record/submit transaction.
 - Document producer/consumer for every semaphore/fence when changing submission paths.
 - Prefer explicit `record_image_barrier` when queue ownership or narrow stage/access scopes matter.
 - Keep rendergraph pass ordering assumptions written next to transition changes.
 
 ## 6. Gotchas & Failure Modes
-- Wrong fence timing: resetting/clearing per-frame state before fence completion can cause use-after-free style GPU faults.
+- Wrong fence timing: clearing per-frame state before fence completion can cause use-after-free style GPU faults; resetting the fence before a path that may return without submit can deadlock slot reuse.
 - Stage masks too broad or too narrow:
   - Too broad (`ALL_COMMANDS`) may hide performance issues.
   - Too narrow can create intermittent hazards across GPUs/drivers.
@@ -156,7 +145,8 @@ present(wait=render_semaphore, image_index=acquired.index)
 - Descriptor allocators: `src/renderer/src/vulkan/vk_descriptor.rs`
 - Barrier helpers and upload transitions: `src/renderer/src/vulkan/vk_util.rs`
 - Rendergraph ordering: `src/renderer/src/rendergraph/mod.rs`
-- Present/UI pass boundaries: `src/renderer/src/rendergraph/passes/present_copy_pass.rs`, `src/renderer/src/rendergraph/passes/imgui_pass.rs`
+- Shadow pass: `src/renderer/src/rendergraph/passes/shadow_pass.rs`, `src/renderer/src/vulkan/vk_shadow.rs`
+- Present/UI/capture boundaries: `src/renderer/src/rendergraph/passes/present_copy_pass.rs`, `imgui_pass.rs`, `debug_capture_pass.rs`, `terminal_present_pass.rs`
 
 ## 9. Standard References
 - Vulkan synchronization chapter: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#synchronization

@@ -6,6 +6,8 @@ reference lives in [03-scene-graph-and-fragment-workflows.md](03-scene-graph-and
 Use that chapter for the implemented contracts around:
 
 - `Scene`, `SceneFragment`, and `Scene::merge_fragment`;
+- default-on frustum culling through `set_frustum_culling` and `frustum_culling_enabled`;
+- one scene `DirectionalLight` with the fixed frame-local directional shadow path;
 - `SceneFragmentMount::mounted_root` and `SceneFragmentMount::node_mapping`;
 - command-backed editor placement and transform workflows;
 - versioned scene persistence, durable asset references, tags, and material override metadata.

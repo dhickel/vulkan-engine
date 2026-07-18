@@ -1,6 +1,6 @@
 # Renderer Internals — API-to-Backend Handoff
 
-> Source: [`src/renderer/src/api/renderer.rs`](../src/renderer/src/api/renderer.rs), [`src/renderer/src/vulkan/vk_render.rs`](../src/renderer/src/vulkan/vk_render.rs) — no legacy docs consulted.
+> Source: [`src/renderer/src/api/renderer.rs`](../../src/renderer/src/api/renderer.rs), [`src/renderer/src/vulkan/vk_render.rs`](../../src/renderer/src/vulkan/vk_render.rs) — no legacy docs consulted.
 
 ## Frame Lifecycle (Detailed)
 
@@ -10,32 +10,19 @@ The renderer supports 2-3 frames in flight via a `VkPresent` ring buffer. Each f
 - A fence (signaled when GPU completes the frame)
 - A set of semaphores (image-acquired, render-complete)
 
-### Step 1: Acquire Swapchain Image
+### Step 1: Wait and Clean the Frame Slot
 
-```rust
-// vk_render.rs — acquire path
-let (image_index, suboptimal) = acquire_next_image_with_retry(
-    &self.swapchain,
-    timeout_ns,
-    &self.frame_data[frame_idx].image_available_semaphore,
-)?;
-```
+The backend waits on the selected slot's render fence before reusing descriptor pools, timing queries, command buffers, or deferred resources. Fence waits classify `VK_ERROR_DEVICE_LOST` instead of panicking.
 
-The acquire uses a timeout-based retry loop. If the swapchain is out of date, it sets a `resize_requested` flag.
+### Step 2: Acquire, Bind, Then Reset the Fence
 
-### Step 2: Wait on Fence
+Windowed rendering acquires with a bounded retry loop and binds the acquired swapchain image to the current frame slot. Headless rendering selects that slot's offscreen present image. Out-of-date/retry paths rewind the ring and leave the already-signaled fence unchanged.
 
-```rust
-// vk_render.rs — fence wait
-device.wait_for_fences(&[self.frame_data[frame_idx].fence], true, u64::MAX)?;
-device.reset_fences(&[self.frame_data[frame_idx].fence])?;
-```
+Only after acquisition/binding succeeds does the backend reset the fence. From that point, normal recording or a failure drain submission must queue a signal for it.
 
-Ensures the GPU is done with this frame slot's resources before reusing them.
+### Step 3: Record-or-Drain Transaction
 
-### Step 3: Reset Pools
-
-The per-frame command pool and descriptor pool are reset. This invalidates all command buffers and descriptor sets from the previous use of this slot.
+The command buffer records the fixed rendergraph. If recording fails after acquisition, partial commands are replaced with a drain recording; windowed mode submits and presents that drain so the acquire semaphore, render semaphore, and acquired image are retired as well as the fence.
 
 ### Step 4: Scene → RenderSubmission
 
@@ -44,10 +31,10 @@ The per-frame command pool and descriptor pool are reset. This invalidates all c
 let submission = scene.build_submission(&self.camera, viewport_size);
 ```
 
-`SceneWorld::build_submission()` at [`scene/scene_world.rs`](../src/renderer/src/scene/scene_world.rs) traverses the scene tree, computes world transforms, and packages flat arrays:
-- `Vec<RenderObject>` — per-draw data (mesh handle, material handle, transform)
-- `Vec<PointLight>` — active point lights
-- `Option<DirectionalLight>` — the scene's single surface-to-light directional source
+`SceneWorld::build_submission()` at [`scene/scene_world.rs`](../../src/renderer/src/scene/scene_world.rs) traverses the scene tree, computes world transforms, and packages flat arrays:
+- `Vec<FrameDrawItem>` — per-draw mesh handle and world transform
+- `Vec<FramePointLight>` — active point lights
+- `Option<FrameDirectionalLight>` — the scene's single surface-to-light directional source
 - `EnvironmentHandle` — active environment map
 
 Frustum culling is enabled by default. Mesh-backed nodes whose transform-aware proxy AABBs are outside the Vulkan `[0, 1]` camera frustum are omitted; descendants are tested independently. The public `Scene` facade can disable culling for diagnostics or compatibility.
@@ -55,14 +42,13 @@ Frustum culling is enabled by default. Mesh-backed nodes whose transform-aware p
 ### Step 5: Rendergraph Execution
 
 ```rust
-// vk_render.rs
-self.render_graph.execute(
-    &self.core,
-    &submission,
-    frame_idx,
-    swapchain_image_view,
-    &self.frame_data[frame_idx],
-);
+// src/renderer/src/rendergraph/mod.rs
+let mut context = RenderGraphContext {
+    submission,
+    frame,
+    renderer: core,
+};
+let report = rendergraph.execute(&mut context)?;
 ```
 
 The default pass order: `PrepareTargetsPass` → `ShadowPass` → `SkyboxPass` → `GeometryPass` → `PresentCopyPass` → `ImguiPass` → `DebugCapturePass` → `TerminalPresentPass`. `ShadowPass` clears and records the current frame slot's 2048² D32 map, then transitions it to shader-read layout before PBR geometry samples scene descriptor set 0 binding 5.
@@ -80,11 +66,11 @@ queue.submit2(&[submit_info], fence)?;
 queue.present_khr(&present_info)?;
 ```
 
-Uses Vulkan 1.3 `vkQueueSubmit2` with timeline semaphore support. The fence signals when the GPU completes the frame; the render-complete semaphore gates presentation.
+Uses Vulkan 1.3 `vkQueueSubmit2` with per-frame binary acquire/render semaphores in windowed mode. The fence signals when the GPU completes the frame; the render-complete semaphore gates presentation. Headless submissions omit the binary semaphores but still signal the fence.
 
-### Step 7: Deferred Cleanup
+### Step 7: Frame Outcome and Deferred Cleanup
 
-After present, the renderer processes a deletion queue — Vulkan resources marked for destruction are actually destroyed once the fence confirms the GPU is done with them.
+Presentation preserves not-presented and suboptimal outcomes for the facade. Deferred frame-local cleanup occurs the next time the slot is selected, after its fence has signaled.
 
 ## Synchronization Model
 
@@ -94,10 +80,11 @@ After present, the renderer processes a deletion queue — Vulkan resources mark
 | Render-complete semaphore | Last usage → present |
 | Per-frame fence | GPU frame completion → CPU pool reset |
 
-Additional barriers inside passes:
-- **Image layout transitions**: `RenderPassNode` trait provides `input_attachment_transitions()` and `output_attachment_transitions()` at [`rendergraph/mod.rs:31`](../src/renderer/src/rendergraph/mod.rs:31)
-- **Buffer barriers**: vertex/index upload → vertex shader read
-- **Descriptor set updates**: batched via `VkDescriptorWriter` after pool reset
+Additional synchronization inside passes:
+- **Image layout transitions**: each pass records its own explicit transition; the current `RenderPassNode` trait does not declare resources or derive barriers.
+- **Directional shadow dependency**: `ShadowPass` transitions D32 writes to fragment shader reads before `GeometryPass`.
+- **Buffer barriers**: upload paths synchronize transfer writes with graphics reads.
+- **Descriptor set updates**: batched via `VkDescriptorWriter` after pool reset.
 
 ## Swapchain Rebuild
 
@@ -113,12 +100,12 @@ Triggered by `resize()` or `VK_ERROR_OUT_OF_DATE_KHR`:
 
 ## Render Hooks
 
-Pre-hook fires after command buffer is acquired but before rendergraph execution. Post-hook fires after present but before frame counter advance. Both receive `RenderHookContext { frame_index, viewport_size }` — no direct access to Vulkan resources.
+Pre-hook fires after command buffer is acquired but before rendergraph execution. The pre-hook fires before rendergraph recording and the post-hook fires after rendergraph recording but before command-buffer end/submit. Both receive `RenderHookContext { frame_index, viewport_size }` and no direct Vulkan resources.
 
-For internal access, the `advanced-interop` feature gate ([`api/advanced.rs`](../src/renderer/src/api/advanced.rs)) exposes `Renderer::raw_core_mut() -> &mut VkRender` — documented as unsafe, internal-use-only.
+For internal access, the `advanced-interop` feature gate (`src/renderer/src/api/advanced.rs`) exposes unsafe `renderer::api::advanced::renderer_core_mut(&mut Renderer) -> &mut VkRenderCore` for expert diagnostics.
 
 ## See Also
 
 - [03-asset-pipeline.md](03-asset-pipeline.md) — asset loading and GPU upload
 - [07-rendergraph.md](07-rendergraph.md) — pass execution order
-- [src/renderer/src/vulkan/vk_render.rs](../src/renderer/src/vulkan/vk_render.rs) — frame orchestration (~3862 lines)
+- [src/renderer/src/vulkan/vk_render.rs](../../src/renderer/src/vulkan/vk_render.rs) — frame transactions and backend orchestration

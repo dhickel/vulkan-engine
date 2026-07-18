@@ -25,6 +25,7 @@ Core path map is in `src/renderer/src/shaders/core_shader_manifest.txt`.
 ## Current Focus Areas
 
 - PBR and unlit material paths (`material_pbr.frag`, `material_unlit.frag`)
+- Directional shadow depth and sampling path (`shadow_depth.vert`, `shadow_depth.frag`, PBR scene binding 5)
 - Environment/IBL generation (`env_irradiance_cube.frag`, `env_prefilter_cube.frag`, `gen_brd_flut.*`)
 - Skybox path (`skybox.vert`, `skybox.frag`)
 

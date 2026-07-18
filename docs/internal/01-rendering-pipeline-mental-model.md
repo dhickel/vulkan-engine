@@ -14,7 +14,8 @@ Current end-to-end flow:
   - `VkRenderCore::draw_imgui(...)` creates the frame UI and delegates to `DebugUiManager`.
   - `DebugUiManager` composes built-in views, registered custom views, and console windows.
 - Descriptor/pipeline ABI is a contract between shader layouts and draw code.
-- Scene graph is CPU-side structure; it is not directly GPU render state.
+- Material resolution copies `CopiedMaterialDrawRecord` while cache guards are held; frame draw objects do not retain cache-owned raw pointers.
+- Scene graph is CPU-side structure; it is not directly GPU render state. New scenes cull by default with transform-aware proxy AABBs and independently test descendants.
 - Template contract reference: `docs/internal/00-index.md` (mandatory 10-section order).
 
 ## 4. Code Walkthrough
@@ -69,6 +70,7 @@ for pass in ordered_passes:
   pass.execute(submission, frame)
 submit(wait acquire_semaphore, signal render_semaphore)
 present(wait render_semaphore)
+# If recording fails after acquisition: reset/record drain -> submit -> retire present sync/image
 ```
 
 ## 5. Best Practices
@@ -81,7 +83,8 @@ present(wait render_semaphore)
 - Reordering passes without transition updates can produce undefined image layouts.
 - Descriptor layout drift vs shader expectations can cause silent draw corruption.
 - Treating scene nodes as direct GPU objects bypasses cache and handle validation rules.
-- Pipeline bucketing changes in geometry draw path have known correctness risk.
+- Pipeline bucketing changes in geometry draw path have known correctness risk; copying new material fields outside the cache guard reintroduces a lifetime hazard.
+- Any early return after frame-fence reset must preserve the drain-transaction contract or the next frame-slot reuse can deadlock.
 
 ## 7. Debugging Playbook
 - Step 1: confirm `RenderSubmission` contains expected draw items and flags.

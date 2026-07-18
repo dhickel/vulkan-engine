@@ -11,9 +11,11 @@ Current flow:
 - Current state is linear pass execution, not dependency-derived scheduling.
 - `RenderGraph` only stores ordered `Vec<Box<dyn RenderPassNode>>`; it does not compute a DAG.
 - Pass dependencies are mostly implicit through image layout/state carryover:
-  - draw/depth target preparation must happen before skybox/geometry.
+  - draw/depth target preparation must happen before shadow/skybox/geometry.
+  - `ShadowPass` must finish its D32 depth write and shader-read transition before PBR geometry samples scene binding 5.
   - present image transition path differs depending on whether draw targets are used.
-  - `ImguiPass` is responsible for final `COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR` handoff.
+  - `DebugCapturePass` reads due draw/present captures after UI recording.
+  - `TerminalPresentPass` owns the final windowed `COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR` handoff; it is a no-op headless.
 - Resource aliasing is not implemented today:
   - no lifetime analysis for transient attachments
   - no allocator-level rendergraph alias planner
@@ -26,10 +28,13 @@ Snippet Type: Real
 pub fn default_graph() -> Self {
     Self::new(vec![
         Box::new(PrepareTargetsPass),
+        Box::new(ShadowPass),
         Box::new(SkyboxPass),
         Box::new(GeometryPass),
         Box::new(PresentCopyPass),
         Box::new(ImguiPass),
+        Box::new(DebugCapturePass),
+        Box::new(TerminalPresentPass),
     ])
 }
 
@@ -60,10 +65,13 @@ Current pass contract and transition ownership matrix:
 | Pass | Reads | Writes | Required incoming state | Outgoing state guarantee |
 |---|---|---|---|---|
 | `PrepareTargetsPass` | submission flags | `frame.draw.image`, `frame.depth.image` layouts | none | draw in `COLOR_ATTACHMENT_OPTIMAL`, depth in `DEPTH_ATTACHMENT_OPTIMAL` when `has_draw_targets()` |
+| `ShadowPass` | optional directional light + opaque resolved draws | frame-slot D32 shadow image | prior contents discarded | shadow map in `SHADER_READ_ONLY_OPTIMAL` for PBR sampling |
 | `SkyboxPass` | skybox mesh/material/env descriptors | draw color attachment | draw image already in `COLOR_ATTACHMENT_OPTIMAL` | draw color attachment remains renderable for later passes |
-| `GeometryPass` | submission draw items + cache-resolved mesh/material data | draw color + depth | draw color in `COLOR_ATTACHMENT_OPTIMAL`, depth in `DEPTH_ATTACHMENT_OPTIMAL` | draw color/depth complete, draw color still in `COLOR_ATTACHMENT_OPTIMAL` |
-| `PresentCopyPass` | draw image when enabled | present image layout + copy/blit result | if draw path: draw color in `COLOR_ATTACHMENT_OPTIMAL`; present image available as acquired image | present image in `COLOR_ATTACHMENT_OPTIMAL` for ImGui |
-| `ImguiPass` | imgui draw data + submission flag | present image + final present transition | present image in `COLOR_ATTACHMENT_OPTIMAL` | present image in `PRESENT_SRC_KHR` |
+| `GeometryPass` | submission draw items + copied material records + scene shadow descriptor | draw color + depth | draw/depth attachments prepared; shadow map shader-readable | draw color/depth complete, draw color still in `COLOR_ATTACHMENT_OPTIMAL` |
+| `PresentCopyPass` | draw image when enabled | present image layout + copy/blit result | if draw path: draw color in `COLOR_ATTACHMENT_OPTIMAL`; present image available as acquired/offscreen image | present image in `COLOR_ATTACHMENT_OPTIMAL` for UI/capture |
+| `ImguiPass` | optional imgui draw data | present image | present image in `COLOR_ATTACHMENT_OPTIMAL` | present image remains `COLOR_ATTACHMENT_OPTIMAL`; headless/no-context path records no dynamic rendering region |
+| `DebugCapturePass` | due capture requests + draw/present image | readback commands/status | source image rendered | due requests consumed before submit |
+| `TerminalPresentPass` | present image | present image layout | windowed present image in `COLOR_ATTACHMENT_OPTIMAL` | windowed image in `PRESENT_SRC_KHR`; headless unchanged |
 
 Snippet Type: Pseudocode
 ```text
@@ -86,7 +94,8 @@ for pass in order:
 - Treat pass order as ABI until dependency metadata exists.
 - Keep transition ownership local and explicit:
   - prepare pass owns draw/depth prep.
-  - present-copy/imgui passes own present image transitions.
+  - shadow pass owns D32 attachment-to-sampled transitions.
+  - present-copy owns the renderable present layout and terminal-present owns the final swapchain handoff.
 - When adding a pass, document:
   - required incoming layout/state
   - produced outgoing layout/state
@@ -98,7 +107,8 @@ for pass in order:
   - a pass may seem independent but still requires a specific prior transition.
 - Incorrect reorder assumptions:
   - moving `GeometryPass` before `PrepareTargetsPass` breaks attachment layout expectations.
-  - moving `ImguiPass` earlier can break final present handoff.
+  - moving `ShadowPass` after `GeometryPass` makes geometry sample stale/unwritten shadow data.
+  - moving `DebugCapturePass` after `TerminalPresentPass` invalidates present-image readback assumptions.
 - Aliasing proposals without synchronization/lifetime analysis can create write-after-read and read-after-write hazards.
 - Branch-dependent present path:
   - `has_draw_targets() == false` bypasses draw image and still requires present image transition for ImGui/present.
@@ -111,6 +121,7 @@ for pass in order:
   - `copy_draw_to_present(...)`
   - `prepare_present_color_attachment(...)`
   - `transition_present_for_present(...)`
+  - `ShadowPass::execute(...)`
 - Step 4: if validation reports layout hazards, map the failing image to pass boundary ownership from the matrix above.
 - Step 5: reproduce with fixed scene flags (all on vs all off) to isolate branch-specific dependency gaps.
 

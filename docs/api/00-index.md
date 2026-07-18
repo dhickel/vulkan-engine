@@ -16,7 +16,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 |-------|----------|-------------------|
 | First frame | [01-quickstart.md](01-quickstart.md) | Window → Renderer → Scene → loop |
 | Renderer lifecycle | [02-renderer.md](02-renderer.md) | `Renderer::new`, frame API, resize, hooks |
-| Scene construction | [03-scene-graph-and-fragment-workflows.md](03-scene-graph-and-fragment-workflows.md) | `Scene`, fragments, transforms, lights, persistence, editor commands |
+| Scene construction | [03-scene-graph-and-fragment-workflows.md](03-scene-graph-and-fragment-workflows.md) | `Scene`, fragments, transforms, default-on culling, directional shadows, persistence, editor commands |
 | Asset loading | [04-assets-sync-deferred-and-handles.md](04-assets-sync-deferred-and-handles.md) | `AssetManager`, packages, durable IDs, load tickets, models, environments |
 | Render hooks | [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md) | `RenderHook`, `RenderHookContext`, extension points |
 | Input system | [06-input.md](06-input.md) | `InputSystem`, layers, action maps, snapshots |
@@ -132,6 +132,15 @@ event_loop.run(move |event, control_flow| {
     }
 })?;
 ```
+
+## Culling and Directional Shadow Defaults
+
+New `Scene` values enable frustum culling by default. Call
+`scene.set_frustum_culling(false)` only for diagnostics or content whose geometry
+extends beyond the current node proxy bounds. A scene may own one
+`DirectionalLight`; PBR materials use it with one fixed 2048² frame-local shadow
+map. Shadow resolution, filtering, cascades, and per-light shadow toggles are not
+publicly configurable in this gate.
 
 ## Running Renderer Examples
 

@@ -1,98 +1,88 @@
 # Rendergraph — Pass Orchestration
 
-> Source: [`src/renderer/src/rendergraph/mod.rs`](../src/renderer/src/rendergraph/mod.rs), [`src/renderer/src/rendergraph/passes/`](../src/renderer/src/rendergraph/passes/) — no legacy docs consulted.
+> Source: [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs), [`src/renderer/src/rendergraph/passes/`](../../src/renderer/src/rendergraph/passes/).
 
 ## RenderPassNode Trait
 
-All passes implement this trait at [`rendergraph/mod.rs:31`](../src/renderer/src/rendergraph/mod.rs:31):
+The current rendergraph is a fixed sequential pass list. Every pass receives the frame submission, current `VkFrame`, and mutable `VkRenderCore` through `RenderGraphContext`:
 
 ```rust
 pub trait RenderPassNode {
     fn name(&self) -> &'static str;
-    fn execute(
-        &mut self,
-        ctx: &mut RenderGraphContext,
-        core: &VkRenderCore,
-        frame_idx: usize,
-    ) -> Result<(), RendererError>;
-
-    // Attachment transitions
-    fn input_attachment_transitions(&self) -> Vec<AttachmentTransition>;
-    fn output_attachment_transitions(&self) -> Vec<AttachmentTransition>;
+    fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String>;
 }
 ```
 
-Each pass records Vulkan commands into the current frame's command buffer (accessible via `core.current_command_buffer(frame_idx)`).
+The module is public only with the `advanced-interop` feature. That exposure is alpha-unstable and does not provide safe public pass registration; mutable core access can violate synchronization and descriptor contracts.
 
 ## Default Pass Chain
 
 ```rust
-// rendergraph/mod.rs
 RenderGraph::new(vec![
-    Box::new(PrepareTargetsPass),   // step 1
-    Box::new(SkyboxPass),           // step 2
-    Box::new(GeometryPass),         // step 3
-    Box::new(PresentCopyPass),      // step 4
-    Box::new(ImguiPass),            // step 5
+    Box::new(PrepareTargetsPass),
+    Box::new(ShadowPass),
+    Box::new(SkyboxPass),
+    Box::new(GeometryPass),
+    Box::new(PresentCopyPass),
+    Box::new(ImguiPass),
+    Box::new(DebugCapturePass),
+    Box::new(TerminalPresentPass),
 ])
 ```
 
-Passes execute sequentially — no parallel execution or automatic dependency resolution. Attachment transitions declare layout changes between passes.
+Passes execute in this exact order. There is no dependency-derived scheduling or transient attachment alias planner.
 
 ### 1. PrepareTargetsPass
 
-Sets up the color and depth attachments for the frame:
-- Transitions swapchain image to `COLOR_ATTACHMENT_OPTIMAL`
-- Creates/transitions depth buffer
-- Clears color (to sky color or black) and depth (to 1.0)
+Transitions the offscreen draw/depth targets into writable attachment layouts when the submission has draw work.
 
-### 2. SkyboxPass
+### 2. ShadowPass
 
-Renders the environment cubemap as a full-screen skybox:
-- Uses `skybox.vert` + `skybox.frag` shaders
-- Samples the prefiltered environment cubemap
-- Writes to the color attachment with depth test enabled (writes to far plane)
+For one optional scene directional light, resolves opaque draw objects, fits a conservative light-space orthographic volume, clears/records the current frame slot's 2048² D32 map, and transitions it to shader-read layout. PBR geometry samples this map from scene set 0 binding 5 with fixed 3×3 comparison PCF.
 
-### 3. GeometryPass
+### 3. SkyboxPass
 
-The primary draw pass:
-- Iterates `RenderSubmission::render_objects`
-- For each `RenderObject`:
-  - Binds the mesh vertex/index buffers (via buffer device address)
-  - Binds the material descriptor set (textures + PBR params)
-  - Sets push constants (`VkModelPushConsts` — model matrix, buffer addresses, joint count)
-  - Issues `vkCmdDrawIndexed`
-- Uses `pbr_base.vert` + `material_pbr.frag` (or `material_unlit.frag` in unlit mode)
-- Supports GPU skinning via joint buffer + `joint_count` in push constants
+Renders the selected environment into the draw color target.
 
-### 4. PresentCopyPass
+### 4. GeometryPass
 
-Copies the rendered color attachment to the swapchain image for presentation:
-- Image layout transitions
-- `vkCmdBlitImage` or `vkCmdCopyImage` (depending on format compatibility)
+Resolves mesh handles and copies material binding fields under cache guards into `CopiedMaterialDrawRecord`. It partitions opaque/masked/blended lists, binds scene/skin/material descriptor sets, pushes model and GPU-address data, and records indexed PBR or unlit draws. Blended objects are sorted back-to-front.
 
-### 5. ImguiPass
+### 5. PresentCopyPass
 
-Renders the imgui draw data:
-- Uploads font atlas
-- Records imgui draw commands (vertex/index buffers, texture bindings)
-- Does not use `VkRenderPass` — uses dynamic rendering
+Copies/blits the offscreen draw image into the present image, or prepares a present color attachment when no draw target path ran. Its outgoing state is suitable for optional UI and capture.
 
-## Adding Custom Passes
+### 6. ImguiPass
 
-The `rendergraph` module is currently **private** (`mod rendergraph;` in `lib.rs`). Users cannot add custom passes through the public API. The `advanced-interop` feature gate exposes `Renderer::raw_core_mut() -> &mut VkRender` but this is documented as unsafe/internal-use-only.
+Records ImGui dynamic rendering only when the submission requests UI and a context exists. Headless rendering has no ImGui context, so this pass records no unmatched begin/end rendering region.
 
-To add a pass internally:
-1. Create a struct implementing `RenderPassNode`
-2. Add it to the `RenderGraph::new()` vec in the desired order
-3. Ensure attachment transitions are correct — wrong transitions cause validation errors
+### 7. DebugCapturePass
 
-## Attachment Aliasing
+Consumes due draw/present capture requests and records readback commands before submission.
 
-The rendergraph supports attachment aliasing (reusing the same GPU memory for different attachments across passes). This is configured via `AttachmentTransition` descriptors. Currently, the default pass chain doesn't alias heavily — each pass writes to the same color attachment.
+### 8. TerminalPresentPass
+
+Transitions a windowed present image to `PRESENT_SRC_KHR`. It is a no-op for headless offscreen present images.
+
+## Adding or Reordering Passes
+
+Internal pass changes must update all of the following together:
+
+1. fixed order in `RenderGraph::default_graph()`;
+2. incoming/outgoing image layouts and stage/access masks;
+3. scene descriptor and shader ABI when a pass adds sampled resources;
+4. frame-transaction failure behavior for any new fallible recording path;
+5. focused validation-layer headless capture evidence.
+
+Do not treat `RenderGraph::new` as a safe application extension API. It accepts unrestricted pass objects but performs no resource declaration, topological sort, hazard analysis, or synchronization validation.
+
+## Resource Aliasing
+
+Rendergraph resource aliasing is not implemented. Frame draw/depth, present, and directional shadow images have explicit owners and frame-slot lifetimes. Any future alias planner requires resource declarations, lifetime analysis, and hazard-aware scheduling before allocations can be shared safely.
 
 ## See Also
 
-- [02-renderer-internals.md](02-renderer-internals.md) — where rendergraph fits in frame loop
-- [08-shaders.md](08-shaders.md) — shaders used by each pass
-- [src/renderer/src/rendergraph/mod.rs](../src/renderer/src/rendergraph/mod.rs) — implementation
+- [02-renderer-internals.md](02-renderer-internals.md) — frame lifecycle
+- [07-rendergraph-dependencies-and-aliasing.md](07-rendergraph-dependencies-and-aliasing.md) — current transition ownership and future graph direction
+- [08-shaders.md](08-shaders.md) — shader and descriptor contracts
+- [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) — implementation

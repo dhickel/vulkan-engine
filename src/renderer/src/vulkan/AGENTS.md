@@ -9,6 +9,7 @@ This module owns:
 - Vulkan initialization (`vk_init.rs`)
 - core ownership/destroy/frame structs (`vk_types.rs`)
 - render loop orchestration (`vk_render.rs`)
+- directional shadow resources and light-volume fitting (`vk_shadow.rs`)
 - descriptor systems (`vk_descriptor.rs`)
 - pipeline creation (`vk_pipeline.rs`)
 - memory/suballocation (`vk_storage.rs`)
@@ -20,9 +21,9 @@ This module owns:
 `VkRender::render(...)` performs:
 
 1. transfer polling and completion handling
-2. frame acquire/reset
-3. rendergraph pass execution
-4. submit/present
+2. frame-slot wait/cleanup and image acquisition
+3. rendergraph execution, including the frame-local directional shadow pass
+4. submit/present, or a drain transaction when recording fails after acquisition
 
 ## Documentation Routing
 
@@ -43,8 +44,8 @@ This module owns:
 
 ## Working Rules
 
-- Keep synchronization/transition ordering explicit when modifying frame logic.
-- Keep descriptor set ordering aligned with shader and pipeline contracts.
+- Keep synchronization/transition ordering explicit when modifying frame logic. Any post-acquire failure after fence reset must retire the fence and acquired semaphore/image state.
+- Keep descriptor set ordering aligned with shader and pipeline contracts; scene set 0 binding 5 is the per-frame comparison shadow map.
 - Validate major changes with renderer checks and bounded runtime smoke.
 - If docs and code diverge, treat code as logical truth and record the divergence.
 

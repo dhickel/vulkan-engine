@@ -39,14 +39,14 @@ Related runtime files:
 
 ## Current Risks
 
-- Raw material pointer lifetime assumptions exist in draw-path objects.
+- Draw-path material bindings are copied into `CopiedMaterialDrawRecord` while the texture-cache lock is held; adding fields without preserving that copy boundary can reintroduce a lifetime hazard.
 - Render bucketing correctness remains sensitive to ordering assumptions.
 - Unchecked deallocation paths can violate default-slot/handle invariants.
 
 ## Working Rules
 
 - Preserve stable handle invariants unless migration updates all consumers.
-- Do not mutate cache storage in ways that invalidate active frame pointers.
+- Keep cache-owned addresses out of frame draw objects; copy only required material binding data under the cache guard.
 - Keep default-slot contracts explicit in any allocation/deallocation edits.
 - If docs and code diverge, treat code as logical truth and record the divergence.
 

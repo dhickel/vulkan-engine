@@ -26,7 +26,7 @@ Implemented:
 - Package-relative paths are normalized deterministically and resolved against the manifest directory or caller-provided package base.
 - `AssetManager` exposes package loading, asset listing, asset record lookup, ID resolution, and ID-based model/prefab/texture/environment load requests.
 - The editor opens project manifests, loads enabled package manifests, lists package records, and places model/prefab/wall chunk records through command-backed scene mutation.
-- `FileWatcher` path invalidation continues to clear path-handle maps and now removes durable records associated with that changed path.
+- `AssetRegistry::invalidate_path` clears path-handle maps and durable records associated with a changed path. The obsolete standalone `FileWatcher` module was removed; automatic hot-reload orchestration remains deferred.
 
 Deferred:
 
@@ -141,7 +141,7 @@ on Ready(fragment):
 - `NotLoaded` means a handle is valid but promotion has not completed.
 - `StaleHandle` means generation mismatch after slot reuse.
 - `OutOfBounds` means invalid slot index.
-- Mutating cache storage during render consumption can invalidate raw material pointers in `RenderObject`.
+- `RenderObject` now owns a `CopiedMaterialDrawRecord` captured while the texture-cache lock is held. New draw-time material fields must be copied under that same guard; storing cache-owned addresses would reintroduce the removed lifetime hazard.
 - Assuming the legacy `src/renderer/src/data/gltf_util.rs` path is active is incorrect; Assimp path is current.
 
 ## 7. Debugging Playbook

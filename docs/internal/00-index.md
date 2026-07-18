@@ -21,10 +21,13 @@ Renderer (public API)
   └── VkRender (Vulkan frame loop)
         └── RenderGraph (pass orchestration)
               ├── PrepareTargetsPass
+              ├── ShadowPass
               ├── SkyboxPass
               ├── GeometryPass
               ├── PresentCopyPass
-              └── ImguiPass
+              ├── ImguiPass
+              ├── DebugCapturePass
+              └── TerminalPresentPass
 ```
 
 ## Reading Order
@@ -49,10 +52,11 @@ Renderer (public API)
 | File | Role |
 |------|------|
 | [`src/renderer/src/api/renderer.rs`](../../src/renderer/src/api/renderer.rs) | Public API facade |
-| [`src/renderer/src/vulkan/vk_render.rs`](../../src/renderer/src/vulkan/vk_render.rs) | Vulkan frame orchestration (~3862 lines) |
+| [`src/renderer/src/vulkan/vk_render.rs`](../../src/renderer/src/vulkan/vk_render.rs) | Vulkan frame transactions, rendergraph orchestration, submit/present, and terminal-error classification |
 | [`src/renderer/src/data/data_cache.rs`](../../src/renderer/src/data/data_cache.rs) | Mesh/texture/material caches (~2475 lines) |
 | [`src/renderer/src/scene/scene_world.rs`](../../src/renderer/src/scene/scene_world.rs) | Scene graph and submission builder |
-| [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) | Render graph and pass trait |
+| [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) | Fixed rendergraph order and pass trait |
+| [`src/renderer/src/vulkan/vk_shadow.rs`](../../src/renderer/src/vulkan/vk_shadow.rs) | Frame-local directional shadow resources and light-space fitting |
 | [`src/input/src/lib.rs`](../../src/input/src/lib.rs) | Input system (single file) |
 | [`src/events/src/lib.rs`](../../src/events/src/lib.rs) | Event contracts, staged bus, recorder |
 | [`src/physics/src/lib.rs`](../../src/physics/src/lib.rs) | Renderer-independent alpha physics API, Rapier wrapper, event bridge |

@@ -19,7 +19,7 @@ Primary entrypoint type exports are in `src/renderer/src/lib.rs` and `src/render
 1. Example constructs `Renderer`.
 2. App updates input and scene each frame.
 3. Scene emits `RenderSubmission`.
-4. `VkRender` executes rendergraph and submits/presents.
+4. `VkRender` executes `PrepareTargets -> Shadow -> Skybox -> Geometry -> PresentCopy -> Imgui -> DebugCapture -> TerminalPresent`, then submits/presents.
 
 ## Documentation Routing
 
@@ -42,8 +42,8 @@ Module guides:
 
 - `src/renderer/src/vulkan/vk_render.rs`: highest blast radius orchestration.
 - `src/renderer/src/data/data_cache.rs`: handle validity and lifetime-sensitive caches.
-- render-path correctness is sensitive to descriptor/pipeline binding order.
-- some destroy paths remain incomplete (`todo!()`).
+- render-path correctness is sensitive to descriptor/pipeline binding order, especially scene binding 5 for the frame-local directional shadow map.
+- material draw records must remain by-value copies made while the texture-cache lock is held; do not reintroduce cache-owned raw pointers.
 
 ## Working Rules
 
@@ -61,6 +61,7 @@ Module guides:
 - `cargo run -p renderer --example demo_model_load`
 - `cargo run -p renderer --example demo_async_loading`
 - `cargo run -p renderer --example capture_culling -- --headless --culling=on`
+- `cargo run -p renderer --example capture_shadows -- --headless`
 
 ## Headless Capture Validation
 

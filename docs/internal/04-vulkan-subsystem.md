@@ -8,13 +8,14 @@
 |------|------|-------|
 | `mod.rs` | Module declarations | — |
 | `vk_init.rs` | Instance, device, swapchain, queues, allocators, surface | — |
-| `vk_render.rs` | Frame orchestration, `VkRenderCore`, `VkRender` | ~3862 |
+| `vk_render.rs` | Frame transactions, `VkRenderCore`, rendergraph execution, submit/present | — |
+| `vk_shadow.rs` | Per-frame D32 directional shadow resources and light-volume fitting | — |
 | `vk_descriptor.rs` | Descriptor layout builder, dynamic allocator, writer | — |
-| `vk_pipeline.rs` | Pipeline creation, shader stages, pipeline layout | — |
+| `vk_pipeline.rs` | Geometry/skybox/environment/shadow pipeline creation | — |
 | `vk_storage.rs` | Buffer/image allocation, sub-allocation, staging | — |
-| `vk_types.rs` | Wrapper types for Vulkan handles | — |
-| `vk_util.rs` | Command buffer helpers, barrier utilities | — |
-| `vk_debug.rs` | Validation layer setup, debug utils | — |
+| `vk_types.rs` | Vulkan ownership wrappers and scene descriptor sets | — |
+| `vk_util.rs` | Command buffer, allocation, upload, and barrier helpers | — |
+| `vk_debug.rs` | Validation callback support | — |
 
 ## Initialization Sequence
 
@@ -43,7 +44,7 @@ Requested at [`vk_init.rs:33-45`](../../src/renderer/src/vulkan/vk_init.rs#L33-L
 
 ### Validation
 
-Debug builds enable `VK_LAYER_KHRONOS_validation` with `VK_EXT_debug_utils` callback. Production builds (or `validation_layer: false`) skip validation layers entirely.
+Validation is controlled by `RendererConfig::validation_layer`, not build profile. When enabled, the renderer requests `VK_LAYER_KHRONOS_validation` and a debug-utils callback. The opt-in ignored GPU smoke and validation-enabled dogfood smoke exercise this path; CPU CI does not require a GPU.
 
 ## Frame Orchestration (`vk_render.rs`)
 
@@ -53,19 +54,9 @@ Owns all Vulkan state: device, queues, swapchain, allocators, command pools, des
 
 ### `VkRender`
 
-Wraps `VkRenderCore` with a `RenderGraph`. This is the type that `api/renderer.rs` interacts with:
+Wraps `VkRenderCore` with the default `RenderGraph` and a shared backend-health state. Facade operations enter through an unwind-aware guard. The first classified device-loss operation maps to `RendererError::DeviceLost`; later backend operations after terminal failure or unwind map to `BackendPoisoned`.
 
-```rust
-pub fn render_with_hooks(
-    &mut self,
-    submission: &RenderSubmission,
-    swapchain_image_view: vk::ImageView,
-    pre_hook: Option<&mut RenderHook>,
-    post_hook: Option<&mut RenderHook>,
-    frame_index: u64,
-    viewport_size: (u32, u32),
-) -> Result<(), RendererError>
-```
+The frame path returns a typed internal `VkFrameRenderOutcome`, preserving rendered, resize-skipped, submitted-not-presented, and presented-suboptimal states for facade mapping.
 
 ### Frame Ring Buffer
 
@@ -99,18 +90,16 @@ FrameData {
 
 ### Descriptor Set Layouts
 
-Three main layouts:
-1. **Material** — combined image samplers for PBR textures + uniform buffer for material params
-2. **Environment** — combined image sampler for skybox + uniform buffer for `EnvironmentUBO`
-3. **Per-frame** — uniform buffer for camera matrices, SSBO for joint transforms
+Active draw layouts are kept distinct:
+1. **Scene set (set 0)** — camera UBO, environment/light UBO, irradiance/prefilter/BRDF samplers, and per-frame comparison shadow sampler at binding 5.
+2. **Skin set (set 1)** — joint-matrix UBO.
+3. **Material set (set 2)** — PBR texture samplers; material metadata is supplied through the draw push-constant record.
+
+`VkSceneDescriptors` allocates one scene set and aligned scene/environment UBO slots per frame. Each set references the shadow image owned by the same frame slot.
 
 ## Pipeline Management (`vk_pipeline.rs`)
 
-Pipeline creation is shader-driven. Each shader pair (`.vert` + `.frag` SPIR-V) defines a pipeline with:
-- Vertex input state (matches `Vertex` struct at [`gpu_data.rs:36`](../../src/renderer/src/data/gpu_data.rs#L36))
-- Dynamic rendering state (color + depth attachment formats)
-- Depth/stencil state (depth test enabled, depth write enabled, `LESS` compare op)
-- Pipeline layout (derived from descriptor set layouts + push constant ranges)
+Pipeline creation is shader-driven. Geometry uses buffer-device-address vertex pulling, scene/skin/material descriptor layouts, dynamic rendering, depth testing, and material push constants. The directional shadow pipeline is depth-only, uses the D32 attachment format, and receives an 80-byte light-model-view-projection plus vertex-address push-constant block.
 
 ## Memory Allocation (`vk_storage.rs`)
 
@@ -123,10 +112,11 @@ The sub-allocator grows by allocating new backing `VkBuffer`s when full. Individ
 
 ## Known Sharp Edges
 
-- **Swapchain image view leak**: old views not destroyed on resize ([`vk_render.rs:1154`](../../src/renderer/src/vulkan/vk_render.rs#L1154))
-- **`todo!()` destroy paths**: several Vulkan wrapper types have incomplete `Drop` implementations
-- **`unwrap()` in production paths**: descriptor allocation, command buffer recording, and window handle extraction use `unwrap()` where errors should propagate; this remains a residual candidate for alpha readiness classification in the [alpha readiness baseline](../gap-report.md).
-- **Push constant size**: skybox push constants may exceed 128-byte minimum (`// FIXME` at [`gpu_data.rs:628`](../../src/renderer/src/data/gpu_data.rs#L628))
+- **Frame transaction boundary**: after fence reset, every recording failure must record and submit a drain; windowed acquisition also has to retire the acquired image and both binary semaphores.
+- **Terminal backend policy**: device loss is classified but not recovered. Hosts must recreate the renderer after `DeviceLost` or `BackendPoisoned`.
+- **Shadow ABI**: scene binding 5, the 656-byte Rust/GLSL `EnvironmentUBO`, D32 layout transitions, and the fixed 3×3 PCF comparison contract must change together.
+- **Material lifetime**: `RenderObject` owns a copied material draw record. Reintroducing cache-owned raw pointers would make cache mutation a frame lifetime hazard.
+- **Push constant portability**: skybox push constants exceed Vulkan's 128-byte minimum guarantee; current target desktop devices expose sufficient capacity, but this remains a portability caveat.
 
 ## See Also
 
