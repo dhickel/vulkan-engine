@@ -24,9 +24,9 @@
 //! 3. At frame start: reset all pools, move full_pools back to ready_pools
 //!
 //! ## Descriptor Lifetime
-//! Descriptors only need to live until vkQueueSubmit (not until GPU completes).
-//! Frame-based reset works because descriptors consumed during command recording,
-//! not execution.
+//! Descriptor sets referenced by submitted command buffers remain valid until GPU execution
+//! completes. Frame-based reset is safe only after the owning frame-slot fence signals and
+//! `CompletedFrameSlot` authorizes that slot's reset.
 
 use crate::data::data_cache;
 use crate::data::data_cache::VkDescType;
