@@ -2,8 +2,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
-use ash::vk;
-
 use super::config::FrameCaptureConfigError;
 use crate::scene::scene_world::SceneNodeId;
 
@@ -427,41 +425,18 @@ pub(crate) fn map_frame_input_err(err: impl Into<String>) -> RendererError {
     RendererFrameError::Input(err.into()).into()
 }
 
-pub(crate) fn map_frame_resize_err(err: impl Into<String>) -> RendererError {
-    RendererFrameError::Resize(err.into()).into()
-}
-
 pub(crate) fn map_frame_render_err(err: impl Into<String>) -> RendererError {
     RendererFrameError::Render(err.into()).into()
 }
 
+// future error mapping helpers
+#[allow(dead_code)]
 pub(crate) fn map_asset_err(err: impl Into<String>) -> RendererError {
     AssetError::Internal(err.into()).into()
 }
 
+// future error mapping helpers
+#[allow(dead_code)]
 pub(crate) fn map_hook_err(err: impl Into<String>) -> RendererError {
     HookError::Invocation(err.into()).into()
-}
-
-/// Convert an `ash::vk::Result` to a `RendererError`.
-/// Returns `Ok(())` on VK_SUCCESS; maps VK_ERROR_DEVICE_LOST to `DeviceLost`;
-/// maps all other errors to `RendererFrameError::Render`.
-pub(crate) fn map_vk_result(result: vk::Result, context: impl Into<String>) -> Result<(), RendererError> {
-    use ash::vk::Result as VkResult;
-    match result {
-        VkResult::SUCCESS => Ok(()),
-        VkResult::ERROR_DEVICE_LOST => Err(RendererError::DeviceLost),
-        err => Err(RendererFrameError::Render(format!("{}: {:?}", context.into(), err)).into()),
-    }
-}
-
-/// Convert an `ash::vk::Result` from a queue operation to a `RendererError`.
-/// Same as `map_vk_result` but uses `RendererFrameError::Render` for non-device-lost.
-pub(crate) fn map_vk_queue_result(result: vk::Result, context: impl Into<String>) -> Result<(), RendererError> {
-    map_vk_result(result, context)
-}
-
-/// Map a `VkResult` that indicates the backend is now poisoned.
-pub(crate) fn poison_backend(err: impl Into<String>) -> RendererError {
-    RendererError::BackendPoisoned(err.into())
 }

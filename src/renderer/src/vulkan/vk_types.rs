@@ -3,6 +3,9 @@
 //! ## Purpose
 //! Core type definitions and abstractions for the entire rendering system. Every other module
 //! depends on these types. This file establishes the fundamental patterns used throughout the
+//!
+//! Internal Vulkan type definitions with many future-facing types; dead code allowed.
+#![allow(dead_code)]
 //! engine: RAII cleanup via VkDestroyable, frame-based resource management, and traditional
 //! Vulkan descriptor set allocation.
 //!
@@ -203,13 +206,13 @@ impl VkWindowState {
         &self.viewport_scissor.1
     }
 
-    pub fn center_cursor(&self, window: &winit::window::Window) {
+    pub fn center_cursor(&self, window: &winit::window::Window) -> Result<(), String> {
         window
             .set_cursor_position(LogicalPosition {
                 x: self.curr_extent.width / 2,
                 y: self.curr_extent.height / 2,
             })
-            .expect("Errored centering cursor");
+            .map_err(|err| format!("failed to center cursor: {err}"))
     }
 }
 
@@ -1232,7 +1235,11 @@ impl VkDestroyable for VkTransfer {
         self.transfer_pool.destroy(device, allocator);
         self.host_buffers
             .iter()
-            .for_each(|buf| buf.lock().unwrap().destroy(device, allocator));
+            .for_each(|buf| {
+                buf.lock()
+                    .expect("transfer buffer lock poisoned during destroy")
+                    .destroy(device, allocator)
+            });
         self.host_buffers.clear();
     }
 }
@@ -1258,10 +1265,10 @@ impl VkImgui {
         }
     }
 
-    pub fn prepare_frame(&mut self, window: &winit::window::Window) {
+    pub fn prepare_frame(&mut self, window: &winit::window::Window) -> Result<(), String> {
         self.platform
             .prepare_frame(self.context.io_mut(), window)
-            .expect("Failed to prepare imgui frame");
+            .map_err(|err| format!("failed to prepare imgui frame: {err}"))
     }
 
     pub fn handle_event<T>(
@@ -1334,7 +1341,9 @@ pub struct ComputeData {
 
 impl ComputeData {
     pub fn get_current_effect(&self) -> &ComputeEffect {
-        self.effects.get(self.current as usize).unwrap()
+        self.effects
+            .get(self.current as usize)
+            .expect("current compute effect index must stay within effects")
     }
 }
 
@@ -1522,6 +1531,7 @@ impl VkDeletable {
 /// - Binding 2: Irradiance cubemap (image sampler)
 /// - Binding 3: Pre-filter cubemap (image sampler)
 /// - Binding 4: BRDF LUT (image sampler)
+/// - Binding 5: Per-frame directional shadow map (comparison sampler)
 ///
 /// ## Update Pattern
 /// update_scene_uniform() writes new SceneDataUBO each frame (camera movement).
@@ -1529,6 +1539,15 @@ impl VkDeletable {
 pub struct ShadowMapRef {
     pub image_view: vk::ImageView,
     pub sampler: vk::Sampler,
+}
+
+unsafe fn write_uniform_slot<T>(destination: *mut u8, value: &T, stride: usize) {
+    std::ptr::write_bytes(destination, 0, stride);
+    std::ptr::copy_nonoverlapping(
+        value as *const T as *const u8,
+        destination,
+        std::mem::size_of::<T>(),
+    );
 }
 
 pub struct VkSceneDescriptors {
@@ -1550,6 +1569,13 @@ impl VkSceneDescriptors {
         shadow_maps: &[ShadowMapRef],
         count: u32,
     ) -> Result<Self, String> {
+        if shadow_maps.len() != count as usize {
+            return Err(format!(
+                "scene descriptor shadow-map count mismatch: expected {count}, found {}",
+                shadow_maps.len()
+            ));
+        }
+
         let pool_ratios = vec![
             PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
@@ -1591,20 +1617,19 @@ impl VkSceneDescriptors {
             .map(|i| {
                 println!("Writing buffers: {}", i);
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &scene_data as *const SceneDataUBO as *const u8,
-                        scene_ptr.cast(),
+                    write_uniform_slot(
+                        scene_ptr,
+                        &scene_data,
                         scene_data_size as usize,
                     );
-
-                    std::ptr::copy_nonoverlapping(
-                        &env_maps.environment_ubo as *const EnvironmentUBO as *const u8,
-                        env_ptr.cast(),
+                    write_uniform_slot(
+                        env_ptr,
+                        &env_maps.environment_ubo,
                         env_data_size as usize,
                     );
 
                     scene_ptr = scene_ptr.add(scene_data_size as usize);
-                    env_ptr = env_ptr.add((env_data_size) as usize);
+                    env_ptr = env_ptr.add(env_data_size as usize);
                 }
 
                 let desc_set = descriptor_pool
@@ -1688,11 +1713,7 @@ impl VkSceneDescriptors {
             let mut data_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
             data_ptr = data_ptr.add((index as usize) * data_size);
 
-            std::ptr::copy_nonoverlapping(
-                &scene_data as *const SceneDataUBO as *const u8,
-                data_ptr.cast(),
-                data_size,
-            );
+            write_uniform_slot(data_ptr, &scene_data, data_size);
         }
 
         let mut writer = VkDescriptorWriter::default();
@@ -1725,20 +1746,12 @@ impl VkSceneDescriptors {
             // Update scene buffer
             let mut scene_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
             scene_ptr = scene_ptr.add((index as usize) * scene_data_size);
-            std::ptr::copy_nonoverlapping(
-                &scene_data as *const SceneDataUBO as *const u8,
-                scene_ptr.cast(),
-                scene_data_size,
-            );
+            write_uniform_slot(scene_ptr, &scene_data, scene_data_size);
 
             // Update env buffer
             let mut env_ptr = self.env_buffer.alloc_info.mapped_data as *mut u8;
             env_ptr = env_ptr.add((index as usize) * env_data_size);
-            std::ptr::copy_nonoverlapping(
-                &env_data as *const EnvironmentUBO as *const u8,
-                env_ptr.cast(),
-                env_data_size,
-            );
+            write_uniform_slot(env_ptr, &env_data, env_data_size);
         }
 
         let mut writer = VkDescriptorWriter::default();

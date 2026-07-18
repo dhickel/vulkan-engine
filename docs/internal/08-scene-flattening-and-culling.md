@@ -193,7 +193,7 @@ reason:
 - Sparse light slots:
   - Light extraction iterates active entries and clamps by count; assumptions based on dense slot indexing can cause confusing debugging expectations.
 - Proxy-bound limitations:
-  - The scene graph does not yet own CPU mesh bounds, so imported meshes use one-unit local proxies. False culls remain possible when actual geometry extends beyond that proxy.
+  - The scene graph does not yet own CPU mesh bounds, so imported meshes use one-unit local proxies. False culls remain possible when actual geometry extends beyond that proxy. `dungeon_dogfood` uses the public culling opt-out because its large chunk meshes can otherwise produce skybox-only captures.
   - A node proxy is not a subtree bound. Skipping recursive traversal when a parent proxy is outside can hide an in-frustum child.
 - Constant drift risk:
   - `MAX_POINT_LIGHTS_GPU` exists in both scene and GPU-data modules (`src/renderer/src/scene/scene_world.rs` and `src/renderer/src/data/gpu_data.rs`); mismatches would silently corrupt or truncate light upload behavior.

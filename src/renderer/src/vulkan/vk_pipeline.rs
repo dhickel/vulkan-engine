@@ -4,6 +4,9 @@
 //! Provides builder pattern for creating Vulkan graphics pipelines with dynamic rendering
 //! (Vulkan 1.3). No VkRenderPass objects - uses VkPipelineRenderingCreateInfo instead.
 //!
+//! Internal Vulkan pipeline builder; dead code allowed.
+#![allow(dead_code)]
+//!
 //! ## Key Concepts
 //! - **PipelineBuilder**: Fluent interface for pipeline creation
 //! - **Dynamic rendering**: VK_KHR_dynamic_rendering (core in Vulkan 1.3)
@@ -41,7 +44,7 @@ use crate::data::gpu_data::{
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
 /// Builder for Vulkan graphics pipelines with dynamic rendering.
 ///
@@ -70,6 +73,7 @@ pub struct PipelineBuilder<'a> {
     pub depth_stencil: vk::PipelineDepthStencilStateCreateInfo<'a>,
     pub render_info: vk::PipelineRenderingCreateInfo<'a>,
     pub color_attachment_format: [vk::Format; 1],
+    pub color_attachment_count: usize,
 }
 
 impl<'a> Default for PipelineBuilder<'a> {
@@ -84,6 +88,7 @@ impl<'a> Default for PipelineBuilder<'a> {
             depth_stencil: Default::default(),
             render_info: Default::default(),
             color_attachment_format: [vk::Format::UNDEFINED],
+            color_attachment_count: 1,
         }
     }
 }
@@ -99,6 +104,7 @@ impl<'a> PipelineBuilder<'a> {
         self.depth_stencil = Default::default();
         self.render_info = Default::default();
         self.color_attachment_format = [vk::Format::UNDEFINED];
+        self.color_attachment_count = 1;
     }
 
     /// Create VkPipeline from accumulated state.
@@ -126,7 +132,7 @@ impl<'a> PipelineBuilder<'a> {
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
             .logic_op(vk::LogicOp::COPY)
-            .attachments(&self.color_blend_attachment);
+            .attachments(&self.color_blend_attachment[..self.color_attachment_count]);
 
         // Empty vertex input state (vertex pulling via buffer device address)
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
@@ -134,9 +140,9 @@ impl<'a> PipelineBuilder<'a> {
         let state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&state);
 
-        let mut render_info = self
-            .render_info
-            .color_attachment_formats(&self.color_attachment_format);
+        let mut render_info = self.render_info.color_attachment_formats(
+            &self.color_attachment_format[..self.color_attachment_count],
+        );
 
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)
@@ -268,6 +274,7 @@ impl<'a> PipelineBuilder<'a> {
 
     pub fn set_color_attachment_format(mut self, format: vk::Format) -> Self {
         self.color_attachment_format = [format];
+        self.color_attachment_count = 1;
 
         // self.render_info = vk::PipelineRenderingCreateInfo::default()
         //     .color_attachment_formats(&self.color_attachment_format);
@@ -275,6 +282,11 @@ impl<'a> PipelineBuilder<'a> {
         // println!(":? {:?}", self.color_attachment_format);
         // println!(":? {:?}", self.render_info);
         //
+        self
+    }
+
+    pub fn disable_color_attachments(mut self) -> Self {
+        self.color_attachment_count = 0;
         self
     }
 
@@ -325,21 +337,21 @@ pub fn init_pipeline_cache(
     shader_cache: &VkShaderCache,
     draw_color_format: vk::Format,
     draw_depth_format: vk::Format,
-) -> VkPipelineCache {
+) -> Result<VkPipelineCache, String> {
     let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(
         device,
         desc_layout_cache,
         shader_cache,
         draw_color_format,
         draw_depth_format,
-    );
+    )?;
     let (unlit_opaque, unlit_alpha) = init_unlit_pipelines(
         device,
         desc_layout_cache,
         shader_cache,
         draw_color_format,
         draw_depth_format,
-    );
+    )?;
 
     let brd_flut_pipeline = init_brd_flut_pipeline(
         device,
@@ -347,7 +359,7 @@ pub fn init_pipeline_cache(
         shader_cache,
         draw_color_format,
         draw_depth_format,
-    );
+    )?;
 
     let skybox_pipeline = init_skybox_pipeline(
         device,
@@ -355,16 +367,18 @@ pub fn init_pipeline_cache(
         shader_cache,
         draw_color_format,
         draw_depth_format,
-    );
+    )?;
 
-    let env_irradiance_pipeline = init_irradiance_pipeline(device, desc_layout_cache, shader_cache);
+    let env_irradiance_pipeline =
+        init_irradiance_pipeline(device, desc_layout_cache, shader_cache)?;
 
-    let env_prefilter_pipeline = init_pre_filter_pipeline(device, desc_layout_cache, shader_cache);
+    let env_prefilter_pipeline =
+        init_pre_filter_pipeline(device, desc_layout_cache, shader_cache)?;
 
     let env_equirect_pipeline =
-        init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache);
+        init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache)?;
 
-    let shadow_depth_pipeline = init_shadow_depth_pipeline(device, desc_layout_cache, shader_cache);
+    let shadow_depth_pipeline = init_shadow_depth_pipeline(device, shader_cache)?;
 
     VkPipelineCache::new(vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
@@ -378,7 +392,6 @@ pub fn init_pipeline_cache(
         (VkPipelineType::EnvEquirectToCube, env_equirect_pipeline),
         (VkPipelineType::ShadowDepth, shadow_depth_pipeline),
     ])
-    .unwrap()
 }
 
 fn init_met_rough_pipelines(
@@ -387,9 +400,8 @@ fn init_met_rough_pipelines(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
-) -> (VkPipeline, VkPipeline) {
+) -> Result<(VkPipeline, VkPipeline), String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
-
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
 
     let matrix_range = [vk::PushConstantRange::default()
@@ -407,16 +419,13 @@ fn init_met_rough_pipelines(
         .set_layouts(&layouts)
         .push_constant_ranges(&matrix_range);
 
-    let layout = unsafe {
-        device
-            .create_pipeline_layout(&mesh_layout_info, None)
-            .unwrap()
-    };
+    let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
+        .map_err(|err| format!("failed to create PBR pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_color_attachment_format(color_format)
         .set_depth_format(depth_format)
@@ -427,18 +436,18 @@ fn init_met_rough_pipelines(
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
-    let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let opaque_pipeline = pipeline_builder.build_pipeline(device)?;
 
     let mut pipeline_builder = pipeline_builder
         .enable_blending_alpha_blend()
         .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
 
-    let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let transparent_pipeline = pipeline_builder.build_pipeline(device)?;
 
-    (
+    Ok((
         VkPipeline::new(opaque_pipeline, layout),
         VkPipeline::new(transparent_pipeline, layout),
-    )
+    ))
 }
 
 fn init_unlit_pipelines(
@@ -447,7 +456,7 @@ fn init_unlit_pipelines(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
-) -> (VkPipeline, VkPipeline) {
+) -> Result<(VkPipeline, VkPipeline), String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFragUnlit);
 
@@ -466,16 +475,13 @@ fn init_unlit_pipelines(
         .set_layouts(&layouts)
         .push_constant_ranges(&matrix_range);
 
-    let layout = unsafe {
-        device
-            .create_pipeline_layout(&mesh_layout_info, None)
-            .unwrap()
-    };
+    let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
+        .map_err(|err| format!("failed to create unlit pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_color_attachment_format(color_format)
         .set_depth_format(depth_format)
@@ -486,18 +492,18 @@ fn init_unlit_pipelines(
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
-    let opaque_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let opaque_pipeline = pipeline_builder.build_pipeline(device)?;
 
     let mut pipeline_builder = pipeline_builder
         .enable_blending_alpha_blend()
         .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
 
-    let transparent_pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let transparent_pipeline = pipeline_builder.build_pipeline(device)?;
 
-    (
+    Ok((
         VkPipeline::new(opaque_pipeline, layout),
         VkPipeline::new(transparent_pipeline, layout),
-    )
+    ))
 }
 
 fn init_brd_flut_pipeline(
@@ -506,7 +512,7 @@ fn init_brd_flut_pipeline(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     _depth_format: vk::Format,
-) -> VkPipeline {
+) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutVert);
 
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutFrag);
@@ -515,16 +521,13 @@ fn init_brd_flut_pipeline(
 
     let mesh_layout_info = vk_util::pipeline_layout_create_info().set_layouts(&layouts);
 
-    let layout = unsafe {
-        device
-            .create_pipeline_layout(&mesh_layout_info, None)
-            .unwrap()
-    };
+    let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
+        .map_err(|err| format!("failed to create BRDF LUT pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_color_attachment_format(color_format)
         .set_polygon_mode(vk::PolygonMode::FILL)
@@ -535,9 +538,9 @@ fn init_brd_flut_pipeline(
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
-    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let pipeline = pipeline_builder.build_pipeline(device)?;
 
-    VkPipeline::new(pipeline, layout)
+    Ok(VkPipeline::new(pipeline, layout))
 }
 
 fn init_skybox_pipeline(
@@ -546,7 +549,7 @@ fn init_skybox_pipeline(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     _depth_format: vk::Format,
-) -> VkPipeline {
+) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxFrag);
 
@@ -570,12 +573,13 @@ fn init_skybox_pipeline(
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
 
-    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        .map_err(|err| format!("failed to create skybox pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
@@ -585,16 +589,16 @@ fn init_skybox_pipeline(
         .disable_depth_test()
         .set_pipeline_layout(layout);
 
-    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let pipeline = pipeline_builder.build_pipeline(device)?;
 
-    VkPipeline::new(pipeline, layout)
+    Ok(VkPipeline::new(pipeline, layout))
 }
 
 fn init_irradiance_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> VkPipeline {
+) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvIrradianceFrag);
 
@@ -609,12 +613,13 @@ fn init_irradiance_pipeline(
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
 
-    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        .map_err(|err| format!("failed to create irradiance pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
@@ -624,16 +629,16 @@ fn init_irradiance_pipeline(
         .set_color_attachment_format(vk::Format::R32G32B32A32_SFLOAT) //Irradiance cubemap format
         .set_pipeline_layout(layout);
 
-    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let pipeline = pipeline_builder.build_pipeline(device)?;
 
-    VkPipeline::new(pipeline, layout)
+    Ok(VkPipeline::new(pipeline, layout))
 }
 
 fn init_pre_filter_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> VkPipeline {
+) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvPrefilterFrag);
 
@@ -648,12 +653,13 @@ fn init_pre_filter_pipeline(
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
 
-    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        .map_err(|err| format!("failed to create prefilter pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
@@ -663,16 +669,16 @@ fn init_pre_filter_pipeline(
         .set_color_attachment_format(vk::Format::R16G16B16A16_SFLOAT) //Prefilter cubemap format
         .set_pipeline_layout(layout);
 
-    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let pipeline = pipeline_builder.build_pipeline(device)?;
 
-    VkPipeline::new(pipeline, layout)
+    Ok(VkPipeline::new(pipeline, layout))
 }
 
 fn init_equirect_to_cube_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> VkPipeline {
+) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvEquirectToCubeFrag);
 
@@ -687,12 +693,13 @@ fn init_equirect_to_cube_pipeline(
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
 
-    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        .map_err(|err| format!("failed to create equirect pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
@@ -702,26 +709,24 @@ fn init_equirect_to_cube_pipeline(
         .set_color_attachment_format(vk::Format::R32G32B32A32_SFLOAT)
         .set_pipeline_layout(layout);
 
-    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let pipeline = pipeline_builder.build_pipeline(device)?;
 
-    VkPipeline::new(pipeline, layout)
+    Ok(VkPipeline::new(pipeline, layout))
 }
 
 /// Push constants for shadow depth pass (per-draw data).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PushConstShadowDepth {
-    pub model_matrix: glam::Mat4,
+    pub light_model_view_projection: glam::Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
-    pub joint_count: u32,
-    pub pad: u32,
+    pub _pad: [u32; 2],
 }
 
 fn init_shadow_depth_pipeline(
     device: &ash::Device,
-    desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> VkPipeline {
+) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthFrag);
 
@@ -732,29 +737,31 @@ fn init_shadow_depth_pipeline(
         .offset(0)
         .size(push_const_size)];
 
-    let layouts = [desc_layout_cache.get(VkDescType::ShadowMap)];
-
     let layout_info = vk_util::pipeline_layout_create_info()
-        .set_layouts(&layouts)
+        .set_layouts(&[])
         .push_constant_ranges(&push_constant_range);
 
-    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
+        .map_err(|err| format!("failed to create shadow pipeline layout: {err:?}"))?;
 
-    let entry = CString::new("main").unwrap();
+    let entry = c"main";
 
     let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_shaders(vert_shader, entry, frag_shader, entry)
         .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .set_polygon_mode(vk::PolygonMode::FILL)
         .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
         .set_multisample_none()
         .disable_blending()
         .set_depth_format(vk::Format::D32_SFLOAT)
-        .set_color_attachment_format(vk::Format::UNDEFINED)
+        .disable_color_attachments()
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
-    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+    let pipeline = pipeline_builder.build_pipeline(device).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
 
-    VkPipeline::new(pipeline, layout)
+    Ok(VkPipeline::new(pipeline, layout))
 }

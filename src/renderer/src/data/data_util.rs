@@ -2,6 +2,9 @@
 //!
 //! Shared helpers for image/format math and lightweight synchronization utilities used by
 //! upload workers and Vulkan transfer orchestration.
+//!
+//! Internal utility module with many future-facing helpers; dead code allowed.
+#![allow(dead_code)]
 
 use crate::data::gpu_data::Vertex;
 use ash::vk;

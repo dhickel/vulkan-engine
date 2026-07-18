@@ -4,6 +4,9 @@
 //! Orchestrates the full Vulkan initialization: Entry → Instance → Surface → Physical Device
 //! → Logical Device → Queues → Swapchain → Allocators → Command Pools → Sync Primitives.
 //!
+//! Internal Vulkan initialization; dead code allowed.
+#![allow(dead_code)]
+//!
 //! ## Initialization Order (Critical!)
 //! 1. **Entry**: Load Vulkan function pointers (ash::Entry::linked)
 //! 2. **Instance**: Create VkInstance with extensions (surface, debug utils)
@@ -76,15 +79,15 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
     layers_names_raw
 }
 
-pub fn get_winit_extensions(window: &winit::window::Window) -> Vec<*const c_char> {
-    ash_window::enumerate_required_extensions(
-        window
-            .display_handle()
-            .expect("failed to get window display handle")
-            .as_raw(),
-    )
-    .expect("failed to enumerate required Vulkan extensions")
-    .to_vec()
+pub fn get_winit_extensions(
+    window: &winit::window::Window,
+) -> Result<Vec<*const c_char>, String> {
+    let display = window
+        .display_handle()
+        .map_err(|err| format!("failed to get window display handle: {err}"))?;
+    ash_window::enumerate_required_extensions(display.as_raw())
+        .map(|extensions| extensions.to_vec())
+        .map_err(|err| format!("failed to enumerate required Vulkan extensions: {err:?}"))
 }
 
 // pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
@@ -118,13 +121,14 @@ pub fn init_instance(
 ) -> Result<(ash::Instance, Option<VkDebug>), String> {
     log::info!("Creating Vulkan Instance");
 
-    let app_name = CString::new(app_name).unwrap();
-    let engine_name = CString::new("Unnamed Engine: Alpha").unwrap();
+    let app_name = CString::new(app_name)
+        .map_err(|_| "application name contains an interior NUL byte".to_string())?;
+    let engine_name = c"Unnamed Engine: Alpha";
 
     let app_info = vk::ApplicationInfo::default()
         .application_name(app_name.as_c_str())
         .application_version(vk::make_api_version(0, 0, 1, 0))
-        .engine_name(engine_name.as_c_str())
+        .engine_name(engine_name)
         .engine_version(vk::make_api_version(0, 0, 1, 0))
         .api_version(vk::make_api_version(0, 1, 3, 0));
 
@@ -170,10 +174,16 @@ pub fn init_instance(
             .pfn_user_callback(Some(vulkan_debug_callback));
 
         let debug_utils_loader = ash::ext::debug_utils::Instance::new(entry, &instance);
-        let debug_call_back: vk::DebugUtilsMessengerEXT = unsafe {
-            debug_utils_loader
-                .create_debug_utils_messenger(&debug_info, None)
-                .unwrap()
+        let debug_call_back: vk::DebugUtilsMessengerEXT = match unsafe {
+            debug_utils_loader.create_debug_utils_messenger(&debug_info, None)
+        } {
+            Ok(callback) => callback,
+            Err(err) => {
+                unsafe { instance.destroy_instance(None) };
+                return Err(format!(
+                    "Fatal: Failed to create Vulkan debug messenger: {err:?}"
+                ));
+            }
         };
         log::info!("Vulkan Instance Created");
 
@@ -223,12 +233,18 @@ pub fn get_window_surface(
 ) -> Result<VkSurface, String> {
     log::info!("Creating surface");
 
+    let display = window
+        .display_handle()
+        .map_err(|err| format!("Fatal: Failed to get window display handle: {err}"))?;
+    let window_handle = window
+        .window_handle()
+        .map_err(|err| format!("Fatal: Failed to get raw window handle: {err}"))?;
     let surface = unsafe {
         ash_window::create_surface(
             entry,
             instance,
-            window.display_handle().unwrap().as_raw(),
-            window.window_handle().unwrap().as_raw(),
+            display.as_raw(),
+            window_handle.as_raw(),
             None,
         )
         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
@@ -288,9 +304,8 @@ pub fn get_physical_devices(
     for (_i, device) in physical_devices.iter().enumerate() {
         let device_properties = unsafe { instance.get_physical_device_properties(*device) };
 
-        let device_name = unsafe { CStr::from_ptr(device_properties.device_name.as_ptr()) }
-            .to_str()
-            .unwrap();
+        let device_name =
+            unsafe { CStr::from_ptr(device_properties.device_name.as_ptr()) }.to_string_lossy();
 
         let device_id = device_properties.device_id;
 
@@ -308,8 +323,12 @@ pub fn get_physical_devices(
 
             let available_ext_cstr: Vec<&CStr> = available_ext
                 .iter()
-                .map(|e| e.extension_name_as_c_str().unwrap())
-                .collect();
+                .map(|extension| {
+                    extension.extension_name_as_c_str().map_err(|err| {
+                        format!("invalid Vulkan extension name from driver: {err:?}")
+                    })
+                })
+                .collect::<Result<_, _>>()?;
 
             if !get_basic_device_ext_names()
                 .iter()
@@ -333,13 +352,12 @@ pub fn get_physical_devices(
         }
 
         if suitability_check(instance, device, surface_info) {
-            let gpu_device = PhyDevice {
-                name: device_name.to_string(),
+            log::info!("Suitable device: {}:{}", device_name, device_id);
+            devices.push(PhyDevice {
+                name: device_name.into_owned(),
                 id: device_id,
                 p_device: *device,
-            };
-            devices.push(gpu_device);
-            log::info!("Suitable device: {}:{}", device_name, device_id);
+            });
         }
     }
 
@@ -850,6 +868,12 @@ pub fn create_swapchain(
 ) -> Result<VkSwapchain, String> {
     log::info!("Creating swapchain");
     let swapchain_support = get_swapchain_support(&physical_device.p_device, surface_info)?;
+    if swapchain_support.formats.is_empty() {
+        return Err("Vulkan surface reported no swapchain formats".to_string());
+    }
+    if swapchain_support.present_modes.is_empty() {
+        return Err("Vulkan surface reported no presentation modes".to_string());
+    }
 
     log::info!("Swapchain: Setting surface format");
     let surface_format = if let Some(sf) = surface_format {
@@ -1020,7 +1044,7 @@ pub fn allocate_draw_images(
             let (image, allocation) = unsafe {
                 allocator
                     .lock()
-                    .unwrap()
+                    .expect("allocator lock poisoned")
                     .create_image(&image_create_info, &allocator_create_info)
                     .map_err(|e| format!("Error creating image: {:?}", e))?
             };
@@ -1091,7 +1115,7 @@ pub fn allocate_depth_images(
             let (image, allocation) = unsafe {
                 allocator
                     .lock()
-                    .unwrap()
+                    .expect("allocator lock poisoned")
                     .create_image(&image_create_info, &allocator_create_info)
                     .map_err(|e| format!("Error creating image: {:?}", e))?
             };
@@ -1159,7 +1183,7 @@ pub fn allocate_offscreen_present_images(
             let (image, allocation) = unsafe {
                 allocator
                     .lock()
-                    .unwrap()
+                    .expect("allocator lock poisoned")
                     .create_image(&image_create_info, &allocator_create_info)
                     .map_err(|e| format!("Error creating offscreen present image: {:?}", e))?
             };
@@ -1254,7 +1278,9 @@ pub fn select_sc_surface_format(
         }
     }
 
-    let first_format = *available_formats.first().unwrap();
+    let first_format = *available_formats
+        .first()
+        .expect("swapchain formats are checked non-empty before selection");
     log::info!(
         "No expected format, returning: {:?}|{:?}",
         first_format.format,

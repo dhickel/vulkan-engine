@@ -3,6 +3,9 @@
 //! ## Purpose
 //! Implements a custom sub-allocator on top of vk_mem to pack multiple small buffers
 //! (vertex/index/uniform) into larger VkBuffer objects. Reduces vkAllocateMemory calls
+//!
+//! Internal Vulkan buffer sub-allocator; dead code allowed.
+#![allow(dead_code)]
 //! (typically limited to ~4096 per device) and improves memory locality.
 //!
 //! ## Key Concepts
@@ -160,7 +163,11 @@ impl VkSubAllocator {
             memory_usage,
             dst_barrier,
             buffer_size,
-            transfer_buffer.lock().unwrap().buffer.size,
+            transfer_buffer
+                .lock()
+                .expect("transfer buffer lock poisoned")
+                .buffer
+                .size,
             0,
         )?;
 
@@ -191,7 +198,9 @@ impl VkSubAllocator {
         let memory_usage = vk_mem::MemoryUsage::AutoPreferDevice;
 
         let (transfer_queue_index, graphics_queue_index) = {
-            let tb = transfer_buffer.lock().unwrap();
+            let tb = transfer_buffer
+                .lock()
+                .expect("transfer buffer lock poisoned");
             (tb.transfer_queue_index, tb.graphics_queue_index)
         };
 
@@ -225,7 +234,9 @@ impl VkSubAllocator {
         let memory_usage = vk_mem::MemoryUsage::AutoPreferDevice;
 
         let (transfer_queue_index, graphics_queue_index) = {
-            let tb = transfer_buffer.lock().unwrap();
+            let tb = transfer_buffer
+                .lock()
+                .expect("transfer buffer lock poisoned");
             (tb.transfer_queue_index, tb.graphics_queue_index)
         };
 
@@ -396,7 +407,10 @@ impl VkSubAllocator {
                             ) {
                                 Ok(retry_buffer) => {
                                     self.extra_buffers.push(retry_buffer);
-                                    let retry_buffer = self.extra_buffers.last_mut().unwrap();
+                                    let retry_buffer = self
+                                        .extra_buffers
+                                        .last_mut()
+                                        .expect("retry buffer was pushed immediately before access");
                                     match retry_buffer.add_items(
                                         &retry_remaining,
                                         buffer_placement,
@@ -786,18 +800,24 @@ impl VkStorageBuffer {
                 }
 
                 debug!("Submitting VkStorage Commands");
-                host_buffer
-                    .submit_transfer_commands(VkSubmitParam::signaling(
-                        // Transfer queue records staging copies, so signal on transfer completion.
-                        vk_util::async_transfer_signal_stage_mask(),
-                    ))
-                    .unwrap();
-                host_buffer
-                    .submit_graphics_commands(VkSubmitParam::waiting(
-                        // Buffer acquire barrier targets VERTEX_INPUT consumption.
-                        vk_util::async_buffer_upload_wait_stage_mask(),
-                    ))
-                    .unwrap();
+                if let Err(err) = host_buffer.submit_transfer_commands(VkSubmitParam::signaling(
+                    // Transfer queue records staging copies, so signal on transfer completion.
+                    vk_util::async_transfer_signal_stage_mask(),
+                )) {
+                    return self.partial_error(
+                        format!("Error submitting storage transfer commands: {err}"),
+                        sub_allocations,
+                    );
+                }
+                if let Err(err) = host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
+                    // Buffer acquire barrier targets VERTEX_INPUT consumption.
+                    vk_util::async_buffer_upload_wait_stage_mask(),
+                )) {
+                    return self.partial_error(
+                        format!("Error submitting storage graphics commands: {err}"),
+                        sub_allocations,
+                    );
+                }
 
                 if let Err(error) = host_buffer.await_done(30) {
                     return self.partial_error(
@@ -872,18 +892,24 @@ impl VkStorageBuffer {
             }
 
             debug!("Submitting VkStorage Commands");
-            host_buffer
-                .submit_transfer_commands(VkSubmitParam::signaling(
-                    // Transfer queue records staging copies, so signal on transfer completion.
-                    vk_util::async_transfer_signal_stage_mask(),
-                ))
-                .unwrap();
-            host_buffer
-                .submit_graphics_commands(VkSubmitParam::waiting(
-                    // Buffer acquire barrier targets VERTEX_INPUT consumption.
-                    vk_util::async_buffer_upload_wait_stage_mask(),
-                ))
-                .unwrap();
+            if let Err(err) = host_buffer.submit_transfer_commands(VkSubmitParam::signaling(
+                // Transfer queue records staging copies, so signal on transfer completion.
+                vk_util::async_transfer_signal_stage_mask(),
+            )) {
+                return self.partial_error(
+                    format!("Error submitting storage transfer commands: {err}"),
+                    sub_allocations,
+                );
+            }
+            if let Err(err) = host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
+                // Buffer acquire barrier targets VERTEX_INPUT consumption.
+                vk_util::async_buffer_upload_wait_stage_mask(),
+            )) {
+                return self.partial_error(
+                    format!("Error submitting storage graphics commands: {err}"),
+                    sub_allocations,
+                );
+            }
 
             if let Err(error) = host_buffer.await_done(30) {
                 return self.partial_error(

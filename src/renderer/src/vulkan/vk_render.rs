@@ -81,7 +81,7 @@ use crate::vulkan::vk_debug::{
 };
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
-use crate::vulkan::vk_shadow::VkShadowResources;
+use crate::vulkan::vk_shadow::{compute_draw_light_view_projection, VkShadowResources};
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_util};
 use ash::vk;
@@ -93,7 +93,9 @@ use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
+use std::fmt::{Display, Formatter};
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use vk_mem::{Allocator, AllocatorCreateInfo};
@@ -105,6 +107,7 @@ pub struct SkyBox {
 }
 
 pub struct VkSingleDescriptor {
+    #[allow(dead_code)]
     pub desc_alloc: VkDescriptorAllocator,
     pub descriptor: [vk::DescriptorSet; 1],
 }
@@ -117,6 +120,7 @@ impl VkSingleDescriptor {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_raw_descriptor(&self) -> vk::DescriptorSet {
         unsafe { *self.descriptor.get_unchecked(0) }
     }
@@ -126,6 +130,7 @@ pub struct VkRenderCore {
     pub surface_mode: RenderSurfaceMode,
     pub window_state: VkWindowState,
     pub allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
+    #[allow(dead_code)]
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug: Option<VkDebug>,
@@ -137,6 +142,7 @@ pub struct VkRenderCore {
     pub present_format: vk::Format,
     frame_slot_count: u32,
     pub presentation: VkPresent,
+    #[allow(dead_code)]
     pub supported_image_formats: HashSet<vk::Format>,
     pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
     pub transfer: VkTransfer,
@@ -170,6 +176,84 @@ pub struct VkRenderCore {
 pub struct VkRender {
     pub core: VkRenderCore,
     pub rendergraph: RenderGraph,
+    backend_health: Arc<BackendHealth>,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum VkFrameRenderOutcome {
+    Rendered,
+    SkippedResizePending,
+    SubmittedNotPresented,
+    PresentedSuboptimal,
+}
+
+#[derive(Debug)]
+pub(crate) enum VkRenderError {
+    DeviceLost(String),
+    Backend(String),
+    BackendPoisoned(String),
+}
+
+impl VkRenderError {
+    fn from_backend_message(message: String) -> Self {
+        let normalized = message.to_ascii_lowercase();
+        if message.contains("ERROR_DEVICE_LOST") || normalized.contains("device lost") {
+            Self::DeviceLost(message)
+        } else {
+            Self::Backend(message)
+        }
+    }
+}
+
+impl Display for VkRenderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DeviceLost(message) | Self::Backend(message) => f.write_str(message),
+            Self::BackendPoisoned(reason) => write!(f, "renderer backend poisoned: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for VkRenderError {}
+
+#[derive(Default)]
+struct BackendHealth {
+    poisoned: AtomicBool,
+    reason: Mutex<Option<String>>,
+}
+
+impl BackendHealth {
+    fn poison(&self, reason: String) {
+        if !self.poisoned.swap(true, Ordering::AcqRel) {
+            *self.reason.lock().expect("backend health lock poisoned") = Some(reason);
+        }
+    }
+
+    fn poisoned_reason(&self) -> Option<String> {
+        if !self.poisoned.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(
+            self.reason
+                .lock()
+                .expect("backend health lock poisoned")
+                .clone()
+                .unwrap_or_else(|| "a previous renderer operation panicked".to_string()),
+        )
+    }
+}
+
+pub(crate) struct BackendPanicGuard {
+    health: Arc<BackendHealth>,
+}
+
+impl Drop for BackendPanicGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.health
+                .poison("a previous renderer operation panicked".to_string());
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -187,6 +271,7 @@ pub enum DebugRuntimeMode {
 }
 
 impl DebugRuntimeMode {
+    #[allow(dead_code)]
     pub fn from_label(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "default" => Some(Self::Default),
@@ -229,7 +314,7 @@ pub fn init_caches(
         &shader_cache,
         color_format,
         depth_format,
-    );
+    )?;
 
     let meta_desc_layout = desc_layout_cache.get(VkDescType::PbrProperties);
     let image_desc_layout = desc_layout_cache.get(VkDescType::PbrSamplers);
@@ -284,7 +369,7 @@ pub fn init_caches(
         desc_layout_cache.get(VkDescType::SkinData),
         vertex_allocator,
         index_allocator,
-    );
+    )?;
 
     let mut environment_cache = EnvironmentCache::new(supported_formats.clone());
 
@@ -516,7 +601,7 @@ impl VkRenderCore {
             match data_cache
                 .mesh_cache
                 .lock()
-                .unwrap()
+                .expect("mesh_cache lock poisoned during startup allocation")
                 .allocate_all(BufferPlacement::ContiguousPreferred, false)
             {
                 data_cache::LoadResult::Success(_) => {}
@@ -528,7 +613,7 @@ impl VkRenderCore {
             match data_cache
                 .texture_cache
                 .lock()
-                .unwrap()
+                .expect("texture_cache lock poisoned during startup allocation")
                 .allocate_all(BufferPlacement::ContiguousPreferred, false)
             {
                 data_cache::LoadResult::Success(_) => Ok(()),
@@ -539,35 +624,36 @@ impl VkRenderCore {
         })
     }
 
-    fn drain_transfer_submissions(&mut self, max_submissions: usize) -> usize {
+    fn drain_transfer_submissions(&mut self, max_submissions: usize) -> Result<usize, String> {
         let mut submitted = 0usize;
         while submitted < max_submissions {
             let Some(cmd) = self.transfer.query_channel() else {
                 break;
             };
-            if let Err(e) = cmd.submit(
+            cmd.submit(
                 &self.device,
                 &self.vulkan_cache.queues,
                 &mut self.fence_await_queue,
-            ) {
-                log::error!("Transfer command submission failed: {}", e);
-                break;
-            }
+            )
+            .map_err(|err| format!("transfer command submission failed: {err}"))?;
             submitted += 1;
         }
-        submitted
+        Ok(submitted)
     }
 
-    fn service_async_transfers(&mut self) {
-        self.pump_transfer_submissions(usize::MAX);
+    fn service_async_transfers(&mut self) -> Result<(), String> {
+        self.pump_transfer_submissions(usize::MAX).map(|_| ())
     }
 
-    pub fn pump_transfer_submissions(&mut self, max_submissions: usize) -> usize {
-        if let Err(e) = self.fence_await_queue.check_fences(&self.device) {
-            log::error!("Fence check failed during transfer pump: {}", e);
-        }
+    pub fn pump_transfer_submissions(
+        &mut self,
+        max_submissions: usize,
+    ) -> Result<usize, String> {
+        self.fence_await_queue
+            .check_fences(&self.device)
+            .map_err(|err| format!("fence check failed during transfer pump: {err}"))?;
         if max_submissions == 0 {
-            return 0;
+            return Ok(0);
         }
         self.drain_transfer_submissions(max_submissions)
     }
@@ -576,12 +662,12 @@ impl VkRenderCore {
         &mut self,
         startup_loader: &std::thread::JoinHandle<Result<(), String>>,
         warning_timeout: Duration,
-    ) {
+    ) -> Result<(), String> {
         let start = SystemTime::now();
         let mut timeout_logged = false;
 
         while !startup_loader.is_finished() {
-            self.service_async_transfers();
+            self.service_async_transfers()?;
 
             if !timeout_logged
                 && SystemTime::now().duration_since(start).unwrap_or_default() >= warning_timeout
@@ -596,9 +682,11 @@ impl VkRenderCore {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        self.service_async_transfers();
+        self.service_async_transfers()?;
+        Ok(())
     }
 
+    #[allow(dead_code)]
     fn destroy(&mut self) {}
 
     /// Compile shader sources to SPIR-V when runtime rebuild is requested.
@@ -630,7 +718,7 @@ impl VkRenderCore {
         with_validation: bool,
     ) -> Result<VulkanCoreInit, String> {
         let entry = vk_init::init_entry();
-        let mut instance_ext = vk_init::get_winit_extensions(window);
+        let mut instance_ext = vk_init::get_winit_extensions(window)?;
         let (instance, debug) = vk_init::init_instance(
             &entry,
             app_name.to_string(),
@@ -998,7 +1086,7 @@ impl VkRenderCore {
     }
 
     /// Build one host upload buffer role (mesh or texture) with dedicated sync objects.
-    /// The `pop().unwrap()` calls are statically safe because the pools are pre-allocated.
+    /// The pool `pop().expect(...)` calls are statically safe because the pools are pre-allocated.
     fn create_host_buffer_role(
         allocator: &Arc<Mutex<Allocator>>,
         transfer: &VkTransfer,
@@ -1125,7 +1213,7 @@ impl VkRenderCore {
         }
 
         let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
-        render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
+        render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
 
         let startup_result = startup_loader
             .join()
@@ -1251,7 +1339,7 @@ impl VkRenderCore {
                 .get(VkQueueType::Graphics)
                 .buffers[0],
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
-        );
+        )?;
 
         let shadow_resources = VkShadowResources::new(
             &device,
@@ -1305,7 +1393,7 @@ impl VkRenderCore {
             Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
         } else {
             let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
-            render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
+            render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
             let startup_result = startup_loader
                 .join()
                 .map_err(|_| "Startup loader thread panicked".to_string())?;
@@ -1419,7 +1507,7 @@ impl VkRenderCore {
                 .get(VkQueueType::Graphics)
                 .buffers[0],
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
-        );
+        )?;
 
         let shadow_resources = VkShadowResources::new(
             &device,
@@ -1473,7 +1561,7 @@ impl VkRenderCore {
             Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
         } else {
             let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
-            render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30));
+            render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
             let startup_result = startup_loader
                 .join()
                 .map_err(|_| "Startup loader thread panicked".to_string())?;
@@ -1487,75 +1575,78 @@ impl VkRenderCore {
         Ok((render, scene_world))
     }
 
-    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
+    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), String> {
         if self.surface_mode.is_headless() {
             self.window_state.update_curr_size(new_size);
             self.resize_requested = false;
-            return;
+            return Ok(());
         }
         self.window_state.update_curr_size(new_size);
 
-        if let Err(e) = unsafe { self.device.device_wait_idle() } {
-            log::error!("device_wait_idle failed during swapchain rebuild: {:?}", e);
-            self.resize_requested = true;
-            return;
+        unsafe {
+            self.device
+                .device_wait_idle()
+                .map_err(|err| format!("device_wait_idle failed during swapchain rebuild: {err:?}"))?;
         }
 
         let surface = self
             .surface
             .as_ref()
-            .expect("windowed renderer must own a surface");
-        let old_swapchain = self
+            .ok_or_else(|| "windowed renderer is missing its Vulkan surface".to_string())?;
+        let old_swapchain_handle = self
             .swapchain
             .as_ref()
-            .expect("windowed renderer must own a swapchain");
+            .map(|swapchain| swapchain.swapchain)
+            .ok_or_else(|| "windowed renderer is missing its Vulkan swapchain".to_string())?;
 
-        let swapchain = match vk_init::create_swapchain(
+        // Supplying oldSwapchain retires it once vkCreateSwapchainKHR starts. Any failure from
+        // here is terminal for this backend and is surfaced to the facade rather than retried.
+        let swapchain = vk_init::create_swapchain(
             &self.instance,
             &self.physical_device,
             &self.device,
             &self.vulkan_cache.queues,
             surface,
             new_size,
-            // Keep startup and rebuild swapchain depth aligned for frame pacing.
             Some(3),
             None,
             Some(vk::PresentModeKHR::MAILBOX),
-            Some(old_swapchain.swapchain),
+            Some(old_swapchain_handle),
             true,
-        ) {
-            Ok(sc) => sc,
-            Err(e) => {
-                log::error!("create_swapchain failed during rebuild: {}", e);
-                self.resize_requested = true;
-                return;
-            }
-        };
+        )?;
 
-        // Surface/compositor may choose an extent different from the requested one
-        // (especially during fullscreen or DPI transitions). Keep render extents in
-        // lock-step with the real swapchain extent to avoid partial/offset rendering.
         if swapchain.extent != self.window_state.get_curr_extent() {
             self.window_state.update_curr_size(swapchain.extent);
         }
 
-        // Old present views are destroyed by replace_present_images (via destroy_present_views)
-        // before the new views are installed.
         let present_images = match vk_init::create_basic_present_views(&self.device, &swapchain) {
             Ok(views) => views,
-            Err(e) => {
-                log::error!("create_basic_present_views failed during rebuild: {}", e);
-                self.resize_requested = true;
-                return;
+            Err(err) => {
+                unsafe {
+                    swapchain
+                        .swapchain_loader
+                        .destroy_swapchain(swapchain.swapchain, None);
+                }
+                return Err(format!(
+                    "create_basic_present_views failed during swapchain rebuild: {err}"
+                ));
             }
         };
 
-        self.swapchain = Some(swapchain);
+        let old_swapchain = self
+            .swapchain
+            .replace(swapchain)
+            .ok_or_else(|| "windowed renderer lost its old Vulkan swapchain".to_string())?;
         self.presentation
             .replace_present_images(&self.device, present_images);
+        unsafe {
+            old_swapchain
+                .swapchain_loader
+                .destroy_swapchain(old_swapchain.swapchain, None);
+        }
 
-        //self.presentation = presentation;
         self.resize_requested = false;
+        Ok(())
     }
 }
 
@@ -1606,6 +1697,7 @@ impl VkRender {
             Self {
                 core,
                 rendergraph: RenderGraph::default_graph(),
+                backend_health: Arc::new(BackendHealth::default()),
             },
             scene_world,
         ))
@@ -1634,16 +1726,47 @@ impl VkRender {
             Self {
                 core,
                 rendergraph: RenderGraph::default_graph(),
+                backend_health: Arc::new(BackendHealth::default()),
             },
             scene_world,
         ))
     }
 
-    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) {
-        self.core.rebuild_swapchain(new_size);
+    pub(crate) fn backend_operation_guard(&self) -> Result<BackendPanicGuard, VkRenderError> {
+        if let Some(reason) = self.backend_health.poisoned_reason() {
+            return Err(VkRenderError::BackendPoisoned(reason));
+        }
+        Ok(BackendPanicGuard {
+            health: Arc::clone(&self.backend_health),
+        })
     }
 
-    pub fn render(&mut self, frame_number: u32, submission: &RenderSubmission) -> Result<(), String> {
+    pub(crate) fn complete_backend_operation<T>(
+        &self,
+        result: Result<T, String>,
+    ) -> Result<T, VkRenderError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(message) => {
+                let error = VkRenderError::from_backend_message(message);
+                self.backend_health.poison(error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), VkRenderError> {
+        let _panic_guard = self.backend_operation_guard()?;
+        let result = self.core.rebuild_swapchain(new_size);
+        self.complete_backend_operation(result)
+    }
+
+    #[allow(dead_code)]
+    pub fn render(
+        &mut self,
+        frame_number: u32,
+        submission: &RenderSubmission,
+    ) -> Result<VkFrameRenderOutcome, VkRenderError> {
         self.render_with_hooks(frame_number, submission, Vec::new(), || {}, || {})
     }
 
@@ -1654,19 +1777,21 @@ impl VkRender {
         due_captures: Vec<DueFrameCapture>,
         pre_render_hook: PreRenderHook,
         post_render_hook: PostRenderHook,
-    ) -> Result<(), String>
+    ) -> Result<VkFrameRenderOutcome, VkRenderError>
     where
         PreRenderHook: FnMut(),
         PostRenderHook: FnMut(),
     {
-        self.core.render_with_hooks(
+        let _panic_guard = self.backend_operation_guard()?;
+        let result = self.core.render_with_hooks(
             frame_number,
             submission,
             &self.rendergraph,
             due_captures,
             pre_render_hook,
             post_render_hook,
-        )
+        );
+        self.complete_backend_operation(result)
     }
 
     pub fn take_frame_capture_statuses(&mut self) -> Vec<FrameCaptureStatus> {
@@ -1696,6 +1821,7 @@ struct FrameAcquire {
     cmd_buffer: vk::CommandBuffer,
     frame_sync: VkFrameSync,
     image_index: u32,
+    acquire_suboptimal: bool,
     frame_slot_index: usize,
     frame_fence_wait_ms: f32,
     frame_cleanup_ms: f32,
@@ -1794,9 +1920,22 @@ impl FrameTransaction {
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum SwapchainAcquireResult {
-    Acquired(u32),
+    Acquired { image_index: u32, suboptimal: bool },
     Retry,
     Recreate,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum PresentFrameOutcome {
+    Presented,
+    PresentedSuboptimal,
+    NotPresented,
+}
+
+impl PresentFrameOutcome {
+    fn reached_present_engine(self) -> bool {
+        !matches!(self, Self::NotPresented)
+    }
 }
 
 struct VulkanCoreInit {
@@ -2548,10 +2687,13 @@ impl VkRenderCore {
     }
 
     /// Service background uploads and update active environment state before frame recording.
-    fn service_transfers_and_prepare_environment(&mut self, submission: &RenderSubmission) {
-        self.service_async_transfers();
+    fn service_transfers_and_prepare_environment(
+        &mut self,
+        submission: &RenderSubmission,
+    ) -> Result<(), String> {
+        self.service_async_transfers()?;
         self.scene_data = submission.camera;
-        self.prepare_submission_environment(submission);
+        self.prepare_submission_environment(submission)
     }
 
     /// Wait for GPU completion of this frame slot before reusing per-frame resources.
@@ -2591,10 +2733,9 @@ impl VkRenderCore {
     unsafe fn acquire_swapchain_image_index(
         &self,
         frame_sync: VkFrameSync,
-    ) -> SwapchainAcquireResult {
+    ) -> Result<SwapchainAcquireResult, String> {
         let Some(swapchain) = self.swapchain.as_ref() else {
-            warn!("Swapchain acquire requested without a swapchain");
-            return SwapchainAcquireResult::Recreate;
+            return Ok(SwapchainAcquireResult::Recreate);
         };
         let acquire_info = vk::AcquireNextImageInfoKHR::default()
             .swapchain(swapchain.swapchain)
@@ -2606,18 +2747,20 @@ impl VkRenderCore {
             .swapchain_loader
             .acquire_next_image2(&acquire_info)
         {
-            Ok((index, _)) => SwapchainAcquireResult::Acquired(index),
-            Err(vk::Result::NOT_READY) | Err(vk::Result::TIMEOUT) => SwapchainAcquireResult::Retry,
+            Ok((image_index, suboptimal)) => Ok(SwapchainAcquireResult::Acquired {
+                image_index,
+                suboptimal,
+            }),
+            Err(vk::Result::NOT_READY) | Err(vk::Result::TIMEOUT) => {
+                Ok(SwapchainAcquireResult::Retry)
+            }
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
-                SwapchainAcquireResult::Recreate
+                Ok(SwapchainAcquireResult::Recreate)
             }
-            Err(err) => {
-                warn!(
-                    "Swapchain acquire failed with {:?}; requesting swapchain rebuild",
-                    err
-                );
-                SwapchainAcquireResult::Recreate
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                Err("Vulkan device lost during swapchain image acquisition".to_string())
             }
+            Err(err) => Err(format!("acquire_next_image2 failed: {err:?}")),
         }
     }
 
@@ -2644,54 +2787,57 @@ impl VkRenderCore {
         self.resolve_gpu_timing_for_slot(frame_slot_index);
 
         let swapchain_acquire_start = Instant::now();
-        let (image_index, swapchain_acquire_ms) = if self.surface_mode.is_headless() {
-            (frame_slot_index as u32, 0.0)
-        } else {
-            let mut acquire_retries = 0u32;
-            let acquire_result = loop {
-                let result = unsafe { self.acquire_swapchain_image_index(frame_sync) };
-                match result {
-                    SwapchainAcquireResult::Retry
-                        if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
-                    {
-                        acquire_retries += 1;
+        let (image_index, acquire_suboptimal, swapchain_acquire_ms) =
+            if self.surface_mode.is_headless() {
+                (frame_slot_index as u32, false, 0.0)
+            } else {
+                let mut acquire_retries = 0u32;
+                let acquire_result = loop {
+                    let result = unsafe { self.acquire_swapchain_image_index(frame_sync)? };
+                    match result {
+                        SwapchainAcquireResult::Retry
+                            if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
+                        {
+                            acquire_retries += 1;
+                        }
+                        _ => break result,
                     }
-                    _ => break result,
-                }
-            };
-            let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
-            warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
+                };
+                let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
+                warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
-            let image_index = match acquire_result {
-                SwapchainAcquireResult::Acquired(index) => index,
-                SwapchainAcquireResult::Retry => {
-                    if acquire_retries > 0 {
+                let (image_index, acquire_suboptimal) = match acquire_result {
+                    SwapchainAcquireResult::Acquired {
+                        image_index,
+                        suboptimal,
+                    } => (image_index, suboptimal),
+                    SwapchainAcquireResult::Retry => {
                         warn!(
-                            "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total)",
+                            "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); requesting rebuild",
                             acquire_retries, swapchain_acquire_ms
                         );
+                        self.presentation.rewind_frame();
+                        self.resize_requested = true;
+                        return Ok(None);
                     }
-                    self.presentation.rewind_frame();
-                    return Ok(None);
-                }
-                SwapchainAcquireResult::Recreate => {
+                    SwapchainAcquireResult::Recreate => {
+                        self.presentation.rewind_frame();
+                        self.resize_requested = true;
+                        return Ok(None);
+                    }
+                };
+
+                if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
+                    error!(
+                        "Failed to bind acquired present target {}: {:?}",
+                        image_index, err
+                    );
                     self.presentation.rewind_frame();
                     self.resize_requested = true;
                     return Ok(None);
                 }
+                (image_index, acquire_suboptimal, swapchain_acquire_ms)
             };
-
-            if let Err(err) = self.presentation.bind_acquired_present_target(image_index) {
-                error!(
-                    "Failed to bind acquired present target {}: {:?}",
-                    image_index, err
-                );
-                self.presentation.rewind_frame();
-                self.resize_requested = true;
-                return Ok(None);
-            }
-            (image_index, swapchain_acquire_ms)
-        };
 
         // Reset only when we have a frame to submit; on retry/skip paths leave signaled.
         unsafe { self.reset_frame_fence(frame_sync)? };
@@ -2701,6 +2847,7 @@ impl VkRenderCore {
             cmd_buffer,
             frame_sync,
             image_index,
+            acquire_suboptimal,
             frame_slot_index,
             frame_fence_wait_ms,
             frame_cleanup_ms,
@@ -2804,16 +2951,14 @@ impl VkRenderCore {
         }
     }
 
-    /// Present the rendered swapchain image; request resize if presentation fails.
-    /// Returns Ok(true) on successful present, Ok(false) on suboptimal/out-of-date.
-    /// Returns Err on device lost or other terminal errors.
-    fn present_frame(&mut self, frame: FrameAcquire) -> Result<bool, String> {
+    /// Present the rendered swapchain image while preserving the exact Vulkan result.
+    fn present_frame(&mut self, frame: FrameAcquire) -> Result<PresentFrameOutcome, String> {
         if self.surface_mode.is_headless() {
-            return Ok(true);
+            return Ok(PresentFrameOutcome::Presented);
         }
         let Some(swapchain) = self.swapchain.as_ref() else {
             self.resize_requested = true;
-            return Ok(false);
+            return Ok(PresentFrameOutcome::NotPresented);
         };
         unsafe {
             let swapchains = [swapchain.swapchain];
@@ -2829,14 +2974,23 @@ impl VkRenderCore {
                 .swapchain_loader
                 .queue_present(frame.queue, &present_info)
             {
-                Ok(_) => Ok(true),
+                Ok(false) => Ok(PresentFrameOutcome::Presented),
+                Ok(true) => {
+                    self.resize_requested = true;
+                    Ok(PresentFrameOutcome::PresentedSuboptimal)
+                }
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                    self.resize_requested = true;
+                    Ok(PresentFrameOutcome::NotPresented)
+                }
+                Err(vk::Result::SUBOPTIMAL_KHR) => {
+                    self.resize_requested = true;
+                    Ok(PresentFrameOutcome::PresentedSuboptimal)
+                }
                 Err(vk::Result::ERROR_DEVICE_LOST) => {
                     Err("Vulkan device lost during present".to_string())
                 }
-                Err(_) => {
-                    self.resize_requested = true;
-                    Ok(false)
-                }
+                Err(err) => Err(format!("queue_present failed: {err:?}")),
             }
         }
     }
@@ -2849,7 +3003,7 @@ impl VkRenderCore {
         due_captures: Vec<DueFrameCapture>,
         mut pre_render_hook: PreRenderHook,
         mut post_render_hook: PostRenderHook,
-    ) -> Result<(), String>
+    ) -> Result<VkFrameRenderOutcome, String>
     where
         PreRenderHook: FnMut(),
         PostRenderHook: FnMut(),
@@ -2861,7 +3015,7 @@ impl VkRenderCore {
 
         // 1. Service transfer completions and resolve requested environment before recording.
         let transfer_start = Instant::now();
-        self.service_transfers_and_prepare_environment(submission);
+        self.service_transfers_and_prepare_environment(submission)?;
         let transfer_ms = elapsed_ms(transfer_start);
 
         // 2. Acquire frame resources, synchronize ownership, and bind present target.
@@ -2885,7 +3039,7 @@ impl VkRenderCore {
                 ],
                 pass_timings: Vec::new(),
             };
-            return Ok(());
+            return Ok(VkFrameRenderOutcome::SkippedResizePending);
         };
         let acquire_ms = elapsed_ms(acquire_start);
         let frame_fence_wait_ms = frame.frame_fence_wait_ms;
@@ -2931,15 +3085,16 @@ impl VkRenderCore {
                     return Err(format!("rendergraph failed: {}; drain submit also failed: {}", err, submit_err));
                 }
                 frame_transaction.mark_submitted();
-                let present_succeeded = drain_plan
+                let present_outcome = drain_plan
                     .present_after_submit
                     .then(|| self.present_frame(frame));
-                // Flatten Result<Option<Result<bool, _>>, _> -> Option<bool>
-                let present_succeeded = match present_succeeded {
-                    Some(Ok(s)) => Some(s),
-                    Some(Err(e)) => {
-                        error!("Present after drain submit failed: {}", e);
-                        return Err(format!("rendergraph failed: {}; present also failed: {}", err, e));
+                let present_succeeded = match present_outcome {
+                    Some(Ok(outcome)) => Some(outcome.reached_present_engine()),
+                    Some(Err(present_err)) => {
+                        error!("Present after drain submit failed: {}", present_err);
+                        return Err(format!(
+                            "rendergraph failed: {err}; present also failed: {present_err}"
+                        ));
                     }
                     None => None,
                 };
@@ -2992,7 +3147,7 @@ impl VkRenderCore {
                     ],
                     pass_timings: Vec::new(),
                 };
-                return Ok(());
+                return Err(format!("rendergraph execution failed: {err}"));
             }
         };
         if !self.due_frame_captures.is_empty() {
@@ -3017,7 +3172,8 @@ impl VkRenderCore {
         let submit_ms = elapsed_ms(submit_start);
 
         let present_start = Instant::now();
-        let present_succeeded = self.present_frame(frame)?;
+        let present_outcome = self.present_frame(frame)?;
+        let present_succeeded = present_outcome.reached_present_engine();
         frame_transaction.finish_after_submit(
             (!self.surface_mode.is_headless()).then_some(present_succeeded),
         );
@@ -3044,7 +3200,24 @@ impl VkRenderCore {
             present_ms,
             graph_report,
         );
-        Ok(())
+
+        if self.surface_mode.is_headless() {
+            return Ok(VkFrameRenderOutcome::Rendered);
+        }
+
+        match present_outcome {
+            PresentFrameOutcome::NotPresented => {
+                Ok(VkFrameRenderOutcome::SubmittedNotPresented)
+            }
+            PresentFrameOutcome::PresentedSuboptimal => {
+                Ok(VkFrameRenderOutcome::PresentedSuboptimal)
+            }
+            PresentFrameOutcome::Presented if frame.acquire_suboptimal => {
+                self.resize_requested = true;
+                Ok(VkFrameRenderOutcome::PresentedSuboptimal)
+            }
+            PresentFrameOutcome::Presented => Ok(VkFrameRenderOutcome::Rendered),
+        }
     }
 
     /// Upload unloaded skybox cubemap data for the requested environment handle.
@@ -3082,7 +3255,7 @@ impl VkRenderCore {
                 bytes,
                 self.transfer.get_local_transfer_pool(),
                 self.vulkan_cache.queues.get_queue(VkQueueType::Transfer),
-            ),
+            )?,
             PendingSkyboxSource::Equirectangular2D {
                 width,
                 height,
@@ -3130,7 +3303,7 @@ impl VkRenderCore {
         self.data_cache
             .environment_cache
             .lock()
-            .unwrap()
+            .expect("environment_cache lock poisoned")
             .store_loaded_cube_map(env_id, cube_map)
             .map_err(|err| {
                 format!(
@@ -3176,7 +3349,7 @@ impl VkRenderCore {
         self.data_cache
             .environment_cache
             .lock()
-            .unwrap()
+            .expect("environment_cache lock poisoned")
             .add_env_maps(env_id, generated_maps)
             .map_err(|err| format!("Failed to store generated env maps: {:?}", err))?;
         Ok(())
@@ -3289,7 +3462,7 @@ impl VkRenderCore {
             .data_cache
             .mesh_cache
             .lock()
-            .unwrap()
+            .expect("mesh_cache lock poisoned")
             .get_loaded_id(MeshCache::SKYBOX_MESH)
             .map_err(|err| format!("Failed to fetch skybox mesh: {:?}", err))?;
         self.sky_box.skybox_consts.vertex_buffer_addr =
@@ -3306,13 +3479,16 @@ impl VkRenderCore {
         Ok(())
     }
 
-    fn prepare_submission_environment(&mut self, submission: &RenderSubmission) {
+    fn prepare_submission_environment(
+        &mut self,
+        submission: &RenderSubmission,
+    ) -> Result<(), String> {
         let requested_env_id = submission.skybox_env_id;
         self.requested_env_id = Some(requested_env_id);
 
         if requested_env_id == self.active_env_id {
             self.clear_environment_failure(requested_env_id);
-            return;
+            return Ok(());
         }
 
         let switch_start = SystemTime::now();
@@ -3326,8 +3502,11 @@ impl VkRenderCore {
                 "Failed to prepare requested environment {:?}: {}. Falling back to active env {:?}",
                 requested_env_id, err, self.active_env_id
             );
-            self.environment_failures.insert(requested_env_id, err);
-            return;
+            self.environment_failures
+                .insert(requested_env_id, err.clone());
+            return Err(format!(
+                "failed to prepare requested environment {requested_env_id:?}: {err}"
+            ));
         }
 
         self.clear_environment_failure(requested_env_id);
@@ -3340,6 +3519,7 @@ impl VkRenderCore {
             "Environment {:?} ready and active (switch took {} ms)",
             self.active_env_id, switch_ms
         );
+        Ok(())
     }
 
     pub fn prepare_draw_targets(&mut self, frame: &VkFrame) {
@@ -3389,24 +3569,24 @@ impl VkRenderCore {
             .get_pipeline(VkPipelineType::Skybox);
 
         let active_env_id = self.active_env_id;
-        let descriptor = self
+        let Some(descriptor) = self
             .sky_box
             .descriptors
             .get(&active_env_id)
-            .map(|desc| desc.descriptor);
-        if descriptor.is_none() {
+            .map(|desc| desc.descriptor)
+        else {
             error!(
                 "Skybox descriptor missing for env {:?}; clearing color attachment only",
                 active_env_id
             );
             return None;
-        }
+        };
 
         let mesh = self
             .data_cache
             .mesh_cache
             .lock()
-            .unwrap()
+            .expect("mesh_cache lock poisoned")
             .get_loaded_id(submission.skybox_mesh_id);
         let Ok(mesh) = mesh else {
             error!(
@@ -3418,7 +3598,7 @@ impl VkRenderCore {
 
         Some(SkyboxDrawInputs {
             pipeline,
-            descriptor: descriptor.unwrap(),
+            descriptor,
             index_buffer: mesh.index_buffer.buffer,
             index_count: mesh.index_count,
         })
@@ -3629,10 +3809,7 @@ impl VkRenderCore {
 
         let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
-        if let Err(err) = self.draw_imgui(cmd_buffer, frame.present_image_view) {
-            error!("{err}");
-        }
-        Ok(())
+        self.draw_imgui(cmd_buffer, frame.present_image_view)
     }
 
     pub fn transition_present_for_present(&mut self, frame: &mut VkFrame) {
@@ -3656,7 +3833,7 @@ impl VkRenderCore {
                 .take(VkPipelineType::COUNT)
                 .collect::<Vec<_>>()
                 .try_into()
-                .unwrap();
+                .expect("draw bucket vector length equals VkPipelineType::COUNT");
 
         let mesh_cache = self
             .data_cache
@@ -3709,10 +3886,23 @@ impl VkRenderCore {
                 transform: draw_item.transform,
                 vertex_buffer_addr: mesh.vertex_buffer.alloc_address,
                 has_uv1: mesh.has_uv1,
+                bounds_min: mesh.bounds_min,
+                bounds_max: mesh.bounds_max,
             });
         }
 
         draw_buckets
+    }
+
+    pub(crate) fn resolve_shadow_draw_objects(
+        &self,
+        submission: &RenderSubmission,
+    ) -> Vec<RenderObject> {
+        self.resolve_submission_buckets(submission)
+            .into_iter()
+            .flatten()
+            .filter(|draw| matches!(draw.material.alpha_mode, gpu_data::AlphaMode::Opaque))
+            .collect()
     }
 
     /// Split resolved render objects into opaque/mask/blend lists per material domain.
@@ -3781,6 +3971,7 @@ impl VkRenderCore {
         base: &EnvironmentUBO,
         submission: &RenderSubmission,
         visual_tuning: VisualTuning,
+        light_view_projection: Option<glam::Mat4>,
     ) -> EnvironmentUBO {
         use crate::data::gpu_data::{GpuPointLight, MAX_POINT_LIGHTS_GPU};
 
@@ -3789,7 +3980,8 @@ impl VkRenderCore {
         env.gamma = visual_tuning.gamma;
         env.ibl_ambient_scale = visual_tuning.ibl_ambient_scale;
 
-        // Populate directional light from submission
+        // Populate the single scene directional light. Environment defaults do not
+        // implicitly create a scene light when the submission has none.
         if let Some(dir_light) = &submission.directional_light {
             let dir = dir_light.direction.normalize();
             env.light_dir = dir.extend(0.0);
@@ -3797,6 +3989,25 @@ impl VkRenderCore {
                 .color
                 .max(glam::Vec3::ZERO)
                 .extend(dir_light.intensity.max(0.0));
+            if let Some(matrix) = light_view_projection {
+                env.light_view_proj = [matrix.x_axis, matrix.y_axis, matrix.z_axis, matrix.w_axis];
+            } else {
+                env.light_view_proj = [
+                    glam::Vec4::X,
+                    glam::Vec4::Y,
+                    glam::Vec4::Z,
+                    glam::Vec4::W,
+                ];
+            }
+        } else {
+            env.light_dir = glam::Vec4::ZERO;
+            env.light_color = glam::Vec4::ZERO;
+            env.light_view_proj = [
+                glam::Vec4::X,
+                glam::Vec4::Y,
+                glam::Vec4::Z,
+                glam::Vec4::W,
+            ];
         }
 
         let light_count = submission.point_lights.len().min(MAX_POINT_LIGHTS_GPU);
@@ -4004,7 +4215,7 @@ impl VkRenderCore {
             .data_cache
             .mesh_cache
             .lock()
-            .unwrap()
+            .expect("mesh_cache lock poisoned")
             .get_default_joint_desc();
 
         // Build per-frame environment UBO with point lights from submission
@@ -4012,7 +4223,7 @@ impl VkRenderCore {
             .data_cache
             .environment_cache
             .lock()
-            .unwrap()
+            .expect("environment_cache lock poisoned")
             .get_env_map(self.active_env_id)
             .ok()
             .and_then(|opt| opt.as_ref())
@@ -4020,8 +4231,21 @@ impl VkRenderCore {
             .copied()
             .unwrap_or_default();
 
-        let frame_env_ubo =
-            Self::build_frame_environment_ubo(&base_env_ubo, submission, self.visual_tuning);
+        let light_view_projection = submission.directional_light.as_ref().and_then(|light| {
+            compute_draw_light_view_projection(
+                light.direction,
+                draw_lists
+                    .pbr_opaque
+                    .iter()
+                    .chain(draw_lists.unlit_opaque.iter()),
+            )
+        });
+        let frame_env_ubo = Self::build_frame_environment_ubo(
+            &base_env_ubo,
+            submission,
+            self.visual_tuning,
+            light_view_projection,
+        );
 
         unsafe {
             self.record_geometry_draw_sequence(
@@ -4041,7 +4265,7 @@ impl VkRenderCore {
             .data_cache
             .mesh_cache
             .lock()
-            .unwrap()
+            .expect("mesh_cache lock poisoned")
             .get_loaded_id(MeshCache::SKYBOX_MESH)
             .map_err(|err| {
                 format!(
@@ -4186,7 +4410,7 @@ impl VkRenderCore {
             format,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
             1,
-        );
+        )?;
 
         let generation_result = (|| -> Result<(VkCubeMap, f32), String> {
             let mut viewport = [vk::Viewport {
@@ -4469,7 +4693,7 @@ impl VkRenderCore {
             cube_format,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
             1,
-        );
+        )?;
 
         let generation_result = (|| -> Result<VkCubeMap, String> {
             let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
@@ -4721,7 +4945,10 @@ impl VkRenderCore {
 
         desc_pool.destroy(&self.device);
 
-        let end = SystemTime::now().duration_since(start).unwrap().as_millis();
+        let end = SystemTime::now()
+            .duration_since(start)
+            .unwrap_or_default()
+            .as_millis();
         info!(
             "Finished Generating Environment Maps, Generation took: {} ms",
             end
@@ -4741,6 +4968,52 @@ impl VkRenderCore {
 #[cfg(test)]
 mod frame_transaction_tests {
     use super::*;
+
+    #[test]
+    fn directional_light_submission_populates_environment_ubo() {
+        let mut submission = RenderSubmission::new(SceneDataUBO::default(), 0);
+        submission.directional_light = Some(
+            crate::scene::render_submission::FrameDirectionalLight {
+                direction: glam::Vec3::new(0.0, 2.0, 0.0),
+                color: glam::Vec3::new(1.0, 0.5, 0.25),
+                intensity: 3.0,
+            },
+        );
+        let light_view_projection = glam::Mat4::from_translation(glam::Vec3::ONE);
+
+        let env = VkRenderCore::build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
+            Some(light_view_projection),
+        );
+
+        assert_eq!(env.light_dir, glam::Vec4::Y);
+        assert_eq!(env.light_color, glam::Vec4::new(1.0, 0.5, 0.25, 3.0));
+        assert_eq!(
+            env.light_view_proj,
+            [
+                light_view_projection.x_axis,
+                light_view_projection.y_axis,
+                light_view_projection.z_axis,
+                light_view_projection.w_axis,
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_directional_light_disables_environment_default_direct_light() {
+        let submission = RenderSubmission::new(SceneDataUBO::default(), 0);
+        let env = VkRenderCore::build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
+            None,
+        );
+
+        assert_eq!(env.light_dir, glam::Vec4::ZERO);
+        assert_eq!(env.light_color, glam::Vec4::ZERO);
+    }
 
     #[test]
     fn headless_imgui_failure_injection_skips_dynamic_rendering() {
@@ -4782,5 +5055,40 @@ mod frame_transaction_tests {
         assert!(transaction.fence_signal_queued());
         assert!(transaction.requires_swapchain_rebuild());
         assert_eq!(transaction.state, FrameTransactionState::PresentFailed);
+    }
+
+    #[test]
+    fn device_lost_backend_message_is_typed() {
+        assert!(matches!(
+            VkRenderError::from_backend_message(
+                "queue_submit2 failed: ERROR_DEVICE_LOST".to_string()
+            ),
+            VkRenderError::DeviceLost(_)
+        ));
+    }
+
+    #[test]
+    fn panic_guard_poisoning_survives_external_unwind_catch() {
+        let health = Arc::new(BackendHealth::default());
+        let guard_health = Arc::clone(&health);
+        let result = std::panic::catch_unwind(move || {
+            let _guard = BackendPanicGuard {
+                health: guard_health,
+            };
+            panic!("injected backend panic");
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            health.poisoned_reason().as_deref(),
+            Some("a previous renderer operation panicked")
+        );
+    }
+
+    #[test]
+    fn present_outcome_distinguishes_not_presented_from_suboptimal() {
+        assert!(!PresentFrameOutcome::NotPresented.reached_present_engine());
+        assert!(PresentFrameOutcome::PresentedSuboptimal.reached_present_engine());
+        assert!(PresentFrameOutcome::Presented.reached_present_engine());
     }
 }

@@ -3,6 +3,9 @@
 //! ## Purpose
 //! Manages loading, GPU upload, and lifetime of textures, materials, and meshes. Implements
 //! lazy loading with Unloaded/Loaded state machines. Provides default resources (white texture,
+//!
+//! Internal cache implementation with many future-facing API surfaces; dead code allowed.
+#![allow(dead_code)]
 //! error pink texture, default materials).
 //!
 //! ## Key Concepts
@@ -229,11 +232,11 @@ impl VkDataCache {
             .destroy(device, allocator);
         self.texture_cache
             .lock()
-            .unwrap()
+            .expect("texture_cache lock poisoned during destroy")
             .destroy(device, allocator);
         self.environment_cache
             .lock()
-            .unwrap()
+            .expect("environment_cache lock poisoned during destroy")
             .destroy(device, allocator);
     }
 }
@@ -424,14 +427,9 @@ impl TextureCache {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             5.0,
         )];
-        let meta_desc_ratios = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_BUFFER, 1.0)];
-
         let image_desc_allocator =
             VkDynamicDescriptorAllocator::new(device, 5_000, &image_desc_ratios)
-                .expect("failed to create image descriptor allocator");
-        let _meta_desc_allocator =
-            VkDynamicDescriptorAllocator::new(device, 1_000, &meta_desc_ratios)
-                .expect("failed to create meta descriptor allocator");
+                .map_err(|err| format!("failed to create image descriptor allocator: {err}"))?;
 
         let material_meta_storage = VkSubAllocator::new_storage_buffer(
             device,
@@ -592,9 +590,17 @@ impl TextureCache {
         self.alloc_texture_slot(CachedTexture::Unloaded(data))
     }
 
-    pub(crate) fn save_debug_image(data: &TextureMeta, bytes: &[u8], filename: String) {
+    pub(crate) fn save_debug_image(
+        data: &TextureMeta,
+        bytes: &[u8],
+        filename: String,
+    ) -> Result<(), String> {
         let path = path::Path::new("debug_textures").join(filename);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("debug texture path has no parent: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create debug texture directory: {err}"))?;
 
         match data.payload.format() {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
@@ -603,7 +609,8 @@ impl TextureCache {
                     data.payload.height(),
                     bytes,
                 ) {
-                    img.save(&path).unwrap();
+                    img.save(&path)
+                        .map_err(|err| format!("failed to save debug texture: {err}"))?;
                 }
             }
             vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
@@ -612,7 +619,8 @@ impl TextureCache {
                     data.payload.height(),
                     bytes,
                 ) {
-                    img.save(&path).unwrap();
+                    img.save(&path)
+                        .map_err(|err| format!("failed to save debug texture: {err}"))?;
                 }
             }
             _ => {
@@ -624,6 +632,7 @@ impl TextureCache {
         }
 
         println!("Saved debug image: {:?}", path);
+        Ok(())
     }
 
     pub fn add_textures(&mut self, data: Vec<TextureMeta>) -> Vec<TextureHandle> {
@@ -783,7 +792,13 @@ impl TextureCache {
                 return false;
             }
 
-            let finalized = self.poll_texture_uploads();
+            let finalized = match self.poll_texture_uploads() {
+                Ok(finalized) => finalized,
+                Err(err) => {
+                    error!("allocate_textures failed while polling uploads: {err}");
+                    return false;
+                }
+            };
             if finalized == 0 {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -896,14 +911,17 @@ impl TextureCache {
             // commands are complete and ownership can move to graphics.
             vk_util::async_transfer_signal_stage_mask(),
         )) {
-            if let Err(e) = host_buffer.reset_buffers(&self.device) {
-                log::error!("Failed to reset host buffers after transfer error: {}", e);
-            }
+            let reset_error = host_buffer.reset_buffers(&self.device).err();
             self.destroy_uploaded_images(image_allocs);
-            return Err(format!(
-                "failed to submit transfer commands for texture upload batch: {}",
-                err
-            ));
+            return Err(match reset_error {
+                Some(reset_err) => format!(
+                    "failed to submit transfer commands for texture upload batch: {err}; \
+                     resetting host buffers also failed: {reset_err}"
+                ),
+                None => format!(
+                    "failed to submit transfer commands for texture upload batch: {err}"
+                ),
+            });
         }
 
         if let Err(err) = host_buffer.submit_graphics_commands(VkSubmitParam::waiting(
@@ -938,8 +956,12 @@ impl TextureCache {
         }
 
         if host_buffer.countdown_latch.get_count() == 0 {
-            if let Err(e) = host_buffer.reset_buffers(&self.device) {
-                log::error!("Failed to reset host buffers after batch completion: {}", e);
+            if let Err(err) = host_buffer.reset_buffers(&self.device) {
+                drop(host_buffer);
+                self.destroy_uploaded_images(image_allocs);
+                return Err(format!(
+                    "failed to reset host buffers after texture batch completion: {err}"
+                ));
             }
             drop(host_buffer);
             self.promote_uploaded_images(batch_texture_ids.as_slice(), image_allocs);
@@ -972,9 +994,9 @@ impl TextureCache {
     ///
     /// For each completed batch, promotes textures from Unloaded → Loaded and
     /// resets the staging buffer for reuse. Returns the number of finalized batches.
-    pub fn poll_texture_uploads(&mut self) -> usize {
+    pub fn poll_texture_uploads(&mut self) -> Result<usize, String> {
         if self.pending_batches.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         let host_buffer = self.host_buffer.lock().expect("host_buffer lock poisoned");
@@ -1004,13 +1026,13 @@ impl TextureCache {
                 }
             }
 
-            return 0;
+            return Ok(0);
         }
 
-        // All fences signaled — reset staging buffer and promote all pending batches
-        if let Err(e) = host_buffer.reset_buffers(&self.device) {
-            log::error!("Failed to reset host buffers during poll: {}", e);
-        }
+        // All fences signaled — reset staging buffer before any pending image is promoted.
+        host_buffer
+            .reset_buffers(&self.device)
+            .map_err(|err| format!("failed to reset host buffers during texture poll: {err}"))?;
         drop(host_buffer);
 
         let batch_ids: Vec<u64> = self.pending_batches.keys().copied().collect();
@@ -1044,7 +1066,7 @@ impl TextureCache {
             }
         }
 
-        finalized
+        Ok(finalized)
     }
 
     fn allocate_materials(
@@ -1500,7 +1522,7 @@ impl MeshCache {
         joint_desc_layout: vk::DescriptorSetLayout,
         vertex_storage: VkSubAllocator,
         index_storage: VkSubAllocator,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let mut cached_meshes = Vec::<CachedMesh>::with_capacity(100);
 
         let (vertices, indices) = data_util::get_skybox_mesh();
@@ -1518,19 +1540,15 @@ impl MeshCache {
             allocator,
             Self::DEFAULT_JOINTS.as_byte_slice(),
             vk::BufferUsageFlags::UNIFORM_BUFFER,
-        )
-        .unwrap();
+        )?;
 
         let mut joint_desc_pool = VkDynamicDescriptorAllocator::new(
             device,
             1,
             &[PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 1.0)],
-        )
-        .unwrap();
+        )?;
 
-        let default_joint_desc = joint_desc_pool
-            .allocate(device, &[joint_desc_layout])
-            .unwrap();
+        let default_joint_desc = joint_desc_pool.allocate(device, &[joint_desc_layout])?;
 
         let mut writer = VkDescriptorWriter::default();
         writer.write_buffer(
@@ -1543,7 +1561,7 @@ impl MeshCache {
 
         writer.update_set(device, default_joint_desc);
 
-        Self {
+        Ok(Self {
             cached_meshes,
             mesh_generations: vec![0],
             free_mesh_slots: Vec::new(),
@@ -1552,7 +1570,7 @@ impl MeshCache {
             joint_desc_pool,
             default_joint_buffer,
             default_joint_desc,
-        }
+        })
     }
 
     pub fn get_default_joint_desc(&self) -> vk::DescriptorSet {
@@ -1709,6 +1727,12 @@ impl MeshCache {
                     let material_id = meta
                         .material_index
                         .unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT);
+                    let (bounds_min, bounds_max) = meta.vertices.iter().fold(
+                        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+                        |(min, max), vertex| {
+                            (min.min(vertex.position), max.max(vertex.position))
+                        },
+                    );
                     let buffer = VkMeshBuffers {
                         cache_id: id,
                         index_count: meta.indices.len() as u32,
@@ -1718,6 +1742,8 @@ impl MeshCache {
                         joint_desc: self.default_joint_desc,
                         material_id,
                         has_uv1: meta.has_uv1,
+                        bounds_min,
+                        bounds_max,
                     };
 
                     debug!(
@@ -2104,12 +2130,11 @@ pub enum VkDescType {
     EnvIrradiance,
     EnvPreFilter,
     EnvEquirect,
-    ShadowMap,
     Empty,
 }
 
 impl VkDescType {
-    const COUNT: usize = 11;
+    const COUNT: usize = 10;
 }
 
 pub struct VkDescLayoutCache {
@@ -2149,8 +2174,7 @@ impl VkDescLayoutCache {
                 6 => VkDescType::EnvIrradiance,
                 7 => VkDescType::EnvPreFilter,
                 8 => VkDescType::EnvEquirect,
-                9 => VkDescType::ShadowMap,
-                10 => VkDescType::Empty,
+                9 => VkDescType::Empty,
                 _ => panic!(),
             };
             debug!("\t{:?} : {:?}", typ, *set)
@@ -2415,14 +2439,15 @@ impl VkSamplerCache {
         &mut self,
         device: &ash::Device,
         info: VkSamplerInfo,
-    ) -> vk::Sampler {
+    ) -> Result<vk::Sampler, String> {
         if let Some(sampler) = self.samplers.get(&info) {
-            *sampler
+            Ok(*sampler)
         } else {
             let create_info = info.to_create_info();
-            let sampler = unsafe { device.create_sampler(&create_info, None).unwrap() };
+            let sampler = unsafe { device.create_sampler(&create_info, None) }
+                .map_err(|err| format!("failed to create texture sampler: {err:?}"))?;
             self.samplers.insert(info, sampler);
-            sampler
+            Ok(sampler)
         }
     }
 

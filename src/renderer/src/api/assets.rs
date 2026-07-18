@@ -130,6 +130,8 @@ impl AssetLoadTracker {
         }
     }
 
+    // future async model loading path
+    #[allow(dead_code)]
     pub(crate) fn request_model_load(&mut self, path: PathBuf) -> LoadTicket {
         self.request_model_load_with_policy(path, AssetPolicyConfig::default())
     }
@@ -307,20 +309,30 @@ impl AssetLoadTracker {
         self.pending_load_count() > 0
     }
 
-    pub(crate) fn pump(&mut self, core: &mut VkRenderCore, max_steps: usize) -> usize {
+    pub(crate) fn pump(
+        &mut self,
+        core: &mut VkRenderCore,
+        max_steps: usize,
+    ) -> Result<usize, String> {
         if max_steps == 0 {
-            return 0;
+            return Ok(0);
         }
 
         let mut progressed = 0usize;
-        progressed += core.pump_transfer_submissions(max_steps - progressed);
+        progressed += core.pump_transfer_submissions(max_steps - progressed)?;
 
         // An upload worker can hold the texture cache while waiting for transfer completion.
         // Never block the render-thread pump on that same lock or both sides deadlock.
-        if let Ok(mut texture_cache) = core.data_cache.texture_cache.try_lock() {
-            let finalized = texture_cache.poll_texture_uploads();
-            if finalized > 0 {
-                debug!("Finalized {} pending texture upload batch(es)", finalized);
+        match core.data_cache.texture_cache.try_lock() {
+            Ok(mut texture_cache) => {
+                let finalized = texture_cache.poll_texture_uploads()?;
+                if finalized > 0 {
+                    debug!("Finalized {} pending texture upload batch(es)", finalized);
+                }
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("texture_cache lock poisoned during asset pump")
             }
         }
 
@@ -333,7 +345,7 @@ impl AssetLoadTracker {
         }
 
         self.cleanup_terminal_tickets();
-        progressed
+        Ok(progressed)
     }
 
     fn next_ticket(&mut self) -> LoadTicket {
@@ -1011,7 +1023,7 @@ impl<'a> AssetManager<'a> {
 
         // Wait for completion while pumping transfer submissions.
         loop {
-            self.pump_transfer_submissions();
+            self.pump_transfer_submissions()?;
             match receiver.recv_timeout(std::time::Duration::from_millis(10)) {
                 Ok(result) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -1024,8 +1036,11 @@ impl<'a> AssetManager<'a> {
         }
     }
 
-    fn pump_transfer_submissions(&mut self) {
-        self.core.pump_transfer_submissions(usize::MAX);
+    fn pump_transfer_submissions(&mut self) -> Result<(), AssetError> {
+        self.core
+            .pump_transfer_submissions(usize::MAX)
+            .map(|_| ())
+            .map_err(AssetError::Sync)
     }
 }
 

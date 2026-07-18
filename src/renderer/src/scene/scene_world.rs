@@ -156,7 +156,7 @@ impl SceneWorld {
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(16),
             free_point_light_slots: Vec::new(),
-            directional_lights: Vec::with_capacity(2),
+            directional_lights: Vec::with_capacity(1),
             free_directional_light_slots: Vec::new(),
             enable_frustum_culling: true,
         }
@@ -391,7 +391,7 @@ impl SceneWorld {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
 
-        // Collect directional light (only first active one is used)
+        // Collect the scene's single directional light.
         submission.directional_light =
             self.get_active_directional_light()
                 .map(|light| FrameDirectionalLight {
@@ -657,6 +657,8 @@ impl SceneWorld {
         true
     }
 
+    // future lighting query API
+    #[allow(dead_code)]
     pub(crate) fn get_active_point_lights(&self) -> Vec<PointLight> {
         self.point_lights
             .iter()
@@ -738,7 +740,7 @@ impl SceneWorld {
         true
     }
 
-    /// Returns the first active directional light (engine supports one).
+    /// Returns the active directional light (the public facade enforces one).
     pub(crate) fn get_active_directional_light(&self) -> Option<DirectionalLight> {
         self.directional_lights
             .iter()

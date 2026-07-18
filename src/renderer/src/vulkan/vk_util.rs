@@ -4,6 +4,9 @@
 //! Collection of helper functions for creating Vulkan structures, recording common
 //! command patterns, and handling images/buffers. Reduces boilerplate throughout codebase.
 //!
+//! Internal Vulkan helpers with many future-facing utilities; dead code allowed.
+#![allow(dead_code)]
+//!
 //! ## Categories
 //! - **Info Creators**: Functions returning VkXxxCreateInfo structs with sensible defaults
 //! - **Image Utilities**: create_image(), image_view_create_info(), transition_image()
@@ -186,7 +189,7 @@ pub fn create_image(
     format: vk::Format,
     usage_flags: vk::ImageUsageFlags,
     mips_levels: u32,
-) -> VkImageAlloc {
+) -> Result<VkImageAlloc, String> {
     let image_info = image_create_info(
         format,
         usage_flags,
@@ -200,7 +203,11 @@ pub fn create_image(
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-    let (image, allocation) = unsafe { allocator.create_image(&image_info, &alloc_info).unwrap() };
+    let (image, mut allocation) = unsafe {
+        allocator
+            .create_image(&image_info, &alloc_info)
+            .map_err(|err| format!("failed to allocate Vulkan image: {err:?}"))?
+    };
     let aspect_flag = if format == vk::Format::D32_SFLOAT {
         vk::ImageAspectFlags::DEPTH
     } else {
@@ -211,16 +218,22 @@ pub fn create_image(
         image_view_create_info(format, vk::ImageViewType::TYPE_2D, image, aspect_flag);
     view_info.subresource_range.level_count = mips_levels;
 
-    let image_view = unsafe { device.create_image_view(&view_info, None).unwrap() };
+    let image_view = match unsafe { device.create_image_view(&view_info, None) } {
+        Ok(view) => view,
+        Err(err) => {
+            unsafe { allocator.destroy_image(image, &mut allocation) };
+            return Err(format!("failed to create Vulkan image view: {err:?}"));
+        }
+    };
 
-    VkImageAlloc {
+    Ok(VkImageAlloc {
         image,
         image_view,
         allocation,
         image_extent: size,
         image_format: format,
         mip_levels: mips_levels,
-    }
+    })
 }
 
 pub fn image_view_create_info<'a>(
@@ -571,7 +584,7 @@ pub fn generate_brdf_lut(
     pipeline: vk::Pipeline,
     graphics_cmd_buffer: vk::CommandBuffer,
     graphics_queue: vk::Queue,
-) -> VkBrdfLut {
+) -> Result<VkBrdfLut, String> {
     info!("Generating BRDF LUT");
     let start = SystemTime::now();
 
@@ -587,7 +600,7 @@ pub fn generate_brdf_lut(
         format,
         vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
         1,
-    );
+    )?;
 
     let brd_sampler = vk::SamplerCreateInfo::default()
         .mag_filter(vk::Filter::LINEAR)
@@ -601,7 +614,8 @@ pub fn generate_brdf_lut(
         .max_anisotropy(1.0)
         .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
 
-    let brd_sampler = unsafe { device.create_sampler(&brd_sampler, None).unwrap() };
+    let brd_sampler = unsafe { device.create_sampler(&brd_sampler, None) }
+        .map_err(|err| format!("failed to create BRDF LUT sampler: {err:?}"))?;
 
     let color_attachment_format = vk::Format::R16G16B16A16_SFLOAT;
     let _pipeline_rendering_create_info = vk::PipelineRenderingCreateInfo::default()
@@ -644,7 +658,7 @@ pub fn generate_brdf_lut(
 
         device
             .begin_command_buffer(graphics_cmd_buffer, &begin_info)
-            .unwrap();
+            .map_err(|err| format!("failed to begin BRDF LUT command buffer: {err:?}"))?;
 
         transition_image(
             device,
@@ -698,25 +712,32 @@ pub fn generate_brdf_lut(
             &[barrier],
         );
 
-        device.end_command_buffer(graphics_cmd_buffer).unwrap();
+        device
+            .end_command_buffer(graphics_cmd_buffer)
+            .map_err(|err| format!("failed to end BRDF LUT command buffer: {err:?}"))?;
 
         let cmd_info = [command_buffer_submit_info(graphics_cmd_buffer)];
         let submit_info = [submit_info_2(&cmd_info, &[], &[])];
         device
             .queue_submit2(graphics_queue, &submit_info, vk::Fence::null())
-            .unwrap();
+            .map_err(|err| format!("BRDF LUT queue_submit2 failed: {err:?}"))?;
 
-        device.device_wait_idle().unwrap();
-        let end = SystemTime::now().duration_since(start).unwrap().as_millis();
+        device
+            .device_wait_idle()
+            .map_err(|err| format!("BRDF LUT device_wait_idle failed: {err:?}"))?;
+        let end = SystemTime::now()
+            .duration_since(start)
+            .unwrap_or_default()
+            .as_millis();
 
         info!("BRDF LUT generation took: {} ms", end);
     }
 
-    VkBrdfLut {
+    Ok(VkBrdfLut {
         sampler: brd_sampler,
         image_alloc: brd_img,
         extent: dim_extent,
-    }
+    })
 }
 
 pub fn get_format_size(format: vk::Format) -> u32 {
@@ -735,7 +756,7 @@ pub fn upload_skybox(
     tex_meta: TextureMeta,
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
-) -> VkCubeMap {
+) -> Result<VkCubeMap, String> {
     let face_width = tex_meta.payload.width() / 6;
     let format_size = get_format_size(tex_meta.payload.format());
 
@@ -743,8 +764,7 @@ pub fn upload_skybox(
         allocator,
         tex_meta.payload.bytes(),
         vk::BufferUsageFlags::TRANSFER_SRC,
-    )
-    .unwrap();
+    )?;
 
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
@@ -764,7 +784,8 @@ pub fn upload_skybox(
         .array_layers(6)
         .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE);
 
-    let image = unsafe { device.create_image(&image_create_info, None).unwrap() };
+    let image = unsafe { device.create_image(&image_create_info, None) }
+        .map_err(|err| format!("failed to create skybox image: {err:?}"))?;
 
     let alloc_info = vk_mem::AllocationCreateInfo {
         usage: vk_mem::MemoryUsage::Unknown,
@@ -776,7 +797,7 @@ pub fn upload_skybox(
     let (allocation, _device_memory, _alloc_offset) = unsafe {
         let alloc = allocator
             .allocate_memory_for_image(image, &alloc_info)
-            .unwrap();
+            .map_err(|err| format!("failed to allocate skybox image memory: {err:?}"))?;
 
         let alloc_info = allocator.get_allocation_info(&alloc);
         let device_memory = alloc_info.device_memory;
@@ -784,7 +805,7 @@ pub fn upload_skybox(
 
         device
             .bind_image_memory(image, device_memory, offset)
-            .unwrap();
+            .map_err(|err| format!("failed to bind skybox image memory: {err:?}"))?;
 
         (alloc, device_memory, offset)
     };
@@ -796,7 +817,7 @@ pub fn upload_skybox(
 
         device
             .begin_command_buffer(cmd_buffer, &begin_info)
-            .unwrap();
+            .map_err(|err| format!("failed to begin skybox upload command buffer: {err:?}"))?;
 
         // Map regions for each face
         let regions: Vec<vk::BufferImageCopy> = (0..6)
@@ -853,17 +874,20 @@ pub fn upload_skybox(
             1,
         );
 
-        device.end_command_buffer(cmd_buffer).unwrap();
+        device
+            .end_command_buffer(cmd_buffer)
+            .map_err(|err| format!("failed to end skybox upload command buffer: {err:?}"))?;
 
         let cmd_info = [vk_util::command_buffer_submit_info(cmd_buffer)];
         let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
 
-        // Submit the command buffer and signal the fence correctly
         device
             .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
-            .unwrap();
+            .map_err(|err| format!("skybox upload queue_submit2 failed: {err:?}"))?;
 
-        let _ = device.device_wait_idle();
+        device
+            .device_wait_idle()
+            .map_err(|err| format!("skybox upload device_wait_idle failed: {err:?}"))?;
 
         let sampler_create_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -882,7 +906,9 @@ pub fn upload_skybox(
             .min_lod(0.0)
             .max_lod(0.0);
 
-        let sampler = device.create_sampler(&sampler_create_info, None).unwrap();
+        let sampler = device
+            .create_sampler(&sampler_create_info, None)
+            .map_err(|err| format!("failed to create skybox sampler: {err:?}"))?;
 
         let view_create_info = vk::ImageViewCreateInfo::default()
             .image(image)
@@ -896,7 +922,9 @@ pub fn upload_skybox(
                 layer_count: 6,
             });
 
-        let image_view = device.create_image_view(&view_create_info, None).unwrap();
+        let image_view = device
+            .create_image_view(&view_create_info, None)
+            .map_err(|err| format!("failed to create skybox image view: {err:?}"))?;
 
         destroy_buffer(allocator, staging_buffer);
 
@@ -912,7 +940,7 @@ pub fn upload_skybox(
             depth: 1,
         };
 
-        VkCubeMap {
+        Ok(VkCubeMap {
             texture_meta: Some(tex_meta),
             full_extent,
             face_extent,
@@ -920,7 +948,7 @@ pub fn upload_skybox(
             image,
             image_view,
             sampler,
-        }
+        })
     }
 }
 
@@ -936,7 +964,7 @@ pub fn upload_cubemap_faces(
     bytes: Vec<u8>,
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
-) -> VkCubeMap {
+) -> Result<VkCubeMap, String> {
     // Delegate to upload_skybox with face-major layout convention
     let meta = TextureMeta {
         payload: crate::data::gpu_data::TexturePayload::Raw {
@@ -981,7 +1009,7 @@ pub fn upload_texture_2d(
         format,
         vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
         1,
-    );
+    )?;
 
     let cmd_buffer = transfer_pool.buffers[0];
     unsafe {
@@ -989,7 +1017,7 @@ pub fn upload_texture_2d(
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         device
             .begin_command_buffer(cmd_buffer, &begin_info)
-            .unwrap();
+            .map_err(|err| format!("failed to begin 2D texture upload command buffer: {err:?}"))?;
 
         transition_image(
             device,
@@ -1028,14 +1056,18 @@ pub fn upload_texture_2d(
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         );
 
-        device.end_command_buffer(cmd_buffer).unwrap();
+        device
+            .end_command_buffer(cmd_buffer)
+            .map_err(|err| format!("failed to end 2D texture upload command buffer: {err:?}"))?;
 
         let cmd_info = [command_buffer_submit_info(cmd_buffer)];
         let submit_info = [submit_info_2(&cmd_info, &[], &[])];
         device
             .queue_submit2(transfer_queue, &submit_info, vk::Fence::null())
-            .unwrap();
-        let _ = device.device_wait_idle();
+            .map_err(|err| format!("2D texture upload queue_submit2 failed: {err:?}"))?;
+        device
+            .device_wait_idle()
+            .map_err(|err| format!("2D texture upload device_wait_idle failed: {err:?}"))?;
 
         destroy_buffer(allocator, staging_buffer);
 
@@ -1049,7 +1081,9 @@ pub fn upload_texture_2d(
             .min_lod(0.0)
             .max_lod(0.0);
 
-        let sampler = device.create_sampler(&sampler_info, None).unwrap();
+        let sampler = device
+            .create_sampler(&sampler_info, None)
+            .map_err(|err| format!("failed to create 2D texture sampler: {err:?}"))?;
 
         Ok((image, sampler))
     }
@@ -1453,7 +1487,7 @@ pub fn record_host_to_image_buffer(
         }
 
         let image_alloc = {
-            let allocator = allocator.lock().unwrap();
+            let allocator = allocator.lock().expect("allocator lock poisoned");
             create_image(
                 device,
                 &allocator,
@@ -1463,7 +1497,7 @@ pub fn record_host_to_image_buffer(
                     | vk::ImageUsageFlags::TRANSFER_DST
                     | vk::ImageUsageFlags::TRANSFER_SRC,
                 effective_mips,
-            )
+            )?
         };
         image_allocs.push(image_alloc);
     }
@@ -1473,10 +1507,14 @@ pub fn record_host_to_image_buffer(
     unsafe {
         device
             .begin_command_buffer(transfer_cmd_buffer, &begin_info)
-            .expect("failed to begin transfer command buffer for texture upload");
+            .map_err(|err| {
+                format!("failed to begin transfer command buffer for texture upload: {err:?}")
+            })?;
         device
             .begin_command_buffer(graphics_cmd_buffer, &begin_info)
-            .expect("failed to begin graphics command buffer for texture upload");
+            .map_err(|err| {
+                format!("failed to begin graphics command buffer for texture upload: {err:?}")
+            })?;
     }
 
     // Perform buffer to image copies
@@ -1689,7 +1727,7 @@ pub fn record_host_to_image_buffer(
             sampler_info.min_lod = sampler_info.max_lod;
         }
 
-        let sampler = sampler_cache.get_or_create_sampler(device, sampler_info);
+        let sampler = sampler_cache.get_or_create_sampler(device, sampler_info)?;
 
         upload_images.push((image_alloc, sampler));
     }
@@ -1697,10 +1735,14 @@ pub fn record_host_to_image_buffer(
     unsafe {
         device
             .end_command_buffer(transfer_cmd_buffer)
-            .expect("failed to end transfer command buffer for texture upload");
+            .map_err(|err| {
+                format!("failed to end transfer command buffer for texture upload: {err:?}")
+            })?;
         device
             .end_command_buffer(graphics_cmd_buffer)
-            .expect("failed to end graphics command buffer for texture upload");
+            .map_err(|err| {
+                format!("failed to end graphics command buffer for texture upload: {err:?}")
+            })?;
     }
 
     Ok(upload_images)

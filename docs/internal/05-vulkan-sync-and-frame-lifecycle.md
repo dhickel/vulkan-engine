@@ -69,7 +69,7 @@ fn acquire_frame_slot(&mut self) -> Option<FrameAcquire> {
 Snippet Type: Real
 ```rust
 // src/renderer/src/vulkan/vk_render.rs
-fn submit_frame(&self, frame: FrameAcquire) {
+fn submit_frame(&self, frame: FrameAcquire) -> Result<(), String> {
     let cmd_info = [vk_util::command_buffer_submit_info(frame.cmd_buffer)];
     let wait_info = [vk_util::semaphore_submit_info(
         vk_util::frame_acquire_wait_stage_mask(),
@@ -80,7 +80,11 @@ fn submit_frame(&self, frame: FrameAcquire) {
         frame.frame_sync.render_semaphore,
     )];
     let submit = [vk_util::submit_info_2(&cmd_info, &signal_info, &wait_info)];
-    unsafe { self.device.queue_submit2(frame.queue, &submit, frame.frame_sync.render_fence).unwrap(); }
+    unsafe {
+        self.device
+            .queue_submit2(frame.queue, &submit, frame.frame_sync.render_fence)
+            .map_err(|err| format!("queue_submit2 failed: {err:?}"))
+    }
 }
 ```
 

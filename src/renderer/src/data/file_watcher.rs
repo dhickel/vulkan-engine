@@ -3,6 +3,9 @@
 //! Uses the `notify` crate to monitor asset directories. When a file changes,
 //! the watcher invalidates the corresponding entry in the `AssetRegistry`
 //! so the next access triggers a fresh load.
+//!
+//! Future-facing hot-reload feature; dead code allowed.
+#![allow(dead_code)]
 
 use crate::data::asset_registry::AssetRegistry;
 use notify::{Event, EventKind, RecursiveMode, Watcher};

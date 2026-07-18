@@ -30,6 +30,8 @@ author/validate project package data -> run the root launcher with `cargo run --
 - Frame outcomes are explicit:
   - `FrameRenderOutcome::Rendered`
   - `FrameRenderOutcome::SkippedResizePending`
+  - `FrameRenderOutcome::SubmittedNotPresented`
+  - `FrameRenderOutcome::PresentedSuboptimal`
 - Model loading can be:
   - sync (`load_model`) for easiest first integration
   - deferred (`request_model_load` + `poll_model_load`) for non-blocking loads

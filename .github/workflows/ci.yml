@@ -1,0 +1,162 @@
+name: Engine CPU CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Formatting ──────────────────────────────────────────────────────────
+  format:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ── Full workspace check ───────────────────────────────────────────────
+  check:
+    name: cargo check --workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libclang-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            cmake \
+            pkg-config
+      - name: cargo check --workspace
+        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo check --workspace
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+
+  # ── Renderer examples ──────────────────────────────────────────────────
+  check-examples:
+    name: cargo check -p renderer --examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libclang-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            cmake \
+            pkg-config
+      - name: cargo check -p renderer --examples
+        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo check -p renderer --examples
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+
+  # ── Dogfood application ────────────────────────────────────────────────
+  check-dogfood:
+    name: cargo check -p dungeon_dogfood
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libclang-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            cmake \
+            pkg-config
+      - name: cargo check -p dungeon_dogfood
+        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo check -p dungeon_dogfood
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+
+  # ── Input crate tests ──────────────────────────────────────────────────
+  test-input:
+    name: cargo test -p input
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test -p input
+        run: cargo test -p input
+
+  # ── Events crate tests ─────────────────────────────────────────────────
+  test-events:
+    name: cargo test -p engine_events
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test -p engine_events
+        run: cargo test -p engine_events
+
+  # ── Renderer CPU tests ─────────────────────────────────────────────────
+  test-renderer:
+    name: cargo test -p renderer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libclang-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            cmake \
+            pkg-config
+      - name: cargo test -p renderer
+        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo test -p renderer
+        env:
+          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+
+  # ── Physics crate tests ────────────────────────────────────────────────
+  test-physics:
+    name: cargo test -p physics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test -p physics
+        run: cargo test -p physics
+
+  # ── Audio crate tests ──────────────────────────────────────────────────
+  test-audio:
+    name: cargo test -p audio
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libasound2-dev
+      - name: cargo test -p audio
+        run: cargo test -p audio
+
+  # ── Scripting crate tests ──────────────────────────────────────────────
+  test-scripting:
+    name: cargo test -p scripting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test -p scripting
+        run: cargo test -p scripting

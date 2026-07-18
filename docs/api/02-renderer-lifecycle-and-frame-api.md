@@ -25,6 +25,11 @@ This chapter is for students, hobbyists, and indie developers using the facade r
 - `FrameRenderOutcome` must be handled exhaustively:
   - `Rendered`
   - `SkippedResizePending`
+  - `SubmittedNotPresented`
+  - `PresentedSuboptimal`
+- `RendererError::DeviceLost` is terminal: destroy and recreate the renderer. A renderer whose
+  backend previously panicked or returned a terminal Vulkan failure rejects later backend work with
+  `RendererError::BackendPoisoned`.
 - Rendering auto-pumps deferred asset work each frame; explicit pumping is available via `pump_asset_tasks(...)`.
 - Debug UI is now renderer-managed and can be controlled via:
   - `toggle_debug_ui()`, `set_debug_ui_visible(...)`, `is_debug_ui_visible()`
@@ -61,6 +66,12 @@ match outcome {
     }
     FrameRenderOutcome::SkippedResizePending => {
         // wait for resize handling and keep loop alive
+    }
+    FrameRenderOutcome::SubmittedNotPresented => {
+        // GPU submission completed, but the out-of-date swapchain was not presented
+    }
+    FrameRenderOutcome::PresentedSuboptimal => {
+        // frame was presented; service the pending swapchain resize/rebuild
     }
 }
 ```
@@ -124,6 +135,12 @@ Every loop tick:
 - Calling `begin_frame(...)` twice without `end_frame(...)` returns invalid state.
 - Calling `render_scene_in_frame(...)` twice for one `FrameContext` is invalid.
 - Resize flow can produce repeated `SkippedResizePending` outcomes until resize is serviced.
+- `SubmittedNotPresented` means queue submission succeeded but presentation did not reach the
+  presentation engine because the swapchain was out of date.
+- `PresentedSuboptimal` means the frame reached presentation, but image acquisition or presentation
+  reported a suboptimal swapchain and requested a rebuild.
+- After `DeviceLost`, or after a backend panic caught by host code, do not retry on the same
+  renderer. Later backend operations return `BackendPoisoned`; recreate the renderer.
 - Running the wrong target is a common startup trap: use root `cargo run -- --project ...` for project manifests, renderer examples for facade diagnostics, and app crates for custom Rust behavior.
 - Registering app UI marks imgui/app chrome as active for input capture, cursor release, and
   built-in FPS-controller suppression.
@@ -134,6 +151,7 @@ Every loop tick:
 - Step 3: inspect resize path; check whether frames are intentionally skipped due to `resize_requested`.
 - Step 4: if init fails and shader compile is enabled, verify shader toolchain availability (`glslc` or `glslangValidator`).
 - Step 5: if frame calls fail, print `RendererError` variant to separate init/frame/scene/asset errors.
+  Treat `DeviceLost` and `BackendPoisoned` as terminal for that renderer instance.
 
 ## 8. Cross-Module Links
 - Facade API surface: `src/renderer/src/api/mod.rs`

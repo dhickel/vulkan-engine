@@ -85,6 +85,17 @@ fn emit_chunk(
             return;
         }
 
+        let (bounds_min, bounds_max) = verts.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(min, max), vertex| {
+                (min.min(vertex.position), max.max(vertex.position))
+            },
+        );
+        let world_origin = (bounds_min + bounds_max) * 0.5;
+        for vertex in &mut verts {
+            vertex.position -= world_origin;
+        }
+
         out.push(ChunkBuild {
             name: base_name.to_string(),
             mesh: ProceduralMeshData {
@@ -93,8 +104,7 @@ fn emit_chunk(
                 indices: inds,
                 material: Some(material),
             },
-            world_origin: tile_to_world(x0, y0)
-                + Vec3::new(0.0, layer_idx as f32 * WALL_HEIGHT, 0.0),
+            world_origin,
         });
     } else {
         // Subdivide

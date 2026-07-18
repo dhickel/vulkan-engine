@@ -100,6 +100,10 @@ name = "capture_lighting"
 path = "examples/capture_tests/capture_lighting.rs"
 
 [[example]]
+name = "capture_shadows"
+path = "examples/capture_tests/capture_shadows.rs"
+
+[[example]]
 name = "capture_geometry"
 path = "examples/capture_tests/capture_geometry.rs"
 

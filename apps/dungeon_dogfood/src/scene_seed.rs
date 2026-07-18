@@ -108,13 +108,21 @@ impl LevelScene {
 
         // Upload chunked dungeon mesh geometry.
         let chunks = build_level_chunks(level, floor_material, wall_material);
+        // Dungeon chunks are much larger than the scene graph's current one-unit
+        // culling proxy. Keep this app on the documented opt-out until true mesh
+        // bounds cross the scene-submission boundary.
+        scene.set_frustum_culling(false);
         let mut chunk_meshes = Vec::with_capacity(chunks.len());
         let mut chunk_nodes = Vec::with_capacity(chunks.len());
         let level_root = scene.create_node(None, Mat4::IDENTITY)?;
 
         for chunk in chunks {
+            let world_origin = chunk.world_origin;
             let mesh = assets.upload_procedural_mesh(chunk.mesh)?;
-            let node = scene.create_node(Some(level_root), Mat4::IDENTITY)?;
+            let node = scene.create_node(
+                Some(level_root),
+                Mat4::from_translation(world_origin),
+            )?;
             scene.add_mesh(node, mesh)?;
             chunk_meshes.push(mesh);
             chunk_nodes.push(node);
@@ -253,7 +261,7 @@ impl LevelScene {
         // Create a directional light (sunlight-like) for shadow casting.
         let directional_light_id = scene
             .create_directional_light(DirectionalLight {
-                direction: glam::Vec3::new(0.3, -0.8, 0.4),
+                direction: glam::Vec3::new(0.3, 0.8, 0.4),
                 color: glam::Vec3::new(1.0, 0.95, 0.85),
                 intensity: 2.5,
             })

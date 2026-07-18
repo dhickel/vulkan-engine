@@ -51,10 +51,6 @@ layout (set = 0, binding = 1) uniform UBOParams {
     uint _pad0;
     uint _pad1;
     uint pointLightCount;
-    uint _pad2;
-    uint _pad3;
-    uint _pad4;
-    uint _pad5;
     PointLightData pointLights[16];
 } uboParams;
 
@@ -342,24 +338,30 @@ void main()
     vec3 u_LightColor = uboParams.lightColor.rgb;
     float u_LightIntensity = uboParams.lightColor.a;
 
-    // Shadow map PCF (3x3)
+    // Shadow map PCF (3x3). Vulkan NDC depth is already [0, 1], so only
+    // clip-space X/Y are remapped from [-1, 1] to texture coordinates.
     float shadowFactor = 1.0;
-    if (NdotL > 0.0) {
+    if (u_LightIntensity > 0.0) {
         vec4 shadowClip = uboParams.lightViewProj * vec4(inWorldPos, 1.0);
-        vec3 shadowUV = shadowClip.xyz / shadowClip.w;
-        // Transform from clip space [-1,1] to UV space [0,1]
-        shadowUV = shadowUV * 0.5 + 0.5;
+        vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
+        vec2 shadowUV = shadowNdc.xy * 0.5 + 0.5;
 
-        // 3x3 PCF
-        vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-        float shadowSum = 0.0;
-        for (int x = -1; x <= 1; ++x) {
-            for (int y = -1; y <= 1; ++y) {
-                vec2 offset = vec2(float(x), float(y)) * texelSize;
-                shadowSum += texture(shadowMap, vec3(shadowUV.xy + offset, shadowUV.z));
+        bool insideShadowMap = shadowNdc.z >= 0.0 && shadowNdc.z <= 1.0
+            && all(greaterThanEqual(shadowUV, vec2(0.0)))
+            && all(lessThanEqual(shadowUV, vec2(1.0)));
+        if (insideShadowMap) {
+            vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+            float depthBias = max(0.01 * (1.0 - NdotL), 0.0015);
+            float compareDepth = shadowNdc.z - depthBias;
+            float shadowSum = 0.0;
+            for (int x = -1; x <= 1; ++x) {
+                for (int y = -1; y <= 1; ++y) {
+                    vec2 offset = vec2(float(x), float(y)) * texelSize;
+                    shadowSum += texture(shadowMap, vec3(shadowUV + offset, compareDepth));
+                }
             }
+            shadowFactor = shadowSum / 9.0;
         }
-        shadowFactor = shadowSum / 9.0;
     }
 
     // Calculation of analytical lighting contribution

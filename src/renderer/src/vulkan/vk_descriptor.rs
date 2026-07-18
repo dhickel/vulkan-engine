@@ -4,6 +4,9 @@
 //! Implements traditional Vulkan descriptor sets with dynamic pool allocation. NOT using
 //! bindless/descriptor indexing - this is the classic Vulkan 1.0 approach.
 //!
+//! Internal Vulkan descriptor management; dead code allowed.
+#![allow(dead_code)]
+//!
 //! ## Key Concepts
 //! - **DescriptorLayoutBuilder**: Builder pattern for creating descriptor set layouts
 //! - **VkDynamicDescriptorAllocator**: Auto-growing pool allocator (ready/full pool strategy)
@@ -534,15 +537,6 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .expect("failed to build scene_data descriptor layout");
 
-    let shadow_map = DescriptorLayoutBuilder::default()
-        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
-        .build(
-            device,
-            vk::ShaderStageFlags::VERTEX,
-            vk::DescriptorSetLayoutCreateFlags::empty(),
-        )
-        .expect("failed to build shadow_map descriptor layout");
-
     let pbr_samplers = DescriptorLayoutBuilder::default()
         .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
         .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -588,7 +582,6 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         (VkDescType::PbrSamplers, pbr_samplers),
         (VkDescType::PbrProperties, pbr_properties),
         (VkDescType::SkinData, skin_data),
-        (VkDescType::ShadowMap, shadow_map),
         (VkDescType::Skybox, frag_combined_image),
         (VkDescType::EnvIrradiance, frag_combined_image),
         (VkDescType::EnvPreFilter, frag_combined_image),

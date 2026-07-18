@@ -38,8 +38,10 @@ pub struct SceneWorld {
     root: Option<SceneNodeId>,         // single root node
     camera: SceneDataUBO,              // camera uniforms
     skybox_env_id: EnvironmentHandle,  // active environment map
-    point_lights: Vec<PointLightEntry>, // slot + generation wrapped lights
+    point_lights: Vec<PointLightEntry>, // slot + generation wrapped point lights
     free_point_light_slots: Vec<u32>,
+    directional_lights: Vec<DirectionalLightEntry>, // public facade permits one live entry
+    free_directional_light_slots: Vec<u32>,
 }
 ```
 
@@ -99,6 +101,7 @@ Persistence negative examples:
 pub struct RenderSubmission {
     pub render_objects: Vec<RenderObject>,
     pub point_lights: Vec<PointLight>,
+    pub directional_light: Option<FrameDirectionalLight>,
     pub environment: Option<EnvironmentHandle>,
     pub camera_position: Vec3,
     pub camera_view: Mat4,
@@ -172,9 +175,11 @@ pub struct SceneFragmentNode {
 
 Fragments are consumed on merge — you cannot re-merge the same fragment. To instance the same model twice, load it twice (each load produces a fresh fragment).
 
-## Point Light System
+## Light Systems
 
-Point lights are stored in a parallel flat array with slot+generation handles (`PointLightId`). The `EnvironmentUBO` at [`gpu_data.rs:242`](../src/renderer/src/data/gpu_data.rs:242) supports up to 16 point lights in std140 layout (32 bytes each). Exceeding 16 lights silently clamps.
+Point lights are stored in a parallel flat array with slot+generation handles (`PointLightId`). The `EnvironmentUBO` supports up to 16 point lights in std140 layout (32 bytes each). Exceeding 16 submitted point lights clamps.
+
+The directional-light store uses the same slot+generation lifecycle, while the public facade rejects a second live light. `direction` is surface-to-light. Submission carries one optional `FrameDirectionalLight`; the renderer writes its direction, color/intensity, and fitted light view-projection matrix into `EnvironmentUBO` before PBR draws.
 
 ## See Also
 

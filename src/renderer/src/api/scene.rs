@@ -61,6 +61,7 @@ pub struct DirectionalLightId {
 /// Directional light definition.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DirectionalLight {
+    /// World-space direction from a shaded surface toward the light source.
     pub direction: Vec3,
     pub color: Vec3,
     pub intensity: f32,
@@ -815,6 +816,11 @@ impl Scene {
         light: DirectionalLight,
     ) -> Result<DirectionalLightId, SceneError> {
         light.validate()?;
+        if self.world.get_active_directional_light().is_some() {
+            return Err(SceneError::InvalidDirectionalLight(
+                "the scene already has its single directional light".to_string(),
+            ));
+        }
         let sanitized = DirectionalLight {
             color: light.sanitize_color(),
             ..light
@@ -865,8 +871,7 @@ impl Scene {
         )))
     }
 
-    /// Returns the active directional light, if any.
-    /// Only the first active light is returned (engine supports one directional light).
+    /// Returns the scene's directional light, if any.
     ///
     /// Thread: Any
     /// May Stall: No
@@ -2480,8 +2485,9 @@ fn default_editor_metadata() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_scene_str, validate_scene_str_with_options, PointLight, Scene, SceneAssetLoader,
-        SceneAssetReference, SceneFragment, SceneFragmentNode, SceneFragmentNodeId,
+        validate_scene_str, validate_scene_str_with_options, DirectionalLight, PointLight, Scene,
+        SceneAssetLoader, SceneAssetReference, SceneFragment, SceneFragmentNode,
+        SceneFragmentNodeId,
         SceneValidationOptions, SerializedScene,
     };
     use crate::api::errors::{AssetError, RendererError, SceneError};
@@ -2569,6 +2575,53 @@ mod tests {
 
         let result = scene.merge_fragment(None, fragment);
         assert!(matches!(result, Err(SceneError::MergeFailed(_))));
+    }
+
+    #[test]
+    fn directional_light_create_update_remove_and_single_light_limit() {
+        let mut scene = Scene::new();
+        let light = DirectionalLight {
+            direction: Vec3::new(0.25, 1.0, 0.5),
+            color: Vec3::new(1.0, 0.9, 0.8),
+            intensity: 3.0,
+        };
+        let id = scene.create_directional_light(light).unwrap();
+
+        assert!(matches!(
+            scene.create_directional_light(light),
+            Err(SceneError::InvalidDirectionalLight(_))
+        ));
+
+        let updated = DirectionalLight {
+            intensity: 4.0,
+            ..light
+        };
+        scene.update_directional_light(id, updated).unwrap();
+        assert_eq!(scene.directional_light(), Some(updated));
+        let submitted = scene.build_submission().directional_light.unwrap();
+        assert_eq!(submitted.direction, updated.direction);
+        assert_eq!(submitted.color, updated.color);
+        assert_eq!(submitted.intensity, updated.intensity);
+
+        scene.remove_directional_light(id).unwrap();
+        assert!(matches!(
+            scene.update_directional_light(id, light),
+            Err(SceneError::StaleDirectionalLight(_))
+        ));
+        assert!(scene.create_directional_light(light).is_ok());
+    }
+
+    #[test]
+    fn directional_light_rejects_zero_or_non_finite_direction() {
+        let mut scene = Scene::new();
+        for direction in [Vec3::ZERO, Vec3::new(f32::NAN, 1.0, 0.0)] {
+            let result = scene.create_directional_light(DirectionalLight {
+                direction,
+                color: Vec3::ONE,
+                intensity: 1.0,
+            });
+            assert!(matches!(result, Err(SceneError::InvalidDirectionalLight(_))));
+        }
     }
 
     #[test]

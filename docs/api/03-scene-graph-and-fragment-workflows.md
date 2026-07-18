@@ -11,7 +11,7 @@ The event crate defines typed scene event contracts, but broad scene mutation em
 
 ## 3. Key Concepts
 - `Scene` is the runtime-owned mutable graph used for rendering.
-- `SceneNodeId` and `PointLightId` are slot+generation handles; they can become stale.
+- `SceneNodeId`, `PointLightId`, and `DirectionalLightId` are slot+generation handles; they can become stale.
 - `SceneFragment` is detached content meant for merge/mount workflows.
 - `SceneFragmentMount` returns:
   - `mounted_root`: root node in destination scene
@@ -327,6 +327,23 @@ scene.update_point_light(light_id, PointLight {
 })?;
 ```
 
+A scene may also own one directional light. Its direction points from a shaded surface toward the light (positive Y means the light is above the scene). PBR materials receive direct lighting and a per-frame 2048² shadow map; unlit materials remain lighting-independent.
+
+Snippet Type: Real
+```rust
+let sun = scene.create_directional_light(DirectionalLight {
+    direction: glam::Vec3::new(-0.4, 1.0, 0.3),
+    color: glam::Vec3::new(1.0, 0.95, 0.85),
+    intensity: 3.0,
+})?;
+
+scene.update_directional_light(sun, DirectionalLight {
+    direction: glam::Vec3::new(-0.2, 1.0, 0.5),
+    color: glam::Vec3::ONE,
+    intensity: 4.0,
+})?;
+```
+
 Snippet Type: Pseudocode
 ```text
 Keep app-level scene edits in one stage of your frame loop:
@@ -348,6 +365,7 @@ Avoid mutating and removing the same node handle in unrelated systems without ow
 - Merging an empty fragment fails (`MergeFailed`).
 - Fragment roots can be ambiguous if not set and multiple parentless nodes exist.
 - Invalid point light values (non-finite color, non-positive range, negative intensity) are rejected.
+- Directional-light directions must be finite and non-zero; a second live directional light is rejected.
 
 ## 7. Debugging Playbook
 - Step 1: print node IDs (`slot`, `generation`) for failing operations.

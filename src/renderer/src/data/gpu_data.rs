@@ -3,6 +3,9 @@
 //! ## Purpose
 //! Defines GPU-visible data structures (vertices, uniforms, push constants) and draw-submission
 //! payloads consumed by the rendergraph. This file bridges CPU-side asset/cache data and Vulkan
+//!
+//! Internal GPU data definitions with many future-facing types; dead code allowed.
+#![allow(dead_code)]
 //! command recording.
 //!
 //! ## Key Concepts
@@ -586,7 +589,9 @@ pub struct GpuPointLight {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct EnvironmentUBO {
+    /// Normalized world-space direction from a shaded surface toward the light.
     pub light_dir: Vec4,
+    /// RGB color and scalar intensity in W.
     pub light_color: Vec4,
     pub light_view_proj: [Vec4; 4],
     pub exposure: f32,
@@ -606,7 +611,12 @@ impl Default for EnvironmentUBO {
         Self {
             light_dir: Vec4::new(0.1, 0.7, 0.7, 0.0),
             light_color: Vec4::new(1.0, 0.95, 0.85, 1.0),
-            light_view_proj: [Vec4::ZERO; 4],
+            light_view_proj: [
+                Vec4::X,
+                Vec4::Y,
+                Vec4::Z,
+                Vec4::W,
+            ],
             exposure: 4.5,
             gamma: 2.2,
             prefilter_mips_levels: 5.0,
@@ -723,6 +733,8 @@ pub struct VkMeshBuffers {
     pub vertex_buffer: VkSubAlloc,
     pub joint_desc: vk::DescriptorSet,
     pub has_uv1: bool,
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
 }
 
 impl VkMeshBuffers {
@@ -802,6 +814,8 @@ pub struct RenderObject {
     pub transform: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
     pub has_uv1: bool,
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
 }
 
 #[repr(C)]
@@ -820,14 +834,25 @@ const _: () = {
         "GpuPointLight must be exactly 32 bytes"
     );
     assert!(
-        std::mem::size_of::<EnvironmentUBO>().is_multiple_of(16),
-        "EnvironmentUBO must be 16-byte aligned"
+        std::mem::size_of::<EnvironmentUBO>() == 656,
+        "EnvironmentUBO must match the GLSL std140 block size"
     );
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_ubo_matches_shader_std140_offsets() {
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, light_dir), 0);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, light_color), 16);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, light_view_proj), 32);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, exposure), 96);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_light_count), 128);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_lights), 144);
+        assert_eq!(std::mem::size_of::<EnvironmentUBO>(), 656);
+    }
 
     #[test]
     fn copied_material_draw_record_survives_cache_mutation() {

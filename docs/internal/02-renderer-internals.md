@@ -47,6 +47,7 @@ let submission = scene.build_submission(&self.camera, viewport_size);
 `SceneWorld::build_submission()` at [`scene/scene_world.rs`](../src/renderer/src/scene/scene_world.rs) traverses the scene tree, computes world transforms, and packages flat arrays:
 - `Vec<RenderObject>` — per-draw data (mesh handle, material handle, transform)
 - `Vec<PointLight>` — active point lights
+- `Option<DirectionalLight>` — the scene's single surface-to-light directional source
 - `EnvironmentHandle` — active environment map
 
 Frustum culling is enabled by default. Mesh-backed nodes whose transform-aware proxy AABBs are outside the Vulkan `[0, 1]` camera frustum are omitted; descendants are tested independently. The public `Scene` facade can disable culling for diagnostics or compatibility.
@@ -64,7 +65,7 @@ self.render_graph.execute(
 );
 ```
 
-The default pass order: `PrepareTargetsPass` → `SkyboxPass` → `GeometryPass` → `PresentCopyPass` → `ImguiPass`. Each pass records Vulkan commands into the frame's command buffer.
+The default pass order: `PrepareTargetsPass` → `ShadowPass` → `SkyboxPass` → `GeometryPass` → `PresentCopyPass` → `ImguiPass` → `DebugCapturePass` → `TerminalPresentPass`. `ShadowPass` clears and records the current frame slot's 2048² D32 map, then transitions it to shader-read layout before PBR geometry samples scene descriptor set 0 binding 5.
 
 ### Step 6: Submit + Present
 

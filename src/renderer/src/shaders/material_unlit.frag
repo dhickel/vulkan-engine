@@ -43,10 +43,6 @@ layout (set = 0, binding = 1) uniform UBOParams {
     uint _pad0;
     uint _pad1;
     uint pointLightCount;
-    uint _pad2;
-    uint _pad3;
-    uint _pad4;
-    uint _pad5;
     PointLightData pointLights[16];
 } uboParams;
 

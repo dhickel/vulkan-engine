@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Instant;
 
 use ash::vk::Extent2D;
@@ -31,8 +30,7 @@ use super::config::{
     FrameCaptureSequence, FrameCaptureStatus, RendererConfig,
 };
 use super::errors::{
-    map_frame_input_err, map_frame_render_err, map_frame_resize_err, map_init_err, RendererError,
-    RendererInitError,
+    map_frame_input_err, map_frame_render_err, map_init_err, RendererError, RendererInitError,
 };
 use super::hooks::{invoke_render_hook, BoxedRenderHook, RenderHookStage};
 use super::scene::Scene;
@@ -52,9 +50,9 @@ pub enum FrameRenderOutcome {
     Rendered,
     /// Frame was skipped because a resize is pending.
     SkippedResizePending,
-    /// Frame was submitted to GPU but presentation failed (suboptimal/out-of-date).
+    /// Frame reached GPU submission, but an out-of-date swapchain prevented presentation.
     SubmittedNotPresented,
-    /// Frame was presented but the swapchain was suboptimal.
+    /// Frame was presented, but acquire or presentation reported a suboptimal swapchain.
     PresentedSuboptimal,
 }
 
@@ -528,16 +526,9 @@ impl Renderer {
 
         self.runtime.core.resize_requested = true;
         let new_extent = Extent2D::default().width(width).height(height);
-        catch_unwind(AssertUnwindSafe(|| {
-            self.runtime.rebuild_swapchain(new_extent)
-        }))
-        .map_err(|panic| {
-            map_frame_resize_err(format!(
-                "swapchain rebuild panicked: {}",
-                super::utils::panic_payload_to_string(panic)
-            ))
-        })?;
-        Ok(())
+        self.runtime
+            .rebuild_swapchain(new_extent)
+            .map_err(renderer_error_from_backend)
     }
 
     /// Thread: Main
@@ -745,21 +736,25 @@ impl Renderer {
         f: impl FnOnce(&mut FrameContext, &mut Scene) -> Result<(), RendererError>,
     ) -> Result<FrameRenderOutcome, RendererError> {
         let mut frame = self.begin_frame(window)?;
-        // Drain PreUpdate events that were emitted by begin_frame.
         self.dispatch_events_for_stage(EventStage::PreUpdate);
-        let result = f(&mut frame, scene);
-        // End the frame regardless of closure result. The closure's error
-        // takes precedence; end_frame errors are logged but not returned
-        // because the frame state is already cleaned up.
-        if let Err(end_err) = self.end_frame(frame) {
-            warn!("end_frame failed after with_frame closure: {end_err}");
-        }
-        result?;
-        // After successful closure, return the frame outcome.
-        if self.runtime.resize_requested() {
-            Ok(FrameRenderOutcome::SkippedResizePending)
-        } else {
-            Ok(FrameRenderOutcome::Rendered)
+
+        let frame_result = match f(&mut frame, scene) {
+            Ok(()) => self.render_scene_in_frame(&mut frame, scene),
+            Err(err) => Err(err),
+        };
+        let end_result = self.end_frame(frame);
+
+        match frame_result {
+            Ok(outcome) => {
+                end_result?;
+                Ok(outcome)
+            }
+            Err(err) => {
+                if let Err(end_err) = end_result {
+                    warn!("end_frame failed after with_frame error: {end_err}");
+                }
+                Err(err)
+            }
         }
     }
 
@@ -782,7 +777,15 @@ impl Renderer {
     /// Thread: Main
     /// May Stall: No
     pub fn pump_asset_tasks(&mut self, max_steps: usize) -> Result<usize, RendererError> {
-        let pumped = self.asset_loads.pump(&mut self.runtime.core, max_steps);
+        let _panic_guard = self
+            .runtime
+            .backend_operation_guard()
+            .map_err(renderer_error_from_backend)?;
+        let result = self.asset_loads.pump(&mut self.runtime.core, max_steps);
+        let pumped = self
+            .runtime
+            .complete_backend_operation(result)
+            .map_err(renderer_error_from_backend)?;
         self.last_asset_pump_steps = pumped;
         Ok(pumped)
     }
@@ -1124,7 +1127,7 @@ impl Renderer {
         let pre_hook = &mut self.pre_render_hook;
         let post_hook = &mut self.post_render_hook;
 
-        if hooks_enabled {
+        let backend_outcome = if hooks_enabled {
             runtime
                 .render_with_hooks(
                     frame_number,
@@ -1153,12 +1156,12 @@ impl Renderer {
                         }
                     },
                 )
-                .map_err(|err| render_error_from_vk_string(err))?;
+                .map_err(renderer_error_from_backend)?
         } else {
             runtime
                 .render_with_hooks(frame_number, &submission, due_captures, || {}, || {})
-                .map_err(|err| render_error_from_vk_string(err))?;
-        }
+                .map_err(renderer_error_from_backend)?
+        };
 
         self.record_frame_capture_statuses();
 
@@ -1190,7 +1193,7 @@ impl Renderer {
                 timings: self.runtime.frame_timing_snapshot(),
             });
 
-        Ok(FrameRenderOutcome::Rendered)
+        Ok(frame_outcome_from_backend(backend_outcome))
     }
 
     fn viewport_size(&self) -> (u32, u32) {
@@ -1237,6 +1240,8 @@ impl Renderer {
         self.apply_cursor_policy(window)
     }
 
+    // advanced-interop feature gate path
+    #[allow(dead_code)]
     pub(crate) fn raw_core_mut(&mut self) -> &mut vk_render::VkRenderCore {
         &mut self.runtime.core
     }
@@ -1421,13 +1426,31 @@ fn map_vk_init_err(err: String, compile_shaders: bool) -> RendererError {
     map_init_err(err)
 }
 
-/// Convert a Vulkan error string to a RendererError.
-/// Checks for device lost keywords.
-fn render_error_from_vk_string(err: String) -> RendererError {
-    if err.contains("Vulkan device lost") {
-        RendererError::DeviceLost
-    } else {
-        map_frame_render_err(err)
+fn renderer_error_from_backend(err: vk_render::VkRenderError) -> RendererError {
+    match err {
+        vk_render::VkRenderError::DeviceLost(message) => {
+            error!("{message}");
+            RendererError::DeviceLost
+        }
+        vk_render::VkRenderError::Backend(message) => map_frame_render_err(message),
+        vk_render::VkRenderError::BackendPoisoned(reason) => {
+            RendererError::BackendPoisoned(reason)
+        }
+    }
+}
+
+fn frame_outcome_from_backend(outcome: vk_render::VkFrameRenderOutcome) -> FrameRenderOutcome {
+    match outcome {
+        vk_render::VkFrameRenderOutcome::Rendered => FrameRenderOutcome::Rendered,
+        vk_render::VkFrameRenderOutcome::SkippedResizePending => {
+            FrameRenderOutcome::SkippedResizePending
+        }
+        vk_render::VkFrameRenderOutcome::SubmittedNotPresented => {
+            FrameRenderOutcome::SubmittedNotPresented
+        }
+        vk_render::VkFrameRenderOutcome::PresentedSuboptimal => {
+            FrameRenderOutcome::PresentedSuboptimal
+        }
     }
 }
 
@@ -1444,7 +1467,8 @@ mod tests {
     use crate::api::Scene;
 
     use super::{
-        build_submission_with_camera_view, emit_input_action_events_from_snapshot, CameraView,
+        build_submission_with_camera_view, emit_input_action_events_from_snapshot,
+        frame_outcome_from_backend, renderer_error_from_backend, CameraView, FrameRenderOutcome,
     };
 
     #[test]
@@ -1579,5 +1603,45 @@ mod tests {
         assert_eq!(submission.camera.projection, projection);
         assert_eq!(submission.camera.cam_pos, position);
         assert_eq!(scene.camera_view_projection(), (view, projection));
+    }
+
+    #[test]
+    fn backend_terminal_errors_map_to_public_variants() {
+        let device_lost =
+            renderer_error_from_backend(crate::vulkan::vk_render::VkRenderError::DeviceLost(
+                "Vulkan device lost during fence wait".to_string(),
+            ));
+        assert!(matches!(
+            device_lost,
+            crate::api::RendererError::DeviceLost
+        ));
+
+        let poisoned =
+            renderer_error_from_backend(crate::vulkan::vk_render::VkRenderError::BackendPoisoned(
+                "prior terminal queue failure".to_string(),
+            ));
+        assert!(matches!(
+            poisoned,
+            crate::api::RendererError::BackendPoisoned(reason)
+                if reason == "prior terminal queue failure"
+        ));
+    }
+
+    #[test]
+    fn backend_frame_outcomes_map_without_collapsing() {
+        use crate::vulkan::vk_render::VkFrameRenderOutcome as BackendOutcome;
+
+        assert_eq!(
+            frame_outcome_from_backend(BackendOutcome::SubmittedNotPresented),
+            FrameRenderOutcome::SubmittedNotPresented
+        );
+        assert_eq!(
+            frame_outcome_from_backend(BackendOutcome::PresentedSuboptimal),
+            FrameRenderOutcome::PresentedSuboptimal
+        );
+        assert_eq!(
+            frame_outcome_from_backend(BackendOutcome::SkippedResizePending),
+            FrameRenderOutcome::SkippedResizePending
+        );
     }
 }

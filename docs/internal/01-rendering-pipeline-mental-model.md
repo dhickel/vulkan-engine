@@ -41,7 +41,7 @@ pub(crate) fn build_submission(&mut self) -> RenderSubmission {
 Snippet Type: Real
 ```rust
 // src/renderer/src/rendergraph/mod.rs
-PrepareTargetsPass -> SkyboxPass -> GeometryPass -> PresentCopyPass -> ImguiPass
+PrepareTargetsPass -> ShadowPass -> SkyboxPass -> GeometryPass -> PresentCopyPass -> ImguiPass -> DebugCapturePass -> TerminalPresentPass
 ```
 
 Submission-to-present timeline:
@@ -50,13 +50,14 @@ Submission-to-present timeline:
 |---|---|---|
 | Facade render call | mutable scene | `RenderSubmission` |
 | PrepareTargetsPass | frame draw/depth images | writable render targets |
+| ShadowPass | directional light + opaque draw bounds | frame-local D32 map in shader-read layout |
 | SkyboxPass | submission skybox flags/env handle | background color in draw target |
 | GeometryPass | draw items + material/mesh handles | scene geometry in draw target |
 | PresentCopyPass | draw target + present target | present image ready for UI/present |
 | ImguiPass | present attachment + manager-composed UI draw data | final present image |
 
 Descriptor/pipeline ABI notes (current convention):
-- Set 0: scene descriptors
+- Set 0: scene descriptors (camera/environment UBOs, IBL maps, BRDF LUT, directional shadow map at binding 5)
 - Set 1: skin/joint descriptors
 - Set 2: material image descriptors
 - Push constants carry model transform + GPU addresses/metadata used by geometry draws

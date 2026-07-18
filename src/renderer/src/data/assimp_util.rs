@@ -2,6 +2,9 @@
 //!
 //! Active model loading path: imports meshes/materials via Assimp, maps them to engine cache
 //! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
+//!
+//! Internal assimp ingestion with future-facing helpers; dead code allowed.
+#![allow(dead_code)]
 
 use crate::api::AssetPolicyConfig;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
