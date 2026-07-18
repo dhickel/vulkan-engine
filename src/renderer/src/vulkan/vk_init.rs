@@ -813,6 +813,209 @@ pub fn get_swapchain_support(
     }
 }
 
+/// Fully validated swapchain creation plan built before any Vulkan call.
+///
+/// All selection decisions are resolved from re-queried surface capabilities,
+/// formats, and present modes. The plan can be inspected before the irreversible
+/// `oldSwapchain` boundary.
+#[derive(Debug, Clone)]
+pub struct SwapchainCreatePlan {
+    pub extent: vk::Extent2D,
+    pub surface_format: vk::SurfaceFormatKHR,
+    pub present_mode: vk::PresentModeKHR,
+    pub image_count: u32,
+    pub pre_transform: vk::SurfaceTransformFlagsKHR,
+    pub composite_alpha: vk::CompositeAlphaFlagsKHR,
+    pub image_usage: vk::ImageUsageFlags,
+}
+
+/// Build a validated swapchain creation plan from re-queried surface data.
+///
+/// Pure selection — no Vulkan calls, no state mutation. Returns a plan that
+/// can be passed to `create_swapchain_with_plan`.
+pub fn build_swapchain_create_plan(
+    support: &SwapchainSupport,
+    requested_extent: vk::Extent2D,
+    image_count: Option<u32>,
+    surface_format: Option<vk::SurfaceFormatKHR>,
+    present_mode: Option<vk::PresentModeKHR>,
+    allow_defaults: bool,
+) -> Result<SwapchainCreatePlan, String> {
+    if support.formats.is_empty() {
+        return Err("Vulkan surface reported no swapchain formats".to_string());
+    }
+    if support.present_modes.is_empty() {
+        return Err("Vulkan surface reported no presentation modes".to_string());
+    }
+
+    log::info!("Swapchain: Setting surface format");
+    let surface_format = if let Some(sf) = surface_format {
+        let (found, fmt) =
+            select_sc_surface_format(&support.formats, sf.format, sf.color_space);
+        if !found && !allow_defaults {
+            return Err("Couldn't find expected surface format".to_string());
+        }
+        fmt
+    } else {
+        get_default_sc_format(&support.formats)
+    };
+
+    log::info!("Swapchain: Setting present mode");
+    let present_mode = if let Some(pm) = present_mode {
+        let (found, mode) = select_sc_present_mode(&support.present_modes, pm);
+        if !found && !allow_defaults {
+            return Err("Couldn't find expected present mode".to_string());
+        }
+        mode
+    } else {
+        select_sc_present_mode(&support.present_modes, vk::PresentModeKHR::FIFO).1
+    };
+
+    log::info!("Swapchain: Setting extent");
+    let extent = select_sc_extent(&support.capabilities, requested_extent);
+
+    let required_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+        | vk::ImageUsageFlags::TRANSFER_DST
+        | vk::ImageUsageFlags::TRANSFER_SRC;
+    if !support
+        .capabilities
+        .supported_usage_flags
+        .contains(required_usage)
+    {
+        return Err(format!(
+            "Swapchain surface does not support required image usage {:?}",
+            required_usage
+        ));
+    }
+
+    let min_count = support.capabilities.min_image_count.max(1);
+    let requested_count = image_count.unwrap_or(min_count.saturating_add(1));
+    let image_count = if support.capabilities.max_image_count > 0 {
+        requested_count
+            .max(min_count)
+            .min(support.capabilities.max_image_count)
+    } else {
+        requested_count.max(min_count)
+    };
+    log::info!("Swapchain: Requesting image count: {}", image_count);
+
+    log::info!("Swapchain: Setting pre transform");
+    let pre_transform = if support
+        .capabilities
+        .supported_transforms
+        .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
+    {
+        vk::SurfaceTransformFlagsKHR::IDENTITY
+    } else {
+        support.capabilities.current_transform
+    };
+
+    log::info!("Swapchain: Setting composite alpha");
+    let composite_alpha = select_composite_alpha(&support.capabilities);
+
+    Ok(SwapchainCreatePlan {
+        extent,
+        surface_format,
+        present_mode,
+        image_count,
+        pre_transform,
+        composite_alpha,
+        image_usage: required_usage,
+    })
+}
+
+/// Select composite alpha: prefer OPAQUE, fall back to INHERIT.
+fn select_composite_alpha(caps: &vk::SurfaceCapabilitiesKHR) -> vk::CompositeAlphaFlagsKHR {
+    if caps
+        .supported_composite_alpha
+        .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
+    {
+        vk::CompositeAlphaFlagsKHR::OPAQUE
+    } else {
+        log::info!("OPAQUE composite alpha not supported; falling back to INHERIT");
+        vk::CompositeAlphaFlagsKHR::INHERIT
+    }
+}
+
+/// Create a swapchain from a validated plan.
+///
+/// The caller is responsible for retiring the old swapchain before calling this
+/// with a non-null `old_swapchain`.
+pub fn create_swapchain_with_plan(
+    instance: &ash::Instance,
+    _physical_device: &PhyDevice,
+    device: &ash::Device,
+    device_queues: &VkDeviceQueues,
+    surface_info: &VkSurface,
+    plan: &SwapchainCreatePlan,
+    old_swapchain: Option<vk::SwapchainKHR>,
+) -> Result<VkSwapchain, String> {
+    log::info!("Creating swapchain from plan: extent={:?} fmt={:?} mode={:?} count={}",
+        plan.extent, plan.surface_format.format, plan.present_mode, plan.image_count);
+
+    let mut sc_create_info = vk::SwapchainCreateInfoKHR::default()
+        .surface(surface_info.surface)
+        .min_image_count(plan.image_count)
+        .image_color_space(plan.surface_format.color_space)
+        .image_format(plan.surface_format.format)
+        .image_extent(plan.extent)
+        .image_usage(plan.image_usage)
+        .pre_transform(plan.pre_transform)
+        .composite_alpha(plan.composite_alpha)
+        .present_mode(plan.present_mode)
+        .clipped(true)
+        .image_array_layers(1);
+
+    let present_gfx_indices = [
+        device_queues.get_queue_index(VkQueueType::Graphics),
+        device_queues.get_queue_index(VkQueueType::Present),
+    ];
+
+    sc_create_info = if present_gfx_indices[0] != present_gfx_indices[1] {
+        log::info!(
+            "Swapchain: Set sharing mode: Concurrent with indies: {:?}",
+            present_gfx_indices
+        );
+        sc_create_info
+            .image_sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(&present_gfx_indices)
+    } else {
+        log::info!("Swapchain: Set sharing mode: Exclusive");
+        sc_create_info.image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+    };
+
+    if let Some(old_swapchain) = old_swapchain {
+        log::info!("Swapchain: Utilizing old swapchain");
+        sc_create_info = sc_create_info.old_swapchain(old_swapchain);
+    }
+
+    log::info!("Swapchain: Initializing loader");
+    let swapchain_loader = ash::khr::swapchain::Device::new(instance, device);
+
+    log::info!("Swapchain: Initializing swapchain");
+    let swapchain = unsafe {
+        swapchain_loader
+            .create_swapchain(&sc_create_info, None)
+            .map_err(|err| format!("Failed to create swapchain: {:?}", err))?
+    };
+
+    log::info!("Swapchain: Initializing images");
+    let swapchain_images = unsafe {
+        swapchain_loader
+            .get_swapchain_images(swapchain)
+            .map_err(|err| format!("Failed to get swapchain images: {:?}", err))?
+    };
+
+    log::info!("Swapchain created");
+    Ok(VkSwapchain {
+        swapchain_loader,
+        swapchain,
+        swapchain_images,
+        surface_format: plan.surface_format,
+        extent: plan.extent,
+    })
+}
+
 pub fn create_swapchain(
     instance: &ash::Instance,
     physical_device: &PhyDevice,

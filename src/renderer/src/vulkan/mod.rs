@@ -12,5 +12,6 @@ pub mod vk_pipeline;
 pub mod vk_render;
 pub mod vk_shadow;
 pub mod vk_storage;
+pub mod vk_swapchain;
 pub mod vk_types;
 pub mod vk_util;

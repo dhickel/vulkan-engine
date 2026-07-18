@@ -156,7 +156,9 @@ else:
 - Descriptor pool exhaustion and churn if `clear_pools` no longer runs on frame-slot reuse.
 - Descriptor reset without a valid `CompletedFrameSlot` token is rejected. The token must be created by the fence-wait path and is single-use. Duplicate or mismatched tokens produce `ResetRejected`.
 - Fragmentation metric means observed `ERROR_FRAGMENTED_POOL` events and affected pool counts, not an unsupported claim about driver-internal fragmentation percentage.
-- Swapchain rebuild lifecycle: `rebuild_swapchain` calls `replace_present_images` which invokes `destroy_present_views` before rebinding. This edge was addressed; monitor for regressions around frame slot desync on resize.
+- Swapchain rebuild lifecycle: `rebuild_swapchain` follows an explicit Nascent → Current → Retired → Absent state machine (see `src/renderer/src/vulkan/vk_swapchain.rs`). Once `vkCreateSwapchainKHR` is called with a non-null `oldSwapchain`, that generation is permanently Retired even if the new creation fails. A Retired generation is never rendered through, restored as current, or passed again as `oldSwapchain`. Present image views are destroyed before their owning swapchain handle, guaranteeing exact-once destruction order. `device_wait_idle` is still called before retirement to drain in-flight work but is not a substitute for the ownership model — state tests must not depend on it.
+- Resize requests are coalesced: only the latest non-zero extent is stored. Zero extents are deferred without Vulkan calls. A successful rebuild consumes only the request generation it installed, so a newer concurrent request remains pending.
+- Acquire and present results are classified structurally via `AcquireClass` / `PresentClass` enums without string parsing. Surface-lost is distinct from out-of-date; both trigger explicit terminal or rebuild paths rather than silent loops.
 - `VkPresent::get_next_frame`/`get_curr_frame_mut` ring semantics depend on counter ordering; changing this can silently desync acquired image binding.
 
 ## 7. Debugging Playbook
@@ -168,6 +170,7 @@ else:
 
 ## 8. Cross-Module Links
 - Frame loop core: `src/renderer/src/vulkan/vk_render.rs`
+- Swapchain lifecycle state machine: `src/renderer/src/vulkan/vk_swapchain.rs`
 - Frame-ring and sync types: `src/renderer/src/vulkan/vk_types.rs`
 - Descriptor allocators: `src/renderer/src/vulkan/vk_descriptor.rs`
 - Barrier helpers and upload transitions: `src/renderer/src/vulkan/vk_util.rs`

@@ -133,3 +133,33 @@ inverse-corner construction. Singular/non-finite matrices must be rejected conse
 | Deterministic / real-WSI matrices | `.internal-dev/captures/engine-integration-sprint/phase-01/deterministic-matrix.md`, `wsi-matrix.md` | `[Phase 0]` |
 | Device budget | `.internal-dev/debug_reports/engine-integration-sprint/phase-01/device-budget.{json,md}` | `[Phase 0]` |
 | Importer assessment | `.internal-dev/reviews/engine-integration-importer-assessment.md` | `[Phase 0]` |
+
+## 5. Surface-Lost Facade Mapping (Phase 03)
+
+Surface loss (`VK_ERROR_SURFACE_LOST_KHR`) is classified internally as
+`AcquireClass::SurfaceLost` or `PresentClass::SurfaceLost`. These variants:
+
+- Are **distinct** from `OutOfDate` and `DeviceLost` in both acquire and present
+  paths (see `vk_swapchain::classify_acquire` / `classify_present`).
+- Are logged as structured `surface_lost` events via the existing `error!` macro
+  at the point of classification.
+- **Poison the backend** and require full `Renderer` recreation if surface
+  recreation is unavailable. The existing public error shape
+  (`RendererError::BackendPoisoned` or `RendererError::DeviceLost` depending
+  on the compound failure) is preserved.
+- **Never** silently loop rebuild on surface loss. No implicit surface
+  recreation is attempted.
+
+Mapping summary:
+
+| Internal class | Logged as | Public error | Behavior |
+|---|---|---|---|
+| `AcquireClass::SurfaceLost` | `error!("Vulkan surface lost during image acquisition")` | `RendererError::BackendPoisoned` | Require renderer recreation |
+| `PresentClass::SurfaceLost` | `error!("Vulkan surface lost during present")` | `RendererError::BackendPoisoned` | Require renderer recreation |
+| `AcquireClass::DeviceLost` | `error!("Vulkan device lost during swapchain image acquisition")` | `RendererError::DeviceLost` | Require renderer recreation |
+| `PresentClass::DeviceLost` | `error!("Vulkan device lost during present")` | `RendererError::DeviceLost` | Require renderer recreation |
+
+**Compatibility note:** The public `FrameRenderOutcome` variants (`Rendered`,
+`SkippedResizePending`, `SubmittedNotPresented`, `PresentedSuboptimal`) are
+unchanged. Surface-lost and device-lost errors surface through the existing
+`RendererError` variants rather than introducing new outcome codes.

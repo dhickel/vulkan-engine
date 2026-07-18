@@ -83,6 +83,9 @@ use crate::vulkan::vk_debug::{
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_shadow::{compute_draw_light_view_projection, VkShadowResources};
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
+use crate::vulkan::vk_swapchain::{
+    AcquireClass, PresentClass, SwapchainOwner,
+};
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_util};
 use ash::vk;
@@ -135,7 +138,7 @@ pub struct VkRenderCore {
     pub device: ash::Device,
     pub vulkan_cache: VkCache,
     pub surface: Option<VkSurface>,
-    pub swapchain: Option<VkSwapchain>,
+    pub swapchain_owner: SwapchainOwner,
     pub present_format: vk::Format,
     frame_slot_count: u32,
     pub presentation: VkPresent,
@@ -161,7 +164,6 @@ pub struct VkRenderCore {
     due_frame_captures: Vec<DueFrameCapture>,
     pending_frame_captures: Vec<PendingFrameCapture>,
     frame_capture_statuses: Vec<FrameCaptureStatus>,
-    pub resize_requested: bool,
 }
 
 pub struct VkRender {
@@ -493,7 +495,8 @@ impl Drop for VkRenderCore {
                 &self.allocator.lock().expect("allocator lock poisoned"),
             );
 
-            if let Some(swapchain) = &self.swapchain {
+            self.swapchain_owner.destroy_present_views(&self.device);
+            if let Some(swapchain) = self.swapchain_owner.swapchain.as_ref() {
                 swapchain
                     .swapchain_loader
                     .destroy_swapchain(swapchain.swapchain, None);
@@ -521,6 +524,11 @@ impl Drop for VkRenderCore {
 impl VkRenderCore {
     pub fn is_headless(&self) -> bool {
         self.surface_mode.is_headless()
+    }
+
+    /// Returns `true` when a resize is pending.
+    pub fn resize_pending(&self) -> bool {
+        self.swapchain_owner.resize_pending()
     }
 
     /// Emit one transparent primitive so imgui draw data is never empty.
@@ -1180,16 +1188,27 @@ impl VkRenderCore {
             swapchain,
         } = Self::init_vulkan_core(&mut window_state, window, app_name, with_validation)?;
 
-        let swapchain_ref = swapchain.as_ref().ok_or_else(|| {
+        let swapchain = swapchain.ok_or_else(|| {
             "Windowed Vulkan initialization did not create a swapchain".to_string()
         })?;
-        let swapchain_image_count = swapchain_ref.swapchain_images.len() as u32;
+        let swapchain_image_count = swapchain.swapchain_images.len() as u32;
+        let swapchain_format = swapchain.surface_format.format;
         let CommandPoolInit {
             host_buffer_pools,
             host_graphic_pools,
             local_transfer_pool,
             present_pools,
         } = Self::init_command_pools(&device, &device_queues, swapchain_image_count)?;
+
+        // Create present views for initial swapchain before building the owner.
+        let initial_present_views =
+            vk_init::create_basic_present_views(&device, &swapchain)?;
+        let swapchain_owner =
+            SwapchainOwner::new(swapchain, initial_present_views);
+
+        let initial_swapchain = swapchain_owner.swapchain.as_ref().ok_or_else(|| {
+            "SwapchainOwner did not retain initial swapchain".to_string()
+        })?;
 
         let PresentationInit {
             allocator,
@@ -1203,7 +1222,7 @@ impl VkRenderCore {
             &device,
             &physical_device,
             RenderSurfaceMode::Windowed,
-            Some(swapchain_ref),
+            Some(initial_swapchain),
             &window_state,
             present_pools,
             swapchain_image_count,
@@ -1214,7 +1233,7 @@ impl VkRenderCore {
             &device,
             device_queues.get_queue(VkQueueType::Graphics),
             imgui_pool,
-            swapchain_ref.surface_format.format,
+            swapchain_format,
             swapchain_image_count,
             window,
         )?;
@@ -1286,7 +1305,7 @@ impl VkRenderCore {
             device,
             vulkan_cache,
             surface,
-            swapchain,
+            swapchain_owner,
             present_format,
             frame_slot_count: swapchain_image_count,
             presentation,
@@ -1312,7 +1331,6 @@ impl VkRenderCore {
             visual_tuning,
             data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
-            resize_requested: false,
         };
 
         let scene_world = if preload_startup_scene {
@@ -1352,7 +1370,7 @@ impl VkRenderCore {
             physical_device,
             device,
             device_queues,
-            swapchain,
+            swapchain: _,
         } = Self::init_headless_vulkan_core(app_name, with_validation)?;
 
         let frame_slot_count = 3;
@@ -1460,7 +1478,7 @@ impl VkRenderCore {
             device,
             vulkan_cache,
             surface,
-            swapchain,
+            swapchain_owner: SwapchainOwner::headless(),
             present_format,
             frame_slot_count,
             presentation,
@@ -1486,7 +1504,6 @@ impl VkRenderCore {
             visual_tuning,
             data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
-            resize_requested: false,
         };
 
         let scene_world = if preload_startup_scene {
@@ -1510,74 +1527,128 @@ impl VkRenderCore {
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), String> {
         if self.surface_mode.is_headless() {
             self.window_state.update_curr_size(new_size);
-            self.resize_requested = false;
             return Ok(());
         }
+
+        // === IRREVERSIBLE BOUNDARY GUARD ===
+        // Rebuild after Retired or Absent is terminal.
+        match self.swapchain_owner.state() {
+            crate::vulkan::vk_swapchain::SwapchainState::Retired { .. }
+            | crate::vulkan::vk_swapchain::SwapchainState::Absent => {
+                return Err(
+                    "swapchain rebuild was attempted after terminal retirement; renderer must be recreated"
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+
         self.window_state.update_curr_size(new_size);
 
+        // --- Phase 1: Re-query surface capabilities (pure, no side effects) ---
+        let surface = self
+            .surface
+            .as_ref()
+            .ok_or_else(|| "windowed renderer is missing its Vulkan surface".to_string())?;
+        let support = vk_init::get_swapchain_support(&self.physical_device.p_device, surface)?;
+
+        let plan = vk_init::build_swapchain_create_plan(
+            &support,
+            new_size,
+            Some(3),
+            None,
+            Some(vk::PresentModeKHR::MAILBOX),
+            true,
+        )?;
+
+        // --- Phase 2: Retire current (IRREVERSIBLE) ---
+        // Must use device_wait_idle before retiring to ensure all operations on the
+        // old swapchain are complete. The phase spec allows device_wait_idle only
+        // where required by current rebuild teardown.
         unsafe {
             self.device.device_wait_idle().map_err(|err| {
                 format!("device_wait_idle failed during swapchain rebuild: {err:?}")
             })?;
         }
 
-        let surface = self
-            .surface
-            .as_ref()
-            .ok_or_else(|| "windowed renderer is missing its Vulkan surface".to_string())?;
-        let old_swapchain_handle = self
-            .swapchain
-            .as_ref()
-            .map(|swapchain| swapchain.swapchain)
-            .ok_or_else(|| "windowed renderer is missing its Vulkan swapchain".to_string())?;
+        // Destroy present views BEFORE retiring to maintain view-before-swapchain order.
+        self.swapchain_owner.destroy_present_views(&self.device);
 
-        // Supplying oldSwapchain retires it once vkCreateSwapchainKHR starts. Any failure from
-        // here is terminal for this backend and is surfaced to the facade rather than retried.
-        let swapchain = vk_init::create_swapchain(
+        let old_handle = self.swapchain_owner.retire_current();
+
+        // --- Phase 3: Create new (old is already retired) ---
+        let new_swapchain = match vk_init::create_swapchain_with_plan(
             &self.instance,
             &self.physical_device,
             &self.device,
             &self.vulkan_cache.queues,
             surface,
-            new_size,
-            Some(3),
-            None,
-            Some(vk::PresentModeKHR::MAILBOX),
-            Some(old_swapchain_handle),
-            true,
-        )?;
-
-        if swapchain.extent != self.window_state.get_curr_extent() {
-            self.window_state.update_curr_size(swapchain.extent);
-        }
-
-        let present_images = match vk_init::create_basic_present_views(&self.device, &swapchain) {
-            Ok(views) => views,
+            &plan,
+            old_handle,
+        ) {
+            Ok(sc) => sc,
             Err(err) => {
-                unsafe {
-                    swapchain
-                        .swapchain_loader
-                        .destroy_swapchain(swapchain.swapchain, None);
+                // Old is already retired. Destroy the old handle.
+                if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
+                    self.swapchain_owner
+                        .destroy_retired(&self.device, old_sc);
                 }
                 return Err(format!(
-                    "create_basic_present_views failed during swapchain rebuild: {err}"
+                    "swapchain creation failed after old generation was retired: {err}"
                 ));
             }
         };
 
-        let old_swapchain = self
-            .swapchain
-            .replace(swapchain)
-            .ok_or_else(|| "windowed renderer lost its old Vulkan swapchain".to_string())?;
-        self.presentation
-            .replace_present_images(&self.device, present_images);
-        unsafe {
-            old_swapchain
-                .swapchain_loader
-                .destroy_swapchain(old_swapchain.swapchain, None);
+        // --- Phase 4: Transactional view creation ---
+        let present_images =
+            match vk_init::create_basic_present_views(&self.device, &new_swapchain) {
+                Ok(views) => views,
+                Err(err) => {
+                    // Destroy the partially-created new swapchain.
+                    unsafe {
+                        new_swapchain
+                            .swapchain_loader
+                            .destroy_swapchain(new_swapchain.swapchain, None);
+                    }
+                    // Destroy the already-retired old swapchain.
+                    if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
+                        self.swapchain_owner
+                            .destroy_retired(&self.device, old_sc);
+                    }
+                    return Err(format!(
+                        "create_basic_present_views failed during swapchain rebuild: {err}"
+                    ));
+                }
+            };
+
+        // --- Phase 5: Install new, destroy retired ---
+        // Sync window state to the actual created extent (may differ from requested).
+        if new_swapchain.extent != self.window_state.get_curr_extent() {
+            self.window_state.update_curr_size(new_swapchain.extent);
         }
 
-        self.resize_requested = false;
+        // Destroy the retired old swapchain before installing the new one.
+        if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
+            self.swapchain_owner
+                .destroy_retired(&self.device, old_sc);
+        }
+
+        // Install new swapchain and present views.
+        self.swapchain_owner
+            .install_new(new_swapchain, present_images.clone());
+
+        // Update frame presentation targets to match new views.
+        self.presentation
+            .replace_present_images(&self.device, present_images);
+
+        // Clear the pending resize request that was installed.
+        if let Some(pending) = self.swapchain_owner.pending_resize() {
+            if pending.extent == plan.extent {
+                let _req = *pending;
+                self.swapchain_owner.clear_installed_request(&_req);
+            }
+        }
+
         Ok(())
     }
 }
@@ -1722,7 +1793,7 @@ impl VkRender {
     }
 
     pub fn resize_requested(&self) -> bool {
-        self.core.resize_requested
+        self.core.resize_pending()
     }
 
     pub fn is_headless(&self) -> bool {
@@ -1839,13 +1910,6 @@ impl FrameTransaction {
     fn requires_swapchain_rebuild(&self) -> bool {
         self.state == FrameTransactionState::PresentFailed
     }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum SwapchainAcquireResult {
-    Acquired { image_index: u32, suboptimal: bool },
-    Retry,
-    Recreate,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -2695,9 +2759,9 @@ impl VkRenderCore {
     unsafe fn acquire_swapchain_image_index(
         &self,
         frame_sync: VkFrameSync,
-    ) -> Result<SwapchainAcquireResult, String> {
-        let Some(swapchain) = self.swapchain.as_ref() else {
-            return Ok(SwapchainAcquireResult::Recreate);
+    ) -> Result<AcquireClass, String> {
+        let Some(swapchain) = self.swapchain_owner.swapchain.as_ref() else {
+            return Ok(AcquireClass::OutOfDate);
         };
         let acquire_info = vk::AcquireNextImageInfoKHR::default()
             .swapchain(swapchain.swapchain)
@@ -2705,25 +2769,10 @@ impl VkRenderCore {
             .device_mask(1)
             .timeout(SWAPCHAIN_ACQUIRE_TIMEOUT_NS);
 
-        match swapchain
+        let result = swapchain
             .swapchain_loader
-            .acquire_next_image2(&acquire_info)
-        {
-            Ok((image_index, suboptimal)) => Ok(SwapchainAcquireResult::Acquired {
-                image_index,
-                suboptimal,
-            }),
-            Err(vk::Result::NOT_READY) | Err(vk::Result::TIMEOUT) => {
-                Ok(SwapchainAcquireResult::Retry)
-            }
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) | Err(vk::Result::SUBOPTIMAL_KHR) => {
-                Ok(SwapchainAcquireResult::Recreate)
-            }
-            Err(vk::Result::ERROR_DEVICE_LOST) => {
-                Err("Vulkan device lost during swapchain image acquisition".to_string())
-            }
-            Err(err) => Err(format!("acquire_next_image2 failed: {err:?}")),
-        }
+            .acquire_next_image2(&acquire_info);
+        Ok(crate::vulkan::vk_swapchain::classify_acquire(result))
     }
 
     /// Reserve frame resources, synchronize CPU/GPU ownership, and bind acquired present target.
@@ -2771,38 +2820,58 @@ impl VkRenderCore {
             (frame_slot_index as u32, false, 0.0)
         } else {
             let mut acquire_retries = 0u32;
-            let acquire_result = loop {
-                let result = unsafe { self.acquire_swapchain_image_index(frame_sync)? };
-                match result {
-                    SwapchainAcquireResult::Retry
+            let acquire_class = loop {
+                let class = unsafe { self.acquire_swapchain_image_index(frame_sync)? };
+                match class {
+                    AcquireClass::Retry
                         if acquire_retries < SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME =>
                     {
                         acquire_retries += 1;
                     }
-                    _ => break result,
+                    _ => break class,
                 }
             };
             let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
             warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
-            let (image_index, acquire_suboptimal) = match acquire_result {
-                SwapchainAcquireResult::Acquired {
+            let (image_index, acquire_suboptimal) = match acquire_class {
+                AcquireClass::Acquired {
                     image_index,
                     suboptimal,
                 } => (image_index, suboptimal),
-                SwapchainAcquireResult::Retry => {
+                AcquireClass::Retry => {
                     warn!(
-                            "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); requesting rebuild",
-                            acquire_retries, swapchain_acquire_ms
-                        );
+                        "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); requesting rebuild",
+                        acquire_retries, swapchain_acquire_ms
+                    );
                     self.presentation.rewind_frame();
-                    self.resize_requested = true;
+                    self.swapchain_owner.request_resize(
+                        self.window_state.get_curr_extent(),
+                    );
                     return Ok(None);
                 }
-                SwapchainAcquireResult::Recreate => {
+                AcquireClass::OutOfDate => {
                     self.presentation.rewind_frame();
-                    self.resize_requested = true;
+                    self.swapchain_owner.request_resize(
+                        self.window_state.get_curr_extent(),
+                    );
                     return Ok(None);
+                }
+                AcquireClass::SurfaceLost => {
+                    self.presentation.rewind_frame();
+                    return Err("Vulkan surface lost during image acquisition".to_string());
+                }
+                AcquireClass::DeviceLost => {
+                    self.presentation.rewind_frame();
+                    return Err(
+                        "Vulkan device lost during swapchain image acquisition".to_string()
+                    );
+                }
+                AcquireClass::Fatal(msg) => {
+                    self.presentation.rewind_frame();
+                    return Err(format!(
+                        "fatal swapchain acquire error: {msg}"
+                    ));
                 }
             };
 
@@ -2812,7 +2881,9 @@ impl VkRenderCore {
                     image_index, err
                 );
                 self.presentation.rewind_frame();
-                self.resize_requested = true;
+                self.swapchain_owner.request_resize(
+                    self.window_state.get_curr_extent(),
+                );
                 return Ok(None);
             }
             (image_index, acquire_suboptimal, swapchain_acquire_ms)
@@ -2939,8 +3010,7 @@ impl VkRenderCore {
         if self.surface_mode.is_headless() {
             return Ok(PresentFrameOutcome::Presented);
         }
-        let Some(swapchain) = self.swapchain.as_ref() else {
-            self.resize_requested = true;
+        let Some(swapchain) = self.swapchain_owner.swapchain.as_ref() else {
             return Ok(PresentFrameOutcome::NotPresented);
         };
         unsafe {
@@ -2953,27 +3023,21 @@ impl VkRenderCore {
                 .wait_semaphores(&render_semaphore)
                 .image_indices(&image_indices);
 
-            match swapchain
+            let result = swapchain
                 .swapchain_loader
-                .queue_present(frame.queue, &present_info)
-            {
-                Ok(false) => Ok(PresentFrameOutcome::Presented),
-                Ok(true) => {
-                    self.resize_requested = true;
-                    Ok(PresentFrameOutcome::PresentedSuboptimal)
+                .queue_present(frame.queue, &present_info);
+            let class = crate::vulkan::vk_swapchain::classify_present(result);
+            match class {
+                PresentClass::Presented => Ok(PresentFrameOutcome::Presented),
+                PresentClass::Suboptimal => Ok(PresentFrameOutcome::PresentedSuboptimal),
+                PresentClass::OutOfDate => Ok(PresentFrameOutcome::NotPresented),
+                PresentClass::SurfaceLost => {
+                    Err("Vulkan surface lost during present".to_string())
                 }
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    self.resize_requested = true;
-                    Ok(PresentFrameOutcome::NotPresented)
-                }
-                Err(vk::Result::SUBOPTIMAL_KHR) => {
-                    self.resize_requested = true;
-                    Ok(PresentFrameOutcome::PresentedSuboptimal)
-                }
-                Err(vk::Result::ERROR_DEVICE_LOST) => {
+                PresentClass::DeviceLost => {
                     Err("Vulkan device lost during present".to_string())
                 }
-                Err(err) => Err(format!("queue_present failed: {err:?}")),
+                PresentClass::Fatal(msg) => Err(msg),
             }
         }
     }
@@ -3050,7 +3114,9 @@ impl VkRenderCore {
                 error!("RenderGraph execution failed: {err}");
                 let capture_failure = format!("frame capture skipped: rendergraph failed: {err}");
                 self.fail_due_frame_captures(frame_number, &capture_failure);
-                self.resize_requested = true;
+                self.swapchain_owner.request_resize(
+                    self.window_state.get_curr_extent(),
+                );
                 self.gpu_timing.active_slot = None;
 
                 // Discard partial recording, transition an acquired swapchain image to present
@@ -3206,7 +3272,9 @@ impl VkRenderCore {
                 Ok(VkFrameRenderOutcome::PresentedSuboptimal)
             }
             PresentFrameOutcome::Presented if frame.acquire_suboptimal => {
-                self.resize_requested = true;
+                self.swapchain_owner.request_resize(
+                    self.window_state.get_curr_extent(),
+                );
                 Ok(VkFrameRenderOutcome::PresentedSuboptimal)
             }
             PresentFrameOutcome::Presented => Ok(VkFrameRenderOutcome::Rendered),
