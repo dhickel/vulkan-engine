@@ -1075,6 +1075,22 @@ impl<'a> AssetManager<'a> {
             .map_err(|err| map_cache_err("mesh_local_aabb", mesh.slot, mesh.generation, err))
     }
 
+    /// Query the [`SceneBounds`] for a loaded mesh by converting its DTO.
+    ///
+    /// Rigid meshes with valid AABBs return [`SceneBounds::Known`].
+    /// Skinned, deformed, unknown, or invalid meshes return
+    /// [`SceneBounds::ConservativeVisible`] with the exact reason.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn mesh_scene_bounds(
+        &self,
+        mesh: MeshHandle,
+    ) -> Result<crate::api::scene::SceneBounds, AssetError> {
+        let dto = self.mesh_geometry(mesh)?;
+        Ok(crate::api::scene::scene_bounds_from_dto(&dto))
+    }
+
     /// Create a PBR material from runtime-generated parameters.
     ///
     /// Thread: Main

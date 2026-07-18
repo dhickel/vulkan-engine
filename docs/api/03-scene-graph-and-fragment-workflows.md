@@ -19,7 +19,7 @@ The event crate defines typed scene event contracts, but broad scene mutation em
 - `Scene::set_skybox(env)` sets scene skybox environment handle.
 - Frustum culling is enabled by default. Use `Scene::set_frustum_culling(false)` for diagnostics or compatibility and `Scene::frustum_culling_enabled()` to inspect the current setting.
 
-Culling uses transform-aware proxy AABBs at scene submission time. Descendants are tested independently, so an off-screen parent cannot hide an in-frustum child. The current scene graph does not retain CPU mesh bounds; imported meshes therefore use the same one-unit local proxy as picking until mesh bounds metadata reaches the scene layer.
+Culling uses authoritative scene bounds from `SceneBounds`. Authoritative local AABBs are carried into scene nodes via `SceneNode.mesh_bounds`, transformed through eight corners for correct world bounds under rotation, shear, and negative scale, and aggregated into subtree unions post-order. `SceneBounds::Known(Aabb)` / `Proxy(Aabb)` trust the bound for pruning; `SceneBounds::ConservativeVisible(BoundsUnknownReason)` forces the node and subtree to always traverse. Descendants are tested independently when subtree pruning is unavailable. Imported rigid meshes receive `Known` bounds from their Phase 01 geometry DTO. Use `Scene::add_mesh_with_bounds` for procedural content; `Scene::add_mesh` (without bounds) marks the mesh `ConservativeVisible(MissingGeometry)`. `AssetManager::mesh_scene_bounds(mesh)` converts a DTO into a `SceneBounds` for callers.
 
 ### Editor Scene File Contract
 
@@ -295,7 +295,7 @@ let placed_node = result.created_node.expect("placement created a node");
 
 ### Picking contract
 
-`Scene::pick_last_camera` casts from screen coordinates using the last camera matrices supplied by `Renderer::render_scene`. The current implementation uses transform-aware editor proxy AABBs because the scene graph does not own CPU mesh bounds. Mesh-backed nodes use a one-unit local proxy; empty/group nodes use a smaller origin proxy. This is more accurate than the old two-corner transformed unit cube for scaled or rotated nodes, but it is still not final mesh-precision picking.
+`Scene::pick_last_camera` casts from screen coordinates using the last camera matrices supplied by `Renderer::render_scene`. Picking uses authoritative world bounds when known (`SceneBounds::Known`) or explicit proxy when set (`SceneBounds::Proxy`). Conservative-visible mesh-bearing nodes skip exact hit to avoid false positives. Empty group nodes still receive a small editor-origin proxy for selection.
 
 Snippet Type: Real
 ```rust

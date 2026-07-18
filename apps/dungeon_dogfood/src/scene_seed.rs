@@ -106,12 +106,8 @@ impl LevelScene {
             },
         )?;
 
-        // Upload chunked dungeon mesh geometry.
+        // Upload chunked dungeon mesh geometry and attach with authoritative bounds.
         let chunks = build_level_chunks(level, floor_material, wall_material);
-        // Dungeon chunks are much larger than the scene graph's current one-unit
-        // culling proxy. Keep this app on the documented opt-out until true mesh
-        // bounds cross the scene-submission boundary.
-        scene.set_frustum_culling(false);
         let mut chunk_meshes = Vec::with_capacity(chunks.len());
         let mut chunk_nodes = Vec::with_capacity(chunks.len());
         let level_root = scene.create_node(None, Mat4::IDENTITY)?;
@@ -119,8 +115,12 @@ impl LevelScene {
         for chunk in chunks {
             let world_origin = chunk.world_origin;
             let mesh = assets.upload_procedural_mesh(chunk.mesh)?;
+            let bounds = assets.mesh_scene_bounds(mesh).unwrap_or_else(|err| {
+                log::warn!("Chunk mesh bounds lookup failed: {err}; using conservative-visible fallback.");
+                renderer::SceneBounds::ConservativeVisible(renderer::BoundsUnknownReason::StaleHandle)
+            });
             let node = scene.create_node(Some(level_root), Mat4::from_translation(world_origin))?;
-            scene.add_mesh(node, mesh)?;
+            scene.add_mesh_with_bounds(node, mesh, bounds)?;
             chunk_meshes.push(mesh);
             chunk_nodes.push(node);
         }

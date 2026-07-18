@@ -24,8 +24,12 @@ Current flow:
   - Collection uses active entries, not raw slot order assumptions, so sparse slot churn still yields active lights.
 - Culling status:
   - Frustum culling is enabled by default in `SceneWorld::build_submission`; occlusion culling is not implemented.
-  - Mesh-backed nodes are tested against transform-aware proxy AABBs using Vulkan `[0, 1]` frustum planes.
-  - Descendants are tested independently because node proxy bounds do not enclose subtrees.
+  - Mesh-backed nodes carry authoritative `SceneBounds` (`Known`, `Proxy`, `ConservativeVisible`) with local AABBs from registered `MeshGeometryDto`.
+  - World AABBs are computed by transforming all eight corners through `node.world_transform` (not min/max only); `Aabb::transformed` handles rotation, shear, and negative scale.
+  - `compute_node_world_bounds` unions all known/proxy mesh AABBs in node-local space, then transforms to world. Any conservative-visible mesh makes the entire node conservative-visible.
+  - `compute_subtree_bounds_post_order` aggregates node world bounds with all child subtree bounds. Known subtrees may prune the branch; conservative-visible subtrees always traverse children.
+  - `collect_draw_items_culled` tests known/proxy node world bounds against the frustum; conservative-visible nodes submit unconditionally. Children are always traversed.
+  - Descendants are tested independently when subtree pruning is unavailable (conservative-visible parent or empty group nodes).
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -58,6 +62,7 @@ pub(crate) fn build_submission(&mut self) -> RenderSubmission {
     }
 
     self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
+    self.compute_subtree_bounds_post_order(root_id);
     let frustum = if self.enable_frustum_culling {
         Some(Frustum::from_view_projection(
             &(self.camera.projection * self.camera.view),
@@ -65,7 +70,7 @@ pub(crate) fn build_submission(&mut self) -> RenderSubmission {
     } else {
         None
     };
-    self.collect_draw_items_recursive_culled(root_id, &mut submission, frustum.as_ref());
+    self.collect_draw_items_culled(root_id, &mut submission, frustum.as_ref());
     submission
 }
 ```
@@ -104,7 +109,7 @@ fn refresh_world_recursive(
 Snippet Type: Real
 ```rust
 // src/renderer/src/scene/scene_world.rs
-fn collect_draw_items_recursive_culled(
+fn collect_draw_items_culled(
     &self,
     node_id: SceneNodeId,
     submission: &mut RenderSubmission,
@@ -114,9 +119,28 @@ fn collect_draw_items_recursive_culled(
         return;
     };
 
-    let meshes_visible = node.meshes.is_empty()
-        || frustum.is_none_or(|frustum| frustum.intersects_aabb(&node_pick_bounds(node)));
-    if meshes_visible {
+    // If subtree is known and completely outside, prune the branch.
+    if let Some(f) = frustum {
+        if let Some(ref subtree) = node.subtree_world_bounds {
+            if subtree.is_trusted_for_pruning() {
+                if let Some(aabb) = subtree.aabb() {
+                    if !f.intersects_aabb(aabb) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Determine if this node's meshes should submit.
+    let node_visible = match &node.node_world_bounds {
+        Some(SceneBounds::Known(aabb)) | Some(SceneBounds::Proxy(aabb)) => {
+            frustum.is_none_or(|f| f.intersects_aabb(aabb))
+        }
+        _ => true, // conservative-visible or no bounds: always submit
+    };
+
+    if node_visible {
         for mesh_id in node.meshes.iter().copied() {
             submission.push_draw_item(FrameDrawItem {
                 mesh_id,
@@ -127,7 +151,7 @@ fn collect_draw_items_recursive_culled(
 
     for child in node.children.iter().copied() {
         if self.is_valid_node_id(child) {
-            self.collect_draw_items_recursive_culled(child, submission, frustum);
+            self.collect_draw_items_culled(child, submission, frustum);
         }
     }
 }
@@ -183,7 +207,7 @@ reason:
 - Keep traversal order explicit: parent transform resolution must happen before child recursion.
 - Preserve handle-validation checks (`is_valid_node_id`) when touching recursive traversal.
 - Keep `RenderSubmission` payload renderer-agnostic; resolve Vulkan resources later in backend code.
-- Do not prune descendants from a node-only proxy bound; branch pruning requires a true subtree bound.
+- Do not prune descendants from a conservative-visible node; branch pruning requires a `Known` or `Proxy` subtree bound (Phase 06).
 - Keep current behavior and roadmap behavior separated in docs and code comments.
 - Keep GPU payload limits explicit and synchronized (`MAX_POINT_LIGHTS_GPU` between scene submission and GPU UBO definitions).
 
@@ -195,7 +219,7 @@ reason:
 - Sparse light slots:
   - Light extraction iterates active entries and clamps by count; assumptions based on dense slot indexing can cause confusing debugging expectations.
 - Proxy-bound limitations:
-  - The scene graph does not yet own CPU mesh bounds, so imported meshes use one-unit local proxies. False culls remain possible when actual geometry extends beyond that proxy. `dungeon_dogfood` uses the public culling opt-out because its large chunk meshes can otherwise produce skybox-only captures.
+  - As of Phase 06, the scene graph owns CPU mesh bounds via `SceneNode.mesh_bounds` and `node_world_bounds`/`subtree_world_bounds`. `SceneBounds::ConservativeVisible` marks skinned, deformed, missing, or stale geometry. `dungeon_dogfood` re-enables culling with authoritative chunk bounds.
   - A node proxy is not a subtree bound. Skipping recursive traversal when a parent proxy is outside can hide an in-frustum child.
 - Constant drift risk:
   - `MAX_POINT_LIGHTS_GPU` exists in both scene and GPU-data modules (`src/renderer/src/scene/scene_world.rs` and `src/renderer/src/data/gpu_data.rs`); mismatches would silently corrupt or truncate light upload behavior.

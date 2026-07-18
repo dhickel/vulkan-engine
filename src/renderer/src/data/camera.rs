@@ -45,7 +45,7 @@ impl Ray {
 }
 
 /// Axis-aligned bounding box for intersection testing.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Aabb {
     pub min: Vec3,
     pub max: Vec3,
@@ -54,6 +54,68 @@ pub struct Aabb {
 impl Aabb {
     pub fn from_min_max(min: Vec3, max: Vec3) -> Self {
         Self { min, max }
+    }
+
+    /// True when every component is finite.
+    pub fn is_finite(&self) -> bool {
+        self.min.is_finite() && self.max.is_finite()
+    }
+
+    /// True when min[i] <= max[i] for all axes.
+    pub fn is_ordered(&self) -> bool {
+        self.min.x <= self.max.x && self.min.y <= self.max.y && self.min.z <= self.max.z
+    }
+
+    /// The eight corners of this AABB.
+    pub fn corners(&self) -> [Vec3; 8] {
+        [
+            Vec3::new(self.min.x, self.min.y, self.min.z),
+            Vec3::new(self.min.x, self.min.y, self.max.z),
+            Vec3::new(self.min.x, self.max.y, self.min.z),
+            Vec3::new(self.min.x, self.max.y, self.max.z),
+            Vec3::new(self.max.x, self.min.y, self.min.z),
+            Vec3::new(self.max.x, self.min.y, self.max.z),
+            Vec3::new(self.max.x, self.max.y, self.min.z),
+            Vec3::new(self.max.x, self.max.y, self.max.z),
+        ]
+    }
+
+    /// Conservative union of `self` and `other`. Returns `None` if either is non-finite.
+    pub fn union(&self, other: &Aabb) -> Option<Aabb> {
+        if !self.is_finite() || !other.is_finite() {
+            return None;
+        }
+        Some(Aabb::from_min_max(self.min.min(other.min), self.max.max(other.max)))
+    }
+
+    /// Extend `self` to enclose `other`. Returns false if either is non-finite.
+    pub fn extend_to_enclose(&mut self, other: &Aabb) -> bool {
+        if !self.is_finite() || !other.is_finite() {
+            return false;
+        }
+        self.min = self.min.min(other.min);
+        self.max = self.max.max(other.max);
+        true
+    }
+
+    /// Transform all eight corners by `transform` and recompute min/max.
+    /// Returns `None` if the transform produces non-finite results.
+    pub fn transformed(&self, transform: &Mat4) -> Option<Aabb> {
+        let corners = self.corners();
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for corner in corners {
+            let world = transform.transform_point3(corner);
+            if !world.is_finite() {
+                return None;
+            }
+            min = min.min(world);
+            max = max.max(world);
+        }
+        if !min.is_finite() || !max.is_finite() {
+            return None;
+        }
+        Some(Aabb::from_min_max(min, max))
     }
 
     /// Ray-AABB intersection test (slab method). Returns the t-value of the

@@ -11,7 +11,8 @@
 //! Stale handles fail validation and are ignored during traversal.
 
 use crate::api::scene::{
-    DirectionalLight, DirectionalLightId, PointLight, PointLightId, SceneAssetReference,
+    BoundsUnknownReason, DirectionalLight, DirectionalLightId, MeshBoundsEntry, PointLight,
+    PointLightId, SceneAssetReference, SceneBounds,
 };
 use crate::data::camera::{Aabb, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
@@ -46,6 +47,15 @@ pub struct SceneNode {
     pub children: Vec<SceneNodeId>,
     #[serde(skip)]
     pub meshes: Vec<MeshHandle>,
+    /// Per-mesh bounds aligned with `meshes`; must never desynchronize.
+    #[serde(skip)]
+    pub mesh_bounds: Vec<MeshBoundsEntry>,
+    /// Cached node-world bounds from local mesh aggregation.
+    #[serde(skip)]
+    pub node_world_bounds: Option<SceneBounds>,
+    /// Cached subtree-world bounds from post-order aggregation.
+    #[serde(skip)]
+    pub subtree_world_bounds: Option<SceneBounds>,
     #[serde(skip)]
     pub asset: Option<SceneAssetReference>,
     #[serde(skip)]
@@ -69,6 +79,9 @@ impl Default for SceneNode {
             parent: None,
             children: Vec::new(),
             meshes: Vec::new(),
+            mesh_bounds: Vec::new(),
+            node_world_bounds: None,
+            subtree_world_bounds: None,
             asset: None,
             material_overrides: BTreeMap::new(),
             local_transform: Mat4::IDENTITY,
@@ -272,6 +285,29 @@ impl SceneWorld {
             parent,
             children: Vec::new(),
             meshes,
+            mesh_bounds: Vec::new(),
+            local_transform,
+            world_transform: Mat4::IDENTITY,
+            dirty: true,
+            layer_mask: u64::MAX,
+            tags: Vec::new(),
+            ..SceneNode::default()
+        };
+        self.add_node(parent, node)
+    }
+
+    pub fn add_node_with_parts_and_bounds(
+        &mut self,
+        parent: Option<SceneNodeId>,
+        local_transform: Mat4,
+        meshes: Vec<MeshHandle>,
+        mesh_bounds: Vec<MeshBoundsEntry>,
+    ) -> SceneNodeId {
+        let node = SceneNode {
+            parent,
+            children: Vec::new(),
+            meshes,
+            mesh_bounds,
             local_transform,
             world_transform: Mat4::IDENTITY,
             dirty: true,
@@ -367,7 +403,8 @@ impl SceneWorld {
     }
 
     /// Ray-pick the scene: iterate all active nodes, compute AABB from
-    /// local transform bounds, and return the closest intersection.
+    /// world bounds when known, explicit proxy when set, or a small
+    /// editor-origin helper for empty non-mesh group nodes.
     pub(crate) fn pick_ray(&self, ray: &Ray) -> Option<SceneNodeId> {
         let mut closest: Option<(f32, SceneNodeId)> = None;
 
@@ -376,7 +413,10 @@ impl SceneWorld {
                 continue;
             };
 
-            let aabb = node_pick_bounds(node);
+            let aabb = match node_pick_bounds_exact(node) {
+                Some(aabb) => aabb,
+                None => continue, // conservative-visible without explicit proxy — skip exact hit
+            };
 
             if let Some(t) = aabb.intersect_ray(ray) {
                 if closest.map_or(true, |(best_t, _)| t < best_t) {
@@ -429,6 +469,9 @@ impl SceneWorld {
         // Children multiply against this exact value, so order is critical.
         self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
 
+        // Compute world and subtree bounds post-order so culling can use them.
+        self.compute_subtree_bounds_post_order(root_id);
+
         // Frustum culling is enabled by default and can be disabled through
         // the Scene facade for diagnostics or compatibility.
         let frustum = if self.enable_frustum_culling {
@@ -439,7 +482,7 @@ impl SceneWorld {
             None
         };
 
-        self.collect_draw_items_recursive_culled(root_id, &mut submission, frustum.as_ref());
+        self.collect_draw_items_culled(root_id, &mut submission, frustum.as_ref());
 
         submission
     }
@@ -560,7 +603,143 @@ impl SceneWorld {
         }
     }
 
-    fn collect_draw_items_recursive_culled(
+    // -----------------------------------------------------------------------
+    // Bounds computation (Steps 6-8)
+    // -----------------------------------------------------------------------
+
+    /// Compute this node's world-space bounds by transforming every local
+    /// mesh/proxy AABB through the node's world transform.
+    fn compute_node_world_bounds(&self, node_id: SceneNodeId) -> Option<SceneBounds> {
+        let node = self.get_node(node_id)?;
+
+        // If an explicit proxy is set and no known meshes exist, use it.
+        if let Some(ref proxy @ SceneBounds::Proxy(_)) = node.node_world_bounds {
+            // Transform proxy from local to world.
+            if let Some(aabb) = proxy.aabb() {
+                return aabb.transformed(&node.world_transform).map(SceneBounds::Proxy);
+            }
+            return Some(*proxy);
+        }
+
+        // Aggregate all mesh local bounds into node-local union.
+        let mut any_conservative = false;
+        let mut local_union: Option<Aabb> = None;
+
+        for entry in &node.mesh_bounds {
+            match &entry.bounds {
+                SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
+                    if aabb.is_finite() && aabb.is_ordered() {
+                        match local_union {
+                            Some(ref mut u) => { u.extend_to_enclose(aabb); }
+                            None => local_union = Some(*aabb),
+                        }
+                    } else {
+                        any_conservative = true;
+                    }
+                }
+                SceneBounds::ConservativeVisible(_) => {
+                    any_conservative = true;
+                }
+            }
+        }
+
+        if any_conservative {
+            // Conservative-visible: node is always visible, prune disabled.
+            return Some(SceneBounds::ConservativeVisible(
+                BoundsUnknownReason::MissingGeometry,
+            ));
+        }
+
+        // Transform the local union to world space.
+        local_union
+            .and_then(|local| {
+                local.transformed(&node.world_transform)
+            })
+            .map(SceneBounds::Known)
+    }
+
+    /// Post-order: compute subtree bounds for this node and all descendants.
+    /// Returns the computed subtree bounds.
+    fn compute_subtree_bounds_post_order(&mut self, node_id: SceneNodeId) -> Option<SceneBounds> {
+        // Ensure node exists.
+        let children = {
+            let Some(node) = self.get_node(node_id) else {
+                return None;
+            };
+            node.children.clone()
+        };
+
+        // Compute children's subtree bounds first (post-order).
+        let mut child_subtree_union: Option<Aabb> = None;
+        let mut any_child_conservative = false;
+
+        for child_id in children {
+            if !self.is_valid_node_id(child_id) {
+                continue;
+            }
+            if let Some(child_bounds) = self.compute_subtree_bounds_post_order(child_id) {
+                match child_bounds {
+                    SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
+                        match child_subtree_union {
+                            Some(ref mut u) => { u.extend_to_enclose(&aabb); }
+                            None => child_subtree_union = Some(aabb),
+                        }
+                    }
+                    SceneBounds::ConservativeVisible(_) => {
+                        any_child_conservative = true;
+                    }
+                }
+            }
+        }
+
+        // Compute this node's own world bounds.
+        // Cache it so culling can read it without recomputation.
+        let node_world = self.compute_node_world_bounds(node_id);
+        if let Some(ref mut node) = self.get_node_mut(node_id) {
+            node.node_world_bounds = node_world;
+        }
+
+        // Build subtree: union of node_world + all child subtrees.
+        let subtree = if any_child_conservative {
+            Some(SceneBounds::ConservativeVisible(
+                BoundsUnknownReason::MissingGeometry,
+            ))
+        } else {
+            match (node_world, child_subtree_union) {
+                (Some(SceneBounds::Known(nw)), Some(child_union)) => {
+                    let mut u = nw;
+                    u.extend_to_enclose(&child_union);
+                    Some(SceneBounds::Known(u))
+                }
+                (Some(SceneBounds::Proxy(nw)), Some(child_union)) => {
+                    let mut u = nw;
+                    u.extend_to_enclose(&child_union);
+                    Some(SceneBounds::Proxy(u))
+                }
+                (Some(SceneBounds::Known(aabb)), None) => Some(SceneBounds::Known(aabb)),
+                (Some(SceneBounds::Proxy(aabb)), None) => Some(SceneBounds::Proxy(aabb)),
+                (None, Some(child_union)) => Some(SceneBounds::Known(child_union)),
+                (None, None) => None,
+                (Some(SceneBounds::ConservativeVisible(reason)), _) => {
+                    Some(SceneBounds::ConservativeVisible(reason))
+                }
+            }
+        };
+
+        // Cache subtree bounds.
+        if let Some(ref mut node) = self.get_node_mut(node_id) {
+            node.subtree_world_bounds = subtree;
+        }
+
+        subtree
+    }
+
+    /// Culling traversal using authoritative bounds.
+    /// - Known/proxy node world bounds are tested against the frustum.
+    /// - Conservative-visible nodes submit their meshes unconditionally.
+    /// - Known subtree bounds may prune the entire branch.
+    /// - Unknown subtree bounds always traverse children.
+    fn collect_draw_items_culled(
         &self,
         node_id: SceneNodeId,
         submission: &mut RenderSubmission,
@@ -570,9 +749,47 @@ impl SceneWorld {
             return;
         };
 
-        let meshes_visible = node.meshes.is_empty()
-            || frustum.is_none_or(|frustum| frustum.intersects_aabb(&node_pick_bounds(node)));
-        if meshes_visible {
+        // Culling is disabled: submit everything.
+        if frustum.is_none() {
+            for mesh_id in node.meshes.iter().copied() {
+                submission.push_draw_item(FrameDrawItem {
+                    mesh_id,
+                    transform: node.world_transform,
+                });
+            }
+            for child in node.children.iter().copied() {
+                if self.is_valid_node_id(child) {
+                    self.collect_draw_items_culled(child, submission, frustum);
+                }
+            }
+            return;
+        }
+
+        let frustum = frustum.unwrap();
+
+        // If subtree is known and completely outside frustum, prune the whole branch.
+        if let Some(ref subtree) = node.subtree_world_bounds {
+            if subtree.is_trusted_for_pruning() {
+                if let Some(aabb) = subtree.aabb() {
+                    if !frustum.intersects_aabb(aabb) {
+                        return; // entire subtree is off-screen
+                    }
+                }
+            }
+        }
+
+        // Determine if this node's own meshes should be submitted.
+        let node_visible = match &node.node_world_bounds {
+            Some(SceneBounds::Known(aabb)) | Some(SceneBounds::Proxy(aabb)) => {
+                frustum.intersects_aabb(aabb)
+            }
+            Some(SceneBounds::ConservativeVisible(_)) | None => {
+                // Conservative-visible or empty: submit meshes unconditionally.
+                true
+            }
+        };
+
+        if node_visible && !node.meshes.is_empty() {
             for mesh_id in node.meshes.iter().copied() {
                 submission.push_draw_item(FrameDrawItem {
                     mesh_id,
@@ -581,12 +798,10 @@ impl SceneWorld {
             }
         }
 
-        // Proxy bounds describe only this node, not its subtree. Always test
-        // descendants independently so an off-screen grouping/parent node
-        // cannot hide an in-frustum child.
+        // Traverse children. Conservative-visible subtrees always traverse.
         for child in node.children.iter().copied() {
             if self.is_valid_node_id(child) {
-                self.collect_draw_items_recursive_culled(child, submission, frustum);
+                self.collect_draw_items_culled(child, submission, Some(frustum));
             }
         }
     }
@@ -735,40 +950,39 @@ impl SceneWorld {
     }
 }
 
-fn node_pick_bounds(node: &SceneNode) -> Aabb {
-    // Current renderer draw submissions do not expose mesh CPU bounds here.
-    // Use a transform-aware picking/culling proxy: mesh-backed nodes get one
-    // unit of volume per axis, while empty grouping nodes receive a smaller
-    // but still selectable proxy around their origin.
-    let half_extent = if node.meshes.is_empty() { 0.25 } else { 0.5 };
-    transformed_aabb(
-        Mat4::from_scale(Vec3::splat(half_extent * 2.0)),
-        node.world_transform,
-    )
-}
-
-fn transformed_aabb(local_bounds: Mat4, world_transform: Mat4) -> Aabb {
-    let local_min = local_bounds.transform_point3(Vec3::splat(-0.5));
-    let local_max = local_bounds.transform_point3(Vec3::splat(0.5));
-    let corners = [
-        Vec3::new(local_min.x, local_min.y, local_min.z),
-        Vec3::new(local_min.x, local_min.y, local_max.z),
-        Vec3::new(local_min.x, local_max.y, local_min.z),
-        Vec3::new(local_min.x, local_max.y, local_max.z),
-        Vec3::new(local_max.x, local_min.y, local_min.z),
-        Vec3::new(local_max.x, local_min.y, local_max.z),
-        Vec3::new(local_max.x, local_max.y, local_min.z),
-        Vec3::new(local_max.x, local_max.y, local_max.z),
-    ];
-
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for corner in corners {
-        let world = world_transform.transform_point3(corner);
-        min = min.min(world);
-        max = max.max(world);
+/// Return the pickable world AABB for a node.
+/// - Known/proxy node_world_bounds are used directly.
+/// - Empty non-mesh group nodes get a small editor-origin helper.
+/// - Conservative-visible mesh-bearing nodes return `None` (skip exact hit).
+fn node_pick_bounds_exact(node: &SceneNode) -> Option<Aabb> {
+    if let Some(ref bounds) = node.node_world_bounds {
+        match bounds {
+            SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
+                if aabb.is_finite() {
+                    return Some(*aabb);
+                }
+            }
+            SceneBounds::ConservativeVisible(_) => {
+                if !node.meshes.is_empty() {
+                    return None; // mesh-bearing unknown: skip exact hit
+                }
+                // fall through to editor proxy for empty group nodes
+            }
+        }
     }
-    Aabb::from_min_max(min, max)
+
+    // Editor-origin proxy for empty non-mesh group nodes.
+    if node.meshes.is_empty() {
+        let half = 0.25;
+        let local = Aabb::from_min_max(Vec3::splat(-half), Vec3::splat(half));
+        return Aabb::transformed(&local, &node.world_transform);
+    }
+
+    // Mesh-bearing but no bounds: use a small transform-aware proxy
+    // as last-resort fallback.
+    let half = 0.5;
+    let local = Aabb::from_min_max(Vec3::splat(-half), Vec3::splat(half));
+    Aabb::transformed(&local, &node.world_transform)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -781,7 +995,8 @@ pub(crate) enum ReparentError {
 #[cfg(test)]
 mod tests {
     use super::{PointLightRefError, SceneNode, SceneNodeId, SceneWorld};
-    use crate::data::camera::Ray;
+    use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
+    use crate::data::camera::{Aabb, Ray};
     use crate::data::handles::MeshHandle;
     use glam::{Mat4, Vec3};
 
@@ -897,13 +1112,24 @@ mod tests {
 
     #[test]
     fn culling_tests_descendants_independently_of_parent_bounds() {
+        use crate::api::scene::{MeshBoundsEntry, SceneBounds};
+        use crate::data::camera::Aabb;
+
         let mut scene = SceneWorld::new();
         let root = scene.add_node(None, SceneNode::default());
+        let unit_proxy = SceneBounds::Proxy(Aabb::from_min_max(
+            Vec3::splat(-0.5),
+            Vec3::splat(0.5),
+        ));
         let offscreen_parent = scene.add_node(
             Some(root),
             SceneNode {
                 local_transform: Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)),
                 meshes: vec![MeshHandle::new(1, 0)],
+                mesh_bounds: vec![MeshBoundsEntry {
+                    mesh: MeshHandle::new(1, 0),
+                    bounds: unit_proxy,
+                }],
                 ..SceneNode::default()
             },
         );
@@ -912,6 +1138,10 @@ mod tests {
             SceneNode {
                 local_transform: Mat4::from_translation(Vec3::new(-100.0, 0.0, -5.0)),
                 meshes: vec![MeshHandle::new(2, 0)],
+                mesh_bounds: vec![MeshBoundsEntry {
+                    mesh: MeshHandle::new(2, 0),
+                    bounds: unit_proxy,
+                }],
                 ..SceneNode::default()
             },
         );
@@ -1145,5 +1375,466 @@ mod tests {
 
         // Try to update after removal should fail
         assert!(!scene.update_point_light(id, light));
+    }
+
+    // -----------------------------------------------------------------------
+    // Conservative bounds tests (Phase 06)
+    // -----------------------------------------------------------------------
+
+    fn make_unit_known() -> SceneBounds {
+        SceneBounds::Known(Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)))
+    }
+
+    fn make_unit_proxy() -> SceneBounds {
+        SceneBounds::Proxy(Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)))
+    }
+
+    fn node_with_mesh_and_bounds(mesh_slot: u32, bounds: SceneBounds) -> SceneNode {
+        SceneNode {
+            meshes: vec![MeshHandle::new(mesh_slot, 0)],
+            mesh_bounds: vec![MeshBoundsEntry {
+                mesh: MeshHandle::new(mesh_slot, 0),
+                bounds,
+            }],
+            ..SceneNode::default()
+        }
+    }
+
+    fn node_with_mesh_and_transform(
+        mesh_slot: u32,
+        bounds: SceneBounds,
+        local_transform: Mat4,
+    ) -> SceneNode {
+        SceneNode {
+            local_transform,
+            meshes: vec![MeshHandle::new(mesh_slot, 0)],
+            mesh_bounds: vec![MeshBoundsEntry {
+                mesh: MeshHandle::new(mesh_slot, 0),
+                bounds,
+            }],
+            ..SceneNode::default()
+        }
+    }
+
+    // -- Exact local AABB under translation --
+
+    #[test]
+    fn known_bounds_transform_to_world_correctly() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.build_submission();
+
+        let node = scene.get_node(root).unwrap();
+        let world = node.node_world_bounds.unwrap();
+        if let SceneBounds::Known(aabb) = world {
+            assert_eq!(aabb.min, Vec3::new(9.5, -0.5, -0.5));
+            assert_eq!(aabb.max, Vec3::new(10.5, 0.5, 0.5));
+        } else {
+            panic!("expected Known world bounds");
+        }
+    }
+
+    // -- Negative scale --
+
+    #[test]
+    fn negative_scale_produces_correct_world_bounds() {
+        let mut scene = SceneWorld::new();
+        // Scale -1 on X flips the AABB across the YZ plane at origin.
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_scale(Vec3::new(-2.0, 1.0, 1.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.build_submission();
+
+        let node = scene.get_node(root).unwrap();
+        let world = node.node_world_bounds.unwrap();
+        if let SceneBounds::Known(aabb) = world {
+            // Unit [-0.5,0.5] scaled by -2 on X becomes [-1, 1] but min/max swap.
+            // The 8-corner transform handles this correctly.
+            assert!((aabb.max.x - aabb.min.x - 2.0).abs() < 0.001);
+            assert!(aabb.min.x < aabb.max.x);
+        } else {
+            panic!("expected Known world bounds under negative scale");
+        }
+    }
+
+    // -- Rotation (45° around Z) --
+
+    #[test]
+    fn rotation_45z_produces_correct_world_bounds() {
+        let mut scene = SceneWorld::new();
+        let rot = glam::Quat::from_rotation_z(45.0_f32.to_radians());
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_rotation_translation(rot, Vec3::ZERO),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.build_submission();
+
+        let node = scene.get_node(root).unwrap();
+        let world = node.node_world_bounds.unwrap();
+        if let SceneBounds::Known(aabb) = world {
+            // The diagonal of the unit cube is sqrt(2) ≈ 1.414. After 45° rotation,
+            // the AABB should enclose the rotated cube.
+            let extent = aabb.max - aabb.min;
+            assert!(
+                (extent.x - 2.0_f32.sqrt()).abs() < 0.01,
+                "rotated extent {extent:?}"
+            );
+        } else {
+            panic!("expected Known world bounds under rotation");
+        }
+    }
+
+    // -- Subtree union --
+
+    #[test]
+    fn subtree_bounds_union_children() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        let child_a = scene.add_node(
+            Some(root),
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(-2.0, 0.0, 0.0)),
+            ),
+        );
+        let child_b = scene.add_node(
+            Some(root),
+            node_with_mesh_and_transform(
+                2,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.enable_frustum_culling = false;
+        scene.build_submission();
+
+        let root_node = scene.get_node(root).unwrap();
+        let subtree = root_node.subtree_world_bounds.unwrap();
+        if let SceneBounds::Known(aabb) = subtree {
+            // Should enclose both children.
+            assert!(aabb.min.x <= -2.5);
+            assert!(aabb.max.x >= 2.5);
+        } else {
+            panic!("expected Known subtree bounds");
+        }
+    }
+
+    // -- Dirty invalidation --
+
+    #[test]
+    fn dirty_flag_invalidates_bounds() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(0.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.build_submission();
+
+        let node = scene.get_node(root).unwrap();
+        assert!(node.node_world_bounds.is_some());
+
+        // Move the node far right and mark dirty.
+        if let Some(n) = scene.get_node_mut(root) {
+            n.local_transform = Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0));
+            n.dirty = true;
+            n.node_world_bounds = None;
+            n.subtree_world_bounds = None;
+        }
+
+        // Bounds should be recomputed on next build.
+        scene.build_submission();
+        let node = scene.get_node(root).unwrap();
+        if let Some(SceneBounds::Known(aabb)) = node.node_world_bounds {
+            assert!(aabb.min.x > 99.0);
+        } else {
+            panic!("expected Known bounds after dirty recompute");
+        }
+    }
+
+    // -- Missing/stale/skinned/deformed visibility --
+
+    #[test]
+    fn conservative_visible_meshes_always_submit() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_bounds(
+                1,
+                SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned),
+            ),
+        );
+        scene.set_root(root);
+        // Camera looks down -Z, node at origin. Conservative-visible must submit.
+        scene.update_camera(
+            Mat4::look_at_rh(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, -1.0), Vec3::Y),
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+        let submission = scene.build_submission();
+        assert_eq!(submission.draw_items.len(), 1);
+        assert_eq!(submission.draw_items[0].mesh_id, MeshHandle::new(1, 0));
+    }
+
+    #[test]
+    fn conservative_visible_dominates_known_in_same_node() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            SceneNode {
+                meshes: vec![MeshHandle::new(1, 0), MeshHandle::new(2, 0)],
+                mesh_bounds: vec![
+                    MeshBoundsEntry {
+                        mesh: MeshHandle::new(1, 0),
+                        bounds: make_unit_known(),
+                    },
+                    MeshBoundsEntry {
+                        mesh: MeshHandle::new(2, 0),
+                        bounds: SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed),
+                    },
+                ],
+                ..SceneNode::default()
+            },
+        );
+        scene.set_root(root);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+        let submission = scene.build_submission();
+        // Both meshes submit because one is conservative-visible.
+        assert_eq!(submission.draw_items.len(), 2);
+    }
+
+    // -- Explicit proxy tagging --
+
+    #[test]
+    fn proxy_bounds_are_used_when_no_known_mesh() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        // Set proxy through node_world_bounds (simulating set_node_proxy_bounds).
+        if let Some(n) = scene.get_node_mut(root) {
+            n.node_world_bounds =
+                Some(SceneBounds::Proxy(Aabb::from_min_max(
+                    Vec3::new(1.0, 2.0, 3.0),
+                    Vec3::new(4.0, 5.0, 6.0),
+                )));
+        }
+        scene.set_root(root);
+        scene.enable_frustum_culling = false;
+        scene.build_submission();
+
+        let node = scene.get_node(root).unwrap();
+        // Proxy should persist when no known meshes are present.
+        assert!(matches!(node.node_world_bounds, Some(SceneBounds::Proxy(_))));
+        assert!(node.subtree_world_bounds.is_some());
+    }
+
+    // -- Descendant independence --
+
+    #[test]
+    fn off_screen_known_parent_does_not_hide_in_frustum_known_child() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        // Parent is far right (outside frustum).
+        let parent = scene.add_node(
+            Some(root),
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+            ),
+        );
+        // Child cancels the translation and sits at origin (in frustum).
+        scene.add_node(
+            Some(parent),
+            node_with_mesh_and_transform(
+                2,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(-100.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+        let submission = scene.build_submission();
+        // Only the child should be submitted; parent is off-screen.
+        let ids: Vec<_> = submission.draw_items.iter().map(|d| d.mesh_id).collect();
+        assert_eq!(ids, vec![MeshHandle::new(2, 0)]);
+    }
+
+    // -- Safe subtree pruning --
+
+    #[test]
+    fn known_subtree_entirely_outside_frustum_is_pruned() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        // A parent node whose entire subtree is far left.
+        let off_parent = scene.add_node(
+            Some(root),
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(-50.0, 0.0, 0.0)),
+            ),
+        );
+        // Child also far left.
+        scene.add_node(
+            Some(off_parent),
+            node_with_mesh_and_transform(
+                2,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(-10.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+        let submission = scene.build_submission();
+        // No draws: the entire subtree is outside.
+        assert!(submission.draw_items.is_empty());
+    }
+
+    #[test]
+    fn conservative_visible_parent_does_not_prune_visible_child() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        // Parent is at origin, conservative-visible (always draws).
+        let parent = scene.add_node(
+            Some(root),
+            node_with_mesh_and_bounds(
+                1,
+                SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned),
+            ),
+        );
+        // Child is also at origin, known bounds, in frustum.
+        // A known in-frustum child under a skip-pruning parent should still draw.
+        scene.add_node(
+            Some(parent),
+            node_with_mesh_and_transform(
+                2,
+                make_unit_known(),
+                Mat4::IDENTITY,
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+        let submission = scene.build_submission();
+        // Both submit: parent always draws, child is in frustum.
+        assert_eq!(submission.draw_items.len(), 2);
+    }
+
+    // -- Handle retirement (BoundsEntry) --
+
+    #[test]
+    fn bounds_entry_retirement_class_exists() {
+        use crate::data::retirement::{FrameSerial, GpuRetirementQueue, RetirementClass};
+
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial::new(5), 42);
+        assert_eq!(q.pending_by_class(RetirementClass::BoundsEntry), 1);
+        let reaped = q.reap_through(FrameSerial::new(5)).unwrap();
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].payload, 42);
+    }
+
+    // -- Merge/undo metadata alignment --
+
+    #[test]
+    fn add_node_with_parts_and_bounds_preserves_mesh_bounds() {
+        let mut scene = SceneWorld::new();
+        let bounds_entry = MeshBoundsEntry {
+            mesh: MeshHandle::new(1, 0),
+            bounds: SceneBounds::Known(Aabb::from_min_max(
+                Vec3::new(-1.0, -1.0, -1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            )),
+        };
+        let mounted = scene.add_node_with_parts_and_bounds(
+            None,
+            Mat4::IDENTITY,
+            vec![MeshHandle::new(1, 0)],
+            vec![bounds_entry],
+        );
+        let mounted_node = scene.get_node(mounted).unwrap();
+        assert_eq!(mounted_node.mesh_bounds.len(), 1);
+        assert_eq!(mounted_node.mesh_bounds[0].mesh, MeshHandle::new(1, 0));
+        assert!(matches!(
+            mounted_node.mesh_bounds[0].bounds,
+            SceneBounds::Known(_)
+        ));
+    }
+
+    // -- Empty group nodes remain traversable --
+
+    #[test]
+    fn empty_group_node_traverses_children() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        let group = scene.add_node(
+            Some(root),
+            SceneNode {
+                local_transform: Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+                ..SceneNode::default()
+            },
+        );
+        let visible = scene.add_node(
+            Some(group),
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(-100.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+        let submission = scene.build_submission();
+        // The group node has no meshes but its child is at origin.
+        assert_eq!(submission.draw_items.len(), 1);
+        assert_eq!(submission.draw_items[0].mesh_id, MeshHandle::new(1, 0));
     }
 }

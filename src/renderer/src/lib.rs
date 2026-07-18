@@ -41,6 +41,10 @@ mod vulkan;
 pub use api::event_logging::install_app_event_logger;
 pub use api::{
     boxed_render_hook,
+    // Scene bounds
+    BoundsUnknownReason,
+    SceneBounds,
+    MeshBoundsEntry,
     AssetError,
     AssetKind,
     // Asset API

@@ -14,6 +14,9 @@ use crate::scene::scene_world::{
 };
 use crate::scene::SceneNodeId;
 
+use crate::data::camera::Aabb;
+use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto};
+
 use super::errors::SceneError;
 
 pub const SCENE_FORMAT_VERSION: u32 = 1;
@@ -31,6 +34,86 @@ impl SceneValidationOptions {
     {
         self.known_asset_ids = Some(known_asset_ids.into_iter().map(Into::into).collect());
         self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scene bounds types
+// ---------------------------------------------------------------------------
+
+/// Reason a node or mesh has no trusted conservative bound for culling/pruning.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BoundsUnknownReason {
+    /// No geometry DTO was registered (orphan handle or upload failure).
+    MissingGeometry,
+    /// The handle generation no longer matches the registered geometry.
+    StaleHandle,
+    /// Geometry is skinned; bind-pose AABB is not a valid bound.
+    Skinned,
+    /// Geometry is procedurally or morph-target deformed.
+    Deformed,
+    /// The stored AABB is non-finite or invalid.
+    InvalidGeometry,
+}
+
+/// Bounding volume state for one mesh or one scene node.
+///
+/// - `Known(Aabb)`: authoritative bound computed from trusted geometry.
+/// - `Proxy(Aabb)`: explicit stand-in bound for a node whose geometry is
+///   intentionally unavailable.
+/// - `ConservativeVisible(reason)`: bound is unreliable; culling must treat
+///   the node as always visible.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum SceneBounds {
+    Known(Aabb),
+    Proxy(Aabb),
+    ConservativeVisible(BoundsUnknownReason),
+}
+
+impl SceneBounds {
+    /// Return the inner `Aabb` when known or proxy, otherwise `None`.
+    pub fn aabb(&self) -> Option<&Aabb> {
+        match self {
+            SceneBounds::Known(a) | SceneBounds::Proxy(a) => Some(a),
+            SceneBounds::ConservativeVisible(_) => None,
+        }
+    }
+
+    /// True when this bound may be used for safe subtree pruning.
+    pub fn is_trusted_for_pruning(&self) -> bool {
+        matches!(self, SceneBounds::Known(_) | SceneBounds::Proxy(_))
+    }
+
+    /// True when the bound is conservative-visible (always visible, never pruned).
+    pub fn is_conservative_visible(&self) -> bool {
+        matches!(self, SceneBounds::ConservativeVisible(_))
+    }
+}
+
+/// Convert a [`MeshGeometryDto`] to a [`SceneBounds`].
+/// Rigid meshes with valid AABBs become `Known`; skinned/deformed/unknown
+/// classification becomes `ConservativeVisible` with the exact reason.
+pub(crate) fn scene_bounds_from_dto(dto: &MeshGeometryDto) -> SceneBounds {
+    match dto.deformation {
+        MeshDeformation::Rigid => {
+            if let Some(ref local_aabb) = dto.local_aabb {
+                if local_aabb.is_valid() {
+                    let min = glam::Vec3::from_array(local_aabb.min);
+                    let max = glam::Vec3::from_array(local_aabb.max);
+                    return SceneBounds::Known(Aabb::from_min_max(min, max));
+                }
+            }
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry)
+        }
+        MeshDeformation::Skinned => {
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
+        }
+        MeshDeformation::Deformed => {
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed)
+        }
+        MeshDeformation::Unknown => {
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry)
+        }
     }
 }
 
@@ -149,6 +232,13 @@ impl SceneFragmentNodeId {
     }
 }
 
+/// Per-mesh bounds record within a scene fragment or scene node.
+#[derive(Clone, Debug)]
+pub struct MeshBoundsEntry {
+    pub mesh: MeshHandle,
+    pub bounds: SceneBounds,
+}
+
 /// One node in a detached scene fragment.
 #[derive(Clone, Debug)]
 pub struct SceneFragmentNode {
@@ -156,6 +246,7 @@ pub struct SceneFragmentNode {
     pub children: Vec<SceneFragmentNodeId>,
     pub local_transform: Mat4,
     pub meshes: Vec<MeshHandle>,
+    pub mesh_bounds: Vec<MeshBoundsEntry>,
 }
 
 impl Default for SceneFragmentNode {
@@ -165,6 +256,7 @@ impl Default for SceneFragmentNode {
             children: Vec::new(),
             local_transform: Mat4::IDENTITY,
             meshes: Vec::new(),
+            mesh_bounds: Vec::new(),
         }
     }
 }
@@ -228,6 +320,18 @@ impl SceneFragment {
         transform: Mat4,
         meshes: Vec<MeshHandle>,
     ) -> Result<SceneFragmentNodeId, SceneError> {
+        self.add_node_with_bounds(parent, transform, meshes, Vec::new())
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn add_node_with_bounds(
+        &mut self,
+        parent: Option<SceneFragmentNodeId>,
+        transform: Mat4,
+        meshes: Vec<MeshHandle>,
+        mesh_bounds: Vec<MeshBoundsEntry>,
+    ) -> Result<SceneFragmentNodeId, SceneError> {
         if let Some(parent_id) = parent {
             if self.nodes.get(parent_id.index as usize).is_none() {
                 return Err(SceneError::MergeFailed(format!(
@@ -243,6 +347,7 @@ impl SceneFragment {
             children: Vec::new(),
             local_transform: transform,
             meshes,
+            mesh_bounds,
         });
 
         if let Some(parent_id) = parent {
@@ -690,7 +795,100 @@ impl Scene {
             return Err(SceneError::InvalidNode(node));
         };
         node_ref.meshes.push(mesh);
+        // Bounds unknown until explicitly provided.
+        node_ref.mesh_bounds.push(MeshBoundsEntry {
+            mesh,
+            bounds: SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry),
+        });
+        node_ref.dirty = true;
 
+        Ok(())
+    }
+
+    /// Attach a mesh to a node with an explicit bound computed from trusted
+    /// geometry. The bound must be model-space, consistent with the DTO.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn add_mesh_with_bounds(
+        &mut self,
+        node: SceneNodeId,
+        mesh: MeshHandle,
+        bounds: SceneBounds,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        if let SceneBounds::Known(aabb) = &bounds {
+            if !aabb.is_finite() || !aabb.is_ordered() {
+                return Err(SceneError::MergeFailed(
+                    "Known scene bounds must be finite and ordered".to_string(),
+                ));
+            }
+        }
+        if let SceneBounds::Proxy(aabb) = &bounds {
+            if !aabb.is_finite() || !aabb.is_ordered() {
+                return Err(SceneError::MergeFailed(
+                    "Proxy scene bounds must be finite and ordered".to_string(),
+                ));
+            }
+        }
+
+        let Some(node_ref) = self.world.get_node_mut(node) else {
+            return Err(SceneError::InvalidNode(node));
+        };
+        node_ref.meshes.push(mesh);
+        node_ref.mesh_bounds.push(MeshBoundsEntry { mesh, bounds });
+        node_ref.dirty = true;
+
+        Ok(())
+    }
+
+    /// Set an explicit proxy bound for a node whose geometry is intentionally
+    /// unavailable. A proxy does not override an existing known mesh bound.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn set_node_proxy_bounds(
+        &mut self,
+        node: SceneNodeId,
+        local_aabb: Aabb,
+    ) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        if !local_aabb.is_finite() || !local_aabb.is_ordered() {
+            return Err(SceneError::MergeFailed(
+                "proxy bounds must be finite and ordered".to_string(),
+            ));
+        }
+        let Some(node_ref) = self.world.get_node_mut(node) else {
+            return Err(SceneError::InvalidNode(node));
+        };
+        // Only set proxy when no known bound is present.
+        if node_ref
+            .mesh_bounds
+            .iter()
+            .any(|e| matches!(e.bounds, SceneBounds::Known(_)))
+        {
+            return Err(SceneError::MergeFailed(
+                "cannot set proxy bounds on a node that already has known mesh bounds".to_string(),
+            ));
+        }
+        node_ref.node_world_bounds = Some(SceneBounds::Proxy(local_aabb));
+        node_ref.dirty = true;
+        Ok(())
+    }
+
+    /// Clear any explicit proxy bounds on a node.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn clear_node_proxy_bounds(&mut self, node: SceneNodeId) -> Result<(), SceneError> {
+        self.validate_node(node)?;
+        let Some(node_ref) = self.world.get_node_mut(node) else {
+            return Err(SceneError::InvalidNode(node));
+        };
+        if matches!(node_ref.node_world_bounds, Some(SceneBounds::Proxy(_))) {
+            node_ref.node_world_bounds = None;
+            node_ref.dirty = true;
+        }
         Ok(())
     }
 
@@ -703,6 +901,9 @@ impl Scene {
             return Err(SceneError::InvalidNode(node));
         };
         node_ref.meshes.clear();
+        node_ref.mesh_bounds.clear();
+        node_ref.node_world_bounds = None;
+        node_ref.dirty = true;
 
         Ok(())
     }
@@ -914,10 +1115,11 @@ impl Scene {
                 parent
             };
 
-            let new_node = self.world.add_node_with_parts(
+            let new_node = self.world.add_node_with_parts_and_bounds(
                 scene_parent,
                 source.local_transform,
                 source.meshes.clone(),
+                source.mesh_bounds.clone(),
             );
             self.ensure_node_persistence_metadata(new_node);
             mapping.insert(fragment_node, new_node);
@@ -3710,6 +3912,9 @@ mod tests {
 
     #[test]
     fn frustum_culling_reduces_draw_count() {
+        use super::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
+        use crate::data::camera::Aabb;
+
         let mut scene = Scene::new();
         assert!(scene.frustum_culling_enabled());
 
@@ -3724,6 +3929,12 @@ mod tests {
 
         let root = scene.create_node_default(None).unwrap();
 
+        // Use an explicit unit proxy so culling can operate on known bounds.
+        let unit_proxy = SceneBounds::Proxy(Aabb::from_min_max(
+            Vec3::splat(-0.5),
+            Vec3::splat(0.5),
+        ));
+
         // Node in front of camera — should stay visible.
         let in_front = scene
             .create_node(
@@ -3731,13 +3942,17 @@ mod tests {
                 Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)),
             )
             .unwrap();
-        scene.add_mesh(in_front, MeshHandle::new(1, 0)).unwrap();
+        scene
+            .add_mesh_with_bounds(in_front, MeshHandle::new(1, 0), unit_proxy)
+            .unwrap();
 
         // Node behind camera — should be culled.
         let behind = scene
             .create_node(Some(root), Mat4::from_translation(Vec3::new(0.0, 0.0, 5.0)))
             .unwrap();
-        scene.add_mesh(behind, MeshHandle::new(2, 0)).unwrap();
+        scene
+            .add_mesh_with_bounds(behind, MeshHandle::new(2, 0), unit_proxy)
+            .unwrap();
 
         // Count with culling off.
         scene.set_frustum_culling(false);

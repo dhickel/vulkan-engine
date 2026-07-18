@@ -5,6 +5,8 @@
 //!
 //! Internal assimp ingestion with future-facing helpers; dead code allowed.
 
+use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
+use crate::data::camera::Aabb;
 use crate::api::AssetPolicyConfig;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
 use crate::data::compression;
@@ -15,6 +17,7 @@ use crate::data::gpu_data::{
     TextureSemantic, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
+use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto};
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
 use ash::vk;
 use glam::{Mat4, Vec3, Vec4};
@@ -200,6 +203,23 @@ pub fn load_model(
         mapped_meshes.insert(og_idx as u32, *id);
     }
 
+    // Derive scene bounds from registered DTOs for every imported mesh.
+    let mesh_bounds_map = {
+        let geo_store = data_cache
+            .mesh_geometry_store
+            .lock()
+            .map_err(|_| AssimpImportError::Internal("mesh_geometry_store lock poisoned".to_string()))?;
+        let mut map = HashMap::with_capacity(mesh_ids.len());
+        for &mesh_id in &mesh_ids {
+            let bounds = match geo_store.get(mesh_id) {
+                Ok(dto) => dto_to_scene_bounds(&dto),
+                Err(_) => SceneBounds::ConservativeVisible(BoundsUnknownReason::StaleHandle),
+            };
+            map.insert(mesh_id, bounds);
+        }
+        map
+    };
+
     let root_ai_node = ai_scene.mRootNode;
 
     if root_ai_node.is_null() {
@@ -208,7 +228,7 @@ pub fn load_model(
         ))
     } else {
         let mut scene_world = SceneWorld::new();
-        let root_id = process_node(root_ai_node, &mapped_meshes, &mut scene_world, None)?;
+        let root_id = process_node(root_ai_node, &mapped_meshes, &mesh_bounds_map, &mut scene_world, None)?;
         scene_world.set_root(root_id);
         Ok(ModelMeta {
             scene_world,
@@ -1066,6 +1086,7 @@ pub fn process_meshes(
 fn process_node(
     ai_node: *const aiNode,
     mapped_meshes: &HashMap<u32, MeshHandle>,
+    mesh_bounds: &HashMap<MeshHandle, SceneBounds>,
     scene_world: &mut SceneWorld,
     parent: Option<SceneNodeId>,
 ) -> Result<SceneNodeId, AssimpImportError> {
@@ -1101,6 +1122,7 @@ fn process_node(
 
         let mesh_count = (*ai_node).mNumMeshes as usize;
         let mut meshes = Vec::with_capacity(mesh_count);
+        let mut bounds = Vec::with_capacity(mesh_count);
         for i in 0..mesh_count {
             let mesh_index = *(*ai_node).mMeshes.add(i);
             let handle = mapped_meshes.get(&mesh_index).copied().ok_or_else(|| {
@@ -1109,15 +1131,22 @@ fn process_node(
                     mesh_index,
                 }
             })?;
+            let bound = mesh_bounds.get(&handle).copied().unwrap_or(
+                SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry),
+            );
             meshes.push(handle);
+            bounds.push(MeshBoundsEntry {
+                mesh: handle,
+                bounds: bound,
+            });
         }
 
-        let node_id = scene_world.add_node_with_parts(parent, local_transform, meshes);
+        let node_id = scene_world.add_node_with_parts_and_bounds(parent, local_transform, meshes, bounds);
 
         // Process children
         for i in 0..(*ai_node).mNumChildren {
             let child_ai_node = *(*ai_node).mChildren.add(i as usize);
-            process_node(child_ai_node, mapped_meshes, scene_world, Some(node_id))?;
+            process_node(child_ai_node, mapped_meshes, mesh_bounds, scene_world, Some(node_id))?;
         }
         Ok(node_id)
     }
@@ -1173,6 +1202,33 @@ const AI_MATKEY_EMISSIVE_INTENSITY: *const c_char =
 const AI_MATKEY_GLTF_ALPHAMODE: *const c_char = b"$mat.gltf.alphaMode\0".as_ptr() as *const c_char;
 const AI_MATKEY_GLTF_ALPHACUTOFF: *const c_char =
     b"$mat.gltf.alphaCutoff\0".as_ptr() as *const c_char;
+
+/// Convert a [`MeshGeometryDto`] to a [`SceneBounds`].
+/// Rigid meshes with valid AABBs become `Known`; skinned/deformed/unknown
+/// meshes become `ConservativeVisible` with the exact reason.
+fn dto_to_scene_bounds(dto: &MeshGeometryDto) -> SceneBounds {
+    match dto.deformation {
+        MeshDeformation::Rigid => {
+            if let Some(ref local_aabb) = dto.local_aabb {
+                if local_aabb.is_valid() {
+                    let min = Vec3::from_array(local_aabb.min);
+                    let max = Vec3::from_array(local_aabb.max);
+                    return SceneBounds::Known(Aabb::from_min_max(min, max));
+                }
+            }
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry)
+        }
+        MeshDeformation::Skinned => {
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
+        }
+        MeshDeformation::Deformed => {
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed)
+        }
+        MeshDeformation::Unknown => {
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
