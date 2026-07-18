@@ -29,7 +29,7 @@ raw-window-handle = { version = "0.6.2", features = ["std"] }
 
 gltf = { version = "1.4.1" }
 mikktspace = { version = "0.3.0", default-features = false, features = ["glam"] }
-russimp-sys = { version = "2.0.2"}
+russimp-sys-ng = "2.0.6"
 
 image = "0.25.1"
 intel_tex_2 = "0.5.0"
@@ -102,6 +102,10 @@ path = "examples/capture_tests/capture_lighting.rs"
 [[example]]
 name = "capture_geometry"
 path = "examples/capture_tests/capture_geometry.rs"
+
+[[example]]
+name = "capture_culling"
+path = "examples/capture_tests/capture_culling.rs"
 
 [[example]]
 name = "capture_environment"

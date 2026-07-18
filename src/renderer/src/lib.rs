@@ -59,6 +59,8 @@ pub use api::{
     MaterialHandle,
     MeshHandle,
     // Lighting
+    DirectionalLight,
+    DirectionalLightId,
     PointLight,
     PointLightId,
     // Hooks

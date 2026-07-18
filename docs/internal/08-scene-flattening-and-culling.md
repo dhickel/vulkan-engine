@@ -22,8 +22,9 @@ Current flow:
   - `RenderSubmission` stores `Vec<FramePointLight>` but clamps to `MAX_POINT_LIGHTS_GPU` (16) for GPU upload contract compatibility.
   - Collection uses active entries, not raw slot order assumptions, so sparse slot churn still yields active lights.
 - Culling status:
-  - Frustum/occlusion culling is not currently implemented in `SceneWorld::build_submission`.
-  - All reachable meshes are currently emitted after transform refresh.
+  - Frustum culling is enabled by default in `SceneWorld::build_submission`; occlusion culling is not implemented.
+  - Mesh-backed nodes are tested against transform-aware proxy AABBs using Vulkan `[0, 1]` frustum planes.
+  - Descendants are tested independently because node proxy bounds do not enclose subtrees.
 
 ## 4. Code Walkthrough
 Snippet Type: Real
@@ -56,7 +57,14 @@ pub(crate) fn build_submission(&mut self) -> RenderSubmission {
     }
 
     self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
-    self.collect_draw_items_recursive(root_id, &mut submission);
+    let frustum = if self.enable_frustum_culling {
+        Some(Frustum::from_view_projection(
+            &(self.camera.projection * self.camera.view),
+        ))
+    } else {
+        None
+    };
+    self.collect_draw_items_recursive_culled(root_id, &mut submission, frustum.as_ref());
     submission
 }
 ```
@@ -95,25 +103,30 @@ fn refresh_world_recursive(
 Snippet Type: Real
 ```rust
 // src/renderer/src/scene/scene_world.rs
-fn collect_draw_items_recursive(
+fn collect_draw_items_recursive_culled(
     &self,
     node_id: SceneNodeId,
     submission: &mut RenderSubmission,
+    frustum: Option<&Frustum>,
 ) {
     let Some(node) = self.get_node(node_id) else {
         return;
     };
 
-    for mesh_id in node.meshes.iter().copied() {
-        submission.push_draw_item(FrameDrawItem {
-            mesh_id,
-            transform: node.world_transform,
-        });
+    let meshes_visible = node.meshes.is_empty()
+        || frustum.is_none_or(|frustum| frustum.intersects_aabb(&node_pick_bounds(node)));
+    if meshes_visible {
+        for mesh_id in node.meshes.iter().copied() {
+            submission.push_draw_item(FrameDrawItem {
+                mesh_id,
+                transform: node.world_transform,
+            });
+        }
     }
 
     for child in node.children.iter().copied() {
         if self.is_valid_node_id(child) {
-            self.collect_draw_items_recursive(child, submission);
+            self.collect_draw_items_recursive_culled(child, submission, frustum);
         }
     }
 }
@@ -168,6 +181,7 @@ reason:
 - Keep traversal order explicit: parent transform resolution must happen before child recursion.
 - Preserve handle-validation checks (`is_valid_node_id`) when touching recursive traversal.
 - Keep `RenderSubmission` payload renderer-agnostic; resolve Vulkan resources later in backend code.
+- Do not prune descendants from a node-only proxy bound; branch pruning requires a true subtree bound.
 - Keep current behavior and roadmap behavior separated in docs and code comments.
 - Keep GPU payload limits explicit and synchronized (`MAX_POINT_LIGHTS_GPU` between scene submission and GPU UBO definitions).
 
@@ -178,6 +192,9 @@ reason:
   - If parent updates are not propagated, child world transforms become stale even when local child transforms are unchanged.
 - Sparse light slots:
   - Light extraction iterates active entries and clamps by count; assumptions based on dense slot indexing can cause confusing debugging expectations.
+- Proxy-bound limitations:
+  - The scene graph does not yet own CPU mesh bounds, so imported meshes use one-unit local proxies. False culls remain possible when actual geometry extends beyond that proxy.
+  - A node proxy is not a subtree bound. Skipping recursive traversal when a parent proxy is outside can hide an in-frustum child.
 - Constant drift risk:
   - `MAX_POINT_LIGHTS_GPU` exists in both scene and GPU-data modules (`src/renderer/src/scene/scene_world.rs` and `src/renderer/src/data/gpu_data.rs`); mismatches would silently corrupt or truncate light upload behavior.
 

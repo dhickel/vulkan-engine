@@ -42,6 +42,13 @@ pub struct FramePointLight {
     pub range: f32,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct FrameDirectionalLight {
+    pub direction: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+}
+
 pub struct RenderSubmission {
     pub camera: SceneDataUBO,
     pub draw_items: Vec<FrameDrawItem>,
@@ -49,6 +56,7 @@ pub struct RenderSubmission {
     pub skybox_mesh_id: MeshHandle,
     pub skybox_env_id: EnvironmentHandle,
     pub point_lights: Vec<FramePointLight>,
+    pub directional_light: Option<FrameDirectionalLight>,
 }
 
 impl RenderSubmission {
@@ -60,6 +68,7 @@ impl RenderSubmission {
             skybox_mesh_id: MeshCache::SKYBOX_MESH,
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(MAX_POINT_LIGHTS_GPU),
+            directional_light: None,
         }
     }
 

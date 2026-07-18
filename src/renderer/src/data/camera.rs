@@ -97,7 +97,8 @@ pub struct Frustum {
 }
 
 impl Frustum {
-    /// Extract frustum planes from a view-projection matrix.
+    /// Extract frustum planes from a view-projection matrix using Vulkan's
+    /// `[0, 1]` normalized-device-coordinate depth range.
     pub fn from_view_projection(vp: &Mat4) -> Self {
         let m = vp.to_cols_array_2d();
         // Left, right, bottom, top, near, far
@@ -126,12 +127,7 @@ impl Frustum {
                 m[2][3] - m[2][1],
                 m[3][3] - m[3][1],
             ),
-            Vec4::new(
-                m[0][3] + m[0][2],
-                m[1][3] + m[1][2],
-                m[2][3] + m[2][2],
-                m[3][3] + m[3][2],
-            ),
+            Vec4::new(m[0][2], m[1][2], m[2][2], m[3][2]),
             Vec4::new(
                 m[0][3] - m[0][2],
                 m[1][3] - m[1][2],
@@ -304,7 +300,7 @@ impl Camera {
 
 #[cfg(test)]
 mod tests {
-    use super::{Camera, CameraLookAtError};
+    use super::{Aabb, Camera, CameraLookAtError, Frustum};
     use glam::{Mat4, Vec3};
 
     const ASSERT_EPSILON: f32 = 1.0e-4;
@@ -354,6 +350,39 @@ mod tests {
 
         assert_eq!(camera.get_position(), original_position);
         assert_matrix_approx_eq(camera.get_view_matrix(), original_view);
+    }
+
+    #[test]
+    fn frustum_uses_vulkan_zero_to_one_depth_range() {
+        let projection = Mat4::perspective_rh(90.0_f32.to_radians(), 1.0, 1.0, 10.0);
+        let frustum = Frustum::from_view_projection(&projection);
+
+        let inside = Aabb::from_min_max(
+            Vec3::new(-0.25, -0.25, -2.0),
+            Vec3::new(0.25, 0.25, -1.5),
+        );
+        let before_near = Aabb::from_min_max(
+            Vec3::new(-0.1, -0.1, -0.9),
+            Vec3::new(0.1, 0.1, -0.8),
+        );
+        let across_near = Aabb::from_min_max(
+            Vec3::new(-0.1, -0.1, -1.1),
+            Vec3::new(0.1, 0.1, -0.9),
+        );
+        let beyond_far = Aabb::from_min_max(
+            Vec3::new(-0.25, -0.25, -11.0),
+            Vec3::new(0.25, 0.25, -10.5),
+        );
+        let outside_right = Aabb::from_min_max(
+            Vec3::new(2.1, -0.1, -2.0),
+            Vec3::new(2.2, 0.1, -1.9),
+        );
+
+        assert!(frustum.intersects_aabb(&inside));
+        assert!(!frustum.intersects_aabb(&before_near));
+        assert!(frustum.intersects_aabb(&across_near));
+        assert!(!frustum.intersects_aabb(&beyond_far));
+        assert!(!frustum.intersects_aabb(&outside_right));
     }
 
     #[test]

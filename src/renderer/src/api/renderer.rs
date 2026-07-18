@@ -48,8 +48,14 @@ pub struct EnvironmentRuntimeStatus {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FrameRenderOutcome {
+    /// Frame was rendered and presented successfully.
     Rendered,
+    /// Frame was skipped because a resize is pending.
     SkippedResizePending,
+    /// Frame was submitted to GPU but presentation failed (suboptimal/out-of-date).
+    SubmittedNotPresented,
+    /// Frame was presented but the swapchain was suboptimal.
+    PresentedSuboptimal,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1118,9 +1124,9 @@ impl Renderer {
         let pre_hook = &mut self.pre_render_hook;
         let post_hook = &mut self.post_render_hook;
 
-        catch_unwind(AssertUnwindSafe(|| {
-            if hooks_enabled {
-                runtime.render_with_hooks(
+        if hooks_enabled {
+            runtime
+                .render_with_hooks(
                     frame_number,
                     &submission,
                     due_captures,
@@ -1146,17 +1152,13 @@ impl Renderer {
                             error!("post_render hook failed at frame {}: {}", frame_index, err);
                         }
                     },
-                );
-            } else {
-                runtime.render_with_hooks(frame_number, &submission, due_captures, || {}, || {});
-            }
-        }))
-        .map_err(|panic| {
-            map_frame_render_err(format!(
-                "render panicked: {}",
-                super::utils::panic_payload_to_string(panic)
-            ))
-        })?;
+                )
+                .map_err(|err| render_error_from_vk_string(err))?;
+        } else {
+            runtime
+                .render_with_hooks(frame_number, &submission, due_captures, || {}, || {})
+                .map_err(|err| render_error_from_vk_string(err))?;
+        }
 
         self.record_frame_capture_statuses();
 
@@ -1417,6 +1419,16 @@ fn map_vk_init_err(err: String, compile_shaders: bool) -> RendererError {
     }
 
     map_init_err(err)
+}
+
+/// Convert a Vulkan error string to a RendererError.
+/// Checks for device lost keywords.
+fn render_error_from_vk_string(err: String) -> RendererError {
+    if err.contains("Vulkan device lost") {
+        RendererError::DeviceLost
+    } else {
+        map_frame_render_err(err)
+    }
 }
 
 #[cfg(test)]

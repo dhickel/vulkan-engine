@@ -17,6 +17,9 @@ The event crate defines typed scene event contracts, but broad scene mutation em
   - `mounted_root`: root node in destination scene
   - `node_mapping`: fragment node IDs mapped to scene node IDs
 - `Scene::set_skybox(env)` sets scene skybox environment handle.
+- Frustum culling is enabled by default. Use `Scene::set_frustum_culling(false)` for diagnostics or compatibility and `Scene::frustum_culling_enabled()` to inspect the current setting.
+
+Culling uses transform-aware proxy AABBs at scene submission time. Descendants are tested independently, so an off-screen parent cannot hide an in-frustum child. The current scene graph does not retain CPU mesh bounds; imported meshes therefore use the same one-unit local proxy as picking until mesh bounds metadata reaches the scene layer.
 
 ### Editor Scene File Contract
 

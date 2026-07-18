@@ -2,6 +2,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
+use ash::vk;
+
 use super::config::FrameCaptureConfigError;
 use crate::scene::scene_world::SceneNodeId;
 
@@ -15,6 +17,12 @@ pub enum RendererError {
     CaptureConfig(FrameCaptureConfigError),
     Unsupported(String),
     InvalidState(String),
+    /// The Vulkan device has been lost (VK_ERROR_DEVICE_LOST).
+    /// The host application should destroy and recreate the Renderer.
+    DeviceLost,
+    /// A Vulkan operation was attempted after a prior terminal error.
+    /// The backend is poisoned; destroy and recreate the Renderer.
+    BackendPoisoned(String),
 }
 
 impl Display for RendererError {
@@ -28,6 +36,8 @@ impl Display for RendererError {
             Self::CaptureConfig(err) => write!(f, "frame capture configuration error: {err}"),
             Self::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
+            Self::DeviceLost => write!(f, "renderer error: Vulkan device lost"),
+            Self::BackendPoisoned(msg) => write!(f, "renderer backend poisoned: {msg}"),
         }
     }
 }
@@ -43,6 +53,8 @@ impl Error for RendererError {
             Self::CaptureConfig(err) => Some(err),
             Self::Unsupported(_) => None,
             Self::InvalidState(_) => None,
+            Self::DeviceLost => None,
+            Self::BackendPoisoned(_) => None,
         }
     }
 }
@@ -154,6 +166,8 @@ pub enum SceneError {
     MergeFailed(String),
     InvalidPointLight(String),
     StalePointLight(crate::api::scene::PointLightId),
+    InvalidDirectionalLight(String),
+    StaleDirectionalLight(crate::api::scene::DirectionalLightId),
     UnsupportedSceneVersion { found: u32, expected: u32 },
     MissingAssetId(String),
     BadSerializedParent { node_id: String, parent_id: String },
@@ -182,6 +196,12 @@ impl Display for SceneError {
             ),
             Self::MergeFailed(msg) => write!(f, "{msg}"),
             Self::InvalidPointLight(msg) => write!(f, "invalid point light: {msg}"),
+            Self::InvalidDirectionalLight(msg) => write!(f, "invalid directional light: {msg}"),
+            Self::StaleDirectionalLight(id) => write!(
+                f,
+                "stale directional light handle (slot={}, generation={})",
+                id.slot, id.generation
+            ),
             Self::StalePointLight(id) => write!(
                 f,
                 "stale point light handle (slot={}, generation={})",
@@ -421,4 +441,27 @@ pub(crate) fn map_asset_err(err: impl Into<String>) -> RendererError {
 
 pub(crate) fn map_hook_err(err: impl Into<String>) -> RendererError {
     HookError::Invocation(err.into()).into()
+}
+
+/// Convert an `ash::vk::Result` to a `RendererError`.
+/// Returns `Ok(())` on VK_SUCCESS; maps VK_ERROR_DEVICE_LOST to `DeviceLost`;
+/// maps all other errors to `RendererFrameError::Render`.
+pub(crate) fn map_vk_result(result: vk::Result, context: impl Into<String>) -> Result<(), RendererError> {
+    use ash::vk::Result as VkResult;
+    match result {
+        VkResult::SUCCESS => Ok(()),
+        VkResult::ERROR_DEVICE_LOST => Err(RendererError::DeviceLost),
+        err => Err(RendererFrameError::Render(format!("{}: {:?}", context.into(), err)).into()),
+    }
+}
+
+/// Convert an `ash::vk::Result` from a queue operation to a `RendererError`.
+/// Same as `map_vk_result` but uses `RendererFrameError::Render` for non-device-lost.
+pub(crate) fn map_vk_queue_result(result: vk::Result, context: impl Into<String>) -> Result<(), RendererError> {
+    map_vk_result(result, context)
+}
+
+/// Map a `VkResult` that indicates the backend is now poisoned.
+pub(crate) fn poison_backend(err: impl Into<String>) -> RendererError {
+    RendererError::BackendPoisoned(err.into())
 }

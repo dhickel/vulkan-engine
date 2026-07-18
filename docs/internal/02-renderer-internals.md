@@ -49,7 +49,7 @@ let submission = scene.build_submission(&self.camera, viewport_size);
 - `Vec<PointLight>` — active point lights
 - `EnvironmentHandle` — active environment map
 
-No frustum culling is performed — all nodes are submitted.
+Frustum culling is enabled by default. Mesh-backed nodes whose transform-aware proxy AABBs are outside the Vulkan `[0, 1]` camera frustum are omitted; descendants are tested independently. The public `Scene` facade can disable culling for diagnostics or compatibility.
 
 ### Step 5: Rendergraph Execution
 

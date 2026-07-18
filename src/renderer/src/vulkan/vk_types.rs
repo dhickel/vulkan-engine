@@ -467,7 +467,7 @@ impl VkCmdSubmitInfo {
         device: &ash::Device,
         device_queues: &VkDeviceQueues,
         fence_queue: &mut VkFenceQueue,
-    ) {
+    ) -> Result<(), String> {
         let _cmd_buffer = [self.cmd_buffer];
         let cmd_info = [vk_util::command_buffer_submit_info(self.cmd_buffer)];
         let queue = device_queues.get_queue(self.queue_type);
@@ -495,12 +495,15 @@ impl VkCmdSubmitInfo {
                 &[]
             });
 
-        unsafe {
-            device
-                .queue_submit2(queue, &[queue_submit], self.fence[0])
-                .unwrap();
+        let result = unsafe {
+            device.queue_submit2(queue, &[queue_submit], self.fence[0])
+        };
+        if let Err(vk::Result::ERROR_DEVICE_LOST) = result {
+            return Err("Vulkan device lost during queue submission".to_string());
         }
-        fence_queue.queue_fence(self.fence, self.latch_guard)
+        result.map_err(|e| format!("queue_submit2 failed: {:?}", e))?;
+        fence_queue.queue_fence(self.fence, self.latch_guard);
+        Ok(())
     }
 }
 
@@ -1134,20 +1137,20 @@ impl VkHostBuffer {
             .await_zero(Duration::from_secs(timeout_sec))
     }
 
-    pub fn reset_buffers(&self, device: &ash::Device) {
+    pub fn reset_buffers(&self, device: &ash::Device) -> Result<(), String> {
         unsafe {
             device
                 .reset_command_buffer(
                     self.transfer_pool.buffers[0],
                     vk::CommandBufferResetFlags::empty(),
                 )
-                .unwrap();
+                .map_err(|e| format!("failed to reset transfer command buffer: {:?}", e))?;
             device
                 .reset_command_buffer(
                     self.graphics_pool.buffers[0],
                     vk::CommandBufferResetFlags::empty(),
                 )
-                .unwrap();
+                .map_err(|e| format!("failed to reset graphics command buffer: {:?}", e))
         }
     }
 }
@@ -1522,6 +1525,12 @@ impl VkDeletable {
 ///
 /// ## Update Pattern
 /// update_scene_uniform() writes new SceneDataUBO each frame (camera movement).
+/// Per-frame shadow map reference passed at construction time to VkSceneDescriptors.
+pub struct ShadowMapRef {
+    pub image_view: vk::ImageView,
+    pub sampler: vk::Sampler,
+}
+
 pub struct VkSceneDescriptors {
     descriptor_pool: VkDynamicDescriptorAllocator,
     scene_descriptors: Vec<vk::DescriptorSet>,
@@ -1538,14 +1547,16 @@ impl VkSceneDescriptors {
         scene_desc_layout: vk::DescriptorSetLayout,
         env_maps: &EnvMaps,
         brdf_lut: &VkBrdfLut,
+        shadow_maps: &[ShadowMapRef],
         count: u32,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let pool_ratios = vec![
             PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0),
-            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 3.0),
+            PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
         let mut descriptor_pool =
-            VkDynamicDescriptorAllocator::new(device, count, &pool_ratios).unwrap();
+            VkDynamicDescriptorAllocator::new(device, count, &pool_ratios)
+                .map_err(|e| format!("failed to create scene descriptor allocator: {}", e))?;
 
         let scene_buffer = vk_util::allocate_buffer(
             allocator,
@@ -1554,7 +1565,7 @@ impl VkSceneDescriptors {
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
         )
-        .unwrap();
+        .map_err(|e| format!("failed to allocate scene UBO buffer: {}", e))?;
 
         let env_buffer = vk_util::allocate_buffer(
             allocator,
@@ -1563,7 +1574,7 @@ impl VkSceneDescriptors {
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk_mem::MemoryUsage::Auto,
         )
-        .unwrap();
+        .map_err(|e| format!("failed to allocate environment UBO buffer: {}", e))?;
 
         let scene_data = SceneDataUBO::default();
 
@@ -1598,7 +1609,7 @@ impl VkSceneDescriptors {
 
                 let desc_set = descriptor_pool
                     .allocate(device, &[scene_desc_layout])
-                    .unwrap();
+                    .map_err(|e| format!("failed to allocate scene descriptor set: {}", e))?;
 
                 let mut writer = VkDescriptorWriter::default();
                 writer.write_buffer(
@@ -1641,18 +1652,28 @@ impl VkSceneDescriptors {
                     vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 );
 
-                writer.update_set(device, desc_set);
-                desc_set
-            })
-            .collect();
+                // Write shadow map at binding 5
+                let shadow_ref = &shadow_maps[i as usize];
+                writer.write_image(
+                    5,
+                    shadow_ref.image_view,
+                    shadow_ref.sampler,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                );
 
-        Self {
+                writer.update_set(device, desc_set);
+                Ok::<vk::DescriptorSet, String>(desc_set)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(Self {
             descriptor_pool,
             scene_descriptors,
             scene_buffer,
             env_buffer,
             alignment: uniform_alignment,
-        }
+        })
     }
 
     pub fn update_scene_uniform(
@@ -1802,16 +1823,20 @@ impl VkFenceQueue {
     /// - If unsignaled: keep in queue
     ///
     /// Called every frame in render loop.
-    pub fn check_fences(&mut self, device: &ash::Device) {
+    pub fn check_fences(&mut self, device: &ash::Device) -> Result<(), String> {
         if self.fence_awaits.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut pending = Vec::with_capacity(self.fence_awaits.len());
         let mut signaled_fences = Vec::new();
 
         for (fence, signal) in self.fence_awaits.drain(..) {
-            let signaled = unsafe { device.get_fence_status(fence).unwrap() };
+            let signaled = unsafe {
+                device
+                    .get_fence_status(fence)
+                    .map_err(|e| format!("get_fence_status failed: {:?}", e))?
+            };
             if signaled {
                 signaled_fences.push(fence);
                 debug!("Signaling and removing fence: {:?}", fence);
@@ -1824,9 +1849,14 @@ impl VkFenceQueue {
         if !signaled_fences.is_empty() {
             // Reset all completed fences in one driver call to reduce burst overhead when
             // multiple async uploads complete in the same frame.
-            unsafe { device.reset_fences(&signaled_fences).unwrap() };
+            unsafe {
+                device
+                    .reset_fences(&signaled_fences)
+                    .map_err(|e| format!("reset_fences failed: {:?}", e))?
+            };
         }
 
         self.fence_awaits = pending;
+        Ok(())
     }
 }

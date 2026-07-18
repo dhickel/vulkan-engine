@@ -804,8 +804,12 @@ impl VkStorageBuffer {
                         format!("Error awaiting upload response: {:?}", error),
                         sub_allocations,
                     );
+                } else if let Err(e) = host_buffer.reset_buffers(device) {
+                    return self.partial_error(
+                        format!("Error resetting host buffers: {}", e),
+                        sub_allocations,
+                    );
                 } else {
-                    host_buffer.reset_buffers(device);
                     debug!("Storage upload latch passed")
                 }
 
@@ -886,8 +890,12 @@ impl VkStorageBuffer {
                     format!("Error awaiting upload response: {:?}", error),
                     sub_allocations,
                 );
+            } else if let Err(e) = host_buffer.reset_buffers(device) {
+                return self.partial_error(
+                    format!("Error resetting host buffers: {}", e),
+                    sub_allocations,
+                );
             } else {
-                host_buffer.reset_buffers(device);
                 debug!("Storage upload latch passed")
             }
 

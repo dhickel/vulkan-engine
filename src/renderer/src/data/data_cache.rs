@@ -694,19 +694,6 @@ impl TextureCache {
         }
     }
 
-    pub fn get_loaded_material_ptr(
-        &self,
-        id: MaterialHandle,
-    ) -> Result<*const VkLoadedMaterial, CacheError> {
-        let slot = self.validate_material_slot(id)?;
-        match self.cached_materials.get(slot) {
-            Some(CachedMaterial::Loaded(loaded)) => Ok(loaded as *const VkLoadedMaterial),
-            Some(CachedMaterial::Unloaded(_)) => Err(CacheError::NotLoaded),
-            Some(CachedMaterial::_NULL) => Err(CacheError::InvalidHandle),
-            None => Err(CacheError::OutOfBounds),
-        }
-    }
-
     pub fn get_texture(&self, id: TextureHandle) -> Result<&CachedTexture, CacheError> {
         let slot = self.validate_texture_slot(id)?;
         self.cached_textures
@@ -909,7 +896,9 @@ impl TextureCache {
             // commands are complete and ownership can move to graphics.
             vk_util::async_transfer_signal_stage_mask(),
         )) {
-            host_buffer.reset_buffers(&self.device);
+            if let Err(e) = host_buffer.reset_buffers(&self.device) {
+                log::error!("Failed to reset host buffers after transfer error: {}", e);
+            }
             self.destroy_uploaded_images(image_allocs);
             return Err(format!(
                 "failed to submit transfer commands for texture upload batch: {}",
@@ -949,7 +938,9 @@ impl TextureCache {
         }
 
         if host_buffer.countdown_latch.get_count() == 0 {
-            host_buffer.reset_buffers(&self.device);
+            if let Err(e) = host_buffer.reset_buffers(&self.device) {
+                log::error!("Failed to reset host buffers after batch completion: {}", e);
+            }
             drop(host_buffer);
             self.promote_uploaded_images(batch_texture_ids.as_slice(), image_allocs);
             return Ok(None);
@@ -1017,7 +1008,9 @@ impl TextureCache {
         }
 
         // All fences signaled — reset staging buffer and promote all pending batches
-        host_buffer.reset_buffers(&self.device);
+        if let Err(e) = host_buffer.reset_buffers(&self.device) {
+            log::error!("Failed to reset host buffers during poll: {}", e);
+        }
         drop(host_buffer);
 
         let batch_ids: Vec<u64> = self.pending_batches.keys().copied().collect();
@@ -1902,10 +1895,12 @@ pub enum CoreShaderType {
     EnvIrradianceFrag,
     EnvPrefilterFrag,
     EnvEquirectToCubeFrag,
+    ShadowDepthVert,
+    ShadowDepthFrag,
 }
 
 impl CoreShaderType {
-    const COUNT: usize = 11;
+    const COUNT: usize = 13;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -1920,6 +1915,8 @@ impl CoreShaderType {
             "EnvIrradianceFrag" => Some(Self::EnvIrradianceFrag),
             "EnvPrefilterFrag" => Some(Self::EnvPrefilterFrag),
             "EnvEquirectToCubeFrag" => Some(Self::EnvEquirectToCubeFrag),
+            "ShadowDepthVert" => Some(Self::ShadowDepthVert),
+            "ShadowDepthFrag" => Some(Self::ShadowDepthFrag),
             _ => None,
         }
     }
@@ -2050,10 +2047,11 @@ pub enum VkPipelineType {
     EnvPreFilter,
     EnvIrradiance,
     EnvEquirectToCube,
+    ShadowDepth,
 }
 
 impl VkPipelineType {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 }
 
 //#[derive(Clone, Copy)]
@@ -2106,11 +2104,12 @@ pub enum VkDescType {
     EnvIrradiance,
     EnvPreFilter,
     EnvEquirect,
+    ShadowMap,
     Empty,
 }
 
 impl VkDescType {
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 }
 
 pub struct VkDescLayoutCache {
@@ -2150,7 +2149,8 @@ impl VkDescLayoutCache {
                 6 => VkDescType::EnvIrradiance,
                 7 => VkDescType::EnvPreFilter,
                 8 => VkDescType::EnvEquirect,
-                9 => VkDescType::Empty,
+                9 => VkDescType::ShadowMap,
+                10 => VkDescType::Empty,
                 _ => panic!(),
             };
             debug!("\t{:?} : {:?}", typ, *set)

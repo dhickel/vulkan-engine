@@ -60,6 +60,7 @@ Module guides:
 - `cargo run -p renderer --example demo_unlit`
 - `cargo run -p renderer --example demo_model_load`
 - `cargo run -p renderer --example demo_async_loading`
+- `cargo run -p renderer --example capture_culling -- --headless --culling=on`
 
 ## Headless Capture Validation
 

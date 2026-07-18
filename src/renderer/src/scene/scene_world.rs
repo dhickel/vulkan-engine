@@ -10,13 +10,14 @@
 //! This allows deletion without invalidating all outstanding references to the old slot.
 //! Stale handles fail validation and are ignored during traversal.
 
-use crate::api::scene::{PointLight, PointLightId, SceneAssetReference};
+use crate::api::scene::{DirectionalLight, DirectionalLightId, PointLight, PointLightId, SceneAssetReference};
 use crate::data::camera::{Aabb, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
 use crate::scene::render_submission::{
-    FrameDrawItem, FramePointLight, RenderSubmission, MAX_POINT_LIGHTS_GPU,
+    FrameDirectionalLight, FrameDrawItem, FramePointLight, RenderSubmission,
+    MAX_POINT_LIGHTS_GPU,
 };
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -98,6 +99,13 @@ pub(crate) enum SceneNodeRefError {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DirectionalLightRefError {
+    OutOfBounds,
+    Vacant,
+    GenerationMismatch,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PointLightRefError {
     OutOfBounds,
     Vacant,
@@ -110,6 +118,12 @@ struct PointLightEntry {
     light: Option<PointLight>,
 }
 
+#[derive(Clone, Debug)]
+struct DirectionalLightEntry {
+    generation: u32,
+    light: Option<DirectionalLight>,
+}
+
 pub struct SceneWorld {
     nodes: Vec<SceneNodeEntry>,
     free_slots: Vec<u32>,
@@ -118,8 +132,11 @@ pub struct SceneWorld {
     skybox_env_id: EnvironmentHandle,
     point_lights: Vec<PointLightEntry>,
     free_point_light_slots: Vec<u32>,
-    /// When true, nodes outside the camera frustum are skipped during
-    /// `build_submission`. Off by default for compatibility.
+    directional_lights: Vec<DirectionalLightEntry>,
+    free_directional_light_slots: Vec<u32>,
+    /// When true, mesh-backed nodes outside the camera frustum are omitted
+    /// from `build_submission`. Descendants are tested independently. Enabled
+    /// by default.
     pub enable_frustum_culling: bool,
 }
 
@@ -139,7 +156,9 @@ impl SceneWorld {
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(16),
             free_point_light_slots: Vec::new(),
-            enable_frustum_culling: false,
+            directional_lights: Vec::with_capacity(2),
+            free_directional_light_slots: Vec::new(),
+            enable_frustum_culling: true,
         }
     }
 
@@ -372,6 +391,15 @@ impl SceneWorld {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
 
+        // Collect directional light (only first active one is used)
+        submission.directional_light =
+            self.get_active_directional_light()
+                .map(|light| FrameDirectionalLight {
+                    direction: light.direction,
+                    color: light.color,
+                    intensity: light.intensity,
+                });
+
         // Collect first N active lights (not first N slots) so sparse slot churn
         // does not accidentally submit zero lights.
         for entry in self.point_lights.iter() {
@@ -400,7 +428,8 @@ impl SceneWorld {
         // Children multiply against this exact value, so order is critical.
         self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
 
-        // Frustum culling (off by default — set enable_frustum_culling to true to activate)
+        // Frustum culling is enabled by default and can be disabled through
+        // the Scene facade for diagnostics or compatibility.
         let frustum = if self.enable_frustum_culling {
             Some(Frustum::from_view_projection(
                 &(self.camera.projection * self.camera.view),
@@ -409,7 +438,7 @@ impl SceneWorld {
             None
         };
 
-        self.collect_draw_items_recursive_culled(root_id, &mut submission, &frustum);
+        self.collect_draw_items_recursive_culled(root_id, &mut submission, frustum.as_ref());
 
         submission
     }
@@ -534,27 +563,26 @@ impl SceneWorld {
         &self,
         node_id: SceneNodeId,
         submission: &mut RenderSubmission,
-        frustum: &Option<Frustum>,
+        frustum: Option<&Frustum>,
     ) {
         let Some(node) = self.get_node(node_id) else {
             return;
         };
 
-        // Cull: skip node if its AABB is outside the frustum
-        if let Some(ref frustum) = frustum {
-            let aabb = node_pick_bounds(node);
-            if !frustum.intersects_aabb(&aabb) {
-                return; // culled — skip node and children
+        let meshes_visible = node.meshes.is_empty()
+            || frustum.is_none_or(|frustum| frustum.intersects_aabb(&node_pick_bounds(node)));
+        if meshes_visible {
+            for mesh_id in node.meshes.iter().copied() {
+                submission.push_draw_item(FrameDrawItem {
+                    mesh_id,
+                    transform: node.world_transform,
+                });
             }
         }
 
-        for mesh_id in node.meshes.iter().copied() {
-            submission.push_draw_item(FrameDrawItem {
-                mesh_id,
-                transform: node.world_transform,
-            });
-        }
-
+        // Proxy bounds describe only this node, not its subtree. Always test
+        // descendants independently so an off-screen grouping/parent node
+        // cannot hide an in-frustum child.
         for child in node.children.iter().copied() {
             if self.is_valid_node_id(child) {
                 self.collect_draw_items_recursive_culled(child, submission, frustum);
@@ -635,13 +663,94 @@ impl SceneWorld {
             .filter_map(|entry| entry.light)
             .collect()
     }
+
+    // Directional light handle validation and lifecycle
+
+    pub(crate) fn validate_directional_light_ref(
+        &self,
+        id: DirectionalLightId,
+    ) -> Result<(), DirectionalLightRefError> {
+        let Some(entry) = self.directional_lights.get(id.slot as usize) else {
+            return Err(DirectionalLightRefError::OutOfBounds);
+        };
+        if entry.generation != id.generation {
+            return Err(DirectionalLightRefError::GenerationMismatch);
+        };
+        if entry.light.is_none() {
+            return Err(DirectionalLightRefError::Vacant);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn add_directional_light(
+        &mut self,
+        light: DirectionalLight,
+    ) -> DirectionalLightId {
+        if let Some(slot) = self.free_directional_light_slots.pop() {
+            let entry = &mut self.directional_lights[slot as usize];
+            debug_assert!(
+                entry.light.is_none(),
+                "free slot list contained a live directional light"
+            );
+            entry.light = Some(light);
+            return DirectionalLightId {
+                slot,
+                generation: entry.generation,
+            };
+        }
+
+        let slot = self.directional_lights.len() as u32;
+        self.directional_lights.push(DirectionalLightEntry {
+            generation: 0,
+            light: Some(light),
+        });
+        DirectionalLightId {
+            slot,
+            generation: 0,
+        }
+    }
+
+    pub(crate) fn update_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+        light: DirectionalLight,
+    ) -> bool {
+        let Some(entry) = self.directional_lights.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.light.is_none() {
+            return false;
+        }
+        entry.light = Some(light);
+        true
+    }
+
+    pub(crate) fn remove_directional_light(&mut self, id: DirectionalLightId) -> bool {
+        let Some(entry) = self.directional_lights.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.light.is_none() {
+            return false;
+        }
+        entry.light = None;
+        entry.generation = entry.generation.wrapping_add(1);
+        self.free_directional_light_slots.push(id.slot);
+        true
+    }
+
+    /// Returns the first active directional light (engine supports one).
+    pub(crate) fn get_active_directional_light(&self) -> Option<DirectionalLight> {
+        self.directional_lights
+            .iter()
+            .find_map(|entry| entry.light)
+    }
 }
 
 fn node_pick_bounds(node: &SceneNode) -> Aabb {
     // Current renderer draw submissions do not expose mesh CPU bounds here.
-    // Use a transform-aware editor proxy: mesh-backed nodes get one unit of
-    // volume per axis, while empty grouping nodes receive a smaller but still
-    // selectable proxy around their origin.
+    // Use a transform-aware picking/culling proxy: mesh-backed nodes get one
+    // unit of volume per axis, while empty grouping nodes receive a smaller
+    // but still selectable proxy around their origin.
     let half_extent = if node.meshes.is_empty() { 0.25 } else { 0.5 };
     transformed_aabb(
         Mat4::from_scale(Vec3::splat(half_extent * 2.0)),
@@ -773,6 +882,7 @@ mod tests {
             },
         );
         scene.set_root(root);
+        scene.enable_frustum_culling = false;
 
         let initial_submission = scene.build_submission();
         assert_eq!(initial_submission.draw_items.len(), 1);
@@ -794,6 +904,39 @@ mod tests {
             moved_submission.draw_items[0].transform,
             Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0))
         );
+    }
+
+    #[test]
+    fn culling_tests_descendants_independently_of_parent_bounds() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(None, SceneNode::default());
+        let offscreen_parent = scene.add_node(
+            Some(root),
+            SceneNode {
+                local_transform: Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0)),
+                meshes: vec![MeshHandle::new(1, 0)],
+                ..SceneNode::default()
+            },
+        );
+        scene.add_node(
+            Some(offscreen_parent),
+            SceneNode {
+                local_transform: Mat4::from_translation(Vec3::new(-100.0, 0.0, -5.0)),
+                meshes: vec![MeshHandle::new(2, 0)],
+                ..SceneNode::default()
+            },
+        );
+        scene.set_root(root);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
+
+        let submission = scene.build_submission();
+
+        assert_eq!(submission.draw_items.len(), 1);
+        assert_eq!(submission.draw_items[0].mesh_id, MeshHandle::new(2, 0));
     }
 
     #[test]
@@ -822,6 +965,7 @@ mod tests {
             },
         );
         scene.set_root(root);
+        scene.enable_frustum_culling = false;
 
         let initial_submission = scene.build_submission();
         assert_eq!(initial_submission.draw_items.len(), 1);
@@ -858,6 +1002,7 @@ mod tests {
             },
         );
         scene.set_root(root);
+        scene.enable_frustum_culling = false;
         scene.build_submission();
 
         let ray = Ray {

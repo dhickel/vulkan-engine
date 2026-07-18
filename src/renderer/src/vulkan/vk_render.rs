@@ -64,8 +64,9 @@ use crate::data::data_cache::{
 use crate::api::config::{CaptureTarget, DueFrameCapture, FrameCaptureStatus, VisualTuning};
 use crate::data::data_util::CountdownLatch;
 use crate::data::gpu_data::{
-    AsByteSlice, EnvironmentUBO, PushConstIrradiance, PushConstPrefilterEnv, PushConstSkyBox,
-    RenderObject, SceneDataUBO, Vertex, VkCubeMap, VkModelPushConsts,
+    AsByteSlice, CopiedMaterialDrawRecord, EnvironmentUBO, PushConstIrradiance,
+    PushConstPrefilterEnv, PushConstSkyBox, RenderObject, SceneDataUBO, Vertex, VkCubeMap,
+    VkModelPushConsts,
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::{data_cache, data_util, gpu_data};
@@ -75,10 +76,12 @@ use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
 use crate::vulkan::vk_debug::{
-    finalize_frame_capture, record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture,
+    discard_frame_capture, finalize_frame_capture, record_frame_capture, FrameCaptureTargetDesc,
+    PendingFrameCapture,
 };
 use crate::vulkan::vk_descriptor::*;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
+use crate::vulkan::vk_shadow::VkShadowResources;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_util};
 use ash::vk;
@@ -138,6 +141,7 @@ pub struct VkRenderCore {
     pub buffer_and_desc_limits: VkBufferAndDescriptorLimits,
     pub transfer: VkTransfer,
     pub scene_descriptors: HashMap<EnvironmentHandle, VkSceneDescriptors>,
+    pub shadow_resources: VkShadowResources,
     pub default_env_id: EnvironmentHandle,
     pub requested_env_id: Option<EnvironmentHandle>,
     pub active_env_id: EnvironmentHandle,
@@ -250,7 +254,7 @@ pub fn init_caches(
             .clone(),
         device_queues.graphics_queue.1,
     )
-    .unwrap();
+    .map_err(|e| format!("Failed to create texture cache: {}", e))?;
 
     let vertex_allocator = VkSubAllocator::new_storage_buffer(
         device,
@@ -262,7 +266,7 @@ pub fn init_caches(
             | vk::BufferUsageFlags::TRANSFER_DST
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
     )
-    .unwrap();
+    .map_err(|e| format!("Failed to create vertex sub-allocator: {}", e))?;
 
     let index_allocator = VkSubAllocator::new_storage_buffer(
         device,
@@ -272,7 +276,7 @@ pub fn init_caches(
         size_of::<u32>() as u64,
         vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
     )
-    .unwrap();
+    .map_err(|e| format!("Failed to create index sub-allocator: {}", e))?;
 
     let mesh_cache = MeshCache::new(
         device,
@@ -310,10 +314,14 @@ pub fn init_caches(
     Ok((Arc::new(data_cache), vulkan_cache, default_env))
 }
 
-pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> VkDescriptors {
+pub fn init_descriptors(
+    device: &ash::Device,
+    image_views: &[vk::ImageView],
+) -> Result<VkDescriptors, String> {
     let sizes = [PoolSizeRatio::new(vk::DescriptorType::STORAGE_IMAGE, 1.0)];
 
-    let alloc = VkDescriptorAllocator::new(device, 10, &sizes).unwrap();
+    let alloc =
+        VkDescriptorAllocator::new(device, 10, &sizes).map_err(|e| format!("Failed to create descriptor allocator: {}", e))?;
 
     let mut descriptors = VkDescriptors::new(alloc);
     for view in image_views {
@@ -324,12 +332,12 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
                 vk::ShaderStageFlags::COMPUTE,
                 vk::DescriptorSetLayoutCreateFlags::empty(),
             )
-            .unwrap()];
+            .map_err(|e| format!("Failed to build descriptor layout: {}", e))?];
 
         let render_desc = descriptors
             .allocator
             .allocate(device, &render_layout)
-            .unwrap();
+            .map_err(|e| format!("Failed to allocate descriptor set: {}", e))?;
 
         let image_info = [vk::DescriptorImageInfo::default()
             .image_layout(vk::ImageLayout::GENERAL)
@@ -346,7 +354,7 @@ pub fn init_descriptors(device: &ash::Device, image_views: &[vk::ImageView]) -> 
         descriptors.add_descriptor(render_desc, render_layout[0])
     }
 
-    descriptors
+    Ok(descriptors)
 }
 
 pub fn init_present_pools(
@@ -431,6 +439,11 @@ impl Drop for VkRenderCore {
                 )
             });
             self.scene_descriptors.clear();
+
+            self.shadow_resources.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
 
             self.data_cache.destroy(
                 &self.device,
@@ -532,11 +545,14 @@ impl VkRenderCore {
             let Some(cmd) = self.transfer.query_channel() else {
                 break;
             };
-            cmd.submit(
+            if let Err(e) = cmd.submit(
                 &self.device,
                 &self.vulkan_cache.queues,
                 &mut self.fence_await_queue,
-            );
+            ) {
+                log::error!("Transfer command submission failed: {}", e);
+                break;
+            }
             submitted += 1;
         }
         submitted
@@ -547,7 +563,9 @@ impl VkRenderCore {
     }
 
     pub fn pump_transfer_submissions(&mut self, max_submissions: usize) -> usize {
-        self.fence_await_queue.check_fences(&self.device);
+        if let Err(e) = self.fence_await_queue.check_fences(&self.device) {
+            log::error!("Fence check failed during transfer pump: {}", e);
+        }
         if max_submissions == 0 {
             return 0;
         }
@@ -803,16 +821,14 @@ impl VkRenderCore {
                 device,
                 device_queues.get_queue_index(VkQueueType::Graphics),
                 vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-            )
-            .unwrap();
+            )?;
 
             let command_buffers = vk_init::create_command_buffers(
                 device,
                 &pool,
                 vk::CommandBufferLevel::PRIMARY,
                 swapchain_image_count,
-            )
-            .unwrap();
+            )?;
 
             command_buffers
                 .into_iter()
@@ -893,7 +909,7 @@ impl VkRenderCore {
                 None,
             )
         };
-        let _descriptors = init_descriptors(device, &draw_views);
+        let _descriptors = init_descriptors(device, &draw_views)?;
 
         let depth_images = vk_init::allocate_depth_images(
             &allocator,
@@ -913,11 +929,11 @@ impl VkRenderCore {
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..swapchain_image_count)
             .map(|_| VkDynamicDescriptorAllocator::new(device, 1000, &pool_ratios))
             .collect::<Result<Vec<_>, _>>()
-            .unwrap();
+            .map_err(|e| format!("Failed to create descriptor allocators: {}", e))?;
 
         let imgui_pool = present_pools
             .first()
-            .unwrap()
+            .ok_or_else(|| "No present pools available for imgui".to_string())?
             .get(VkQueueType::Graphics)
             .pool;
 
@@ -930,7 +946,7 @@ impl VkRenderCore {
             present_pools,
             descriptor_allocators,
         )
-        .unwrap();
+        .map_err(|e| format!("Failed to create VkPresent: {:?}", e))?;
 
         Ok(PresentationInit {
             allocator,
@@ -951,7 +967,7 @@ impl VkRenderCore {
         swapchain_format: vk::Format,
         swapchain_image_count: u32,
         window: &winit::window::Window,
-    ) -> VkImgui {
+    ) -> Result<VkImgui, String> {
         let mut imgui_context = imgui::Context::create();
         imgui_context.set_ini_filename(None);
         let mut platform = WinitPlatform::init(&mut imgui_context);
@@ -976,12 +992,13 @@ impl VkRenderCore {
             &mut imgui_context,
             Some(imgui_opts),
         )
-        .unwrap();
+        .map_err(|e| format!("Failed to create imgui renderer: {}", e))?;
 
-        VkImgui::new(imgui_context, platform, imgui_render)
+        Ok(VkImgui::new(imgui_context, platform, imgui_render))
     }
 
     /// Build one host upload buffer role (mesh or texture) with dedicated sync objects.
+    /// The `pop().unwrap()` calls are statically safe because the pools are pre-allocated.
     fn create_host_buffer_role(
         allocator: &Arc<Mutex<Allocator>>,
         transfer: &VkTransfer,
@@ -992,23 +1009,24 @@ impl VkRenderCore {
         size_bytes: u64,
         fence: [vk::Fence; 2],
         semaphore: vk::Semaphore,
-    ) -> Arc<Mutex<VkHostBuffer>> {
+    ) -> Result<Arc<Mutex<VkHostBuffer>>, String> {
         let host_buffer = VkHostBuffer {
             buffer: vk_util::allocate_host_buffer(
                 &allocator.lock().expect("allocator lock poisoned"),
                 size_bytes,
             )
-            .unwrap(),
+            .map_err(|e| format!("Failed to allocate host buffer: {}", e))?,
             render_sender: transfer.get_sender(),
-            transfer_pool: host_buffer_pools.pop().unwrap(),
-            graphics_pool: host_graphic_pools.pop().unwrap(),
+            // SAFETY: host_buffer_pools are pre-allocated with exactly enough entries
+            transfer_pool: host_buffer_pools.pop().expect("host_buffer_pools is pre-allocated"),
+            graphics_pool: host_graphic_pools.pop().expect("host_graphic_pools is pre-allocated"),
             fence,
             semaphore: [semaphore],
             countdown_latch: CountdownLatch::new(),
             transfer_queue_index,
             graphics_queue_index,
         };
-        Arc::new(Mutex::new(host_buffer))
+        Ok(Arc::new(Mutex::new(host_buffer)))
     }
 
     /// Create transfer engine and host staging buffers used by async mesh/texture uploads.
@@ -1019,25 +1037,37 @@ impl VkRenderCore {
         local_transfer_pool: VkCommandPool,
         mut host_buffer_pools: Vec<VkCommandPool>,
         mut host_graphic_pools: Vec<VkCommandPool>,
-    ) -> (
-        VkTransfer,
-        Arc<Mutex<VkHostBuffer>>,
-        Arc<Mutex<VkHostBuffer>>,
-    ) {
+    ) -> Result<
+        (
+            VkTransfer,
+            Arc<Mutex<VkHostBuffer>>,
+            Arc<Mutex<VkHostBuffer>>,
+        ),
+        String,
+    > {
         let mut transfer = VkTransfer::new(local_transfer_pool);
 
         let fence_info = vk::FenceCreateInfo::default();
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         let fences: Vec<vk::Fence> = (0..4)
-            .map(|_| unsafe { device.create_fence(&fence_info, None).unwrap() })
-            .collect();
+            .map(|_| unsafe {
+                device
+                    .create_fence(&fence_info, None)
+                    .map_err(|e| format!("create_fence failed: {:?}", e))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut semaphores: Vec<vk::Semaphore> = (0..2)
-            .map(|_| unsafe { device.create_semaphore(&semaphore_info, None).unwrap() })
-            .collect();
+            .map(|_| unsafe {
+                device
+                    .create_semaphore(&semaphore_info, None)
+                    .map_err(|e| format!("create_semaphore failed: {:?}", e))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let transfer_queue_index = device_queues.get_queue_index(VkQueueType::Transfer);
         let graphics_queue_index = device_queues.get_queue_index(VkQueueType::Graphics);
 
+        // SAFETY: fences has exactly 4 elements; try_into on [..2] and [2..4] is infallible
         let mesh_host_buffer = Self::create_host_buffer_role(
             allocator,
             &transfer,
@@ -1046,9 +1076,9 @@ impl VkRenderCore {
             transfer_queue_index,
             graphics_queue_index,
             data_util::mb_to_bytes(64),
-            fences[..2].try_into().unwrap(),
-            semaphores.pop().unwrap(),
-        );
+            fences[..2].try_into().expect("slice[..2] -> [Fence; 2] is infallible"),
+            semaphores.pop().expect("semaphores has 2 elements"),
+        )?;
 
         let texture_host_buffer = Self::create_host_buffer_role(
             allocator,
@@ -1058,14 +1088,14 @@ impl VkRenderCore {
             transfer_queue_index,
             graphics_queue_index,
             data_util::mb_to_bytes(128),
-            fences[2..4].try_into().unwrap(),
-            semaphores.pop().unwrap(),
-        );
+            fences[2..4].try_into().expect("slice[2..4] -> [Fence; 2] is infallible"),
+            semaphores.pop().expect("semaphores had 2 elements; 1 remains"),
+        )?;
 
         transfer.add_host_buffer(Arc::clone(&mesh_host_buffer));
         transfer.add_host_buffer(Arc::clone(&texture_host_buffer));
 
-        (transfer, mesh_host_buffer, texture_host_buffer)
+        Ok((transfer, mesh_host_buffer, texture_host_buffer))
     }
 
     /// Load startup scene content and ensure first environment maps are resident.
@@ -1167,7 +1197,7 @@ impl VkRenderCore {
             swapchain_ref.surface_format.format,
             swapchain_image_count,
             window,
-        );
+        )?;
 
         let (transfer, mesh_host_buffer, texture_host_buffer) =
             Self::init_transfer_and_host_buffers(
@@ -1177,7 +1207,7 @@ impl VkRenderCore {
                 local_transfer_pool,
                 host_buffer_pools,
                 host_graphic_pools,
-            );
+            )?;
 
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
@@ -1223,6 +1253,12 @@ impl VkRenderCore {
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         );
 
+        let shadow_resources = VkShadowResources::new(
+            &device,
+            &allocator,
+            swapchain_image_count,
+        )?;
+
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::Windowed,
             window_state,
@@ -1242,6 +1278,7 @@ impl VkRenderCore {
             presentation,
             transfer,
             scene_descriptors: HashMap::new(),
+            shadow_resources,
             default_env_id,
             requested_env_id: None,
             active_env_id: default_env_id,
@@ -1338,7 +1375,7 @@ impl VkRenderCore {
                 local_transfer_pool,
                 host_buffer_pools,
                 host_graphic_pools,
-            );
+            )?;
 
         let supported_image_formats =
             vk_init::get_supported_image_formats(&instance, physical_device.p_device);
@@ -1384,6 +1421,12 @@ impl VkRenderCore {
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         );
 
+        let shadow_resources = VkShadowResources::new(
+            &device,
+            &allocator,
+            frame_slot_count,
+        )?;
+
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::HeadlessOffscreen,
             window_state,
@@ -1403,6 +1446,7 @@ impl VkRenderCore {
             presentation,
             transfer,
             scene_descriptors: HashMap::new(),
+            shadow_resources,
             default_env_id,
             requested_env_id: None,
             active_env_id: default_env_id,
@@ -1451,7 +1495,11 @@ impl VkRenderCore {
         }
         self.window_state.update_curr_size(new_size);
 
-        unsafe { self.device.device_wait_idle().unwrap() }
+        if let Err(e) = unsafe { self.device.device_wait_idle() } {
+            log::error!("device_wait_idle failed during swapchain rebuild: {:?}", e);
+            self.resize_requested = true;
+            return;
+        }
 
         let surface = self
             .surface
@@ -1462,7 +1510,7 @@ impl VkRenderCore {
             .as_ref()
             .expect("windowed renderer must own a swapchain");
 
-        let swapchain = vk_init::create_swapchain(
+        let swapchain = match vk_init::create_swapchain(
             &self.instance,
             &self.physical_device,
             &self.device,
@@ -1475,8 +1523,14 @@ impl VkRenderCore {
             Some(vk::PresentModeKHR::MAILBOX),
             Some(old_swapchain.swapchain),
             true,
-        )
-        .unwrap();
+        ) {
+            Ok(sc) => sc,
+            Err(e) => {
+                log::error!("create_swapchain failed during rebuild: {}", e);
+                self.resize_requested = true;
+                return;
+            }
+        };
 
         // Surface/compositor may choose an extent different from the requested one
         // (especially during fullscreen or DPI transitions). Keep render extents in
@@ -1487,7 +1541,14 @@ impl VkRenderCore {
 
         // Old present views are destroyed by replace_present_images (via destroy_present_views)
         // before the new views are installed.
-        let present_images = vk_init::create_basic_present_views(&self.device, &swapchain).unwrap();
+        let present_images = match vk_init::create_basic_present_views(&self.device, &swapchain) {
+            Ok(views) => views,
+            Err(e) => {
+                log::error!("create_basic_present_views failed during rebuild: {}", e);
+                self.resize_requested = true;
+                return;
+            }
+        };
 
         self.swapchain = Some(swapchain);
         self.presentation
@@ -1582,8 +1643,8 @@ impl VkRender {
         self.core.rebuild_swapchain(new_size);
     }
 
-    pub fn render(&mut self, frame_number: u32, submission: &RenderSubmission) {
-        self.render_with_hooks(frame_number, submission, Vec::new(), || {}, || {});
+    pub fn render(&mut self, frame_number: u32, submission: &RenderSubmission) -> Result<(), String> {
+        self.render_with_hooks(frame_number, submission, Vec::new(), || {}, || {})
     }
 
     pub fn render_with_hooks<PreRenderHook, PostRenderHook>(
@@ -1593,7 +1654,8 @@ impl VkRender {
         due_captures: Vec<DueFrameCapture>,
         pre_render_hook: PreRenderHook,
         post_render_hook: PostRenderHook,
-    ) where
+    ) -> Result<(), String>
+    where
         PreRenderHook: FnMut(),
         PostRenderHook: FnMut(),
     {
@@ -1604,7 +1666,7 @@ impl VkRender {
             due_captures,
             pre_render_hook,
             post_render_hook,
-        );
+        )
     }
 
     pub fn take_frame_capture_statuses(&mut self) -> Vec<FrameCaptureStatus> {
@@ -1638,6 +1700,96 @@ struct FrameAcquire {
     frame_fence_wait_ms: f32,
     frame_cleanup_ms: f32,
     swapchain_acquire_ms: f32,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum FrameTransactionState {
+    Acquired,
+    Recording,
+    Submitted,
+    Retired,
+    PresentFailed,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+struct FrameDrainPlan {
+    transition_present_image: bool,
+    present_after_submit: bool,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum ImguiPassPlan {
+    Skip,
+    RecordBalancedRegion,
+}
+
+fn imgui_pass_plan(imgui_available: bool) -> ImguiPassPlan {
+    if imgui_available {
+        ImguiPassPlan::RecordBalancedRegion
+    } else {
+        ImguiPassPlan::Skip
+    }
+}
+
+/// Tracks the synchronization obligations created by acquiring a frame slot.
+///
+/// Once recording starts, every terminal path must queue a fence-signaling submit. Windowed
+/// frames must also attempt presentation so the acquired image and binary semaphores are retired;
+/// a presentation error transitions to `PresentFailed` and requires swapchain rebuild.
+#[derive(Debug, Copy, Clone)]
+struct FrameTransaction {
+    state: FrameTransactionState,
+    windowed: bool,
+}
+
+impl FrameTransaction {
+    fn acquired(windowed: bool) -> Self {
+        Self {
+            state: FrameTransactionState::Acquired,
+            windowed,
+        }
+    }
+
+    fn begin_recording(&mut self) {
+        debug_assert_eq!(self.state, FrameTransactionState::Acquired);
+        self.state = FrameTransactionState::Recording;
+    }
+
+    fn recording_failure_plan(&self) -> FrameDrainPlan {
+        debug_assert_eq!(self.state, FrameTransactionState::Recording);
+        FrameDrainPlan {
+            transition_present_image: self.windowed,
+            present_after_submit: self.windowed,
+        }
+    }
+
+    fn mark_submitted(&mut self) {
+        debug_assert_eq!(self.state, FrameTransactionState::Recording);
+        self.state = FrameTransactionState::Submitted;
+    }
+
+    fn finish_after_submit(&mut self, present_succeeded: Option<bool>) {
+        debug_assert_eq!(self.state, FrameTransactionState::Submitted);
+        self.state = match (self.windowed, present_succeeded) {
+            (false, None) => FrameTransactionState::Retired,
+            (true, Some(true)) => FrameTransactionState::Retired,
+            (true, Some(false)) => FrameTransactionState::PresentFailed,
+            _ => panic!("frame transaction completed with an invalid presentation outcome"),
+        };
+    }
+
+    fn fence_signal_queued(&self) -> bool {
+        matches!(
+            self.state,
+            FrameTransactionState::Submitted
+                | FrameTransactionState::Retired
+                | FrameTransactionState::PresentFailed
+        )
+    }
+
+    fn requires_swapchain_rebuild(&self) -> bool {
+        self.state == FrameTransactionState::PresentFailed
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1826,6 +1978,27 @@ impl VkRenderCore {
         }
     }
 
+    fn discard_pending_frame_captures(&mut self, message: &str) {
+        for capture in std::mem::take(&mut self.pending_frame_captures) {
+            let frame_number = capture.frame_number;
+            let target = capture.target;
+            let output_path = capture.output_path.clone();
+            let source = capture.source;
+            {
+                let allocator = self.allocator.lock().expect("allocator lock poisoned");
+                discard_frame_capture(&self.device, &allocator, capture);
+            }
+            self.frame_capture_statuses
+                .push(FrameCaptureStatus::Failed {
+                    frame_number,
+                    target,
+                    output_path,
+                    source,
+                    message: message.to_string(),
+                });
+        }
+    }
+
     fn default_sidecar_path(capture: &DueFrameCapture) -> std::path::PathBuf {
         capture.request.sidecar_path.clone().unwrap_or_else(|| {
             let mut sidecar = capture.request.output_path.clone();
@@ -1906,13 +2079,13 @@ impl VkRenderCore {
         }
     }
 
-    fn finalize_pending_frame_captures(&mut self, frame_sync: VkFrameSync) {
+    fn finalize_pending_frame_captures(&mut self, frame_sync: VkFrameSync) -> Result<(), String> {
         if self.pending_frame_captures.is_empty() {
-            return;
+            return Ok(());
         }
 
         unsafe {
-            self.wait_for_frame_fence(frame_sync);
+            self.wait_for_frame_fence(frame_sync)?;
         }
 
         let pending = std::mem::take(&mut self.pending_frame_captures);
@@ -1963,6 +2136,8 @@ impl VkRenderCore {
                 }
             }
         }
+
+        Ok(())
     }
 
     fn init_gpu_timing_state(
@@ -2380,25 +2555,36 @@ impl VkRenderCore {
     }
 
     /// Wait for GPU completion of this frame slot before reusing per-frame resources.
-    unsafe fn wait_for_frame_fence(&self, frame_sync: VkFrameSync) {
+    /// Returns an error if the device is lost or the fence wait fails.
+    unsafe fn wait_for_frame_fence(&self, frame_sync: VkFrameSync) -> Result<(), String> {
         let fence = [frame_sync.render_fence];
-        self.device.wait_for_fences(&fence, true, u64::MAX).unwrap();
+        let result = self.device.wait_for_fences(&fence, true, u64::MAX);
+        if let Err(vk::Result::ERROR_DEVICE_LOST) = result {
+            return Err("Vulkan device lost during fence wait".to_string());
+        }
+        result.map_err(|e| format!("wait_for_fences failed: {:?}", e))
     }
 
     /// Reset frame fence immediately before submitting work that will signal it again.
-    unsafe fn reset_frame_fence(&self, frame_sync: VkFrameSync) {
+    /// Returns an error if the device is lost or the fence reset fails.
+    unsafe fn reset_frame_fence(&self, frame_sync: VkFrameSync) -> Result<(), String> {
         let fence = [frame_sync.render_fence];
-        self.device.reset_fences(&fence).unwrap();
+        self.device
+            .reset_fences(&fence)
+            .map_err(|e| format!("reset_fences failed: {:?}", e))
     }
 
     /// Release per-frame deferred resources and reset dynamic descriptor pools.
-    unsafe fn cleanup_curr_frame_resources(&mut self) {
+    unsafe fn cleanup_curr_frame_resources(&mut self) -> Result<(), String> {
         let curr_frame = self.presentation.get_curr_frame_mut();
         curr_frame.process_deletions(
             &self.device,
             &self.allocator.lock().expect("allocator lock poisoned"),
         );
-        curr_frame.descriptors.clear_pools(&self.device).unwrap();
+        curr_frame
+            .descriptors
+            .clear_pools(&self.device)
+            .map_err(|e| format!("descriptor clear_pools failed: {:?}", e))
     }
 
     /// Acquire the next swapchain image index for this frame slot.
@@ -2436,7 +2622,8 @@ impl VkRenderCore {
     }
 
     /// Reserve frame resources, synchronize CPU/GPU ownership, and bind acquired present target.
-    fn acquire_frame_slot(&mut self) -> Option<FrameAcquire> {
+    /// Returns Ok(Some(FrameAcquire)) on success, Ok(None) on retry/skip, Err on terminal failure.
+    fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
         let frame_data = self.presentation.get_next_frame();
         let frame_slot_index = frame_data.index as usize;
         let frame_sync = frame_data.sync;
@@ -2445,12 +2632,12 @@ impl VkRenderCore {
         let queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         let fence_wait_start = Instant::now();
-        unsafe { self.wait_for_frame_fence(frame_sync) };
+        unsafe { self.wait_for_frame_fence(frame_sync)? };
         let frame_fence_wait_ms = elapsed_ms(fence_wait_start);
         warn_if_acquire_stage_spike("frame_fence_wait", frame_fence_wait_ms);
 
         let cleanup_start = Instant::now();
-        unsafe { self.cleanup_curr_frame_resources() };
+        unsafe { self.cleanup_curr_frame_resources()? };
         let frame_cleanup_ms = elapsed_ms(cleanup_start);
         warn_if_acquire_stage_spike("frame_cleanup", frame_cleanup_ms);
 
@@ -2485,12 +2672,12 @@ impl VkRenderCore {
                         );
                     }
                     self.presentation.rewind_frame();
-                    return None;
+                    return Ok(None);
                 }
                 SwapchainAcquireResult::Recreate => {
                     self.presentation.rewind_frame();
                     self.resize_requested = true;
-                    return None;
+                    return Ok(None);
                 }
             };
 
@@ -2501,15 +2688,15 @@ impl VkRenderCore {
                 );
                 self.presentation.rewind_frame();
                 self.resize_requested = true;
-                return None;
+                return Ok(None);
             }
             (image_index, swapchain_acquire_ms)
         };
 
         // Reset only when we have a frame to submit; on retry/skip paths leave signaled.
-        unsafe { self.reset_frame_fence(frame_sync) };
+        unsafe { self.reset_frame_fence(frame_sync)? };
 
-        Some(FrameAcquire {
+        Ok(Some(FrameAcquire {
             queue,
             cmd_buffer,
             frame_sync,
@@ -2518,22 +2705,22 @@ impl VkRenderCore {
             frame_fence_wait_ms,
             frame_cleanup_ms,
             swapchain_acquire_ms,
-        })
+        }))
     }
 
     /// Begin command recording for one-time frame submission.
-    fn reset_and_begin_frame_cmd(&self, cmd_buffer: vk::CommandBuffer) {
+    fn reset_and_begin_frame_cmd(&self, cmd_buffer: vk::CommandBuffer) -> Result<(), String> {
         unsafe {
             self.device
                 .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
-                .unwrap();
+                .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
             self.device
                 .begin_command_buffer(cmd_buffer, &begin_info)
-                .unwrap();
+                .map_err(|e| format!("begin_command_buffer failed: {:?}", e))
         }
     }
 
@@ -2556,14 +2743,35 @@ impl VkRenderCore {
     }
 
     /// Finish command buffer recording for submit.
-    fn end_frame_cmd(&self, cmd_buffer: vk::CommandBuffer) {
+    fn end_frame_cmd(&self, cmd_buffer: vk::CommandBuffer) -> Result<(), String> {
         unsafe {
-            self.device.end_command_buffer(cmd_buffer).unwrap();
+            self.device
+                .end_command_buffer(cmd_buffer)
+                .map_err(|e| format!("end_command_buffer failed: {:?}", e))
         }
     }
 
+    /// Replace failed partial recording with the smallest valid submission that can retire the
+    /// acquired frame. Resetting first also closes any pass-local recording scope left behind by
+    /// the failed graph. Windowed images are discarded from `UNDEFINED` into present layout.
+    fn record_failed_frame_drain(&self, frame: FrameAcquire, plan: FrameDrainPlan) -> Result<(), String> {
+        self.reset_and_begin_frame_cmd(frame.cmd_buffer)?;
+        if plan.transition_present_image {
+            let present_image = self.presentation.get_curr_frame().present_image;
+            vk_util::transition_image(
+                &self.device,
+                frame.cmd_buffer,
+                present_image,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+            );
+        }
+        self.end_frame_cmd(frame.cmd_buffer)
+    }
+
     /// Submit recorded work to graphics queue with acquire/render synchronization semaphores.
-    fn submit_frame(&self, frame: FrameAcquire) {
+    /// Returns Err on queue submission failure, including VK_ERROR_DEVICE_LOST.
+    fn submit_frame(&self, frame: FrameAcquire) -> Result<(), String> {
         unsafe {
             let cmd_info = [vk_util::command_buffer_submit_info(frame.cmd_buffer)];
             let wait_info = [vk_util::semaphore_submit_info(
@@ -2586,20 +2794,26 @@ impl VkRenderCore {
             };
             let submit = [vk_util::submit_info_2(&cmd_info, signal_info, wait_info)];
 
-            self.device
-                .queue_submit2(frame.queue, &submit, frame.frame_sync.render_fence)
-                .unwrap();
+            let result = self
+                .device
+                .queue_submit2(frame.queue, &submit, frame.frame_sync.render_fence);
+            if let Err(vk::Result::ERROR_DEVICE_LOST) = result {
+                return Err("Vulkan device lost during frame submission".to_string());
+            }
+            result.map_err(|e| format!("queue_submit2 failed: {:?}", e))
         }
     }
 
     /// Present the rendered swapchain image; request resize if presentation fails.
-    fn present_frame(&mut self, frame: FrameAcquire) {
+    /// Returns Ok(true) on successful present, Ok(false) on suboptimal/out-of-date.
+    /// Returns Err on device lost or other terminal errors.
+    fn present_frame(&mut self, frame: FrameAcquire) -> Result<bool, String> {
         if self.surface_mode.is_headless() {
-            return;
+            return Ok(true);
         }
         let Some(swapchain) = self.swapchain.as_ref() else {
             self.resize_requested = true;
-            return;
+            return Ok(false);
         };
         unsafe {
             let swapchains = [swapchain.swapchain];
@@ -2611,12 +2825,18 @@ impl VkRenderCore {
                 .wait_semaphores(&render_semaphore)
                 .image_indices(&image_indices);
 
-            let present_result = swapchain
+            match swapchain
                 .swapchain_loader
-                .queue_present(frame.queue, &present_info);
-
-            if present_result.is_err() {
-                self.resize_requested = true;
+                .queue_present(frame.queue, &present_info)
+            {
+                Ok(_) => Ok(true),
+                Err(vk::Result::ERROR_DEVICE_LOST) => {
+                    Err("Vulkan device lost during present".to_string())
+                }
+                Err(_) => {
+                    self.resize_requested = true;
+                    Ok(false)
+                }
             }
         }
     }
@@ -2629,7 +2849,8 @@ impl VkRenderCore {
         due_captures: Vec<DueFrameCapture>,
         mut pre_render_hook: PreRenderHook,
         mut post_render_hook: PostRenderHook,
-    ) where
+    ) -> Result<(), String>
+    where
         PreRenderHook: FnMut(),
         PostRenderHook: FnMut(),
     {
@@ -2645,7 +2866,7 @@ impl VkRenderCore {
 
         // 2. Acquire frame resources, synchronize ownership, and bind present target.
         let acquire_start = Instant::now();
-        let Some(frame) = self.acquire_frame_slot() else {
+        let Some(frame) = self.acquire_frame_slot()? else {
             self.frame_timing_snapshot = DebugTimingSnapshot {
                 gpu_supported: self.gpu_timing.supported,
                 frame_cpu_ms: elapsed_ms(frame_start),
@@ -2664,16 +2885,19 @@ impl VkRenderCore {
                 ],
                 pass_timings: Vec::new(),
             };
-            return;
+            return Ok(());
         };
         let acquire_ms = elapsed_ms(acquire_start);
         let frame_fence_wait_ms = frame.frame_fence_wait_ms;
         let frame_cleanup_ms = frame.frame_cleanup_ms;
         let swapchain_acquire_ms = frame.swapchain_acquire_ms;
+        let mut frame_transaction =
+            FrameTransaction::acquired(!self.surface_mode.is_headless());
 
         // 3. Record this frame.
         let record_start = Instant::now();
-        self.reset_and_begin_frame_cmd(frame.cmd_buffer);
+        self.reset_and_begin_frame_cmd(frame.cmd_buffer)?;
+        frame_transaction.begin_recording();
         self.begin_gpu_timing_for_frame_slot(frame.frame_slot_index, frame.cmd_buffer);
 
         let pre_hook_start = Instant::now();
@@ -2687,12 +2911,44 @@ impl VkRenderCore {
             Ok(report) => report,
             Err(err) => {
                 error!("RenderGraph execution failed: {err}");
-                self.fail_due_frame_captures(
-                    frame_number,
-                    format!("frame capture skipped: rendergraph failed: {err}"),
-                );
+                let capture_failure = format!("frame capture skipped: rendergraph failed: {err}");
+                self.fail_due_frame_captures(frame_number, &capture_failure);
                 self.resize_requested = true;
                 self.gpu_timing.active_slot = None;
+
+                // Discard partial recording, transition an acquired swapchain image to present
+                // layout, then submit+present. The submit consumes the acquire semaphore and
+                // queues a signal for the reset fence; presentation retires the image and render
+                // semaphore. Headless frames need only the fence-signaling drain submit.
+                let drain_plan = frame_transaction.recording_failure_plan();
+                if let Err(drain_err) = self.record_failed_frame_drain(frame, drain_plan) {
+                    error!("Failed drain frame recording after rendergraph failure: {}", drain_err);
+                    return Err(format!("rendergraph failed: {}; drain recording also failed: {}", err, drain_err));
+                }
+                self.discard_pending_frame_captures(&capture_failure);
+                if let Err(submit_err) = self.submit_frame(frame) {
+                    error!("Failed drain frame submit after rendergraph failure: {}", submit_err);
+                    return Err(format!("rendergraph failed: {}; drain submit also failed: {}", err, submit_err));
+                }
+                frame_transaction.mark_submitted();
+                let present_succeeded = drain_plan
+                    .present_after_submit
+                    .then(|| self.present_frame(frame));
+                // Flatten Result<Option<Result<bool, _>>, _> -> Option<bool>
+                let present_succeeded = match present_succeeded {
+                    Some(Ok(s)) => Some(s),
+                    Some(Err(e)) => {
+                        error!("Present after drain submit failed: {}", e);
+                        return Err(format!("rendergraph failed: {}; present also failed: {}", err, e));
+                    }
+                    None => None,
+                };
+                frame_transaction.finish_after_submit(present_succeeded);
+                debug_assert!(frame_transaction.fence_signal_queued());
+                debug_assert_eq!(
+                    frame_transaction.requires_swapchain_rebuild(),
+                    drain_plan.present_after_submit && !present_succeeded.unwrap_or(true)
+                );
                 self.frame_timing_snapshot = DebugTimingSnapshot {
                     gpu_supported: self.gpu_timing.supported,
                     frame_cpu_ms: elapsed_ms(frame_start),
@@ -2736,7 +2992,7 @@ impl VkRenderCore {
                     ],
                     pass_timings: Vec::new(),
                 };
-                return;
+                return Ok(());
             }
         };
         if !self.due_frame_captures.is_empty() {
@@ -2751,18 +3007,27 @@ impl VkRenderCore {
         let post_hook_ms = elapsed_ms(post_hook_start);
 
         self.finish_gpu_timing_for_frame_slot(frame.cmd_buffer);
-        self.end_frame_cmd(frame.cmd_buffer);
+        self.end_frame_cmd(frame.cmd_buffer)?;
         let record_ms = elapsed_ms(record_start);
 
         // 4. Submit then present in acquire -> render -> present semaphore order.
         let submit_start = Instant::now();
-        self.submit_frame(frame);
+        self.submit_frame(frame)?;
+        frame_transaction.mark_submitted();
         let submit_ms = elapsed_ms(submit_start);
 
         let present_start = Instant::now();
-        self.present_frame(frame);
+        let present_succeeded = self.present_frame(frame)?;
+        frame_transaction.finish_after_submit(
+            (!self.surface_mode.is_headless()).then_some(present_succeeded),
+        );
+        debug_assert!(frame_transaction.fence_signal_queued());
+        debug_assert_eq!(
+            frame_transaction.requires_swapchain_rebuild(),
+            !self.surface_mode.is_headless() && !present_succeeded
+        );
         let present_ms = elapsed_ms(present_start);
-        self.finalize_pending_frame_captures(frame.frame_sync);
+        self.finalize_pending_frame_captures(frame.frame_sync)?;
 
         self.frame_timing_snapshot = self.build_frame_timing_snapshot(
             frame_start,
@@ -2779,6 +3044,7 @@ impl VkRenderCore {
             present_ms,
             graph_report,
         );
+        Ok(())
     }
 
     /// Upload unloaded skybox cubemap data for the requested environment handle.
@@ -2986,6 +3252,16 @@ impl VkRenderCore {
                 .as_ref()
                 .ok_or_else(|| format!("Env maps missing for {:?}", env_id))?;
 
+            let shadow_refs: Vec<ShadowMapRef> = self
+                .shadow_resources
+                .frames
+                .iter()
+                .map(|f| ShadowMapRef {
+                    image_view: f.shadow_map_view,
+                    sampler: f.shadow_sampler,
+                })
+                .collect();
+
             VkSceneDescriptors::new(
                 &self.device,
                 &self.allocator.lock().expect("allocator lock poisoned"),
@@ -2994,8 +3270,9 @@ impl VkRenderCore {
                 self.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
                 env_maps,
                 &self.brdf_lut,
+                &shadow_refs,
                 self.frame_slot_count,
-            )
+            )?
         };
 
         self.scene_descriptors.insert(env_id, scene_descriptors);
@@ -3238,6 +3515,10 @@ impl VkRenderCore {
         cmd_buffer: vk::CommandBuffer,
         image_view: vk::ImageView,
     ) -> Result<(), String> {
+        let Some(imgui) = self.imgui.as_mut() else {
+            return Ok(());
+        };
+
         let attachment_info = [vk_util::attachment_info(
             image_view,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -3250,45 +3531,6 @@ impl VkRenderCore {
         unsafe {
             self.device.cmd_begin_rendering(cmd_buffer, &render_info);
         }
-
-        //  let mut selected = self.compute_data.get_current_effect();
-
-        // let frame = self.imgui.context.new_frame();
-        // frame.text(&selected.name);
-
-        // let data_1_arr = &mut selected.data.data_1.to_array();
-        // let mut data_1 = frame
-        //     .input_float4("data1", data_1_arr);
-        //
-        // if data_1.build() {
-        //     selected.data.data_1 = Vec4::from_array(*data_1_arr);
-        // }
-        //
-        //
-        //
-        // let data_2 = frame
-        //     .input_float4("data2", &mut selected.data.data_2.to_array())
-        //     .build();
-        // let data_3 = frame
-        //     .input_float4("data3", &mut selected.data.data_3.to_array())
-        //     .build();
-        // let data_4 = frame
-        //     .input_float4("data4", &mut selected.data.data_4.to_array())
-        //     .build();
-
-        //
-        // frame.slider(
-        //     "Effect Index".to_string(),
-        //     0,
-        //     (self.scene_data.effects.len() - 1) as u32,
-        //     &mut self.scene_data.current,
-        // );
-        //
-        // self.imgui.platform.prepare_render(frame, &self.window);
-
-        let Some(imgui) = self.imgui.as_mut() else {
-            return Ok(());
-        };
 
         let ui = imgui.context.new_frame();
         self.debug_ui.render(ui);
@@ -3381,6 +3623,10 @@ impl VkRenderCore {
     }
 
     pub fn draw_imgui_to_present(&mut self, frame: &mut VkFrame) -> Result<(), String> {
+        if imgui_pass_plan(self.imgui.is_some()) == ImguiPassPlan::Skip {
+            return Ok(());
+        }
+
         let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
         let cmd_buffer = cmd_pool.buffers[0];
         if let Err(err) = self.draw_imgui(cmd_buffer, frame.present_image_view) {
@@ -3429,20 +3675,12 @@ impl VkRenderCore {
                 Err(_) => continue,
             };
 
-            let material_ptr = match tex_cache.get_loaded_material_ptr(mesh.material_id) {
-                Ok(material_ptr) => material_ptr,
+            let copied_material = match tex_cache.get_loaded_material(mesh.material_id) {
+                Ok(material) => CopiedMaterialDrawRecord::from(material),
                 Err(_) => continue,
             };
 
-            // SAFETY: material_ptr comes from tex_cache.get_loaded_material_ptr(),
-            // which returns a pointer to cache-owned memory. The tex_cache lock
-            // is held for the entire function scope, and materials are never
-            // deallocated while the lock is held. The pointer is validated
-            // non-null by get_loaded_material_ptr returning Ok.
-            debug_assert!(!material_ptr.is_null());
-            let material = unsafe { *material_ptr };
-
-            if material.requires_uv1 && !mesh.has_uv1 {
+            if copied_material.requires_uv1 && !mesh.has_uv1 {
                 let mut warnings = self
                     .uv_fallback_warnings
                     .lock()
@@ -3457,7 +3695,7 @@ impl VkRenderCore {
                 }
             }
 
-            let pipeline_idx = material.pipeline as usize;
+            let pipeline_idx = copied_material.pipeline as usize;
             if pipeline_idx >= VkPipelineType::COUNT {
                 continue;
             }
@@ -3467,7 +3705,7 @@ impl VkRenderCore {
                 first_index: mesh.get_first_index(),
                 index_buffer: mesh.index_buffer.buffer,
                 joint_desc: mesh.joint_desc,
-                material: material_ptr,
+                material: copied_material,
                 transform: draw_item.transform,
                 vertex_buffer_addr: mesh.vertex_buffer.alloc_address,
                 has_uv1: mesh.has_uv1,
@@ -3498,13 +3736,7 @@ impl VkRenderCore {
         let unlit_blend = draw_buckets[unlit_blend_idx].clone();
 
         for obj in pbr_opaque_bucket.iter().copied() {
-            // SAFETY: obj.material is a raw pointer to a Material in the texture
-            // cache. The tex_cache lock is held for the entire render submission,
-            // and materials are not deallocated during frame rendering. The pointer
-            // was validated non-null during bucket construction in build_buckets.
-            debug_assert!(!obj.material.is_null());
-            let alpha_mode = unsafe { (*obj.material).alpha_mode };
-            if matches!(alpha_mode, gpu_data::AlphaMode::Mask) {
+            if matches!(obj.material.alpha_mode, gpu_data::AlphaMode::Mask) {
                 pbr_mask.push(obj);
             } else {
                 pbr_opaque.push(obj);
@@ -3512,11 +3744,7 @@ impl VkRenderCore {
         }
 
         for obj in unlit_opaque_bucket.iter().copied() {
-            // SAFETY: Same invariant as pbr_opaque loop above — material pointer
-            // is cache-owned, cache lock is held, pointer was validated non-null.
-            debug_assert!(!obj.material.is_null());
-            let alpha_mode = unsafe { (*obj.material).alpha_mode };
-            if matches!(alpha_mode, gpu_data::AlphaMode::Mask) {
+            if matches!(obj.material.alpha_mode, gpu_data::AlphaMode::Mask) {
                 unlit_mask.push(obj);
             } else {
                 unlit_opaque.push(obj);
@@ -3560,6 +3788,17 @@ impl VkRenderCore {
         env.exposure = visual_tuning.exposure;
         env.gamma = visual_tuning.gamma;
         env.ibl_ambient_scale = visual_tuning.ibl_ambient_scale;
+
+        // Populate directional light from submission
+        if let Some(dir_light) = &submission.directional_light {
+            let dir = dir_light.direction.normalize();
+            env.light_dir = dir.extend(0.0);
+            env.light_color = dir_light
+                .color
+                .max(glam::Vec3::ZERO)
+                .extend(dir_light.intensity.max(0.0));
+        }
+
         let light_count = submission.point_lights.len().min(MAX_POINT_LIGHTS_GPU);
         env.point_light_count = light_count as u32;
         env.point_lights = [GpuPointLight {
@@ -3623,7 +3862,7 @@ impl VkRenderCore {
         let mut curr_joint_desc = default_joint_desc;
 
         let mut draw_fn = |obj: &RenderObject, pipeline_type: VkPipelineType| {
-            let material = &(*obj.material);
+            let material = &obj.material;
 
             if curr_pipeline_type != Some(pipeline_type) {
                 let next_pipeline = *self.vulkan_cache.pipelines.get_pipeline(pipeline_type);
@@ -3895,22 +4134,28 @@ impl VkRenderCore {
         &self,
         render_buffer: vk::CommandBuffer,
         render_queue: vk::Queue,
-    ) {
+    ) -> Result<(), String> {
         let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
         let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
         let fence = self
             .device
             .create_fence(&vk::FenceCreateInfo::default(), None)
-            .unwrap();
+            .map_err(|e| format!("create_fence failed: {:?}", e))?;
         let fences = [fence];
 
-        self.device
-            .queue_submit2(render_queue, &submit_info, fence)
-            .unwrap();
-        self.device
-            .wait_for_fences(&fences, true, u64::MAX)
-            .unwrap();
+        let submit_result = self.device.queue_submit2(render_queue, &submit_info, fence);
+        if let Err(vk::Result::ERROR_DEVICE_LOST) = submit_result {
+            self.device.destroy_fence(fence, None);
+            return Err("Vulkan device lost during env generation submission".to_string());
+        }
+        submit_result.map_err(|e| format!("queue_submit2 failed: {:?}", e))?;
+
+        let wait_result = self.device.wait_for_fences(&fences, true, u64::MAX);
         self.device.destroy_fence(fence, None);
+        if let Err(vk::Result::ERROR_DEVICE_LOST) = wait_result {
+            return Err("Vulkan device lost during env generation wait".to_string());
+        }
+        wait_result.map_err(|e| format!("wait_for_fences failed: {:?}", e))
     }
 
     /// Generate one target cubemap (irradiance or prefiltered) from the source skybox.
@@ -3983,13 +4228,13 @@ impl VkRenderCore {
             unsafe {
                 self.device
                     .reset_command_buffer(render_buffer, vk::CommandBufferResetFlags::empty())
-                    .unwrap();
+                    .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
 
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 self.device
                     .begin_command_buffer(render_buffer, &begin_info)
-                    .unwrap();
+                    .map_err(|e| format!("begin_command_buffer failed: {:?}", e))?;
 
                 vk_util::transition_image_layered(
                     &self.device,
@@ -4134,8 +4379,10 @@ impl VkRenderCore {
                     mips_count,
                 );
 
-                self.device.end_command_buffer(render_buffer).unwrap();
-                self.submit_and_wait_graphics(render_buffer, render_queue);
+                self.device
+                    .end_command_buffer(render_buffer)
+                    .map_err(|e| format!("end_command_buffer failed: {:?}", e))?;
+                self.submit_and_wait_graphics(render_buffer, render_queue)?;
             }
 
             let final_cubemap = VkCubeMap {
@@ -4248,12 +4495,12 @@ impl VkRenderCore {
             unsafe {
                 self.device
                     .reset_command_buffer(render_buffer, vk::CommandBufferResetFlags::empty())
-                    .unwrap();
+                    .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
                 self.device
                     .begin_command_buffer(render_buffer, &begin_info)
-                    .unwrap();
+                    .map_err(|e| format!("begin_command_buffer failed: {:?}", e))?;
 
                 vk_util::transition_image_layered(
                     &self.device,
@@ -4385,8 +4632,10 @@ impl VkRenderCore {
                     1,
                 );
 
-                self.device.end_command_buffer(render_buffer).unwrap();
-                self.submit_and_wait_graphics(render_buffer, render_queue);
+                self.device
+                    .end_command_buffer(render_buffer)
+                    .map_err(|e| format!("end_command_buffer failed: {:?}", e))?;
+                self.submit_and_wait_graphics(render_buffer, render_queue)?;
             }
 
             Ok(VkCubeMap {
@@ -4486,5 +4735,52 @@ impl VkRenderCore {
             irradiance: irradiance_cubemap.ok_or("No Irradiance Map")?,
             pre_filter: prefiltered_cubemap.ok_or("No Cube Map")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod frame_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn headless_imgui_failure_injection_skips_dynamic_rendering() {
+        assert_eq!(imgui_pass_plan(false), ImguiPassPlan::Skip);
+        assert_eq!(
+            imgui_pass_plan(true),
+            ImguiPassPlan::RecordBalancedRegion
+        );
+    }
+
+    #[test]
+    fn post_acquire_recording_failure_requires_submit_and_present_drain() {
+        let mut transaction = FrameTransaction::acquired(true);
+        transaction.begin_recording();
+
+        let plan = transaction.recording_failure_plan();
+        assert_eq!(
+            plan,
+            FrameDrainPlan {
+                transition_present_image: true,
+                present_after_submit: true,
+            }
+        );
+
+        transaction.mark_submitted();
+        transaction.finish_after_submit(Some(true));
+        assert!(transaction.fence_signal_queued());
+        assert!(!transaction.requires_swapchain_rebuild());
+        assert_eq!(transaction.state, FrameTransactionState::Retired);
+    }
+
+    #[test]
+    fn post_submit_present_failure_keeps_fence_safe_and_requests_rebuild() {
+        let mut transaction = FrameTransaction::acquired(true);
+        transaction.begin_recording();
+        transaction.mark_submitted();
+        transaction.finish_after_submit(Some(false));
+
+        assert!(transaction.fence_signal_queued());
+        assert!(transaction.requires_swapchain_rebuild());
+        assert_eq!(transaction.state, FrameTransactionState::PresentFailed);
     }
 }

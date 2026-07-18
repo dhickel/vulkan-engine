@@ -5,7 +5,7 @@ use glam::Mat4;
 use renderer::prelude::{
     EnvironmentSource, MeshHandle, PbrMaterialDesc, TextureHandle, TextureLoadOptions,
 };
-use renderer::{AssetManager, PointLight, PointLightId, Scene, SceneNodeId};
+use renderer::{AssetManager, DirectionalLight, PointLight, PointLightId, Scene, SceneNodeId};
 use thiserror::Error;
 
 use crate::collision::WALL_HEIGHT;
@@ -42,6 +42,7 @@ pub struct LevelScene {
     pub chunk_meshes: Vec<MeshHandle>,
     pub chunk_nodes: Vec<SceneNodeId>,
     pub light_ids: Vec<PointLightId>,
+    pub directional_light_id: Option<renderer::DirectionalLightId>,
     pub prop_roots: Vec<SceneNodeId>,
 }
 
@@ -249,12 +250,22 @@ impl LevelScene {
             );
         }
 
+        // Create a directional light (sunlight-like) for shadow casting.
+        let directional_light_id = scene
+            .create_directional_light(DirectionalLight {
+                direction: glam::Vec3::new(0.3, -0.8, 0.4),
+                color: glam::Vec3::new(1.0, 0.95, 0.85),
+                intensity: 2.5,
+            })
+            .ok();
+
         Ok(Self {
             wall_material,
             floor_material,
             chunk_meshes,
             chunk_nodes,
             light_ids,
+            directional_light_id,
             prop_roots,
         })
     }

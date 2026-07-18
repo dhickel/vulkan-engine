@@ -23,6 +23,7 @@
 - Finalized work gets a changelog entry in `.internal-dev/changelogs/`.
 - Move finalized bug/plan artifacts to sibling `.archive/` directories.
 - When repository or task policy requires a commit, include both implementation changes and related `.internal-dev` updates.
+- **Stopgap commits**: Before starting any new phase, plan, or major task, commit all unfinished work in the working tree as a stopgap commit with a message like `wip: stopgap before <next-task>`. If uncommitted work from a prior session or agent is detected, commit it first before dispatching new work. This prevents working-tree edits from being clobbered when multiple agents touch the same files. Stopgap commits are never pushed without review.
 - Inbound AgentMail or remote-work coordination uses the global `mailctl status`, `mailctl next`, and `mailctl wait` workflow. Do not create a repo-local `.internal-dev/inbox` ledger.
 
 ### Controlled access

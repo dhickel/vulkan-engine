@@ -2,7 +2,6 @@ mod audio_bridge;
 mod collision;
 mod content;
 mod events;
-mod generator;
 mod geometry;
 mod layout;
 mod player;
@@ -10,16 +9,16 @@ mod scene_seed;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
 use engine::camera::{Camera, FPSController};
 use engine::events::{runtime_event_bus, DispatchReport, EventBus};
-use engine::frame::FrameClock;
+use engine::frame::{FixedStepClock, FixedStepConfig, FrameClock};
 use engine::input::{
     ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
 };
-use generator::{generate_dungeon, GeneratedDungeon, ProceduralLevelConfig, GENERATED_LEVEL_ID};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
@@ -35,16 +34,15 @@ use winit::keyboard::KeyCode;
 use winit::window::WindowBuilder;
 
 const APP_WINDOW_TITLE: &str = "Dungeon Dogfood - Phase 07";
-const DEFAULT_LEVEL_ID: &str = GENERATED_LEVEL_ID;
+const DEFAULT_LEVEL_ID: &str = LEVEL_01_PATH;
 const LEVEL_SELECT_ENV: &str = "DUNGEON_DOGFOOD_LEVEL";
 const LEVEL_01_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_01.txt";
 const LEVEL_02_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_02_ramps.txt";
 const LEVEL_03_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_03_lighting.txt";
 const CONTENT_PACK_PATH: &str = "apps/dungeon_dogfood/assets/content_pack.toml";
-const GENERATOR_SEED_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_SEED";
-const GENERATOR_WIDTH_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_WIDTH";
-const GENERATOR_HEIGHT_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_HEIGHT";
-const GENERATOR_LAYERS_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_LAYERS";
+
+/// Fixed simulation timestep for physics and gameplay logic (60 Hz).
+const FIXED_DT: f32 = 1.0 / 60.0;
 
 #[derive(Debug, Default)]
 struct HeadlessOptions {
@@ -216,17 +214,6 @@ fn run() -> Result<(), AppError> {
     );
     log::info!("Light markers: {}", level.light_markers.len());
     log::info!("Model markers: {}", level.model_markers.len());
-    if let Some(seed) = loaded_level.seed {
-        log::info!(
-            "Generated dungeon seed={} walkable_tiles={} connectors={}",
-            seed,
-            loaded_level.walkable_tiles,
-            loaded_level.connector_count
-        );
-    }
-    if let Some(map_overview) = loaded_level.map_overview.as_ref() {
-        log::info!("Dungeon map overview:\n{}", map_overview);
-    }
 
     let collision_world = CollisionWorld::from_level(level);
 
@@ -235,7 +222,6 @@ fn run() -> Result<(), AppError> {
             level,
             &content_pack,
             &collision_world,
-            &loaded_level,
             &headless_opts,
         );
     }
@@ -299,11 +285,16 @@ fn run() -> Result<(), AppError> {
             -0.5,
         );
     let mut player = PlayerState::new(spawn_position);
+    let mut previous_player_position = player.position;
     let mut app_camera = Camera::new(spawn_position);
     let mut app_input = InputSystem::new();
     let mut fps_controller = install_app_fps_input(&mut app_input);
     let mut action_events = InputActionEventEmitter::new();
     let mut frame_clock = FrameClock::new();
+    let mut fixed_clock = FixedStepClock::new(FixedStepConfig {
+        step: Duration::from_secs_f32(FIXED_DT),
+        max_steps_per_frame: 10,
+    });
 
     log::info!("Dungeon dogfood initialized, starting event loop");
 
@@ -378,12 +369,14 @@ fn run() -> Result<(), AppError> {
                                 &mut scene,
                                 &collision_world,
                                 &mut player,
+                                &mut previous_player_position,
                                 &mut app_camera,
                                 &mut fps_controller,
                                 &mut app_input,
                                 &mut action_events,
                                 &mut app_events,
                                 &mut frame_clock,
+                                &mut fixed_clock,
                                 current_size.width,
                                 current_size.height,
                                 false,
@@ -402,6 +395,10 @@ fn run() -> Result<(), AppError> {
                                             "Render skipped while swapchain resize is pending; waiting for a stable window size."
                                         );
                                     }
+                                }
+                                Ok(FrameRenderOutcome::SubmittedNotPresented)
+                                | Ok(FrameRenderOutcome::PresentedSuboptimal) => {
+                                    // Continue rendering; presentation suboptimality is not a fatal state.
                                 }
                                 Err(e) => {
                                     log::error!("Render failed: {}", e);
@@ -455,12 +452,14 @@ fn render_frame(
     scene: &mut renderer::Scene,
     collision_world: &CollisionWorld,
     player: &mut PlayerState,
+    previous_player_position: &mut glam::Vec3,
     camera: &mut Camera,
     fps_controller: &mut FPSController,
     input: &mut InputSystem,
     action_events: &mut InputActionEventEmitter,
     events: &mut EventBus,
     frame_clock: &mut FrameClock,
+    fixed_clock: &mut FixedStepClock,
     viewport_width: u32,
     viewport_height: u32,
     headless: bool,
@@ -469,39 +468,73 @@ fn render_frame(
     log_dispatch_failures(begin_report.input_dispatch, "dogfood input");
     log_dispatch_failures(begin_report.frame_started, "dogfood lifecycle");
 
-    fps_controller.update_from_snapshot(input.snapshot(), begin_report.frame.delta_seconds, camera);
-    match player.ingest_camera_intent(camera.get_position(), begin_report.frame.delta_seconds) {
-        CameraIntentGuard::Accepted => {}
-        CameraIntentGuard::Clamped {
-            attempted_displacement,
-            applied_displacement,
-        } => {
-            log::warn!(
-                "Clamped player movement from {:.3}m to {:.3}m for this frame.",
+    // Accumulate real time, sample display-frame input once, then advance the
+    // authoritative player state in fixed simulation steps. Applying the FPS
+    // controller once avoids multiplying this frame's mouse delta when a
+    // catch-up frame runs more than one simulation step.
+    let fixed_update = fixed_clock.update(begin_report.frame.delta);
+    let simulated_seconds = FIXED_DT * fixed_update.steps as f32;
+    fps_controller.update_from_snapshot(input.snapshot(), simulated_seconds, camera);
+
+    if fixed_update.steps > 0 {
+        match player.ingest_camera_intent(camera.get_position(), simulated_seconds) {
+            CameraIntentGuard::Accepted => {}
+            CameraIntentGuard::Clamped {
                 attempted_displacement,
-                applied_displacement
-            );
+                applied_displacement,
+            } => {
+                log::warn!(
+                    "Clamped player movement from {:.3}m to {:.3}m for this simulation update.",
+                    attempted_displacement,
+                    applied_displacement
+                );
+            }
+            CameraIntentGuard::RejectedNonFinite => {
+                log::error!(
+                    "Rejected non-finite camera intent before collision resolution; keeping previous player position."
+                );
+            }
         }
-        CameraIntentGuard::RejectedNonFinite => {
-            log::error!(
-                "Rejected non-finite camera intent before collision resolution; keeping previous player position."
-            );
+
+        for _ in 0..fixed_update.steps {
+            *previous_player_position = player.position;
+            collision::resolve_player_step(player, collision_world, FIXED_DT);
+            if !player.has_finite_position() {
+                log::error!(
+                    "Player position became non-finite after collision resolution: {:?}",
+                    player.position
+                );
+                return Err(RendererError::InvalidState(
+                    "player position must remain finite before camera view construction".to_string(),
+                ));
+            }
         }
-    }
-    collision::resolve_player_step(player, collision_world, begin_report.frame.delta_seconds);
-    if !player.has_finite_position() {
-        log::error!(
-            "Player position became non-finite after collision resolution: {:?}",
-            player.position
-        );
-        return Err(RendererError::InvalidState(
-            "player position must remain finite before camera view construction".to_string(),
-        ));
     }
     camera.set_position(player.position);
 
+    if !fixed_update.dropped_time.is_zero() {
+        log::warn!(
+            "Dropped {:.3}ms of accumulated simulation time after reaching the fixed-step catch-up limit.",
+            fixed_update.dropped_time.as_secs_f64() * 1_000.0
+        );
+    }
+
+    // Render one simulation step behind and interpolate toward the current
+    // authoritative state using the accumulator remainder. The previous state
+    // persists across display frames, including frames that run zero steps.
+    let authoritative_position = player.position;
+    camera.set_position(interpolated_player_position(
+        *previous_player_position,
+        authoritative_position,
+        fixed_update.alpha,
+    ));
+
     renderer.pump_asset_tasks(32)?;
     let view = engine::render::camera_view_for_size(camera, viewport_width, viewport_height);
+
+    // Restore camera to authoritative simulation position.
+    camera.set_position(authoritative_position);
+
     let outcome = if headless {
         renderer.render_scene_headless_with_view(scene, view)?
     } else {
@@ -513,20 +546,23 @@ fn render_frame(
     Ok(outcome)
 }
 
+fn interpolated_player_position(
+    previous: glam::Vec3,
+    current: glam::Vec3,
+    alpha: f32,
+) -> glam::Vec3 {
+    previous.lerp(current, alpha.clamp(0.0, 1.0))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LevelSelection {
     label: String,
     path: PathBuf,
-    procedural: bool,
 }
 
 struct LoadedLevel {
     level: ParsedLevel,
     source_description: String,
-    map_overview: Option<String>,
-    seed: Option<u64>,
-    walkable_tiles: usize,
-    connector_count: usize,
 }
 
 fn selected_level() -> LevelSelection {
@@ -546,49 +582,24 @@ fn selected_level() -> LevelSelection {
 fn resolve_level_selector(selector: impl AsRef<str>) -> LevelSelection {
     let selector = selector.as_ref().trim();
 
-    let (label, path, procedural) = match selector {
-        DEFAULT_LEVEL_ID | "generated" => (GENERATED_LEVEL_ID, GENERATED_LEVEL_ID, true),
-        "level_01" | "level_01.txt" | LEVEL_01_PATH => ("level_01", LEVEL_01_PATH, false),
+    let (label, path) = match selector {
+        "level_01" | "level_01.txt" | LEVEL_01_PATH => ("level_01", LEVEL_01_PATH),
         "level_02_ramps" | "level_02_ramps.txt" | LEVEL_02_PATH => {
-            ("level_02_ramps", LEVEL_02_PATH, false)
+            ("level_02_ramps", LEVEL_02_PATH)
         }
         "level_03_lighting" | "level_03_lighting.txt" | LEVEL_03_PATH => {
-            ("level_03_lighting", LEVEL_03_PATH, false)
+            ("level_03_lighting", LEVEL_03_PATH)
         }
-        _ => (selector, selector, false),
+        _ => (selector, selector),
     };
 
     LevelSelection {
         label: label.to_string(),
         path: PathBuf::from(path),
-        procedural,
     }
 }
 
 fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppError> {
-    if selection.procedural {
-        let procedural_config = procedural_level_config();
-        let GeneratedDungeon {
-            level,
-            seed,
-            map_overview,
-            walkable_tiles,
-            connector_count,
-        } = generate_dungeon(procedural_config);
-
-        return Ok(LoadedLevel {
-            level,
-            source_description: format!(
-                "procedural generator (seed={}, {}x{}x{})",
-                seed, procedural_config.width, procedural_config.height, procedural_config.layers
-            ),
-            map_overview: Some(map_overview),
-            seed: Some(seed),
-            walkable_tiles,
-            connector_count,
-        });
-    }
-
     let resolved_level_path = resolve_content_path(&selection.path);
     let level = load_level_file(&resolved_level_path).map_err(|source| AppError::LevelLoad {
         selection: selection.clone(),
@@ -598,22 +609,7 @@ fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppErr
     Ok(LoadedLevel {
         level,
         source_description: resolved_level_path.display().to_string(),
-        map_overview: None,
-        seed: None,
-        walkable_tiles: 0,
-        connector_count: 0,
     })
-}
-
-fn procedural_level_config() -> ProceduralLevelConfig {
-    let default = ProceduralLevelConfig::default();
-    ProceduralLevelConfig {
-        width: env_usize(GENERATOR_WIDTH_ENV).unwrap_or(default.width),
-        height: env_usize(GENERATOR_HEIGHT_ENV).unwrap_or(default.height),
-        layers: env_usize(GENERATOR_LAYERS_ENV).unwrap_or(default.layers),
-        seed: env_u64(GENERATOR_SEED_ENV).unwrap_or(default.seed),
-    }
-    .sanitized()
 }
 
 fn parse_level_arg() -> Option<String> {
@@ -647,10 +643,6 @@ fn print_level_load_help() {
         "Use --level <selector-or-path> or {}=<selector-or-path>",
         LEVEL_SELECT_ENV
     );
-    eprintln!(
-        "Procedural generator env: {} {} {} {}",
-        GENERATOR_SEED_ENV, GENERATOR_WIDTH_ENV, GENERATOR_HEIGHT_ENV, GENERATOR_LAYERS_ENV
-    );
     eprintln!();
     eprintln!("Expected ASCII level file with tokens:");
     eprintln!("  # = wall");
@@ -675,7 +667,6 @@ fn run_headless(
     level: &ParsedLevel,
     content_pack: &content::ContentPack,
     collision_world: &CollisionWorld,
-    _loaded_level: &LoadedLevel,
     headless_opts: &HeadlessOptions,
 ) -> Result<(), AppError> {
     log::info!("Starting dogfood headless capture run");
@@ -733,11 +724,16 @@ fn run_headless(
             -0.5,
         );
     let mut player = PlayerState::new(spawn_position);
+    let mut previous_player_position = player.position;
     let mut app_camera = Camera::new(spawn_position);
     let mut app_input = InputSystem::new();
     let mut fps_controller = install_app_fps_input(&mut app_input);
     let mut action_events = InputActionEventEmitter::new();
     let mut frame_clock = FrameClock::new();
+    let mut fixed_clock = FixedStepClock::new(FixedStepConfig {
+        step: Duration::from_secs_f32(FIXED_DT),
+        max_steps_per_frame: 10,
+    });
 
     // Configure frame capture if requested
     let capture_target = headless_opts.capture_target;
@@ -794,17 +790,22 @@ fn run_headless(
             &mut scene,
             collision_world,
             &mut player,
+            &mut previous_player_position,
             &mut app_camera,
             &mut fps_controller,
             &mut app_input,
             &mut action_events,
             &mut app_events,
             &mut frame_clock,
+            &mut fixed_clock,
             1280,
             720,
             true,
         ) {
-            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Ok(FrameRenderOutcome::Rendered)
+            | Ok(FrameRenderOutcome::SkippedResizePending)
+            | Ok(FrameRenderOutcome::SubmittedNotPresented)
+            | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}
             Err(err) => {
                 log::error!("Headless render failed at frame {frame_num}: {err}");
                 return Err(AppError::RendererInit(err));
@@ -895,32 +896,6 @@ fn env_flag(var_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn env_usize(var_name: &str) -> Option<usize> {
-    std::env::var(var_name).ok().and_then(|value| {
-        value
-            .trim()
-            .parse::<usize>()
-            .map_err(|err| {
-                log::warn!("Ignoring invalid {}='{}': {}", var_name, value, err);
-                err
-            })
-            .ok()
-    })
-}
-
-fn env_u64(var_name: &str) -> Option<u64> {
-    std::env::var(var_name).ok().and_then(|value| {
-        value
-            .trim()
-            .parse::<u64>()
-            .map_err(|err| {
-                log::warn!("Ignoring invalid {}='{}': {}", var_name, value, err);
-                err
-            })
-            .ok()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,11 +918,29 @@ mod tests {
     }
 
     #[test]
+    fn interpolates_between_previous_and_current_simulation_positions() {
+        let previous = glam::Vec3::new(1.0, 2.0, 3.0);
+        let current = glam::Vec3::new(5.0, 6.0, 7.0);
+
+        assert_eq!(
+            interpolated_player_position(previous, current, 0.25),
+            glam::Vec3::new(2.0, 3.0, 4.0)
+        );
+        assert_eq!(
+            interpolated_player_position(previous, current, 0.0),
+            previous
+        );
+        assert_eq!(
+            interpolated_player_position(previous, current, 1.0),
+            current
+        );
+    }
+
+    #[test]
     fn resolve_builtin_level_id() {
         let selection = resolve_level_selector("level_02_ramps");
         assert_eq!(selection.label, "level_02_ramps");
         assert_eq!(selection.path, PathBuf::from(LEVEL_02_PATH));
-        assert!(!selection.procedural);
     }
 
     #[test]
@@ -955,14 +948,12 @@ mod tests {
         let selection = resolve_level_selector("level_03_lighting.txt");
         assert_eq!(selection.label, "level_03_lighting");
         assert_eq!(selection.path, PathBuf::from(LEVEL_03_PATH));
-        assert!(!selection.procedural);
     }
 
     #[test]
-    fn resolve_generated_level_id() {
-        let selection = resolve_level_selector("generated");
-        assert_eq!(selection.label, GENERATED_LEVEL_ID);
-        assert!(selection.procedural);
+    fn resolve_level_01_path_as_default() {
+        let selection = resolve_level_selector(DEFAULT_LEVEL_ID);
+        assert_eq!(selection.label, "level_01");
     }
 
     #[test]
@@ -970,6 +961,5 @@ mod tests {
         let selection = resolve_level_selector("custom/level.txt");
         assert_eq!(selection.label, "custom/level.txt");
         assert_eq!(selection.path, PathBuf::from("custom/level.txt"));
-        assert!(!selection.procedural);
     }
 }

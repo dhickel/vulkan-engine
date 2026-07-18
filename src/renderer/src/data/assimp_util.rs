@@ -18,7 +18,7 @@ use ash::vk;
 use glam::{Mat4, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
 use log::debug;
-use russimp_sys::{
+use russimp_sys_ng::{
     aiColor4D, aiCreatePropertyStore, aiGetMaterialColor, aiGetMaterialFloatArray,
     aiGetMaterialString, aiGetMaterialTexture, aiGetMaterialTextureCount,
     aiImportFileExWithProperties, aiMaterial, aiNode,

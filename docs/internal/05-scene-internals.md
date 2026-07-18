@@ -132,7 +132,7 @@ pub struct RenderObject {
 
 ### Optional Culling
 
-`SceneWorld` has optional frustum culling disabled by default. With the default setting, all nodes under the single runtime root are submitted every frame. When enabled, nodes outside the current proxy AABB/frustum test are skipped; there is still no distance-based LOD or occlusion culling.
+`SceneWorld` has frustum culling enabled by default, with `Scene::set_frustum_culling(false)` as an opt-out. Mesh-backed nodes outside the current transform-aware proxy AABB/frustum test omit their own draw items. Descendants are always tested independently because a node proxy is not a subtree bound. There is still no distance-based LOD or occlusion culling, and true CPU mesh bounds are not yet available to the scene graph.
 
 ### Material Pointer Convention
 

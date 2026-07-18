@@ -8,7 +8,9 @@
 //! ## Key Concepts
 //! - **Vertex layout**: Comprehensive layout with all glTF attributes (position, normal, tangent, UVs, skinning)
 //! - **Push constants**: Per-draw data (model matrix, buffer addresses) avoiding descriptor updates
-use crate::data::data_cache::{TextureCache, VkLoadedMaterial, VkSamplerInfo};
+use crate::data::data_cache::{
+    TextureCache, VkLoadedMaterial, VkPipelineType, VkSamplerInfo,
+};
 use crate::data::handles::{MaterialHandle, MeshHandle, TextureHandle};
 use crate::vulkan::vk_types::{VkImageAlloc, VkSubAlloc};
 use ash::vk;
@@ -585,6 +587,8 @@ pub struct GpuPointLight {
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct EnvironmentUBO {
     pub light_dir: Vec4,
+    pub light_color: Vec4,
+    pub light_view_proj: [Vec4; 4],
     pub exposure: f32,
     pub gamma: f32,
     pub prefilter_mips_levels: f32,
@@ -601,6 +605,8 @@ impl Default for EnvironmentUBO {
     fn default() -> Self {
         Self {
             light_dir: Vec4::new(0.1, 0.7, 0.7, 0.0),
+            light_color: Vec4::new(1.0, 0.95, 0.85, 1.0),
+            light_view_proj: [Vec4::ZERO; 4],
             exposure: 4.5,
             gamma: 2.2,
             prefilter_mips_levels: 5.0,
@@ -753,26 +759,46 @@ pub struct VkMetRoughUniforms {
 // SCENE GRAPH & RENDERING //
 /////////////////////////////
 
+/// Self-contained material draw record copied from `VkLoadedMaterial` while the texture
+/// cache lock is held.  No raw pointers remain after lock release, so the draw path never
+/// dereferences cache-owned memory outside the lock guard.
+#[derive(Debug, Copy, Clone)]
+pub struct CopiedMaterialDrawRecord {
+    pub pipeline: VkPipelineType,
+    pub alpha_mode: AlphaMode,
+    pub image_descriptor: vk::DescriptorSet,
+    pub meta_alloc: VkSubAlloc,
+    pub requires_uv1: bool,
+}
+
+impl From<VkLoadedMaterial> for CopiedMaterialDrawRecord {
+    fn from(material: VkLoadedMaterial) -> Self {
+        Self {
+            pipeline: material.pipeline,
+            alpha_mode: material.alpha_mode,
+            image_descriptor: material.image_descriptor,
+            meta_alloc: material.meta_alloc,
+            requires_uv1: material.requires_uv1,
+        }
+    }
+}
+
 /// Compact draw command data for a single mesh instance consumed by the Vulkan draw path.
 ///
 /// ## Fields
 /// - **index_count/first_index**: Draw parameters for vkCmdDrawIndexed
 /// - **index_buffer**: Buffer handle to bind
 /// - **joint_desc**: Descriptor set for joint matrices (skinning), vk::DescriptorSet::null() if not skinned
-/// - **material**: Raw pointer to VkLoadedMaterial (stable address in TextureCache, valid for frame)
+/// - **material**: Copied material draw record (stable by-value copy, no raw pointer)
 /// - **transform**: World transform from `SceneWorld`
 /// - **vertex_buffer_addr**: Device address passed via push constants
-///
-/// ## Why Raw Pointer for Material
-/// Materials stored in TextureCache Vec with stable indices. Pointer cheaper than Arc<>,
-/// and lifetime guaranteed for the current frame's draw recording path.
 #[derive(Debug, Copy, Clone)]
 pub struct RenderObject {
     pub index_count: u32,
     pub first_index: u32,
     pub index_buffer: vk::Buffer,
     pub joint_desc: vk::DescriptorSet,
-    pub material: *const VkLoadedMaterial,
+    pub material: CopiedMaterialDrawRecord,
     pub transform: Mat4,
     pub vertex_buffer_addr: vk::DeviceAddress,
     pub has_uv1: bool,
@@ -798,3 +824,46 @@ const _: () = {
         "EnvironmentUBO must be 16-byte aligned"
     );
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copied_material_draw_record_survives_cache_mutation() {
+        let original_meta_alloc = VkSubAlloc {
+            alloc_address: 0x1000,
+            offset: 64,
+            buffer: vk::Buffer::null(),
+            size: 128,
+            sub_buffer_index: 3,
+        };
+        let mut cached_material = VkLoadedMaterial {
+            texture_ids: TextureIds::default(),
+            meta_alloc: original_meta_alloc,
+            image_descriptor: vk::DescriptorSet::null(),
+            pipeline: VkPipelineType::PbrMetRoughOpaque,
+            alpha_mode: AlphaMode::Mask,
+            requires_uv1: true,
+        };
+
+        let copied = CopiedMaterialDrawRecord::from(cached_material);
+
+        cached_material.pipeline = VkPipelineType::UnlitAlpha;
+        cached_material.alpha_mode = AlphaMode::Blend;
+        cached_material.meta_alloc = VkSubAlloc {
+            alloc_address: 0x2000,
+            ..original_meta_alloc
+        };
+        cached_material.requires_uv1 = false;
+
+        assert_eq!(cached_material.pipeline, VkPipelineType::UnlitAlpha);
+        assert_eq!(cached_material.alpha_mode, AlphaMode::Blend);
+        assert_eq!(cached_material.meta_alloc.alloc_address, 0x2000);
+        assert!(!cached_material.requires_uv1);
+        assert_eq!(copied.pipeline, VkPipelineType::PbrMetRoughOpaque);
+        assert_eq!(copied.alpha_mode, AlphaMode::Mask);
+        assert_eq!(copied.meta_alloc, original_meta_alloc);
+        assert!(copied.requires_uv1);
+    }
+}

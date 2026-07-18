@@ -40,6 +40,8 @@ struct PointLightData {
 
 layout (set = 0, binding = 1) uniform UBOParams {
     vec4 lightDir;
+    vec4 lightColor;
+    mat4 lightViewProj;
     float exposure;
     float gamma;
     float prefilteredCubeMipLevels;
@@ -59,6 +61,7 @@ layout (set = 0, binding = 1) uniform UBOParams {
 layout (set = 0, binding = 2) uniform samplerCube samplerIrradiance;
 layout (set = 0, binding = 3) uniform samplerCube prefilteredMap;
 layout (set = 0, binding = 4) uniform sampler2D samplerBRDFLUT;
+layout (set = 0, binding = 5) uniform sampler2DShadow shadowMap;
 
 // Textures
 
@@ -336,13 +339,34 @@ void main()
     float G = geometricOcclusion(pbrInputs);
     float D = microfacetDistribution(pbrInputs);
 
-    const vec3 u_LightColor = vec3(1.0);
+    vec3 u_LightColor = uboParams.lightColor.rgb;
+    float u_LightIntensity = uboParams.lightColor.a;
+
+    // Shadow map PCF (3x3)
+    float shadowFactor = 1.0;
+    if (NdotL > 0.0) {
+        vec4 shadowClip = uboParams.lightViewProj * vec4(inWorldPos, 1.0);
+        vec3 shadowUV = shadowClip.xyz / shadowClip.w;
+        // Transform from clip space [-1,1] to UV space [0,1]
+        shadowUV = shadowUV * 0.5 + 0.5;
+
+        // 3x3 PCF
+        vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
+        float shadowSum = 0.0;
+        for (int x = -1; x <= 1; ++x) {
+            for (int y = -1; y <= 1; ++y) {
+                vec2 offset = vec2(float(x), float(y)) * texelSize;
+                shadowSum += texture(shadowMap, vec3(shadowUV.xy + offset, shadowUV.z));
+            }
+        }
+        shadowFactor = shadowSum / 9.0;
+    }
 
     // Calculation of analytical lighting contribution
     vec3 diffuseContrib = (1.0 - F) * diffuse(pbrInputs);
     vec3 specContrib = F * G * D / (4.0 * NdotL * NdotV);
     // Obtain final intensity as reflectance (BRDF) scaled by the energy of the light (cosine law)
-    vec3 color = NdotL * u_LightColor * (diffuseContrib + specContrib);
+    vec3 color = NdotL * u_LightColor * u_LightIntensity * shadowFactor * (diffuseContrib + specContrib);
 
     // Add point light contributions
     for (uint i = 0; i < uboParams.pointLightCount; ++i) {

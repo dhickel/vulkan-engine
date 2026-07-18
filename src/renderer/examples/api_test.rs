@@ -289,7 +289,10 @@ fn run_headless_api_test(
 
     for _ in 0..frame_budget {
         match renderer.render_scene_headless(&mut scene) {
-            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Ok(FrameRenderOutcome::Rendered)
+            | Ok(FrameRenderOutcome::SkippedResizePending)
+            | Ok(FrameRenderOutcome::SubmittedNotPresented)
+            | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}
             Err(err) => {
                 error!("Headless render failed: {err}");
                 return;

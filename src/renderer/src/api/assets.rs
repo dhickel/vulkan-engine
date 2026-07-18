@@ -315,8 +315,9 @@ impl AssetLoadTracker {
         let mut progressed = 0usize;
         progressed += core.pump_transfer_submissions(max_steps - progressed);
 
-        // Poll pending texture upload batches for fence completion
-        if let Ok(mut texture_cache) = core.data_cache.texture_cache.lock() {
+        // An upload worker can hold the texture cache while waiting for transfer completion.
+        // Never block the render-thread pump on that same lock or both sides deadlock.
+        if let Ok(mut texture_cache) = core.data_cache.texture_cache.try_lock() {
             let finalized = texture_cache.poll_texture_uploads();
             if finalized > 0 {
                 debug!("Finalized {} pending texture upload batch(es)", finalized);

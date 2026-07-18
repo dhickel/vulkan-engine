@@ -2,8 +2,10 @@ mod common;
 
 use log::{error, info, warn};
 use renderer::prelude::{
-    FrameRenderOutcome, LoadStatus, LoadTicket, Renderer, RendererConfig, RendererError, Scene,
+    FrameCaptureStatus, FrameRenderOutcome, LoadStatus, LoadTicket, Renderer, RendererConfig,
+    RendererError, Scene,
 };
+use std::collections::HashSet;
 use std::env;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalSize;
@@ -24,6 +26,18 @@ fn main() {
         }
     };
 
+    let config = RendererConfig {
+        app_name: "renderer facade demo (async loading)".to_string(),
+        headless: launch_options.headless,
+        ..RendererConfig::default()
+    };
+
+    let app_name = config.app_name.clone();
+    if launch_options.headless {
+        run_headless_async_demo(config, launch_options, &app_name);
+        return;
+    }
+
     let event_loop = match EventLoop::new() {
         Ok(event_loop) => event_loop,
         Err(err) => {
@@ -33,13 +47,6 @@ fn main() {
     };
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let config = RendererConfig {
-        app_name: "renderer facade demo (async loading)".to_string(),
-        headless: launch_options.headless,
-        ..RendererConfig::default()
-    };
-
-    let app_name = config.app_name.clone();
     let window = match WindowBuilder::new()
         .with_title(format!("{} - requesting model", app_name))
         .with_inner_size(PhysicalSize::new(config.window_width, config.window_height))
@@ -177,7 +184,7 @@ fn main() {
                                 &mut renderer,
                                 &mut scene,
                                 &mut load_state,
-                                &window,
+                                Some(&window),
                                 app_name.as_str(),
                             ) {
                                 error!("Asset polling failed: {err}");
@@ -229,6 +236,109 @@ fn main() {
         .expect("failed to run renderer async loading example loop");
 }
 
+fn run_headless_async_demo(
+    config: RendererConfig,
+    launch_options: common::LaunchOptions,
+    app_name: &str,
+) {
+    let mut renderer = match Renderer::new_headless(config.clone()) {
+        Ok(renderer) => renderer,
+        Err(err) => {
+            error!("Headless renderer initialization failed: {err}");
+            return;
+        }
+    };
+    if let Err(err) =
+        common::apply_frame_capture_launch_options(&mut renderer, &launch_options, app_name)
+    {
+        error!("Failed to configure frame capture: {err}");
+        return;
+    }
+    if let Err(err) = common::apply_debug_record_launch_options(&mut renderer, &launch_options) {
+        error!("Failed to configure debug timing: {err}");
+        return;
+    }
+
+    let _ = renderer.take_startup_scene();
+    let mut scene = Scene::new();
+    let model_path = launch_options
+        .model_path
+        .as_deref()
+        .unwrap_or(std::path::Path::new(DEFAULT_MODEL_PATH));
+    let load_ticket = {
+        let mut assets = renderer.assets();
+        match assets.request_model_load(model_path) {
+            Ok(ticket) => ticket,
+            Err(err) => {
+                error!("Failed to queue model load: {err}");
+                return;
+            }
+        }
+    };
+    let mut load_state = AsyncLoadState::new(load_ticket);
+    let load_deadline = Instant::now() + Duration::from_secs(30);
+    while !load_state.model_mounted {
+        if let Err(err) = renderer.pump_asset_tasks(64) {
+            error!("Asset pump failed: {err}");
+            return;
+        }
+        if let Err(err) = poll_async_load(
+            &mut renderer,
+            &mut scene,
+            &mut load_state,
+            None,
+            app_name,
+        ) {
+            error!("Asset polling failed: {err}");
+            return;
+        }
+        if Instant::now() >= load_deadline {
+            error!("Headless async model load did not complete within 30 seconds");
+            return;
+        }
+        std::thread::yield_now();
+    }
+
+    let expected_captures = usize::from(launch_options.capture_frame.is_some())
+        + launch_options.capture_frames.unwrap_or(0) as usize;
+    let mut succeeded_paths = HashSet::new();
+
+    for _ in 0..240 {
+        if let Err(err) = renderer.render_scene_headless(&mut scene) {
+            error!("Headless render failed: {err}");
+            return;
+        }
+
+        match renderer.last_frame_capture_status() {
+            Some(FrameCaptureStatus::Succeeded { output_path, .. }) => {
+                succeeded_paths.insert(output_path.clone());
+                if succeeded_paths.len() >= expected_captures {
+                    info!(
+                        "Headless capture completed: {} capture(s) written",
+                        succeeded_paths.len()
+                    );
+                    return;
+                }
+            }
+            Some(FrameCaptureStatus::Failed { message, .. }) => {
+                error!("Headless capture failed: {message}");
+                return;
+            }
+            _ if expected_captures == 0 => {
+                info!("Headless async model load completed");
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    error!(
+        "Headless async demo did not complete ({} of {} capture(s) written)",
+        succeeded_paths.len(),
+        expected_captures
+    );
+}
+
 struct AsyncLoadState {
     ticket: LoadTicket,
     model_mounted: bool,
@@ -249,7 +359,7 @@ fn poll_async_load(
     renderer: &mut Renderer,
     scene: &mut Scene,
     state: &mut AsyncLoadState,
-    window: &winit::window::Window,
+    window: Option<&winit::window::Window>,
     app_name: &str,
 ) -> Result<(), RendererError> {
     if state.model_mounted {
@@ -266,7 +376,9 @@ fn poll_async_load(
             if state.last_pending_log.elapsed() >= Duration::from_millis(500) {
                 let queued_ms = queued_at.elapsed().as_millis();
                 info!("Model load still pending after {queued_ms}ms");
-                window.set_title(format!("{} - loading ({queued_ms}ms)", app_name).as_str());
+                if let Some(window) = window {
+                    window.set_title(format!("{} - loading ({queued_ms}ms)", app_name).as_str());
+                }
                 state.last_pending_log = Instant::now();
             }
             Ok(())
@@ -275,7 +387,9 @@ fn poll_async_load(
             let mount = scene.merge_fragment(None, value)?;
             scene.set_transform(mount.mounted_root, glam::Mat4::IDENTITY)?;
             state.model_mounted = true;
-            window.set_title(format!("{} - model ready", app_name).as_str());
+            if let Some(window) = window {
+                window.set_title(format!("{} - model ready", app_name).as_str());
+            }
             info!("Async model load completed and scene fragment mounted");
             Ok(())
         }

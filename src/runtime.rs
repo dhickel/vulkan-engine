@@ -256,7 +256,10 @@ fn run_headless(
 
     for _ in 0..plan.frame_budget {
         match renderer.render_scene_headless(&mut scene) {
-            Ok(FrameRenderOutcome::Rendered) | Ok(FrameRenderOutcome::SkippedResizePending) => {}
+            Ok(FrameRenderOutcome::Rendered)
+            | Ok(FrameRenderOutcome::SkippedResizePending)
+            | Ok(FrameRenderOutcome::SubmittedNotPresented)
+            | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}
             Err(err) => return Err(format!("headless render failed: {err}")),
         }
 

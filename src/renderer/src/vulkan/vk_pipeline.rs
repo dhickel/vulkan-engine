@@ -364,6 +364,8 @@ pub fn init_pipeline_cache(
     let env_equirect_pipeline =
         init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache);
 
+    let shadow_depth_pipeline = init_shadow_depth_pipeline(device, desc_layout_cache, shader_cache);
+
     VkPipelineCache::new(vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
         (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
@@ -374,6 +376,7 @@ pub fn init_pipeline_cache(
         (VkPipelineType::EnvIrradiance, env_irradiance_pipeline),
         (VkPipelineType::EnvPreFilter, env_prefilter_pipeline),
         (VkPipelineType::EnvEquirectToCube, env_equirect_pipeline),
+        (VkPipelineType::ShadowDepth, shadow_depth_pipeline),
     ])
     .unwrap()
 }
@@ -697,6 +700,58 @@ fn init_equirect_to_cube_pipeline(
         .disable_blending()
         .disable_depth_test()
         .set_color_attachment_format(vk::Format::R32G32B32A32_SFLOAT)
+        .set_pipeline_layout(layout);
+
+    let pipeline = pipeline_builder.build_pipeline(device).unwrap();
+
+    VkPipeline::new(pipeline, layout)
+}
+
+/// Push constants for shadow depth pass (per-draw data).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PushConstShadowDepth {
+    pub model_matrix: glam::Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    pub joint_count: u32,
+    pub pad: u32,
+}
+
+fn init_shadow_depth_pipeline(
+    device: &ash::Device,
+    desc_layout_cache: &VkDescLayoutCache,
+    shader_cache: &VkShaderCache,
+) -> VkPipeline {
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthVert);
+    let frag_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthFrag);
+
+    let push_const_size = std::mem::size_of::<PushConstShadowDepth>() as u32;
+
+    let push_constant_range = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX)
+        .offset(0)
+        .size(push_const_size)];
+
+    let layouts = [desc_layout_cache.get(VkDescType::ShadowMap)];
+
+    let layout_info = vk_util::pipeline_layout_create_info()
+        .set_layouts(&layouts)
+        .push_constant_ranges(&push_constant_range);
+
+    let layout = unsafe { device.create_pipeline_layout(&layout_info, None).unwrap() };
+
+    let entry = CString::new("main").unwrap();
+
+    let mut pipeline_builder = PipelineBuilder::default()
+        .set_shaders(vert_shader, &entry, frag_shader, &entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .set_depth_format(vk::Format::D32_SFLOAT)
+        .set_color_attachment_format(vk::Format::UNDEFINED)
+        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
     let pipeline = pipeline_builder.build_pipeline(device).unwrap();

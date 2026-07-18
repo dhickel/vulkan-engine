@@ -162,6 +162,15 @@ pub fn finalize_frame_capture(
     result
 }
 
+/// Release a recorded capture whose command buffer will not be submitted.
+pub fn discard_frame_capture(
+    device: &ash::Device,
+    allocator: &vk_mem::Allocator,
+    mut pending: PendingFrameCapture,
+) {
+    pending.readback.destroy(device, allocator);
+}
+
 fn finalize_frame_capture_inner(
     allocator: &vk_mem::Allocator,
     pending: &PendingFrameCapture,

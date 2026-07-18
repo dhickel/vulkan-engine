@@ -9,7 +9,9 @@ use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use crate::scene::command::{Command, CommandHistory, CommandResult};
 use crate::scene::render_submission::RenderSubmission;
-use crate::scene::scene_world::{PointLightRefError, ReparentError, SceneNodeRefError, SceneWorld};
+use crate::scene::scene_world::{
+    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError, SceneWorld,
+};
 use crate::scene::SceneNodeId;
 
 use super::errors::SceneError;
@@ -46,6 +48,48 @@ impl SceneAssetReference {
             id: id.into(),
             path_hint,
         }
+    }
+}
+
+/// Directional light ID with slot+generation semantics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DirectionalLightId {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+/// Directional light definition.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DirectionalLight {
+    pub direction: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+}
+
+impl DirectionalLight {
+    /// Validate directional light parameters.
+    fn validate(&self) -> Result<(), SceneError> {
+        if !self.direction.is_finite() || self.direction.length_squared() < 1e-6 {
+            return Err(SceneError::InvalidDirectionalLight(
+                "direction must be finite and non-zero".to_string(),
+            ));
+        }
+        if !self.intensity.is_finite() || self.intensity < 0.0 {
+            return Err(SceneError::InvalidDirectionalLight(
+                "intensity must be finite and >= 0.0".to_string(),
+            ));
+        }
+        if !self.color.is_finite() {
+            return Err(SceneError::InvalidDirectionalLight(
+                "color must be finite".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Clamp color to valid range.
+    fn sanitize_color(&self) -> Vec3 {
+        self.color.max(Vec3::ZERO)
     }
 }
 
@@ -668,6 +712,25 @@ impl Scene {
         self.world.update_camera(view, projection, position);
     }
 
+    /// Enable or disable frustum culling. It is enabled by default. When
+    /// enabled, mesh-backed nodes whose transform-aware proxy AABB is outside
+    /// the camera frustum are skipped during submission, reducing GPU draws.
+    /// Descendants are tested independently.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn set_frustum_culling(&mut self, enabled: bool) {
+        self.world.enable_frustum_culling = enabled;
+    }
+
+    /// Returns whether frustum culling is currently enabled.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn frustum_culling_enabled(&self) -> bool {
+        self.world.enable_frustum_culling
+    }
+
     /// Thread: Any
     /// May Stall: No
     pub fn has_skybox(&self) -> bool {
@@ -743,6 +806,72 @@ impl Scene {
             "failed to remove point light (slot={}, generation={})",
             id.slot, id.generation
         )))
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn create_directional_light(
+        &mut self,
+        light: DirectionalLight,
+    ) -> Result<DirectionalLightId, SceneError> {
+        light.validate()?;
+        let sanitized = DirectionalLight {
+            color: light.sanitize_color(),
+            ..light
+        };
+        Ok(self.world.add_directional_light(sanitized))
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn update_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+        light: DirectionalLight,
+    ) -> Result<(), SceneError> {
+        light.validate()?;
+        self.validate_directional_light(id)?;
+
+        let sanitized = DirectionalLight {
+            color: light.sanitize_color(),
+            ..light
+        };
+
+        if self.world.update_directional_light(id, sanitized) {
+            return Ok(());
+        }
+
+        Err(SceneError::InvalidDirectionalLight(format!(
+            "failed to update directional light (slot={}, generation={})",
+            id.slot, id.generation
+        )))
+    }
+
+    /// Thread: Any
+    /// May Stall: No
+    pub fn remove_directional_light(
+        &mut self,
+        id: DirectionalLightId,
+    ) -> Result<(), SceneError> {
+        self.validate_directional_light(id)?;
+
+        if self.world.remove_directional_light(id) {
+            return Ok(());
+        }
+
+        Err(SceneError::InvalidDirectionalLight(format!(
+            "failed to remove directional light (slot={}, generation={})",
+            id.slot, id.generation
+        )))
+    }
+
+    /// Returns the active directional light, if any.
+    /// Only the first active light is returned (engine supports one directional light).
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    pub fn directional_light(&self) -> Option<DirectionalLight> {
+        self.world.get_active_directional_light()
     }
 
     /// Thread: Any
@@ -992,6 +1121,12 @@ impl Scene {
             .map_err(|err| map_point_light_ref_error(id, err))
     }
 
+    fn validate_directional_light(&self, id: DirectionalLightId) -> Result<(), SceneError> {
+        self.world
+            .validate_directional_light_ref(id)
+            .map_err(|err| map_directional_light_ref_error(id, err))
+    }
+
     fn ensure_node_persistence_metadata(&mut self, node: SceneNodeId) {
         let stable_id = format!("node.{:06}", self.next_stable_node_id);
         self.next_stable_node_id += 1;
@@ -1029,6 +1164,21 @@ fn map_point_light_ref_error(id: PointLightId, err: PointLightRefError) -> Scene
         PointLightRefError::OutOfBounds | PointLightRefError::Vacant => {
             SceneError::InvalidPointLight(format!(
                 "point light out of bounds or vacant (slot={}, generation={})",
+                id.slot, id.generation
+            ))
+        }
+    }
+}
+
+fn map_directional_light_ref_error(
+    id: DirectionalLightId,
+    err: DirectionalLightRefError,
+) -> SceneError {
+    match err {
+        DirectionalLightRefError::GenerationMismatch => SceneError::StaleDirectionalLight(id),
+        DirectionalLightRefError::OutOfBounds | DirectionalLightRefError::Vacant => {
+            SceneError::InvalidDirectionalLight(format!(
+                "directional light out of bounds or vacant (slot={}, generation={})",
                 id.slot, id.generation
             ))
         }
@@ -2811,6 +2961,7 @@ mod tests {
         assert!(wall_summary.tags.iter().any(|tag| tag == "wall"));
         assert_transform_translation(model_summary.local_transform, Vec3::new(-1.5, 0.0, -2.0));
         assert_transform_translation(wall_summary.local_transform, Vec3::new(1.5, 0.0, -2.0));
+        fs::remove_file(saved_scene).unwrap();
     }
 
     #[test]
@@ -3427,14 +3578,10 @@ mod tests {
     }
 
     fn phase_02_saved_scene_copy_path() -> PathBuf {
-        let renderer_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = renderer_dir
-            .parent()
-            .and_then(Path::parent)
-            .expect("renderer crate lives under src/renderer");
-        workspace_root.join(
-            "../../../../.internal-dev/plans/.archive/2026-07-03-engine-alpha-roadmap/sprints/sprint-03-editor-packaged-placement/artifacts/phase-02-saved-scene-copy.engine.scene.json",
-        )
+        std::env::temp_dir().join(format!(
+            "renderer-phase-02-saved-scene-copy-{}.engine.scene.json",
+            std::process::id()
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3507,5 +3654,67 @@ mod tests {
             self.loaded_environments.push(asset.clone());
             Ok(EnvironmentHandle::new(9, 0))
         }
+    }
+
+    #[test]
+    fn frustum_culling_reduces_draw_count() {
+        let mut scene = Scene::new();
+        assert!(scene.frustum_culling_enabled());
+
+        // Camera at origin looking down -Z with a moderate FOV.
+        let view = Mat4::look_at_rh(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let projection =
+            Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
+        scene.set_camera(view, projection, Vec3::new(0.0, 0.0, 0.0));
+
+        let root = scene.create_node_default(None).unwrap();
+
+        // Node in front of camera — should stay visible.
+        let in_front = scene
+            .create_node(
+                Some(root),
+                Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)),
+            )
+            .unwrap();
+        scene
+            .add_mesh(in_front, MeshHandle::new(1, 0))
+            .unwrap();
+
+        // Node behind camera — should be culled.
+        let behind = scene
+            .create_node(
+                Some(root),
+                Mat4::from_translation(Vec3::new(0.0, 0.0, 5.0)),
+            )
+            .unwrap();
+        scene
+            .add_mesh(behind, MeshHandle::new(2, 0))
+            .unwrap();
+
+        // Count with culling off.
+        scene.set_frustum_culling(false);
+        assert!(!scene.frustum_culling_enabled());
+        let submission_off = scene.build_submission();
+        let count_off = submission_off.draw_items.len();
+        assert_eq!(count_off, 2);
+
+        // Count with culling on.
+        scene.set_frustum_culling(true);
+        assert!(scene.frustum_culling_enabled());
+        let submission_on = scene.build_submission();
+        let count_on = submission_on.draw_items.len();
+
+        assert!(
+            count_on < count_off,
+            "Expected culling to reduce draw count (off={count_off}, on={count_on})"
+        );
+        assert_eq!(
+            count_on, 1,
+            "Expected exactly 1 visible mesh with culling on, got {count_on}"
+        );
     }
 }

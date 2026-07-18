@@ -32,6 +32,8 @@ struct PointLightData {
 
 layout (set = 0, binding = 1) uniform UBOParams {
     vec4 lightDir;
+    vec4 lightColor;
+    mat4 lightViewProj;
     float exposure;
     float gamma;
     float prefilteredCubeMipLevels;
