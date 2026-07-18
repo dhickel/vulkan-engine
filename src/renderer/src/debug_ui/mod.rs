@@ -819,8 +819,9 @@ impl DebugUiManager {
         if let Some(ref ds) = timings.descriptor_stats {
             ui.separator();
             ui.text("Descriptor Allocator (all slots)");
+            ui.text(format!("Frame serial: {}", ds.frame_serial));
             ui.text(format!(
-                "Allocs: {} attempts / {} successful",
+                "Current epoch allocs: {} attempts / {} successful",
                 ds.allocation_attempts, ds.successful_allocations
             ));
             ui.text(format!(
@@ -1281,7 +1282,8 @@ impl DebugUiManager {
 
         if let Some(ref ds) = timings.descriptor_stats {
             fields.push(format!(
-                "\"descriptor_stats\":{{\"allocation_attempts\":{},\"successful_allocations\":{},\"pool_count\":{},\"pools_created\":{},\"pool_growth_events\":{},\"peak_allocated_sets\":{},\"peak_utilization_ratio\":{:.4},\"out_of_pool_events\":{},\"fragmented_pool_events\":{},\"reset_count\":{},\"reset_rejections\":{}}}",
+                "\"descriptor_stats\":{{\"frame_serial\":{},\"allocation_attempts\":{},\"successful_allocations\":{},\"pool_count\":{},\"pools_created\":{},\"pool_growth_events\":{},\"peak_allocated_sets\":{},\"peak_utilization_ratio\":{:.4},\"out_of_pool_events\":{},\"fragmented_pool_events\":{},\"reset_count\":{},\"reset_rejections\":{}}}",
+                ds.frame_serial,
                 ds.allocation_attempts,
                 ds.successful_allocations,
                 ds.pool_count,

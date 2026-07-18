@@ -57,7 +57,7 @@ use vk_mem::Allocator;
 /// `take()` returns `Some(...)` exactly once; subsequent calls return `None`. The allocator
 /// rejects reset when `take()` returns `None`.
 #[derive(Debug)]
-pub struct CompletedFrameSlot {
+pub(crate) struct CompletedFrameSlot {
     slot_index: u32,
     submitted_serial: u64,
     consumed: bool,
@@ -73,21 +73,9 @@ impl CompletedFrameSlot {
         }
     }
 
-    /// The physical frame-slot index this token authorizes.
-    #[allow(dead_code, reason = "public API consumed by descriptor allocator")]
-    pub fn slot_index(&self) -> u32 {
-        self.slot_index
-    }
-
-    /// The frame epoch serial captured when the fence was waited.
-    #[allow(dead_code, reason = "public API consumed by descriptor allocator")]
-    pub fn submitted_serial(&self) -> u64 {
-        self.submitted_serial
-    }
-
     /// Consume the token and return the verified slot/serial pair.
     /// Returns `None` if the token was already consumed.
-    pub fn take(&mut self) -> Option<(u32, u64)> {
+    pub(crate) fn take(&mut self) -> Option<(u32, u64)> {
         if self.consumed {
             None
         } else {
@@ -96,8 +84,8 @@ impl CompletedFrameSlot {
         }
     }
 
-    /// Returns `true` if the token has not yet been consumed.
-    pub fn is_consumed(&self) -> bool {
+    /// Returns `true` if the token has already been consumed.
+    pub(crate) fn is_consumed(&self) -> bool {
         self.consumed
     }
 }

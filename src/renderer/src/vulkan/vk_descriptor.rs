@@ -41,14 +41,14 @@ use vk_mem::Allocator;
 
 /// Per-pool lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DescriptorPoolState {
+pub(crate) enum DescriptorPoolState {
     Ready,
     Exhausted,
 }
 
 /// A tracked descriptor pool with capacity and allocation accounting.
 #[derive(Debug, Clone)]
-pub struct DescriptorPoolRecord {
+pub(crate) struct DescriptorPoolRecord {
     pub handle: vk::DescriptorPool,
     pub capacity_sets: u32,
     pub allocated_sets: u32,
@@ -75,7 +75,7 @@ impl DescriptorPoolRecord {
 
 /// Structured outcome for descriptor allocation failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DescriptorAllocError {
+pub(crate) enum DescriptorAllocError {
     /// No pool could satisfy the allocation after one retry with a fresh pool.
     OutOfPoolMemory,
     /// Pool fragmentation prevented allocation after one retry.
@@ -107,11 +107,11 @@ impl fmt::Display for DescriptorAllocError {
 /// Per-frame and lifetime descriptor allocator statistics.
 #[derive(Debug, Clone, Default)]
 pub struct DescriptorAllocatorStats {
-    /// Most recent frame epoch that was reset.
-    pub last_reset_epoch: u64,
-    /// Total allocation attempts (including retries).
+    /// Most recent frame serial authorized by a successful reset.
+    pub frame_serial: u64,
+    /// Allocation attempts in the current frame epoch, including retries.
     pub allocation_attempts: u64,
-    /// Successful allocations.
+    /// Successful allocations in the current frame epoch.
     pub successful_allocations: u64,
     /// Current number of ready + exhausted pools.
     pub pool_count: u32,
@@ -123,9 +123,9 @@ pub struct DescriptorAllocatorStats {
     pub peak_allocated_sets: u32,
     /// Highest observed utilization ratio (allocated / capacity) across all pools.
     pub peak_utilization_ratio: f32,
-    /// Cumulative `ERROR_OUT_OF_POOL_MEMORY` classification events.
+    /// `ERROR_OUT_OF_POOL_MEMORY` observations in the current frame epoch.
     pub out_of_pool_events: u64,
-    /// Cumulative `ERROR_FRAGMENTED_POOL` classification events.
+    /// `ERROR_FRAGMENTED_POOL` observations in the current frame epoch.
     pub fragmented_pool_events: u64,
     /// Cumulative successful pool resets.
     pub reset_count: u64,
@@ -143,7 +143,7 @@ pub struct DescriptorAllocatorStats {
     dead_code,
     reason = "production path only; fault adapter is consumed exclusively by tests"
 )]
-pub(crate) trait VkDescriptorAdapter {
+trait VkDescriptorAdapter {
     fn create_pool(
         &self,
         device: &ash::Device,
@@ -167,7 +167,7 @@ pub(crate) trait VkDescriptorAdapter {
     fn destroy_pool(&self, device: &ash::Device, pool: vk::DescriptorPool);
 }
 
-pub(crate) struct DefaultVulkanAdapter;
+struct DefaultVulkanAdapter;
 
 impl VkDescriptorAdapter for DefaultVulkanAdapter {
     fn create_pool(
@@ -226,11 +226,11 @@ impl VkDescriptorAdapter for DefaultVulkanAdapter {
     }
 }
 
-/// Create a null ash::Device for use in fault-injection tests.
-/// Only safe to pass to a `VkDescriptorAdapter` implementation that ignores it.
+/// Create a valid, unloaded ash device table for fault-injection tests.
+/// The injected adapter never invokes these fallback function pointers.
 #[cfg(test)]
-unsafe fn null_device() -> ash::Device {
-    std::mem::MaybeUninit::zeroed().assume_init()
+unsafe fn unloaded_device() -> ash::Device {
+    ash::Device::load_with(|_| std::ptr::null(), vk::Device::null())
 }
 
 /// Builder for creating descriptor set layouts.
@@ -578,7 +578,7 @@ impl VkDynamicDescriptorAllocator {
     }
 
     /// Internal constructor with injectable adapter for testing.
-    pub(crate) fn new_with_adapter(
+    fn new_with_adapter(
         device: &ash::Device,
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
@@ -587,13 +587,13 @@ impl VkDynamicDescriptorAllocator {
         let mut pool = VkDynamicDescriptorAllocator::default();
         pool_ratios.iter().for_each(|r| pool.ratios.push(*r));
         pool.adapter = adapter;
-        pool.sets_per_pool = max_sets;
-        pool.max_sets_cap = Self::MAX_SETS_CAP.min(max_sets.max(1));
+        pool.max_sets_cap = Self::MAX_SETS_CAP;
+        pool.sets_per_pool = max_sets.clamp(1, pool.max_sets_cap);
 
         let handle = pool
             .adapter
-            .create_pool(device, max_sets, pool_ratios)?;
-        let record = DescriptorPoolRecord::new(handle, max_sets);
+            .create_pool(device, pool.sets_per_pool, pool_ratios)?;
+        let record = DescriptorPoolRecord::new(handle, pool.sets_per_pool);
         pool.ready_pools.push(record);
         pool.stats.pool_count = 1;
         pool.stats.pools_created = 1;
@@ -609,8 +609,8 @@ impl VkDynamicDescriptorAllocator {
     ///
     /// The `token` must be a `CompletedFrameSlot` created by the fence-wait path for
     /// this allocator's owning slot. It is consumed on first use. Mismatched slot
-    /// identity, stale epoch, or an already-consumed token all result in
-    /// `ResetRejected` before any Vulkan call.
+    /// identity, a serial unequal to `expected_frame_serial`, a stale epoch, or an
+    /// already-consumed token all result in `ResetRejected` before any Vulkan call.
     ///
     /// Every unique pool is reset exactly once. Exhausted pools are moved back to
     /// ready state. If any reset fails, conservative state is retained and the pools
@@ -619,6 +619,7 @@ impl VkDynamicDescriptorAllocator {
         &mut self,
         device: &ash::Device,
         token: &mut CompletedFrameSlot,
+        expected_frame_serial: u64,
     ) -> Result<(), DescriptorAllocError> {
         // ── Token validation (before any Vulkan call) ────────────────────
         let (slot_index, epoch) = token.take().ok_or_else(|| {
@@ -633,6 +634,13 @@ impl VkDynamicDescriptorAllocator {
             return Err(DescriptorAllocError::ResetRejected(format!(
                 "slot mismatch: token slot {} != allocator slot {}",
                 slot_index, self.frame_slot_index
+            )));
+        }
+
+        if epoch != expected_frame_serial {
+            self.stats.reset_rejections += 1;
+            return Err(DescriptorAllocError::ResetRejected(format!(
+                "serial mismatch: token serial {epoch} != expected serial {expected_frame_serial}"
             )));
         }
 
@@ -656,11 +664,20 @@ impl VkDynamicDescriptorAllocator {
 
         // ── Reset every unique pool exactly once ───────────────────────
         for &handle in &reset_handles {
-            self.adapter.reset_pool(device, handle).map_err(|e| {
-                DescriptorAllocError::ResetFailed(format!(
-                    "vkResetDescriptorPool failed: {:?}", e
-                ))
-            })?;
+            if let Err(error) = self.adapter.reset_pool(device, handle) {
+                // A preceding pool may already have been reset. Treat every pool as
+                // unavailable so allocation cannot reuse partially-reset state.
+                for mut record in self.ready_pools.drain(..) {
+                    record.state = DescriptorPoolState::Exhausted;
+                    self.full_pools.push(record);
+                }
+                for record in &mut self.full_pools {
+                    record.state = DescriptorPoolState::Exhausted;
+                }
+                return Err(DescriptorAllocError::ResetFailed(format!(
+                    "vkResetDescriptorPool failed: {:?}", error
+                )));
+            }
         }
 
         // ── All Vulkan resets succeeded; update state ──────────────────
@@ -682,8 +699,14 @@ impl VkDynamicDescriptorAllocator {
         );
 
         self.last_reset_epoch = epoch;
-        self.stats.last_reset_epoch = epoch;
+        self.stats.frame_serial = epoch;
         self.stats.reset_count += 1;
+        // These counters describe allocations made since the last authorized reset.
+        // Lifetime pool/reset counters and lifetime peaks remain intact.
+        self.stats.allocation_attempts = 0;
+        self.stats.successful_allocations = 0;
+        self.stats.out_of_pool_events = 0;
+        self.stats.fragmented_pool_events = 0;
         Ok(())
     }
 
@@ -696,8 +719,10 @@ impl VkDynamicDescriptorAllocator {
             return Ok(record);
         }
 
-        // Calculate next capacity with growth, clamped to cap.
-        let next_sets = ((self.sets_per_pool as f32 * 1.5) as u32)
+        // Calculate 1.5x growth without overflow, clamped before creation.
+        let next_sets = self
+            .sets_per_pool
+            .saturating_add(self.sets_per_pool / 2)
             .clamp(1, self.max_sets_cap);
         self.sets_per_pool = next_sets;
 
@@ -733,33 +758,31 @@ impl VkDynamicDescriptorAllocator {
             .allocate_sets(device, pool_record.handle, layout);
 
         match alloc_result {
-            Ok(sets) => {
-                pool_record.allocated_sets += sets.len() as u32;
-                self.update_peak_stats(&pool_record);
-                self.stats.successful_allocations += 1;
-                self.ready_pools.push(pool_record);
-                Ok(sets[0])
-            }
+            Ok(sets) => self.finish_successful_allocation(
+                pool_record,
+                sets,
+                "allocation returned no descriptor sets",
+            ),
             Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) => {
                 self.stats.out_of_pool_events += 1;
                 pool_record.state = DescriptorPoolState::Exhausted;
                 self.full_pools.push(pool_record);
 
-                // Retry exactly once with a fresh pool.
+                // Retry exactly once with a replacement pool.
                 let mut replacement = self.get_pool(device)?;
+                self.stats.allocation_attempts += 1;
                 let retry_result = self
                     .adapter
                     .allocate_sets(device, replacement.handle, layout);
 
                 match retry_result {
-                    Ok(sets) => {
-                        replacement.allocated_sets += sets.len() as u32;
-                        self.update_peak_stats(&replacement);
-                        self.stats.successful_allocations += 1;
-                        self.ready_pools.push(replacement);
-                        Ok(sets[0])
-                    }
+                    Ok(sets) => self.finish_successful_allocation(
+                        replacement,
+                        sets,
+                        "allocation retry returned no descriptor sets",
+                    ),
                     Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) => {
+                        self.stats.out_of_pool_events += 1;
                         replacement.state = DescriptorPoolState::Exhausted;
                         self.full_pools.push(replacement);
                         Err(DescriptorAllocError::OutOfPoolMemory)
@@ -786,21 +809,21 @@ impl VkDynamicDescriptorAllocator {
                 pool_record.state = DescriptorPoolState::Exhausted;
                 self.full_pools.push(pool_record);
 
-                // Retry exactly once with a fresh pool.
+                // Retry exactly once with a replacement pool.
                 let mut replacement = self.get_pool(device)?;
+                self.stats.allocation_attempts += 1;
                 let retry_result = self
                     .adapter
                     .allocate_sets(device, replacement.handle, layout);
 
                 match retry_result {
-                    Ok(sets) => {
-                        replacement.allocated_sets += sets.len() as u32;
-                        self.update_peak_stats(&replacement);
-                        self.stats.successful_allocations += 1;
-                        self.ready_pools.push(replacement);
-                        Ok(sets[0])
-                    }
+                    Ok(sets) => self.finish_successful_allocation(
+                        replacement,
+                        sets,
+                        "allocation retry returned no descriptor sets",
+                    ),
                     Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
+                        self.stats.fragmented_pool_events += 1;
                         replacement.state = DescriptorPoolState::Exhausted;
                         self.full_pools.push(replacement);
                         Err(DescriptorAllocError::FragmentedPool)
@@ -831,6 +854,25 @@ impl VkDynamicDescriptorAllocator {
                 )))
             }
         }
+    }
+
+    fn finish_successful_allocation(
+        &mut self,
+        mut record: DescriptorPoolRecord,
+        sets: Vec<vk::DescriptorSet>,
+        empty_message: &'static str,
+    ) -> Result<vk::DescriptorSet, DescriptorAllocError> {
+        let Some(set) = sets.first().copied() else {
+            record.state = DescriptorPoolState::Exhausted;
+            self.full_pools.push(record);
+            return Err(DescriptorAllocError::VulkanError(empty_message.to_string()));
+        };
+
+        record.allocated_sets += sets.len() as u32;
+        self.update_peak_stats(&record);
+        self.stats.successful_allocations += 1;
+        self.ready_pools.push(record);
+        Ok(set)
     }
 
     fn update_peak_stats(&mut self, record: &DescriptorPoolRecord) {
@@ -871,8 +913,8 @@ impl VkDynamicDescriptorAllocator {
     }
 }
 
-impl VkDestroyable for VkDynamicDescriptorAllocator {
-    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
+impl VkDynamicDescriptorAllocator {
+    fn destroy_pools(&mut self, device: &Device) {
         // Defensively deduplicate handles during teardown.
         let mut destroyed = std::collections::HashSet::new();
         for record in self.ready_pools.iter().chain(self.full_pools.iter()) {
@@ -883,6 +925,12 @@ impl VkDestroyable for VkDynamicDescriptorAllocator {
         self.ready_pools.clear();
         self.full_pools.clear();
         self.stats.pool_count = 0;
+    }
+}
+
+impl VkDestroyable for VkDynamicDescriptorAllocator {
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
+        self.destroy_pools(device);
     }
 }
 
@@ -979,7 +1027,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ash::vk::{DescriptorSet, Handle};
+    use ash::vk::Handle;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -990,6 +1038,8 @@ mod tests {
         create_results: RefCell<VecDeque<Result<vk::DescriptorPool, String>>>,
         allocate_results: RefCell<VecDeque<Result<Vec<vk::DescriptorSet>, vk::Result>>>,
         reset_results: RefCell<VecDeque<Result<(), vk::Result>>>,
+        create_capacity_log: Rc<RefCell<Vec<u32>>>,
+        reset_log: Rc<RefCell<Vec<vk::DescriptorPool>>>,
         destroy_log: Rc<RefCell<Vec<vk::DescriptorPool>>>,
     }
 
@@ -999,6 +1049,8 @@ mod tests {
                 create_results: RefCell::new(VecDeque::new()),
                 allocate_results: RefCell::new(VecDeque::new()),
                 reset_results: RefCell::new(VecDeque::new()),
+                create_capacity_log: Rc::new(RefCell::new(Vec::new())),
+                reset_log: Rc::new(RefCell::new(Vec::new())),
                 destroy_log: Rc::new(RefCell::new(Vec::new())),
             }
         }
@@ -1020,9 +1072,10 @@ mod tests {
         fn create_pool(
             &self,
             _device: &ash::Device,
-            _set_count: u32,
+            set_count: u32,
             _pool_ratios: &[PoolSizeRatio],
         ) -> Result<vk::DescriptorPool, String> {
+            self.create_capacity_log.borrow_mut().push(set_count);
             self.create_results
                 .borrow_mut()
                 .pop_front()
@@ -1055,8 +1108,9 @@ mod tests {
         fn reset_pool(
             &self,
             _device: &ash::Device,
-            _pool: vk::DescriptorPool,
+            pool: vk::DescriptorPool,
         ) -> Result<(), vk::Result> {
+            self.reset_log.borrow_mut().push(pool);
             self.reset_results
                 .borrow_mut()
                 .pop_front()
@@ -1080,7 +1134,7 @@ mod tests {
     }
 
     unsafe fn fake_device() -> ash::Device {
-        null_device()
+        unloaded_device()
     }
 
     // ── happy path ───────────────────────────────────────────────────────
@@ -1111,6 +1165,8 @@ mod tests {
             assert_eq!(snap.successful_allocations, 1);
             assert_eq!(snap.pool_count, 1);
             assert_eq!(snap.pools_created, 1);
+            assert_eq!(snap.peak_allocated_sets, 1);
+            assert!((snap.peak_utilization_ratio - 0.1).abs() < f32::EPSILON);
             assert_eq!(snap.out_of_pool_events, 0);
             assert_eq!(snap.fragmented_pool_events, 0);
         }
@@ -1122,6 +1178,7 @@ mod tests {
     fn out_of_pool_memory_growth_and_retry() {
         unsafe {
             let adapter = FaultInjectAdapter::new();
+            let create_capacity_log = adapter.create_capacity_log.clone();
             let fake_dev = fake_device();
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(1))); // initial pool
             adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)); // first attempt fails
@@ -1141,10 +1198,12 @@ mod tests {
             assert_eq!(set, vk::DescriptorSet::from_raw(200));
 
             let snap = alloc.stats_snapshot();
+            assert_eq!(snap.allocation_attempts, 2);
             assert_eq!(snap.successful_allocations, 1);
             assert_eq!(snap.out_of_pool_events, 1);
             assert_eq!(snap.pools_created, 2);
             assert_eq!(snap.pool_growth_events, 1);
+            assert_eq!(create_capacity_log.borrow().as_slice(), &[10, 15]);
             // The exhausted pool moved to full_pools.
             assert_eq!(alloc.pool_count(), 2);
         }
@@ -1175,6 +1234,7 @@ mod tests {
             assert_eq!(set, vk::DescriptorSet::from_raw(300));
 
             let snap = alloc.stats_snapshot();
+            assert_eq!(snap.allocation_attempts, 2);
             assert_eq!(snap.fragmented_pool_events, 1);
             assert_eq!(snap.pools_created, 2);
         }
@@ -1225,6 +1285,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn growth_pool_creation_failure_preserves_exhausted_pool() {
+        unsafe {
+            let adapter = FaultInjectAdapter::new();
+            let destroy_log = adapter.destroy_log.clone();
+            let fake_dev = fake_device();
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
+            adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
+            adapter.push_create(Err("injected growth failure".to_string()));
+
+            let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
+                &fake_dev,
+                10,
+                &make_ratios(),
+                Box::new(adapter),
+            )
+            .expect("allocator creation");
+            let result = alloc.allocate(&fake_dev, &[]);
+            assert!(matches!(
+                result,
+                Err(DescriptorAllocError::PoolCreationFailed(_))
+            ));
+            assert_eq!(alloc.ready_pool_count(), 0);
+            assert_eq!(alloc.pool_count(), 1);
+
+            alloc.destroy_pools(&fake_dev);
+            assert_eq!(destroy_log.borrow().as_slice(), &[vk::DescriptorPool::from_raw(1)]);
+        }
+    }
+
     // ── reset before fence completion (no token) ──────────────────────────
 
     #[test]
@@ -1248,7 +1338,7 @@ mod tests {
             let mut token = make_token(0, 1);
             token.take(); // consumed
 
-            let result = alloc.clear_pools(&fake_dev, &mut token);
+            let result = alloc.clear_pools(&fake_dev, &mut token, 1);
             assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
             assert_eq!(alloc.stats_snapshot().reset_rejections, 1);
         }
@@ -1275,12 +1365,12 @@ mod tests {
             // First reset with a valid token.
             let mut token1 = make_token(0, 1);
             alloc
-                .clear_pools(&fake_dev, &mut token1)
+                .clear_pools(&fake_dev, &mut token1, 1)
                 .expect("first reset");
             assert_eq!(alloc.stats_snapshot().reset_count, 1);
 
             // Second reset with same already-consumed token.
-            let result = alloc.clear_pools(&fake_dev, &mut token1);
+            let result = alloc.clear_pools(&fake_dev, &mut token1, 1);
             assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
             assert_eq!(alloc.stats_snapshot().reset_rejections, 1);
         }
@@ -1305,8 +1395,34 @@ mod tests {
             alloc.set_frame_slot_index(2);
 
             let mut token = make_token(0, 1); // slot 0, but allocator is slot 2
-            let result = alloc.clear_pools(&fake_dev, &mut token);
+            let result = alloc.clear_pools(&fake_dev, &mut token, 1);
             assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+        }
+    }
+
+    // ── serial mismatch ──────────────────────────────────────────────────
+
+    #[test]
+    fn serial_mismatch_rejected_before_reset() {
+        unsafe {
+            let adapter = FaultInjectAdapter::new();
+            let reset_log = adapter.reset_log.clone();
+            let fake_dev = fake_device();
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
+
+            let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
+                &fake_dev,
+                10,
+                &make_ratios(),
+                Box::new(adapter),
+            )
+            .expect("allocator creation");
+            alloc.set_frame_slot_index(0);
+
+            let mut token = make_token(0, 4);
+            let result = alloc.clear_pools(&fake_dev, &mut token, 5);
+            assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+            assert!(reset_log.borrow().is_empty());
         }
     }
 
@@ -1330,11 +1446,13 @@ mod tests {
 
             // Reset with epoch 5.
             let mut token = make_token(0, 5);
-            alloc.clear_pools(&fake_dev, &mut token).expect("reset at epoch 5");
+            alloc
+                .clear_pools(&fake_dev, &mut token, 5)
+                .expect("reset at epoch 5");
 
             // Try reset with epoch 3 (stale).
             let mut token2 = make_token(0, 3);
-            let result = alloc.clear_pools(&fake_dev, &mut token2);
+            let result = alloc.clear_pools(&fake_dev, &mut token2, 3);
             assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
         }
     }
@@ -1342,14 +1460,22 @@ mod tests {
     // ── partial reset failure retains conservative state ──────────────────
 
     #[test]
-    fn partial_reset_failure_retains_state() {
+    fn partial_reset_failure_quarantines_every_pool() {
         unsafe {
             let adapter = FaultInjectAdapter::new();
+            let reset_log = adapter.reset_log.clone();
             let fake_dev = fake_device();
-            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1))); // initial pool
-            adapter.push_allocate(Ok(vec![vk::DescriptorSet::from_raw(100)])); // fill it
-            // Script a reset failure.
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
+            adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(2)));
+            adapter.push_allocate(Ok(vec![vk::DescriptorSet::from_raw(100)]));
+            // Pool 2 resets, then pool 1 fails. Neither may remain reusable.
+            adapter.push_reset(Ok(()));
             adapter.push_reset(Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY));
+            // A later direct allocation must create pool 3 rather than reuse either
+            // pool whose reset state is now ambiguous.
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(3)));
+            adapter.push_allocate(Ok(vec![vk::DescriptorSet::from_raw(101)]));
 
             let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
                 &fake_dev,
@@ -1359,17 +1485,21 @@ mod tests {
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
-
-            // Allocate once to move pool into ready state with allocated_sets > 0.
             let _set = alloc.allocate(&fake_dev, &[]).expect("allocate");
 
             let mut token = make_token(0, 1);
-            let result = alloc.clear_pools(&fake_dev, &mut token);
+            let result = alloc.clear_pools(&fake_dev, &mut token, 1);
             assert!(matches!(result, Err(DescriptorAllocError::ResetFailed(_))));
-            // Token was consumed (take() succeeded) before the reset failure.
             assert!(token.is_consumed());
-            // Reset count should NOT increment on failure.
             assert_eq!(alloc.stats_snapshot().reset_count, 0);
+            assert_eq!(alloc.ready_pool_count(), 0);
+            assert_eq!(reset_log.borrow().as_slice(), &[
+                vk::DescriptorPool::from_raw(2),
+                vk::DescriptorPool::from_raw(1),
+            ]);
+
+            let _set = alloc.allocate(&fake_dev, &[]).expect("replacement allocation");
+            assert_eq!(alloc.pool_count(), 3);
         }
     }
 
@@ -1379,6 +1509,7 @@ mod tests {
     fn exact_once_reset_and_destruction() {
         unsafe {
             let adapter = FaultInjectAdapter::new();
+            let reset_log = adapter.reset_log.clone();
             let destroy_log = adapter.destroy_log.clone();
             let fake_dev = fake_device();
 
@@ -1401,14 +1532,22 @@ mod tests {
 
             // Reset with valid token.
             let mut token = make_token(0, 1);
-            alloc.clear_pools(&fake_dev, &mut token).expect("reset");
+            alloc
+                .clear_pools(&fake_dev, &mut token, 1)
+                .expect("reset");
 
             assert_eq!(alloc.stats_snapshot().reset_count, 1);
+            let mut reset_handles = reset_log.borrow().clone();
+            reset_handles.sort_by_key(|pool| pool.as_raw());
+            assert_eq!(reset_handles, vec![
+                vk::DescriptorPool::from_raw(1),
+                vk::DescriptorPool::from_raw(2),
+            ]);
             // After reset, exhausted pools moved to ready.
             assert_eq!(alloc.ready_pool_count(), 2);
 
             // Destroy: each unique pool destroyed exactly once.
-            alloc.destroy(&fake_dev, &unsafe { std::mem::zeroed() });
+            alloc.destroy_pools(&fake_dev);
 
             let logged = destroy_log.borrow();
             let mut sorted = logged.clone();
@@ -1424,8 +1563,9 @@ mod tests {
     fn growth_saturation_does_not_exceed_cap() {
         unsafe {
             let adapter = FaultInjectAdapter::new();
+            let create_capacity_log = adapter.create_capacity_log.clone();
             let fake_dev = fake_device();
-            // Initial pool at cap, then allocate fails, growth pool created, retry succeeds.
+            // Initial request exceeds the cap; both initial and growth pools are clamped.
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
             adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(2))); // growth pool: clamped to cap
@@ -1433,7 +1573,7 @@ mod tests {
 
             let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
                 &fake_dev,
-                4092,
+                5000,
                 &make_ratios(),
                 Box::new(adapter),
             )
@@ -1447,6 +1587,7 @@ mod tests {
             let snap = alloc.stats_snapshot();
             assert_eq!(snap.pool_growth_events, 1);
             assert_eq!(snap.pools_created, 2);
+            assert_eq!(create_capacity_log.borrow().as_slice(), &[4092, 4092]);
         }
     }
 
@@ -1478,27 +1619,57 @@ mod tests {
 
             // Reset frame 1.
             let mut token = make_token(0, 1);
-            alloc.clear_pools(&fake_dev, &mut token).unwrap();
+            alloc.clear_pools(&fake_dev, &mut token, 1).unwrap();
 
             assert_eq!(alloc.stats_snapshot().reset_count, 1);
             assert_eq!(alloc.stats_snapshot().reset_rejections, 0);
-            assert_eq!(alloc.stats_snapshot().last_reset_epoch, 1);
+            assert_eq!(alloc.stats_snapshot().frame_serial, 1);
+            assert_eq!(alloc.stats_snapshot().allocation_attempts, 0);
+            assert_eq!(alloc.stats_snapshot().successful_allocations, 0);
 
             // Frame 2: allocate again.
             let _ = alloc.allocate(&fake_dev, &[]).unwrap();
 
             // Reset frame 2.
             let mut token2 = make_token(0, 2);
-            alloc.clear_pools(&fake_dev, &mut token2).unwrap();
+            alloc.clear_pools(&fake_dev, &mut token2, 2).unwrap();
 
             assert_eq!(alloc.stats_snapshot().reset_count, 2);
-            assert_eq!(alloc.stats_snapshot().last_reset_epoch, 2);
+            assert_eq!(alloc.stats_snapshot().frame_serial, 2);
 
-            // Overall stats.
+            // Frame counters reset only after each authorized reset; lifetime
+            // reset counters and peaks remain.
+            let snap = alloc.stats_snapshot();
+            assert_eq!(snap.allocation_attempts, 0);
+            assert_eq!(snap.successful_allocations, 0);
+            assert_eq!(snap.peak_allocated_sets, 1);
+            assert_eq!(snap.reset_rejections, 0);
+        }
+    }
+
+    #[test]
+    fn double_fragmentation_returns_fragmented_pool() {
+        unsafe {
+            let adapter = FaultInjectAdapter::new();
+            let fake_dev = fake_device();
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
+            adapter.push_allocate(Err(vk::Result::ERROR_FRAGMENTED_POOL));
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(2)));
+            adapter.push_allocate(Err(vk::Result::ERROR_FRAGMENTED_POOL));
+
+            let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
+                &fake_dev,
+                10,
+                &make_ratios(),
+                Box::new(adapter),
+            )
+            .expect("allocator creation");
+
+            let result = alloc.allocate(&fake_dev, &[]);
+            assert!(matches!(result, Err(DescriptorAllocError::FragmentedPool)));
             let snap = alloc.stats_snapshot();
             assert_eq!(snap.allocation_attempts, 2);
-            assert_eq!(snap.successful_allocations, 2);
-            assert_eq!(snap.reset_rejections, 0);
+            assert_eq!(snap.fragmented_pool_events, 2);
         }
     }
 
@@ -1525,6 +1696,9 @@ mod tests {
 
             let result = alloc.allocate(&fake_dev, &[]);
             assert!(matches!(result, Err(DescriptorAllocError::OutOfPoolMemory)));
+            let snap = alloc.stats_snapshot();
+            assert_eq!(snap.allocation_attempts, 2);
+            assert_eq!(snap.out_of_pool_events, 2);
         }
     }
 }

@@ -41,11 +41,12 @@ Snippet Type: Pseudocode
 fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
     let frame = self.presentation.get_next_frame();
     let frame_sync = frame.sync;
+    let expected_frame_serial = self.presentation.frame_epoch();
 
     // Wait for the frame-slot fence and create a completion token.
     let mut token = unsafe { self.wait_for_frame_fence(frame_sync, frame.index)?; }
     // Descriptor cleanup consumes the token; rejects stale/duplicate tokens.
-    unsafe { self.cleanup_curr_frame_resources(&mut token)?; }
+    unsafe { self.cleanup_curr_frame_resources(&mut token, expected_frame_serial)?; }
     debug_assert!(token.is_consumed());
 
     let acquired = /* acquire/bind swapchain image, or choose headless slot */;
@@ -77,18 +78,30 @@ fn submit_frame(&self, frame: FrameAcquire) -> Result<(), String> {
 Snippet Type: Real
 ```rust
 // src/renderer/src/vulkan/vk_descriptor.rs
-pub fn clear_pools(&mut self, device: &ash::Device, token: &mut CompletedFrameSlot) -> Result<(), DescriptorAllocError> {
+pub fn clear_pools(
+    &mut self,
+    device: &ash::Device,
+    token: &mut CompletedFrameSlot,
+    expected_frame_serial: u64,
+) -> Result<(), DescriptorAllocError> {
     // Token validation before any Vulkan call.
     let (slot_index, epoch) = token.take()
         .ok_or_else(|| DescriptorAllocError::ResetRejected("token already consumed".into()))?;
-    if slot_index != self.frame_slot_index || epoch <= self.last_reset_epoch {
-        return Err(DescriptorAllocError::ResetRejected("slot/epoch mismatch".into()));
+    if slot_index != self.frame_slot_index
+        || epoch != expected_frame_serial
+        || epoch <= self.last_reset_epoch
+    {
+        return Err(DescriptorAllocError::ResetRejected("slot/serial mismatch".into()));
     }
-    // Reset every unique pool exactly once.
+    // Reset every unique pool exactly once. On partial failure, quarantine all
+    // records as exhausted so no physically-reset subset is claimed reusable.
     for handle in unique_handles(&self.ready_pools, &self.full_pools) {
-        self.adapter.reset_pool(device, handle)?;
+        if let Err(error) = self.adapter.reset_pool(device, handle) {
+            self.quarantine_all_pools();
+            return Err(DescriptorAllocError::ResetFailed(format!("{error:?}")));
+        }
     }
-    // All Vulkan resets succeeded; update state.
+    // All Vulkan resets succeeded; update state and begin fresh frame counters.
     for record in self.ready_pools.iter_mut() { record.allocated_sets = 0; }
     for record in self.full_pools.drain(..) { self.ready_pools.push(record); }
     self.last_reset_epoch = epoch;

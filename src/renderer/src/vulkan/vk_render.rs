@@ -2644,7 +2644,7 @@ impl VkRenderCore {
             if snap.peak_utilization_ratio > agg.peak_utilization_ratio {
                 agg.peak_utilization_ratio = snap.peak_utilization_ratio;
             }
-            agg.last_reset_epoch = agg.last_reset_epoch.max(snap.last_reset_epoch);
+            agg.frame_serial = agg.frame_serial.max(snap.frame_serial);
         }
         agg
     }
@@ -2682,11 +2682,12 @@ impl VkRenderCore {
     unsafe fn cleanup_curr_frame_resources(
         &mut self,
         token: &mut CompletedFrameSlot,
+        expected_frame_serial: u64,
     ) -> Result<(), String> {
         let curr_frame = self.presentation.get_curr_frame_mut();
         curr_frame
             .descriptors
-            .clear_pools(&self.device, token)
+            .clear_pools(&self.device, token, expected_frame_serial)
             .map_err(|e| format!("descriptor clear_pools failed: {e}"))
     }
 
@@ -2732,6 +2733,7 @@ impl VkRenderCore {
             let frame_data = self.presentation.get_next_frame();
             frame_data.index
         };
+        let expected_frame_serial = self.presentation.frame_epoch();
         // Re-borrow to get the remaining frame data after get_next_frame's
         // mutable borrow is released.
         let frame_data = &self.presentation.frame_data[frame_index as usize];
@@ -2748,7 +2750,9 @@ impl VkRenderCore {
         warn_if_acquire_stage_spike("frame_fence_wait", frame_fence_wait_ms);
 
         let cleanup_start = Instant::now();
-        unsafe { self.cleanup_curr_frame_resources(&mut completion_token)? };
+        unsafe {
+            self.cleanup_curr_frame_resources(&mut completion_token, expected_frame_serial)?
+        };
         let frame_cleanup_ms = elapsed_ms(cleanup_start);
         // Token is consumed by cleanup; assert for safety.
         debug_assert!(
