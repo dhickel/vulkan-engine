@@ -8,8 +8,6 @@
 //! 2. Define a scene builder closure
 //! 3. Call `run_headless_capture_test()`
 
-#![allow(dead_code)]
-
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use log::{error, info};
 use renderer::prelude::{
@@ -297,6 +295,10 @@ pub fn set_default_camera(
 ///
 /// Returns vertices and indices forming 12 triangles (2 per face × 6 faces).
 /// Each face gets its own vertices for correct face normals.
+#[allow(
+    dead_code,
+    reason = "shared mesh helper is not used by every capture binary"
+)]
 pub fn build_cube_mesh(name: &str) -> ProceduralMeshData {
     let s = 0.5; // half-size
                  // 6 faces × 4 vertices = 24 vertices for correct face normals
@@ -352,6 +354,10 @@ pub fn build_cube_mesh(name: &str) -> ProceduralMeshData {
 ///
 /// `segments` controls the number of longitudinal slices (min 3).
 /// The sphere has radius 1.0 and is centered at origin.
+#[allow(
+    dead_code,
+    reason = "shared mesh helper is not used by every capture binary"
+)]
 pub fn build_sphere_mesh(name: &str, segments: u32) -> ProceduralMeshData {
     let segs = segments.max(4);
     let rings = segs / 2; // latitude rings (half the segments)
@@ -418,6 +424,10 @@ pub fn build_sphere_mesh(name: &str, segments: u32) -> ProceduralMeshData {
 /// Build a flat quad in the XZ plane as procedural mesh data.
 ///
 /// Centered at origin, normal pointing +Y.
+#[allow(
+    dead_code,
+    reason = "shared mesh helper is not used by every capture binary"
+)]
 pub fn build_plane_mesh(name: &str, size: f32) -> ProceduralMeshData {
     let s = size * 0.5;
     let vertices = vec![
@@ -438,6 +448,10 @@ pub fn build_plane_mesh(name: &str, size: f32) -> ProceduralMeshData {
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
+#[allow(
+    dead_code,
+    reason = "shared mesh helper is not used by every capture binary"
+)]
 fn vtx(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> ProceduralVertex {
     let position = Vec3::from_array(pos);
     let n = Vec3::from_array(normal);
@@ -455,6 +469,10 @@ fn vtx(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> ProceduralVertex {
 /// For +Y normal (0,1,0), returns (1,0,0,1) (tangent in +X, handedness +1).
 /// For -Y normal (0,-1,0), returns (1,0,0,-1) (tangent in +X, handedness -1).
 /// For other normals, uses a cross-product with an up vector.
+#[allow(
+    dead_code,
+    reason = "shared mesh helper is not used by every capture binary"
+)]
 pub fn compute_tangent(normal: Vec3) -> Vec4 {
     let up = if normal.x.abs() < 0.9 {
         Vec3::X

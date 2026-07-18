@@ -218,12 +218,7 @@ fn run() -> Result<(), AppError> {
     let collision_world = CollisionWorld::from_level(level);
 
     if headless_opts.enabled {
-        return run_headless(
-            level,
-            &content_pack,
-            &collision_world,
-            &headless_opts,
-        );
+        return run_headless(level, &content_pack, &collision_world, &headless_opts);
     }
 
     let event_loop = EventLoop::new()?;
@@ -505,7 +500,8 @@ fn render_frame(
                     player.position
                 );
                 return Err(RendererError::InvalidState(
-                    "player position must remain finite before camera view construction".to_string(),
+                    "player position must remain finite before camera view construction"
+                        .to_string(),
                 ));
             }
         }

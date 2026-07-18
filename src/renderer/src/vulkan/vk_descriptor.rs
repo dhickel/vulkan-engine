@@ -4,8 +4,6 @@
 //! Implements traditional Vulkan descriptor sets with dynamic pool allocation. NOT using
 //! bindless/descriptor indexing - this is the classic Vulkan 1.0 approach.
 //!
-//! Internal Vulkan descriptor management; dead code allowed.
-#![allow(dead_code)]
 //!
 //! ## Key Concepts
 //! - **DescriptorLayoutBuilder**: Builder pattern for creating descriptor set layouts
@@ -45,7 +43,7 @@ use vk_mem::Allocator;
 /// then creates VkDescriptorSetLayout.
 ///
 /// ## Usage Pattern
-/// ```ignore
+/// ```text
 /// let layout = DescriptorLayoutBuilder::default()
 ///     .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
 ///     .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
@@ -101,10 +99,6 @@ impl<'a> DescriptorLayoutBuilder<'a> {
                 .map_err(|err| format!("Error creating descriptor set layout: {:?}", err))
         }
     }
-
-    pub fn clear(&mut self) {
-        self.bindings.clear()
-    }
 }
 
 /// Descriptor type ratio for pool sizing.
@@ -113,7 +107,7 @@ impl<'a> DescriptorLayoutBuilder<'a> {
 /// Specifies how many descriptors of each type a pool should hold, as a ratio of max_sets.
 ///
 /// ## Example
-/// ```ignore
+/// ```text
 /// PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0)
 /// // For max_sets=10: pool will have 10*2.0 = 20 uniform buffer descriptors
 /// ```
@@ -177,17 +171,6 @@ impl VkDescriptorAllocator {
         Ok(Self { pool })
     }
 
-    pub fn clear(&mut self, device: &LogicalDevice) -> Result<(), String> {
-        unsafe {
-            device
-                .device
-                .reset_descriptor_pool(self.pool, vk::DescriptorPoolResetFlags::default())
-                .map_err(|err| format!("Failed to create pool {:?}", err))?
-        }
-
-        Ok(())
-    }
-
     pub fn destroy(&self, device: &ash::Device) {
         unsafe { device.destroy_descriptor_pool(self.pool, None) }
     }
@@ -220,7 +203,7 @@ pub enum VkDescWriterType {
 /// vkUpdateDescriptorSets. More efficient than individual updates.
 ///
 /// ## Usage Pattern
-/// ```ignore
+/// ```text
 /// let mut writer = VkDescriptorWriter::default();
 /// writer.write_buffer(0, buffer, size, offset, vk::DescriptorType::UNIFORM_BUFFER);
 /// writer.write_image(1, image_view, sampler, layout, vk::DescriptorType::COMBINED_IMAGE_SAMPLER);
@@ -297,12 +280,6 @@ impl<'a> VkDescriptorWriter<'a> {
             .descriptor_type(typ);
 
         self.writes.push((VkDescWriterType::Buffer, descriptor_set));
-    }
-
-    pub fn clear(&mut self) {
-        self.image_infos.clear();
-        self.buffer_infos.clear();
-        self.writes.clear();
     }
 
     pub fn update_set(&mut self, device: &ash::Device, set: vk::DescriptorSet) {

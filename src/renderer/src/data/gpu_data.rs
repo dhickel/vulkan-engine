@@ -5,17 +5,14 @@
 //! payloads consumed by the rendergraph. This file bridges CPU-side asset/cache data and Vulkan
 //!
 //! Internal GPU data definitions with many future-facing types; dead code allowed.
-#![allow(dead_code)]
 //! command recording.
 //!
 //! ## Key Concepts
 //! - **Vertex layout**: Comprehensive layout with all glTF attributes (position, normal, tangent, UVs, skinning)
 //! - **Push constants**: Per-draw data (model matrix, buffer addresses) avoiding descriptor updates
-use crate::data::data_cache::{
-    TextureCache, VkLoadedMaterial, VkPipelineType, VkSamplerInfo,
-};
-use crate::data::handles::{MaterialHandle, MeshHandle, TextureHandle};
-use crate::vulkan::vk_types::{VkImageAlloc, VkSubAlloc};
+use crate::data::data_cache::{TextureCache, VkLoadedMaterial, VkPipelineType, VkSamplerInfo};
+use crate::data::handles::{MaterialHandle, TextureHandle};
+use crate::vulkan::vk_types::VkSubAlloc;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, UVec4, Vec3, Vec4};
@@ -128,24 +125,6 @@ impl AlphaMode {
 //     pub specular_color_tex_id: u32,
 // }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct EmissiveMap {
-    pub factor: Vec3,
-    pub texture_id: TextureHandle,
-}
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct NormalMap {
-    pub scale: f32,
-    pub texture_id: TextureHandle,
-}
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct OcclusionMap {
-    pub strength: f32,
-    pub texture_id: TextureHandle,
-}
-
 /////////////////////////////
 // MESH & TEXTURE METADATA //
 /////////////////////////////
@@ -203,29 +182,6 @@ impl Default for MaterialMeta {
 }
 
 impl MaterialMeta {
-    pub fn unlit(base_color: Vec4, texture: Option<TextureHandle>) -> Self {
-        let mut meta = Self {
-            shading_model: MaterialShadingModel::Unlit,
-            ..Default::default()
-        };
-        meta.material_values.base_color_factor = base_color;
-
-        if let Some(texture_id) = texture {
-            meta.texture_ids.base_color = texture_id;
-            meta.material_values.base_color_uv_set = 0;
-        }
-
-        meta
-    }
-
-    pub fn pbr_simple(base_color: Vec4, metallic: f32, roughness: f32) -> Self {
-        let mut meta = Self::default();
-        meta.material_values.base_color_factor = base_color;
-        meta.material_values.metallic_factor = metallic.clamp(0.0, 1.0);
-        meta.material_values.roughness_factor = roughness.clamp(0.0, 1.0);
-        meta
-    }
-
     pub fn set_alpha_mode(&mut self, alpha_mode: AlphaMode, alpha_cutoff: f32) {
         self.alpha_mode = alpha_mode;
         self.material_values.alpha_mask = alpha_mode.to_float_value();
@@ -319,21 +275,6 @@ impl Default for MaterialValues {
     }
 }
 
-#[derive(Copy, Clone, Default, PartialEq, Debug)]
-pub struct TextureSamplers {
-    base_color: vk::Sampler,
-    met_rough: vk::Sampler,
-    normal: vk::Sampler,
-    occlusion: vk::Sampler,
-    emissive: vk::Sampler,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Sampler {
-    Linear,
-    Nearest,
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TextureSemantic {
     BaseColor,
@@ -420,20 +361,10 @@ pub struct TextureMeta {
 }
 
 pub struct VkCubeMap {
-    pub texture_meta: Option<TextureMeta>,
-    pub full_extent: vk::Extent3D,
-    pub face_extent: vk::Extent3D,
     pub allocation: vk_mem::Allocation,
     pub image: vk::Image,
     pub image_view: vk::ImageView,
     pub sampler: vk::Sampler,
-}
-
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct SurfaceMeta {
-    pub start_index: u32,
-    pub count: u32,
-    pub material_index: Option<MaterialHandle>,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -538,23 +469,6 @@ impl VkModelPushConsts {
             _pad: [0; 2],
         }
     }
-
-    pub fn new_anim(
-        model_matrix: Mat4,
-        joint_count: u32,
-        vertex_buffer_addr: vk::DeviceAddress,
-        mat_meta_buffer_addr: vk::DeviceAddress,
-        has_uv1: bool,
-    ) -> Self {
-        Self {
-            model_matrix,
-            vertex_buffer_addr,
-            mat_meta_buffer_addr,
-            joint_count,
-            has_uv1: if has_uv1 { 1 } else { 0 },
-            _pad: [0; 2],
-        }
-    }
 }
 
 #[repr(C)]
@@ -611,12 +525,7 @@ impl Default for EnvironmentUBO {
         Self {
             light_dir: Vec4::new(0.1, 0.7, 0.7, 0.0),
             light_color: Vec4::new(1.0, 0.95, 0.85, 1.0),
-            light_view_proj: [
-                Vec4::X,
-                Vec4::Y,
-                Vec4::Z,
-                Vec4::W,
-            ],
+            light_view_proj: [Vec4::X, Vec4::Y, Vec4::Z, Vec4::W],
             exposure: 4.5,
             gamma: 2.2,
             prefilter_mips_levels: 5.0,
@@ -725,9 +634,7 @@ impl PushConstCubeCapture {
 
 #[derive(Debug, Copy, Clone)]
 pub struct VkMeshBuffers {
-    pub cache_id: MeshHandle,
     pub index_count: u32,
-    pub vertex_count: u32,
     pub material_id: MaterialHandle,
     pub index_buffer: VkSubAlloc,
     pub vertex_buffer: VkSubAlloc,
@@ -742,29 +649,6 @@ impl VkMeshBuffers {
         // 4 bytes per u32
         (self.index_buffer.offset / 4) as u32
     }
-}
-
-#[derive(Debug)]
-pub struct VkGpuTextureBuffer {
-    pub image_alloc: VkImageAlloc,
-    pub data_buffer: vk::Buffer,
-    pub data_buffer_offset: u32,
-}
-
-#[derive(Debug)]
-pub struct VkGpuMetRoughBuffer {
-    pub color_image: VkImageAlloc,
-    pub metal_rough_image: VkImageAlloc,
-    pub data_buffer: vk::Buffer,
-    pub data_buffer_offset: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct VkMetRoughUniforms {
-    pub color_factors: Vec4,
-    pub metal_rough_factors: Vec4,
-    pub extra: [Vec4; 14],
 }
 
 /////////////////////////////
@@ -816,15 +700,6 @@ pub struct RenderObject {
     pub has_uv1: bool,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
-}
-
-#[repr(C)]
-#[derive(PartialEq, Debug, Copy, Clone)]
-pub enum MaterialPass {
-    MainColor,
-    Transparent,
-    Other,
-    NULL,
 }
 
 // Compile-time layout assertions for UBO std140 alignment

@@ -10,7 +10,6 @@ pub mod compression;
 pub mod data_cache;
 pub mod data_util;
 pub mod environment_import;
-pub mod file_watcher;
 pub mod gpu_data;
 pub mod handles;
 pub(crate) mod thread_pool;

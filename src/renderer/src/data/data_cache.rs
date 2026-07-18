@@ -5,7 +5,6 @@
 //! lazy loading with Unloaded/Loaded state machines. Provides default resources (white texture,
 //!
 //! Internal cache implementation with many future-facing API surfaces; dead code allowed.
-#![allow(dead_code)]
 //! error pink texture, default materials).
 //!
 //! ## Key Concepts
@@ -61,8 +60,8 @@
 
 use crate::data::environment_import::{self, EnvironmentSource, PendingSkyboxSource};
 use crate::data::gpu_data::{
-    AlphaMode, AsByteSlice, EmissiveMap, EnvironmentUBO, MaterialMeta, MaterialShadingModel,
-    MeshMeta, NormalMap, OcclusionMap, TextureIds, TextureMeta, VkCubeMap, VkMeshBuffers,
+    AlphaMode, AsByteSlice, EnvironmentUBO, MaterialMeta, MaterialShadingModel, MeshMeta,
+    TextureIds, TextureMeta, VkCubeMap, VkMeshBuffers,
 };
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
@@ -73,17 +72,16 @@ use crate::vulkan::vk_descriptor::{
 };
 use crate::vulkan::vk_storage::{BufferPlacement, VkAllocResult, VkSubAllocator};
 use crate::vulkan::vk_types::{
-    VkBuffer, VkBufferAndDescriptorLimits, VkCommandPool, VkDestroyable, VkDeviceQueues,
-    VkHostBuffer, VkImageAlloc, VkPipeline, VkSubAlloc, VkSubmitParam,
+    VkBuffer, VkBufferAndDescriptorLimits, VkDestroyable, VkDeviceQueues, VkHostBuffer,
+    VkImageAlloc, VkPipeline, VkSubAlloc, VkSubmitParam,
 };
 
 use crate::vulkan::vk_util;
 use ash::{vk, Device};
 use glam::{vec4, Vec3, Vec4};
-use image::{ImageBuffer, Rgba};
+use image::ImageBuffer;
 use log::{debug, error, info};
 use std::collections::{HashMap, HashSet};
-use std::path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use vk_mem::Allocator;
@@ -107,7 +105,6 @@ pub struct PendingTextureBatch {
 
 pub enum UploadBatchStatus {
     WaitingFence,
-    Completed,
     Failed(String),
 }
 
@@ -258,7 +255,6 @@ pub struct TextureCache {
     material_meta_storage: VkSubAllocator,
     host_buffer: Arc<Mutex<VkHostBuffer>>,
     host_alignment: u64,
-    gfx_pool: VkCommandPool,
     gfx_queue: vk::Queue,
     linear_blit_support: Mutex<HashMap<vk::Format, bool>>,
     pending_batches: HashMap<u64, PendingTextureBatch>,
@@ -287,21 +283,6 @@ impl TextureCache {
     pub const DEFAULT_ERROR_MAT: MaterialHandle = MaterialHandle::new(1, 0);
     pub const DEFAULT_MAT_ITER_START: usize = 2;
 
-    pub const DEFAULT_NORMAL_MAP: NormalMap = NormalMap {
-        scale: Self::DEFAULT_NORMAL_SCALE,
-        texture_id: Self::DEFAULT_NORMAL_TEX,
-    };
-
-    pub const DEFAULT_OCCLUSION_MAP: OcclusionMap = OcclusionMap {
-        strength: Self::DEFAULT_OCCLUSION_STRENGTH,
-        texture_id: Self::DEFAULT_OCCLUSION_TEX,
-    };
-
-    pub const DEFAULT_EMISSIVE_MAP: EmissiveMap = EmissiveMap {
-        factor: Self::DEFAULT_EMISSIVE_FACTOR,
-        texture_id: Self::DEFAULT_EMISSIVE_TEX,
-    };
-
     pub fn new(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
@@ -314,7 +295,6 @@ impl TextureCache {
         host_buffer: Arc<Mutex<VkHostBuffer>>,
         meta_buffer_size: u64,
         limits: &VkBufferAndDescriptorLimits,
-        gfx_pool: VkCommandPool,
         gfx_queue: vk::Queue,
     ) -> Result<Self, String> {
         let def_color = CachedTexture::Unloaded(TextureMeta {
@@ -462,17 +442,12 @@ impl TextureCache {
             host_buffer,
             sampler_cache,
             host_alignment: std::cmp::max(limits.optimal_buffer_copy_offset_alignment, 4),
-            gfx_pool,
             gfx_queue,
             linear_blit_support: Mutex::new(HashMap::new()),
             pending_batches: HashMap::new(),
             pending_textures: HashMap::new(),
             next_batch_id: 1,
         })
-    }
-
-    pub fn is_supported_format(&self, format: vk::Format) -> bool {
-        self.supported_formats.contains(&format)
     }
 
     fn supports_linear_mip_blit(&self, format: vk::Format) -> bool {
@@ -590,57 +565,6 @@ impl TextureCache {
         self.alloc_texture_slot(CachedTexture::Unloaded(data))
     }
 
-    pub(crate) fn save_debug_image(
-        data: &TextureMeta,
-        bytes: &[u8],
-        filename: String,
-    ) -> Result<(), String> {
-        let path = path::Path::new("debug_textures").join(filename);
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("debug texture path has no parent: {}", path.display()))?;
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create debug texture directory: {err}"))?;
-
-        match data.payload.format() {
-            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
-                if let Some(img) = ImageBuffer::<Rgba<u8>, _>::from_raw(
-                    data.payload.width(),
-                    data.payload.height(),
-                    bytes,
-                ) {
-                    img.save(&path)
-                        .map_err(|err| format!("failed to save debug texture: {err}"))?;
-                }
-            }
-            vk::Format::R8G8B8_UNORM | vk::Format::R8G8B8_SRGB => {
-                if let Some(img) = ImageBuffer::<image::Rgb<u8>, _>::from_raw(
-                    data.payload.width(),
-                    data.payload.height(),
-                    bytes,
-                ) {
-                    img.save(&path)
-                        .map_err(|err| format!("failed to save debug texture: {err}"))?;
-                }
-            }
-            _ => {
-                println!(
-                    "Unsupported format for debug save: {:?}",
-                    data.payload.format()
-                );
-            }
-        }
-
-        println!("Saved debug image: {:?}", path);
-        Ok(())
-    }
-
-    pub fn add_textures(&mut self, data: Vec<TextureMeta>) -> Vec<TextureHandle> {
-        data.into_iter()
-            .map(|meta| self.add_texture(meta))
-            .collect()
-    }
-
     pub fn add_material(&mut self, data: MaterialMeta) -> MaterialHandle {
         self.alloc_material_slot(CachedMaterial::Unloaded(data))
     }
@@ -738,7 +662,7 @@ impl TextureCache {
 
         for (image_alloc, _) in image_allocs.into_iter() {
             let allocator = self.allocator.lock().expect("allocator lock poisoned");
-            vk_util::destroy_image(&allocator, image_alloc);
+            vk_util::destroy_image(&self.device, &allocator, image_alloc);
         }
     }
 
@@ -918,9 +842,9 @@ impl TextureCache {
                     "failed to submit transfer commands for texture upload batch: {err}; \
                      resetting host buffers also failed: {reset_err}"
                 ),
-                None => format!(
-                    "failed to submit transfer commands for texture upload batch: {err}"
-                ),
+                None => {
+                    format!("failed to submit transfer commands for texture upload batch: {err}")
+                }
             });
         }
 
@@ -1050,13 +974,6 @@ impl TextureCache {
                 }
                 UploadBatchStatus::Failed(ref msg) => {
                     error!("Dropping failed batch {}: {}", batch_id, msg);
-                    for id in batch.texture_ids.iter() {
-                        self.pending_textures.remove(id);
-                    }
-                    self.destroy_uploaded_images(batch.image_allocs);
-                    finalized += 1;
-                }
-                UploadBatchStatus::Completed => {
                     for id in batch.texture_ids.iter() {
                         self.pending_textures.remove(id);
                     }
@@ -1390,7 +1307,7 @@ impl TextureCache {
                 let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
                 if let CachedTexture::Loaded(tex) = old_tex {
                     let allocator = self.allocator.lock().expect("allocator lock poisoned");
-                    vk_util::destroy_image(&allocator, tex.alloc)
+                    vk_util::destroy_image(&self.device, &allocator, tex.alloc)
                 }
                 self.texture_generations[slot_idx] =
                     self.texture_generations[slot_idx].wrapping_add(1);
@@ -1405,15 +1322,6 @@ impl TextureCache {
 
     pub fn deallocate_texture(&mut self, texture_id: TextureHandle) {
         self.deallocate_textures(vec![texture_id]);
-    }
-
-    pub fn deallocate_textures_safe(&mut self, texture_ids: Vec<TextureHandle>) {
-        self.deallocate_textures(texture_ids);
-    }
-
-    /// Unsafe because this can destroy reserved/default texture slots relied on by engine code.
-    pub unsafe fn deallocate_textures_unchecked(&mut self, texture_ids: Vec<TextureHandle>) {
-        self.deallocate_textures_with_policy(texture_ids, false);
     }
 
     fn deallocate_materials_with_policy(
@@ -1450,11 +1358,6 @@ impl TextureCache {
     pub fn deallocate_materials(&mut self, material_ids: Vec<MaterialHandle>) {
         self.deallocate_materials_with_policy(material_ids, true);
     }
-
-    /// Unsafe because this can destroy reserved/default material slots relied on by engine code.
-    pub unsafe fn deallocate_materials_unchecked(&mut self, material_ids: Vec<MaterialHandle>) {
-        self.deallocate_materials_with_policy(material_ids, false);
-    }
 }
 
 impl VkDestroyable for TextureCache {
@@ -1470,7 +1373,7 @@ impl VkDestroyable for TextureCache {
         for slot in self.cached_textures.iter_mut() {
             let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
             if let CachedTexture::Loaded(tex) = old_tex {
-                vk_util::destroy_image(allocator, tex.alloc);
+                vk_util::destroy_image(device, allocator, tex.alloc);
             }
         }
 
@@ -1608,26 +1511,6 @@ impl MeshCache {
         data.into_iter().map(|mesh| self.add(mesh)).collect()
     }
 
-    pub fn add_and_allocate(
-        &mut self,
-        data: MeshMeta,
-        buffer_placement: BufferPlacement,
-        return_buffers: bool,
-    ) -> LoadResult<VkMeshBuffers> {
-        let id = self.add(data);
-        self.allocate_id(id, buffer_placement, return_buffers)
-    }
-
-    pub fn add_and_allocate_multi(
-        &mut self,
-        data: Vec<MeshMeta>,
-        buffer_placement: BufferPlacement,
-        return_buffers: bool,
-    ) -> LoadResult<VkMeshBuffers> {
-        let ids = self.add_multi(data);
-        self.allocate_ids(&ids, buffer_placement, return_buffers)
-    }
-
     pub fn get_id(&self, id: MeshHandle) -> Result<&CachedMesh, CacheError> {
         let slot = self.validate_mesh_slot(id)?;
         self.cached_meshes.get(slot).ok_or(CacheError::OutOfBounds)
@@ -1640,21 +1523,6 @@ impl MeshCache {
             Some(CachedMesh::Unloaded(_)) => Err(CacheError::NotLoaded),
             Some(CachedMesh::_NULL) => Err(CacheError::InvalidHandle),
             None => Err(CacheError::OutOfBounds),
-        }
-    }
-
-    pub fn get_ids(&self, ids: Vec<MeshHandle>) -> Vec<Result<&CachedMesh, CacheError>> {
-        ids.into_iter().map(|id| self.get_id(id)).collect()
-    }
-
-    pub fn is_id_loaded(&self, id: MeshHandle) -> bool {
-        let Ok(slot) = self.validate_mesh_slot(id) else {
-            return false;
-        };
-        if let Some(found) = self.cached_meshes.get(slot) {
-            matches!(found, CachedMesh::Loaded(_))
-        } else {
-            false
         }
     }
 
@@ -1729,14 +1597,10 @@ impl MeshCache {
                         .unwrap_or(TextureCache::DEFAULT_MAT_ROUGH_MAT);
                     let (bounds_min, bounds_max) = meta.vertices.iter().fold(
                         (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
-                        |(min, max), vertex| {
-                            (min.min(vertex.position), max.max(vertex.position))
-                        },
+                        |(min, max), vertex| (min.min(vertex.position), max.max(vertex.position)),
                     );
                     let buffer = VkMeshBuffers {
-                        cache_id: id,
                         index_count: meta.indices.len() as u32,
-                        vertex_count: meta.vertices.len() as u32,
                         index_buffer: index_alloc,
                         vertex_buffer: vert_alloc,
                         joint_desc: self.default_joint_desc,
@@ -1878,18 +1742,8 @@ impl MeshCache {
         self.deallocate_id_with_policy(mesh_id, true);
     }
 
-    /// Unsafe because this can destroy reserved/default mesh slots relied on by engine code.
-    pub unsafe fn deallocate_id_unchecked(&mut self, mesh_id: MeshHandle) {
-        self.deallocate_id_with_policy(mesh_id, false);
-    }
-
     pub fn deallocate_ids(&mut self, mesh_ids: &[MeshHandle]) {
         mesh_ids.iter().for_each(|&id| self.deallocate_id(id))
-    }
-
-    pub fn deallocate_all(&mut self, _allocator: &vk_mem::Allocator) {
-        (Self::DEFAULT_MESH_ITER_START..self.cached_meshes.len())
-            .for_each(|i| self.deallocate_id(self.mesh_handle_for_slot(i as u32)))
     }
 }
 
@@ -2107,10 +1961,20 @@ impl VkPipelineCache {
 }
 
 impl VkDestroyable for VkPipelineCache {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.pipelines
-            .iter_mut()
-            .for_each(|pipe| pipe.destroy(device, allocator));
+    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
+        let mut destroyed_pipelines = HashSet::new();
+        let mut destroyed_layouts = HashSet::new();
+        for pipeline in self.pipelines.iter() {
+            unsafe {
+                if destroyed_pipelines.insert(pipeline.pipeline) {
+                    device.destroy_pipeline(pipeline.pipeline, None);
+                }
+                // Opaque/alpha variants intentionally share pipeline layouts.
+                if destroyed_layouts.insert(pipeline.layout) {
+                    device.destroy_pipeline_layout(pipeline.layout, None);
+                }
+            }
+        }
     }
 }
 
@@ -2184,9 +2048,13 @@ impl VkDescLayoutCache {
 
 impl VkDestroyable for VkDescLayoutCache {
     fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
-        self.layouts.iter().for_each(|layout| unsafe {
-            device.destroy_descriptor_set_layout(*layout, None);
-        })
+        let mut destroyed = HashSet::new();
+        for layout in self.layouts.iter().copied() {
+            // Environment descriptor roles intentionally alias the skybox layout.
+            if destroyed.insert(layout) {
+                unsafe { device.destroy_descriptor_set_layout(layout, None) };
+            }
+        }
     }
 }
 
@@ -2510,19 +2378,64 @@ mod tests {
             VkPipelineType::PbrMetRoughAlpha
         );
 
-        let mut unlit_opaque = MaterialMeta::unlit(vec4(1.0, 1.0, 1.0, 1.0), None);
+        let mut unlit_opaque = MaterialMeta {
+            shading_model: MaterialShadingModel::Unlit,
+            ..MaterialMeta::default()
+        };
         unlit_opaque.alpha_mode = AlphaMode::Opaque;
         assert_eq!(
             TextureCache::pipeline_for_material(&unlit_opaque),
             VkPipelineType::UnlitOpaque
         );
 
-        let mut unlit_blend = MaterialMeta::unlit(vec4(1.0, 1.0, 1.0, 0.5), None);
+        let mut unlit_blend = MaterialMeta {
+            shading_model: MaterialShadingModel::Unlit,
+            ..MaterialMeta::default()
+        };
         unlit_blend.alpha_mode = AlphaMode::Blend;
         assert_eq!(
             TextureCache::pipeline_for_material(&unlit_blend),
             VkPipelineType::UnlitAlpha
         );
+    }
+
+    #[test]
+    fn environment_source_can_be_restored_after_failed_upload() {
+        let mut cache = EnvironmentCache::new(HashSet::from([vk::Format::R8G8B8A8_UNORM]));
+        cache.skyboxes.push(CachedEnvironment::Unloaded(
+            PendingSkyboxSource::CubemapFaces {
+                face_size: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                bytes: vec![7; 24],
+            },
+        ));
+        cache.env_maps.push(None);
+        cache.env_generations.push(0);
+        let env_id = EnvironmentHandle::new(0, 0);
+
+        let source = cache
+            .take_unloaded_source(env_id)
+            .expect("environment handle should be valid")
+            .expect("environment should still need an upload");
+        cache
+            .restore_unloaded_source(env_id, source)
+            .expect("failed uploads must remain retryable");
+
+        let restored = cache
+            .take_unloaded_source(env_id)
+            .expect("environment handle should remain valid")
+            .expect("restored source should be available for retry");
+        let PendingSkyboxSource::CubemapFaces {
+            face_size,
+            format,
+            bytes,
+        } = restored
+        else {
+            panic!("restored source changed representation");
+        };
+        assert_eq!(face_size, 1);
+        assert_eq!(format, vk::Format::R8G8B8A8_UNORM);
+        assert_eq!(bytes, vec![7; 24]);
     }
 
     #[test]

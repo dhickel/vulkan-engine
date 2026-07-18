@@ -5,7 +5,6 @@
 //! → Logical Device → Queues → Swapchain → Allocators → Command Pools → Sync Primitives.
 //!
 //! Internal Vulkan initialization; dead code allowed.
-#![allow(dead_code)]
 //!
 //! ## Initialization Order (Critical!)
 //! 1. **Entry**: Load Vulkan function pointers (ash::Entry::linked)
@@ -79,9 +78,7 @@ pub fn get_debug_layers() -> Vec<*const c_char> {
     layers_names_raw
 }
 
-pub fn get_winit_extensions(
-    window: &winit::window::Window,
-) -> Result<Vec<*const c_char>, String> {
+pub fn get_winit_extensions(window: &winit::window::Window) -> Result<Vec<*const c_char>, String> {
     let display = window
         .display_handle()
         .map_err(|err| format!("failed to get window display handle: {err}"))?;
@@ -174,17 +171,16 @@ pub fn init_instance(
             .pfn_user_callback(Some(vulkan_debug_callback));
 
         let debug_utils_loader = ash::ext::debug_utils::Instance::new(entry, &instance);
-        let debug_call_back: vk::DebugUtilsMessengerEXT = match unsafe {
-            debug_utils_loader.create_debug_utils_messenger(&debug_info, None)
-        } {
-            Ok(callback) => callback,
-            Err(err) => {
-                unsafe { instance.destroy_instance(None) };
-                return Err(format!(
-                    "Fatal: Failed to create Vulkan debug messenger: {err:?}"
-                ));
-            }
-        };
+        let debug_call_back: vk::DebugUtilsMessengerEXT =
+            match unsafe { debug_utils_loader.create_debug_utils_messenger(&debug_info, None) } {
+                Ok(callback) => callback,
+                Err(err) => {
+                    unsafe { instance.destroy_instance(None) };
+                    return Err(format!(
+                        "Fatal: Failed to create Vulkan debug messenger: {err:?}"
+                    ));
+                }
+            };
         log::info!("Vulkan Instance Created");
 
         let vk_debug = VkDebug {
@@ -482,42 +478,6 @@ pub fn create_logical_device(
 
     log::info!("{}", queue_info);
     Ok((device, queues))
-}
-
-pub fn graphics_only_queue_indices(
-    instance: &ash::Instance,
-    p_device: &vk::PhysicalDevice,
-    surface: &VkSurface,
-) -> Result<Vec<QueueIndex>, String> {
-    let qf_properties = unsafe { instance.get_physical_device_queue_family_properties(*p_device) };
-
-    let gfx_index = qf_properties.iter().enumerate().find_map(|(index, qf)| {
-        let present_support = unsafe {
-            surface
-                .surface_instance // Present support make this a presentation queue
-                .get_physical_device_surface_support(*p_device, index as u32, surface.surface)
-                .map_err(|e| format!("Fatal: Failed surface support check: {:?}", e))
-                .ok()?
-        };
-
-        if qf.queue_flags.contains(vk::QueueFlags::GRAPHICS) && present_support {
-            Some(index as u32)
-        } else {
-            None
-        }
-    });
-
-    let mut indices = Vec::<QueueIndex>::new();
-    if let Some(index) = gfx_index {
-        let index_data = QueueIndex {
-            index,
-            queue_types: vec![VkQueueType::Present, VkQueueType::Graphics],
-        };
-        indices.push(index_data)
-    } else {
-        return Err("Fatal: Failed to find suitable queue".to_string());
-    }
-    Ok(indices)
 }
 
 pub fn queue_indices_with_preferences(

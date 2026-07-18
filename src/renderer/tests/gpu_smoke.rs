@@ -5,6 +5,8 @@
 //! Run manually with:
 //!   LIBCLANG_PATH=/usr/lib64 cargo test -p renderer gpu_smoke -- --ignored --nocapture
 
+use std::process::Command;
+
 use glam::{Vec3, Vec4};
 use renderer::prelude::{
     CaptureTarget, FrameCaptureRequest, FrameCaptureStatus, FrameRenderOutcome, PbrMaterialDesc,
@@ -55,7 +57,11 @@ fn build_cube_mesh() -> ProceduralMeshData {
             let up = if n.x.abs() < 0.9 { Vec3::X } else { Vec3::Z };
             let tangent = up.cross(n).normalize();
             let bitangent = n.cross(tangent);
-            let handedness = if bitangent.dot(Vec3::Y) >= 0.0 { 1.0 } else { -1.0 };
+            let handedness = if bitangent.dot(Vec3::Y) >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
             ProceduralVertex {
                 position,
                 normal: n,
@@ -93,7 +99,14 @@ fn build_cube_mesh() -> ProceduralMeshData {
 /// ```
 #[test]
 #[ignore]
-fn gpu_smoke_headless_capture() {
+fn renderer_headless_capture_worker() {
+    // This worker is launched by gpu_smoke_headless_capture so the parent test can assert
+    // validation diagnostics and teardown failures emitted after Renderer is dropped.
+    if std::env::var_os("RENDERER_GPU_SMOKE_WORKER").is_none() {
+        return;
+    }
+    let _ = env_logger::builder().is_test(true).try_init();
+
     // Ensure we're writing captures to a temp directory.
     let output_dir = std::env::temp_dir().join("renderer-gpu-smoke");
     std::fs::create_dir_all(&output_dir).expect("create temp output dir");
@@ -121,11 +134,7 @@ fn gpu_smoke_headless_capture() {
 
     // Position the camera looking at origin.
     renderer
-        .set_camera_look_at(
-            Vec3::new(0.0, 2.0, 5.0),
-            Vec3::ZERO,
-            Vec3::Y,
-        )
+        .set_camera_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y)
         .expect("set camera look-at");
 
     // ── Build scene ──────────────────────────────────────────────────
@@ -181,14 +190,10 @@ fn gpu_smoke_headless_capture() {
     let outcome = renderer
         .render_scene_headless(&mut scene)
         .expect("render headless frame");
-    assert!(
-        matches!(
-            outcome,
-            FrameRenderOutcome::Rendered
-                | FrameRenderOutcome::SubmittedNotPresented
-                | FrameRenderOutcome::PresentedSuboptimal
-        ),
-        "unexpected frame outcome: {outcome:?}"
+    assert_eq!(
+        outcome,
+        FrameRenderOutcome::Rendered,
+        "headless frame must complete rendering"
     );
 
     // ── Check capture status ─────────────────────────────────────────
@@ -207,14 +212,22 @@ fn gpu_smoke_headless_capture() {
             let metadata =
                 std::fs::metadata(output_path).expect("capture PNG file should be accessible");
             let size = metadata.len();
-            assert!(
-                size > 1024,
-                "capture PNG must be > 1KB (got {size} bytes)"
-            );
+            assert!(size > 1024, "capture PNG must be > 1KB (got {size} bytes)");
             assert!(*width > 0, "capture width must be positive");
             assert!(*height > 0, "capture height must be positive");
+            let decoded = image::open(output_path).expect("capture must decode as a valid image");
+            assert_eq!(
+                decoded.width(),
+                *width,
+                "decoded capture width must match status"
+            );
+            assert_eq!(
+                decoded.height(),
+                *height,
+                "decoded capture height must match status"
+            );
             eprintln!(
-                "GPU smoke test PASSED: {output_path:?} ({width}x{height}, {size} bytes)"
+                "GPU smoke worker rendered: {output_path:?} ({width}x{height}, {size} bytes)"
             );
         }
         FrameCaptureStatus::Failed { message, .. } => {
@@ -228,8 +241,49 @@ fn gpu_smoke_headless_capture() {
         }
     }
 
-    // Check that validation was enabled and the debug callback was set
-    // up. Vulkan validation errors/warnings go to stderr and can be
-    // inspected by running with `--nocapture`.
-    eprintln!("Validation layer was enabled — check stderr for any Vulkan validation messages.");
+    // Force backend teardown inside this test so the parent process observes lifecycle failures.
+    drop(renderer);
+}
+
+#[test]
+#[ignore]
+fn gpu_smoke_headless_capture() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve workspace root");
+    let output = Command::new(std::env::current_exe().expect("resolve GPU smoke test executable"))
+        .current_dir(workspace_root)
+        .args([
+            "--ignored",
+            "--exact",
+            "renderer_headless_capture_worker",
+            "--nocapture",
+        ])
+        .env("RENDERER_GPU_SMOKE_WORKER", "1")
+        .output()
+        .expect("launch isolated GPU smoke worker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprint!("{stderr}");
+    print!("{stdout}");
+
+    assert!(
+        output.status.success(),
+        "GPU smoke worker failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    let diagnostics = format!("{stdout}\n{stderr}");
+    let lines: Vec<_> = diagnostics.lines().collect();
+    let has_validation_error = lines.windows(2).any(|pair| {
+        pair[0].trim() == "ERROR:" && pair[1].to_ascii_uppercase().contains("VALIDATION")
+    });
+    assert!(
+        !has_validation_error,
+        "Vulkan validation error(s) were emitted:\n{diagnostics}"
+    );
 }

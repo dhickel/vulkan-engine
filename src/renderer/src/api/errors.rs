@@ -428,15 +428,3 @@ pub(crate) fn map_frame_input_err(err: impl Into<String>) -> RendererError {
 pub(crate) fn map_frame_render_err(err: impl Into<String>) -> RendererError {
     RendererFrameError::Render(err.into()).into()
 }
-
-// future error mapping helpers
-#[allow(dead_code)]
-pub(crate) fn map_asset_err(err: impl Into<String>) -> RendererError {
-    AssetError::Internal(err.into()).into()
-}
-
-// future error mapping helpers
-#[allow(dead_code)]
-pub(crate) fn map_hook_err(err: impl Into<String>) -> RendererError {
-    HookError::Invocation(err.into()).into()
-}

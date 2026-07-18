@@ -1,6 +1,5 @@
-// Shared example infrastructure — items here are used by sibling example binaries
-// (demo_pbr.rs, demo_unlit.rs, etc.) but flagged as dead_code within this module.
-#![allow(dead_code)]
+// Shared example infrastructure is compiled separately into each sibling example binary,
+// so helpers used only by other examples carry narrow dead-code allowances below.
 
 use glam::{Mat4, Vec3};
 use log::{error, info};
@@ -19,8 +18,13 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowBuilder};
 
+#[allow(
+    dead_code,
+    reason = "shared helper constant is not used by every example binary"
+)]
 const FACADE_DEMO_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHelmet.glb";
 
+#[allow(dead_code, reason = "each demo binary constructs one scenario variant")]
 #[derive(Copy, Clone)]
 pub enum DemoScenario {
     Pbr,
@@ -28,6 +32,10 @@ pub enum DemoScenario {
     ModelLoad,
 }
 
+#[allow(
+    dead_code,
+    reason = "scenario helpers are unused in non-demo example binaries"
+)]
 impl DemoScenario {
     fn title(self) -> &'static str {
         match self {
@@ -317,6 +325,10 @@ pub fn apply_debug_record_launch_options(
     Ok(None)
 }
 
+#[allow(
+    dead_code,
+    reason = "shared helper is not used by every example binary"
+)]
 pub fn apply_frame_capture_launch_options(
     renderer: &mut Renderer,
     options: &LaunchOptions,
@@ -422,6 +434,10 @@ fn validate_capture_options(options: &LaunchOptions) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "demo runner is unused in non-demo example binaries"
+)]
 pub fn run_demo(scenario: DemoScenario) {
     init_logging();
     let launch_options = match parse_launch_options() {
@@ -628,6 +644,10 @@ pub fn run_demo(scenario: DemoScenario) {
         .expect("failed to run renderer example loop");
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn run_headless_demo(
     config: RendererConfig,
     launch_options: LaunchOptions,
@@ -731,6 +751,10 @@ fn run_headless_demo(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn expected_launch_captures(options: &LaunchOptions) -> usize {
     options
         .capture_frames
@@ -738,6 +762,10 @@ fn expected_launch_captures(options: &LaunchOptions) -> usize {
         .unwrap_or(0) as usize
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn handle_fullscreen_toggle(
     window: &Window,
     key_event: &KeyEvent,
@@ -760,6 +788,10 @@ fn handle_fullscreen_toggle(
     true
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn handle_manual_capture_key(renderer: &mut Renderer, key_event: &KeyEvent) -> bool {
     if key_event.state != ElementState::Pressed || key_event.repeat {
         return false;
@@ -775,6 +807,10 @@ fn handle_manual_capture_key(renderer: &mut Renderer, key_event: &KeyEvent) -> b
     true
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn initialize_scene(
     renderer: &mut Renderer,
     scenario: DemoScenario,
@@ -787,6 +823,10 @@ fn initialize_scene(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn build_model_load_scene(
     renderer: &mut Renderer,
     model_path: &Path,
@@ -821,6 +861,10 @@ fn build_model_load_scene(
     Ok(scene)
 }
 
+#[allow(
+    dead_code,
+    reason = "demo helper is unused in non-demo example binaries"
+)]
 fn init_logging() {
     let _ = env_logger::Builder::new()
         .target(env_logger::Target::Stdout)

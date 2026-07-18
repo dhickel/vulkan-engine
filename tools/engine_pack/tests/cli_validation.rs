@@ -28,8 +28,8 @@ fn validation_options_can_precede_positional_paths() {
         .args([
             "validate-package",
             "--expected-package-id",
-            "editor_sample",
-            "../../apps/editor/sample_project/assets/editor_sample.package.toml",
+            "fixture",
+            "fixtures/packages/valid.package.toml",
         ])
         .output()
         .expect("run engine_pack");
@@ -39,8 +39,8 @@ fn validation_options_can_precede_positional_paths() {
         .args([
             "validate-scene",
             "--project",
-            "../../apps/editor/sample_project/engine.project.toml",
-            "../../apps/editor/sample_project/scenes/start.engine.scene.json",
+            "fixtures/projects/valid/engine.project.toml",
+            "fixtures/projects/valid/scenes/start.engine.scene.json",
         ])
         .output()
         .expect("run engine_pack");
@@ -511,7 +511,7 @@ fn pack_outputs_folder_package_and_report() {
     let output = engine_pack()
         .args([
             "pack",
-            "../../apps/editor/sample_project/engine.project.toml",
+            "fixtures/projects/valid/engine.project.toml",
             "--out",
             path_str(&out).as_str(),
         ])
@@ -520,12 +520,12 @@ fn pack_outputs_folder_package_and_report() {
     assert_success_contains(output, "packed[project]");
 
     assert!(out.join("engine.project.toml").exists());
-    assert!(out.join("assets/editor_sample.package.toml").exists());
-    assert!(out.join("assets/models/block_prop.obj").exists());
+    assert!(out.join("assets/fixture.package.toml").exists());
+    assert!(out.join("assets/models/crate.obj").exists());
     assert!(out.join("scenes/start.engine.scene.json").exists());
     let report = fs::read_to_string(out.join("PACK_REPORT.json")).expect("read report");
     assert!(report.contains("\"validation_status\": \"passed\""));
-    assert!(report.contains("assets/prefabs/wall_straight_2m.obj"));
+    assert!(report.contains("assets/models/crate.obj"));
 }
 
 #[test]

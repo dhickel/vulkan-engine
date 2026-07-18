@@ -119,10 +119,7 @@ impl LevelScene {
         for chunk in chunks {
             let world_origin = chunk.world_origin;
             let mesh = assets.upload_procedural_mesh(chunk.mesh)?;
-            let node = scene.create_node(
-                Some(level_root),
-                Mat4::from_translation(world_origin),
-            )?;
+            let node = scene.create_node(Some(level_root), Mat4::from_translation(world_origin))?;
             scene.add_mesh(node, mesh)?;
             chunk_meshes.push(mesh);
             chunk_nodes.push(node);

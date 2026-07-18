@@ -33,6 +33,7 @@ pub struct CubemapFaces {
 }
 
 /// Pending skybox source data waiting for GPU upload.
+#[derive(Clone)]
 pub enum PendingSkyboxSource {
     /// Face-major cubemap data: +X, -X, +Y, -Y, +Z, -Z.
     CubemapFaces {

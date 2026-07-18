@@ -282,13 +282,9 @@ fn run_headless_async_demo(
             error!("Asset pump failed: {err}");
             return;
         }
-        if let Err(err) = poll_async_load(
-            &mut renderer,
-            &mut scene,
-            &mut load_state,
-            None,
-            app_name,
-        ) {
+        if let Err(err) =
+            poll_async_load(&mut renderer, &mut scene, &mut load_state, None, app_name)
+        {
             error!("Asset polling failed: {err}");
             return;
         }

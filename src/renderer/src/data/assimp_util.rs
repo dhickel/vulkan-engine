@@ -4,7 +4,6 @@
 //! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
 //!
 //! Internal assimp ingestion with future-facing helpers; dead code allowed.
-#![allow(dead_code)]
 
 use crate::api::AssetPolicyConfig;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
@@ -1160,21 +1159,13 @@ pub fn to_vk_format_srgb(format: &DynamicImage) -> vk::Format {
     }
 }
 
-struct MeshTemp {
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<u32>,
-}
-
 const AI_MATKEY_BASE_COLOR: *const c_char = b"$clr.base\0".as_ptr() as *const c_char;
 const AI_MATKEY_COLOR_DIFFUSE: *const c_char = b"$clr.diffuse\0".as_ptr() as *const c_char;
-const AI_MATKEY_COLOR_SPECULAR: *const c_char = b"$clr.specular\0".as_ptr() as *const c_char;
-const AI_MATKEY_COLOR_AMBIENT: *const c_char = b"$clr.ambient\0".as_ptr() as *const c_char;
 const AI_MATKEY_COLOR_EMISSIVE: *const c_char = b"$clr.emissive\0".as_ptr() as *const c_char;
 const AI_MATKEY_ROUGHNESS_FACTOR: *const c_char =
     b"$mat.roughnessFactor\0".as_ptr() as *const c_char;
 const AI_MATKEY_METALLIC_FACTOR: *const c_char = b"$mat.metallicFactor\0".as_ptr() as *const c_char;
 const AI_MATKEY_BUMPSCALING: *const c_char = b"$mat.bumpscaling\0".as_ptr() as *const c_char;
-const AI_MATKEY_OPACITY: *const c_char = b"$mat.opacity\0".as_ptr() as *const c_char;
 const AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION: *const c_char =
     b"$mat.occlusionTexture.strength\0".as_ptr() as *const c_char;
 const AI_MATKEY_EMISSIVE_INTENSITY: *const c_char =

@@ -9,8 +9,7 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 /// channel. When all senders are dropped (including clones), the channel
 /// disconnects and workers exit.
 pub(crate) struct BoundedThreadPool {
-    sender: mpsc::Sender<Job>,
-    #[allow(dead_code)]
+    sender: Option<mpsc::Sender<Job>>,
     workers: Vec<thread::JoinHandle<()>>,
 }
 
@@ -34,7 +33,10 @@ impl BoundedThreadPool {
             }));
         }
 
-        Self { sender, workers }
+        Self {
+            sender: Some(sender),
+            workers,
+        }
     }
 
     /// Submit a job to the thread pool.
@@ -42,6 +44,21 @@ impl BoundedThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        let _ = self.sender.send(Box::new(job));
+        if let Some(sender) = &self.sender {
+            let _ = sender.send(Box::new(job));
+        }
+    }
+}
+
+impl Drop for BoundedThreadPool {
+    fn drop(&mut self) {
+        // Disconnect the queue before joining so idle workers leave recv(). This also ensures
+        // renderer-owned worker jobs release Vulkan cache Arcs before backend teardown.
+        self.sender.take();
+        for worker in self.workers.drain(..) {
+            if worker.join().is_err() {
+                log::error!("asset worker panicked before thread-pool shutdown");
+            }
+        }
     }
 }

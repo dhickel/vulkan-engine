@@ -54,7 +54,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     let receiver = scene
         .create_node(Some(root), Mat4::IDENTITY)
         .expect("receiver node");
-    scene.add_mesh(receiver, plane).expect("receiver attachment");
+    scene
+        .add_mesh(receiver, plane)
+        .expect("receiver attachment");
 
     let mut cube = build_cube_mesh("shadow_caster");
     cube.material = Some(caster_material);
@@ -75,11 +77,7 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
         let node = scene
             .create_node(
                 Some(root),
-                Mat4::from_scale_rotation_translation(
-                    scale,
-                    glam::Quat::IDENTITY,
-                    position,
-                ),
+                Mat4::from_scale_rotation_translation(scale, glam::Quat::IDENTITY, position),
             )
             .expect("caster node");
         scene.set_node_name(node, name).unwrap();

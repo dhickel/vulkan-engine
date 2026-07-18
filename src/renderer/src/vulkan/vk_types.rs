@@ -5,7 +5,6 @@
 //! depends on these types. This file establishes the fundamental patterns used throughout the
 //!
 //! Internal Vulkan type definitions with many future-facing types; dead code allowed.
-#![allow(dead_code)]
 //! engine: RAII cleanup via VkDestroyable, frame-based resource management, and traditional
 //! Vulkan descriptor set allocation.
 //!
@@ -26,25 +25,22 @@
 //! ## Critical Gotchas
 //! - **Y-flip viewport**: Lines 67, 105 use negative height for Vulkan coordinate system
 //! - **Command pools are NOT thread-safe**: Each pool is tied to a single queue family
-//! - **Frame resource lifecycle**: Resources deleted via VkDeletable deferred to frame completion
 
 use crate::data::data_cache::EnvMaps;
 use crate::data::data_util::{CountDownDropGuard, CountdownLatch, LatchTimeOutError};
 use crate::data::gpu_data::{EnvironmentUBO, SceneDataUBO};
 use crate::vulkan::vk_descriptor::{
-    PoolSizeRatio, VkDescriptorAllocator, VkDescriptorWriter, VkDynamicDescriptorAllocator,
+    PoolSizeRatio, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
 use crate::vulkan::vk_util;
 use ash::vk::{DeviceSize, Extent2D};
 use ash::{vk, Device};
-use bytemuck::{Pod, Zeroable};
 use log::debug;
 use std::collections::HashSet;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vk_mem::Allocator;
-use winit::dpi::LogicalPosition;
 
 /// Core RAII trait for all Vulkan resources requiring cleanup.
 ///
@@ -65,6 +61,16 @@ pub trait VkDestroyable {
 pub enum VkError {
     Present(String),
 }
+
+impl std::fmt::Display for VkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Present(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for VkError {}
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum RenderSurfaceMode {
@@ -94,11 +100,9 @@ impl RenderSurfaceMode {
 /// ## Integration
 /// - Viewport/scissor updated on resize and cached for command buffer recording
 pub struct VkWindowState {
-    pub resize_requested: bool,
     max_extent: vk::Extent2D,
     curr_extent: vk::Extent2D,
     curr_aspect_ratio: f32,
-    pub render_scale: f32,
     /// Cached viewport and scissor to avoid recreation every frame
     viewport_scissor: ([vk::Viewport; 1], [vk::Rect2D; 1]),
 }
@@ -126,21 +130,8 @@ impl VkWindowState {
             curr_extent,
             max_extent,
             viewport_scissor: (viewport, scissor),
-            resize_requested: false,
             curr_aspect_ratio,
-            render_scale: 1.0,
         }
-    }
-
-    /// Adjust window scale factor. Note: when called repeatedly, each invocation
-    /// compounds on the current extent rather than the original, which may not be
-    /// the intended behavior. Prefer `update_curr_size` for size-driven changes.
-    pub fn update_window_scale(&mut self, new_scalar: Option<f32>) {
-        if let Some(scalar) = new_scalar {
-            self.render_scale = scalar
-        }
-        self.curr_extent.height = (self.curr_extent.height as f32 * self.render_scale) as u32;
-        self.curr_extent.width = (self.curr_extent.width as f32 * self.render_scale) as u32;
     }
 
     /// Update window extent and rebuild viewport/scissor on resize.
@@ -167,14 +158,6 @@ impl VkWindowState {
         self.curr_aspect_ratio = self.curr_extent.width as f32 / self.curr_extent.height as f32;
     }
 
-    pub fn get_curr_width(&self) -> u32 {
-        self.curr_extent.width
-    }
-
-    pub fn get_curr_height(&self) -> u32 {
-        self.curr_extent.height
-    }
-
     pub fn get_curr_extent(&self) -> Extent2D {
         self.curr_extent
     }
@@ -187,32 +170,12 @@ impl VkWindowState {
         self.max_extent
     }
 
-    pub fn ensure_max_extent_at_least(&mut self, extent: vk::Extent2D) -> bool {
-        let grown_extent = vk::Extent2D::default()
-            .width(self.max_extent.width.max(extent.width))
-            .height(self.max_extent.height.max(extent.height));
-        let changed = grown_extent != self.max_extent;
-        if changed {
-            self.max_extent = grown_extent;
-        }
-        changed
-    }
-
     pub fn get_viewport(&self) -> &[vk::Viewport; 1] {
         &self.viewport_scissor.0
     }
 
     pub fn get_scissor(&self) -> &[vk::Rect2D; 1] {
         &self.viewport_scissor.1
-    }
-
-    pub fn center_cursor(&self, window: &winit::window::Window) -> Result<(), String> {
-        window
-            .set_cursor_position(LogicalPosition {
-                x: self.curr_extent.width / 2,
-                y: self.curr_extent.height / 2,
-            })
-            .map_err(|err| format!("failed to center cursor: {err}"))
     }
 }
 
@@ -241,14 +204,17 @@ pub struct VkSurface {
 }
 
 pub struct PhyDevice {
+    #[allow(
+        dead_code,
+        reason = "retained device identity for advanced backend diagnostics"
+    )]
     pub name: String,
+    #[allow(
+        dead_code,
+        reason = "retained PCI/device identity for advanced backend diagnostics"
+    )]
     pub id: u32,
     pub p_device: vk::PhysicalDevice,
-}
-
-pub struct LogicalDevice {
-    pub device: ash::Device,
-    pub queues: VkDeviceQueues,
 }
 
 /// Hardware limits queried from physical device.
@@ -267,6 +233,10 @@ pub struct LogicalDevice {
 /// - buffer_image_granularity affects sub-allocator strategy (see vk_storage.rs)
 /// - min_uniform_buffer_offset_alignment enforces sub-allocation alignment (often 256 bytes)
 /// - Violating these limits causes validation errors or undefined behavior
+#[allow(
+    dead_code,
+    reason = "capability snapshot is exposed to advanced diagnostics; allocation uses a subset"
+)]
 pub struct VkBufferAndDescriptorLimits {
     // Buffer limits
     pub max_storage_buffer_range: vk::DeviceSize,
@@ -331,20 +301,6 @@ pub enum VkQueueType {
     Graphics = 1,
     Compute = 2,
     Transfer = 3,
-}
-
-impl VkQueueType {
-    // Define an array of all the enum variants
-    const ALL_QUEUE_TYPES: [VkQueueType; 4] = [
-        VkQueueType::Present,
-        VkQueueType::Graphics,
-        VkQueueType::Compute,
-        VkQueueType::Transfer,
-    ];
-
-    pub fn iter() -> std::slice::Iter<'static, VkQueueType> {
-        Self::ALL_QUEUE_TYPES.iter()
-    }
 }
 
 /// Map of command pools indexed by queue type.
@@ -420,17 +376,9 @@ impl VkCommandPoolMap {
 /// See vk_render.rs frame loop for reset pattern.
 #[derive(Debug, Clone)]
 pub struct VkCommandPool {
-    pub queue_index: u32,
-    pub queue_type: VkQueueType,
     pub pool: vk::CommandPool,
     pub buffers: Vec<vk::CommandBuffer>,
 }
-
-pub type VkSubmitFn = Box<
-    dyn Fn(&VkCmdSubmitInfo, &vk::Device, &mut VkFenceQueue, &VkDeviceQueues) -> Result<(), String>
-        + Send
-        + Sync,
->;
 
 #[derive(Debug)]
 pub struct VkSubmitParam {
@@ -498,9 +446,7 @@ impl VkCmdSubmitInfo {
                 &[]
             });
 
-        let result = unsafe {
-            device.queue_submit2(queue, &[queue_submit], self.fence[0])
-        };
+        let result = unsafe { device.queue_submit2(queue, &[queue_submit], self.fence[0]) };
         if let Err(vk::Result::ERROR_DEVICE_LOST) = result {
             return Err("Vulkan device lost during queue submission".to_string());
         }
@@ -609,7 +555,6 @@ pub struct VkFrame {
     pub owned_present: Option<VkImageAlloc>,
     pub cmd_pools: VkCommandPoolMap,
     pub descriptors: VkDynamicDescriptorAllocator,
-    deletions: Vec<VkDeletable>,
 }
 
 impl VkDestroyable for VkFrame {
@@ -649,43 +594,7 @@ impl VkFrame {
             owned_present,
             cmd_pools,
             descriptors,
-            deletions: Vec::with_capacity(100),
         }
-    }
-
-    pub fn destroy_for_rebuild(
-        &mut self,
-        device: &Device,
-        allocator: &Allocator,
-    ) -> (VkFrameSync, VkCommandPoolMap) {
-        self.draw.destroy(device, allocator);
-        self.depth.destroy(device, allocator);
-        if let Some(owned_present) = self.owned_present.as_mut() {
-            owned_present.destroy(device, allocator);
-        }
-        self.owned_present = None;
-        // device.destroy_image_view(self.present_image_view, None);
-        // device.destroy_image(self.present_image, None);
-        (self.sync, self.cmd_pools.clone())
-    }
-
-    pub fn add_deletion(&mut self, deletion: VkDeletable) {
-        self.deletions.push(deletion);
-    }
-
-    /// Process deferred deletions for this frame.
-    ///
-    /// ## When Called
-    /// After fence signals (GPU finished with this frame). Safe to destroy resources.
-    ///
-    /// ## Why Deferred
-    /// Resources may be referenced by command buffers in flight. Can't destroy until
-    /// GPU completes execution.
-    pub fn process_deletions(&mut self, device: &ash::Device, allocator: &Allocator) {
-        self.deletions
-            .iter_mut()
-            .for_each(|d| d.delete(device, allocator));
-        self.deletions.clear();
     }
 }
 
@@ -823,10 +732,6 @@ impl VkPresent {
         self.curr_frame_count = self.curr_frame_count.saturating_sub(1);
     }
 
-    pub fn get_curr_frame_count(&self) -> u32 {
-        self.curr_frame_count
-    }
-
     pub fn get_curr_frame_mut(&mut self) -> &mut VkFrame {
         let index = (self.curr_frame_count - 1) % self.max_frames_active;
         unsafe { self.frame_data.get_unchecked_mut(index as usize) }
@@ -835,11 +740,6 @@ impl VkPresent {
     pub fn get_curr_frame(&self) -> &VkFrame {
         let index = (self.curr_frame_count - 1) % self.max_frames_active;
         unsafe { self.frame_data.get_unchecked(index as usize) }
-    }
-
-    pub fn add_deletion_to_curr_frame(&mut self, deletion: VkDeletable) {
-        let index = (self.curr_frame_count - 1) % self.max_frames_active;
-        self.frame_data[index as usize].add_deletion(deletion);
     }
 
     fn destroy_present_views(&mut self, device: &Device) {
@@ -870,31 +770,6 @@ impl VkPresent {
         self.curr_frame_count = 0;
     }
 
-    pub fn replace_draw_depth_images(
-        &mut self,
-        device: &Device,
-        allocator: &Allocator,
-        draw_images: Vec<VkImageAlloc>,
-        depth_images: Vec<VkImageAlloc>,
-    ) {
-        if draw_images.len() != self.frame_data.len() || depth_images.len() != self.frame_data.len()
-        {
-            panic!("Replacement draw/depth images have mismatched frame count");
-        }
-
-        for ((frame, draw), depth) in self
-            .frame_data
-            .iter_mut()
-            .zip(draw_images.into_iter())
-            .zip(depth_images.into_iter())
-        {
-            frame.draw.destroy(device, allocator);
-            frame.depth.destroy(device, allocator);
-            frame.draw = draw;
-            frame.depth = depth;
-        }
-    }
-
     pub fn bind_acquired_present_target(&mut self, image_index: u32) -> Result<(), VkError> {
         let Some(&(present_image, present_image_view)) =
             self.present_targets.get(image_index as usize)
@@ -910,20 +785,6 @@ impl VkPresent {
         curr_frame.present_image = present_image;
         curr_frame.present_image_view = present_image_view;
         Ok(())
-    }
-
-    pub fn destroy_for_rebuild(
-        &mut self,
-        device: &Device,
-        allocator: &Allocator,
-    ) -> (Vec<VkFrameSync>, Vec<VkCommandPoolMap>) {
-        let (frame_sync, cmd_pools): (Vec<_>, Vec<_>) = self
-            .frame_data
-            .iter_mut()
-            .map(|frame| frame.destroy_for_rebuild(device, allocator))
-            .unzip();
-
-        (frame_sync, cmd_pools)
     }
 }
 
@@ -964,36 +825,6 @@ impl VkDeviceQueues {
             VkQueueType::Transfer => self.transfer_queue.0,
         }
     }
-    pub fn get_queue_by_index(&self, index: u32) -> Option<(u32, vk::Queue)> {
-        if self.present_queue.0 == index {
-            Some(self.present_queue)
-        } else if self.graphics_queue.0 == index {
-            Some(self.graphics_queue)
-        } else if self.compute_queue.0 == index {
-            Some(self.compute_queue)
-        } else if self.transfer_queue.0 == index {
-            Some(self.transfer_queue)
-        } else {
-            None
-        }
-    }
-
-    pub fn has_queue_type(&self, typ: VkQueueType) -> bool {
-        match typ {
-            VkQueueType::Present => {
-                self.present_queue.0 < u32::MAX && self.present_queue.1 != vk::Queue::null()
-            }
-            VkQueueType::Graphics => {
-                self.graphics_queue.0 < u32::MAX && self.graphics_queue.1 != vk::Queue::null()
-            }
-            VkQueueType::Compute => {
-                self.compute_queue.0 < u32::MAX && self.compute_queue.1 != vk::Queue::null()
-            }
-            VkQueueType::Transfer => {
-                self.transfer_queue.0 < u32::MAX && self.transfer_queue.1 != vk::Queue::null()
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1007,29 +838,6 @@ impl VkPipeline {
         Self {
             pipeline,
             layout: pipeline_layout,
-        }
-    }
-}
-
-impl VkDestroyable for VkPipeline {
-    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
-        unsafe {
-            device.destroy_pipeline_layout(self.layout, None);
-            device.destroy_pipeline(self.pipeline, None);
-        }
-    }
-}
-
-pub struct VkImmediate {
-    pub command_pool: VkCommandPool,
-    pub fence: [vk::Fence; 1],
-}
-
-impl VkImmediate {
-    pub fn new(command_pool: VkCommandPool, fence: vk::Fence) -> Self {
-        Self {
-            command_pool,
-            fence: [fence],
         }
     }
 }
@@ -1161,10 +969,13 @@ impl VkHostBuffer {
 impl VkDestroyable for VkHostBuffer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.buffer.destroy(device, allocator);
+        self.transfer_pool.destroy(device, allocator);
+        self.graphics_pool.destroy(device, allocator);
         // fence[0] = transfer fence, fence[1] = graphics fence
         unsafe {
             device.destroy_fence(self.fence[0], None);
             device.destroy_fence(self.fence[1], None);
+            device.destroy_semaphore(self.semaphore[0], None);
         }
     }
 }
@@ -1217,10 +1028,6 @@ impl VkTransfer {
         self.sender.clone()
     }
 
-    pub fn send_to_self(&self, info: VkCmdSubmitInfo) -> Result<(), SendError<VkCmdSubmitInfo>> {
-        self.sender.send(info)
-    }
-
     pub fn get_local_transfer_pool(&self) -> &VkCommandPool {
         &self.transfer_pool
     }
@@ -1233,13 +1040,11 @@ impl VkTransfer {
 impl VkDestroyable for VkTransfer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.transfer_pool.destroy(device, allocator);
-        self.host_buffers
-            .iter()
-            .for_each(|buf| {
-                buf.lock()
-                    .expect("transfer buffer lock poisoned during destroy")
-                    .destroy(device, allocator)
-            });
+        self.host_buffers.iter().for_each(|buf| {
+            buf.lock()
+                .expect("transfer buffer lock poisoned during destroy")
+                .destroy(device, allocator)
+        });
         self.host_buffers.clear();
     }
 }
@@ -1248,7 +1053,6 @@ pub struct VkImgui {
     pub context: imgui::Context,
     pub platform: imgui_winit_support::WinitPlatform,
     pub renderer: imgui_rs_vulkan_renderer::Renderer,
-    pub opened: bool,
 }
 
 impl VkImgui {
@@ -1261,14 +1065,7 @@ impl VkImgui {
             context,
             platform,
             renderer,
-            opened: true,
         }
-    }
-
-    pub fn prepare_frame(&mut self, window: &winit::window::Window) -> Result<(), String> {
-        self.platform
-            .prepare_frame(self.context.io_mut(), window)
-            .map_err(|err| format!("failed to prepare imgui frame: {err}"))
     }
 
     pub fn handle_event<T>(
@@ -1278,114 +1075,6 @@ impl VkImgui {
     ) {
         self.platform
             .handle_event(self.context.io_mut(), window, event);
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable, Default)]
-pub struct Compute4x4PushConstants {
-    pub data_1: glam::Vec4,
-    pub data_2: glam::Vec4,
-    pub data_3: glam::Vec4,
-    pub data_4: glam::Vec4,
-}
-
-impl Compute4x4PushConstants {
-    pub fn set_data_1(mut self, data: glam::Vec4) -> Self {
-        self.data_1 = data;
-        self
-    }
-    pub fn set_data_2(mut self, data: glam::Vec4) -> Self {
-        self.data_2 = data;
-        self
-    }
-    pub fn set_data_3(mut self, data: glam::Vec4) -> Self {
-        self.data_3 = data;
-        self
-    }
-    pub fn set_data_4(mut self, data: glam::Vec4) -> Self {
-        self.data_4 = data;
-        self
-    }
-}
-
-impl Compute4x4PushConstants {
-    pub fn as_byte_slice(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-    }
-}
-
-pub struct ComputeEffect {
-    pub name: String,
-    pub pipeline: vk::Pipeline,
-    pub layout: vk::PipelineLayout,
-    pub descriptors: VkDescriptors,
-    pub data: Compute4x4PushConstants,
-}
-
-impl VkDestroyable for ComputeEffect {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.descriptors.destroy(device, allocator);
-        unsafe {
-            device.destroy_pipeline_layout(self.layout, None);
-            device.destroy_pipeline(self.pipeline, None);
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct ComputeData {
-    pub effects: Vec<ComputeEffect>,
-    pub current: u32,
-}
-
-impl ComputeData {
-    pub fn get_current_effect(&self) -> &ComputeEffect {
-        self.effects
-            .get(self.current as usize)
-            .expect("current compute effect index must stay within effects")
-    }
-}
-
-impl VkDestroyable for ComputeData {
-    fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        self.effects
-            .iter_mut()
-            .for_each(|e| e.destroy(device, allocator));
-    }
-}
-
-// TODO make this have a lookup method using an enum?
-#[derive(Clone)]
-pub struct VkDescriptors {
-    pub allocator: VkDescriptorAllocator,
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
-    pub descriptor_layouts: Vec<vk::DescriptorSetLayout>,
-}
-
-impl VkDestroyable for VkDescriptors {
-    fn destroy(&mut self, device: &Device, _allocator: &Allocator) {
-        self.allocator.destroy(device);
-        unsafe {
-            self.descriptor_layouts
-                .iter()
-                .for_each(|set| device.destroy_descriptor_set_layout(*set, None));
-        }
-    }
-}
-
-impl VkDescriptors {
-    pub fn new(allocator: VkDescriptorAllocator) -> Self {
-        Self {
-            allocator,
-            descriptor_sets: vec![],
-            descriptor_layouts: vec![],
-        }
-    }
-
-    pub fn add_descriptor(&mut self, set: vk::DescriptorSet, layout: vk::DescriptorSetLayout) {
-        self.descriptor_sets.push(set);
-        self.descriptor_layouts.push(layout);
     }
 }
 
@@ -1439,7 +1128,6 @@ pub struct VkSubAlloc {
 pub struct VkBrdfLut {
     pub sampler: vk::Sampler,
     pub image_alloc: VkImageAlloc,
-    pub extent: Extent2D,
 }
 
 impl VkDestroyable for VkBrdfLut {
@@ -1451,61 +1139,10 @@ impl VkDestroyable for VkBrdfLut {
     }
 }
 
-impl VkBuffer {
-    pub fn new(
-        buffer: vk::Buffer,
-        size: u64,
-        allocation: vk_mem::Allocation,
-        alloc_info: vk_mem::AllocationInfo,
-    ) -> Self {
-        Self {
-            buffer,
-            size,
-            allocation,
-            alloc_info,
-        }
-    }
-}
-
 impl VkDestroyable for VkBuffer {
     fn destroy(&mut self, _device: &Device, allocator: &Allocator) {
         unsafe {
             allocator.destroy_buffer(self.buffer, &mut self.allocation);
-        }
-    }
-}
-
-/// Deferred deletion queue for frame resources.
-///
-/// ## Purpose
-/// Wraps resources that outlive their creation scope but must be deleted after GPU finishes.
-/// Stored in VkFrame::deletions and processed when frame fence signals.
-///
-/// ## Why Deferred Deletion
-/// Example: Resize creates new buffers, but old buffers are still referenced by in-flight
-/// command buffers. Can't destroy immediately. Add to current frame's deletion queue,
-/// destroy when frame completes.
-///
-/// ## Usage Pattern
-/// ```ignore
-/// let deletion = VkDeletable::AllocatedBuffer(old_buffer);
-/// vk_present.add_deletion_to_curr_frame(deletion);
-/// // old_buffer destroyed when frame fence signals
-/// ```
-///
-/// ## Extensible Design
-/// Enum allows adding more resource types (images, pipelines, etc.) without changing
-/// VkFrame interface.
-pub enum VkDeletable {
-    AllocatedBuffer(VkBuffer),
-}
-
-impl VkDeletable {
-    pub fn delete(&mut self, _device: &ash::Device, allocator: &Allocator) {
-        match self {
-            VkDeletable::AllocatedBuffer(ref mut buffer) => unsafe {
-                allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation);
-            },
         }
     }
 }
@@ -1580,9 +1217,8 @@ impl VkSceneDescriptors {
             PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 2.0),
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
-        let mut descriptor_pool =
-            VkDynamicDescriptorAllocator::new(device, count, &pool_ratios)
-                .map_err(|e| format!("failed to create scene descriptor allocator: {}", e))?;
+        let mut descriptor_pool = VkDynamicDescriptorAllocator::new(device, count, &pool_ratios)
+            .map_err(|e| format!("failed to create scene descriptor allocator: {}", e))?;
 
         let scene_buffer = vk_util::allocate_buffer(
             allocator,
@@ -1617,16 +1253,8 @@ impl VkSceneDescriptors {
             .map(|i| {
                 println!("Writing buffers: {}", i);
                 unsafe {
-                    write_uniform_slot(
-                        scene_ptr,
-                        &scene_data,
-                        scene_data_size as usize,
-                    );
-                    write_uniform_slot(
-                        env_ptr,
-                        &env_maps.environment_ubo,
-                        env_data_size as usize,
-                    );
+                    write_uniform_slot(scene_ptr, &scene_data, scene_data_size as usize);
+                    write_uniform_slot(env_ptr, &env_maps.environment_ubo, env_data_size as usize);
 
                     scene_ptr = scene_ptr.add(scene_data_size as usize);
                     env_ptr = env_ptr.add(env_data_size as usize);
@@ -1701,35 +1329,6 @@ impl VkSceneDescriptors {
         })
     }
 
-    pub fn update_scene_uniform(
-        &mut self,
-        device: &ash::Device,
-        scene_data: SceneDataUBO,
-        index: u32,
-    ) -> vk::DescriptorSet {
-        let data_size = size_of::<SceneDataUBO>().next_multiple_of(self.alignment as usize);
-
-        unsafe {
-            let mut data_ptr = self.scene_buffer.alloc_info.mapped_data as *mut u8;
-            data_ptr = data_ptr.add((index as usize) * data_size);
-
-            write_uniform_slot(data_ptr, &scene_data, data_size);
-        }
-
-        let mut writer = VkDescriptorWriter::default();
-        writer.write_buffer(
-            0,
-            self.scene_buffer.buffer,
-            data_size as u64,
-            (index as usize) * data_size,
-            vk::DescriptorType::UNIFORM_BUFFER,
-        );
-
-        let desc = self.scene_descriptors[index as usize];
-        writer.update_set(device, desc);
-        desc
-    }
-
     /// Update both scene and environment uniforms for a frame.
     /// Used for dynamic per-frame data like point lights.
     pub fn update_scene_uniforms(
@@ -1774,10 +1373,6 @@ impl VkSceneDescriptors {
         writer.update_set(device, desc);
         desc
     }
-
-    pub fn get_scene_descriptor(&self, index: u32) -> vk::DescriptorSet {
-        self.scene_descriptors[index as usize]
-    }
 }
 
 impl VkDestroyable for VkSceneDescriptors {
@@ -1817,10 +1412,6 @@ impl VkFenceQueue {
         Self {
             fence_awaits: Vec::with_capacity(4),
         }
-    }
-
-    pub fn pending_count(&self) -> usize {
-        self.fence_awaits.len()
     }
 
     pub fn queue_fence(&mut self, fence: [vk::Fence; 1], latch_guard: CountDownDropGuard) {

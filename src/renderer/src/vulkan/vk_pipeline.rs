@@ -5,7 +5,6 @@
 //! (Vulkan 1.3). No VkRenderPass objects - uses VkPipelineRenderingCreateInfo instead.
 //!
 //! Internal Vulkan pipeline builder; dead code allowed.
-#![allow(dead_code)]
 //!
 //! ## Key Concepts
 //! - **PipelineBuilder**: Fluent interface for pipeline creation
@@ -94,19 +93,6 @@ impl<'a> Default for PipelineBuilder<'a> {
 }
 
 impl<'a> PipelineBuilder<'a> {
-    pub fn clear(&mut self) {
-        self.shader_stages.clear();
-        self.input_assembly = Default::default();
-        self.rasterizer = Default::default();
-        self.color_blend_attachment = [vk::PipelineColorBlendAttachmentState::default()];
-        self.multi_sampling = Default::default();
-        self.pipeline_layout = Default::default();
-        self.depth_stencil = Default::default();
-        self.render_info = Default::default();
-        self.color_attachment_format = [vk::Format::UNDEFINED];
-        self.color_attachment_count = 1;
-    }
-
     /// Create VkPipeline from accumulated state.
     ///
     /// ## Logic Flow
@@ -140,9 +126,9 @@ impl<'a> PipelineBuilder<'a> {
         let state = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_info = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&state);
 
-        let mut render_info = self.render_info.color_attachment_formats(
-            &self.color_attachment_format[..self.color_attachment_count],
-        );
+        let mut render_info = self
+            .render_info
+            .color_attachment_formats(&self.color_attachment_format[..self.color_attachment_count]);
 
         let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
             .stages(&self.shader_stages)
@@ -233,24 +219,6 @@ impl<'a> PipelineBuilder<'a> {
                     | vk::ColorComponentFlags::A,
             )
             .blend_enable(false);
-        self
-    }
-
-    pub fn enable_blending_additive(mut self) -> Self {
-        self.color_blend_attachment[0] = self.color_blend_attachment[0]
-            .color_write_mask(
-                vk::ColorComponentFlags::R
-                    | vk::ColorComponentFlags::G
-                    | vk::ColorComponentFlags::B
-                    | vk::ColorComponentFlags::A,
-            )
-            .blend_enable(true)
-            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-            .dst_color_blend_factor(vk::BlendFactor::ONE)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
-            .alpha_blend_op(vk::BlendOp::ADD);
         self
     }
 
@@ -372,8 +340,7 @@ pub fn init_pipeline_cache(
     let env_irradiance_pipeline =
         init_irradiance_pipeline(device, desc_layout_cache, shader_cache)?;
 
-    let env_prefilter_pipeline =
-        init_pre_filter_pipeline(device, desc_layout_cache, shader_cache)?;
+    let env_prefilter_pipeline = init_pre_filter_pipeline(device, desc_layout_cache, shader_cache)?;
 
     let env_equirect_pipeline =
         init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache)?;

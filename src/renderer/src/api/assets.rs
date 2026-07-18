@@ -130,9 +130,8 @@ impl AssetLoadTracker {
         }
     }
 
-    // future async model loading path
-    #[allow(dead_code)]
-    pub(crate) fn request_model_load(&mut self, path: PathBuf) -> LoadTicket {
+    #[cfg(test)]
+    fn request_model_load(&mut self, path: PathBuf) -> LoadTicket {
         self.request_model_load_with_policy(path, AssetPolicyConfig::default())
     }
 

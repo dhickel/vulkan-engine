@@ -10,14 +10,15 @@
 //! This allows deletion without invalidating all outstanding references to the old slot.
 //! Stale handles fail validation and are ignored during traversal.
 
-use crate::api::scene::{DirectionalLight, DirectionalLightId, PointLight, PointLightId, SceneAssetReference};
+use crate::api::scene::{
+    DirectionalLight, DirectionalLightId, PointLight, PointLightId, SceneAssetReference,
+};
 use crate::data::camera::{Aabb, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
 use crate::scene::render_submission::{
-    FrameDirectionalLight, FrameDrawItem, FramePointLight, RenderSubmission,
-    MAX_POINT_LIGHTS_GPU,
+    FrameDirectionalLight, FrameDrawItem, FramePointLight, RenderSubmission, MAX_POINT_LIGHTS_GPU,
 };
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -657,15 +658,6 @@ impl SceneWorld {
         true
     }
 
-    // future lighting query API
-    #[allow(dead_code)]
-    pub(crate) fn get_active_point_lights(&self) -> Vec<PointLight> {
-        self.point_lights
-            .iter()
-            .filter_map(|entry| entry.light)
-            .collect()
-    }
-
     // Directional light handle validation and lifecycle
 
     pub(crate) fn validate_directional_light_ref(
@@ -684,10 +676,7 @@ impl SceneWorld {
         Ok(())
     }
 
-    pub(crate) fn add_directional_light(
-        &mut self,
-        light: DirectionalLight,
-    ) -> DirectionalLightId {
+    pub(crate) fn add_directional_light(&mut self, light: DirectionalLight) -> DirectionalLightId {
         if let Some(slot) = self.free_directional_light_slots.pop() {
             let entry = &mut self.directional_lights[slot as usize];
             debug_assert!(
@@ -742,9 +731,7 @@ impl SceneWorld {
 
     /// Returns the active directional light (the public facade enforces one).
     pub(crate) fn get_active_directional_light(&self) -> Option<DirectionalLight> {
-        self.directional_lights
-            .iter()
-            .find_map(|entry| entry.light)
+        self.directional_lights.iter().find_map(|entry| entry.light)
     }
 }
 

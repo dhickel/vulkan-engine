@@ -87,9 +87,7 @@ fn emit_chunk(
 
         let (bounds_min, bounds_max) = verts.iter().fold(
             (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
-            |(min, max), vertex| {
-                (min.min(vertex.position), max.max(vertex.position))
-            },
+            |(min, max), vertex| (min.min(vertex.position), max.max(vertex.position)),
         );
         let world_origin = (bounds_min + bounds_max) * 0.5;
         for vertex in &mut verts {

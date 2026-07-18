@@ -5,7 +5,6 @@
 //! (vertex/index/uniform) into larger VkBuffer objects. Reduces vkAllocateMemory calls
 //!
 //! Internal Vulkan buffer sub-allocator; dead code allowed.
-#![allow(dead_code)]
 //! (typically limited to ~4096 per device) and improves memory locality.
 //!
 //! ## Key Concepts
@@ -33,9 +32,7 @@
 //! - Want device address tracking for SSBO/bindless usage
 //! - Buffer usage flags differ (STORAGE_BUFFER vs UNIFORM_BUFFER)
 
-use crate::vulkan::vk_types::{
-    VkBuffer, VkBufferAndDescriptorLimits, VkDestroyable, VkHostBuffer, VkSubAlloc, VkSubmitParam,
-};
+use crate::vulkan::vk_types::{VkBuffer, VkDestroyable, VkHostBuffer, VkSubAlloc, VkSubmitParam};
 use crate::vulkan::vk_util;
 use ash::vk::DeviceAddress;
 use ash::{vk, Device};
@@ -222,44 +219,6 @@ impl VkSubAllocator {
         )
     }
 
-    pub fn new_uniform_buffer(
-        device: &ash::Device,
-        allocator: Arc<Mutex<Allocator>>,
-        transfer_buffer: Arc<Mutex<VkHostBuffer>>,
-        buffer_size: u64,
-        limits: &VkBufferAndDescriptorLimits,
-    ) -> Result<Self, String> {
-        let usage_flags = vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-
-        let memory_usage = vk_mem::MemoryUsage::AutoPreferDevice;
-
-        let (transfer_queue_index, graphics_queue_index) = {
-            let tb = transfer_buffer
-                .lock()
-                .expect("transfer buffer lock poisoned");
-            (tb.transfer_queue_index, tb.graphics_queue_index)
-        };
-
-        let dst_barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::UNIFORM_READ)
-            .src_queue_family_index(transfer_queue_index)
-            .dst_queue_family_index(graphics_queue_index);
-
-        let alignment = limits.min_storage_buffer_offset_alignment;
-
-        Self::new(
-            device,
-            allocator,
-            transfer_buffer,
-            buffer_size,
-            usage_flags,
-            memory_usage,
-            dst_barrier,
-            alignment,
-        )
-    }
-
     fn allocate_buffer(
         device: &ash::Device,
         allocator: Arc<Mutex<Allocator>>,
@@ -407,10 +366,9 @@ impl VkSubAllocator {
                             ) {
                                 Ok(retry_buffer) => {
                                     self.extra_buffers.push(retry_buffer);
-                                    let retry_buffer = self
-                                        .extra_buffers
-                                        .last_mut()
-                                        .expect("retry buffer was pushed immediately before access");
+                                    let retry_buffer = self.extra_buffers.last_mut().expect(
+                                        "retry buffer was pushed immediately before access",
+                                    );
                                     match retry_buffer.add_items(
                                         &retry_remaining,
                                         buffer_placement,
@@ -524,12 +482,10 @@ impl VkSubAllocator {
 struct VkStorageBuffer {
     buffer_index: u32,
     max_size: u64,
-    curr_size: u64,
     alignment: u64,
     max_upload_bytes: u64,
     buffer_tail: FreeChunk,
     buffer_start_addr: DeviceAddress,
-    buffer_end_addr: DeviceAddress,
     buffer: VkBuffer,
     free_chunks: FreeChunkVec,
     dst_barrier: vk::BufferMemoryBarrier<'static>,
@@ -548,7 +504,6 @@ impl VkStorageBuffer {
         Self {
             buffer_index,
             max_size: buffer_size,
-            curr_size: 0,
             alignment: stride,
             max_upload_bytes,
             buffer_tail: FreeChunk {
@@ -556,7 +511,6 @@ impl VkStorageBuffer {
                 size: buffer_size,
             },
             buffer_start_addr: buffer_address,
-            buffer_end_addr: buffer_address.add(buffer_size),
             buffer,
             free_chunks: FreeChunkVec::default(),
             dst_barrier,

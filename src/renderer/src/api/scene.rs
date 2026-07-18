@@ -855,10 +855,7 @@ impl Scene {
 
     /// Thread: Any
     /// May Stall: No
-    pub fn remove_directional_light(
-        &mut self,
-        id: DirectionalLightId,
-    ) -> Result<(), SceneError> {
+    pub fn remove_directional_light(&mut self, id: DirectionalLightId) -> Result<(), SceneError> {
         self.validate_directional_light(id)?;
 
         if self.world.remove_directional_light(id) {
@@ -2487,8 +2484,7 @@ mod tests {
     use super::{
         validate_scene_str, validate_scene_str_with_options, DirectionalLight, PointLight, Scene,
         SceneAssetLoader, SceneAssetReference, SceneFragment, SceneFragmentNode,
-        SceneFragmentNodeId,
-        SceneValidationOptions, SerializedScene,
+        SceneFragmentNodeId, SceneValidationOptions, SerializedScene,
     };
     use crate::api::errors::{AssetError, RendererError, SceneError};
     use crate::data::handles::{EnvironmentHandle, MeshHandle};
@@ -2620,7 +2616,10 @@ mod tests {
                 color: Vec3::ONE,
                 intensity: 1.0,
             });
-            assert!(matches!(result, Err(SceneError::InvalidDirectionalLight(_))));
+            assert!(matches!(
+                result,
+                Err(SceneError::InvalidDirectionalLight(_))
+            ));
         }
     }
 
@@ -3720,8 +3719,7 @@ mod tests {
             Vec3::new(0.0, 0.0, -1.0),
             Vec3::new(0.0, 1.0, 0.0),
         );
-        let projection =
-            Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
+        let projection = Mat4::perspective_rh(60.0_f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
         scene.set_camera(view, projection, Vec3::new(0.0, 0.0, 0.0));
 
         let root = scene.create_node_default(None).unwrap();
@@ -3733,20 +3731,13 @@ mod tests {
                 Mat4::from_translation(Vec3::new(0.0, 0.0, -5.0)),
             )
             .unwrap();
-        scene
-            .add_mesh(in_front, MeshHandle::new(1, 0))
-            .unwrap();
+        scene.add_mesh(in_front, MeshHandle::new(1, 0)).unwrap();
 
         // Node behind camera — should be culled.
         let behind = scene
-            .create_node(
-                Some(root),
-                Mat4::from_translation(Vec3::new(0.0, 0.0, 5.0)),
-            )
+            .create_node(Some(root), Mat4::from_translation(Vec3::new(0.0, 0.0, 5.0)))
             .unwrap();
-        scene
-            .add_mesh(behind, MeshHandle::new(2, 0))
-            .unwrap();
+        scene.add_mesh(behind, MeshHandle::new(2, 0)).unwrap();
 
         // Count with culling off.
         scene.set_frustum_culling(false);

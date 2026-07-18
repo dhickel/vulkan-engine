@@ -36,12 +36,14 @@ jobs:
             libclang-dev \
             libvulkan-dev \
             libasound2-dev \
+            libassimp-dev \
+            glslc \
             cmake \
             pkg-config
+      - name: Locate libclang
+        run: echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name libclang.so -print -quit)")" >> "$GITHUB_ENV"
       - name: cargo check --workspace
-        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo check --workspace
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: cargo check --workspace
 
   # ── Renderer examples ──────────────────────────────────────────────────
   check-examples:
@@ -57,12 +59,14 @@ jobs:
             libclang-dev \
             libvulkan-dev \
             libasound2-dev \
+            libassimp-dev \
+            glslc \
             cmake \
             pkg-config
+      - name: Locate libclang
+        run: echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name libclang.so -print -quit)")" >> "$GITHUB_ENV"
       - name: cargo check -p renderer --examples
-        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo check -p renderer --examples
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: cargo check -p renderer --examples
 
   # ── Dogfood application ────────────────────────────────────────────────
   check-dogfood:
@@ -78,12 +82,14 @@ jobs:
             libclang-dev \
             libvulkan-dev \
             libasound2-dev \
+            libassimp-dev \
+            glslc \
             cmake \
             pkg-config
+      - name: Locate libclang
+        run: echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name libclang.so -print -quit)")" >> "$GITHUB_ENV"
       - name: cargo check -p dungeon_dogfood
-        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo check -p dungeon_dogfood
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: cargo check -p dungeon_dogfood
 
   # ── Input crate tests ──────────────────────────────────────────────────
   test-input:
@@ -119,12 +125,14 @@ jobs:
             libclang-dev \
             libvulkan-dev \
             libasound2-dev \
+            libassimp-dev \
+            glslc \
             cmake \
             pkg-config
+      - name: Locate libclang
+        run: echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name libclang.so -print -quit)")" >> "$GITHUB_ENV"
       - name: cargo test -p renderer
-        run: LIBCLANG_PATH=/usr/lib/llvm-*/lib cargo test -p renderer
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-18/lib
+        run: cargo test -p renderer
 
   # ── Physics crate tests ────────────────────────────────────────────────
   test-physics:
@@ -160,3 +168,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo test -p scripting
         run: cargo test -p scripting
+
+  # ── Remaining workspace package tests ─────────────────────────────────
+  test-remaining-workspace:
+    name: cargo test (engine, launch_shared, engine_pack, dogfood)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            libclang-dev \
+            libvulkan-dev \
+            libasound2-dev \
+            libassimp-dev \
+            glslc \
+            cmake \
+            pkg-config
+      - name: Locate libclang
+        run: echo "LIBCLANG_PATH=$(dirname "$(find /usr/lib/llvm-* -name libclang.so -print -quit)")" >> "$GITHUB_ENV"
+      - name: Test remaining workspace packages
+        run: cargo test -p engine -p launch_shared -p engine_pack -p dungeon_dogfood

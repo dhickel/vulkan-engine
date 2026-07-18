@@ -49,6 +49,9 @@ pub use api::{
     CameraView,
     // Debug
     DebugRuntimeMode,
+    // Lighting
+    DirectionalLight,
+    DirectionalLightId,
     EngineEvent,
     // Event API
     EventBus,
@@ -58,9 +61,6 @@ pub use api::{
     // Handles (widely used)
     MaterialHandle,
     MeshHandle,
-    // Lighting
-    DirectionalLight,
-    DirectionalLightId,
     PointLight,
     PointLightId,
     // Hooks

@@ -29,9 +29,7 @@ impl RenderPassNode for ShadowPass {
         let shadow_map = &shadow_frame.shadow_map;
         let shadow_map_view = shadow_frame.shadow_map_view;
 
-        let shadow_draws = ctx
-            .renderer
-            .resolve_shadow_draw_objects(ctx.submission);
+        let shadow_draws = ctx.renderer.resolve_shadow_draw_objects(ctx.submission);
         let light_view_proj = ctx
             .submission
             .directional_light

@@ -357,26 +357,15 @@ mod tests {
         let projection = Mat4::perspective_rh(90.0_f32.to_radians(), 1.0, 1.0, 10.0);
         let frustum = Frustum::from_view_projection(&projection);
 
-        let inside = Aabb::from_min_max(
-            Vec3::new(-0.25, -0.25, -2.0),
-            Vec3::new(0.25, 0.25, -1.5),
-        );
-        let before_near = Aabb::from_min_max(
-            Vec3::new(-0.1, -0.1, -0.9),
-            Vec3::new(0.1, 0.1, -0.8),
-        );
-        let across_near = Aabb::from_min_max(
-            Vec3::new(-0.1, -0.1, -1.1),
-            Vec3::new(0.1, 0.1, -0.9),
-        );
-        let beyond_far = Aabb::from_min_max(
-            Vec3::new(-0.25, -0.25, -11.0),
-            Vec3::new(0.25, 0.25, -10.5),
-        );
-        let outside_right = Aabb::from_min_max(
-            Vec3::new(2.1, -0.1, -2.0),
-            Vec3::new(2.2, 0.1, -1.9),
-        );
+        let inside = Aabb::from_min_max(Vec3::new(-0.25, -0.25, -2.0), Vec3::new(0.25, 0.25, -1.5));
+        let before_near =
+            Aabb::from_min_max(Vec3::new(-0.1, -0.1, -0.9), Vec3::new(0.1, 0.1, -0.8));
+        let across_near =
+            Aabb::from_min_max(Vec3::new(-0.1, -0.1, -1.1), Vec3::new(0.1, 0.1, -0.9));
+        let beyond_far =
+            Aabb::from_min_max(Vec3::new(-0.25, -0.25, -11.0), Vec3::new(0.25, 0.25, -10.5));
+        let outside_right =
+            Aabb::from_min_max(Vec3::new(2.1, -0.1, -2.0), Vec3::new(2.2, 0.1, -1.9));
 
         assert!(frustum.intersects_aabb(&inside));
         assert!(!frustum.intersects_aabb(&before_near));

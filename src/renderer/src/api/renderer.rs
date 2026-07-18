@@ -152,6 +152,9 @@ struct FpsInputPlugin {
 }
 
 pub struct Renderer {
+    // Worker jobs can retain cache Arcs, so the pool must join before Vulkan backend teardown.
+    // Rust drops struct fields in declaration order.
+    asset_loads: AssetLoadTracker,
     runtime: vk_render::VkRender,
     input_system: InputSystem,
     frame_number: u32,
@@ -160,7 +163,6 @@ pub struct Renderer {
     last_asset_pump_steps: usize,
     open_frame: Option<u32>,
     startup_scene: Option<Scene>,
-    asset_loads: AssetLoadTracker,
     asset_policy: AssetPolicyConfig,
     event_bus: EventBus,
     observed_action_values: HashMap<ActionId, f32>,
@@ -1240,8 +1242,10 @@ impl Renderer {
         self.apply_cursor_policy(window)
     }
 
-    // advanced-interop feature gate path
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(feature = "advanced-interop"),
+        allow(dead_code, reason = "used by the opt-in advanced-interop facade")
+    )]
     pub(crate) fn raw_core_mut(&mut self) -> &mut vk_render::VkRenderCore {
         &mut self.runtime.core
     }
@@ -1433,9 +1437,7 @@ fn renderer_error_from_backend(err: vk_render::VkRenderError) -> RendererError {
             RendererError::DeviceLost
         }
         vk_render::VkRenderError::Backend(message) => map_frame_render_err(message),
-        vk_render::VkRenderError::BackendPoisoned(reason) => {
-            RendererError::BackendPoisoned(reason)
-        }
+        vk_render::VkRenderError::BackendPoisoned(reason) => RendererError::BackendPoisoned(reason),
     }
 }
 
@@ -1611,10 +1613,7 @@ mod tests {
             renderer_error_from_backend(crate::vulkan::vk_render::VkRenderError::DeviceLost(
                 "Vulkan device lost during fence wait".to_string(),
             ));
-        assert!(matches!(
-            device_lost,
-            crate::api::RendererError::DeviceLost
-        ));
+        assert!(matches!(device_lost, crate::api::RendererError::DeviceLost));
 
         let poisoned =
             renderer_error_from_backend(crate::vulkan::vk_render::VkRenderError::BackendPoisoned(

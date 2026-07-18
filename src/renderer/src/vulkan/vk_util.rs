@@ -4,9 +4,6 @@
 //! Collection of helper functions for creating Vulkan structures, recording common
 //! command patterns, and handling images/buffers. Reduces boilerplate throughout codebase.
 //!
-//! Internal Vulkan helpers with many future-facing utilities; dead code allowed.
-#![allow(dead_code)]
-//!
 //! ## Categories
 //! - **Info Creators**: Functions returning VkXxxCreateInfo structs with sensible defaults
 //! - **Image Utilities**: create_image(), image_view_create_info(), transition_image()
@@ -17,8 +14,8 @@
 //! ## Design Pattern
 //! Most functions return Vk...CreateInfo structs with .default() fields, allowing
 //! caller to override specific fields via builder pattern. Example:
-//! ```ignore
-//! let info = vk_util::image_create_info(format, usage, extent, type, samples, mips)
+//! ```text
+//! let info = vk_util::image_create_info(format, usage, extent, image_type, samples, mips)
 //!     .sharing_mode(vk::SharingMode::CONCURRENT)  // Override default EXCLUSIVE
 //!     .queue_family_indices(&indices);
 //! ```
@@ -60,34 +57,6 @@ use crate::vulkan::vk_util;
 use std::fs;
 use std::ops::Add;
 use std::path::Path;
-
-pub fn command_pool_create_info<'a>(
-    queue_family_index: u32,
-    flags: vk::CommandPoolCreateFlags,
-) -> vk::CommandPoolCreateInfo<'a> {
-    vk::CommandPoolCreateInfo::default()
-        .queue_family_index(queue_family_index)
-        .flags(flags)
-}
-
-pub fn command_buffer_allocate_info<'a>(
-    command_pool: vk::CommandPool,
-    count: u32,
-    level: vk::CommandBufferLevel,
-) -> vk::CommandBufferAllocateInfo<'a> {
-    vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .command_buffer_count(count)
-        .level(level)
-}
-
-pub fn fence_create_info<'a>(flags: vk::FenceCreateFlags) -> vk::FenceCreateInfo<'a> {
-    vk::FenceCreateInfo::default().flags(flags)
-}
-
-pub fn semaphore_create_info<'a>(flags: vk::SemaphoreCreateFlags) -> vk::SemaphoreCreateInfo<'a> {
-    vk::SemaphoreCreateInfo::default().flags(flags)
-}
 
 pub fn command_buffer_begin_info<'a>(
     flags: vk::CommandBufferUsageFlags,
@@ -146,21 +115,6 @@ pub fn submit_info_2<'a>(
         .command_buffer_infos(cmd_info)
         .wait_semaphore_infos(wait_semaphore)
         .signal_semaphore_infos(signal_semaphore)
-}
-
-pub fn render_pass_begin_info<'a>(
-    render_pass: vk::RenderPass,
-    window_extent: vk::Extent2D,
-    frame_buffer: vk::Framebuffer,
-) -> vk::RenderPassBeginInfo<'a> {
-    vk::RenderPassBeginInfo::default()
-        .render_pass(render_pass)
-        .render_area(
-            vk::Rect2D::default()
-                .offset(vk::Offset2D::default().x(0).y(0))
-                .extent(window_extent),
-        )
-        .framebuffer(frame_buffer)
 }
 
 pub fn image_create_info<'a>(
@@ -570,8 +524,11 @@ pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
     unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
 }
 
-pub fn destroy_image(allocator: &Allocator, mut image: VkImageAlloc) {
-    unsafe { allocator.destroy_image(image.image, &mut image.allocation) }
+pub fn destroy_image(device: &ash::Device, allocator: &Allocator, mut image: VkImageAlloc) {
+    unsafe {
+        device.destroy_image_view(image.image_view, None);
+        allocator.destroy_image(image.image, &mut image.allocation);
+    }
 }
 
 //////////////////
@@ -736,7 +693,6 @@ pub fn generate_brdf_lut(
     Ok(VkBrdfLut {
         sampler: brd_sampler,
         image_alloc: brd_img,
-        extent: dim_extent,
     })
 }
 
@@ -928,22 +884,7 @@ pub fn upload_skybox(
 
         destroy_buffer(allocator, staging_buffer);
 
-        let full_extent = Extent3D {
-            width: tex_meta.payload.width(),
-            height: tex_meta.payload.height(),
-            depth: 1,
-        };
-
-        let face_extent = Extent3D {
-            width: face_width,
-            height: tex_meta.payload.height(),
-            depth: 1,
-        };
-
         Ok(VkCubeMap {
-            texture_meta: Some(tex_meta),
-            full_extent,
-            face_extent,
             allocation,
             image,
             image_view,
@@ -1087,32 +1028,6 @@ pub fn upload_texture_2d(
 
         Ok((image, sampler))
     }
-}
-
-fn create_buffer_image_copy(
-    face_index: u32, // 0-based index of the face in the horizontal strip
-    face_width: u32,
-    face_height: u32,
-    total_width: u32,
-    layer: u32,
-) -> vk::BufferImageCopy {
-    let buffer_offset = (face_index * face_width * face_height * 4) as u64;
-    vk::BufferImageCopy::default()
-        .buffer_offset(buffer_offset)
-        .buffer_row_length(total_width)
-        .buffer_image_height(face_height)
-        .image_subresource(vk::ImageSubresourceLayers {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            mip_level: 0,
-            base_array_layer: layer,
-            layer_count: 1,
-        })
-        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-        .image_extent(vk::Extent3D {
-            width: face_width,
-            height: face_height,
-            depth: 1,
-        })
 }
 
 pub fn compile_shaders(shader_dir: &str, out_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1343,7 +1258,9 @@ pub fn record_host_to_storage_buffer(
 
         let release_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
+            // Queue-family release operations make writes available; the acquire operation
+            // defines the consumer access scope.
+            .dst_access_mask(vk::AccessFlags::empty())
             .src_queue_family_index(host_info.transfer_queue_index)
             .dst_queue_family_index(host_info.graphics_queue_index)
             .buffer(device_buffer.buffer)
@@ -1370,7 +1287,9 @@ pub fn record_host_to_storage_buffer(
             .map_err(|err| format!("Error beginning graphics buffer: {}", err))?;
 
         let acquire_barrier = vk::BufferMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            // The matching release and semaphore signal provide availability; this acquire
+            // operation only needs to define visibility to vertex/index reads.
+            .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
             .src_queue_family_index(host_info.transfer_queue_index)
             .dst_queue_family_index(host_info.graphics_queue_index)
@@ -1608,29 +1527,37 @@ pub fn record_host_to_image_buffer(
             }
         }
 
-        // Record transfer->graphics barrier
-        vk_util::record_image_barrier(
-            device,
-            transfer_cmd_buffer,
-            image_alloc.image,
-            None,
-            (
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-            ),
-            (
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::TRANSFER,
-            ),
-            Some((
-                vk::AccessFlags::TRANSFER_WRITE,
-                vk::AccessFlags::TRANSFER_READ,
-            )),
-            Some((
-                host_info.transfer_queue_index,
-                host_info.graphics_queue_index,
-            )),
-        );
+        // Queue ownership transfers require matching release/acquire barriers. When both
+        // queues are in the same family, recording the layout transition twice is invalid:
+        // the graphics command would still declare TRANSFER_DST after the transfer command
+        // already moved the image to TRANSFER_SRC. In that case, record one transition on
+        // the graphics command and let the semaphore order it after the copy.
+        let queue_families_differ =
+            host_info.transfer_queue_index != host_info.graphics_queue_index;
+        if queue_families_differ {
+            vk_util::record_image_barrier(
+                device,
+                transfer_cmd_buffer,
+                image_alloc.image,
+                None,
+                (
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                ),
+                (
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                ),
+                Some((
+                    vk::AccessFlags::TRANSFER_WRITE,
+                    vk::AccessFlags::TRANSFER_READ,
+                )),
+                Some((
+                    host_info.transfer_queue_index,
+                    host_info.graphics_queue_index,
+                )),
+            );
+        }
 
         vk_util::record_image_barrier(
             device,
@@ -1649,7 +1576,7 @@ pub fn record_host_to_image_buffer(
                 vk::AccessFlags::TRANSFER_WRITE,
                 vk::AccessFlags::TRANSFER_READ,
             )),
-            Some((
+            queue_families_differ.then_some((
                 host_info.transfer_queue_index,
                 host_info.graphics_queue_index,
             )),

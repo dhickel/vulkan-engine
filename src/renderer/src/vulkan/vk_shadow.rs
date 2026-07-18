@@ -43,7 +43,9 @@ impl VkShadowResources {
         allocator: &Arc<Mutex<Allocator>>,
         frame_count: u32,
     ) -> Result<Self, String> {
-        let allocator = allocator.lock().map_err(|e| format!("allocator lock: {e}"))?;
+        let allocator = allocator
+            .lock()
+            .map_err(|e| format!("allocator lock: {e}"))?;
         let shadow_map_extent = vk::Extent2D {
             width: Self::SHADOW_MAP_DIM,
             height: Self::SHADOW_MAP_DIM,
@@ -227,8 +229,7 @@ mod tests {
     fn vertical_direction_produces_finite_matrix_covering_scene_bounds() {
         let min = Vec3::new(-4.0, -1.0, -3.0);
         let max = Vec3::new(7.0, 5.0, 2.0);
-        let (_, _, view_projection) =
-            compute_light_view_projection(Vec3::Y, min, max);
+        let (_, _, view_projection) = compute_light_view_projection(Vec3::Y, min, max);
 
         assert!(view_projection.is_finite());
         for corner in aabb_corners(min, max) {
