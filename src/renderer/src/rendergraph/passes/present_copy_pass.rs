@@ -10,10 +10,12 @@ impl RenderPassNode for PresentCopyPass {
     }
 
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
-        if ctx.submission.has_draw_targets() {
-            ctx.renderer.copy_draw_to_present(ctx.frame);
+        let has_draw_targets = ctx.submission.has_draw_targets();
+        let mut recording = ctx.present_copy_ctx();
+        if has_draw_targets {
+            recording.copy_draw_to_present();
         } else {
-            ctx.renderer.prepare_present_color_attachment(ctx.frame);
+            recording.prepare_present_color_attachment();
         }
         Ok(())
     }

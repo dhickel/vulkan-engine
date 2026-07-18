@@ -13,5 +13,6 @@ pub mod environment_import;
 pub mod gpu_data;
 pub mod handles;
 pub mod mesh_geometry;
+pub mod retirement;
 pub(crate) mod thread_pool;
 pub mod validation;

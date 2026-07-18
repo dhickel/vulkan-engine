@@ -59,15 +59,21 @@ use vk_mem::Allocator;
 #[derive(Debug)]
 pub(crate) struct CompletedFrameSlot {
     slot_index: u32,
+    descriptor_reset_serial: u64,
     submitted_serial: u64,
     consumed: bool,
 }
 
 impl CompletedFrameSlot {
     /// Create a completion token. Only the frame-fence wait path may call this.
-    pub(crate) fn new(slot_index: u32, submitted_serial: u64) -> Self {
+    pub(crate) fn new(
+        slot_index: u32,
+        descriptor_reset_serial: u64,
+        submitted_serial: u64,
+    ) -> Self {
         Self {
             slot_index,
+            descriptor_reset_serial,
             submitted_serial,
             consumed: false,
         }
@@ -80,8 +86,13 @@ impl CompletedFrameSlot {
             None
         } else {
             self.consumed = true;
-            Some((self.slot_index, self.submitted_serial))
+            Some((self.slot_index, self.descriptor_reset_serial))
         }
+    }
+
+    /// Return the submitted serial without consuming the token.
+    pub(crate) fn submitted_serial(&self) -> u64 {
+        self.submitted_serial
     }
 
     /// Returns `true` if the token has already been consumed.
@@ -603,6 +614,10 @@ pub struct VkFrame {
     pub owned_present: Option<VkImageAlloc>,
     pub cmd_pools: VkCommandPoolMap,
     pub descriptors: VkDynamicDescriptorAllocator,
+    /// Serial of the last submission that signalled this slot's fence.
+    /// Updated by `submit_frame`; read by `wait_for_frame_fence` to create
+    /// the `CompletedFrameSlot` token. Starts at 0 (never submitted).
+    pub last_submitted_serial: u64,
 }
 
 impl VkDestroyable for VkFrame {
@@ -642,6 +657,7 @@ impl VkFrame {
             owned_present,
             cmd_pools,
             descriptors,
+            last_submitted_serial: 0,
         }
     }
 }
@@ -680,13 +696,9 @@ pub struct VkPresent {
 
 impl VkDestroyable for VkPresent {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
-        if self
-            .frame_data
-            .iter()
-            .all(|frame| frame.owned_present.is_none())
-        {
-            self.destroy_present_views(device);
-        }
+        // Window-system image views are owned by SwapchainOwner. VkPresent only
+        // references those handles. Headless present images remain owned by each
+        // VkFrame and are destroyed through VkFrame::destroy below.
         self.frame_data
             .iter_mut()
             .for_each(|frame| frame.destroy(device, allocator));
@@ -800,26 +812,21 @@ impl VkPresent {
         unsafe { self.frame_data.get_unchecked(index as usize) }
     }
 
-    fn destroy_present_views(&mut self, device: &Device) {
-        for (_, view) in self.present_targets.iter_mut() {
-            if *view != vk::ImageView::null() {
-                unsafe {
-                    device.destroy_image_view(*view, None);
-                }
-                *view = vk::ImageView::null();
-            }
-        }
+    pub(crate) fn present_targets(&self) -> &[(vk::Image, vk::ImageView)] {
+        &self.present_targets
     }
 
     pub fn replace_present_images(
         &mut self,
-        device: &Device,
         images: Vec<(vk::Image, vk::ImageView)>,
-    ) {
+    ) -> Result<(), VkError> {
         if images.len() != self.frame_data.len() {
-            panic!("Replacement present images, more than existing")
+            return Err(VkError::Present(format!(
+                "replacement present image count {} does not match frame slot count {}",
+                images.len(),
+                self.frame_data.len()
+            )));
         }
-        self.destroy_present_views(device);
         self.present_targets = images.clone();
         for x in 0..images.len() {
             self.frame_data[x].present_image = images[x].0;
@@ -827,6 +834,7 @@ impl VkPresent {
         }
         self.curr_frame_count = 0;
         self.frame_epoch = 0;
+        Ok(())
     }
 
     pub fn bind_acquired_present_target(&mut self, image_index: u32) -> Result<(), VkError> {

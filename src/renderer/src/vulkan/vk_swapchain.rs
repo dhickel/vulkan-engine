@@ -23,8 +23,9 @@
 //! - No `device_wait_idle` as a substitute for ownership modeling.
 //! - Preserve `FrameRenderOutcome` and existing public error variants.
 
-use ash::vk;
+use ash::vk::{self, Handle};
 use log::{info, warn};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -87,6 +88,17 @@ impl SwapchainState {
     #[allow(dead_code)]
     pub(crate) fn is_usable(&self) -> bool {
         matches!(self, Self::Current { .. })
+    }
+
+    fn install(&mut self, generation: SwapchainGeneration) -> Result<(), &'static str> {
+        match self {
+            Self::Nascent | Self::Retired { .. } => {
+                *self = Self::Current { generation };
+                Ok(())
+            }
+            Self::Current { .. } => Err("cannot install over a current swapchain"),
+            Self::Absent => Err("cannot install into terminal absent state"),
+        }
     }
 }
 
@@ -289,9 +301,9 @@ impl SwapchainOwner {
     }
 
     /// Store a resize request. If an older request is already pending, its
-    /// extent is replaced by the latest one (coalescing).
+    /// extent is replaced by the latest one (coalescing). Zero extents remain
+    /// pending so minimize/occlusion never invokes swapchain replacement.
     pub(crate) fn request_resize(&mut self, extent: vk::Extent2D) {
-        assert!(extent.width > 0 && extent.height > 0, "zero extent deferred by caller");
         let request = ResizeRequest::new(extent);
         let replacing = self.pending_resize.is_some();
         self.pending_resize = Some(request);
@@ -326,8 +338,8 @@ impl SwapchainOwner {
                 self.pending_resize = None;
                 self.installed_sequence = installed.sequence;
                 info!(
-                    "Swapchain resize installed (seq={}); no newer request pending",
-                    installed.sequence
+                    "Swapchain resize installed (seq={}, extent={:?}); no newer request pending",
+                    installed.sequence, installed.extent
                 );
             }
             _ => {
@@ -345,32 +357,29 @@ impl SwapchainOwner {
     ///
     /// After this call, the old handle must be passed to `vkCreateSwapchainKHR`
     /// or explicitly destroyed. It must never be restored as current.
-    pub(crate) fn retire_current(&mut self) -> Option<vk::SwapchainKHR> {
+    pub(crate) fn retire_current(&mut self) -> Result<vk::SwapchainKHR, String> {
         let old_state = std::mem::replace(&mut self.state, SwapchainState::Absent);
-        let old_handle = match old_state {
+        match old_state {
             SwapchainState::Current { generation } => {
                 self.state = SwapchainState::Retired { generation };
                 info!(
                     "Swapchain generation {:?} retired (oldSwapchain boundary)",
                     generation
                 );
-                self.swapchain.as_ref().map(|sc| sc.swapchain)
-            }
-            SwapchainState::Nascent => {
-                self.state = SwapchainState::Nascent;
-                None
+                self.swapchain
+                    .as_ref()
+                    .map(|sc| sc.swapchain)
+                    .ok_or_else(|| "current lifecycle state has no swapchain handle".to_string())
             }
             other => {
-                // Should not happen; log and recover.
                 warn!(
-                    "SwapchainOwner::retire_current called in unexpected state {:?}",
+                    "SwapchainOwner::retire_current rejected state {:?}",
                     other
                 );
                 self.state = other;
-                None
+                Err("only a current swapchain can be retired".to_string())
             }
-        };
-        old_handle
+        }
     }
 
     /// Install a newly created swapchain as current.
@@ -381,25 +390,20 @@ impl SwapchainOwner {
         &mut self,
         swapchain: crate::vulkan::vk_types::VkSwapchain,
         present_views: Vec<(vk::Image, vk::ImageView)>,
-    ) {
+    ) -> Result<(), String> {
         let gen = SwapchainGeneration::next();
+        self.state.install(gen).map_err(str::to_string)?;
         self.swapchain = Some(swapchain);
         self.present_views = present_views;
-        self.state = SwapchainState::Current { generation: gen };
         info!("Swapchain generation {:?} installed", gen);
+        Ok(())
     }
 
     /// Destroy present image views owned by this owner.
     pub(crate) fn destroy_present_views(&mut self, device: &ash::Device) {
-        for (_, view) in self.present_views.iter_mut() {
-            if *view != vk::ImageView::null() {
-                unsafe {
-                    device.destroy_image_view(*view, None);
-                }
-                *view = vk::ImageView::null();
-            }
-        }
-        self.present_views.clear();
+        drain_present_views(&mut self.present_views, |view| unsafe {
+            device.destroy_image_view(view, None)
+        });
     }
 
     /// Take ownership of and destroy the current swapchain, views, and retire
@@ -430,14 +434,27 @@ impl SwapchainOwner {
     }
 
     /// Consume and destroy a retired swapchain handle after it has been replaced.
-    pub(crate) fn destroy_retired(&mut self, _device: &ash::Device, old: crate::vulkan::vk_types::VkSwapchain) {
-        info!(
-            "Destroying retired swapchain handle {:?}",
-            old.swapchain
-        );
+    pub(crate) fn destroy_retired(
+        &mut self,
+        _device: &ash::Device,
+        old: crate::vulkan::vk_types::VkSwapchain,
+    ) {
+        info!("Destroying retired swapchain handle {:?}", old.swapchain);
         unsafe {
             old.swapchain_loader
                 .destroy_swapchain(old.swapchain, None);
+        }
+    }
+}
+
+fn drain_present_views(
+    views: &mut Vec<(vk::Image, vk::ImageView)>,
+    mut destroy: impl FnMut(vk::ImageView),
+) {
+    let mut destroyed = HashSet::new();
+    for (_, view) in views.drain(..) {
+        if view != vk::ImageView::null() && destroyed.insert(view.as_raw()) {
+            destroy(view);
         }
     }
 }
@@ -484,6 +501,36 @@ mod tests {
     }
 
     #[test]
+    fn install_rejects_current_and_absent_states() {
+        let generation = SwapchainGeneration::next();
+        let mut current = SwapchainState::Current { generation };
+        assert!(current.install(SwapchainGeneration::next()).is_err());
+        assert_eq!(current, SwapchainState::Current { generation });
+
+        let mut absent = SwapchainState::Absent;
+        assert!(absent.install(SwapchainGeneration::next()).is_err());
+        assert_eq!(absent, SwapchainState::Absent);
+    }
+
+    #[test]
+    fn install_accepts_nascent_and_retired_states() {
+        let mut nascent = SwapchainState::Nascent;
+        let first = SwapchainGeneration::next();
+        nascent.install(first).unwrap();
+        assert_eq!(nascent, SwapchainState::Current { generation: first });
+
+        let mut retired = SwapchainState::Retired { generation: first };
+        let replacement = SwapchainGeneration::next();
+        retired.install(replacement).unwrap();
+        assert_eq!(
+            retired,
+            SwapchainState::Current {
+                generation: replacement
+            }
+        );
+    }
+
+    #[test]
     fn generation_identities_are_monotonic() {
         let g1 = SwapchainGeneration::next();
         let g2 = SwapchainGeneration::next();
@@ -497,6 +544,12 @@ mod tests {
     // -----------------------------------------------------------------------
     // Resize request coalescing
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn zero_extent_request_remains_explicitly_pending_data() {
+        let request = ResizeRequest::new(vk::Extent2D::default());
+        assert_eq!(request.extent, vk::Extent2D::default());
+    }
 
     #[test]
     fn resize_request_has_monotonic_sequence() {
@@ -749,6 +802,22 @@ mod tests {
     }
 
     #[test]
+    fn present_views_are_destroyed_exactly_once() {
+        let first = vk::ImageView::from_raw(11);
+        let second = vk::ImageView::from_raw(12);
+        let mut views = vec![
+            (vk::Image::from_raw(1), first),
+            (vk::Image::from_raw(2), second),
+            (vk::Image::from_raw(3), first),
+            (vk::Image::from_raw(4), vk::ImageView::null()),
+        ];
+        let mut destroyed = Vec::new();
+        drain_present_views(&mut views, |view| destroyed.push(view.as_raw()));
+        assert!(views.is_empty());
+        assert_eq!(destroyed, vec![11, 12]);
+    }
+
+    #[test]
     fn generation_identity_preserved_through_retirement() {
         let gen = SwapchainGeneration::next();
 
@@ -914,14 +983,105 @@ mod tests {
         assert_eq!(selected, vk::PresentModeKHR::FIFO);
     }
 
-    #[test]
-    fn composite_alpha_fallback_to_opaque() {
-        // Test the composite alpha selection is OPAQUE when supported
-        let flags = vk::CompositeAlphaFlagsKHR::OPAQUE;
-        assert!(flags.contains(vk::CompositeAlphaFlagsKHR::OPAQUE));
+    fn support_with(
+        format: vk::SurfaceFormatKHR,
+        min_count: u32,
+    ) -> crate::vulkan::vk_types::SwapchainSupport {
+        crate::vulkan::vk_types::SwapchainSupport {
+            capabilities: vk::SurfaceCapabilitiesKHR {
+                min_image_count: min_count,
+                max_image_count: min_count + 2,
+                current_extent: vk::Extent2D {
+                    width: u32::MAX,
+                    height: u32::MAX,
+                },
+                min_image_extent: vk::Extent2D { width: 1, height: 1 },
+                max_image_extent: vk::Extent2D {
+                    width: 4096,
+                    height: 4096,
+                },
+                supported_transforms: vk::SurfaceTransformFlagsKHR::ROTATE_90,
+                current_transform: vk::SurfaceTransformFlagsKHR::ROTATE_90,
+                supported_composite_alpha: vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+                supported_usage_flags: vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+                ..Default::default()
+            },
+            formats: vec![format],
+            present_modes: vec![vk::PresentModeKHR::FIFO],
+        }
+    }
 
-        // When OPAQUE is NOT supported, should fallback
-        let no_opaque = vk::CompositeAlphaFlagsKHR::INHERIT;
-        assert!(!no_opaque.contains(vk::CompositeAlphaFlagsKHR::OPAQUE));
+    #[test]
+    fn changed_surface_data_produces_a_new_validated_plan() {
+        let format = vk::SurfaceFormatKHR {
+            format: vk::Format::R8G8B8A8_UNORM,
+            color_space: vk::ColorSpaceKHR::DISPLAY_P3_NONLINEAR_EXT,
+        };
+        let plan = crate::vulkan::vk_init::build_swapchain_create_plan(
+            &support_with(format, 4),
+            vk::Extent2D { width: 900, height: 700 },
+            Some(3),
+            None,
+            Some(vk::PresentModeKHR::MAILBOX),
+            true,
+        )
+        .unwrap();
+        assert_eq!(plan.surface_format, format);
+        assert_eq!(plan.image_count, 4);
+        assert_eq!(plan.extent, vk::Extent2D { width: 900, height: 700 });
+        assert_eq!(plan.pre_transform, vk::SurfaceTransformFlagsKHR::ROTATE_90);
+        assert_eq!(
+            plan.composite_alpha,
+            vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED
+        );
+        assert_eq!(plan.present_mode, vk::PresentModeKHR::FIFO);
+    }
+
+    #[test]
+    fn preflight_rejects_missing_required_usage() {
+        let format = vk::SurfaceFormatKHR {
+            format: vk::Format::B8G8R8A8_UNORM,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+        };
+        let mut support = support_with(format, 2);
+        support.capabilities.supported_usage_flags = vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        assert!(crate::vulkan::vk_init::build_swapchain_create_plan(
+            &support,
+            vk::Extent2D { width: 640, height: 480 },
+            None,
+            None,
+            None,
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn composite_alpha_selection_uses_only_supported_modes() {
+        let opaque = vk::SurfaceCapabilitiesKHR {
+            supported_composite_alpha: vk::CompositeAlphaFlagsKHR::OPAQUE,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::vulkan::vk_init::select_composite_alpha(&opaque).unwrap(),
+            vk::CompositeAlphaFlagsKHR::OPAQUE
+        );
+
+        let fallback = vk::SurfaceCapabilitiesKHR {
+            supported_composite_alpha: vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED
+                | vk::CompositeAlphaFlagsKHR::INHERIT,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::vulkan::vk_init::select_composite_alpha(&fallback).unwrap(),
+            vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED
+        );
+
+        assert!(crate::vulkan::vk_init::select_composite_alpha(
+            &vk::SurfaceCapabilitiesKHR::default()
+        )
+        .is_err());
     }
 }

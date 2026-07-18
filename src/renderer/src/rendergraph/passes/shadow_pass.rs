@@ -23,15 +23,18 @@ impl RenderPassNode for ShadowPass {
             return Ok(());
         }
 
-        let frame_index = ctx.frame.index;
-        let shadow_extent = ctx.renderer.shadow_resources.shadow_map_extent;
-        let shadow_frame = ctx.renderer.shadow_resources.get_frame(frame_index);
-        let shadow_map = &shadow_frame.shadow_map;
-        let shadow_map_view = shadow_frame.shadow_map_view;
+        let mut recording = ctx.shadow_ctx();
 
-        let shadow_draws = ctx.renderer.resolve_shadow_draw_objects(ctx.submission);
-        let light_view_proj = ctx
-            .submission
+        let frame_index = recording.frame_index();
+        let shadow_extent = recording.shadow_resources().shadow_map_extent;
+        let (shadow_map_image, shadow_map_view) = {
+            let shadow_frame = recording.shadow_resources().get_frame(frame_index);
+            (shadow_frame.shadow_map.image, shadow_frame.shadow_map_view)
+        };
+
+        let shadow_draws = recording.resolve_shadow_draw_objects();
+        let light_view_proj = recording
+            .submission()
             .directional_light
             .as_ref()
             .filter(|light| light.intensity > 0.0)
@@ -39,11 +42,7 @@ impl RenderPassNode for ShadowPass {
                 compute_draw_light_view_projection(light.direction, shadow_draws.iter())
             });
 
-        let cmd_pool = ctx
-            .frame
-            .cmd_pools
-            .get(crate::vulkan::vk_types::VkQueueType::Graphics);
-        let cmd_buffer = cmd_pool.buffers[0];
+        let cmd_buffer = recording.cmd_buffer();
 
         // Transition shadow map to depth attachment optimal
         let barrier = vk::ImageMemoryBarrier2::default()
@@ -59,7 +58,7 @@ impl RenderPassNode for ShadowPass {
             )
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .image(shadow_map.image)
+            .image(shadow_map_image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::DEPTH,
                 base_mip_level: 0,
@@ -71,9 +70,7 @@ impl RenderPassNode for ShadowPass {
         let barriers = [barrier];
         let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         unsafe {
-            ctx.renderer
-                .device
-                .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+            recording.device().cmd_pipeline_barrier2(cmd_buffer, &dep_info);
         }
 
         // Begin depth-only rendering
@@ -98,19 +95,16 @@ impl RenderPassNode for ShadowPass {
             .depth_attachment(&depth_attachment);
 
         unsafe {
-            ctx.renderer
-                .device
-                .cmd_begin_rendering(cmd_buffer, &rendering_info);
+            recording.device().cmd_begin_rendering(cmd_buffer, &rendering_info);
         }
 
         // Bind shadow pipeline
-        let shadow_pipeline = ctx
-            .renderer
-            .vulkan_cache
+        let shadow_pipeline = recording
+            .vulkan_cache()
             .pipelines
             .get_pipeline(VkPipelineType::ShadowDepth);
         unsafe {
-            ctx.renderer.device.cmd_bind_pipeline(
+            recording.device().cmd_bind_pipeline(
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 shadow_pipeline.pipeline,
@@ -131,18 +125,14 @@ impl RenderPassNode for ShadowPass {
             extent: shadow_extent,
         };
         unsafe {
-            ctx.renderer
-                .device
-                .cmd_set_viewport(cmd_buffer, 0, &[viewport]);
-            ctx.renderer
-                .device
-                .cmd_set_scissor(cmd_buffer, 0, &[scissor]);
+            recording.device().cmd_set_viewport(cmd_buffer, 0, &[viewport]);
+            recording.device().cmd_set_scissor(cmd_buffer, 0, &[scissor]);
         }
 
         if let Some(light_view_proj) = light_view_proj {
             for draw in &shadow_draws {
                 unsafe {
-                    ctx.renderer.device.cmd_bind_index_buffer(
+                    recording.device().cmd_bind_index_buffer(
                         cmd_buffer,
                         draw.index_buffer,
                         0,
@@ -157,7 +147,7 @@ impl RenderPassNode for ShadowPass {
                 };
 
                 unsafe {
-                    ctx.renderer.device.cmd_push_constants(
+                    recording.device().cmd_push_constants(
                         cmd_buffer,
                         shadow_pipeline.layout,
                         vk::ShaderStageFlags::VERTEX,
@@ -165,7 +155,7 @@ impl RenderPassNode for ShadowPass {
                         bytemuck::bytes_of(&push_consts),
                     );
 
-                    ctx.renderer.device.cmd_draw_indexed(
+                    recording.device().cmd_draw_indexed(
                         cmd_buffer,
                         draw.index_count,
                         1,
@@ -178,7 +168,7 @@ impl RenderPassNode for ShadowPass {
         }
 
         unsafe {
-            ctx.renderer.device.cmd_end_rendering(cmd_buffer);
+            recording.device().cmd_end_rendering(cmd_buffer);
         }
 
         // Transition shadow map to SHADER_READ_ONLY_OPTIMAL for sampling
@@ -192,7 +182,7 @@ impl RenderPassNode for ShadowPass {
             .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(shadow_map.image)
+            .image(shadow_map_image)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::DEPTH,
                 base_mip_level: 0,
@@ -204,9 +194,7 @@ impl RenderPassNode for ShadowPass {
         let read_barriers = [read_barrier];
         let dep_info = vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
         unsafe {
-            ctx.renderer
-                .device
-                .cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+            recording.device().cmd_pipeline_barrier2(cmd_buffer, &dep_info);
         }
 
         Ok(())

@@ -51,10 +51,12 @@ Snippet Type: Real
 ```rust
 // src/renderer/src/rendergraph/passes/present_copy_pass.rs
 fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
-    if ctx.submission.has_draw_targets() {
-        ctx.renderer.copy_draw_to_present(ctx.frame);
+    let has_draw_targets = ctx.submission.has_draw_targets();
+    let mut recording = ctx.present_copy_ctx();
+    if has_draw_targets {
+        recording.copy_draw_to_present();
     } else {
-        ctx.renderer.prepare_present_color_attachment(ctx.frame);
+        recording.prepare_present_color_attachment();
     }
     Ok(())
 }
@@ -128,7 +130,7 @@ for pass in order:
 ## 8. Cross-Module Links
 - Rendergraph core and pass ordering: `src/renderer/src/rendergraph/mod.rs`
 - Pass implementations: `src/renderer/src/rendergraph/passes/mod.rs`
-- Frame execution integration: `src/renderer/src/vulkan/vk_render.rs`
+- Frame execution integration: `src/renderer/src/vulkan/vk_render.rs` (coordinator), `src/renderer/src/vulkan/vk_commands.rs` (recording)
 - Submission flags and draw-target branch condition: `src/renderer/src/scene/render_submission.rs`
 - Frame synchronization context: `docs/internal/05-vulkan-sync-and-frame-lifecycle.md`
 

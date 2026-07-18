@@ -129,7 +129,7 @@ Why this helps:
 - Submission payload contract: `src/renderer/src/scene/render_submission.rs`
 - Debug UI context + manager: `src/renderer/src/debug_ui/mod.rs`
 - Event lifecycle internals: `docs/internal/10-event-system-and-lifecycle.md`
-- Backend frame execution: `src/renderer/src/vulkan/vk_render.rs`
+- Backend frame execution: `src/renderer/src/vulkan/vk_render.rs` (coordinator), `src/renderer/src/vulkan/vk_frame.rs` (frame lifecycle), `src/renderer/src/vulkan/vk_commands.rs` (command recording)
 - High-level frame mental model: `docs/internal/01-rendering-pipeline-mental-model.md`
 
 ## 9. Standard References

@@ -902,35 +902,63 @@ impl<'a> AssetManager<'a> {
     /// Thread: Main
     /// May Stall: No
     pub fn unload_mesh(&mut self, mesh: MeshHandle) -> Result<(), AssetError> {
+        // Validate the handle exists and is not reserved before retiring.
+        {
+            let mesh_cache = self
+                .core
+                .data_cache
+                .mesh_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("mesh_cache"))?;
+
+            mesh_cache
+                .get_id(mesh)
+                .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
+
+            if mesh.slot == MeshCache::SKYBOX_MESH.slot {
+                return Err(AssetError::ReservedHandle {
+                    resource: "mesh",
+                    slot: mesh.slot,
+                    generation: mesh.generation,
+                });
+            }
+        }
+
+        // Acquire both stores before mutating either. Geometry registration never holds
+        // these locks together, so this ordering cannot deadlock with ingestion.
         let mut mesh_cache = self
             .core
             .data_cache
             .mesh_cache
             .lock()
             .map_err(|_| poisoned_lock_err("mesh_cache"))?;
-
-        mesh_cache
-            .get_id(mesh)
-            .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
-
-        if mesh.slot == MeshCache::SKYBOX_MESH.slot {
-            return Err(AssetError::ReservedHandle {
-                resource: "mesh",
-                slot: mesh.slot,
-                generation: mesh.generation,
-            });
-        }
-
-        // Acquire both stores before mutating either. Geometry registration never holds these
-        // locks together, so this ordering cannot deadlock with ingestion.
         let mut geo_store = self
             .core
             .data_cache
             .mesh_geometry_store
             .lock()
             .map_err(|_| poisoned_lock_err("mesh_geometry_store"))?;
-        mesh_cache.deallocate_id(mesh);
-        geo_store.remove(mesh);
+
+        // Invalidate the cache generation first. Generation exhaustion is checked before
+        // ownership moves, so an error leaves both the cache and DTO visible.
+        let retired = mesh_cache
+            .retire_mesh(
+                mesh,
+                crate::data::retirement::FrameSerial::new(
+                    self.core.latest_submitted_serial,
+                ),
+            )
+            .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
+        let geometry = geo_store.take(mesh);
+
+        if let Some((mut payload, retire_after)) = retired {
+            payload.geometry = geometry;
+            self.core.mesh_retirement_queue.enqueue(
+                crate::data::retirement::RetirementClass::MeshGeometry,
+                retire_after,
+                payload,
+            );
+        }
 
         Ok(())
     }
@@ -1667,6 +1695,9 @@ fn map_cache_err(
             slot,
             generation,
         },
+        CacheError::GenerationExhausted => AssetError::Internal(format!(
+            "generation exhausted for {resource} slot {slot}; slot reuse is permanently rejected"
+        )),
         CacheError::DescriptorAllocation(msg) => AssetError::Internal(format!(
             "descriptor allocation failed for {resource} slot {slot}: {msg}"
         )),

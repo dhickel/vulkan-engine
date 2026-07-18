@@ -1410,6 +1410,7 @@ pub struct MeshCache {
     index_storage: VkSubAllocator,
     cached_meshes: Vec<CachedMesh>,
     mesh_generations: Vec<u32>,
+    last_referenced_serials: Vec<u64>,
     free_mesh_slots: Vec<u32>,
     joint_desc_pool: VkDynamicDescriptorAllocator,
     default_joint_desc: vk::DescriptorSet,
@@ -1471,6 +1472,7 @@ impl MeshCache {
         Ok(Self {
             cached_meshes,
             mesh_generations: vec![0],
+            last_referenced_serials: vec![0],
             free_mesh_slots: Vec::new(),
             vertex_storage,
             index_storage,
@@ -1507,6 +1509,7 @@ impl MeshCache {
             let slot = self.cached_meshes.len() as u32;
             self.cached_meshes.push(CachedMesh::Unloaded(data));
             self.mesh_generations.push(0);
+            self.last_referenced_serials.push(0);
             MeshHandle::new(slot, 0)
         }
     }
@@ -1528,6 +1531,21 @@ impl MeshCache {
             Some(CachedMesh::_NULL) => Err(CacheError::InvalidHandle),
             None => Err(CacheError::OutOfBounds),
         }
+    }
+
+    /// Mark a live mesh as referenced by commands owned by `submitted_serial`.
+    pub fn mark_referenced(
+        &mut self,
+        id: MeshHandle,
+        submitted_serial: u64,
+    ) -> Result<(), CacheError> {
+        let slot = self.validate_mesh_slot(id)?;
+        if !matches!(self.cached_meshes.get(slot), Some(CachedMesh::Loaded(_))) {
+            return Err(CacheError::NotLoaded);
+        }
+        self.last_referenced_serials[slot] =
+            self.last_referenced_serials[slot].max(submitted_serial);
+        Ok(())
     }
 
     unsafe fn allocate(
@@ -1749,6 +1767,97 @@ impl MeshCache {
     pub fn deallocate_ids(&mut self, mesh_ids: &[MeshHandle]) {
         mesh_ids.iter().for_each(|&id| self.deallocate_id(id))
     }
+
+    /// Retire a mesh handle for deferred GPU-safe destruction.
+    ///
+    /// Invalidates the handle immediately (generation bump, NULL tombstone)
+    /// but returns the GPU payload and slot ownership as a [`MeshRetiredPayload`]
+    /// for the caller to enqueue in a retirement queue. The slot is **not**
+    /// returned to the free list until [`release_mesh_slot`] is called.
+    ///
+    /// Returns `Ok(None)` for reserved/default slots.
+    /// Returns `Err(CacheError::…)` for stale, invalid, or unloaded handles.
+    pub fn retire_mesh(
+        &mut self,
+        mesh_id: MeshHandle,
+        latest_submitted_serial: crate::data::retirement::FrameSerial,
+    ) -> Result<
+        Option<(
+            crate::data::retirement::MeshRetiredPayload,
+            crate::data::retirement::FrameSerial,
+        )>,
+        CacheError,
+    > {
+        if is_reserved_mesh_slot(mesh_id.slot) {
+            return Ok(None);
+        }
+
+        let slot_idx = self.validate_mesh_slot(mesh_id)?;
+        // Determine the replacement generation before moving any payload. Exhaustion must
+        // leave both visibility and ownership unchanged.
+        let next_gen = checked_retired_generation(self.mesh_generations[slot_idx])?;
+        let last_referenced = crate::data::retirement::FrameSerial::new(
+            self.last_referenced_serials[slot_idx],
+        );
+        let retire_after = last_referenced.max(latest_submitted_serial);
+
+        let slot = self
+            .cached_meshes
+            .get_mut(slot_idx)
+            .ok_or(CacheError::OutOfBounds)?;
+        let old_mesh = std::mem::replace(slot, CachedMesh::_NULL);
+        self.mesh_generations[slot_idx] = next_gen;
+        self.last_referenced_serials[slot_idx] = 0;
+
+        match old_mesh {
+            CachedMesh::Loaded(buffers) => Ok(Some((
+                crate::data::retirement::MeshRetiredPayload {
+                    slot: slot_idx as u32,
+                    buffers,
+                    geometry: None,
+                },
+                retire_after,
+            ))),
+            CachedMesh::Unloaded(_) => {
+                // No GPU command can reference an unloaded mesh, so completed work already
+                // authorizes immediate slot release.
+                self.free_mesh_slots.push(slot_idx as u32);
+                Ok(None)
+            }
+            CachedMesh::_NULL => unreachable!("validated live mesh slot became null"),
+        }
+    }
+
+    /// Destroy the GPU suballocations held by a retired mesh payload.
+    ///
+    /// Called after the retirement queue has determined it is safe to free
+    /// these resources. Does not release the cache slot — call
+    /// [`release_mesh_slot`] separately.
+    pub fn destroy_retired_payload(
+        &mut self,
+        payload: &crate::data::retirement::MeshRetiredPayload,
+    ) {
+        self.index_storage.deallocate(payload.buffers.index_buffer);
+        self.vertex_storage.deallocate(payload.buffers.vertex_buffer);
+    }
+
+    /// Release a cache slot back to the free list after its retired payload
+    /// has been destroyed.
+    pub fn release_mesh_slot(&mut self, slot: u32) {
+        debug_assert!((slot as usize) >= Self::DEFAULT_MESH_ITER_START);
+        debug_assert!(!self.free_mesh_slots.contains(&slot));
+        self.free_mesh_slots.push(slot);
+    }
+}
+
+fn is_reserved_mesh_slot(slot: u32) -> bool {
+    (slot as usize) < MeshCache::DEFAULT_MESH_ITER_START
+}
+
+fn checked_retired_generation(generation: u32) -> Result<u32, CacheError> {
+    generation
+        .checked_add(1)
+        .ok_or(CacheError::GenerationExhausted)
 }
 
 impl VkDestroyable for MeshCache {
@@ -2440,6 +2549,17 @@ mod tests {
         assert_eq!(face_size, 1);
         assert_eq!(format, vk::Format::R8G8B8A8_UNORM);
         assert_eq!(bytes, vec![7; 24]);
+    }
+
+    #[test]
+    fn mesh_retirement_rejects_reserved_slots_and_generation_wrap() {
+        assert!(is_reserved_mesh_slot(MeshCache::SKYBOX_MESH.slot));
+        assert!(!is_reserved_mesh_slot(1));
+        assert_eq!(checked_retired_generation(7), Ok(8));
+        assert_eq!(
+            checked_retired_generation(u32::MAX),
+            Err(CacheError::GenerationExhausted)
+        );
     }
 
     #[test]

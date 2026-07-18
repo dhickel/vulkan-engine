@@ -615,7 +615,7 @@ impl VkDynamicDescriptorAllocator {
     /// Every unique pool is reset exactly once. Exhausted pools are moved back to
     /// ready state. If any reset fails, conservative state is retained and the pools
     /// are not marked reusable.
-    pub fn clear_pools(
+    pub(crate) fn clear_pools(
         &mut self,
         device: &ash::Device,
         token: &mut CompletedFrameSlot,
@@ -744,7 +744,7 @@ impl VkDynamicDescriptorAllocator {
     /// is moved to `full_pools`, a replacement is acquired, and allocation is retried
     /// exactly once. Other Vulkan errors are returned as structured errors without
     /// silently growing pools.
-    pub fn allocate(
+    pub(crate) fn allocate(
         &mut self,
         device: &ash::Device,
         layout: &[vk::DescriptorSetLayout],
@@ -1130,7 +1130,7 @@ mod tests {
     }
 
     fn make_token(slot: u32, epoch: u64) -> CompletedFrameSlot {
-        CompletedFrameSlot::new(slot, epoch)
+        CompletedFrameSlot::new(slot, epoch, epoch)
     }
 
     unsafe fn fake_device() -> ash::Device {

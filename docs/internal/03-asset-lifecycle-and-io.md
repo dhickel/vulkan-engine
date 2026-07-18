@@ -143,6 +143,7 @@ on Ready(fragment):
 - `OutOfBounds` means invalid slot index.
 - `RenderObject` now owns a `CopiedMaterialDrawRecord` captured while the texture-cache lock is held. New draw-time material fields must be copied under that same guard; storing cache-owned addresses would reintroduce the removed lifetime hazard.
 - Assuming the legacy `src/renderer/src/data/gltf_util.rs` path is active is incorrect; Assimp path is current.
+- **Mesh handle retirement**: `AssetManager::unload_mesh` invalidates the handle immediately (generation bump and geometry lookup removal) but retains the copied `VkMeshBuffers`, GPU suballocations, and neutral geometry DTO until the fence for `max(last_referenced_serial, latest_submitted_serial)` signals. Querying a retired handle returns `StaleHandle`. The cache slot is not reusable until destruction and retirement-queue reaping complete. Double-unload is idempotently stale. Reserved default slots (e.g. skybox mesh at slot 0) are never retired and return `AssetError::ReservedHandle`; generation exhaustion rejects invalidation without moving or destroying the live payload.
 
 ## 7. Debugging Playbook
 - Step 1: verify ticket state transitions (`Pending` -> `Ready` or `Failed`) in API load tracker.

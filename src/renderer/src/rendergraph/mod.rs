@@ -9,13 +9,10 @@
 //!
 //! ## Safety
 //!
-//! [`RenderGraphContext`] exposes [`RenderGraphContext::renderer`] as `&mut VkRenderCore`,
-//! giving custom [`RenderPassNode`] implementations unrestricted mutable access to the
-//! Vulkan backend. Custom pass registration has **no** resource declaration,
-//! synchronization validation, or ordering constraint checks. Inserting a custom pass
-//! without understanding the implicit state-carryover dependencies documented in
-//! `docs/internal/07-rendergraph-dependencies-and-aliasing.md` can cause Vulkan validation
-//! errors, GPU hangs, or undefined behavior.
+//! Default passes receive narrow pass-specific recording contexts; no pass receives
+//! unrestricted mutable access to `VkRenderCore`. Custom pass registration still has no
+//! resource declaration, synchronization validation, or ordering checks, and the unstable
+//! context intentionally exposes no generalized Vulkan recording escape hatch.
 //!
 //! ## Purpose
 //! The RenderGraph is a high-level abstraction that decouples the "what" to render from the
@@ -25,8 +22,8 @@
 //! ## Key Concepts
 //! - **RenderPassNode**: A single stage in the frame (e.g., `GeometryPass`). It implements
 //!   `execute` to record Vulkan commands for that stage.
-//! - **RenderGraphContext**: Provides passes with everything they need: the frame's resources,
-//!   the scene submission, and access to the core renderer.
+//! - **RenderGraphContext**: Provides the frame submission plus internal narrow recording
+//!   contexts for each default pass.
 //! - **Pass Ordering**: The order of passes in the graph is the order they are recorded into
 //!   the command buffer.
 //!
@@ -42,7 +39,7 @@ use crate::rendergraph::passes::{
     SkyboxPass, TerminalPresentPass,
 };
 use crate::scene::render_submission::RenderSubmission;
-use crate::vulkan::vk_render::VkRenderCore;
+use crate::vulkan::vk_commands::RecordingDispatcher;
 use crate::vulkan::vk_types::{VkFrame, VkQueueType};
 use std::time::Instant;
 
@@ -54,17 +51,29 @@ pub struct RenderGraph {
 
 /// Context passed to each render pass during graph execution.
 ///
-/// # Safety
+/// # Recording access
 ///
-/// The [`renderer`](Self::renderer) field provides `&mut VkRenderCore` — unrestricted mutable
-/// access to the Vulkan backend. Pass implementations must respect all implicit state-carryover
-/// dependencies documented in `docs/internal/07-rendergraph-dependencies-and-aliasing.md`.
-/// Incorrect layout transitions, descriptor mutations, or resource ownership violations can
-/// cause Vulkan validation errors or undefined behavior.
+/// The private recording dispatcher yields lifetime-bound pass-specific contexts. It owns
+/// no resources and cannot access frame lifecycle, presentation, queues, or swapchain state.
+///
+/// # Stability
+///
+/// Pass implementations must respect all implicit state-carryover dependencies documented
+/// in `docs/internal/07-rendergraph-dependencies-and-aliasing.md`.
 pub struct RenderGraphContext<'a> {
     pub submission: &'a RenderSubmission,
     pub frame: &'a mut VkFrame,
-    pub renderer: &'a mut VkRenderCore,
+    pub(crate) recording: &'a mut RecordingDispatcher<'a>,
+}
+
+impl<'a> RenderGraphContext<'a> {
+    pub(crate) fn new(
+        submission: &'a RenderSubmission,
+        frame: &'a mut VkFrame,
+        recording: &'a mut RecordingDispatcher<'a>,
+    ) -> Self {
+        Self { submission, frame, recording }
+    }
 }
 
 /// A single stage in the render graph.
@@ -72,10 +81,9 @@ pub struct RenderGraphContext<'a> {
 /// # Stability
 ///
 /// **Alpha unstable.** This trait is only available when the `advanced-interop` feature is
-/// enabled. Its signature may change across alpha sprints. Custom implementations receive
-/// [`RenderGraphContext`] which gives unrestricted mutable access to the Vulkan backend.
-/// There is no resource declaration, synchronization validation, or ordering constraint
-/// checking for custom pass implementations.
+/// enabled. Its signature may change across alpha sprints. Custom implementations can inspect
+/// the submission and frame but receive no generalized backend recording access. There is no
+/// resource declaration, synchronization validation, or ordering constraint checking.
 pub trait RenderPassNode {
     fn name(&self) -> &'static str;
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String>;
@@ -121,12 +129,12 @@ impl RenderGraph {
         for pass in self.passes.iter() {
             let cmd_pool = ctx.frame.cmd_pools.get(VkQueueType::Graphics);
             let cmd_buffer = cmd_pool.buffers[0];
-            ctx.renderer.begin_gpu_pass_timing(cmd_buffer, pass.name());
+            ctx.begin_gpu_pass_timing(cmd_buffer, pass.name());
 
             let pass_start = Instant::now();
             let result = pass.execute(ctx);
             let cpu_ms = elapsed_ms(pass_start);
-            ctx.renderer.end_gpu_pass_timing(cmd_buffer);
+            ctx.end_gpu_pass_timing(cmd_buffer);
 
             result.map_err(|err| format!("render pass '{}' failed: {err}", pass.name()))?;
             pass_timings.push(RenderGraphPassTiming {

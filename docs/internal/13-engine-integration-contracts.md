@@ -74,12 +74,12 @@ associate submitted work with the slot fence until explicit serial tracking exis
 | Resource | Retirement rule |
 |---|---|
 | Per-frame descriptor pool | Reset only after its owning frame-slot fence signals. A `CompletedFrameSlot` token created by the fence-wait path must authorize the reset; the token is single-use and consumed during `clear_pools`. |
-| Mesh/material/image payload | Caller invalidation is immediate; GPU payload reuse/destruction still needs the greatest referencing frame serial. Phase 04 implements delayed reuse. |
+| Mesh payload | Caller invalidation is immediate. `MeshCache::mark_referenced` records the serial reserved while draw records are built; unload retires after the maximum of that serial and the latest successful submit. `VkMeshBuffers`, suballocations, and neutral geometry remain owned by the retirement queue until fence completion, then destruction precedes slot release. |
 | Acquire semaphore | Never reuse a signaled binary semaphore until a queue wait consumes it. |
 | Render semaphore | Never signal it again until presentation (or an equivalent retirement operation) consumes the prior signal. |
 | Swapchain generation | Once creation begins with non-null `oldSwapchain`, the old generation is retired even if replacement creation fails; never restore it as current. |
-| Frame serial | Submitted once, complete only after its fence signals. Current code has slot fences but no explicit serial field. |
-| CompletedFrameSlot token | Created by the fence-wait path (`wait_for_frame_fence`) after GPU completion. Single-use: consumed during `clear_pools`. Duplicate, mismatched, or stale tokens are rejected with `ResetRejected` before any Vulkan call. |
+| Frame serial | Starts at one and is published only after `queue_submit2` succeeds. Each frame slot stores its last successful submitted serial; completion advances only after that slot's fence wait succeeds. Zero means no submitted work. |
+| CompletedFrameSlot token | Created by `wait_for_frame_fence` after GPU completion. It keeps the descriptor-reset epoch separate from the completed submitted serial. The reset authorization is single-use and consumed during `clear_pools`; duplicate, mismatched, or stale tokens are rejected before any Vulkan call. |
 
 ## 2. Public Compatibility Map
 
@@ -144,9 +144,9 @@ Surface loss (`VK_ERROR_SURFACE_LOST_KHR`) is classified internally as
 - Are logged as structured `surface_lost` events via the existing `error!` macro
   at the point of classification.
 - **Poison the backend** and require full `Renderer` recreation if surface
-  recreation is unavailable. The existing public error shape
-  (`RendererError::BackendPoisoned` or `RendererError::DeviceLost` depending
-  on the compound failure) is preserved.
+  recreation is unavailable. The triggering surface-loss call preserves the
+  existing `RendererError::Frame(RendererFrameError::Render(_))` shape; later
+  backend operations return `RendererError::BackendPoisoned`.
 - **Never** silently loop rebuild on surface loss. No implicit surface
   recreation is attempted.
 
@@ -154,10 +154,10 @@ Mapping summary:
 
 | Internal class | Logged as | Public error | Behavior |
 |---|---|---|---|
-| `AcquireClass::SurfaceLost` | `error!("Vulkan surface lost during image acquisition")` | `RendererError::BackendPoisoned` | Require renderer recreation |
-| `PresentClass::SurfaceLost` | `error!("Vulkan surface lost during present")` | `RendererError::BackendPoisoned` | Require renderer recreation |
-| `AcquireClass::DeviceLost` | `error!("Vulkan device lost during swapchain image acquisition")` | `RendererError::DeviceLost` | Require renderer recreation |
-| `PresentClass::DeviceLost` | `error!("Vulkan device lost during present")` | `RendererError::DeviceLost` | Require renderer recreation |
+| `AcquireClass::SurfaceLost` | `wsi_outcome class=surface_lost operation=acquire` | Trigger: `RendererError::Frame(Render(_))`; later: `BackendPoisoned` | Require renderer recreation |
+| `PresentClass::SurfaceLost` | `wsi_outcome class=surface_lost operation=present` | Trigger: `RendererError::Frame(Render(_))`; later: `BackendPoisoned` | Require renderer recreation |
+| `AcquireClass::DeviceLost` | `wsi_outcome class=device_lost operation=acquire` | `RendererError::DeviceLost` | Require renderer recreation |
+| `PresentClass::DeviceLost` | `wsi_outcome class=device_lost operation=present` | `RendererError::DeviceLost` | Require renderer recreation |
 
 **Compatibility note:** The public `FrameRenderOutcome` variants (`Rendered`,
 `SkippedResizePending`, `SubmittedNotPresented`, `PresentedSuboptimal`) are

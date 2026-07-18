@@ -98,7 +98,7 @@ present(wait render_semaphore)
 - Scene flattening: `src/renderer/src/scene/scene_world.rs`
 - Submission payload: `src/renderer/src/scene/render_submission.rs`
 - Rendergraph orchestration: `src/renderer/src/rendergraph/mod.rs`
-- Vulkan frame execution: `src/renderer/src/vulkan/vk_render.rs`
+- Vulkan frame execution: `src/renderer/src/vulkan/vk_render.rs` (coordinator), `src/renderer/src/vulkan/vk_frame.rs` (frame lifecycle), `src/renderer/src/vulkan/vk_commands.rs` (command recording)
 - Debug UI composition: `src/renderer/src/debug_ui/mod.rs`
 
 ## 9. Standard References

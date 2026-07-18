@@ -108,4 +108,6 @@ For internal access, the `advanced-interop` feature gate (`src/renderer/src/api/
 
 - [03-asset-pipeline.md](03-asset-pipeline.md) — asset loading and GPU upload
 - [07-rendergraph.md](07-rendergraph.md) — pass execution order
-- [src/renderer/src/vulkan/vk_render.rs](../../src/renderer/src/vulkan/vk_render.rs) — frame transactions and backend orchestration
+- [src/renderer/src/vulkan/vk_render.rs](../../src/renderer/src/vulkan/vk_render.rs) — owning backend coordinator, construction, and teardown
+- [src/renderer/src/vulkan/vk_frame.rs](../../src/renderer/src/vulkan/vk_frame.rs) — frame transactions, acquire, submit, and present
+- [src/renderer/src/vulkan/vk_commands.rs](../../src/renderer/src/vulkan/vk_commands.rs) — rendergraph dispatch and command recording

@@ -14,6 +14,7 @@ impl RenderPassNode for ImguiPass {
             return Ok(());
         }
 
-        ctx.renderer.draw_imgui_to_present(ctx.frame)
+        let mut recording = ctx.imgui_ctx();
+        recording.draw_imgui_to_present()
     }
 }

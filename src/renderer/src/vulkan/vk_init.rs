@@ -911,7 +911,7 @@ pub fn build_swapchain_create_plan(
     };
 
     log::info!("Swapchain: Setting composite alpha");
-    let composite_alpha = select_composite_alpha(&support.capabilities);
+    let composite_alpha = select_composite_alpha(&support.capabilities)?;
 
     Ok(SwapchainCreatePlan {
         extent,
@@ -924,17 +924,19 @@ pub fn build_swapchain_create_plan(
     })
 }
 
-/// Select composite alpha: prefer OPAQUE, fall back to INHERIT.
-fn select_composite_alpha(caps: &vk::SurfaceCapabilitiesKHR) -> vk::CompositeAlphaFlagsKHR {
-    if caps
-        .supported_composite_alpha
-        .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
-    {
-        vk::CompositeAlphaFlagsKHR::OPAQUE
-    } else {
-        log::info!("OPAQUE composite alpha not supported; falling back to INHERIT");
-        vk::CompositeAlphaFlagsKHR::INHERIT
-    }
+/// Select a supported composite-alpha mode in deterministic preference order.
+pub(crate) fn select_composite_alpha(
+    caps: &vk::SurfaceCapabilitiesKHR,
+) -> Result<vk::CompositeAlphaFlagsKHR, String> {
+    [
+        vk::CompositeAlphaFlagsKHR::OPAQUE,
+        vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::INHERIT,
+    ]
+    .into_iter()
+    .find(|mode| caps.supported_composite_alpha.contains(*mode))
+    .ok_or_else(|| "Vulkan surface reported no supported composite-alpha mode".to_string())
 }
 
 /// Create a swapchain from a validated plan.
@@ -1000,10 +1002,12 @@ pub fn create_swapchain_with_plan(
     };
 
     log::info!("Swapchain: Initializing images");
-    let swapchain_images = unsafe {
-        swapchain_loader
-            .get_swapchain_images(swapchain)
-            .map_err(|err| format!("Failed to get swapchain images: {:?}", err))?
+    let swapchain_images = match unsafe { swapchain_loader.get_swapchain_images(swapchain) } {
+        Ok(images) => images,
+        Err(err) => {
+            unsafe { swapchain_loader.destroy_swapchain(swapchain, None) };
+            return Err(format!("Failed to get swapchain images: {:?}", err));
+        }
     };
 
     log::info!("Swapchain created");
@@ -1031,86 +1035,32 @@ pub fn create_swapchain(
 ) -> Result<VkSwapchain, String> {
     log::info!("Creating swapchain");
     let swapchain_support = get_swapchain_support(&physical_device.p_device, surface_info)?;
-    if swapchain_support.formats.is_empty() {
-        return Err("Vulkan surface reported no swapchain formats".to_string());
-    }
-    if swapchain_support.present_modes.is_empty() {
-        return Err("Vulkan surface reported no presentation modes".to_string());
-    }
-
-    log::info!("Swapchain: Setting surface format");
-    let surface_format = if let Some(sf) = surface_format {
-        let format =
-            select_sc_surface_format(&swapchain_support.formats, sf.format, sf.color_space);
-
-        if !format.0 && !allow_defaults {
-            return Err("Couldn't find expected surface format".to_string());
-        }
-        format.1
-    } else {
-        get_default_sc_format(&swapchain_support.formats)
-    };
-
-    log::info!("Swapchain: Setting present mode");
-    let present_mode = if let Some(pm) = present_mode {
-        let mode = select_sc_present_mode(&swapchain_support.present_modes, pm);
-
-        if !mode.0 && !allow_defaults {
-            return Err("Couldn't find expected present mode".to_string());
-        }
-        mode.1
-    } else {
-        select_sc_present_mode(&swapchain_support.present_modes, vk::PresentModeKHR::FIFO).1
-    };
-
-    log::info!("Swapchain: Setting extent");
-    let extent = select_sc_extent(&swapchain_support.capabilities, requested_extent);
-    let required_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
-        | vk::ImageUsageFlags::TRANSFER_DST
-        | vk::ImageUsageFlags::TRANSFER_SRC;
-    if !swapchain_support
-        .capabilities
-        .supported_usage_flags
-        .contains(required_usage)
-    {
-        return Err(format!(
-            "Swapchain surface does not support required image usage {:?}; windowed present capture needs TRANSFER_SRC",
-            required_usage
-        ));
-    }
-
-    let min_count = swapchain_support.capabilities.min_image_count.max(1);
-    let requested_count = image_count.unwrap_or(min_count.saturating_add(1));
-    let image_count = if swapchain_support.capabilities.max_image_count > 0 {
-        requested_count
-            .max(min_count)
-            .min(swapchain_support.capabilities.max_image_count)
-    } else {
-        requested_count.max(min_count)
-    };
-    log::info!("Swapchain: Requesting image count: {}", image_count);
-
-    log::info!("Swapchain: Setting pre transform");
-    let pre_transform = if swapchain_support
-        .capabilities
-        .supported_transforms
-        .contains(vk::SurfaceTransformFlagsKHR::IDENTITY)
-    {
-        vk::SurfaceTransformFlagsKHR::IDENTITY
-    } else {
-        swapchain_support.capabilities.current_transform
-    };
+    let plan = build_swapchain_create_plan(
+        &swapchain_support,
+        requested_extent,
+        image_count,
+        surface_format,
+        present_mode,
+        allow_defaults,
+    )?;
+    let surface_format = plan.surface_format;
+    let present_mode = plan.present_mode;
+    let extent = plan.extent;
+    let required_usage = plan.image_usage;
+    let image_count = plan.image_count;
+    let pre_transform = plan.pre_transform;
+    let composite_alpha = plan.composite_alpha;
 
     log::info!("Swapchain: Creating info");
     let mut sc_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface_info.surface)
         .min_image_count(image_count)
-        .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        .image_color_space(surface_format.color_space)
         .image_format(surface_format.format)
         .image_extent(extent)
         .image_usage(required_usage)
         .pre_transform(pre_transform)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .composite_alpha(composite_alpha)
         .present_mode(present_mode)
         .clipped(true)
         .image_array_layers(1);
@@ -1149,10 +1099,12 @@ pub fn create_swapchain(
     };
 
     log::info!("Swapchain: Initializing images");
-    let swapchain_images = unsafe {
-        swapchain_loader
-            .get_swapchain_images(swapchain)
-            .map_err(|err| format!("Failed to get swapchain images: {:?}", err))?
+    let swapchain_images = match unsafe { swapchain_loader.get_swapchain_images(swapchain) } {
+        Ok(images) => images,
+        Err(err) => {
+            unsafe { swapchain_loader.destroy_swapchain(swapchain, None) };
+            return Err(format!("Failed to get swapchain images: {:?}", err));
+        }
     };
 
     log::info!("Swapchain created");
@@ -1387,33 +1339,36 @@ pub fn create_basic_present_views(
             .map_err(|err| format!("Error getting swapchain images: {:?}", err))?
     };
 
-    let image_views: Vec<(vk::Image, vk::ImageView)> = present_images
-        .iter()
-        .map(|&image| unsafe {
-            let create_view_info = vk::ImageViewCreateInfo::default()
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(swapchain.surface_format.format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::R,
-                    g: vk::ComponentSwizzle::G,
-                    b: vk::ComponentSwizzle::B,
-                    a: vk::ComponentSwizzle::A,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .image(image);
+    let mut image_views = Vec::with_capacity(present_images.len());
+    for image in present_images {
+        let create_view_info = vk::ImageViewCreateInfo::default()
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(swapchain.surface_format.format)
+            .components(vk::ComponentMapping {
+                r: vk::ComponentSwizzle::R,
+                g: vk::ComponentSwizzle::G,
+                b: vk::ComponentSwizzle::B,
+                a: vk::ComponentSwizzle::A,
+            })
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image(image);
 
-            logical_device
-                .create_image_view(&create_view_info, None)
-                .map(|image_view| (image, image_view))
-                .map_err(|err| format!("Error creating image views: {:?}", err))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        match unsafe { logical_device.create_image_view(&create_view_info, None) } {
+            Ok(image_view) => image_views.push((image, image_view)),
+            Err(err) => {
+                for (_, view) in image_views.drain(..) {
+                    unsafe { logical_device.destroy_image_view(view, None) };
+                }
+                return Err(format!("Error creating image views: {:?}", err));
+            }
+        }
+    }
 
     log::info!("Image views created");
     Ok(image_views)

@@ -522,12 +522,11 @@ impl Renderer {
             ));
         }
 
+        let new_extent = Extent2D::default().width(width).height(height);
+        self.runtime.core.swapchain_owner.request_resize(new_extent);
         if width == 0 || height == 0 {
             return Ok(());
         }
-
-        let new_extent = Extent2D::default().width(width).height(height);
-        self.runtime.core.swapchain_owner.request_resize(new_extent);
         self.runtime
             .rebuild_swapchain(new_extent)
             .map_err(renderer_error_from_backend)

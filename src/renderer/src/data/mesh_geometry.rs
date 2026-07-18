@@ -205,16 +205,23 @@ impl MeshGeometryStore {
         Ok(stored.dto.local_aabb)
     }
 
-    /// Invalidate a handle: remove the entry so subsequent queries fail.
-    /// The slot can be reused with a new (incremented) generation.
-    pub fn remove(&mut self, handle: MeshHandle) {
+    /// Invalidate a handle and return its DTO for optional deferred retention.
+    /// The entry disappears from lookup immediately even when the caller keeps the DTO alive.
+    pub fn take(&mut self, handle: MeshHandle) -> Option<MeshGeometryDto> {
         if self
             .entries
             .get(&handle.slot)
             .is_some_and(|stored| stored.generation == handle.generation)
         {
-            self.entries.remove(&handle.slot);
+            return self.entries.remove(&handle.slot).map(|stored| stored.dto);
         }
+        None
+    }
+
+    /// Invalidate a handle: remove the entry so subsequent queries fail.
+    /// The slot can be reused with a new (incremented) generation.
+    pub fn remove(&mut self, handle: MeshHandle) {
+        let _ = self.take(handle);
     }
 
     /// Remove every entry in `handles` that matches by generation.

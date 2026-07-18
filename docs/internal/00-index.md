@@ -55,7 +55,9 @@ Renderer (public API)
 | File | Role |
 |------|------|
 | [`src/renderer/src/api/renderer.rs`](../../src/renderer/src/api/renderer.rs) | Public API facade |
-| [`src/renderer/src/vulkan/vk_render.rs`](../../src/renderer/src/vulkan/vk_render.rs) | Vulkan frame transactions, rendergraph orchestration, submit/present, and terminal-error classification |
+| [`src/renderer/src/vulkan/vk_render.rs`](../../src/renderer/src/vulkan/vk_render.rs) | Vulkan ownership, construction/teardown, environment generation, and frame coordination |
+| [`src/renderer/src/vulkan/vk_frame.rs`](../../src/renderer/src/vulkan/vk_frame.rs) | Frame transaction, acquire/drain/submit/present, and timing lifecycle |
+| [`src/renderer/src/vulkan/vk_commands.rs`](../../src/renderer/src/vulkan/vk_commands.rs) | Pass-specific command recording and draw-list policy |
 | [`src/renderer/src/data/data_cache.rs`](../../src/renderer/src/data/data_cache.rs) | Mesh/texture/material caches (~2475 lines) |
 | [`src/renderer/src/scene/scene_world.rs`](../../src/renderer/src/scene/scene_world.rs) | Scene graph and submission builder |
 | [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) | Fixed rendergraph order and pass trait |

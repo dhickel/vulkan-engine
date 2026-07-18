@@ -14,8 +14,8 @@ impl RenderPassNode for GeometryPass {
             return Ok(());
         }
 
-        ctx.renderer
-            .draw_geometry_from_submission(ctx.frame, ctx.submission);
+        let mut recording = ctx.geometry_ctx();
+        recording.draw_geometry_from_submission();
         Ok(())
     }
 }

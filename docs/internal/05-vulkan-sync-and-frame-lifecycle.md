@@ -1,11 +1,11 @@
 # Vulkan Sync and Frame Lifecycle
 
 ## 1. Purpose & Audience
-This chapter is for contributors editing Vulkan frame orchestration in `vk_render`, especially fence/semaphore ordering, image layout transitions, descriptor pool lifetime, and rendergraph pass sequencing.
+This chapter is for contributors editing Vulkan frame orchestration in `vk_render`, `vk_frame` and `vk_commands`, especially fence/semaphore ordering, image layout transitions, descriptor pool lifetime, and rendergraph pass sequencing.
 
 ## 2. Where This Fits in Engine Flow
 Per-frame backend flow:
-`Renderer::render_scene(...)` -> `VkRender::render_with_hooks(...)` -> `VkRenderCore::render_with_hooks(...)` -> acquire frame slot -> rendergraph pass recording -> submit -> present.
+`Renderer::render_scene(...)` -> `VkRender::render_with_hooks(...)` -> `VkRenderCore::render_with_hooks(...)` -> acquire frame slot (`vk_frame`) -> rendergraph pass recording (`vk_commands`) -> submit -> present.
 
 ## 3. Key Concepts
 - `VkFrameSync` defines one frame slot's synchronization contract:
@@ -37,7 +37,7 @@ Synchronization primitive role table:
 ## 4. Code Walkthrough
 Snippet Type: Pseudocode
 ```rust
-// Simplified from src/renderer/src/vulkan/vk_render.rs
+// Simplified from src/renderer/src/vulkan/vk_frame.rs
 fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
     let frame = self.presentation.get_next_frame();
     let frame_sync = frame.sync;
@@ -63,7 +63,7 @@ fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
 
 Snippet Type: Pseudocode
 ```rust
-// Simplified from src/renderer/src/vulkan/vk_render.rs
+// Simplified from src/renderer/src/vulkan/vk_frame.rs
 fn submit_frame(&self, frame: FrameAcquire) -> Result<(), String> {
     // Windowed: wait swap semaphore, signal render semaphore, signal frame fence.
     // Headless: no binary semaphores; the queue submission still signals the fence.
@@ -155,9 +155,11 @@ else:
   - Too narrow can create intermittent hazards across GPUs/drivers.
 - Descriptor pool exhaustion and churn if `clear_pools` no longer runs on frame-slot reuse.
 - Descriptor reset without a valid `CompletedFrameSlot` token is rejected. The token must be created by the fence-wait path and is single-use. Duplicate or mismatched tokens produce `ResetRejected`.
+- `CompletedFrameSlot` carries two distinct serials: the descriptor-reset epoch consumed by `clear_pools`, and the slot's `last_submitted_serial` used for GPU retirement. Conflating them would either reject valid descriptor cleanup or retire resources against the wrong submission.
+- **Handle retirement**: Every slot+generation resource store must use fence-aware retirement. `GpuRetirementQueue<T>` delays payload destruction and slot reuse until `completed_serial >= retire_after`. `FrameSerial` is committed only after successful queue submission and completion advances only from successful fence observations; submit failure cannot fabricate either serial. Mesh references are marked while immutable draw records are built. Mesh unload uses `retire_after = max(last_referenced_serial, latest_submitted_serial)`, immediately bumps generation/removes lookup visibility, and retains `VkMeshBuffers`, suballocations, and the neutral geometry DTO through `GpuRetirementQueue` until `reap_mesh_retirement` destroys the payload and releases the slot. Reserved default slots are non-retirable. Dependent phases must use the same `RetirementClass` taxonomy for bounds entries, collider recipes, BVH leaves, LOD chains, and instance records.
 - Fragmentation metric means observed `ERROR_FRAGMENTED_POOL` events and affected pool counts, not an unsupported claim about driver-internal fragmentation percentage.
-- Swapchain rebuild lifecycle: `rebuild_swapchain` follows an explicit Nascent → Current → Retired → Absent state machine (see `src/renderer/src/vulkan/vk_swapchain.rs`). Once `vkCreateSwapchainKHR` is called with a non-null `oldSwapchain`, that generation is permanently Retired even if the new creation fails. A Retired generation is never rendered through, restored as current, or passed again as `oldSwapchain`. Present image views are destroyed before their owning swapchain handle, guaranteeing exact-once destruction order. `device_wait_idle` is still called before retirement to drain in-flight work but is not a substitute for the ownership model — state tests must not depend on it.
-- Resize requests are coalesced: only the latest non-zero extent is stored. Zero extents are deferred without Vulkan calls. A successful rebuild consumes only the request generation it installed, so a newer concurrent request remains pending.
+- Swapchain rebuild lifecycle: `rebuild_swapchain` follows an explicit Nascent → Current → Retired → Absent state machine (see `src/renderer/src/vulkan/vk_swapchain.rs`). Once `vkCreateSwapchainKHR` is called with a non-null `oldSwapchain`, that generation is permanently Retired even if the new creation fails. A Retired generation is never rendered through, restored as current, or passed again as `oldSwapchain`. `SwapchainOwner` solely owns window-system present views; `VkPresent` only references them. Views are destroyed before their swapchain handle, partial view creation is rolled back, and the retired handle remains alive until replacement publication commits. `device_wait_idle` is still called before retirement to drain in-flight work but is not a substitute for the ownership model — state tests must not depend on it.
+- Resize requests are coalesced to the latest event, including zero extents. A zero extent remains pending and is deferred without capability queries or replacement calls. A successful non-zero rebuild consumes only the request generation it installed, so a newer concurrent request remains pending.
 - Acquire and present results are classified structurally via `AcquireClass` / `PresentClass` enums without string parsing. Surface-lost is distinct from out-of-date; both trigger explicit terminal or rebuild paths rather than silent loops.
 - `VkPresent::get_next_frame`/`get_curr_frame_mut` ring semantics depend on counter ordering; changing this can silently desync acquired image binding.
 
@@ -169,7 +171,9 @@ else:
 - Step 5: if resize/present loops occur, inspect `rebuild_swapchain` and acquired present target rebinding (`bind_acquired_present_target`).
 
 ## 8. Cross-Module Links
-- Frame loop core: `src/renderer/src/vulkan/vk_render.rs`
+- Frame loop core: `src/renderer/src/vulkan/vk_render.rs` (coordinator)
+- Frame lifecycle: `src/renderer/src/vulkan/vk_frame.rs`
+- Command recording: `src/renderer/src/vulkan/vk_commands.rs`
 - Swapchain lifecycle state machine: `src/renderer/src/vulkan/vk_swapchain.rs`
 - Frame-ring and sync types: `src/renderer/src/vulkan/vk_types.rs`
 - Descriptor allocators: `src/renderer/src/vulkan/vk_descriptor.rs`

@@ -71,5 +71,6 @@ pub enum CacheError {
     StaleHandle,
     NotLoaded,
     OutOfBounds,
+    GenerationExhausted,
     DescriptorAllocation(String),
 }

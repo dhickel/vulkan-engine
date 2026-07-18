@@ -11,7 +11,8 @@ impl RenderPassNode for PrepareTargetsPass {
 
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
         if ctx.submission.has_draw_targets() {
-            ctx.renderer.prepare_draw_targets(ctx.frame);
+            let mut recording = ctx.prepare_targets_ctx();
+            recording.prepare_draw_targets();
         }
 
         Ok(())
