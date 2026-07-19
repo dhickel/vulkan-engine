@@ -54,13 +54,17 @@ pub struct GenerationResult {
     pub resource_counts: resources::ResourceCounts,
     /// The seed used for generation.
     pub seed: u64,
+    /// Zero-based index of the winning attempt.
+    pub attempt_index: u32,
 }
 
 /// Run the complete generator pipeline and return a validated level.
 ///
-/// This is the single public entrypoint for the app. All generation phases —
-/// placement, topology, materialization, repair, markers, resources,
-/// and capture views — are executed transactionally.
+/// This is the single public entrypoint for the app. Each call runs up to
+/// `generation_attempts` clean deterministic attempts. A terminal integrity
+/// failure (configuration, prefab, serialization, binding, IR invariant)
+/// is returned immediately. Exhaustion produces a single
+/// `GenerationExhausted` error with aggregate failure-category counts.
 pub fn generate(
     config: GeneratorConfig,
     catalog: &PrefabCatalog,
@@ -68,25 +72,70 @@ pub fn generate(
 ) -> Result<GenerationResult, GeneratorError> {
     let normalized = config.normalize()?;
     let identity = GeneratorIdentity::new(&normalized, catalog.identity_bytes(), seed);
-    let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
-    let diagnostics = GeneratorDiagnostics::new(&normalized, catalog.identity_bytes(), seed);
+    run_generation_attempts(normalized.generation_attempts(), identity, |attempt, factory| {
+        generate_attempt(&normalized, catalog, seed, attempt, factory)
+    })
+}
+
+fn run_generation_attempts<T>(
+    attempts: u32,
+    identity: GeneratorIdentity,
+    mut run: impl FnMut(AttemptIdentity, SemanticStreamFactory) -> Result<T, GeneratorError>,
+) -> Result<T, GeneratorError> {
+    debug_assert!(attempts > 0, "normalized attempt budget must be nonzero");
+    let mut last_error: Option<GeneratorError> = None;
+    let mut category_counts = std::collections::BTreeMap::new();
+
+    for index in 0..attempts {
+        let attempt_identity = AttemptIdentity::new(identity, index);
+        let factory = SemanticStreamFactory::new(attempt_identity);
+        match run(attempt_identity, factory) {
+            Ok(result) => return Ok(result),
+            Err(error) if !error.is_retryable() => return Err(error),
+            Err(error) => {
+                *category_counts
+                    .entry(error.reason_code().to_owned())
+                    .or_insert(0) += 1;
+                last_error = Some(error);
+            }
+        }
+    }
+
+    let last = last_error.expect("normalized attempt budget must be nonzero");
+    Err(GeneratorError::GenerationExhausted {
+        attempts,
+        last_stage: last.stage(),
+        last_reason: last.reason_code().to_owned(),
+        category_counts,
+    })
+}
+
+/// Single clean attempt at the full generator pipeline.
+fn generate_attempt(
+    config: &NormalizedGeneratorConfig,
+    catalog: &PrefabCatalog,
+    seed: u64,
+    attempt_identity: AttemptIdentity,
+    factory: SemanticStreamFactory,
+) -> Result<GenerationResult, GeneratorError> {
+    let diagnostics = GeneratorDiagnostics::new(config, catalog.identity_bytes(), seed);
 
     // Phase 02 — Placement.
     let mut roles_rng = factory.stream(SemanticStage::Roles, &[]);
-    let (placed_topology, grid) = place_regions(&normalized, catalog, &mut roles_rng, factory)?;
+    let (placed_topology, grid) = place_regions(config, catalog, &mut roles_rng, factory)?;
 
     // Phase 03 — Topology.
     let candidate_graph = build_candidate_graph(&placed_topology, &grid)?;
     let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
     let selected_topology = select_topology(
         placed_topology,
-        &normalized,
+        config,
         &candidate_graph,
         &mut topology_rng,
     )?;
 
     // Phase 04 — Materialization.
-    let tile_buffer = materialize_topology(&selected_topology, catalog, &normalized)?;
+    let tile_buffer = materialize_topology(&selected_topology, catalog, config)?;
 
     // Build a bare ParsedLevel (no markers yet).
     let spawn_region = selected_topology
@@ -102,7 +151,7 @@ pub fn generate(
     let bare_level = tile_buffer.clone().into_parsed_level((initial_spawn_x, initial_spawn_y));
 
     // Phase 05 — Repair + validation.
-    let mut repair_engine = RepairEngine::new(&normalized, factory);
+    let mut repair_engine = RepairEngine::new(config, factory);
     let accepted = repair_engine.repair_until_valid(
         selected_topology,
         tile_buffer,
@@ -121,7 +170,7 @@ pub fn generate(
         &post_repair_topology,
         &movement,
         &envelopes,
-        &normalized,
+        config,
     )?;
 
     // Write markers back into the ParsedLevel.
@@ -156,21 +205,21 @@ pub fn generate(
         &post_repair_topology,
         marker_placement.lights.len() as u32,
         marker_placement.models.len() as u32,
-        &normalized,
+        config,
     )?;
-    enforce_budgets(&resource_counts, &normalized)?;
+    enforce_budgets(&resource_counts, config)?;
 
     // Phase 07 — Capture views.
     let capture_views = derive_capture_views(
         &final_level,
         &post_repair_topology,
         &movement,
-        &normalized,
+        config,
     )?;
 
     // Canonical diagnostics.
     let diagnostics_bytes = diagnostics
-        .with_attempt(AttemptIdentity::new(identity, 0))
+        .with_attempt(attempt_identity)
         .canonical_json_bytes()?;
 
     Ok(GenerationResult {
@@ -179,6 +228,7 @@ pub fn generate(
         capture_views,
         resource_counts,
         seed,
+        attempt_index: attempt_identity.index(),
     })
 }
 
@@ -188,4 +238,118 @@ pub fn generate_default(
     seed: u64,
 ) -> Result<GenerationResult, GeneratorError> {
     generate(GeneratorConfig::qualified(QualifiedProfile::Primary), catalog, seed)
+}
+
+#[cfg(test)]
+mod attempt_tests {
+    use super::*;
+
+    fn identity() -> GeneratorIdentity {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .unwrap();
+        GeneratorIdentity::new(&config, [0x5a; 32], 17)
+    }
+
+    fn retryable(reason: &'static str) -> GeneratorError {
+        GeneratorError::PlacementExhausted {
+            stage: ErrorStage::Placement,
+            reason,
+            attempted: 1,
+            placed: 0,
+            target: 1,
+        }
+    }
+
+    #[test]
+    fn retry_loop_uses_fresh_deterministic_attempt_identities_and_records_winner() {
+        let generator = identity();
+        let mut observed = Vec::new();
+        let winning = run_generation_attempts(3, generator, |attempt, factory| {
+            let mut stream = factory.stream(SemanticStage::Roles, &[]);
+            observed.push((attempt.index(), attempt.bytes(), stream.next_u32()));
+            if attempt.index() < 2 {
+                Err(retryable("placement_retry"))
+            } else {
+                Ok(attempt.index())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(winning, 2);
+        assert_eq!(observed.len(), 3);
+        for (index, bytes, first_roll) in observed {
+            let expected = AttemptIdentity::new(generator, index);
+            let mut expected_stream =
+                SemanticStreamFactory::new(expected).stream(SemanticStage::Roles, &[]);
+            assert_eq!(bytes, expected.bytes());
+            assert_eq!(first_roll, expected_stream.next_u32());
+        }
+    }
+
+    #[test]
+    fn index_zero_success_preserves_single_attempt_behavior() {
+        let mut calls = 0;
+        let winner = run_generation_attempts(4, identity(), |attempt, _| {
+            calls += 1;
+            Ok(attempt.index())
+        })
+        .unwrap();
+        assert_eq!(winner, 0);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn terminal_error_stops_without_concealing_integrity_failure() {
+        let mut calls = 0;
+        let error = run_generation_attempts::<()>(4, identity(), |_, _| {
+            calls += 1;
+            Err(GeneratorError::IrInvariant {
+                stage: ErrorStage::Ir,
+                detail: "broken_ir".into(),
+            })
+        })
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(matches!(error, GeneratorError::IrInvariant { .. }));
+    }
+
+    #[test]
+    fn exhaustion_has_exact_attempt_and_ordered_category_counts() {
+        let mut calls = 0;
+        let error = run_generation_attempts::<()>(3, identity(), |attempt, _| {
+            calls += 1;
+            Err(if attempt.index() == 1 {
+                retryable("candidate_disconnected")
+            } else {
+                retryable("placement_retry")
+            })
+        })
+        .unwrap_err();
+
+        assert_eq!(calls, 3);
+        assert_eq!(error.stage(), ErrorStage::Generation);
+        assert_eq!(error.reason_code(), "generation_exhausted");
+        match error {
+            GeneratorError::GenerationExhausted {
+                attempts,
+                last_stage,
+                last_reason,
+                category_counts,
+            } => {
+                assert_eq!(attempts, 3);
+                assert_eq!(last_stage, ErrorStage::Placement);
+                assert_eq!(last_reason, "placement_retry");
+                assert_eq!(category_counts.values().copied().sum::<u32>(), attempts);
+                assert_eq!(
+                    category_counts.into_iter().collect::<Vec<_>>(),
+                    vec![
+                        ("candidate_disconnected".into(), 1),
+                        ("placement_retry".into(), 2),
+                    ]
+                );
+            }
+            other => panic!("expected exhaustion, got {other:?}"),
+        }
+    }
 }

@@ -37,6 +37,57 @@ impl PendingEdge {
     }
 }
 
+/// Route a single socket pair through the occupancy grid with the given corridor
+/// width. Returns the path witness, the width envelope cells, and the path cost
+/// (path.len()), or None when no legal route exists.
+pub(super) fn route_socket_pair(
+    source_region: &PlacedRegion,
+    source_socket: &PlacedSocket,
+    target_region: &PlacedRegion,
+    target_socket: &PlacedSocket,
+    grid: &OccupancyGrid,
+    config: &NormalizedGeneratorConfig,
+    width: u16,
+) -> Result<Option<(Vec<GridCoord>, Vec<GridCoord>, u64)>, GeneratorError> {
+    if let Some((path, envelope)) = find_path_with_envelope(
+        source_region,
+        source_socket,
+        target_region,
+        target_socket,
+        grid,
+        config,
+        width,
+    )? {
+        let cost = u64::try_from(path.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Topology,
+            operation: "route_socket_pair_cost",
+        })?;
+        Ok(Some((path, envelope, cost)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn is_ordinary_socket_role(role: SocketRole) -> bool {
+    matches!(
+        role,
+        SocketRole::Corridor
+            | SocketRole::Hall
+            | SocketRole::Doorway
+            | SocketRole::Junction
+            | SocketRole::DeadEnd
+            | SocketRole::LandmarkApproach
+    )
+}
+
+fn sockets_compatible_relaxed(left: &PlacedSocket, right: &PlacedSocket) -> bool {
+    left.global_anchor.layer == right.global_anchor.layer
+        && left.width > 0
+        && left.width == right.width
+        && is_ordinary_socket_role(left.role)
+        && is_ordinary_socket_role(right.role)
+}
+
 /// Build the canonical candidate graph only after placement has committed the
 /// occupancy grid. Cross-layer edges are emitted solely from explicit
 /// transition endpoint bindings; ordinary socket pairs are routed by A*.
@@ -105,25 +156,24 @@ pub(super) fn build_candidate_graph(
                         }
                         continue;
                     }
-                    if !sockets_compatible(left_socket, right_socket) {
+                    let strict = sockets_compatible(left_socket, right_socket);
+                    let relaxed = sockets_compatible_relaxed(left_socket, right_socket);
+                    if !strict && !relaxed {
                         continue;
                     }
                     let width = corridor_width_for_sockets(left_socket, right_socket, config)?;
-                    if let Some((path, envelope)) = find_path_with_envelope(
-                        left,
-                        left_socket,
-                        right,
-                        right_socket,
-                        grid,
-                        config,
-                        width,
-                    )? {
-                        let cost = u64::try_from(path.len()).map_err(|_| {
-                            GeneratorError::ArithmeticOverflow {
-                                stage: ErrorStage::Topology,
-                                operation: "candidate_path_cost",
-                            }
-                        })?;
+                    // Try strict routing first; fall back to direction-relaxed.
+                    let mut routed = if strict {
+                        route_socket_pair(left, left_socket, right, right_socket, grid, config, width)?
+                    } else {
+                        None
+                    };
+                    if routed.is_none() && relaxed {
+                        routed = route_socket_pair(
+                            left, left_socket, right, right_socket, grid, config, width,
+                        )?;
+                    }
+                    if let Some((path, envelope, cost)) = routed {
                         pending.push(PendingEdge {
                             source_socket: left_socket.id,
                             target_socket: right_socket.id,

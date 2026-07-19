@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +11,7 @@ pub enum ErrorStage {
     Placement,
     Topology,
     Materialization,
+    Generation,
     Ir,
 }
 
@@ -24,6 +26,7 @@ impl ErrorStage {
             Self::Placement => "placement",
             Self::Topology => "topology",
             Self::Materialization => "materialization",
+            Self::Generation => "generation",
             Self::Ir => "ir",
         }
     }
@@ -130,6 +133,12 @@ pub enum GeneratorError {
         constraint: &'static str,
         detail: String,
     },
+    GenerationExhausted {
+        attempts: u32,
+        last_stage: ErrorStage,
+        last_reason: String,
+        category_counts: BTreeMap<String, u32>,
+    },
 }
 
 impl GeneratorError {
@@ -154,6 +163,7 @@ impl GeneratorError {
             | Self::CorridorNoPath { stage, .. }
             | Self::CorridorInvariant { stage, .. }
             | Self::MaterializationInfeasible { stage, .. } => *stage,
+            Self::GenerationExhausted { .. } => ErrorStage::Generation,
         }
     }
 
@@ -178,6 +188,7 @@ impl GeneratorError {
             | Self::CorridorInvariant { detail, .. } => detail.as_str(),
             Self::CorridorNoPath { .. } => "corridor_no_path",
             Self::MaterializationInfeasible { constraint, .. } => constraint,
+            Self::GenerationExhausted { .. } => "generation_exhausted",
         }
     }
 }
@@ -303,6 +314,64 @@ impl fmt::Display for GeneratorError {
                 "generator error stage={} constraint={} detail={}",
                 stage.code(), constraint, detail
             ),
+            Self::GenerationExhausted { attempts, last_stage, last_reason, category_counts } => {
+                write!(
+                    f,
+                    "generator error stage=generation reason=generation_exhausted attempts={} last_stage={} last_reason={}",
+                    attempts, last_stage.code(), last_reason
+                )?;
+                if !category_counts.is_empty() {
+                    write!(f, " categories=[")?;
+                    for (i, (category, count)) in category_counts.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}={}", category, count)?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl GeneratorError {
+    /// Returns true when this error could resolve on a fresh attempt with
+    /// different placement/topology/materialization RNG rolls.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::UnsupportedConfiguration { .. }
+            | Self::ArithmeticOverflow { .. }
+            | Self::InvalidRngRange { .. }
+            | Self::CanonicalSerialization { .. }
+            | Self::PrefabIntegrity { .. }
+            | Self::TransitionBinding { .. }
+            | Self::IrInvariant { .. } => false,
+            Self::MandatoryInfeasibility { stage, .. } => match stage {
+                ErrorStage::Configuration
+                | ErrorStage::CanonicalConfiguration
+                | ErrorStage::Rng
+                | ErrorStage::Diagnostics
+                | ErrorStage::Prefab
+                | ErrorStage::Generation
+                | ErrorStage::Ir => false,
+                ErrorStage::Placement
+                | ErrorStage::Topology
+                | ErrorStage::Materialization => true,
+            },
+            Self::PlacementExhausted { .. }
+            | Self::TopologyInfeasible { .. }
+            | Self::TransitionInfeasible { .. }
+            | Self::GraphBoundViolation { .. }
+            | Self::SearchExhausted { .. }
+            | Self::OccupancyConflict { .. }
+            | Self::TileBufferOverflow { .. }
+            | Self::TileBufferConflict { .. }
+            | Self::CorridorNoPath { .. }
+            | Self::CorridorInvariant { .. }
+            | Self::MaterializationInfeasible { .. } => true,
+            Self::GenerationExhausted { .. } => false,
         }
     }
 }
@@ -415,12 +484,148 @@ mod tests {
                 constraint: "ramp_approach_blocked",
                 detail: "lower approach cell not walkable".into(),
             },
+            GeneratorError::GenerationExhausted {
+                attempts: 100,
+                last_stage: ErrorStage::Placement,
+                last_reason: "grid_exhausted".into(),
+                category_counts: {
+                    let mut m = BTreeMap::new();
+                    m.insert("grid_exhausted".into(), 55);
+                    m.insert("topology_infeasible".into(), 45);
+                    m
+                },
+            },
         ];
         for error in errors {
             assert!(!error.to_string().contains('/'));
             assert!(!error.to_string().contains('\\'));
             assert!(!error.stage().code().is_empty());
             assert!(!error.reason_code().is_empty());
+        }
+    }
+
+    #[test]
+    fn is_retryable_classifies_every_variant() {
+        let retryable: &[GeneratorError] = &[
+            GeneratorError::PlacementExhausted {
+                stage: ErrorStage::Placement,
+                reason: "grid_exhausted",
+                attempted: 10,
+                placed: 5,
+                target: 20,
+            },
+            GeneratorError::TopologyInfeasible {
+                stage: ErrorStage::Topology,
+                constraint: "spine_distance",
+                required: 100,
+                available: 50,
+            },
+            GeneratorError::TransitionInfeasible {
+                stage: ErrorStage::Placement,
+                lower_layer: 0,
+                upper_layer: 1,
+                required: 2,
+                available: 1,
+                rejected: 9,
+            },
+            GeneratorError::GraphBoundViolation {
+                stage: ErrorStage::Topology,
+                constraint: "cycle_bounds",
+                minimum: 1,
+                maximum: 4,
+                actual: 0,
+            },
+            GeneratorError::SearchExhausted {
+                stage: ErrorStage::Topology,
+                search: "topology_search",
+                attempted: 32,
+                budget: 32,
+            },
+            GeneratorError::OccupancyConflict {
+                stage: ErrorStage::Placement,
+                detail: "overlap".into(),
+            },
+            GeneratorError::TileBufferOverflow {
+                stage: ErrorStage::Materialization,
+                detail: "overflow".into(),
+            },
+            GeneratorError::TileBufferConflict {
+                stage: ErrorStage::Materialization,
+                detail: "conflict".into(),
+            },
+            GeneratorError::CorridorNoPath {
+                stage: ErrorStage::Materialization,
+                edge: 7,
+            },
+            GeneratorError::CorridorInvariant {
+                stage: ErrorStage::Materialization,
+                edge: 7,
+                detail: "missing".into(),
+            },
+            GeneratorError::MaterializationInfeasible {
+                stage: ErrorStage::Materialization,
+                constraint: "blocked",
+                detail: "detail".into(),
+            },
+            GeneratorError::MandatoryInfeasibility {
+                stage: ErrorStage::Placement,
+                constraint: "roles",
+                required: 2,
+                available: 1,
+            },
+        ];
+        let terminal: &[GeneratorError] = &[
+            GeneratorError::UnsupportedConfiguration {
+                stage: ErrorStage::Configuration,
+                reason: "dim",
+                value: 1,
+            },
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::CanonicalConfiguration,
+                operation: "overflow",
+            },
+            GeneratorError::InvalidRngRange {
+                stage: ErrorStage::Rng,
+                reason: "bad",
+                lower: 0,
+                upper: 0,
+            },
+            GeneratorError::CanonicalSerialization {
+                stage: ErrorStage::Diagnostics,
+                reason: "json",
+            },
+            GeneratorError::PrefabIntegrity {
+                stage: ErrorStage::Prefab,
+                context: "ctx".into(),
+                reason: "bad",
+            },
+            GeneratorError::TransitionBinding {
+                stage: ErrorStage::Ir,
+                transition: 1,
+                reason: "missing",
+            },
+            GeneratorError::IrInvariant {
+                stage: ErrorStage::Ir,
+                detail: "bad".into(),
+            },
+            GeneratorError::MandatoryInfeasibility {
+                stage: ErrorStage::Configuration,
+                constraint: "roles",
+                required: 2,
+                available: 1,
+            },
+            GeneratorError::GenerationExhausted {
+                attempts: 1,
+                last_stage: ErrorStage::Placement,
+                last_reason: "x".into(),
+                category_counts: BTreeMap::new(),
+            },
+        ];
+        for err in retryable {
+            assert!(err.is_retryable(), "expected retryable: {err:?}");
+        }
+        for err in terminal {
+            assert!(!err.is_retryable(), "expected terminal: {err:?}");
         }
     }
 }

@@ -788,8 +788,9 @@ fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppErr
             })?;
 
             let source_description = format!(
-                "generated sprawl (seed={} config_hash={} lights={} models={})",
+                "generated sprawl (seed={} attempt={} config_hash={} lights={} models={})",
                 result.seed,
+                result.attempt_index,
                 &crate::generator::determinism::lowercase_hex(&catalog.identity_bytes())[..16],
                 result.level.light_markers.len(),
                 result.level.model_markers.len(),

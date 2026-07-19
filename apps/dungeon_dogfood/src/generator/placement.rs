@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use super::config::NormalizedGeneratorConfig;
@@ -11,6 +12,7 @@ use super::ir::{
 use super::prefab::{
     PrefabCatalog, PrefabVariant, ReservationKind, ReservationOwner, SocketRole as PrefabSocketRole,
 };
+use super::topology::route_socket_pair;
 
 // ─── Role manifest ──────────────────────────────────────────────────────────
 
@@ -820,6 +822,297 @@ fn reserve_transitions_and_endpoints(
     Ok((transitions, endpoints))
 }
 
+// ─── Connectivity gate helpers ──────────────────────────────────────────────
+
+fn is_core_role(role: RegionRole) -> bool {
+    matches!(
+        role,
+        RegionRole::Spawn
+            | RegionRole::DistantLandmark
+            | RegionRole::MajorLandmark
+            | RegionRole::Junction
+            | RegionRole::VerticalHub
+            | RegionRole::RequiredRoute
+    )
+}
+
+fn is_backbone_region(role: RegionRole) -> bool {
+    role != RegionRole::DeadEnd
+}
+
+/// Collect all sockets belonging to committed non-dead-end regions, grouped by
+/// layer. Each entry is `(region, socket)` with the owning region for ownership
+/// checks during routing.
+fn collect_backbone_sockets(
+    placed: &[PlacedRegion],
+) -> BTreeMap<u16, Vec<(PlacedRegion, PlacedSocket)>> {
+    let mut per_layer: BTreeMap<u16, Vec<(PlacedRegion, PlacedSocket)>> = BTreeMap::new();
+    for region in placed {
+        if !is_backbone_region(region.role) {
+            continue;
+        }
+        for socket in &region.sockets {
+            per_layer
+                .entry(region.layer)
+                .or_default()
+                .push((region.clone(), socket.clone()));
+        }
+    }
+    per_layer
+}
+
+/// Stage a region candidate in a temporary occupancy view without committing
+/// real IDs. Returns the staged grid (with footprint, sockets, and spacing
+/// reserved), the staged alloc (with IDs consumed), the staged sockets, and
+/// a provisional PlacedRegion for routing probes.
+fn stage_candidate_region(
+    variant: &PrefabVariant,
+    variant_index: u16,
+    layer: u16,
+    origin_x: u16,
+    origin_y: u16,
+    role: RegionRole,
+    grid: &OccupancyGrid,
+    config: &NormalizedGeneratorConfig,
+    alloc: &IdAllocator,
+) -> Result<
+    (
+        OccupancyGrid,
+        IdAllocator,
+        Vec<PlacedSocket>,
+        PlacedRegion,
+    ),
+    GeneratorError,
+> {
+    if !can_place_footprint(variant, layer, origin_x, origin_y, grid, config)? {
+        return Err(GeneratorError::OccupancyConflict {
+            stage: ErrorStage::Placement,
+            detail: "stage_candidate_footprint_unavailable".into(),
+        });
+    }
+    let mut staged_grid = grid.clone();
+    let mut staged_alloc = alloc.clone();
+    let region_id = staged_alloc.next_region()?;
+    let mut sockets = Vec::with_capacity(variant.sockets.len());
+    for (index, socket) in variant.sockets.iter().enumerate() {
+        let global_layer = layer.checked_add(socket.anchor.layer).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "stage_region_socket_layer",
+            },
+        )?;
+        let global_x = origin_x.checked_add(socket.anchor.x).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "stage_region_socket_x",
+            },
+        )?;
+        let global_y = origin_y.checked_add(socket.anchor.y).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "stage_region_socket_y",
+            },
+        )?;
+        sockets.push(PlacedSocket {
+            id: staged_alloc.next_socket()?,
+            variant_socket_index: u16::try_from(index).map_err(|_| {
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "stage_region_socket_index",
+                }
+            })?,
+            global_anchor: GridCoord::new(
+                global_layer,
+                global_x,
+                global_y,
+                config.width(),
+                config.height(),
+                config.layers().2,
+            )?,
+            direction: map_direction_from_variant(socket.direction),
+            width: socket.width,
+            role: map_socket_role_from_variant(socket.role),
+            paired_socket_id: None,
+        });
+    }
+
+    staged_grid.reserve_rect(
+        layer,
+        origin_x,
+        origin_y,
+        variant.width,
+        variant.height,
+        OccupancyClass::Region(region_id.raw()),
+    )?;
+    for socket in &sockets {
+        match staged_grid.get(socket.global_anchor) {
+            Some(OccupancyClass::Region(owner)) if owner == region_id.raw() => {
+                staged_grid.set(
+                    socket.global_anchor,
+                    OccupancyClass::Socket(socket.id.raw()),
+                )?;
+            }
+            other => {
+                return Err(GeneratorError::OccupancyConflict {
+                    stage: ErrorStage::Placement,
+                    detail: format!(
+                        "stage_socket_anchor_not_owned {} existing={:?}",
+                        socket.global_anchor, other
+                    ),
+                });
+            }
+        }
+    }
+
+    let spacing = i32::try_from(config.spacing()).map_err(|_| {
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_convert",
+        }
+    })?;
+    let min_x = i32::from(origin_x)
+        .checked_sub(spacing)
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_min_x",
+        })?
+        .max(0);
+    let min_y = i32::from(origin_y)
+        .checked_sub(spacing)
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_min_y",
+        })?
+        .max(0);
+    let max_x = (i32::from(origin_x)
+        .checked_add(i32::from(variant.width))
+        .and_then(|value| value.checked_add(spacing))
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_max_x",
+        })?)
+    .min(
+        i32::from(config.width())
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "stage_spacing_grid_max_x",
+            })?,
+    );
+    let max_y = (i32::from(origin_y)
+        .checked_add(i32::from(variant.height))
+        .and_then(|value| value.checked_add(spacing))
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "stage_spacing_max_y",
+        })?)
+    .min(
+        i32::from(config.height())
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "stage_spacing_grid_max_y",
+            })?,
+    );
+    for cell_y in min_y..=max_y {
+        for cell_x in min_x..=max_x {
+            let cell = GridCoord::new(
+                layer,
+                u16::try_from(cell_x).map_err(|_| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "stage_spacing_x_convert",
+                })?,
+                u16::try_from(cell_y).map_err(|_| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "stage_spacing_y_convert",
+                })?,
+                config.width(),
+                config.height(),
+                config.layers().2,
+            )?;
+            if staged_grid.get(cell) == Some(OccupancyClass::Empty) {
+                staged_grid.set(cell, OccupancyClass::Spacing(region_id.raw()))?;
+            }
+        }
+    }
+
+    let staged_region = PlacedRegion {
+        id: region_id,
+        role,
+        variant_index,
+        layer,
+        footprint: (origin_x, origin_y, variant.width, variant.height),
+        sockets: sockets.clone(),
+        transitions: Vec::new(),
+        marker_variant_indices: marker_indices_for_layer(variant, 0)?,
+    };
+    Ok((staged_grid, staged_alloc, sockets, staged_region))
+}
+
+/// Check whether any staged socket can route to any backbone socket on the same
+/// layer through the staged occupancy. Returns true when at least one legal
+/// route exists. Uses both strict and direction-relaxed compatibility so the
+/// connectivity gate mirrors the enriched candidate graph.
+fn can_connect_to_backbone(
+    staged_region: &PlacedRegion,
+    staged_sockets: &[PlacedSocket],
+    staged_grid: &OccupancyGrid,
+    backbone: &[(PlacedRegion, PlacedSocket)],
+    config: &NormalizedGeneratorConfig,
+) -> Result<bool, GeneratorError> {
+    for staged_socket in staged_sockets {
+        for (backbone_region, backbone_socket) in backbone {
+            if staged_socket.global_anchor.layer != backbone_socket.global_anchor.layer {
+                continue;
+            }
+            let width = if staged_socket.width >= 2 && backbone_socket.width >= 2 {
+                config.hall_width()
+            } else {
+                config.corridor_width()
+            };
+            let width = u16::try_from(width).map_err(|_| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "backbone_connectivity_width_convert",
+            })?;
+            // Require same width; relaxed compatibility for connectivity gating
+            // does not require opposite directions — only that a legal A* path
+            // exists through valid occupancy.
+            if staged_socket.width == 0 || staged_socket.width != backbone_socket.width {
+                continue;
+            }
+            if route_socket_pair(
+                staged_region,
+                staged_socket,
+                backbone_region,
+                backbone_socket,
+                staged_grid,
+                config,
+                width,
+            )?
+            .is_some()
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Publish a successfully staged region into the real grid and allocator.
+fn publish_staged_region(
+    staged_grid: OccupancyGrid,
+    staged_alloc: IdAllocator,
+    staged_region: PlacedRegion,
+    grid: &mut OccupancyGrid,
+    alloc: &mut IdAllocator,
+) -> PlacedRegion {
+    *grid = staged_grid;
+    *alloc = staged_alloc;
+    staged_region
+}
+
 // ─── Ordinary region placement ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1189,6 +1482,7 @@ fn place_role_regions(
     factory: SemanticStreamFactory,
     alloc: &mut IdAllocator,
 ) -> Result<(), GeneratorError> {
+    let gated = is_core_role(role) || role == RegionRole::DeadEnd;
     for ordinal in 0..target_count {
         let mut scored = Vec::new();
         for layer in 0..config.layers().2 {
@@ -1257,74 +1551,143 @@ fn place_role_regions(
                 .then_with(|| left.y.cmp(&right.y))
                 .then_with(|| left.x.cmp(&right.x))
         });
-        let best_score = scored
-            .first()
-            .map(|candidate| candidate.score)
-            .ok_or(GeneratorError::IrInvariant {
-                stage: ErrorStage::Placement,
-                detail: "sorted_placement_candidates_empty".into(),
-            })?;
-        let equal_count = scored
-            .iter()
-            .take_while(|candidate| candidate.score == best_score)
-            .count();
-        let chosen_index = if equal_count > 1 {
-            let upper = NonZeroU32::new(u32::try_from(equal_count).map_err(|_| {
-                GeneratorError::InvalidRngRange {
-                    stage: ErrorStage::Placement,
-                    reason: "placement_tie_count_unrepresentable",
-                    lower: 0,
-                    upper: u64::MAX,
+
+        if gated {
+            // Build the backbone from already-committed non-dead-end regions.
+            let backbone = collect_backbone_sockets(placed);
+            let mut region_placed = false;
+            for candidate in &scored {
+                let variant = candidates
+                    .iter()
+                    .find(|(index, _)| *index == candidate.variant_index)
+                    .map(|(_, variant)| *variant)
+                    .ok_or(GeneratorError::IrInvariant {
+                        stage: ErrorStage::Placement,
+                        detail: "placement_variant_missing".into(),
+                    })?;
+                // Stage the candidate in a temporary occupancy view.
+                let staged = stage_candidate_region(
+                    variant,
+                    candidate.variant_index,
+                    candidate.layer,
+                    candidate.x,
+                    candidate.y,
+                    role,
+                    grid,
+                    config,
+                    alloc,
+                );
+                let (staged_grid, staged_alloc, staged_sockets, staged_region) =
+                    match staged {
+                        Ok(value) => value,
+                        Err(_) => continue, // spacing or other conflict; try next
+                    };
+                // First region on an otherwise empty layer requires no gate.
+                let layer_backbone = backbone.get(&candidate.layer);
+                let connected = if layer_backbone.is_none() || layer_backbone.is_some_and(|b| b.is_empty()) {
+                    true
+                } else {
+                    can_connect_to_backbone(
+                        &staged_region,
+                        &staged_sockets,
+                        &staged_grid,
+                        layer_backbone.unwrap(),
+                        config,
+                    )?
+                };
+                if connected {
+                    let region = publish_staged_region(
+                        staged_grid,
+                        staged_alloc,
+                        staged_region,
+                        grid,
+                        alloc,
+                    );
+                    placed.push(region);
+                    region_placed = true;
+                    break;
                 }
-            })?)
-            .ok_or(GeneratorError::InvalidRngRange {
-                stage: ErrorStage::Placement,
-                reason: "placement_tie_empty",
-                lower: 0,
-                upper: 0,
-            })?;
-            let mut stream = factory.stream(
-                SemanticStage::Placement,
-                &[
-                    SemanticComponent::StableId(role.label().as_bytes()),
-                    SemanticComponent::Index(ordinal),
-                ],
-            );
-            usize::try_from(stream.gen_bounded(upper)).map_err(|_| {
-                GeneratorError::ArithmeticOverflow {
+                // Connectivity failed; discard the staged data and try next.
+            }
+            if !region_placed {
+                return Err(GeneratorError::TopologyInfeasible {
                     stage: ErrorStage::Placement,
-                    operation: "placement_tie_index_convert",
-                }
-            })?
+                    constraint: "connectivity_gate",
+                    required: 1,
+                    available: 0,
+                });
+            }
         } else {
-            0
-        };
-        let chosen = scored
-            .get(chosen_index)
-            .ok_or(GeneratorError::IrInvariant {
-                stage: ErrorStage::Placement,
-                detail: "placement_choice_out_of_bounds".into(),
-            })?;
-        let variant = candidates
-            .iter()
-            .find(|(index, _)| *index == chosen.variant_index)
-            .map(|(_, variant)| *variant)
-            .ok_or(GeneratorError::IrInvariant {
-                stage: ErrorStage::Placement,
-                detail: "placement_variant_missing".into(),
-            })?;
-        let region = commit_region(
-            variant,
-            chosen.variant_index,
-            chosen.layer,
-            chosen.x,
-            chosen.y,
-            role,
-            grid,
-            config,
-            alloc,
-        )?;
-        placed.push(region);
+            // Non-gated roles: use existing deterministic selection.
+            let best_score = scored
+                .first()
+                .map(|candidate| candidate.score)
+                .ok_or(GeneratorError::IrInvariant {
+                    stage: ErrorStage::Placement,
+                    detail: "sorted_placement_candidates_empty".into(),
+                })?;
+            let equal_count = scored
+                .iter()
+                .take_while(|candidate| candidate.score == best_score)
+                .count();
+            let chosen_index = if equal_count > 1 {
+                let upper = NonZeroU32::new(u32::try_from(equal_count).map_err(|_| {
+                    GeneratorError::InvalidRngRange {
+                        stage: ErrorStage::Placement,
+                        reason: "placement_tie_count_unrepresentable",
+                        lower: 0,
+                        upper: u64::MAX,
+                    }
+                })?)
+                .ok_or(GeneratorError::InvalidRngRange {
+                    stage: ErrorStage::Placement,
+                    reason: "placement_tie_empty",
+                    lower: 0,
+                    upper: 0,
+                })?;
+                let mut stream = factory.stream(
+                    SemanticStage::Placement,
+                    &[
+                        SemanticComponent::StableId(role.label().as_bytes()),
+                        SemanticComponent::Index(ordinal),
+                    ],
+                );
+                usize::try_from(stream.gen_bounded(upper)).map_err(|_| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "placement_tie_index_convert",
+                    }
+                })?
+            } else {
+                0
+            };
+            let chosen = scored
+                .get(chosen_index)
+                .ok_or(GeneratorError::IrInvariant {
+                    stage: ErrorStage::Placement,
+                    detail: "placement_choice_out_of_bounds".into(),
+                })?;
+            let variant = candidates
+                .iter()
+                .find(|(index, _)| *index == chosen.variant_index)
+                .map(|(_, variant)| *variant)
+                .ok_or(GeneratorError::IrInvariant {
+                    stage: ErrorStage::Placement,
+                    detail: "placement_variant_missing".into(),
+                })?;
+            let region = commit_region(
+                variant,
+                chosen.variant_index,
+                chosen.layer,
+                chosen.x,
+                chosen.y,
+                role,
+                grid,
+                config,
+                alloc,
+            )?;
+            placed.push(region);
+        }
     }
     Ok(())
 }
@@ -1636,5 +1999,304 @@ mod tests {
         let a = place_regions(&config, &catalog, &mut rng_a, factory).expect("placement a");
         let b = place_regions(&config, &catalog, &mut rng_b, factory).expect("placement b");
         assert_eq!(a.0, b.0);
+    }
+
+    // ── Connectivity gate tests ────────────────────────────────────────
+
+    #[test]
+    fn is_core_role_classifies_correctly() {
+        assert!(is_core_role(RegionRole::Spawn));
+        assert!(is_core_role(RegionRole::DistantLandmark));
+        assert!(is_core_role(RegionRole::MajorLandmark));
+        assert!(is_core_role(RegionRole::Junction));
+        assert!(is_core_role(RegionRole::VerticalHub));
+        assert!(is_core_role(RegionRole::RequiredRoute));
+        assert!(!is_core_role(RegionRole::DeadEnd));
+        assert!(!is_core_role(RegionRole::OptionalBranch));
+        assert!(!is_core_role(RegionRole::OrdinaryRoom));
+    }
+
+    #[test]
+    fn backbone_excludes_dead_end_regions() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let mut alloc = IdAllocator::new();
+        let core = PlacedRegion {
+            id: alloc.next_region().unwrap(),
+            role: RegionRole::Spawn,
+            variant_index: 0,
+            layer: 0,
+            footprint: (2, 2, 3, 3),
+            sockets: vec![PlacedSocket {
+                id: alloc.next_socket().unwrap(),
+                variant_socket_index: 0,
+                global_anchor: GridCoord::new(0, 3, 3, config.width(), config.height(), config.layers().2).unwrap(),
+                direction: Direction::East,
+                width: 1,
+                role: SocketRole::Corridor,
+                paired_socket_id: None,
+            }],
+            transitions: vec![],
+            marker_variant_indices: vec![],
+        };
+        let dead_end = PlacedRegion {
+            id: alloc.next_region().unwrap(),
+            role: RegionRole::DeadEnd,
+            variant_index: 0,
+            layer: 0,
+            footprint: (10, 2, 3, 3),
+            sockets: vec![PlacedSocket {
+                id: alloc.next_socket().unwrap(),
+                variant_socket_index: 0,
+                global_anchor: GridCoord::new(0, 11, 3, config.width(), config.height(), config.layers().2).unwrap(),
+                direction: Direction::West,
+                width: 1,
+                role: SocketRole::DeadEnd,
+                paired_socket_id: None,
+            }],
+            transitions: vec![],
+            marker_variant_indices: vec![],
+        };
+        let backbone = collect_backbone_sockets(&[core.clone(), dead_end.clone()]);
+        assert_eq!(backbone.len(), 1);
+        let layer0 = backbone.get(&0).expect("layer 0 backbone");
+        assert_eq!(layer0.len(), 1);
+        assert_eq!(layer0[0].1.id, core.sockets[0].id);
+    }
+
+    #[test]
+    fn staged_candidate_does_not_consume_real_ids_or_occupancy() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let variant_index = catalog
+            .variants()
+            .iter()
+            .position(|v| v.tags.iter().any(|t| t == "ordinary"))
+            .expect("ordinary variant");
+        let variant_index = u16::try_from(variant_index).expect("variant index");
+        let variant = catalog
+            .variants()
+            .get(usize::from(variant_index))
+            .expect("variant");
+        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
+            .expect("grid");
+        grid.reserve_borders();
+        let mut alloc = IdAllocator::new();
+        // Allocate a real ID to establish a baseline.
+        let r0 = alloc.next_region().expect("first region").raw();
+        // Stage a candidate region (uses a clone internally).
+        let staged = stage_candidate_region(
+            variant,
+            variant_index,
+            0,
+            2,
+            2,
+            RegionRole::OrdinaryRoom,
+            &grid,
+            &config,
+            &alloc,
+        );
+        let (staged_grid, _staged_alloc, staged_sockets, staged_region) =
+            staged.expect("stage succeeds");
+        assert!(!staged_sockets.is_empty());
+        // Real alloc counter should be unchanged (next ID after r0).
+        let r1 = alloc.next_region().expect("after-stage region").raw();
+        assert_eq!(r1, r0 + 1, "staging should not consume real region IDs");
+        // Real grid is untouched (cells are still Empty, not owned by staged IDs).
+        for socket in &staged_region.sockets {
+            match grid.get(socket.global_anchor) {
+                Some(OccupancyClass::Empty) | None => {}
+                other => panic!("real grid cell should be empty, got {:?}", other),
+            }
+        }
+        // Staged grid does have the socket ownership.
+        for socket in &staged_region.sockets {
+            assert_eq!(
+                staged_grid.get(socket.global_anchor),
+                Some(OccupancyClass::Socket(socket.id.raw())),
+                "staged grid should own the socket cell"
+            );
+        }
+        drop(staged_grid);
+        // After drop, the real grid is still untouched.
+        for socket in &staged_region.sockets {
+            match grid.get(socket.global_anchor) {
+                Some(OccupancyClass::Empty) | None => {}
+                other => panic!("real grid should still be empty after drop, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn connectivity_gate_connects_to_backbone_through_empty_occupancy() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let mut alloc = IdAllocator::new();
+        // Place a backbone region with an east-facing socket at (5,5).
+        let backbone = PlacedRegion {
+            id: alloc.next_region().unwrap(),
+            role: RegionRole::Spawn,
+            variant_index: 0,
+            layer: 0,
+            footprint: (2, 4, 3, 3),
+            sockets: vec![PlacedSocket {
+                id: alloc.next_socket().unwrap(),
+                variant_socket_index: 0,
+                global_anchor: GridCoord::new(0, 5, 5, config.width(), config.height(), config.layers().2).unwrap(),
+                direction: Direction::East,
+                width: 1,
+                role: SocketRole::Corridor,
+                paired_socket_id: None,
+            }],
+            transitions: vec![],
+            marker_variant_indices: vec![],
+        };
+        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
+            .expect("grid");
+        grid.reserve_borders();
+        grid.reserve_rect(
+            backbone.layer,
+            backbone.footprint.0,
+            backbone.footprint.1,
+            backbone.footprint.2,
+            backbone.footprint.3,
+            OccupancyClass::Region(backbone.id.raw()),
+        )
+        .expect("reserve backbone");
+        grid.set(
+            backbone.sockets[0].global_anchor,
+            OccupancyClass::Socket(backbone.sockets[0].id.raw()),
+        )
+        .expect("set socket");
+
+        let backbone_list = vec![(backbone.clone(), backbone.sockets[0].clone())];
+
+        // Stage a candidate to the east with a west-facing socket.
+        let variant_index = catalog
+            .variants()
+            .iter()
+            .position(|v| v.tags.iter().any(|t| t == "ordinary"))
+            .expect("ordinary variant");
+        let variant_index = u16::try_from(variant_index).expect("variant index");
+        let variant = catalog
+            .variants()
+            .get(usize::from(variant_index))
+            .expect("variant");
+        let (staged_grid, _staged_alloc, staged_sockets, staged_region) =
+            stage_candidate_region(
+                variant,
+                variant_index,
+                0,
+                8, // to the east with gap for corridor
+                4,
+                RegionRole::MajorLandmark,
+                &grid,
+                &config,
+                &alloc,
+            )
+            .expect("stage candidate");
+
+        // The staged region should be connectable.
+        let connected = can_connect_to_backbone(
+            &staged_region,
+            &staged_sockets,
+            &staged_grid,
+            &backbone_list,
+            &config,
+        )
+        .expect("connectivity check");
+        assert!(connected, "staged region should connect to backbone");
+    }
+
+    #[test]
+    fn connectivity_gate_rejects_isolated_candidate() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let mut alloc = IdAllocator::new();
+        // Place backbone far away, blocked by occupied cells.
+        let backbone = PlacedRegion {
+            id: alloc.next_region().unwrap(),
+            role: RegionRole::Spawn,
+            variant_index: 0,
+            layer: 0,
+            footprint: (2, 2, 3, 3),
+            sockets: vec![PlacedSocket {
+                id: alloc.next_socket().unwrap(),
+                variant_socket_index: 0,
+                global_anchor: GridCoord::new(0, 5, 3, config.width(), config.height(), config.layers().2).unwrap(),
+                direction: Direction::East,
+                width: 1,
+                role: SocketRole::Corridor,
+                paired_socket_id: None,
+            }],
+            transitions: vec![],
+            marker_variant_indices: vec![],
+        };
+        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
+            .expect("grid");
+        grid.reserve_borders();
+        grid.reserve_rect(
+            backbone.layer,
+            backbone.footprint.0,
+            backbone.footprint.1,
+            backbone.footprint.2,
+            backbone.footprint.3,
+            OccupancyClass::Region(backbone.id.raw()),
+        )
+        .expect("reserve backbone");
+        grid.set(
+            backbone.sockets[0].global_anchor,
+            OccupancyClass::Socket(backbone.sockets[0].id.raw()),
+        )
+        .expect("set socket");
+        // Fill the cells between backbone and candidate to block routing.
+        // Block a full vertical wall from y=0 to y=config.height at x=8.
+        for y in 0..config.height() {
+            let cell = GridCoord::new(0, 8, y, config.width(), config.height(), config.layers().2)
+                .expect("block cell");
+            grid.set(cell, OccupancyClass::Region(999)).expect("block");
+        }
+
+        let backbone_list = vec![(backbone.clone(), backbone.sockets[0].clone())];
+        let variant_index = catalog
+            .variants()
+            .iter()
+            .position(|v| v.tags.iter().any(|t| t == "ordinary"))
+            .expect("ordinary variant");
+        let variant_index = u16::try_from(variant_index).expect("variant index");
+        let variant = catalog
+            .variants()
+            .get(usize::from(variant_index))
+            .expect("variant");
+        let staged_result = stage_candidate_region(
+            variant,
+            variant_index,
+            0,
+            14, // far to the east, blocked by filled cells
+            2,
+            RegionRole::MajorLandmark,
+            &grid,
+            &config,
+            &alloc,
+        );
+        // Staging might fail if spacing overlaps blocked cells; that's fine.
+        if let Ok((staged_grid, _, staged_sockets, staged_region)) = staged_result {
+            let connected = can_connect_to_backbone(
+                &staged_region,
+                &staged_sockets,
+                &staged_grid,
+                &backbone_list,
+                &config,
+            )
+            .expect("connectivity check");
+            assert!(!connected, "isolated candidate should not connect");
+        }
     }
 }
