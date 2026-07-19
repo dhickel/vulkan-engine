@@ -166,6 +166,9 @@ pub enum SceneError {
     StalePointLight(crate::api::scene::PointLightId),
     InvalidDirectionalLight(String),
     StaleDirectionalLight(crate::api::scene::DirectionalLightId),
+    InvalidSpotLight(String),
+    StaleSpotLight(crate::api::scene::SpotLightId),
+    UnsupportedLightFeature(String),
     UnsupportedSceneVersion { found: u32, expected: u32 },
     MissingAssetId(String),
     BadSerializedParent { node_id: String, parent_id: String },
@@ -200,6 +203,13 @@ impl Display for SceneError {
                 "stale directional light handle (slot={}, generation={})",
                 id.slot, id.generation
             ),
+            Self::InvalidSpotLight(msg) => write!(f, "invalid spot light: {msg}"),
+            Self::StaleSpotLight(id) => write!(
+                f,
+                "stale spot light handle (slot={}, generation={})",
+                id.slot, id.generation
+            ),
+            Self::UnsupportedLightFeature(msg) => write!(f, "unsupported light feature: {msg}"),
             Self::StalePointLight(id) => write!(
                 f,
                 "stale point light handle (slot={}, generation={})",

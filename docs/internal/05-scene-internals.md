@@ -83,7 +83,7 @@ Current limit: the runtime still has a single submitted root. Phase 03 load vali
 
 Phase 05 editor mutations use `CommandHistory` around scene commands. `SetTransformCommand` stores the old local transform and treats each inspector edit as a completed undo transaction. `RemoveNodeCommand` snapshots the removed subtree, then removes it through normal slot/generation invalidation. Undo restores equivalent nodes with fresh `SceneNodeId` values and returns a remap, so old handles remain stale and editor selection can move to the restored runtime ID without weakening handle safety.
 
-Picking uses the scene's last renderer-updated camera matrices and transform-aware proxy AABBs. The scene graph currently does not retain CPU mesh bounds, so mesh-backed nodes use a one-unit local proxy and empty/group nodes use a smaller origin proxy. The proxy AABB is built from all eight transformed corners, which handles scale and rotation better than a two-corner unit-cube approximation. This remains an editor approximation until mesh/cache bounds metadata is exposed to the scene layer.
+Picking uses the scene's last renderer-updated camera matrices and current scene transforms. Known meshes use exact eight-corner-transformed world AABBs, explicitly declared proxies remain tagged, and empty/group nodes use a small editor-origin helper. Conservative-visible mesh-bearing nodes are skipped rather than reporting a false proxy hit.
 
 Persistence negative examples:
 
@@ -135,7 +135,7 @@ pub struct RenderObject {
 
 ### Optional Culling
 
-`SceneWorld` has frustum culling enabled by default, with `Scene::set_frustum_culling(false)` as an opt-out. Mesh-backed nodes outside the current transform-aware proxy AABB/frustum test omit their own draw items. Descendants are always tested independently because a node proxy is not a subtree bound. There is still no distance-based LOD or occlusion culling, and true CPU mesh bounds are not yet available to the scene graph.
+`SceneWorld` has frustum culling enabled by default, with `Scene::set_frustum_culling(false)` as a diagnostic opt-out. Known/proxy node bounds are tested against the frustum, known subtree unions may prune complete branches, and conservative-visible members prevent pruning. There is still no distance-based LOD or occlusion culling.
 
 ### Material Pointer Convention
 

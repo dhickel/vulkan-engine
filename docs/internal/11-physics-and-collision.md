@@ -31,13 +31,37 @@ The alpha `physics` crate wraps Rapier while exposing engine-owned IDs:
 
 - `PhysicsBodyId` and `PhysicsColliderId` are durable strings used by authored/app code.
 - `BodyDescriptor` supports `Static`, `Dynamic`, and `Kinematic` bodies.
-- `ColliderDescriptor` supports cuboid, sphere, and Y-capsule primitive shapes.
+- `ColliderDescriptor` supports cuboid, sphere, Y-capsule, convex hull, and static triangle mesh shapes.
 - `PhysicsWorld::create_body` and `create_collider` validate duplicate IDs, missing parents, finite transforms, and positive dimensions.
 - `PhysicsWorld::cast_ray` returns `RayHit` using durable body/collider IDs.
 - `PhysicsWorld::step` records collision and trigger `Enter`, `Stay`, and `Exit` transitions.
 - Deprecated raw Rapier handle helpers remain for legacy smoke compatibility only.
 
 The crate does not depend on renderer internals, windowing, scene graph storage, editor UI, or package loading.
+
+### 3.1 Convex Hull
+
+`ColliderShape::ConvexHull { points: Vec<[f32; 3]> }` builds a Rapier convex hull collider
+from an arbitrary point cloud. It is valid on static, dynamic, and kinematic bodies.
+
+Validation (performed before any Rapier call):
+
+- Rejects empty input with `ConvexHullEmpty`.
+- Rejects any non-finite (`NaN` / infinity) vertex with `ConvexHullNonFiniteVertex { index }`.
+- Deterministically deduplicates exact points, treating IEEE `-0.0` and `+0.0` as equal.
+- Requires at least four unique points; fewer returns `ConvexHullInsufficientPoints { unique_count }`.
+- Rejects coplanar, collinear, or numerically zero-volume sets with a rotation-independent
+  affine-basis check. Point-to-line and point-to-plane distances are computed in `f64` and
+  compared with a `1e-6` tolerance relative to the largest model-space extent, mapped to
+  `ConvexHullDegenerate`.
+- Delegates final degeneracy detection to Parry's `convex_hull` builder, which may also
+  return `None` for zero-volume or otherwise unconstructable input.
+
+Construction is transactional: validation runs and a Rapier collider is built before
+insertion into the collider set. A failure leaves no side effects on `PhysicsWorld`.
+
+The public payload preserves model-space coordinates; the app-owned bridge owns
+instance transforms.
 
 ## 4. Collision Metadata Validation
 

@@ -24,7 +24,6 @@
 //! - Generation wrap must reject reuse before collision.
 
 use crate::data::gpu_data::VkMeshBuffers;
-use crate::data::mesh_geometry::MeshGeometryDto;
 
 // ---------------------------------------------------------------------------
 // FrameSerial
@@ -238,8 +237,6 @@ pub struct MeshRetiredPayload {
     pub slot: u32,
     /// Complete copied GPU draw metadata, including both suballocations.
     pub buffers: VkMeshBuffers,
-    /// Neutral CPU geometry retained until the same fence boundary.
-    pub geometry: Option<MeshGeometryDto>,
 }
 
 // ---------------------------------------------------------------------------

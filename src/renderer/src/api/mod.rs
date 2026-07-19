@@ -65,7 +65,8 @@ pub use renderer::{
 pub use scene::{
     validate_scene_file, validate_scene_file_with_options, validate_scene_str,
     validate_scene_str_with_options, BoundsUnknownReason, DirectionalLight, DirectionalLightId,
-    MeshBoundsEntry, PointLight, PointLightId, Scene, SceneAssetReference, SceneBounds,
+    MeshBoundsEntry, PointLight, PointLightId, SpotLight, SpotLightId, Scene,
+    SceneAssetReference, SceneBounds,
     SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeSummary,
     SceneValidationOptions,
 };

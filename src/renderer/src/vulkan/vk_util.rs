@@ -136,6 +136,64 @@ pub fn image_create_info<'a>(
         .usage(usage_flags)
 }
 
+pub fn create_array_image(
+    device: &ash::Device,
+    allocator: &Allocator,
+    size: vk::Extent3D,
+    array_layers: u32,
+    format: vk::Format,
+    usage_flags: vk::ImageUsageFlags,
+    mips_levels: u32,
+) -> Result<VkImageAlloc, String> {
+    let mut image_info = image_create_info(
+        format,
+        usage_flags,
+        size,
+        ImageType::TYPE_2D,
+        vk::SampleCountFlags::TYPE_1,
+        mips_levels,
+    );
+    image_info.array_layers = array_layers;
+    image_info.flags |= vk::ImageCreateFlags::empty();
+
+    let mut alloc_info = vk_mem::AllocationCreateInfo::default();
+    alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
+    alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+    let (image, mut allocation) = unsafe {
+        allocator
+            .create_image(&image_info, &alloc_info)
+            .map_err(|err| format!("failed to allocate Vulkan array image: {err:?}"))?
+    };
+    let aspect_flag = if format == vk::Format::D32_SFLOAT {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
+    };
+
+    let mut view_info =
+        image_view_create_info(format, vk::ImageViewType::TYPE_2D_ARRAY, image, aspect_flag);
+    view_info.subresource_range.level_count = mips_levels;
+    view_info.subresource_range.layer_count = array_layers;
+
+    let image_view = match unsafe { device.create_image_view(&view_info, None) } {
+        Ok(view) => view,
+        Err(err) => {
+            unsafe { allocator.destroy_image(image, &mut allocation) };
+            return Err(format!("failed to create Vulkan array image view: {err:?}"));
+        }
+    };
+
+    Ok(VkImageAlloc {
+        image,
+        image_view,
+        allocation,
+        image_extent: size,
+        image_format: format,
+        mip_levels: mips_levels,
+    })
+}
+
 pub fn create_image(
     device: &ash::Device,
     allocator: &Allocator,

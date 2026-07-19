@@ -1814,7 +1814,6 @@ impl MeshCache {
                 crate::data::retirement::MeshRetiredPayload {
                     slot: slot_idx as u32,
                     buffers,
-                    geometry: None,
                 },
                 retire_after,
             ))),

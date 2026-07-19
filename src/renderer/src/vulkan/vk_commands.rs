@@ -65,6 +65,7 @@ pub(crate) struct RecordingDispatcher<'a> {
     frame_capture_statuses: &'a mut Vec<FrameCaptureStatus>,
     surface_mode: RenderSurfaceMode,
     shadow_resources: &'a crate::vulkan::vk_shadow::VkShadowResources,
+    csm_shadow_resources: Option<&'a crate::vulkan::vk_shadow::VkCsmShadowResources>,
     gpu_timing: &'a mut crate::vulkan::vk_render::GpuTimingState,
 }
 
@@ -72,6 +73,7 @@ pub(crate) struct PrepareTargetsRecording<'a> { device: &'a ash::Device, frame: 
 pub(crate) struct ShadowRecording<'a> {
     device: &'a ash::Device,
     shadow_resources: &'a crate::vulkan::vk_shadow::VkShadowResources,
+    csm_shadow_resources: Option<&'a crate::vulkan::vk_shadow::VkCsmShadowResources>,
     vulkan_cache: &'a VkCache,
     data_cache: &'a Arc<VkDataCache>,
     uv_fallback_warnings: &'a Mutex<HashSet<(MeshHandle, MaterialHandle)>>,
@@ -116,6 +118,7 @@ impl PrepareTargetsRecording<'_> {
 
 impl ShadowRecording<'_> {
     pub(crate) fn shadow_resources(&self) -> &crate::vulkan::vk_shadow::VkShadowResources { self.shadow_resources }
+    pub(crate) fn csm_shadow_resources(&self) -> Option<&crate::vulkan::vk_shadow::VkCsmShadowResources> { self.csm_shadow_resources }
     pub(crate) fn device(&self) -> &ash::Device { self.device }
     pub(crate) fn vulkan_cache(&self) -> &VkCache { self.vulkan_cache }
     pub(crate) fn resolve_shadow_draw_objects(&mut self) -> Vec<RenderObject> {
@@ -196,6 +199,7 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         frame_capture_statuses: &mut core.frame_capture_statuses,
         surface_mode: core.surface_mode,
         shadow_resources: &core.shadow_resources,
+        csm_shadow_resources: core.csm_shadow_resources.as_ref(),
         gpu_timing: &mut core.gpu_timing,
     };
     // SAFETY: `frame_ptr` is unique for this scope and dispatcher cannot reach presentation.
@@ -217,6 +221,7 @@ impl RenderGraphContext<'_> {
         ShadowRecording {
             device: self.recording.device,
             shadow_resources: self.recording.shadow_resources,
+            csm_shadow_resources: self.recording.csm_shadow_resources,
             vulkan_cache: self.recording.vulkan_cache,
             data_cache: self.recording.data_cache,
             uv_fallback_warnings: self.recording.uv_fallback_warnings,
@@ -729,6 +734,13 @@ fn resolve_submission_buckets_impl(
         .lock()
         .expect("texture_cache lock poisoned");
 
+    // Bounds can participate in culling even when their mesh produces no draw.
+    // Mark their exact-generation owner handles against the same prospective
+    // submit serial so unload cannot recycle the slot before this frame retires.
+    for mesh in submission.bounds_references.iter().copied() {
+        let _ = mesh_cache.mark_referenced(mesh, next_submit_serial);
+    }
+
     for draw_item in submission.draw_items.iter().copied() {
         let mesh = match mesh_cache.get_loaded_id(draw_item.mesh_id) {
             Ok(mesh) => mesh,
@@ -1196,6 +1208,7 @@ mod tests {
                 direction: glam::Vec3::new(0.0, 2.0, 0.0),
                 color: glam::Vec3::new(1.0, 0.5, 0.25),
                 intensity: 3.0,
+                enable_shadows: false,
             });
         let light_view_projection = glam::Mat4::from_translation(glam::Vec3::ONE);
 

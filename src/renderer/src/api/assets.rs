@@ -951,8 +951,14 @@ impl<'a> AssetManager<'a> {
             .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
         let geometry = geo_store.take(mesh);
 
-        if let Some((mut payload, retire_after)) = retired {
-            payload.geometry = geometry;
+        if let Some((payload, retire_after)) = retired {
+            if let Some(geometry) = geometry {
+                self.core.bounds_retirement_queue.enqueue(
+                    crate::data::retirement::RetirementClass::BoundsEntry,
+                    retire_after,
+                    geometry,
+                );
+            }
             self.core.mesh_retirement_queue.enqueue(
                 crate::data::retirement::RetirementClass::MeshGeometry,
                 retire_after,
@@ -1176,13 +1182,12 @@ fn load_model_gpu_ready(
     let loaded_model = assimp_util::load_model(path_str, data_cache.clone(), false, policy_config)
         .map_err(AssetError::from)?;
 
-    // Capture and register every DTO as one transaction before GPU promotion.
-    // MeshMeta does not retain trustworthy skin/morph classification, so imported geometry
-    // remains conservatively unknown until importer metadata proves it rigid.
-    let dtos = collect_mesh_geometry_dtos(
+    // Capture and register every DTO as one transaction before GPU promotion,
+    // preserving importer-derived rigid/skinned/deformed classification.
+    let dtos = collect_mesh_geometry_dtos_with_deformations(
         &data_cache,
         &loaded_model.mesh_ids,
-        MeshDeformation::Unknown,
+        &loaded_model.mesh_deformations,
     );
     let registration_result = dtos.and_then(|dtos| register_mesh_geometry_dtos(&data_cache, dtos));
     if let Err(err) = registration_result {
@@ -1450,6 +1455,39 @@ fn collect_mesh_geometry_dtos(
         .collect()
 }
 
+fn collect_mesh_geometry_dtos_with_deformations(
+    data_cache: &Arc<VkDataCache>,
+    mesh_ids: &[MeshHandle],
+    deformations: &[MeshDeformation],
+) -> Result<Vec<MeshGeometryDto>, String> {
+    if mesh_ids.len() != deformations.len() {
+        return Err(format!(
+            "mesh/deformation count mismatch: {} handles, {} classifications",
+            mesh_ids.len(),
+            deformations.len()
+        ));
+    }
+    let mesh_cache = data_cache
+        .mesh_cache
+        .lock()
+        .map_err(|_| "mesh_cache lock poisoned".to_string())?;
+    mesh_ids
+        .iter()
+        .copied()
+        .zip(deformations.iter().copied())
+        .map(|(mesh_id, deformation)| match mesh_cache.get_id(mesh_id) {
+            Ok(CachedMesh::Unloaded(meta)) => mesh_meta_to_dto(mesh_id, meta, deformation),
+            Ok(CachedMesh::Loaded(_)) => Err(format!(
+                "mesh {mesh_id:?} was promoted before geometry capture"
+            )),
+            Ok(CachedMesh::_NULL) => Err(format!(
+                "mesh {mesh_id:?} was invalidated before geometry capture"
+            )),
+            Err(error) => Err(format!("mesh {mesh_id:?}: {error:?}")),
+        })
+        .collect()
+}
+
 fn register_mesh_geometry_dtos(
     data_cache: &Arc<VkDataCache>,
     dtos: Vec<MeshGeometryDto>,
@@ -1639,10 +1677,11 @@ fn scene_world_to_fragment(scene_world: SceneWorld) -> Result<SceneFragment, Ass
         })?;
 
         let fragment_node_id = fragment
-            .add_node(
+            .add_node_with_bounds(
                 fragment_parent_id,
                 source_node.local_transform,
                 source_node.meshes.clone(),
+                source_node.mesh_bounds.clone(),
             )
             .map_err(|err| {
                 AssetError::Internal(format!("failed to build scene fragment: {err}"))
@@ -2022,6 +2061,32 @@ fn procedural_vertex_to_gpu(v: &ProceduralVertex) -> Vertex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_scene_fragment_preserves_exact_mesh_bounds() {
+        let mesh = MeshHandle::new(7, 3);
+        let bounds = crate::api::scene::SceneBounds::Known(
+            crate::data::camera::Aabb::from_min_max(
+                glam::Vec3::new(-2.0, -1.0, -3.0),
+                glam::Vec3::new(4.0, 5.0, 6.0),
+            ),
+        );
+        let mut world = SceneWorld::new();
+        let root = world.add_node_with_parts_and_bounds(
+            None,
+            glam::Mat4::IDENTITY,
+            vec![mesh],
+            vec![crate::api::scene::MeshBoundsEntry { mesh, bounds }],
+        );
+        world.set_root(root);
+
+        let fragment = scene_world_to_fragment(world).unwrap();
+        let node = fragment.node(fragment.root().unwrap()).unwrap();
+        assert_eq!(node.meshes, vec![mesh]);
+        assert_eq!(node.mesh_bounds.len(), 1);
+        assert_eq!(node.mesh_bounds[0].mesh, mesh);
+        assert_eq!(node.mesh_bounds[0].bounds, bounds);
+    }
 
     #[test]
     fn material_desc_clamps_metallic_and_roughness() {

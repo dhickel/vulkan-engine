@@ -12,14 +12,15 @@
 
 use crate::api::scene::{
     BoundsUnknownReason, DirectionalLight, DirectionalLightId, MeshBoundsEntry, PointLight,
-    PointLightId, SceneAssetReference, SceneBounds,
+    PointLightId, SceneAssetReference, SceneBounds, SpotLight, SpotLightId,
 };
 use crate::data::camera::{Aabb, Frustum, Ray};
 use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
 use crate::scene::render_submission::{
-    FrameDirectionalLight, FrameDrawItem, FramePointLight, RenderSubmission, MAX_POINT_LIGHTS_GPU,
+    FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight,
+    RenderSubmission, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -126,6 +127,13 @@ pub(crate) enum PointLightRefError {
     GenerationMismatch,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SpotLightRefError {
+    OutOfBounds,
+    Vacant,
+    GenerationMismatch,
+}
+
 #[derive(Clone, Debug)]
 struct PointLightEntry {
     generation: u32,
@@ -138,6 +146,12 @@ struct DirectionalLightEntry {
     light: Option<DirectionalLight>,
 }
 
+#[derive(Clone, Debug)]
+struct SpotLightEntry {
+    generation: u32,
+    light: Option<SpotLight>,
+}
+
 pub struct SceneWorld {
     nodes: Vec<SceneNodeEntry>,
     free_slots: Vec<u32>,
@@ -148,6 +162,10 @@ pub struct SceneWorld {
     free_point_light_slots: Vec<u32>,
     directional_lights: Vec<DirectionalLightEntry>,
     free_directional_light_slots: Vec<u32>,
+    spot_lights: Vec<SpotLightEntry>,
+    free_spot_light_slots: Vec<u32>,
+    /// ID of the directional light that casts shadows (at most one).
+    shadow_casting_directional: Option<DirectionalLightId>,
     /// When true, mesh-backed nodes outside the camera frustum are omitted
     /// from `build_submission`. Descendants are tested independently. Enabled
     /// by default.
@@ -172,6 +190,9 @@ impl SceneWorld {
             free_point_light_slots: Vec::new(),
             directional_lights: Vec::with_capacity(1),
             free_directional_light_slots: Vec::new(),
+            spot_lights: Vec::with_capacity(16),
+            free_spot_light_slots: Vec::new(),
+            shadow_casting_directional: None,
             enable_frustum_culling: true,
         }
     }
@@ -433,12 +454,18 @@ impl SceneWorld {
         submission.skybox_env_id = self.skybox_env_id;
 
         // Collect the scene's single directional light.
+        // Collect the scene's single directional light, with shadow flag from tracked state.
+        let shadow_caster_id = self.shadow_casting_directional;
         submission.directional_light =
             self.get_active_directional_light()
-                .map(|light| FrameDirectionalLight {
-                    direction: light.direction,
-                    color: light.color,
-                    intensity: light.intensity,
+                .map(|light| {
+                    let light_id = self.current_directional_light_id();
+                    FrameDirectionalLight {
+                        direction: light.direction,
+                        color: light.color,
+                        intensity: light.intensity,
+                        enable_shadows: light_id == shadow_caster_id,
+                    }
                 });
 
         // Collect first N active lights (not first N slots) so sparse slot churn
@@ -453,6 +480,27 @@ impl SceneWorld {
                     color: light.color,
                     intensity: light.intensity,
                     range: light.range,
+                });
+            }
+        }
+
+        // Collect spot lights.
+        for entry in self.spot_lights.iter() {
+            if submission.spot_lights.len() >= MAX_SPOT_LIGHTS_GPU {
+                break;
+            }
+            if let Some(light) = entry.light {
+                let dir = light.direction.normalize();
+                let inner_half = light.inner_cone_angle * 0.5;
+                let outer_half = light.outer_cone_angle * 0.5;
+                submission.spot_lights.push(FrameSpotLight {
+                    position: light.position,
+                    direction: dir,
+                    color: light.color,
+                    intensity: light.intensity,
+                    range: light.range,
+                    inner_cos: inner_half.cos(),
+                    outer_cos: outer_half.cos(),
                 });
             }
         }
@@ -947,6 +995,61 @@ impl SceneWorld {
     /// Returns the active directional light (the public facade enforces one).
     pub(crate) fn get_active_directional_light(&self) -> Option<DirectionalLight> {
         self.directional_lights.iter().find_map(|entry| entry.light)
+    }
+
+    /// Returns the ID of the active directional light, if any.
+    fn current_directional_light_id(&self) -> Option<DirectionalLightId> {
+        self.directional_lights.iter().enumerate().find_map(|(slot, entry)| {
+            entry.light.map(|_| DirectionalLightId { slot: slot as u32, generation: entry.generation })
+        })
+    }
+
+    pub(crate) fn set_shadow_casting_directional(&mut self, id: Option<DirectionalLightId>) {
+        self.shadow_casting_directional = id;
+    }
+
+    pub(crate) fn shadow_casting_directional(&self) -> Option<DirectionalLightId> {
+        self.shadow_casting_directional
+    }
+
+    // ── Spot light lifecycle ────────────────────────────────────────────
+
+    pub(crate) fn validate_spot_light_ref(&self, id: SpotLightId) -> Result<(), SpotLightRefError> {
+        let Some(entry) = self.spot_lights.get(id.slot as usize) else { return Err(SpotLightRefError::OutOfBounds); };
+        if entry.generation != id.generation { return Err(SpotLightRefError::GenerationMismatch); }
+        if entry.light.is_none() { return Err(SpotLightRefError::Vacant); }
+        Ok(())
+    }
+
+    pub(crate) fn add_spot_light(&mut self, light: SpotLight) -> SpotLightId {
+        if let Some(slot) = self.free_spot_light_slots.pop() {
+            let entry = &mut self.spot_lights[slot as usize];
+            entry.light = Some(light);
+            return SpotLightId { slot, generation: entry.generation };
+        }
+        let slot = self.spot_lights.len() as u32;
+        self.spot_lights.push(SpotLightEntry { generation: 0, light: Some(light) });
+        SpotLightId { slot, generation: 0 }
+    }
+
+    pub(crate) fn update_spot_light(&mut self, id: SpotLightId, light: SpotLight) -> bool {
+        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else { return false; };
+        if entry.generation != id.generation || entry.light.is_none() { return false; }
+        entry.light = Some(light);
+        true
+    }
+
+    pub(crate) fn remove_spot_light(&mut self, id: SpotLightId) -> bool {
+        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else { return false; };
+        if entry.generation != id.generation || entry.light.is_none() { return false; }
+        entry.light = None;
+        entry.generation = entry.generation.wrapping_add(1);
+        self.free_spot_light_slots.push(id.slot);
+        true
+    }
+
+    pub(crate) fn get_active_spot_lights(&self) -> Vec<SpotLight> {
+        self.spot_lights.iter().filter_map(|entry| entry.light).collect()
     }
 }
 

@@ -130,3 +130,7 @@ path = "examples/capture_tests/capture_model_load.rs"
 name = "capture_transform"
 path = "examples/capture_tests/capture_transform.rs"
 
+[[example]]
+name = "capture_csm"
+path = "examples/capture_tests/capture_csm.rs"
+

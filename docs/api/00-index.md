@@ -135,9 +135,9 @@ event_loop.run(move |event, control_flow| {
 
 ## Culling and Directional Shadow Defaults
 
-New `Scene` values enable frustum culling by default. Call
-`scene.set_frustum_culling(false)` only for diagnostics or content whose geometry
-extends beyond the current node proxy bounds. A scene may own one
+New `Scene` values enable frustum culling by default. Known meshes use authoritative
+bounds, untrusted geometry remains conservative-visible, and explicit proxies are tagged.
+Call `scene.set_frustum_culling(false)` only for diagnostics. A scene may own one
 `DirectionalLight`; PBR materials use it with one fixed 2048² frame-local shadow
 map. Shadow resolution, filtering, cascades, and per-light shadow toggles are not
 publicly configurable in this gate.

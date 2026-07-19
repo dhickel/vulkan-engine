@@ -17,7 +17,7 @@ Use this guide for physics body/collider identity, simulation stepping, and engi
 - `BodyDescriptor`, `ColliderDescriptor` — creation descriptors
 - `PhysicsWorld` — simulation container (step, add/remove, query)
 - `BodyKind` — Static, Dynamic, Kinematic
-- `ColliderShape` — Cuboid, Sphere, CapsuleY, TriMeshStatic
+- `ColliderShape` — Cuboid, Sphere, CapsuleY, TriMeshStatic, ConvexHull
 - `RayHit` — ray cast result with body/collider IDs
 - `PhysicsContactRecord` — collision contact record
 - `to_engine_event()` — converters that produce `EngineEvent::Physics` variants

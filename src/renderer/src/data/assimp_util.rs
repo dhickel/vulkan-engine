@@ -6,8 +6,8 @@
 //! Internal assimp ingestion with future-facing helpers; dead code allowed.
 
 use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
-use crate::data::camera::Aabb;
 use crate::api::AssetPolicyConfig;
+use crate::data::camera::Aabb;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
 use crate::data::compression;
 use crate::data::data_cache::{TextureCache, VkDataCache};
@@ -17,7 +17,7 @@ use crate::data::gpu_data::{
     TextureSemantic, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
-use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto};
+use crate::data::mesh_geometry::MeshDeformation;
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
 use ash::vk;
 use glam::{Mat4, Vec3, Vec4};
@@ -120,6 +120,8 @@ pub struct ModelMeta {
     pub scene_world: SceneWorld,
     pub material_ids: Vec<MaterialHandle>,
     pub mesh_ids: Vec<MeshHandle>,
+    /// Importer-derived deformation classification aligned with `mesh_ids`.
+    pub mesh_deformations: Vec<MeshDeformation>,
 }
 
 pub fn load_model(
@@ -190,6 +192,12 @@ pub fn load_model(
     }
 
     let meshes = process_meshes(ai_scene, mapped_materials)?;
+    let mesh_deformations = classify_imported_meshes(ai_scene, meshes.len())?;
+    let mesh_bound_states = meshes
+        .iter()
+        .zip(mesh_deformations.iter().copied())
+        .map(|(mesh, deformation)| imported_mesh_bounds(mesh, deformation))
+        .collect::<Vec<_>>();
     let mesh_indices = 0..meshes.len();
 
     let mut mapped_meshes = HashMap::<u32, MeshHandle>::with_capacity(meshes.len());
@@ -203,22 +211,14 @@ pub fn load_model(
         mapped_meshes.insert(og_idx as u32, *id);
     }
 
-    // Derive scene bounds from registered DTOs for every imported mesh.
-    let mesh_bounds_map = {
-        let geo_store = data_cache
-            .mesh_geometry_store
-            .lock()
-            .map_err(|_| AssimpImportError::Internal("mesh_geometry_store lock poisoned".to_string()))?;
-        let mut map = HashMap::with_capacity(mesh_ids.len());
-        for &mesh_id in &mesh_ids {
-            let bounds = match geo_store.get(mesh_id) {
-                Ok(dto) => dto_to_scene_bounds(&dto),
-                Err(_) => SceneBounds::ConservativeVisible(BoundsUnknownReason::StaleHandle),
-            };
-            map.insert(mesh_id, bounds);
-        }
-        map
-    };
+    // Build node metadata directly from the CPU meshes before GPU promotion.
+    // DTO registration happens after this import function returns, so querying
+    // the geometry store here would incorrectly classify every mesh as stale.
+    let mesh_bounds_map = mesh_ids
+        .iter()
+        .copied()
+        .zip(mesh_bound_states)
+        .collect::<HashMap<_, _>>();
 
     let root_ai_node = ai_scene.mRootNode;
 
@@ -234,6 +234,7 @@ pub fn load_model(
             scene_world,
             material_ids,
             mesh_ids,
+            mesh_deformations,
         })
     }
 }
@@ -1203,20 +1204,24 @@ const AI_MATKEY_GLTF_ALPHAMODE: *const c_char = b"$mat.gltf.alphaMode\0".as_ptr(
 const AI_MATKEY_GLTF_ALPHACUTOFF: *const c_char =
     b"$mat.gltf.alphaCutoff\0".as_ptr() as *const c_char;
 
-/// Convert a [`MeshGeometryDto`] to a [`SceneBounds`].
-/// Rigid meshes with valid AABBs become `Known`; skinned/deformed/unknown
-/// meshes become `ConservativeVisible` with the exact reason.
-fn dto_to_scene_bounds(dto: &MeshGeometryDto) -> SceneBounds {
-    match dto.deformation {
+fn imported_mesh_bounds(mesh: &MeshMeta, deformation: MeshDeformation) -> SceneBounds {
+    match deformation {
         MeshDeformation::Rigid => {
-            if let Some(ref local_aabb) = dto.local_aabb {
-                if local_aabb.is_valid() {
-                    let min = Vec3::from_array(local_aabb.min);
-                    let max = Vec3::from_array(local_aabb.max);
-                    return SceneBounds::Known(Aabb::from_min_max(min, max));
-                }
+            let mut positions = mesh.vertices.iter().map(|vertex| vertex.position);
+            let Some(first) = positions.next() else {
+                return SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry);
+            };
+            if !first.is_finite() {
+                return SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry);
             }
-            SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry)
+            let Some((min, max)) = positions.try_fold((first, first), |(min, max), position| {
+                position
+                    .is_finite()
+                    .then_some((min.min(position), max.max(position)))
+            }) else {
+                return SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry);
+            };
+            SceneBounds::Known(Aabb::from_min_max(min, max))
         }
         MeshDeformation::Skinned => {
             SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
@@ -1230,10 +1235,82 @@ fn dto_to_scene_bounds(dto: &MeshGeometryDto) -> SceneBounds {
     }
 }
 
+fn classify_imported_meshes(
+    ai_scene: &aiScene,
+    expected_count: usize,
+) -> Result<Vec<MeshDeformation>, AssimpImportError> {
+    if ai_scene.mNumMeshes as usize != expected_count
+        || (expected_count > 0 && ai_scene.mMeshes.is_null())
+    {
+        return Err(AssimpImportError::Internal(
+            "Assimp mesh classification count did not match processed meshes".to_string(),
+        ));
+    }
+
+    let mut classifications = Vec::with_capacity(expected_count);
+    for index in 0..expected_count {
+        let mesh = unsafe { *ai_scene.mMeshes.add(index) };
+        if mesh.is_null() {
+            return Err(AssimpImportError::Internal(format!(
+                "Assimp mesh {index} was null during deformation classification"
+            )));
+        }
+        let mesh = unsafe { &*mesh };
+        classifications.push(if mesh.mNumBones > 0 {
+            MeshDeformation::Skinned
+        } else if mesh.mNumAnimMeshes > 0 {
+            MeshDeformation::Deformed
+        } else {
+            MeshDeformation::Rigid
+        });
+    }
+    Ok(classifications)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::AssetError;
+
+    #[test]
+    fn imported_mesh_bounds_classify_rigid_and_deformed_geometry() {
+        let mesh = MeshMeta {
+            name: "bounds-test".to_string(),
+            indices: vec![0, 1, 2],
+            vertices: vec![
+                Vertex {
+                    position: Vec3::new(-2.0, 3.0, 1.0),
+                    ..Vertex::default()
+                },
+                Vertex {
+                    position: Vec3::new(4.0, -1.0, 5.0),
+                    ..Vertex::default()
+                },
+                Vertex {
+                    position: Vec3::new(0.0, 2.0, -3.0),
+                    ..Vertex::default()
+                },
+            ],
+            material_index: None,
+            has_uv1: false,
+        };
+
+        assert_eq!(
+            imported_mesh_bounds(&mesh, MeshDeformation::Rigid),
+            SceneBounds::Known(Aabb::from_min_max(
+                Vec3::new(-2.0, -1.0, -3.0),
+                Vec3::new(4.0, 3.0, 5.0),
+            ))
+        );
+        assert_eq!(
+            imported_mesh_bounds(&mesh, MeshDeformation::Skinned),
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
+        );
+        assert_eq!(
+            imported_mesh_bounds(&mesh, MeshDeformation::Deformed),
+            SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed)
+        );
+    }
 
     // ── Error Display formatting ──────────────────────────────────────
 

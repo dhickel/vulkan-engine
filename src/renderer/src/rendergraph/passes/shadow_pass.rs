@@ -1,12 +1,17 @@
 //! Shadow map render pass.
 //!
 //! Renders opaque geometry depth from the directional light's perspective into
-//! a 2048² D32 shadow map. Uses a minimal depth-only pipeline.
+//! a shadow map. Supports two paths:
+//! - Legacy: single 2048² D32 shadow map.
+//! - CSM (`csm` feature): three 1024² D32 layers with per-cascade culling.
 
 use crate::data::data_cache::VkPipelineType;
+use crate::data::gpu_data::{CSM_CASCADE_COUNT, RenderObject};
 use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 use crate::vulkan::vk_pipeline::PushConstShadowDepth;
-use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
+use crate::vulkan::vk_shadow::{
+    compute_csm_cascades, compute_draw_light_view_projection, cull_casters_for_cascade,
+};
 use ash::vk;
 
 pub struct ShadowPass;
@@ -17,8 +22,6 @@ impl RenderPassNode for ShadowPass {
     }
 
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
-        // The map must be cleared and transitioned before a PBR draw can bind it,
-        // even when this frame has no active directional light.
         if !ctx.submission.flags.draw_geometry || ctx.submission.draw_items.is_empty() {
             return Ok(());
         }
@@ -26,23 +29,306 @@ impl RenderPassNode for ShadowPass {
         let mut recording = ctx.shadow_ctx();
 
         let frame_index = recording.frame_index();
+        let shadow_draws = recording.resolve_shadow_draw_objects();
+
+        // Copy light data before borrowing to avoid the move conflict.
+        let light_data = recording.submission().directional_light;
+        let light_active = light_data.map_or(false, |l| l.intensity > 0.0);
+
+        if !light_active || shadow_draws.is_empty() {
+            return Ok(());
+        }
+
+        let light = light_data.unwrap();
+        let light_dir = light.direction;
+
+        let cmd_buffer = recording.cmd_buffer();
+        let device = recording.device();
+
+        // Check if CSM is available and enabled.
+        #[cfg(feature = "csm")]
+        let use_csm = recording.csm_shadow_resources().is_some()
+            && light.enable_shadows;
+        #[cfg(not(feature = "csm"))]
+        let use_csm = false;
+
+        if use_csm {
+            #[cfg(feature = "csm")]
+            {
+                let csm_resources = recording.csm_shadow_resources().unwrap();
+                let csm_frame = csm_resources.get_frame(frame_index);
+                let csm_extent = csm_resources.extent;
+                let csm_image = csm_frame.csm_image.image;
+
+                // Compute CSM cascades from camera matrices.
+                let camera = &recording.submission().camera;
+                let view = camera.view;
+                let projection = camera.projection;
+
+                // Derive camera near/far from frustum corners.
+                let vp = projection * view;
+                let inv_vp = vp.inverse();
+                if !inv_vp.is_finite() {
+                    // Fall through to legacy path below.
+                    return self.execute_legacy(
+                        recording, &shadow_draws, &light,
+                    );
+                }
+
+                // Use a reasonable near/far range.
+                let camera_near = 0.1_f32;
+                let camera_far = 500.0_f32;
+
+                let cascades = match compute_csm_cascades(
+                    &view,
+                    &projection,
+                    light_dir,
+                    camera_near,
+                    camera_far,
+                    &shadow_draws,
+                ) {
+                    Some(c) => c,
+                    None => {
+                        // Cascade fitting failed — fall back to legacy.
+                        return Ok(());
+                    }
+                };
+
+                // Transition entire array to DEPTH_ATTACHMENT_OPTIMAL.
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+                    .src_access_mask(vk::AccessFlags2::empty())
+                    .dst_stage_mask(
+                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    )
+                    .dst_access_mask(
+                        vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+                            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+                    )
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                    .image(csm_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: CSM_CASCADE_COUNT,
+                    });
+
+                let barriers = [barrier];
+                let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+                unsafe {
+                    device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+                }
+
+                // Bind shadow pipeline once.
+                let shadow_pipeline = recording
+                    .vulkan_cache()
+                    .pipelines
+                    .get_pipeline(VkPipelineType::ShadowDepth);
+                unsafe {
+                    device.cmd_bind_pipeline(
+                        cmd_buffer,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        shadow_pipeline.pipeline,
+                    );
+                }
+
+                let viewport = vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: csm_extent.width as f32,
+                    height: csm_extent.height as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
+                let scissor = vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: csm_extent,
+                };
+                unsafe {
+                    device.cmd_set_viewport(cmd_buffer, 0, &[viewport]);
+                    device.cmd_set_scissor(cmd_buffer, 0, &[scissor]);
+                }
+
+                // Render each cascade layer.
+                for (i, cascade) in cascades.iter().enumerate() {
+                    let layer_idx = i as u32;
+
+                    // Cull per cascade.
+                    let visible = cull_casters_for_cascade(
+                        shadow_draws.iter(),
+                        &cascade.light_view_proj,
+                    );
+
+                    if visible.is_empty() {
+                        // No casters in this cascade, but still clear the layer.
+                        // We need to at least clear to 1.0.
+                    }
+
+                    let layer_view = csm_frame.csm_layer_views[layer_idx as usize];
+                    let depth_attachment = vk::RenderingAttachmentInfo::default()
+                        .image_view(layer_view)
+                        .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                        .load_op(vk::AttachmentLoadOp::CLEAR)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue {
+                            depth_stencil: vk::ClearDepthStencilValue {
+                                depth: 1.0,
+                                stencil: 0,
+                            },
+                        });
+
+                    let rendering_info = vk::RenderingInfo::default()
+                        .render_area(vk::Rect2D {
+                            offset: vk::Offset2D { x: 0, y: 0 },
+                            extent: csm_extent,
+                        })
+                        .layer_count(1)
+                        .depth_attachment(&depth_attachment);
+
+                    unsafe {
+                        device.cmd_begin_rendering(cmd_buffer, &rendering_info);
+                    }
+
+                    for draw in &visible {
+                        unsafe {
+                            device.cmd_bind_index_buffer(
+                                cmd_buffer,
+                                draw.index_buffer,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                        }
+
+                        let push_consts = PushConstShadowDepth {
+                            light_model_view_projection: cascade.light_view_proj
+                                * draw.transform,
+                            vertex_buffer_addr: draw.vertex_buffer_addr,
+                            _pad: [0; 2],
+                        };
+
+                        unsafe {
+                            device.cmd_push_constants(
+                                cmd_buffer,
+                                shadow_pipeline.layout,
+                                vk::ShaderStageFlags::VERTEX,
+                                0,
+                                bytemuck::bytes_of(&push_consts),
+                            );
+
+                            device.cmd_draw_indexed(
+                                cmd_buffer,
+                                draw.index_count,
+                                1,
+                                draw.first_index,
+                                0,
+                                0,
+                            );
+                        }
+                    }
+
+                    unsafe {
+                        device.cmd_end_rendering(cmd_buffer);
+                    }
+
+                    // Barrier: depth write → depth read for next layer.
+                    if i + 1 < CSM_CASCADE_COUNT as usize {
+                        let layer_barrier = vk::ImageMemoryBarrier2::default()
+                            .src_stage_mask(
+                                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                            )
+                            .src_access_mask(
+                                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                            )
+                            .dst_stage_mask(
+                                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                            )
+                            .dst_access_mask(
+                                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+                                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+                            )
+                            .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                            .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                            .image(csm_image)
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: layer_idx,
+                                layer_count: 1,
+                            });
+
+                        let layer_barriers = [layer_barrier];
+                        let dep_info = vk::DependencyInfo::default()
+                            .image_memory_barriers(&layer_barriers);
+                        unsafe {
+                            device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+                        }
+                    }
+                }
+
+                // Final transition: all layers to SHADER_READ_ONLY_OPTIMAL.
+                let read_barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(
+                        vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                    )
+                    .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_READ)
+                    .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .image(csm_image)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: CSM_CASCADE_COUNT,
+                    });
+
+                let read_barriers = [read_barrier];
+                let dep_info =
+                    vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
+                unsafe {
+                    device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+                }
+
+                return Ok(());
+            }
+        }
+
+        // Legacy single-map path.
+        self.execute_legacy(recording, &shadow_draws, &light)
+    }
+}
+
+impl ShadowPass {
+    fn execute_legacy(
+        &self,
+        recording: crate::vulkan::vk_commands::ShadowRecording<'_>,
+        shadow_draws: &[RenderObject],
+        light: &crate::scene::render_submission::FrameDirectionalLight,
+    ) -> Result<(), String> {
+        let frame_index = recording.frame_index();
         let shadow_extent = recording.shadow_resources().shadow_map_extent;
         let (shadow_map_image, shadow_map_view) = {
             let shadow_frame = recording.shadow_resources().get_frame(frame_index);
             (shadow_frame.shadow_map.image, shadow_frame.shadow_map_view)
         };
 
-        let shadow_draws = recording.resolve_shadow_draw_objects();
-        let light_view_proj = recording
-            .submission()
-            .directional_light
-            .as_ref()
-            .filter(|light| light.intensity > 0.0)
-            .and_then(|light| {
-                compute_draw_light_view_projection(light.direction, shadow_draws.iter())
-            });
+        let light_view_proj = compute_draw_light_view_projection(
+            light.direction,
+            shadow_draws.iter(),
+        );
 
         let cmd_buffer = recording.cmd_buffer();
+        let device = recording.device();
 
         // Transition shadow map to depth attachment optimal
         let barrier = vk::ImageMemoryBarrier2::default()
@@ -70,7 +356,7 @@ impl RenderPassNode for ShadowPass {
         let barriers = [barrier];
         let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         unsafe {
-            recording.device().cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+            device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
         }
 
         // Begin depth-only rendering
@@ -95,7 +381,7 @@ impl RenderPassNode for ShadowPass {
             .depth_attachment(&depth_attachment);
 
         unsafe {
-            recording.device().cmd_begin_rendering(cmd_buffer, &rendering_info);
+            device.cmd_begin_rendering(cmd_buffer, &rendering_info);
         }
 
         // Bind shadow pipeline
@@ -104,7 +390,7 @@ impl RenderPassNode for ShadowPass {
             .pipelines
             .get_pipeline(VkPipelineType::ShadowDepth);
         unsafe {
-            recording.device().cmd_bind_pipeline(
+            device.cmd_bind_pipeline(
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 shadow_pipeline.pipeline,
@@ -125,14 +411,14 @@ impl RenderPassNode for ShadowPass {
             extent: shadow_extent,
         };
         unsafe {
-            recording.device().cmd_set_viewport(cmd_buffer, 0, &[viewport]);
-            recording.device().cmd_set_scissor(cmd_buffer, 0, &[scissor]);
+            device.cmd_set_viewport(cmd_buffer, 0, &[viewport]);
+            device.cmd_set_scissor(cmd_buffer, 0, &[scissor]);
         }
 
         if let Some(light_view_proj) = light_view_proj {
-            for draw in &shadow_draws {
+            for draw in shadow_draws {
                 unsafe {
-                    recording.device().cmd_bind_index_buffer(
+                    device.cmd_bind_index_buffer(
                         cmd_buffer,
                         draw.index_buffer,
                         0,
@@ -147,7 +433,7 @@ impl RenderPassNode for ShadowPass {
                 };
 
                 unsafe {
-                    recording.device().cmd_push_constants(
+                    device.cmd_push_constants(
                         cmd_buffer,
                         shadow_pipeline.layout,
                         vk::ShaderStageFlags::VERTEX,
@@ -155,7 +441,7 @@ impl RenderPassNode for ShadowPass {
                         bytemuck::bytes_of(&push_consts),
                     );
 
-                    recording.device().cmd_draw_indexed(
+                    device.cmd_draw_indexed(
                         cmd_buffer,
                         draw.index_count,
                         1,
@@ -168,7 +454,7 @@ impl RenderPassNode for ShadowPass {
         }
 
         unsafe {
-            recording.device().cmd_end_rendering(cmd_buffer);
+            device.cmd_end_rendering(cmd_buffer);
         }
 
         // Transition shadow map to SHADER_READ_ONLY_OPTIMAL for sampling
@@ -194,7 +480,7 @@ impl RenderPassNode for ShadowPass {
         let read_barriers = [read_barrier];
         let dep_info = vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
         unsafe {
-            recording.device().cmd_pipeline_barrier2(cmd_buffer, &dep_info);
+            device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
         }
 
         Ok(())

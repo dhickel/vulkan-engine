@@ -28,7 +28,7 @@ pub use super::{
     LifecycleEvent, ListenerError, ListenerFailure, ListenerId, LoadStatus, LoadTicket,
     MaterialHandle, MeshBoundsEntry, MeshDeformation, MeshGeometryDto, MeshHandle, MeshLocalAabb,
     PackageAssetRecord, PackageManifest, PackageValidationOptions,
-    PbrMaterialDesc, PhysicsBodyId, PhysicsEvent, PointLight, PointLightId, ProceduralMeshData,
+    PbrMaterialDesc, PhysicsBodyId, PhysicsEvent, PointLight, PointLightId, SpotLight, SpotLightId, ProceduralMeshData,
     ProceduralVertex, Project, ProjectPackage, ProjectSettings, ProjectValidationOptions, Renderer,
     RendererConfig, RendererError, RendererFrameError, RendererInitError, RendererInputRouting,
     RendererInputSuppression, ResolvedTexturePolicy, SamplerOverride, Scene, SceneAssetReference,

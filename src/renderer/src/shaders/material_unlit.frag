@@ -30,6 +30,15 @@ struct PointLightData {
     vec4 colorIntensity;
 };
 
+struct SpotLightData {
+    vec4 positionRange;
+    vec4 directionInnerCos;
+    vec4 colorIntensity;
+    vec4 outerCos;
+};
+
+#define CSM_CASCADE_COUNT 3
+
 layout (set = 0, binding = 1) uniform UBOParams {
     vec4 lightDir;
     vec4 lightColor;
@@ -40,10 +49,24 @@ layout (set = 0, binding = 1) uniform UBOParams {
     float scaleIBLAmbient;
     float debugViewInputs;
     float debugViewEquation;
-    uint _pad0;
-    uint _pad1;
+    uint cascadeCount;
+    uint _padCascade;
+    vec4 cascadeSplits;
     uint pointLightCount;
+    uint _pad0_0;
+    uint _pad0_1;
+    uint _pad0_2;
+    uint spotLightCount;
+    uint _padSpot0;
+    uint _padSpot1;
+    uint _padSpot2;
+    mat4 cascadeViewProj[CSM_CASCADE_COUNT];
+    float blendFraction;
+    uint _padBlend0;
+    uint _padBlend1;
+    uint _padBlend2;
     PointLightData pointLights[16];
+    SpotLightData spotLights[16];
 } uboParams;
 
 layout (set = 2, binding = 0) uniform sampler2D colorMap;

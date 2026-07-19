@@ -4,6 +4,7 @@
 //! this module receives borrowed field bundles and never owns Vulkan resources.
 
 use crate::data::data_cache::VkDataCache;
+use crate::data::mesh_geometry::MeshGeometryDto;
 use crate::data::retirement::{FrameSerial, GpuRetirementQueue, MeshRetiredPayload};
 use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot};
 use crate::rendergraph::RenderGraphExecutionReport;
@@ -185,6 +186,7 @@ pub(crate) struct FrameLifecycleContext<'a> {
     pub latest_completed_serial: &'a mut u64,
     pub latest_submitted_serial: &'a mut u64,
     pub mesh_retirement_queue: &'a mut GpuRetirementQueue<MeshRetiredPayload>,
+    pub bounds_retirement_queue: &'a mut GpuRetirementQueue<MeshGeometryDto>,
     pub data_cache: &'a Arc<VkDataCache>,
     pub gpu_timing: &'a mut GpuTimingState,
 }
@@ -275,6 +277,19 @@ pub(crate) fn reap_mesh_retirement(
         mesh_cache.destroy_retired_payload(&record.payload);
         mesh_cache.release_mesh_slot(record.payload.slot);
     }
+    Ok(())
+}
+
+pub(crate) fn reap_bounds_retirement(
+    latest_completed_serial: u64,
+    bounds_retirement_queue: &mut GpuRetirementQueue<MeshGeometryDto>,
+) -> Result<(), String> {
+    let reaped = bounds_retirement_queue
+        .reap_through(FrameSerial::new(latest_completed_serial))
+        .map_err(|err| format!("bounds retirement completion regression: {err:?}"))?;
+    debug_assert!(reaped.iter().all(|record| {
+        record.class == crate::data::retirement::RetirementClass::BoundsEntry
+    }));
     Ok(())
 }
 
@@ -370,6 +385,10 @@ pub(crate) fn acquire_frame_slot(
         *ctx.latest_completed_serial,
         ctx.mesh_retirement_queue,
         ctx.data_cache,
+    )?;
+    reap_bounds_retirement(
+        *ctx.latest_completed_serial,
+        ctx.bounds_retirement_queue,
     )?;
 
     // GPU timing resolution for the retiring slot
@@ -886,6 +905,38 @@ mod tests {
         assert!(transaction.fence_signal_queued());
         assert!(transaction.requires_swapchain_rebuild());
         assert_eq!(transaction.state, FrameTransactionState::PresentFailed);
+    }
+
+    #[test]
+    fn bounds_metadata_reaps_only_at_its_fence_serial() {
+        let mesh = crate::data::handles::MeshHandle::new(4, 2);
+        let dto = MeshGeometryDto {
+            mesh,
+            positions: std::sync::Arc::from([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            indices: std::sync::Arc::from([]),
+            local_aabb: Some(crate::data::mesh_geometry::MeshLocalAabb::new(
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            )),
+            deformation: crate::data::mesh_geometry::MeshDeformation::Rigid,
+        };
+        let mut queue = GpuRetirementQueue::new();
+        queue.enqueue(
+            crate::data::retirement::RetirementClass::BoundsEntry,
+            FrameSerial::new(5),
+            dto,
+        );
+
+        reap_bounds_retirement(4, &mut queue).unwrap();
+        assert_eq!(
+            queue.pending_by_class(crate::data::retirement::RetirementClass::BoundsEntry),
+            1
+        );
+        reap_bounds_retirement(5, &mut queue).unwrap();
+        assert_eq!(
+            queue.pending_by_class(crate::data::retirement::RetirementClass::BoundsEntry),
+            0
+        );
     }
 
     #[test]

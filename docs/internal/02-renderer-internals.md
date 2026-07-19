@@ -37,7 +37,7 @@ let submission = scene.build_submission(&self.camera, viewport_size);
 - `Option<FrameDirectionalLight>` — the scene's single surface-to-light directional source
 - `EnvironmentHandle` — active environment map
 
-Frustum culling is enabled by default. Mesh-backed nodes whose transform-aware proxy AABBs are outside the Vulkan `[0, 1]` camera frustum are omitted; descendants are tested independently. The public `Scene` facade can disable culling for diagnostics or compatibility.
+Frustum culling is enabled by default. Known and explicit-proxy world bounds are tested against the Vulkan `[0, 1]` camera frustum; known subtree unions may prune complete branches, while conservative-visible nodes always submit and traverse descendants. The public `Scene` facade can disable culling for diagnostics.
 
 ### Step 5: Rendergraph Execution
 

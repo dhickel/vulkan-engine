@@ -82,15 +82,26 @@ impl Aabb {
 
     /// Conservative union of `self` and `other`. Returns `None` if either is non-finite.
     pub fn union(&self, other: &Aabb) -> Option<Aabb> {
-        if !self.is_finite() || !other.is_finite() {
+        if !self.is_finite()
+            || !self.is_ordered()
+            || !other.is_finite()
+            || !other.is_ordered()
+        {
             return None;
         }
-        Some(Aabb::from_min_max(self.min.min(other.min), self.max.max(other.max)))
+        Some(Aabb::from_min_max(
+            self.min.min(other.min),
+            self.max.max(other.max),
+        ))
     }
 
     /// Extend `self` to enclose `other`. Returns false if either is non-finite.
     pub fn extend_to_enclose(&mut self, other: &Aabb) -> bool {
-        if !self.is_finite() || !other.is_finite() {
+        if !self.is_finite()
+            || !self.is_ordered()
+            || !other.is_finite()
+            || !other.is_ordered()
+        {
             return false;
         }
         self.min = self.min.min(other.min);
@@ -101,6 +112,9 @@ impl Aabb {
     /// Transform all eight corners by `transform` and recompute min/max.
     /// Returns `None` if the transform produces non-finite results.
     pub fn transformed(&self, transform: &Mat4) -> Option<Aabb> {
+        if !self.is_finite() || !self.is_ordered() || !transform.is_finite() {
+            return None;
+        }
         let corners = self.corners();
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);

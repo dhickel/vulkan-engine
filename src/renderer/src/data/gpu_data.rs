@@ -21,6 +21,12 @@ use std::f32::consts::PI;
 
 /// Maximum number of point lights that can be uploaded to GPU per frame.
 pub const MAX_POINT_LIGHTS_GPU: usize = 16;
+/// Maximum number of spot lights that can be uploaded to GPU per frame.
+pub const MAX_SPOT_LIGHTS_GPU: usize = 16;
+/// CSM cascade count (must match shader constant).
+pub const CSM_CASCADE_COUNT: u32 = 3;
+/// CSM cascade resolution per layer.
+pub const CSM_CASCADE_DIM: u32 = 1024;
 
 //////////////////////////
 //  MESH & TEXTURE DATA //
@@ -500,6 +506,39 @@ pub struct GpuPointLight {
     pub color_intensity: Vec4, // rgb = color, w = intensity
 }
 
+/// GPU spot light struct matching GLSL std140 layout.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct GpuSpotLight {
+    pub position_range: Vec4,       // xyz = position, w = range
+    pub direction_inner_cos: Vec4,  // xyz = direction, w = inner cos
+    pub color_intensity: Vec4,      // rgb = color, w = intensity
+    pub outer_cos: Vec4,            // x = outer cos, yzw = pad
+}
+
+/// Extended EnvironmentUBO with CSM cascade data and spot lights.
+///
+/// Layout (std140):
+///   offset   0: light_dir             (vec4, 16 B)
+///   offset  16: light_color           (vec4, 16 B)
+///   offset  32: light_view_proj       (mat4, 64 B)
+///   offset  96: exposure, gamma,      (4 × f32 = 16 B)
+///               prefilter_mips,
+///               ibl_ambient_scale
+///   offset 112: debug_view_inputs,    (4 × f32 = 16 B)
+///               debug_view_equation,
+///               cascade_count (u32),
+///               _pad_cascade
+///   offset 128: cascade_splits        (vec4, 16 B)
+///   offset 144: point_light_count     (u32 + 12 B pad)
+///   offset 160: spot_light_count      (u32 + 12 B pad)
+///   offset 176: cascade_view_proj[0]  (mat4, 64 B)
+///   offset 240: cascade_view_proj[1]  (mat4, 64 B)
+///   offset 304: cascade_view_proj[2]  (mat4, 64 B)
+///   offset 368: blend_fraction + pad
+///   offset 384: point_lights[16]      (16 × 32 B = 512 B)
+///   offset 896: spot_lights[16]       (16 × 64 B = 1024 B)
+///   total: 1920 B
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct EnvironmentUBO {
@@ -514,10 +553,21 @@ pub struct EnvironmentUBO {
     pub ibl_ambient_scale: f32,
     pub debug_view_inputs: f32,
     pub debug_view_equation: f32,
-    pub _pad0: [u32; 2],
+    pub cascade_count: u32,
+    pub _pad_cascade: u32,
+    /// CSM cascade split distances in view space (x, y, z, unused).
+    pub cascade_splits: Vec4,
     pub point_light_count: u32,
     pub _pad1: [u32; 3],
+    pub spot_light_count: u32,
+    pub _pad_spot: [u32; 3],
+    /// CSM cascade light view-projection matrices (3 × mat4).
+    pub cascade_view_proj: [Vec4; 12],
+    /// CSM blend band fraction (0.0 .. 1.0).
+    pub blend_fraction: f32,
+    pub _pad_blend: [u32; 3],
     pub point_lights: [GpuPointLight; MAX_POINT_LIGHTS_GPU],
+    pub spot_lights: [GpuSpotLight; MAX_SPOT_LIGHTS_GPU],
 }
 
 impl Default for EnvironmentUBO {
@@ -532,13 +582,26 @@ impl Default for EnvironmentUBO {
             ibl_ambient_scale: 1.0,
             debug_view_inputs: 0.0,
             debug_view_equation: 0.0,
-            _pad0: [0, 0],
+            cascade_count: 0,
+            _pad_cascade: 0,
+            cascade_splits: Vec4::ZERO,
             point_light_count: 0,
             _pad1: [0, 0, 0],
+            spot_light_count: 0,
+            _pad_spot: [0, 0, 0],
+            cascade_view_proj: [Vec4::ZERO; 12],
+            blend_fraction: 0.1,
+            _pad_blend: [0, 0, 0],
             point_lights: [GpuPointLight {
                 position_range: Vec4::ZERO,
                 color_intensity: Vec4::ZERO,
             }; MAX_POINT_LIGHTS_GPU],
+            spot_lights: [GpuSpotLight {
+                position_range: Vec4::ZERO,
+                direction_inner_cos: Vec4::ZERO,
+                color_intensity: Vec4::ZERO,
+                outer_cos: Vec4::ZERO,
+            }; MAX_SPOT_LIGHTS_GPU],
         }
     }
 }
@@ -709,8 +772,12 @@ const _: () = {
         "GpuPointLight must be exactly 32 bytes"
     );
     assert!(
-        std::mem::size_of::<EnvironmentUBO>() == 656,
-        "EnvironmentUBO must match the GLSL std140 block size"
+        std::mem::size_of::<GpuSpotLight>() == 64,
+        "GpuSpotLight must be exactly 64 bytes"
+    );
+    assert!(
+        std::mem::size_of::<EnvironmentUBO>() == 1920,
+        "EnvironmentUBO must match the GLSL std140 block size (CSM extended)"
     );
 };
 
@@ -724,9 +791,15 @@ mod tests {
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, light_color), 16);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, light_view_proj), 32);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, exposure), 96);
-        assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_light_count), 128);
-        assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_lights), 144);
-        assert_eq!(std::mem::size_of::<EnvironmentUBO>(), 656);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, cascade_count), 120);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, cascade_splits), 128);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_light_count), 144);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, spot_light_count), 160);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, cascade_view_proj), 176);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, blend_fraction), 368);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_lights), 384);
+        assert_eq!(std::mem::offset_of!(EnvironmentUBO, spot_lights), 896);
+        assert_eq!(std::mem::size_of::<EnvironmentUBO>(), 1920);
     }
 
     #[test]

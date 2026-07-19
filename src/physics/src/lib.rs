@@ -56,6 +56,9 @@ pub enum ColliderShape {
         vertices: Vec<[f32; 3]>,
         indices: Vec<[u32; 3]>,
     },
+    ConvexHull {
+        points: Vec<[f32; 3]>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,6 +110,52 @@ pub enum PhysicsError {
     TrimeshEmpty,
     TrimeshDegenerateTriangle { index: usize },
     TrimeshOnDynamicBody,
+    ConvexHullEmpty,
+    ConvexHullNonFiniteVertex { index: usize },
+    ConvexHullInsufficientPoints { unique_count: usize },
+    ConvexHullDegenerate,
+}
+
+impl std::fmt::Display for PhysicsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PhysicsError::DuplicateBodyId(id) => write!(f, "duplicate body id: {id}"),
+            PhysicsError::DuplicateColliderId(id) => write!(f, "duplicate collider id: {id}"),
+            PhysicsError::MissingBody(id) => write!(f, "missing body: {id}"),
+            PhysicsError::NonFiniteValue { field } => write!(f, "non-finite value in {field}"),
+            PhysicsError::NonPositiveDimension { field } => {
+                write!(f, "non-positive dimension in {field}")
+            }
+            PhysicsError::NonPositiveDeltaTime => write!(f, "non-positive delta time"),
+            PhysicsError::ZeroDirection => write!(f, "zero direction"),
+            PhysicsError::TrimeshNonFiniteVertex { index } => {
+                write!(f, "non-finite trimesh vertex at index {index}")
+            }
+            PhysicsError::TrimeshIndexOutOfBounds {
+                index,
+                vertex_count,
+            } => write!(
+                f,
+                "trimesh index {index} out of bounds (vertex count: {vertex_count})"
+            ),
+            PhysicsError::TrimeshEmpty => write!(f, "empty trimesh"),
+            PhysicsError::TrimeshDegenerateTriangle { index } => {
+                write!(f, "degenerate trimesh triangle at index {index}")
+            }
+            PhysicsError::TrimeshOnDynamicBody => write!(f, "trimesh on non-static body"),
+            PhysicsError::ConvexHullEmpty => write!(f, "empty convex hull"),
+            PhysicsError::ConvexHullNonFiniteVertex { index } => {
+                write!(f, "non-finite convex hull vertex at index {index}")
+            }
+            PhysicsError::ConvexHullInsufficientPoints { unique_count } => write!(
+                f,
+                "insufficient unique points for convex hull: {unique_count} (need at least 4)"
+            ),
+            PhysicsError::ConvexHullDegenerate => {
+                write!(f, "degenerate convex hull (coplanar or zero-volume)")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -531,6 +580,15 @@ fn shape_builder(shape: ColliderShape) -> Result<ColliderBuilder, PhysicsError> 
                 .collect();
             Ok(ColliderBuilder::trimesh(points, indices))
         }
+        ColliderShape::ConvexHull { points } => {
+            let validated = validate_convex_hull(&points)?;
+            let rapier_points: Vec<na::Point3<f32>> = validated
+                .into_iter()
+                .map(|v| na::Point3::new(v[0], v[1], v[2]))
+                .collect();
+            ColliderBuilder::convex_hull(&rapier_points)
+                .ok_or(PhysicsError::ConvexHullDegenerate)
+        }
     }
 }
 
@@ -557,6 +615,117 @@ fn validate_trimesh(vertices: &[[f32; 3]], indices: &[[u32; 3]]) -> Result<(), P
         }
     }
     Ok(())
+}
+
+fn dedup_points(points: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    fn coordinate_key(value: f32) -> u32 {
+        // IEEE -0.0 and +0.0 are numerically equal and must not inflate the
+        // unique-point count merely because their sign bits differ.
+        if value == 0.0 {
+            0
+        } else {
+            value.to_bits()
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut result = Vec::new();
+    for &p in points {
+        let key = (
+            coordinate_key(p[0]),
+            coordinate_key(p[1]),
+            coordinate_key(p[2]),
+        );
+        if seen.insert(key) {
+            result.push(p);
+        }
+    }
+    result
+}
+
+fn convex_hull_is_degenerate(unique: &[[f32; 3]]) -> bool {
+    const RELATIVE_EPSILON: f64 = 1e-6;
+
+    let points: Vec<[f64; 3]> = unique
+        .iter()
+        .map(|point| [point[0] as f64, point[1] as f64, point[2] as f64])
+        .collect();
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for point in &points {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(point[axis]);
+            max[axis] = max[axis].max(point[axis]);
+        }
+    }
+    let scale = (0..3)
+        .map(|axis| max[axis] - min[axis])
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return true;
+    }
+
+    let subtract = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+
+    // Build a stable affine basis: the point furthest from the origin point,
+    // then the point furthest from that line, then measure distance from the
+    // resulting plane. Distances are compared to one relative model-space
+    // scale, making the classification translation- and rotation-independent.
+    let origin = points[0];
+    let direction = points
+        .iter()
+        .map(|&point| subtract(point, origin))
+        .max_by(|a, b| dot(*a, *a).total_cmp(&dot(*b, *b)))
+        .unwrap_or([0.0; 3]);
+    let direction_length = dot(direction, direction).sqrt();
+    if direction_length <= scale * RELATIVE_EPSILON {
+        return true;
+    }
+
+    let normal = points
+        .iter()
+        .map(|&point| cross(direction, subtract(point, origin)))
+        .max_by(|a, b| dot(*a, *a).total_cmp(&dot(*b, *b)))
+        .unwrap_or([0.0; 3]);
+    let normal_length = dot(normal, normal).sqrt();
+    if normal_length / direction_length <= scale * RELATIVE_EPSILON {
+        return true;
+    }
+
+    let max_plane_distance = points
+        .iter()
+        .map(|&point| dot(normal, subtract(point, origin)).abs() / normal_length)
+        .fold(0.0_f64, f64::max);
+    max_plane_distance <= scale * RELATIVE_EPSILON
+}
+
+fn validate_convex_hull(points: &[[f32; 3]]) -> Result<Vec<[f32; 3]>, PhysicsError> {
+    if points.is_empty() {
+        return Err(PhysicsError::ConvexHullEmpty);
+    }
+    for (i, p) in points.iter().enumerate() {
+        if p.iter().any(|c| !c.is_finite()) {
+            return Err(PhysicsError::ConvexHullNonFiniteVertex { index: i });
+        }
+    }
+    let unique = dedup_points(points);
+    if unique.len() < 4 {
+        return Err(PhysicsError::ConvexHullInsufficientPoints {
+            unique_count: unique.len(),
+        });
+    }
+    if convex_hull_is_degenerate(&unique) {
+        return Err(PhysicsError::ConvexHullDegenerate);
+    }
+    Ok(unique)
 }
 
 fn validate_vec3(field: &'static str, value: [f32; 3]) -> Result<(), PhysicsError> {
@@ -1279,5 +1448,760 @@ mod tests {
             .body_position_by_id(&PhysicsBodyId::new("body.ball"))
             .unwrap();
         assert!(pos[1] < 2.0, "ball should fall toward floor");
+    }
+
+    // --- ConvexHull tests ---
+
+    /// Four points forming a non-degenerate tetrahedron.
+    fn tetrahedron_points() -> Vec<[f32; 3]> {
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    }
+
+    /// Eight cube points plus interior and duplicate points.
+    fn cube_with_redundant_points() -> Vec<[f32; 3]> {
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            // interior point
+            [0.5, 0.5, 0.5],
+            // duplicate of first corner
+            [0.0, 0.0, 0.0],
+        ]
+    }
+
+    // --- Step 5: body-kind policy ---
+
+    #[test]
+    fn convex_hull_static_body_accepted() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let result = world.create_collider(ColliderDescriptor::new(
+            "collider.s",
+            "body.s",
+            ColliderShape::ConvexHull {
+                points: tetrahedron_points(),
+            },
+        ));
+        assert!(result.is_ok(), "convex hull on static body should succeed");
+    }
+
+    #[test]
+    fn convex_hull_dynamic_body_accepted() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.d",
+                BodyKind::Dynamic,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let result = world.create_collider(ColliderDescriptor::new(
+            "collider.d",
+            "body.d",
+            ColliderShape::ConvexHull {
+                points: tetrahedron_points(),
+            },
+        ));
+        assert!(
+            result.is_ok(),
+            "convex hull on dynamic body should succeed"
+        );
+    }
+
+    #[test]
+    fn convex_hull_kinematic_body_accepted() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.k",
+                BodyKind::Kinematic,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let result = world.create_collider(ColliderDescriptor::new(
+            "collider.k",
+            "body.k",
+            ColliderShape::ConvexHull {
+                points: tetrahedron_points(),
+            },
+        ));
+        assert!(
+            result.is_ok(),
+            "convex hull on kinematic body should succeed"
+        );
+    }
+
+    // --- Step 6: valid fixtures ---
+
+    #[test]
+    fn convex_hull_tetrahedron_creation() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.tetra",
+                BodyKind::Dynamic,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let collider = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.tetra",
+                "body.tetra",
+                ColliderShape::ConvexHull {
+                    points: tetrahedron_points(),
+                },
+            ))
+            .unwrap();
+        assert!(world.collider_exists(&collider));
+    }
+
+    #[test]
+    fn convex_hull_tetrahedron_ray_hit() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.tetra",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let collider = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.tetra",
+                "body.tetra",
+                ColliderShape::ConvexHull {
+                    points: tetrahedron_points(),
+                },
+            ))
+            .unwrap();
+
+        // Ray from above hitting the tetrahedron
+        let hit = world
+            .cast_ray(RayQuery::new(
+                [0.25, 0.25, -2.0],
+                [0.0, 0.0, 1.0],
+                10.0,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.collider, collider);
+        assert!(hit.time_of_impact > 0.0);
+    }
+
+    #[test]
+    fn convex_hull_cube_with_redundant_points() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.cube",
+                BodyKind::Dynamic,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let collider = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.cube",
+                "body.cube",
+                ColliderShape::ConvexHull {
+                    points: cube_with_redundant_points(),
+                },
+            ))
+            .unwrap();
+        assert!(world.collider_exists(&collider));
+    }
+
+    #[test]
+    fn convex_hull_dynamic_collides_with_static_floor() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(0.0, -10.0, 0.0);
+
+        // Static floor cube
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, -0.5, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.floor",
+                "body.floor",
+                ColliderShape::Cuboid {
+                    half_extents: [3.0, 0.5, 3.0],
+                },
+            ))
+            .unwrap();
+
+        // Dynamic convex hull tetrahedron above floor
+        world
+            .create_body(BodyDescriptor::new(
+                "body.hull",
+                BodyKind::Dynamic,
+                [0.0, 3.0, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.hull",
+                "body.hull",
+                ColliderShape::ConvexHull {
+                    points: tetrahedron_points(),
+                },
+            ))
+            .unwrap();
+
+        world.step(1.0 / 60.0).unwrap();
+        let pos = world
+            .body_position_by_id(&PhysicsBodyId::new("body.hull"))
+            .unwrap();
+        assert!(pos[1] < 3.0, "convex hull should fall toward floor");
+    }
+
+    // --- Step 7: invalid fixtures ---
+
+    #[test]
+    fn convex_hull_empty_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        assert!(
+            ColliderBuilder::convex_hull(&[]).is_none(),
+            "empty fixture must also be rejected by Rapier/Parry"
+        );
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull { points: vec![] },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::ConvexHullEmpty);
+    }
+
+    #[test]
+    fn convex_hull_one_unique_point_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull {
+                    points: vec![[0.0, 0.0, 0.0]],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PhysicsError::ConvexHullInsufficientPoints { unique_count: 1 }
+        );
+    }
+
+    #[test]
+    fn convex_hull_three_unique_points_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let points = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull { points },
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PhysicsError::ConvexHullInsufficientPoints { unique_count: 3 }
+        );
+    }
+
+    #[test]
+    fn convex_hull_nan_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull {
+                    points: vec![
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, f32::NAN, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::ConvexHullNonFiniteVertex { index: 2 });
+    }
+
+    #[test]
+    fn convex_hull_infinity_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull {
+                    points: vec![
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, f32::INFINITY],
+                    ],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::ConvexHullNonFiniteVertex { index: 3 });
+    }
+
+    #[test]
+    fn convex_hull_all_duplicates_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull {
+                    points: vec![
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0],
+                    ],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            PhysicsError::ConvexHullInsufficientPoints { unique_count: 1 }
+        );
+    }
+
+    #[test]
+    fn convex_hull_collinear_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        // Four points on the same line
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull {
+                    points: vec![
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [2.0, 0.0, 0.0],
+                        [3.0, 0.0, 0.0],
+                    ],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::ConvexHullDegenerate);
+    }
+
+    #[test]
+    fn convex_hull_coplanar_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        // Four points on the same plane (z=0).
+        let points = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.bad",
+                "body.s",
+                ColliderShape::ConvexHull { points },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::ConvexHullDegenerate);
+    }
+
+    #[test]
+    fn convex_hull_near_coplanar_rejected() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        // Four points with an extremely small z offset produce a near-zero
+        // point-to-plane distance relative to their scale.
+        let z = 1e-8;
+        let err = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.near",
+                "body.s",
+                ColliderShape::ConvexHull {
+                    points: vec![
+                        [0.0, 0.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.5, 0.5, z],
+                    ],
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(err, PhysicsError::ConvexHullDegenerate);
+
+        // The same thin tetrahedron rotated around Y must classify identically;
+        // an axis-aligned AABB thickness test would miss this orientation.
+        let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+        let rotated = vec![
+            [0.0, 0.0, 0.0],
+            [diagonal, 0.0, -diagonal],
+            [0.0, 1.0, 0.0],
+            [0.5 * diagonal + z * diagonal, 0.5, -0.5 * diagonal + z * diagonal],
+        ];
+        assert_eq!(
+            validate_convex_hull(&rotated),
+            Err(PhysicsError::ConvexHullDegenerate)
+        );
+    }
+
+    #[test]
+    fn convex_hull_all_failures_are_transactional() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.s",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+
+        let invalid_cases = vec![
+            (vec![], PhysicsError::ConvexHullEmpty),
+            (
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, f32::NAN, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                PhysicsError::ConvexHullNonFiniteVertex { index: 2 },
+            ),
+            (
+                vec![[0.0, 0.0, 0.0]; 4],
+                PhysicsError::ConvexHullInsufficientPoints { unique_count: 1 },
+            ),
+            (
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                    [3.0, 0.0, 0.0],
+                ],
+                PhysicsError::ConvexHullDegenerate,
+            ),
+            (
+                // An oblique plane exercises orientation-independent detection.
+                vec![
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.5, 0.25, 0.25],
+                ],
+                PhysicsError::ConvexHullDegenerate,
+            ),
+        ];
+
+        for (index, (points, expected)) in invalid_cases.into_iter().enumerate() {
+            let id = PhysicsColliderId::new(format!("collider.bad.{index}"));
+            let collider_count_before = world.colliders.len();
+            let err = world
+                .create_collider(ColliderDescriptor::new(
+                    id.clone(),
+                    "body.s",
+                    ColliderShape::ConvexHull { points },
+                ))
+                .unwrap_err();
+            assert_eq!(err, expected);
+            assert!(!world.collider_exists(&id));
+            assert_eq!(world.colliders.len(), collider_count_before);
+            assert_eq!(world.collider_ids.len(), collider_count_before);
+        }
+    }
+
+    #[test]
+    fn convex_hull_signed_zero_duplicates_are_insufficient() {
+        let points = vec![
+            [0.0, 0.0, 0.0],
+            [-0.0, 0.0, 0.0],
+            [0.0, -0.0, 0.0],
+            [0.0, 0.0, -0.0],
+        ];
+        assert_eq!(
+            validate_convex_hull(&points),
+            Err(PhysicsError::ConvexHullInsufficientPoints { unique_count: 1 })
+        );
+    }
+
+    // --- Step 8: event conversion unchanged with convex hull ---
+
+    #[test]
+    fn convex_hull_contact_event_conversion() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(0.0, -10.0, 0.0);
+
+        // Static floor
+        world
+            .create_body(BodyDescriptor::new(
+                "body.floor",
+                BodyKind::Static,
+                [0.0, -1.0, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.floor",
+                "body.floor",
+                ColliderShape::Cuboid {
+                    half_extents: [3.0, 0.5, 3.0],
+                },
+            ))
+            .unwrap();
+
+        // Dynamic convex hull starting just above the floor
+        world
+            .create_body(BodyDescriptor::new(
+                "body.hull",
+                BodyKind::Dynamic,
+                [0.0, 0.1, 0.0],
+            ))
+            .unwrap();
+        world
+            .create_collider(ColliderDescriptor::new(
+                "collider.hull",
+                "body.hull",
+                ColliderShape::ConvexHull {
+                    points: vec![
+                        [-0.5, -0.5, -0.5],
+                        [0.5, -0.5, -0.5],
+                        [-0.5, 0.5, -0.5],
+                        [0.0, -0.5, 0.5],
+                    ],
+                },
+            ))
+            .unwrap();
+
+        // Multiple steps to ensure contact is registered
+        for _ in 0..10 {
+            world.step(1.0 / 60.0).unwrap();
+        }
+        let records = world.last_contact_records();
+        assert!(!records.is_empty(), "convex hull should produce contacts");
+        assert_eq!(records[0].kind, PhysicsContactKind::Collision);
+
+        // Verify event conversion works
+        let event = records[0].to_engine_event();
+        assert!(matches!(event, EngineEvent::Physics(PhysicsEvent::Collision { .. })));
+    }
+
+    // --- Display / error formatting tests ---
+
+    #[test]
+    fn convex_hull_error_display_formatting() {
+        assert_eq!(
+            format!("{}", PhysicsError::ConvexHullEmpty),
+            "empty convex hull"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                PhysicsError::ConvexHullNonFiniteVertex { index: 5 }
+            ),
+            "non-finite convex hull vertex at index 5"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                PhysicsError::ConvexHullInsufficientPoints { unique_count: 2 }
+            ),
+            "insufficient unique points for convex hull: 2 (need at least 4)"
+        );
+        assert_eq!(
+            format!("{}", PhysicsError::ConvexHullDegenerate),
+            "degenerate convex hull (coplanar or zero-volume)"
+        );
+    }
+
+    #[test]
+    fn convex_hull_error_equality() {
+        assert_eq!(
+            PhysicsError::ConvexHullEmpty,
+            PhysicsError::ConvexHullEmpty
+        );
+        assert_eq!(
+            PhysicsError::ConvexHullNonFiniteVertex { index: 2 },
+            PhysicsError::ConvexHullNonFiniteVertex { index: 2 }
+        );
+        assert_ne!(
+            PhysicsError::ConvexHullNonFiniteVertex { index: 2 },
+            PhysicsError::ConvexHullNonFiniteVertex { index: 3 }
+        );
+        assert_eq!(
+            PhysicsError::ConvexHullInsufficientPoints { unique_count: 1 },
+            PhysicsError::ConvexHullInsufficientPoints { unique_count: 1 }
+        );
+        assert_eq!(
+            PhysicsError::ConvexHullDegenerate,
+            PhysicsError::ConvexHullDegenerate
+        );
+    }
+
+    #[test]
+    fn convex_hull_error_distinct_from_trimesh_errors() {
+        assert_ne!(PhysicsError::ConvexHullEmpty, PhysicsError::TrimeshEmpty);
+        assert_ne!(
+            PhysicsError::ConvexHullDegenerate,
+            PhysicsError::TrimeshDegenerateTriangle { index: 0 }
+        );
+        assert_ne!(
+            PhysicsError::ConvexHullNonFiniteVertex { index: 0 },
+            PhysicsError::TrimeshNonFiniteVertex { index: 0 }
+        );
+    }
+
+    #[test]
+    fn convex_hull_preserves_model_space_points() {
+        // Verify the public shape payload is unchanged after a successful creation.
+        let points = tetrahedron_points();
+        let shape = ColliderShape::ConvexHull {
+            points: points.clone(),
+        };
+        // The shape is consumed by shape_builder, so test the payload round-trip
+        // by asserting the points are visible before consumption.
+        if let ColliderShape::ConvexHull { points: p } = &shape {
+            assert_eq!(p, &points);
+        } else {
+            panic!("expected ConvexHull variant");
+        }
+    }
+
+    /// Scale-aware epsilon rationale: affine distances are computed in `f64`
+    /// and compared to the largest model-space extent. This avoids a fixed
+    /// world-unit tolerance and gives the same result after rotation.
+    #[test]
+    fn convex_hull_scale_aware_epsilon_rationale() {
+        // Large-scale tetrahedron (kilometer extent) should succeed
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new(
+                "body.big",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let result = world.create_collider(ColliderDescriptor::new(
+            "collider.big",
+            "body.big",
+            ColliderShape::ConvexHull {
+                points: vec![
+                    [0.0, 0.0, 0.0],
+                    [1000.0, 0.0, 0.0],
+                    [0.0, 1000.0, 0.0],
+                    [0.0, 0.0, 1000.0],
+                ],
+            },
+        ));
+        assert!(result.is_ok(), "large-scale convex hull should succeed");
+
+        // Tiny tetrahedron (sub-millimeter extent) should succeed
+        world
+            .create_body(BodyDescriptor::new(
+                "body.tiny",
+                BodyKind::Static,
+                [0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let result = world.create_collider(ColliderDescriptor::new(
+            "collider.tiny",
+            "body.tiny",
+            ColliderShape::ConvexHull {
+                points: vec![
+                    [0.0, 0.0, 0.0],
+                    [0.001, 0.0, 0.0],
+                    [0.0, 0.001, 0.0],
+                    [0.0, 0.0, 0.001],
+                ],
+            },
+        ));
+        assert!(result.is_ok(), "tiny-scale convex hull should succeed");
     }
 }

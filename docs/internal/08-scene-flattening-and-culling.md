@@ -29,6 +29,8 @@ Current flow:
   - `compute_node_world_bounds` unions all known/proxy mesh AABBs in node-local space, then transforms to world. Any conservative-visible mesh makes the entire node conservative-visible.
   - `compute_subtree_bounds_post_order` aggregates node world bounds with all child subtree bounds. Known subtrees may prune the branch; conservative-visible subtrees always traverse children.
   - `collect_draw_items_culled` tests known/proxy node world bounds against the frustum; conservative-visible nodes submit unconditionally. Children are always traversed.
+  - `CullingStats` records known/proxy tests, exact conservative-visible reasons, subtree tests/prunes, and submitted draws.
+  - `RenderSubmission::bounds_references` carries exact-generation mesh handles whose bounds participated in aggregation. Command resolution marks them against the prospective submit serial, and unloaded DTO metadata retires as `RetirementClass::BoundsEntry`.
   - Descendants are tested independently when subtree pruning is unavailable (conservative-visible parent or empty group nodes).
 
 ## 4. Code Walkthrough
@@ -63,6 +65,9 @@ pub(crate) fn build_submission(&mut self) -> RenderSubmission {
 
     self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
     self.compute_subtree_bounds_post_order(root_id);
+    self.collect_bounds_references(root_id, &mut submission.bounds_references);
+    submission.bounds_references.sort_unstable_by_key(|mesh| (mesh.slot, mesh.generation));
+    submission.bounds_references.dedup();
     let frustum = if self.enable_frustum_culling {
         Some(Frustum::from_view_projection(
             &(self.camera.projection * self.camera.view),
@@ -168,6 +173,8 @@ pub struct FrameDrawItem {
 pub struct RenderSubmission {
     pub camera: SceneDataUBO,
     pub draw_items: Vec<FrameDrawItem>,
+    pub bounds_references: Vec<MeshHandle>,
+    pub culling_stats: CullingStats,
     pub flags: SubmissionFlags,
     pub skybox_mesh_id: MeshHandle,
     pub skybox_env_id: EnvironmentHandle,
@@ -178,17 +185,10 @@ pub struct RenderSubmission {
 
 Snippet Type: Pseudocode
 ```text
-future_build_submission():
+future_bvh_submission():
   refresh_world_recursive(root)
-  candidates = flatten_nodes_to_candidates()
-  planes = extract_frustum_planes(camera.projection * camera.view)
-
-  visible = []
-  for candidate in candidates:
-    if intersects_frustum(candidate.bounding_sphere, planes):
-      visible.push(candidate)
-
-  submission.draw_items = pack_visible_items(visible)
+  candidates = query_bvh(frustum)
+  submission.draw_items = pack_visible_items(candidates)
 ```
 
 Snippet Type: Pseudocode

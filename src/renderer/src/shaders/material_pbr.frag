@@ -38,6 +38,15 @@ struct PointLightData {
     vec4 colorIntensity;
 };
 
+struct SpotLightData {
+    vec4 positionRange;
+    vec4 directionInnerCos;
+    vec4 colorIntensity;
+    vec4 outerCos;
+};
+
+#define CSM_CASCADE_COUNT 3
+
 layout (set = 0, binding = 1) uniform UBOParams {
     vec4 lightDir;
     vec4 lightColor;
@@ -48,16 +57,30 @@ layout (set = 0, binding = 1) uniform UBOParams {
     float scaleIBLAmbient;
     float debugViewInputs;
     float debugViewEquation;
-    uint _pad0;
-    uint _pad1;
+    uint cascadeCount;
+    uint _padCascade;
+    vec4 cascadeSplits;
     uint pointLightCount;
+    uint _pad0_0;
+    uint _pad0_1;
+    uint _pad0_2;
+    uint spotLightCount;
+    uint _padSpot0;
+    uint _padSpot1;
+    uint _padSpot2;
+    mat4 cascadeViewProj[CSM_CASCADE_COUNT];
+    float blendFraction;
+    uint _padBlend0;
+    uint _padBlend1;
+    uint _padBlend2;
     PointLightData pointLights[16];
+    SpotLightData spotLights[16];
 } uboParams;
 
 layout (set = 0, binding = 2) uniform samplerCube samplerIrradiance;
 layout (set = 0, binding = 3) uniform samplerCube prefilteredMap;
 layout (set = 0, binding = 4) uniform sampler2D samplerBRDFLUT;
-layout (set = 0, binding = 5) uniform sampler2DShadow shadowMap;
+layout (set = 0, binding = 5) uniform sampler2DArrayShadow shadowMap;
 
 // Textures
 
@@ -220,6 +243,35 @@ float convertMetallic(vec3 diffuse, vec3 specular, float maxSpecular) {
     return clamp((-b + sqrt(D)) / (2.0 * a), 0.0, 1.0);
 }
 
+/// Sample a single cascade with 3x3 PCF.
+float cascadeShadowSample(uint cascadeIdx, vec3 worldPos, float NdotL) {
+    mat4 lightVP = uboParams.cascadeViewProj[cascadeIdx];
+    vec4 shadowClip = lightVP * vec4(worldPos, 1.0);
+    vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    vec2 shadowUV = shadowNdc.xy * 0.5 + 0.5;
+
+    bool insideShadowMap = shadowNdc.z >= 0.0 && shadowNdc.z <= 1.0
+        && all(greaterThanEqual(shadowUV, vec2(0.0)))
+        && all(lessThanEqual(shadowUV, vec2(1.0)));
+
+    if (!insideShadowMap) {
+        return 1.0;
+    }
+
+    // textureSize for array sampler returns ivec3; take XY.
+    vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+    float depthBias = max(0.01 * (1.0 - NdotL), 0.0015);
+    float compareDepth = shadowNdc.z - depthBias;
+    float shadowSum = 0.0;
+    for (int x = -1; x <= 1; ++x) {
+        for (int y = -1; y <= 1; ++y) {
+            vec2 offset = vec2(float(x), float(y)) * texelSize;
+            shadowSum += texture(shadowMap, vec4(shadowUV + offset, float(cascadeIdx), compareDepth));
+        }
+    }
+    return shadowSum / 9.0;
+}
+
 // Windowed inverse-square point light attenuation
 float pointLightAttenuation(vec3 fragPos, vec3 lightPos, float range)
 {
@@ -338,10 +390,47 @@ void main()
     vec3 u_LightColor = uboParams.lightColor.rgb;
     float u_LightIntensity = uboParams.lightColor.a;
 
-    // Shadow map PCF (3x3). Vulkan NDC depth is already [0, 1], so only
-    // clip-space X/Y are remapped from [-1, 1] to texture coordinates.
+    // CSM shadow with cascade selection and blend band.
     float shadowFactor = 1.0;
-    if (u_LightIntensity > 0.0) {
+    if (u_LightIntensity > 0.0 && uboParams.cascadeCount > 0u) {
+        // Compute view-space depth of this fragment.
+        vec4 viewPos = ubo.view * vec4(inWorldPos, 1.0);
+        float viewDepth = -viewPos.z;
+
+        // Select cascade layer.
+        uint cascadeIdx = uboParams.cascadeCount - 1u;
+        for (uint ci = 0u; ci < uboParams.cascadeCount - 1u; ++ci) {
+            if (viewDepth < uboParams.cascadeSplits[ci]) {
+                cascadeIdx = ci;
+                break;
+            }
+        }
+
+        // Compute blend factor at cascade boundary.
+        float blendFactor = 0.0;
+        if (cascadeIdx > 0u) {
+            float prevSplit = uboParams.cascadeSplits[cascadeIdx - 1u];
+            float blendRange = prevSplit * uboParams.blendFraction;
+            float distToBoundary = viewDepth - prevSplit;
+            if (distToBoundary < blendRange) {
+                blendFactor = 1.0 - (distToBoundary / max(blendRange, 1e-4));
+                blendFactor = clamp(blendFactor, 0.0, 1.0);
+            }
+        }
+
+        // Sample shadow in selected cascade.
+        float shadow0 = cascadeShadowSample(cascadeIdx, inWorldPos, NdotL);
+        float shadowResult = shadow0;
+
+        // Blend with previous cascade if near boundary.
+        if (blendFactor > 0.001) {
+            float shadow1 = cascadeShadowSample(cascadeIdx - 1u, inWorldPos, NdotL);
+            shadowResult = mix(shadow0, shadow1, blendFactor);
+        }
+
+        shadowFactor = shadowResult;
+    } else if (u_LightIntensity > 0.0) {
+        // Legacy single-map fallback (CSM disabled): sample layer 0.
         vec4 shadowClip = uboParams.lightViewProj * vec4(inWorldPos, 1.0);
         vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
         vec2 shadowUV = shadowNdc.xy * 0.5 + 0.5;
@@ -350,14 +439,15 @@ void main()
             && all(greaterThanEqual(shadowUV, vec2(0.0)))
             && all(lessThanEqual(shadowUV, vec2(1.0)));
         if (insideShadowMap) {
-            vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+            // textureSize for array sampler returns ivec3; take XY.
+            vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
             float depthBias = max(0.01 * (1.0 - NdotL), 0.0015);
             float compareDepth = shadowNdc.z - depthBias;
             float shadowSum = 0.0;
             for (int x = -1; x <= 1; ++x) {
                 for (int y = -1; y <= 1; ++y) {
                     vec2 offset = vec2(float(x), float(y)) * texelSize;
-                    shadowSum += texture(shadowMap, vec3(shadowUV + offset, compareDepth));
+                    shadowSum += texture(shadowMap, vec4(shadowUV + offset, 0.0, compareDepth));
                 }
             }
             shadowFactor = shadowSum / 9.0;
@@ -417,6 +507,58 @@ void main()
         // Radiance
         vec3 radiance = lightColor * lightIntensity * attenuation;
         color += NdotL_point * radiance * (diffusePoint + specPoint);
+    }
+
+    // Add spot light contributions
+    for (uint j = 0; j < uboParams.spotLightCount; ++j) {
+        SpotLightData spot = uboParams.spotLights[j];
+        vec3 spotPos = spot.positionRange.xyz;
+        float spotRange = spot.positionRange.w;
+        vec3 spotDir = normalize(spot.directionInnerCos.xyz);
+        float innerCos = spot.directionInnerCos.w;
+        float outerCos = spot.outerCos.x;
+        vec3 spotColor = spot.colorIntensity.xyz;
+        float spotIntensity = spot.colorIntensity.w;
+
+        vec3 L_spot = normalize(spotPos - inWorldPos);
+        float attenuation = pointLightAttenuation(inWorldPos, spotPos, spotRange);
+        if (attenuation < 1e-5) continue;
+
+        // Spot cone falloff
+        float cosAngle = dot(-L_spot, spotDir);
+        float spotFactor = smoothstep(outerCos, innerCos, cosAngle);
+        if (spotFactor < 1e-5) continue;
+
+        vec3 H_spot = normalize(L_spot + v);
+
+        float NdotL_spot = clamp(dot(n, L_spot), 0.001, 1.0);
+        float NdotH_spot = clamp(dot(n, H_spot), 0.0, 1.0);
+        float LdotH_spot = clamp(dot(L_spot, H_spot), 0.0, 1.0);
+
+        PBRInfo spotPbrInputs = PBRInfo(
+            NdotL_spot,
+            pbrInputs.NdotV,
+            NdotH_spot,
+            LdotH_spot,
+            pbrInputs.VdotH,
+            pbrInputs.perceptualRoughness,
+            pbrInputs.metalness,
+            pbrInputs.reflectance0,
+            pbrInputs.reflectance90,
+            pbrInputs.alphaRoughness,
+            pbrInputs.diffuseColor,
+            pbrInputs.specularColor
+        );
+
+        vec3 F_spot = specularReflection(spotPbrInputs);
+        float G_spot = geometricOcclusion(spotPbrInputs);
+        float D_spot = microfacetDistribution(spotPbrInputs);
+
+        vec3 diffuseSpot = (1.0 - F_spot) * diffuse(spotPbrInputs);
+        vec3 specSpot = F_spot * G_spot * D_spot / (4.0 * NdotL_spot * pbrInputs.NdotV);
+
+        vec3 radiance = spotColor * spotIntensity * attenuation * spotFactor;
+        color += NdotL_spot * radiance * (diffuseSpot + specSpot);
     }
 
     // Calculate lighting contribution from image based lighting source (IBL)

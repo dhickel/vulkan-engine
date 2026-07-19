@@ -10,6 +10,8 @@ use glam::{Mat4, Vec3};
 
 /// Maximum number of point lights that can be uploaded to GPU per frame.
 pub const MAX_POINT_LIGHTS_GPU: usize = 16;
+/// Maximum number of spot lights that can be uploaded to GPU per frame.
+pub const MAX_SPOT_LIGHTS_GPU: usize = 16;
 
 #[derive(Debug, Copy, Clone)]
 pub struct SubmissionFlags {
@@ -47,6 +49,18 @@ pub struct FrameDirectionalLight {
     pub direction: Vec3,
     pub color: Vec3,
     pub intensity: f32,
+    pub enable_shadows: bool,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct FrameSpotLight {
+    pub position: Vec3,
+    pub direction: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub range: f32,
+    pub inner_cos: f32,
+    pub outer_cos: f32,
 }
 
 pub struct RenderSubmission {
@@ -57,6 +71,19 @@ pub struct RenderSubmission {
     pub skybox_env_id: EnvironmentHandle,
     pub point_lights: Vec<FramePointLight>,
     pub directional_light: Option<FrameDirectionalLight>,
+    pub spot_lights: Vec<FrameSpotLight>,
+    pub culling_stats: CullingStats,
+    pub bounds_references: Vec<MeshHandle>,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct CullingStats {
+    pub known_nodes_tested: u32,
+    pub proxy_nodes_tested: u32,
+    pub conservative_nodes_by_reason: [u32; 5],
+    pub subtree_bounds_tested: u32,
+    pub subtrees_pruned: u32,
+    pub submitted_draw_items: u32,
 }
 
 impl RenderSubmission {
@@ -69,11 +96,15 @@ impl RenderSubmission {
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(MAX_POINT_LIGHTS_GPU),
             directional_light: None,
+            spot_lights: Vec::with_capacity(MAX_SPOT_LIGHTS_GPU),
+            culling_stats: CullingStats::default(),
+            bounds_references: Vec::with_capacity(draw_capacity),
         }
     }
 
     pub fn push_draw_item(&mut self, draw_item: FrameDrawItem) {
         self.draw_items.push(draw_item);
+        self.culling_stats.submitted_draw_items += 1;
     }
 
     pub fn has_draw_targets(&self) -> bool {

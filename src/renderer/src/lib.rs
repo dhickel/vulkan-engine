@@ -56,6 +56,8 @@ pub use api::{
     // Lighting
     DirectionalLight,
     DirectionalLightId,
+    SpotLight,
+    SpotLightId,
     EngineEvent,
     // Event API
     EventBus,

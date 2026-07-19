@@ -53,7 +53,7 @@ fn descriptor_abi_live_bindings_and_shader_pairs_match_manifest() {
             "PBR material sampler binding {binding} missing"
         );
     }
-    assert!(pbr.contains("sampler2DShadow shadowMap"));
+    assert!(pbr.contains("sampler2DArrayShadow shadowMap"));
 
     let vertex = read(root.join("src/shaders/pbr_base.vert"));
     assert!(vertex.contains("set = 1, binding = 0"));
@@ -83,12 +83,12 @@ fn descriptor_abi_live_bindings_and_shader_pairs_match_manifest() {
 fn descriptor_abi_document_records_critical_compatibility_points() {
     let root = renderer_root();
     let gpu_data = read(root.join("src/data/gpu_data.rs"));
-    assert!(gpu_data.contains("size_of::<EnvironmentUBO>() == 656"));
+    assert!(gpu_data.contains("size_of::<EnvironmentUBO>() == 1920"));
     assert!(gpu_data.contains("VkModelPushConsts"));
 
     let document = read(root.join("../../docs/internal/14-renderer-descriptor-abi.md"));
     for marker in [
-        "`sampler2DShadow shadowMap`",
+        "`sampler2DArrayShadow shadowMap`",
         "`sampler2DArrayShadow`",
         "`PbrProperties`",
         "**Not in a live pipeline layout and never bound.**",

@@ -10,7 +10,8 @@ use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationEr
 use crate::scene::command::{Command, CommandHistory, CommandResult};
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::{
-    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError, SceneWorld,
+    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError,
+    SceneWorld, SpotLightRefError,
 };
 use crate::scene::SceneNodeId;
 
@@ -182,6 +183,47 @@ impl DirectionalLight {
 pub struct PointLightId {
     pub slot: u32,
     pub generation: u32,
+}
+
+/// Spot light ID with slot+generation semantics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SpotLightId {
+    pub slot: u32,
+    pub generation: u32,
+}
+
+/// Spot light definition.
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpotLight {
+    pub position: Vec3,
+    /// World-space direction from light origin toward the lit scene.
+    pub direction: Vec3,
+    pub color: Vec3,
+    pub intensity: f32,
+    pub range: f32,
+    pub inner_cone_angle: f32,
+    pub outer_cone_angle: f32,
+}
+
+impl SpotLight {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(position: Vec3, direction: Vec3, color: Vec3, intensity: f32, range: f32, inner: f32, outer: f32) -> Self {
+        Self { position, direction, color, intensity, range, inner_cone_angle: inner, outer_cone_angle: outer }
+    }
+
+    fn validate(&self) -> Result<(), SceneError> {
+        if !self.position.is_finite() { return Err(SceneError::InvalidSpotLight("position must be finite".into())); }
+        if !self.direction.is_finite() || self.direction.length_squared() < 1e-6 { return Err(SceneError::InvalidSpotLight("direction must be finite and non-zero".into())); }
+        if !self.range.is_finite() || self.range <= 0.0 { return Err(SceneError::InvalidSpotLight("range must be finite and > 0.0".into())); }
+        if !self.intensity.is_finite() || self.intensity < 0.0 { return Err(SceneError::InvalidSpotLight("intensity must be finite and >= 0.0".into())); }
+        if !self.color.is_finite() { return Err(SceneError::InvalidSpotLight("color must be finite".into())); }
+        if !self.inner_cone_angle.is_finite() || self.inner_cone_angle < 0.0 || self.inner_cone_angle > std::f32::consts::PI { return Err(SceneError::InvalidSpotLight("inner_cone_angle must be in [0, PI]".into())); }
+        if !self.outer_cone_angle.is_finite() || self.outer_cone_angle < 0.0 || self.outer_cone_angle > std::f32::consts::PI { return Err(SceneError::InvalidSpotLight("outer_cone_angle must be in [0, PI]".into())); }
+        if self.inner_cone_angle > self.outer_cone_angle { return Err(SceneError::InvalidSpotLight("inner_cone_angle must be <= outer_cone_angle".into())); }
+        Ok(())
+    }
+
+    fn sanitize_color(&self) -> Vec3 { self.color.max(Vec3::ZERO) }
 }
 
 /// Point light definition.
@@ -1070,11 +1112,49 @@ impl Scene {
     }
 
     /// Returns the scene's directional light, if any.
-    ///
-    /// Thread: Any
-    /// May Stall: No
     pub fn directional_light(&self) -> Option<DirectionalLight> {
         self.world.get_active_directional_light()
+    }
+
+    /// Set which directional light (if any) casts shadows.
+    /// Only one directional light may be the shadow caster at a time.
+    pub fn set_shadow_casting_directional(&mut self, id: Option<DirectionalLightId>) -> Result<(), SceneError> {
+        if let Some(id) = id { self.validate_directional_light(id)?; }
+        self.world.set_shadow_casting_directional(id);
+        Ok(())
+    }
+
+    /// Returns the ID of the shadow-casting directional light, if any.
+    pub fn shadow_casting_directional_light_id(&self) -> Option<DirectionalLightId> {
+        self.world.shadow_casting_directional()
+    }
+
+    /// Create a spot light.
+    pub fn create_spot_light(&mut self, light: SpotLight) -> Result<SpotLightId, SceneError> {
+        light.validate()?;
+        let sanitized = SpotLight { color: light.sanitize_color(), ..light };
+        Ok(self.world.add_spot_light(sanitized))
+    }
+
+    /// Update a spot light.
+    pub fn update_spot_light(&mut self, id: SpotLightId, light: SpotLight) -> Result<(), SceneError> {
+        light.validate()?;
+        self.validate_spot_light(id)?;
+        let sanitized = SpotLight { color: light.sanitize_color(), ..light };
+        if self.world.update_spot_light(id, sanitized) { return Ok(()); }
+        Err(SceneError::InvalidSpotLight(format!("failed to update spot light")))
+    }
+
+    /// Remove a spot light.
+    pub fn remove_spot_light(&mut self, id: SpotLightId) -> Result<(), SceneError> {
+        self.validate_spot_light(id)?;
+        if self.world.remove_spot_light(id) { return Ok(()); }
+        Err(SceneError::InvalidSpotLight(format!("failed to remove spot light")))
+    }
+
+    /// Returns all active spot lights.
+    pub fn spot_lights(&self) -> Vec<SpotLight> {
+        self.world.get_active_spot_lights()
     }
 
     /// Thread: Any
@@ -1331,6 +1411,12 @@ impl Scene {
             .map_err(|err| map_directional_light_ref_error(id, err))
     }
 
+    fn validate_spot_light(&self, id: SpotLightId) -> Result<(), SceneError> {
+        self.world
+            .validate_spot_light_ref(id)
+            .map_err(|err| map_spot_light_ref_error(id, err))
+    }
+
     fn ensure_node_persistence_metadata(&mut self, node: SceneNodeId) {
         let stable_id = format!("node.{:06}", self.next_stable_node_id);
         self.next_stable_node_id += 1;
@@ -1386,6 +1472,14 @@ fn map_directional_light_ref_error(
                 id.slot, id.generation
             ))
         }
+    }
+}
+
+fn map_spot_light_ref_error(id: SpotLightId, err: SpotLightRefError) -> SceneError {
+    match err {
+        SpotLightRefError::GenerationMismatch => SceneError::StaleSpotLight(id),
+        SpotLightRefError::OutOfBounds | SpotLightRefError::Vacant =>
+            SceneError::InvalidSpotLight(format!("spot light out of bounds or vacant")),
     }
 }
 

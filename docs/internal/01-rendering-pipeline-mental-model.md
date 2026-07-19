@@ -15,7 +15,7 @@ Current end-to-end flow:
   - `DebugUiManager` composes built-in views, registered custom views, and console windows.
 - Descriptor/pipeline ABI is a contract between shader layouts and draw code.
 - Material resolution copies `CopiedMaterialDrawRecord` while cache guards are held; frame draw objects do not retain cache-owned raw pointers.
-- Scene graph is CPU-side structure; it is not directly GPU render state. New scenes cull by default with transform-aware proxy AABBs and independently test descendants.
+- Scene graph is CPU-side structure; it is not directly GPU render state. New scenes cull by default with authoritative known bounds, explicit tagged proxies, conservative-visible fallback, and post-order subtree unions.
 - Template contract reference: `docs/internal/00-index.md` (mandatory 10-section order).
 
 ## 4. Code Walkthrough

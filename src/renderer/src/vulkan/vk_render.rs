@@ -68,7 +68,7 @@ use crate::data::gpu_data::{
     SceneDataUBO, Vertex, VkCubeMap,
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
-use crate::data::mesh_geometry::MeshGeometryStore;
+use crate::data::mesh_geometry::{MeshGeometryDto, MeshGeometryStore};
 use crate::data::retirement::{GpuRetirementQueue, MeshRetiredPayload};
 use crate::data::{data_cache, data_util};
 use crate::debug_ui::{DebugTimingSnapshot, DebugUiManager};
@@ -80,7 +80,7 @@ use crate::vulkan::vk_debug::{
     discard_frame_capture, finalize_frame_capture, PendingFrameCapture,
 };
 use crate::vulkan::vk_descriptor::*;
-use crate::vulkan::vk_shadow::VkShadowResources;
+use crate::vulkan::vk_shadow::{VkCsmShadowResources, VkShadowResources};
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_swapchain::SwapchainOwner;
 use crate::vulkan::vk_types::*;
@@ -143,6 +143,9 @@ pub struct VkRenderCore {
     pub transfer: VkTransfer,
     pub scene_descriptors: HashMap<EnvironmentHandle, VkSceneDescriptors>,
     pub shadow_resources: VkShadowResources,
+    /// CSM shadow resources — created only when the `csm` feature is compiled
+    /// and runtime-enabled. `None` for the legacy single-map path.
+    pub csm_shadow_resources: Option<VkCsmShadowResources>,
     pub default_env_id: EnvironmentHandle,
     pub requested_env_id: Option<EnvironmentHandle>,
     pub active_env_id: EnvironmentHandle,
@@ -164,6 +167,8 @@ pub struct VkRenderCore {
     pub(crate) latest_completed_serial: u64,
     /// Retirement queue for mesh payloads awaiting GPU completion.
     pub(crate) mesh_retirement_queue: GpuRetirementQueue<MeshRetiredPayload>,
+    /// CPU bounds/geometry metadata retained to the same fence boundary.
+    pub(crate) bounds_retirement_queue: GpuRetirementQueue<MeshGeometryDto>,
     pub(crate) gpu_timing: GpuTimingState,
     frame_timing_snapshot: DebugTimingSnapshot,
     pub(crate) due_frame_captures: Vec<DueFrameCapture>,
@@ -474,6 +479,10 @@ impl Drop for VkRenderCore {
             });
             self.scene_descriptors.clear();
 
+            if let Some(ref mut csm) = self.csm_shadow_resources {
+                let alloc = self.allocator.lock().expect("allocator lock poisoned");
+                csm.destroy(&self.device, &alloc);
+            }
             self.shadow_resources.destroy(
                 &self.device,
                 &self.allocator.lock().expect("allocator lock poisoned"),
@@ -1272,6 +1281,13 @@ impl VkRenderCore {
         )?;
 
         let shadow_resources = VkShadowResources::new(&device, &allocator, swapchain_image_count)?;
+        // Create CSM resources when the feature is compiled.
+        #[cfg(feature = "csm")]
+        let csm_shadow_resources = Some(
+            VkCsmShadowResources::new(&device, &allocator, swapchain_image_count)?,
+        );
+        #[cfg(not(feature = "csm"))]
+        let csm_shadow_resources: Option<VkCsmShadowResources> = None;
 
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::Windowed,
@@ -1292,6 +1308,7 @@ impl VkRenderCore {
             transfer,
             scene_descriptors: HashMap::new(),
             shadow_resources,
+            csm_shadow_resources,
             default_env_id,
             requested_env_id: None,
             active_env_id: default_env_id,
@@ -1304,6 +1321,7 @@ impl VkRenderCore {
             latest_submitted_serial: 0,
             latest_completed_serial: 0,
             mesh_retirement_queue: GpuRetirementQueue::new(),
+            bounds_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -1450,6 +1468,18 @@ impl VkRenderCore {
                 err
             })?;
 
+        // Create CSM resources when the feature is compiled.
+        #[cfg(feature = "csm")]
+        let csm_shadow_resources = Some(
+            VkCsmShadowResources::new(&device, &allocator, frame_slot_count)
+                .map_err(|err| {
+                    error!("Headless CSM shadow initialization failed: {err}");
+                    err
+                })?,
+        );
+        #[cfg(not(feature = "csm"))]
+        let csm_shadow_resources: Option<VkCsmShadowResources> = None;
+
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::HeadlessOffscreen,
             window_state,
@@ -1469,6 +1499,7 @@ impl VkRenderCore {
             transfer,
             scene_descriptors: HashMap::new(),
             shadow_resources,
+            csm_shadow_resources,
             default_env_id,
             requested_env_id: None,
             active_env_id: default_env_id,
@@ -1481,6 +1512,7 @@ impl VkRenderCore {
             latest_submitted_serial: 0,
             latest_completed_serial: 0,
             mesh_retirement_queue: GpuRetirementQueue::new(),
+            bounds_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -2290,6 +2322,7 @@ impl VkRenderCore {
                 latest_completed_serial: &mut self.latest_completed_serial,
                 latest_submitted_serial: &mut self.latest_submitted_serial,
                 mesh_retirement_queue: &mut self.mesh_retirement_queue,
+                bounds_retirement_queue: &mut self.bounds_retirement_queue,
                 data_cache: &self.data_cache,
                 gpu_timing: &mut self.gpu_timing,
             };
@@ -2767,15 +2800,25 @@ impl VkRenderCore {
                 .as_ref()
                 .ok_or_else(|| format!("Env maps missing for {:?}", env_id))?;
 
-            let shadow_refs: Vec<ShadowMapRef> = self
-                .shadow_resources
-                .frames
-                .iter()
-                .map(|f| ShadowMapRef {
-                    image_view: f.shadow_map_view,
-                    sampler: f.shadow_sampler,
-                })
-                .collect();
+            // Use CSM array view when available, otherwise fall back to legacy single-map view.
+            let shadow_refs: Vec<ShadowMapRef> = if let Some(ref csm) = self.csm_shadow_resources {
+                csm.frames
+                    .iter()
+                    .map(|f| ShadowMapRef {
+                        image_view: f.csm_array_view,
+                        sampler: f.csm_sampler,
+                    })
+                    .collect()
+            } else {
+                self.shadow_resources
+                    .frames
+                    .iter()
+                    .map(|f| ShadowMapRef {
+                        image_view: f.shadow_map_view,
+                        sampler: f.shadow_sampler,
+                    })
+                    .collect()
+            };
 
             VkSceneDescriptors::new(
                 &self.device,
