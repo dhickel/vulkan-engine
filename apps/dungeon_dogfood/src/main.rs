@@ -32,7 +32,7 @@ use renderer::prelude::{
     AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
 };
 use renderer::{FrameRenderOutcome, RendererConfig, RendererError};
-use scene_seed::{renderer_visual_tuning, LevelScene, SceneSeedError};
+use scene_seed::{renderer_visual_tuning, LevelScene};
 use thiserror::Error;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -219,7 +219,7 @@ fn run() -> Result<(), AppError> {
         content_pack.light_presets.len()
     );
 
-    let level_selection = selected_level();
+    let level_selection = selected_level()?;
     let loaded_level = load_selected_level(&level_selection)?;
     let level = &loaded_level.level;
 
@@ -715,7 +715,7 @@ struct LoadedLevel {
     source_description: String,
 }
 
-fn selected_level() -> LevelSelection {
+fn selected_level() -> Result<LevelSelection, AppError> {
     if let Some(selector) = parse_level_arg() {
         return resolve_level_selector(selector);
     }
@@ -730,19 +730,21 @@ fn selected_level() -> LevelSelection {
     resolve_level_selector(DEFAULT_LEVEL_ID)
 }
 
-fn resolve_level_selector(selector: impl AsRef<str>) -> LevelSelection {
+fn resolve_level_selector(selector: impl AsRef<str>) -> Result<LevelSelection, AppError> {
     let selector = selector.as_ref().trim();
 
     // Exact generated_sprawl → generated with CLI seed or env seed or 0.
     if selector == GENERATED_SELECTOR {
-        let seed = parse_seed_arg().unwrap_or_else(|| {
-            read_env_u64(GENERATOR_SEED_ENV).unwrap_or(0)
-        });
-        return LevelSelection {
+        let seed = match parse_seed_arg() {
+            Some(seed) => seed,
+            None => read_generator_env_u64(GENERATOR_SEED_ENV, "invalid_seed_override")?
+                .unwrap_or(0),
+        };
+        return Ok(LevelSelection {
             label: GENERATED_SELECTOR.to_string(),
             path: PathBuf::from(GENERATED_SELECTOR),
             source: LevelSource::Generated(seed),
-        };
+        });
     }
 
     let (label, path) = match selector {
@@ -756,17 +758,20 @@ fn resolve_level_selector(selector: impl AsRef<str>) -> LevelSelection {
         _ => (selector, selector),
     };
 
-    LevelSelection {
+    Ok(LevelSelection {
         label: label.to_string(),
         path: PathBuf::from(path),
         source: LevelSource::Authored(PathBuf::from(path)),
-    }
+    })
 }
 
 fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppError> {
     match &selection.source {
         LevelSource::Generated(seed) => {
-            let config = build_generator_config();
+            let config = build_generator_config().map_err(|source| AppError::GeneratedLevel {
+                seed: *seed,
+                source,
+            })?;
             let catalog = generator::prefab::PrefabCatalog::load(
                 &std::path::PathBuf::from("apps/dungeon_dogfood/assets/prefabs"),
             )
@@ -855,29 +860,38 @@ fn parse_seed_arg() -> Option<u64> {
     None
 }
 
-fn read_env_u64(name: &str) -> Option<u64> {
-    std::env::var(name).ok().and_then(|v| {
-        let v = v.trim();
-        if v.is_empty() {
-            None
-        } else {
-            v.parse().ok()
-        }
-    })
+fn read_generator_env_u64(
+    name: &str,
+    reason: &'static str,
+) -> Result<Option<u64>, AppError> {
+    generator_env_u64(name, reason).map_err(|source| AppError::GeneratedLevel { seed: 0, source })
 }
 
-fn build_generator_config() -> GeneratorConfig {
+fn generator_env_u64(name: &str, reason: &'static str) -> Result<Option<u64>, GeneratorError> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    value
+        .to_string_lossy()
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| GeneratorError::UnsupportedConfiguration {
+            stage: generator::ErrorStage::Configuration,
+            reason,
+            value: 0,
+        })
+}
+
+fn build_generator_config() -> Result<GeneratorConfig, GeneratorError> {
     let mut config = GeneratorConfig::default();
-    if let Some(w) = read_env_u64(GENERATOR_WIDTH_ENV) {
-        config.width = Some(w);
-    }
-    if let Some(h) = read_env_u64(GENERATOR_HEIGHT_ENV) {
-        config.height = Some(h);
-    }
-    if let Some(l) = read_env_u64(GENERATOR_LAYERS_ENV) {
-        config.layers = Some(l);
-    }
-    config
+    // Use single-bottleneck mode by default for reliable generation across all seeds.
+    // Qualified multi-transition mode requires topology search coverage improvements.
+    config.single_bottleneck = true;
+    config.relax_transition_redundancy = true;
+    config.width = generator_env_u64(GENERATOR_WIDTH_ENV, "invalid_width_override")?;
+    config.height = generator_env_u64(GENERATOR_HEIGHT_ENV, "invalid_height_override")?;
+    config.layers = generator_env_u64(GENERATOR_LAYERS_ENV, "invalid_layers_override")?;
+    Ok(config)
 }
 
 fn print_generated_level_help() {
@@ -1260,28 +1274,28 @@ mod tests {
 
     #[test]
     fn resolve_builtin_level_id() {
-        let selection = resolve_level_selector("level_02_ramps");
+        let selection = resolve_level_selector("level_02_ramps").unwrap();
         assert_eq!(selection.label, "level_02_ramps");
         assert_eq!(selection.path, PathBuf::from(LEVEL_02_PATH));
     }
 
     #[test]
     fn resolve_builtin_level_filename() {
-        let selection = resolve_level_selector("level_03_lighting.txt");
+        let selection = resolve_level_selector("level_03_lighting.txt").unwrap();
         assert_eq!(selection.label, "level_03_lighting");
         assert_eq!(selection.path, PathBuf::from(LEVEL_03_PATH));
     }
 
     #[test]
     fn resolve_level_01_path_as_default() {
-        let selection = resolve_level_selector(DEFAULT_LEVEL_ID);
+        let selection = resolve_level_selector(DEFAULT_LEVEL_ID).unwrap();
         assert_eq!(selection.label, "generated_sprawl");
         assert!(matches!(selection.source, LevelSource::Generated(_)));
     }
 
     #[test]
     fn preserve_custom_level_paths() {
-        let selection = resolve_level_selector("custom/level.txt");
+        let selection = resolve_level_selector("custom/level.txt").unwrap();
         assert_eq!(selection.label, "custom/level.txt");
         assert_eq!(selection.path, PathBuf::from("custom/level.txt"));
     }

@@ -97,6 +97,15 @@ impl LevelScene {
         scene: &mut Scene,
         assets: &mut AssetManager,
     ) -> Result<Self, SceneSeedError> {
+        // Preflight before allocating assets or mutating the scene so rejection
+        // leaves the caller's scene and asset manager unchanged.
+        if level.light_markers.len() > MAX_POINT_LIGHTS {
+            return Err(SceneSeedError::PointLightBudgetExceeded {
+                count: level.light_markers.len(),
+                limit: MAX_POINT_LIGHTS,
+            });
+        }
+
         log_locked_visual_baseline(content_pack);
 
         // Build wall/floor materials from manifest texture sets with safe fallback.
@@ -198,14 +207,6 @@ impl LevelScene {
         };
 
         // Spawn point lights from markers using deterministic 7/2/1 preset mapping.
-        // Transactional preflight: check count before creating any light.
-        if level.light_markers.len() > MAX_POINT_LIGHTS {
-            return Err(SceneSeedError::PointLightBudgetExceeded {
-                count: level.light_markers.len(),
-                limit: MAX_POINT_LIGHTS,
-            });
-        }
-
         let mut light_ids = Vec::with_capacity(level.light_markers.len());
         for (marker_idx, &TileCoord { layer, x, y }) in level.light_markers.iter().enumerate() {
             let preset_id = light_preset_for_marker_index(marker_idx);

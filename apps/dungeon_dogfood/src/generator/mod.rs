@@ -37,7 +37,7 @@ use self::validation::reconstruct_movement_graph;
 // Re-export public types.
 pub use self::config::GeneratorConfig;
 pub use self::config::QualifiedProfile;
-pub use self::error::GeneratorError;
+pub use self::error::{ErrorStage, GeneratorError};
 pub use self::resources::ResourceCounts;
 pub use self::capture_views::{CaptureView, CaptureViewCategory};
 
