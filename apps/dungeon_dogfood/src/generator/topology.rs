@@ -1895,8 +1895,8 @@ fn attach_dead_ends(
         }
         dead_end_entries.push((region.id, candidates));
     }
-    // Sort by fewest candidates (most constrained first).
-    dead_end_entries.sort_by_key(|(_, candidates)| candidates.len());
+    // Sort by fewest candidates (most constrained first), then stable region ID.
+    dead_end_entries.sort_by_key(|(region, candidates)| (candidates.len(), *region));
     let budget = u64::from(topology.config.routing_attempts())
         .checked_mul(u64::from(topology.config.reroute_budget()))
         .ok_or(GeneratorError::ArithmeticOverflow {
@@ -2428,16 +2428,30 @@ fn check_topology_feasibility(
         }
     }
 
-    // 3. Required-region reachability: spawn and distant landmark must be in
-    //    the same non-dead-end component of the raw candidate graph.
-    let (spawn, landmark) = spawn_and_landmark(topology)?;
+    // 3. Global non-dead-end connectivity through actual candidates, including
+    //    reservation-bound transitions. Per-layer connectivity alone cannot
+    //    detect an otherwise connected layer that has no route to other layers.
     let global_labels = raw_component_labels(topology, graph, None, true)?;
+    let global_components: BTreeSet<u32> = global_labels.values().copied().collect();
+    if global_components.len() > 1 {
+        return Err(GeneratorError::TopologyInfeasible {
+            stage: ErrorStage::Topology,
+            constraint: "raw_global_disconnection",
+            required: 1,
+            available: u64::try_from(global_components.len()).map_err(|_| {
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "feasibility_global_component_count",
+                }
+            })?,
+        });
+    }
+
+    // 4. Required-route endpoints must both be represented in that component.
+    let (spawn, landmark) = spawn_and_landmark(topology)?;
     let spawn_label = global_labels.get(&spawn);
     let landmark_label = global_labels.get(&landmark);
-    if spawn_label.is_none()
-        || landmark_label.is_none()
-        || spawn_label != landmark_label
-    {
+    if spawn_label.is_none() || landmark_label.is_none() || spawn_label != landmark_label {
         return Err(GeneratorError::TopologyInfeasible {
             stage: ErrorStage::Topology,
             constraint: "raw_spawn_landmark_disconnected",
@@ -3495,7 +3509,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "topology search coverage — requires relaxed_transition_redundancy plumbing in select_topology"]
     fn place_build_select_runs_end_to_end() {
         let config = end_to_end_config();
         let catalog = catalog();
@@ -3605,6 +3618,33 @@ mod tests {
 
     fn minimal_grid() -> OccupancyGrid {
         OccupancyGrid::new(96, 96, 3).expect("grid")
+    }
+
+    fn blocked_grid() -> OccupancyGrid {
+        let mut grid = minimal_grid();
+        for layer in 0..3 {
+            grid.reserve_rect(layer, 0, 0, 96, 96, OccupancyClass::Border)
+                .expect("blocked layer");
+        }
+        grid
+    }
+
+    fn zero_crossing_config() -> NormalizedGeneratorConfig {
+        let mut raw = GeneratorConfig::custom(96, 96, 3);
+        raw.single_bottleneck = true;
+        raw.relax_route_redundancy = true;
+        raw.relax_transition_redundancy = true;
+        raw.region_min = Some(16);
+        raw.region_max = Some(24);
+        raw.required_route_min = Some(50);
+        raw.required_route_max = Some(250);
+        raw.branch_depth_min = Some(2);
+        raw.branch_depth_max = Some(12);
+        raw.articulation_max = Some(12);
+        raw.crossings_max = Some(0);
+        raw.intentional_dead_ends_min = Some(1);
+        raw.intentional_dead_ends_max = Some(4);
+        raw.normalize().expect("zero-crossing config")
     }
 
     #[test]
@@ -3734,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn feasibility_oracle_rejects_spawn_landmark_disconnected() {
+    fn feasibility_oracle_rejects_global_disconnection() {
         // Put spawn and landmark on different layers with no cross-layer
         // edges. Each layer has a single non-dead-end component, so the
         // per-layer check passes, but the global check catches the
@@ -3766,7 +3806,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(GeneratorError::TopologyInfeasible { constraint, .. }) => {
-                assert_eq!(constraint, "raw_spawn_landmark_disconnected");
+                assert_eq!(constraint, "raw_global_disconnection");
             }
             other => panic!("expected TopologyInfeasible, got {other:?}"),
         }
@@ -3890,6 +3930,56 @@ mod tests {
     }
 
     #[test]
+    fn dead_end_search_backtracks_after_greedy_candidate_blocks_assignment() {
+        let topology = IntendedTopology {
+            regions: vec![
+                minimal_region(0, RegionRole::Spawn, 0, 0, 0, Direction::East),
+                minimal_region(1, RegionRole::DistantLandmark, 0, 30, 0, Direction::West),
+                // Flexible dead end deliberately precedes the constrained one.
+                minimal_region(2, RegionRole::DeadEnd, 0, 10, 0, Direction::West),
+                minimal_region(3, RegionRole::DeadEnd, 0, 20, 0, Direction::West),
+            ],
+            transitions: vec![],
+            config: zero_crossing_config(),
+            edges: vec![],
+            route_distance: 0,
+            per_layer_cycles: vec![],
+            max_branch_depth: 0,
+            dead_end_count: 0,
+            articulation_count: 0,
+            crossing_count: 0,
+        };
+        let spine = minimal_edge(0, RegionId(0), RegionId(1), SocketId(0), SocketId(10));
+        let conflict_cell = GridCoord::new(0, 80, 80, 96, 96, 3).unwrap();
+        let alternate_cell = GridCoord::new(0, 81, 80, 96, 96, 3).unwrap();
+        let mut greedy = minimal_edge(1, RegionId(2), RegionId(0), SocketId(20), SocketId(0));
+        greedy.cost = 1;
+        greedy.path_witness = vec![conflict_cell];
+        greedy.allowed_envelope_cells = vec![conflict_cell];
+        let mut constrained = minimal_edge(2, RegionId(3), RegionId(1), SocketId(30), SocketId(10));
+        constrained.cost = 2;
+        constrained.path_witness = vec![conflict_cell];
+        constrained.allowed_envelope_cells = vec![conflict_cell];
+        let mut fallback = minimal_edge(3, RegionId(2), RegionId(0), SocketId(20), SocketId(0));
+        fallback.cost = 3;
+        fallback.path_witness = vec![alternate_cell];
+        fallback.allowed_envelope_cells = vec![alternate_cell];
+        let mut graph = CandidateGraph {
+            edges: vec![spine, greedy, constrained, fallback],
+            occupancy: blocked_grid(),
+        };
+        let ordered = edge_order(&graph, 0);
+        let mut selected = BTreeSet::from([EdgeId(0)]);
+
+        attach_dead_ends(&topology, &mut graph, &ordered, &mut selected)
+            .expect("backtracking assignment");
+
+        assert!(selected.contains(&EdgeId(2)), "constrained dead end first");
+        assert!(selected.contains(&EdgeId(3)), "fallback selected after conflict");
+        assert!(!selected.contains(&EdgeId(1)), "greedy conflicting edge rejected");
+    }
+
+    #[test]
     fn layer_core_search_connects_two_components() {
         let topology = IntendedTopology {
             regions: vec![
@@ -3923,6 +4013,55 @@ mod tests {
         connect_layer_cores(&topology, &mut graph, &ordered, &mut selected)
             .expect("should connect layer cores");
         assert_eq!(selected.len(), 1);
+    }
+
+    #[test]
+    fn layer_core_search_backtracks_when_cheapest_bridge_blocks_completion() {
+        let topology = IntendedTopology {
+            regions: vec![
+                minimal_region(0, RegionRole::Spawn, 0, 0, 0, Direction::East),
+                minimal_region(1, RegionRole::DistantLandmark, 0, 30, 0, Direction::West),
+                minimal_region(2, RegionRole::OrdinaryRoom, 0, 10, 0, Direction::West),
+                minimal_region(3, RegionRole::OrdinaryRoom, 0, 20, 0, Direction::West),
+            ],
+            transitions: vec![],
+            config: zero_crossing_config(),
+            edges: vec![],
+            route_distance: 0,
+            per_layer_cycles: vec![],
+            max_branch_depth: 0,
+            dead_end_count: 0,
+            articulation_count: 0,
+            crossing_count: 0,
+        };
+        let spine = minimal_edge(0, RegionId(0), RegionId(1), SocketId(0), SocketId(10));
+        let conflict_cell = GridCoord::new(0, 80, 80, 96, 96, 3).unwrap();
+        let alternate_cell = GridCoord::new(0, 81, 80, 96, 96, 3).unwrap();
+        let mut greedy = minimal_edge(1, RegionId(2), RegionId(0), SocketId(20), SocketId(0));
+        greedy.cost = 1;
+        greedy.path_witness = vec![conflict_cell];
+        greedy.allowed_envelope_cells = vec![conflict_cell];
+        let mut fallback = minimal_edge(2, RegionId(2), RegionId(1), SocketId(20), SocketId(10));
+        fallback.cost = 2;
+        fallback.path_witness = vec![alternate_cell];
+        fallback.allowed_envelope_cells = vec![alternate_cell];
+        let mut final_bridge = minimal_edge(3, RegionId(3), RegionId(0), SocketId(30), SocketId(0));
+        final_bridge.cost = 3;
+        final_bridge.path_witness = vec![conflict_cell];
+        final_bridge.allowed_envelope_cells = vec![conflict_cell];
+        let mut graph = CandidateGraph {
+            edges: vec![spine, greedy, fallback, final_bridge],
+            occupancy: blocked_grid(),
+        };
+        let ordered = edge_order(&graph, 0);
+        let mut selected = BTreeSet::from([EdgeId(0)]);
+
+        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected)
+            .expect("backtracking core search");
+
+        assert!(selected.contains(&EdgeId(2)), "fallback bridge selected");
+        assert!(selected.contains(&EdgeId(3)), "final component connected");
+        assert!(!selected.contains(&EdgeId(1)), "greedy bridge rolled back");
     }
 
     #[test]
@@ -3970,60 +4109,44 @@ mod tests {
     }
 
     #[test]
-    fn assembly_order_places_dead_ends_before_redundancy() {
-        // Verify topological order: dead-ends attached before redundancy runs.
-        // We check this indirectly by confirming assemble_topology calls
-        // attach_dead_ends before ensure_route_redundancy in the new order.
-        // The key observable: dead-ends get their edges assigned before
-        // disjoint-route paths consume crossing capacity.
+    fn assembly_order_preserves_exact_dead_end_degree() {
+        // The production assembly order is spine → transitions → dead-ends →
+        // cores → cycles → redundancy. Exercise that exact path and require a
+        // conclusive result rather than silently passing when every seed fails.
         let config = end_to_end_config();
         let catalog = catalog();
-        // Use a seed known to produce dead-ends
-        for seed in [23u64, 41, 77] {
-            let factory = factory(&config, &catalog, seed);
-            let mut roles = factory.stream(SemanticStage::Roles, &[]);
-            let Ok((topology, grid)) =
-                place_regions(&config, &catalog, &mut roles, factory)
-            else {
-                continue;
-            };
-            let graph =
-                build_candidate_graph(&topology, &grid).expect("candidate graph");
-            let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-            let result = select_topology(topology, &config, &graph, &mut topology_rng);
-            if let Ok(selected) = result {
-                // Every dead-end must have exactly 1 selected edge
-                for region in selected.regions.iter().filter(|r| {
-                    r.role == RegionRole::DeadEnd
-                }) {
-                    let degree = selected
-                        .edges
-                        .iter()
-                        .filter(|e| {
-                            e.source_region == region.id
-                                || e.target_region == region.id
-                        })
-                        .count();
-                    assert_eq!(
-                        degree, 1,
-                        "dead-end region {} should have degree 1, got {degree}",
-                        region.id.raw()
-                    );
-                }
-                return; // At least one seed succeeded — test passes
-            }
+        let factory = factory(&config, &catalog, 23);
+        let mut roles = factory.stream(SemanticStage::Roles, &[]);
+        let (topology, grid) =
+            place_regions(&config, &catalog, &mut roles, factory).expect("placement");
+        let graph = build_candidate_graph(&topology, &grid).expect("candidate graph");
+        let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
+        let selected = select_topology(topology, &config, &graph, &mut topology_rng)
+            .expect("topology selection");
+        let dead_ends: Vec<_> = selected
+            .regions
+            .iter()
+            .filter(|region| region.role == RegionRole::DeadEnd)
+            .collect();
+        assert!(!dead_ends.is_empty(), "fixture must contain a dead end");
+        for region in dead_ends {
+            let degree = selected
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.source_region == region.id || edge.target_region == region.id
+                })
+                .count();
+            assert_eq!(degree, 1, "dead-end region {}", region.id.raw());
         }
-        // If all seeds fail, the test is inconclusive but not a failure
-        // (placement may not produce dead-ends for these seeds)
     }
 
     #[test]
-    #[ignore = "topology search coverage — requires relaxed_transition_redundancy plumbing in select_topology"]
     fn end_to_end_pipeline_is_reproducible() {
         let config = end_to_end_config();
         let catalog = catalog();
         let run = || {
-            let factory = factory(&config, &catalog, 41);
+            let factory = factory(&config, &catalog, 23);
             let mut roles = factory.stream(SemanticStage::Roles, &[]);
             let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory)
                 .expect("placement");

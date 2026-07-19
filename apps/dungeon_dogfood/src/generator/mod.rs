@@ -353,3 +353,126 @@ mod attempt_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod qualification_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn prefab_catalog() -> PrefabCatalog {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs");
+        PrefabCatalog::load(&path).expect("prefab catalog must load")
+    }
+
+    /// Smoke test: run seed 0 at the Primary profile with the current
+    /// supported workaround path (single_bottleneck +
+    /// relax_transition_redundancy) matching `build_generator_config()`.
+    #[test]
+    fn seed_matrix_harness_smoke() {
+        let catalog = prefab_catalog();
+        let mut config = GeneratorConfig::qualified(QualifiedProfile::Primary);
+        // Current supported path requires single-bottleneck mode until
+        // topology coverage repair is complete (Phase 4 exit gate not met).
+        config.single_bottleneck = true;
+        config.relax_transition_redundancy = true;
+        match generate(config, &catalog, 0) {
+            Ok(result) => {
+                assert!(result.level.width > 0);
+                assert!(result.level.height > 0);
+                assert!(result.level.layer_count() > 0);
+                eprintln!(
+                    "Harness smoke: seed=0 OK, attempt_index={}",
+                    result.attempt_index
+                );
+            }
+            Err(e) => {
+                eprintln!("Harness smoke: seed=0 FAILED: {e}");
+                panic!("seed 0 at Primary profile (relaxed) must succeed: {e}");
+            }
+        }
+    }
+
+    /// Full seed matrix: unrelaxed Primary profile, seeds 0..99.
+    /// Ignored by default; run manually with:
+    ///   cargo test -p dungeon_dogfood --release -- --ignored --nocapture seed_matrix_primary_0_99
+    ///
+    /// NOTE: As of 2026-07-19, the unrelaxed path does not pass the acceptance
+    /// gate. The workaround flags `single_bottleneck=true` and
+    /// `relax_transition_redundancy=true` (or `relax_route_redundancy=true`)
+    /// are still required in `build_generator_config()`. This test reports
+    /// results without asserting pass/fail so it can be used to track
+    /// progress toward gate closure.
+    #[test]
+    #[ignore]
+    fn seed_matrix_primary_0_99() {
+        let catalog = prefab_catalog();
+        let config = GeneratorConfig::qualified(QualifiedProfile::Primary);
+        let mut successes = 0u32;
+        let mut failures: Vec<(u64, String)> = Vec::new();
+        let mut attempt_zero = 0u32;
+        let mut attempt_distribution = std::collections::BTreeMap::<u32, u32>::new();
+        let mut failure_categories = std::collections::BTreeMap::<String, u32>::new();
+
+        for seed in 0..100u64 {
+            match generate(config.clone(), &catalog, seed) {
+                Ok(result) => {
+                    successes += 1;
+                    assert!(result.level.width > 0, "seed {seed}: zero width");
+                    assert!(result.level.height > 0, "seed {seed}: zero height");
+                    assert!(result.level.layer_count() > 0, "seed {seed}: zero layers");
+                    assert!(!result.level.light_markers.is_empty(), "seed {seed}: no lights");
+                    if result.attempt_index == 0 {
+                        attempt_zero += 1;
+                    }
+                    *attempt_distribution.entry(result.attempt_index).or_insert(0) += 1;
+                }
+                Err(e) => {
+                    let reason = e.reason_code().to_owned();
+                    *failure_categories.entry(reason.clone()).or_insert(0) += 1;
+                    failures.push((seed, reason));
+                }
+            }
+        }
+
+        let total = successes as usize + failures.len();
+        eprintln!("\n=== Seed Matrix Results (Unrelaxed Primary, seeds 0..99) ===");
+        eprintln!("  Successes:        {successes}/{total}");
+        eprintln!("  Attempt-zero:     {attempt_zero}/{total}");
+        eprintln!("  Failures:         {}/{total}", failures.len());
+        if !attempt_distribution.is_empty() {
+            eprintln!("  Attempt distribution:");
+            for (idx, count) in &attempt_distribution {
+                eprintln!("    attempt {idx}: {count}");
+            }
+        }
+        if !failure_categories.is_empty() {
+            eprintln!("\n  Failure categories:");
+            for (cat, count) in &failure_categories {
+                eprintln!("    {cat}: {count}");
+            }
+        }
+        if !failures.is_empty() {
+            eprintln!("\n  Failure seeds:");
+            for (seed, reason) in &failures {
+                eprintln!("    seed={seed}: {reason}");
+            }
+        }
+        eprintln!("=== End Matrix ===\n");
+
+        // Report the gate status but do not assert — the unrelaxed path is
+        // not yet passing. When this test reports 100 successes, the
+        // workarounds in build_generator_config() can be removed.
+        if !failures.is_empty() {
+            eprintln!(
+                "GATE NOT MET: {}/100 failed. Workarounds still required.",
+                failures.len()
+            );
+        } else if attempt_zero < 80 {
+            eprintln!(
+                "GATE PARTIALLY MET: all accepted but only {attempt_zero}/100 attempt-zero."
+            );
+        } else {
+            eprintln!("GATE MET: 100/100 accepted, {attempt_zero}/100 attempt-zero.");
+        }
+    }
+}
