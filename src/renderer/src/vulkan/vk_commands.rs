@@ -29,9 +29,10 @@ use crate::vulkan::vk_frame::{
     imgui_pass_plan, ImguiPassPlan,
 };
 use crate::vulkan::vk_render::VkRenderCore;
+use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
+#[cfg(feature = "csm")]
 use crate::vulkan::vk_shadow::{
-    compute_csm_cascades, compute_draw_light_view_projection,
-    frustum_corners_from_vp, derive_camera_near_far_from_corners,
+    compute_csm_cascades, derive_camera_near_far_from_corners, frustum_corners_from_vp,
 };
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
@@ -377,12 +378,15 @@ fn draw_geometry_from_submission_impl(
         )
     });
 
-    // Compute CSM cascade UBO data when shadows are enabled for the directional light.
-    let csm_data: Option<CsmUboData> =
-        submission.directional_light.as_ref().and_then(|light| {
-            if !light.enable_shadows {
-                return None;
-            }
+    // Compute CSM cascade UBO data only in feature builds. The default path
+    // must upload cascade_count=0 so its legacy matrix and one-layer image stay
+    // paired.
+    #[cfg(feature = "csm")]
+    let csm_data: Option<CsmUboData> = submission
+        .directional_lights
+        .iter()
+        .find(|light| light.enable_shadows)
+        .and_then(|light| {
             // Collect all non-blended draw objects as potential casters.
             let casters: Vec<RenderObject> = draw_lists
                 .pbr_opaque
@@ -397,7 +401,9 @@ fn draw_geometry_from_submission_impl(
             }
             let vp = scene_data.projection * scene_data.view;
             let corners = frustum_corners_from_vp(&vp)?;
-            let (camera_near, camera_far) = derive_camera_near_far_from_corners(&corners);
+            let (camera_near, camera_far) =
+                derive_camera_near_far_from_corners(&scene_data.view, &corners);
+            let camera_far = camera_far.min(crate::vulkan::vk_shadow::CSM_MAX_DISTANCE);
             let cascades = compute_csm_cascades(
                 &scene_data.view,
                 &scene_data.projection,
@@ -425,6 +431,8 @@ fn draw_geometry_from_submission_impl(
                 blend_fraction: crate::vulkan::vk_shadow::CSM_BLEND_FRACTION,
             })
         });
+    #[cfg(not(feature = "csm"))]
+    let csm_data: Option<CsmUboData> = None;
 
     let frame_env_ubo = build_frame_environment_ubo(
         &base_env_ubo,
@@ -1203,7 +1211,10 @@ pub(crate) fn build_frame_environment_ubo(
     light_view_projection: Option<glam::Mat4>,
     csm_data: Option<&CsmUboData>,
 ) -> EnvironmentUBO {
-    use crate::data::gpu_data::{GpuPointLight, GpuSpotLight, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU, CSM_CASCADE_COUNT};
+    use crate::data::gpu_data::{
+        GpuDirectionalLight, GpuPointLight, GpuSpotLight, CSM_CASCADE_COUNT,
+        MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
+    };
 
     let mut env = *base;
     env.exposure = visual_tuning.exposure;
@@ -1212,7 +1223,16 @@ pub(crate) fn build_frame_environment_ubo(
 
     if let Some(dir_light) = &submission.directional_light {
         let dir = dir_light.direction.normalize();
-        env.light_dir = dir.extend(0.0);
+        let shadow_index = if cfg!(not(feature = "csm")) || csm_data.is_some() {
+            submission
+                .directional_lights
+                .iter()
+                .position(|light| light.enable_shadows)
+                .map_or(0.0, |index| index as f32 + 1.0)
+        } else {
+            0.0
+        };
+        env.light_dir = dir.extend(shadow_index);
         env.light_color = dir_light
             .color
             .max(glam::Vec3::ZERO)
@@ -1226,6 +1246,30 @@ pub(crate) fn build_frame_environment_ubo(
         env.light_dir = glam::Vec4::ZERO;
         env.light_color = glam::Vec4::ZERO;
         env.light_view_proj = [glam::Vec4::X, glam::Vec4::Y, glam::Vec4::Z, glam::Vec4::W];
+    }
+
+    let directional_count = submission
+        .directional_lights
+        .len()
+        .min(MAX_DIRECTIONAL_LIGHTS_GPU);
+    env.directional_light_count = directional_count as u32;
+    env.directional_lights = [GpuDirectionalLight {
+        direction: glam::Vec4::ZERO,
+        color_intensity: glam::Vec4::ZERO,
+    }; MAX_DIRECTIONAL_LIGHTS_GPU];
+    for (i, light) in submission
+        .directional_lights
+        .iter()
+        .take(MAX_DIRECTIONAL_LIGHTS_GPU)
+        .enumerate()
+    {
+        env.directional_lights[i] = GpuDirectionalLight {
+            direction: light.direction.normalize().extend(0.0),
+            color_intensity: light
+                .color
+                .max(glam::Vec3::ZERO)
+                .extend(light.intensity.max(0.0)),
+        };
     }
 
     // CSM cascade data — when present, the shader samples the cascade array.
@@ -1293,6 +1337,13 @@ pub(crate) fn build_frame_environment_ubo(
         };
     }
 
+    log::debug!(
+        "frame lighting UBO: directional_count={} shadow_index={} cascade_count={} splits={:?}",
+        env.directional_light_count,
+        env.light_dir.w,
+        env.cascade_count,
+        env.cascade_splits
+    );
     env
 }
 
@@ -1310,13 +1361,14 @@ mod tests {
     #[test]
     fn directional_light_submission_populates_environment_ubo() {
         let mut submission = RenderSubmission::new(SceneDataUBO::default(), 0);
-        submission.directional_light =
-            Some(crate::scene::render_submission::FrameDirectionalLight {
-                direction: glam::Vec3::new(0.0, 2.0, 0.0),
-                color: glam::Vec3::new(1.0, 0.5, 0.25),
-                intensity: 3.0,
-                enable_shadows: false,
-            });
+        let directional = crate::scene::render_submission::FrameDirectionalLight {
+            direction: glam::Vec3::new(0.0, 2.0, 0.0),
+            color: glam::Vec3::new(1.0, 0.5, 0.25),
+            intensity: 3.0,
+            enable_shadows: false,
+        };
+        submission.directional_light = Some(directional);
+        submission.directional_lights.push(directional);
         let light_view_projection = glam::Mat4::from_translation(glam::Vec3::ONE);
 
         let env = build_frame_environment_ubo(
@@ -1329,6 +1381,12 @@ mod tests {
 
         assert_eq!(env.light_dir, glam::Vec4::Y);
         assert_eq!(env.light_color, glam::Vec4::new(1.0, 0.5, 0.25, 3.0));
+        assert_eq!(env.directional_light_count, 1);
+        assert_eq!(env.directional_lights[0].direction, glam::Vec4::Y);
+        assert_eq!(
+            env.directional_lights[0].color_intensity,
+            glam::Vec4::new(1.0, 0.5, 0.25, 3.0)
+        );
         assert_eq!(
             env.light_view_proj,
             [
@@ -1392,6 +1450,40 @@ mod tests {
         sort_geometry_blended_lists(&mut lists, glam::Vec3::ZERO);
         assert_eq!(lists.pbr_blend[0].transform.w_axis.z, 5.0);
         assert_eq!(lists.pbr_blend[1].transform.w_axis.z, 2.0);
+    }
+
+    #[test]
+    fn spot_and_cascade_submission_populate_environment_ubo() {
+        let mut submission = RenderSubmission::new(SceneDataUBO::default(), 0);
+        submission.spot_lights.push(crate::scene::render_submission::FrameSpotLight {
+            position: glam::Vec3::new(1.0, 2.0, 3.0),
+            direction: glam::Vec3::NEG_Y,
+            color: glam::Vec3::new(0.2, 0.4, 0.6),
+            intensity: 5.0,
+            range: 12.0,
+            inner_cos: 0.9,
+            outer_cos: 0.8,
+        });
+        let matrices = std::array::from_fn(|index| glam::Vec4::splat(index as f32));
+        let csm = CsmUboData {
+            cascade_view_proj: matrices,
+            cascade_splits: glam::Vec4::new(9.0, 24.0, 100.0, 0.0),
+            cascade_count: 3,
+            blend_fraction: 0.1,
+        };
+        let env = build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
+            None,
+            Some(&csm),
+        );
+        assert_eq!(env.spot_light_count, 1);
+        assert_eq!(env.spot_lights[0].position_range, glam::Vec4::new(1.0, 2.0, 3.0, 12.0));
+        assert_eq!(env.cascade_count, 3);
+        assert_eq!(env.cascade_splits, csm.cascade_splits);
+        assert_eq!(env.cascade_view_proj, matrices);
+        assert_eq!(env.blend_fraction, 0.1);
     }
 
     #[test]

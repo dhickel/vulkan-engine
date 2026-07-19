@@ -1889,10 +1889,14 @@ pub enum CoreShaderType {
     EnvEquirectToCubeFrag,
     ShadowDepthVert,
     ShadowDepthFrag,
+    #[cfg(feature = "instancing")]
     MetRoughInstancedVert,
 }
 
 impl CoreShaderType {
+    #[cfg(not(feature = "instancing"))]
+    const COUNT: usize = 13;
+    #[cfg(feature = "instancing")]
     const COUNT: usize = 14;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
@@ -1910,6 +1914,7 @@ impl CoreShaderType {
             "EnvEquirectToCubeFrag" => Some(Self::EnvEquirectToCubeFrag),
             "ShadowDepthVert" => Some(Self::ShadowDepthVert),
             "ShadowDepthFrag" => Some(Self::ShadowDepthFrag),
+            #[cfg(feature = "instancing")]
             "MetRoughInstancedVert" => Some(Self::MetRoughInstancedVert),
             _ => None,
         }
@@ -1936,6 +1941,11 @@ pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>
                 line
             ));
         };
+
+        #[cfg(not(feature = "instancing"))]
+        if key.trim() == "MetRoughInstancedVert" {
+            continue;
+        }
 
         let shader_type = CoreShaderType::from_manifest_key(key.trim()).ok_or_else(|| {
             format!(
@@ -2042,11 +2052,16 @@ pub enum VkPipelineType {
     EnvIrradiance,
     EnvEquirectToCube,
     ShadowDepth,
+    #[cfg(feature = "instancing")]
     PbrMetRoughOpaqueInstanced,
+    #[cfg(feature = "instancing")]
     UnlitOpaqueInstanced,
 }
 
 impl VkPipelineType {
+    #[cfg(not(feature = "instancing"))]
+    pub const COUNT: usize = 10;
+    #[cfg(feature = "instancing")]
     pub const COUNT: usize = 12;
 }
 
@@ -2111,10 +2126,14 @@ pub enum VkDescType {
     EnvPreFilter,
     EnvEquirect,
     Empty,
+    #[cfg(feature = "instancing")]
     SceneDataInstanced,
 }
 
 impl VkDescType {
+    #[cfg(not(feature = "instancing"))]
+    const COUNT: usize = 10;
+    #[cfg(feature = "instancing")]
     const COUNT: usize = 11;
 }
 
@@ -2156,6 +2175,7 @@ impl VkDescLayoutCache {
                 7 => VkDescType::EnvPreFilter,
                 8 => VkDescType::EnvEquirect,
                 9 => VkDescType::Empty,
+                #[cfg(feature = "instancing")]
                 10 => VkDescType::SceneDataInstanced,
                 _ => panic!(),
             };

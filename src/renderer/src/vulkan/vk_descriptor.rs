@@ -1006,6 +1006,7 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .expect("failed to build empty descriptor layout");
 
+    #[cfg(feature = "instancing")]
     // Instanced scene data: binding 0 = scene UBO, binding 1 = instance SSBO,
     // bindings 2-5 = shadow/env samplers (same as non-instanced for compatibility).
     let scene_data_instanced = DescriptorLayoutBuilder::default()
@@ -1022,7 +1023,8 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         )
         .expect("failed to build scene_data_instanced descriptor layout");
 
-    let cache = data_cache::VkDescLayoutCache::new(vec![
+    #[allow(unused_mut)]
+    let mut layouts = vec![
         (VkDescType::DrawImage, compute_draw_image),
         (VkDescType::SceneData, scene_data),
         (VkDescType::PbrSamplers, pbr_samplers),
@@ -1033,8 +1035,11 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         (VkDescType::EnvPreFilter, frag_combined_image),
         (VkDescType::EnvEquirect, frag_combined_image),
         (VkDescType::Empty, empty),
-        (VkDescType::SceneDataInstanced, scene_data_instanced),
-    ]);
+    ];
+    #[cfg(feature = "instancing")]
+    layouts.push((VkDescType::SceneDataInstanced, scene_data_instanced));
+
+    let cache = data_cache::VkDescLayoutCache::new(layouts);
     cache.debug();
     cache
 }

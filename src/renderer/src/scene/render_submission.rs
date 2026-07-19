@@ -8,6 +8,8 @@ use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use glam::{Mat4, Vec3};
 
+/// Maximum number of directional lights that can be uploaded to GPU per frame.
+pub const MAX_DIRECTIONAL_LIGHTS_GPU: usize = 4;
 /// Maximum number of point lights that can be uploaded to GPU per frame.
 pub const MAX_POINT_LIGHTS_GPU: usize = 16;
 /// Maximum number of spot lights that can be uploaded to GPU per frame.
@@ -70,7 +72,10 @@ pub struct RenderSubmission {
     pub skybox_mesh_id: MeshHandle,
     pub skybox_env_id: EnvironmentHandle,
     pub point_lights: Vec<FramePointLight>,
+    /// First directional light, retained for legacy consumers.
     pub directional_light: Option<FrameDirectionalLight>,
+    /// Bounded collection used by multi-directional direct lighting.
+    pub directional_lights: Vec<FrameDirectionalLight>,
     pub spot_lights: Vec<FrameSpotLight>,
     pub culling_stats: CullingStats,
     pub bounds_references: Vec<MeshHandle>,
@@ -96,6 +101,7 @@ impl RenderSubmission {
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(MAX_POINT_LIGHTS_GPU),
             directional_light: None,
+            directional_lights: Vec::with_capacity(MAX_DIRECTIONAL_LIGHTS_GPU),
             spot_lights: Vec::with_capacity(MAX_SPOT_LIGHTS_GPU),
             culling_stats: CullingStats::default(),
             bounds_references: Vec::with_capacity(draw_capacity),

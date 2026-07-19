@@ -13,7 +13,10 @@ use crate::rendergraph::{RenderGraphContext, RenderPassNode};
 use crate::vulkan::vk_pipeline::PushConstShadowDepth;
 use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
 #[cfg(feature = "csm")]
-use crate::vulkan::vk_shadow::{compute_csm_cascades, cull_casters_for_cascade};
+use crate::vulkan::vk_shadow::{
+    compute_csm_cascades, cull_casters_for_cascade, derive_camera_near_far_from_corners,
+    frustum_corners_from_vp,
+};
 use ash::vk;
 
 pub struct ShadowPass;
@@ -35,7 +38,13 @@ impl RenderPassNode for ShadowPass {
         let shadow_draws = recording.resolve_shadow_draw_objects();
 
         // Copy light data before borrowing to avoid the move conflict.
-        let light_data = recording.submission().directional_light;
+        let light_data = recording
+            .submission()
+            .directional_lights
+            .iter()
+            .copied()
+            .find(|light| light.enable_shadows)
+            .or(recording.submission().directional_light);
         let light_active = light_data.map_or(false, |l| l.intensity > 0.0);
 
         if !light_active || shadow_draws.is_empty() {
@@ -73,13 +82,12 @@ impl RenderPassNode for ShadowPass {
             let projection = camera.projection;
 
             let vp = projection * view;
-            let inv_vp = vp.inverse();
-            if !inv_vp.is_finite() {
+            let Some(corners) = frustum_corners_from_vp(&vp) else {
                 return Ok(());
-            }
-
-            let camera_near = 0.1_f32;
-            let camera_far = 500.0_f32;
+            };
+            let (camera_near, camera_far) =
+                derive_camera_near_far_from_corners(&view, &corners);
+            let camera_far = camera_far.min(crate::vulkan::vk_shadow::CSM_MAX_DISTANCE);
 
             let cascades = match compute_csm_cascades(
                 &view,
@@ -92,6 +100,16 @@ impl RenderPassNode for ShadowPass {
                 Some(c) => c,
                 None => return Ok(()),
             };
+
+            log::debug!(
+                "CSM frame {}: cascades={} candidates/emitted={:?}",
+                frame_index,
+                cascades.len(),
+                cascades
+                    .iter()
+                    .map(|cascade| (cascade.candidate_casters, cascade.emitted_casters))
+                    .collect::<Vec<_>>()
+            );
 
             // Transition entire array to DEPTH_ATTACHMENT_OPTIMAL.
             let barrier = vk::ImageMemoryBarrier2::default()
@@ -318,6 +336,12 @@ impl ShadowPass {
         let light_view_proj = compute_draw_light_view_projection(
             light.direction,
             shadow_draws.iter(),
+        );
+        log::debug!(
+            "legacy shadow frame {}: draws={} fitted={}",
+            frame_index,
+            shadow_draws.len(),
+            light_view_proj.is_some()
         );
 
         let cmd_buffer = recording.cmd_buffer();

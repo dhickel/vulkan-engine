@@ -166,9 +166,12 @@ pub fn run_headless_capture_test(
 ) {
     init_logging();
 
+    let validation_layer = std::env::var("ENGINE_CAPTURE_VALIDATION")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
     let config = RendererConfig {
         app_name: app_name.to_string(),
         headless: true,
+        validation_layer,
         ..RendererConfig::default()
     };
 

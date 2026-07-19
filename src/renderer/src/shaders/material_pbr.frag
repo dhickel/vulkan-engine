@@ -33,6 +33,11 @@ layout (set = 0, binding = 0) uniform UBO {
     vec3 camPos;
 } ubo;
 
+struct DirectionalLightData {
+    vec4 direction;
+    vec4 colorIntensity;
+};
+
 struct PointLightData {
     vec4 positionRange;
     vec4 colorIntensity;
@@ -58,7 +63,7 @@ layout (set = 0, binding = 1) uniform UBOParams {
     float debugViewInputs;
     float debugViewEquation;
     uint cascadeCount;
-    uint _padCascade;
+    uint directionalLightCount;
     vec4 cascadeSplits;
     uint pointLightCount;
     uint _pad0_0;
@@ -75,6 +80,7 @@ layout (set = 0, binding = 1) uniform UBOParams {
     uint _padBlend2;
     PointLightData pointLights[16];
     SpotLightData spotLights[16];
+    DirectionalLightData directionalLights[4];
 } uboParams;
 
 layout (set = 0, binding = 2) uniform samplerCube samplerIrradiance;
@@ -386,79 +392,91 @@ void main()
     vec3 F = specularReflection(pbrInputs);
     float G = geometricOcclusion(pbrInputs);
     float D = microfacetDistribution(pbrInputs);
-
-    vec3 u_LightColor = uboParams.lightColor.rgb;
-    float u_LightIntensity = uboParams.lightColor.a;
-
-    // CSM shadow with cascade selection and blend band.
-    float shadowFactor = 1.0;
-    if (u_LightIntensity > 0.0 && uboParams.cascadeCount > 0u) {
-        // Compute view-space depth of this fragment.
-        vec4 viewPos = ubo.view * vec4(inWorldPos, 1.0);
-        float viewDepth = -viewPos.z;
-
-        // Select cascade layer.
-        uint cascadeIdx = uboParams.cascadeCount - 1u;
-        for (uint ci = 0u; ci < uboParams.cascadeCount - 1u; ++ci) {
-            if (viewDepth < uboParams.cascadeSplits[ci]) {
-                cascadeIdx = ci;
-                break;
-            }
-        }
-
-        // Compute blend factor at cascade boundary.
-        float blendFactor = 0.0;
-        if (cascadeIdx > 0u) {
-            float prevSplit = uboParams.cascadeSplits[cascadeIdx - 1u];
-            float blendRange = prevSplit * uboParams.blendFraction;
-            float distToBoundary = viewDepth - prevSplit;
-            if (distToBoundary < blendRange) {
-                blendFactor = 1.0 - (distToBoundary / max(blendRange, 1e-4));
-                blendFactor = clamp(blendFactor, 0.0, 1.0);
-            }
-        }
-
-        // Sample shadow in selected cascade.
-        float shadow0 = cascadeShadowSample(cascadeIdx, inWorldPos, NdotL);
-        float shadowResult = shadow0;
-
-        // Blend with previous cascade if near boundary.
-        if (blendFactor > 0.001) {
-            float shadow1 = cascadeShadowSample(cascadeIdx - 1u, inWorldPos, NdotL);
-            shadowResult = mix(shadow0, shadow1, blendFactor);
-        }
-
-        shadowFactor = shadowResult;
-    } else if (u_LightIntensity > 0.0) {
-        // Legacy single-map fallback (CSM disabled): sample layer 0.
-        vec4 shadowClip = uboParams.lightViewProj * vec4(inWorldPos, 1.0);
-        vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
-        vec2 shadowUV = shadowNdc.xy * 0.5 + 0.5;
-
-        bool insideShadowMap = shadowNdc.z >= 0.0 && shadowNdc.z <= 1.0
-            && all(greaterThanEqual(shadowUV, vec2(0.0)))
-            && all(lessThanEqual(shadowUV, vec2(1.0)));
-        if (insideShadowMap) {
-            // textureSize for array sampler returns ivec3; take XY.
-            vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
-            float depthBias = max(0.01 * (1.0 - NdotL), 0.0015);
-            float compareDepth = shadowNdc.z - depthBias;
-            float shadowSum = 0.0;
-            for (int x = -1; x <= 1; ++x) {
-                for (int y = -1; y <= 1; ++y) {
-                    vec2 offset = vec2(float(x), float(y)) * texelSize;
-                    shadowSum += texture(shadowMap, vec4(shadowUV + offset, 0.0, compareDepth));
-                }
-            }
-            shadowFactor = shadowSum / 9.0;
-        }
-    }
-
-    // Calculation of analytical lighting contribution
     vec3 diffuseContrib = (1.0 - F) * diffuse(pbrInputs);
     vec3 specContrib = F * G * D / (4.0 * NdotL * NdotV);
-    // Obtain final intensity as reflectance (BRDF) scaled by the energy of the light (cosine law)
-    vec3 color = NdotL * u_LightColor * u_LightIntensity * shadowFactor * (diffuseContrib + specContrib);
+
+    vec3 color = vec3(0.0);
+    uint shadowLight = uint(max(uboParams.lightDir.w, 0.0));
+    for (uint directionalIndex = 0u;
+         directionalIndex < uboParams.directionalLightCount;
+         ++directionalIndex) {
+        DirectionalLightData directional = uboParams.directionalLights[directionalIndex];
+        vec3 directionalL = normalize(directional.direction.xyz);
+        vec3 directionalH = normalize(directionalL + v);
+        float directionalNdotL = clamp(dot(n, directionalL), 0.001, 1.0);
+        float directionalNdotH = clamp(dot(n, directionalH), 0.0, 1.0);
+        float directionalLdotH = clamp(dot(directionalL, directionalH), 0.0, 1.0);
+        PBRInfo directionalInputs = PBRInfo(
+            directionalNdotL, NdotV, directionalNdotH, directionalLdotH,
+            clamp(dot(v, directionalH), 0.0, 1.0), perceptualRoughness,
+            metallic, specularEnvironmentR0, specularEnvironmentR90,
+            alphaRoughness, diffuseColor, specularColor
+        );
+        vec3 directionalF = specularReflection(directionalInputs);
+        float directionalG = geometricOcclusion(directionalInputs);
+        float directionalD = microfacetDistribution(directionalInputs);
+        float shadowFactor = 1.0;
+
+        if (shadowLight == directionalIndex + 1u && uboParams.cascadeCount > 0u) {
+            float viewDepth = -(ubo.view * vec4(inWorldPos, 1.0)).z;
+            uint cascadeIdx = uboParams.cascadeCount - 1u;
+            for (uint ci = 0u; ci + 1u < uboParams.cascadeCount; ++ci) {
+                if (viewDepth < uboParams.cascadeSplits[ci]) {
+                    cascadeIdx = ci;
+                    break;
+                }
+            }
+            float blendFactor = 0.0;
+            if (cascadeIdx > 0u) {
+                float previousSplit = uboParams.cascadeSplits[cascadeIdx - 1u];
+                float blendRange = previousSplit * uboParams.blendFraction;
+                blendFactor = clamp(
+                    1.0 - ((viewDepth - previousSplit) / max(blendRange, 1e-4)),
+                    0.0,
+                    1.0
+                );
+            }
+            float selectedShadow = cascadeShadowSample(
+                cascadeIdx, inWorldPos, directionalNdotL
+            );
+            if (blendFactor > 0.001) {
+                float previousShadow = cascadeShadowSample(
+                    cascadeIdx - 1u, inWorldPos, directionalNdotL
+                );
+                selectedShadow = mix(selectedShadow, previousShadow, blendFactor);
+            }
+            shadowFactor = selectedShadow;
+        } else if (shadowLight == directionalIndex + 1u) {
+            vec4 shadowClip = uboParams.lightViewProj * vec4(inWorldPos, 1.0);
+            vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
+            vec2 shadowUV = shadowNdc.xy * 0.5 + 0.5;
+            bool insideShadowMap = shadowNdc.z >= 0.0 && shadowNdc.z <= 1.0
+                && all(greaterThanEqual(shadowUV, vec2(0.0)))
+                && all(lessThanEqual(shadowUV, vec2(1.0)));
+            if (insideShadowMap) {
+                vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0).xy);
+                float compareDepth = shadowNdc.z
+                    - max(0.01 * (1.0 - directionalNdotL), 0.0015);
+                float shadowSum = 0.0;
+                for (int x = -1; x <= 1; ++x) {
+                    for (int y = -1; y <= 1; ++y) {
+                        shadowSum += texture(
+                            shadowMap,
+                            vec4(shadowUV + vec2(x, y) * texelSize, 0.0, compareDepth)
+                        );
+                    }
+                }
+                shadowFactor = shadowSum / 9.0;
+            }
+        }
+
+        vec3 directionalDiffuse = (1.0 - directionalF) * diffuse(directionalInputs);
+        vec3 directionalSpecular = directionalF * directionalG * directionalD
+            / (4.0 * directionalNdotL * NdotV);
+        color += directionalNdotL * directional.colorIntensity.rgb
+            * directional.colorIntensity.w * shadowFactor
+            * (directionalDiffuse + directionalSpecular);
+    }
 
     // Add point light contributions
     for (uint i = 0; i < uboParams.pointLightCount; ++i) {

@@ -25,6 +25,11 @@ layout (set = 0, binding = 0) uniform UBO {
     vec3 camPos;
 } ubo;
 
+struct DirectionalLightData {
+    vec4 direction;
+    vec4 colorIntensity;
+};
+
 struct PointLightData {
     vec4 positionRange;
     vec4 colorIntensity;
@@ -50,7 +55,7 @@ layout (set = 0, binding = 1) uniform UBOParams {
     float debugViewInputs;
     float debugViewEquation;
     uint cascadeCount;
-    uint _padCascade;
+    uint directionalLightCount;
     vec4 cascadeSplits;
     uint pointLightCount;
     uint _pad0_0;
@@ -67,6 +72,7 @@ layout (set = 0, binding = 1) uniform UBOParams {
     uint _padBlend2;
     PointLightData pointLights[16];
     SpotLightData spotLights[16];
+    DirectionalLightData directionalLights[4];
 } uboParams;
 
 layout (set = 2, binding = 0) uniform sampler2D colorMap;

@@ -102,6 +102,7 @@ pub struct InstancedGroupKey {
     /// Use the raw descriptor set handle for identity.
     /// (Only valid within a single frame; cross-frame identity is not needed.)
     pub material_image_descriptor: u64,
+    pub material_meta_addr: u64,
     pub joint_descriptor: u64,
     pub has_uv1: bool,
 }
@@ -160,20 +161,19 @@ pub struct InstancedGroupBuilder {
 }
 
 pub fn build_instanced_groups(inputs: &[InstanceInput]) -> InstancedGroupBuilder {
-    let mut eligible: Vec<&InstanceInput> = Vec::new();
-    let mut legacy: Vec<InstanceInput> = Vec::new();
+    let mut legacy_indices = Vec::new();
 
-    for input in inputs {
-        if input.is_skinned_or_deformed || input.is_alpha_mask_or_blend {
-            legacy.push(input.clone());
-        } else {
-            eligible.push(input);
+    // Group eligible inputs by key. Preserve source indices so legacy draws retain
+    // their original ordering even when eligible singletons are discovered later.
+    let mut groups_map: BTreeMap<InstancedGroupKey, Vec<(usize, &InstanceInput)>> = BTreeMap::new();
+    for (index, input) in inputs.iter().enumerate() {
+        if input.is_skinned_or_deformed
+            || input.is_alpha_mask_or_blend
+            || !matches!(input.material.alpha_mode, crate::data::gpu_data::AlphaMode::Opaque)
+        {
+            legacy_indices.push(index);
+            continue;
         }
-    }
-
-    // Group eligible inputs by key.
-    let mut groups_map: BTreeMap<InstancedGroupKey, Vec<&InstanceInput>> = BTreeMap::new();
-    for input in &eligible {
         let key = InstancedGroupKey {
             mesh_slot: input.mesh_handle.slot,
             mesh_generation: input.mesh_handle.generation,
@@ -183,26 +183,24 @@ pub fn build_instanced_groups(inputs: &[InstanceInput]) -> InstancedGroupBuilder
             index_count: input.index_count,
             vertex_buffer_addr: input.vertex_buffer_addr,
             material_image_descriptor: input.material.image_descriptor.as_raw(),
+            material_meta_addr: input.material.meta_alloc.alloc_address,
             joint_descriptor: input.joint_desc.as_raw(),
             has_uv1: input.has_uv1,
         };
-        groups_map.entry(key).or_default().push(input);
+        groups_map.entry(key).or_default().push((index, input));
     }
 
     let mut groups = Vec::new();
     for (key, members) in groups_map {
         if members.len() < 2 {
-            // Singleton — use legacy path.
-            for m in members {
-                legacy.push((*m).clone());
-            }
+            legacy_indices.extend(members.into_iter().map(|(index, _)| index));
             continue;
         }
 
-        let first = members[0];
+        let first = members[0].1;
         let instances: Vec<InstanceData> = members
             .iter()
-            .map(|m| InstanceData::from_transform(m.transform))
+            .map(|(_, input)| InstanceData::from_transform(input.transform))
             .collect();
 
         groups.push(InstancedGroup {
@@ -218,6 +216,12 @@ pub fn build_instanced_groups(inputs: &[InstanceInput]) -> InstancedGroupBuilder
             has_uv1: first.has_uv1,
         });
     }
+
+    legacy_indices.sort_unstable();
+    let legacy = legacy_indices
+        .into_iter()
+        .map(|index| inputs[index].clone())
+        .collect();
 
     InstancedGroupBuilder { groups, legacy }
 }
@@ -280,16 +284,31 @@ impl InstanceBufferRing {
         required_bytes: vk::DeviceSize,
         allocator: &Arc<Mutex<Allocator>>,
         current_serial: FrameSerial,
+        completed_serial: FrameSerial,
     ) -> Result<&mut FrameInstanceBuffer, String> {
-        let buf = &mut self.buffers[slot_index];
+        if required_bytes == 0 {
+            return Err("instance buffer size must be non-zero".to_string());
+        }
+        let buf = self
+            .buffers
+            .get_mut(slot_index)
+            .ok_or_else(|| format!("instance buffer slot {slot_index} is out of range"))?;
 
         if let Some(ref existing) = buf.vk_buffer {
+            if completed_serial < buf.last_used_serial {
+                return Err(format!(
+                    "instance buffer slot {slot_index} is still referenced by {}",
+                    buf.last_used_serial
+                ));
+            }
             if existing.size >= required_bytes {
                 buf.last_used_serial = current_serial;
                 return Ok(buf);
             }
         }
 
+        // Allocate before publishing. On failure the old buffer remains owned by
+        // the slot. The old allocation is destroyed only after fence completion.
         let alloc = allocator.lock().expect("allocator lock poisoned");
         let new_vk_buffer = vk_util::allocate_buffer(
             &alloc,
@@ -297,11 +316,30 @@ impl InstanceBufferRing {
             vk::BufferUsageFlags::STORAGE_BUFFER,
             vk_mem::MemoryUsage::Auto,
         )?;
+        if new_vk_buffer.alloc_info.mapped_data.is_null() {
+            vk_util::destroy_buffer(&alloc, new_vk_buffer);
+            return Err("instance buffer allocation is not host-mapped".to_string());
+        }
 
-        buf.vk_buffer = Some(new_vk_buffer);
+        let old = buf.vk_buffer.replace(new_vk_buffer);
+        if let Some(old) = old {
+            vk_util::destroy_buffer(&alloc, old);
+        }
         buf.last_used_serial = current_serial;
 
         Ok(buf)
+    }
+
+    /// Destroy every frame-local allocation exactly once after the caller has
+    /// drained all frame fences.
+    pub fn destroy(&mut self, allocator: &Arc<Mutex<Allocator>>) {
+        let alloc = allocator.lock().expect("allocator lock poisoned");
+        for buffer in &mut self.buffers {
+            if let Some(vk_buffer) = buffer.vk_buffer.take() {
+                vk_util::destroy_buffer(&alloc, vk_buffer);
+            }
+            buffer.last_used_serial = FrameSerial::ZERO;
+        }
     }
 
     /// Write instance data into the mapped buffer.
@@ -448,17 +486,44 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_group_order() {
-        let inputs: Vec<InstanceInput> = (0..10)
-            .map(|i| mk_input(i, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false))
-            .collect();
-        let r1 = build_instanced_groups(&inputs);
-        let r2 = build_instanced_groups(&inputs);
-        // All singletons → legacy. Order must be deterministic.
-        assert_eq!(r1.legacy.len(), r2.legacy.len());
-        for (a, b) in r1.legacy.iter().zip(r2.legacy.iter()) {
-            assert_eq!(a.mesh_handle, b.mesh_handle);
-        }
+    fn deterministic_group_and_legacy_order() {
+        let mut inputs = vec![
+            mk_input(9, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, true),
+            mk_input(3, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(3, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+            mk_input(8, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false),
+        ];
+        let result = build_instanced_groups(&inputs);
+        assert_eq!(
+            result.groups.iter().map(|group| group.key.mesh_slot).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            result.legacy.iter().map(|input| input.mesh_handle.slot).collect::<Vec<_>>(),
+            vec![9, 8],
+            "legacy draws must preserve source order"
+        );
+
+        inputs.reverse();
+        let reversed = build_instanced_groups(&inputs);
+        assert_eq!(
+            reversed.groups.iter().map(|group| group.key.mesh_slot).collect::<Vec<_>>(),
+            vec![1, 3],
+            "group ordering must depend on the key, not input order"
+        );
+    }
+
+    #[test]
+    fn different_material_metadata_splits_groups() {
+        let mut a = mk_input(1, 0, VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, false);
+        let mut b = a.clone();
+        a.material.meta_alloc.alloc_address = 100;
+        b.material.meta_alloc.alloc_address = 200;
+        let result = build_instanced_groups(&[a, b]);
+        assert!(result.groups.is_empty());
+        assert_eq!(result.legacy.len(), 2);
     }
 
     #[test]

@@ -27,6 +27,8 @@ pub const LEGACY_SHADOW_MAP_DIM: u32 = 2048;
 
 /// CSM blend band fraction (0.0–1.0, clamped in shader).
 pub const CSM_BLEND_FRACTION: f32 = 0.1;
+/// Maximum view-space receiver distance covered by the fixed CSM vertical.
+pub const CSM_MAX_DISTANCE: f32 = 100.0;
 
 /// Guard band multiplier for depth bounds in light space.
 const DEPTH_GUARD_BAND: f32 = 0.1;
@@ -78,6 +80,28 @@ impl VkCsmShadowFrame {
         }
         VkDestroyable::destroy(&mut self.csm_image, device, allocator);
     }
+}
+
+fn destroy_partial_csm_frame(
+    device: &ash::Device,
+    allocator: &Allocator,
+    image: &mut VkImageAlloc,
+    array_view: vk::ImageView,
+    layer_views: &[vk::ImageView],
+) {
+    unsafe {
+        if array_view != vk::ImageView::null() {
+            device.destroy_image_view(array_view, None);
+        }
+        for view in layer_views
+            .iter()
+            .copied()
+            .filter(|view| *view != vk::ImageView::null())
+        {
+            device.destroy_image_view(view, None);
+        }
+    }
+    VkDestroyable::destroy(image, device, allocator);
 }
 
 // ── Resource collections ──────────────────────────────────────────────────
@@ -207,7 +231,7 @@ impl VkCsmShadowResources {
 
         for _ in 0..frame_count {
             // Create the 2D-array D32 image with 3 layers.
-            let csm_image = match vk_util::create_array_image(
+            let mut csm_image = match vk_util::create_array_image(
                 device,
                 &allocator,
                 vk::Extent3D {
@@ -242,10 +266,21 @@ impl VkCsmShadowResources {
                     layer_count: CSM_CASCADE_COUNT,
                 });
 
-            let csm_array_view = unsafe {
-                device
-                    .create_image_view(&array_view_info, None)
-                    .map_err(|e| format!("failed to create CSM array view: {e:?}"))?
+            let csm_array_view = match unsafe { device.create_image_view(&array_view_info, None) } {
+                Ok(view) => view,
+                Err(err) => {
+                    destroy_partial_csm_frame(
+                        device,
+                        &allocator,
+                        &mut csm_image,
+                        vk::ImageView::null(),
+                        &[],
+                    );
+                    for frame in &mut frames {
+                        frame.destroy(device, &allocator);
+                    }
+                    return Err(format!("failed to create CSM array view: {err:?}"));
+                }
             };
 
             // Single-layer depth-attachment views for each cascade.
@@ -263,11 +298,25 @@ impl VkCsmShadowResources {
                         layer_count: 1,
                     });
 
-                csm_layer_views[layer as usize] = unsafe {
-                    device
-                        .create_image_view(&layer_view_info, None)
-                        .map_err(|e| format!("failed to create CSM layer {layer} view: {e:?}"))?
-                };
+                csm_layer_views[layer as usize] =
+                    match unsafe { device.create_image_view(&layer_view_info, None) } {
+                        Ok(view) => view,
+                        Err(err) => {
+                            destroy_partial_csm_frame(
+                                device,
+                                &allocator,
+                                &mut csm_image,
+                                csm_array_view,
+                                &csm_layer_views,
+                            );
+                            for frame in &mut frames {
+                                frame.destroy(device, &allocator);
+                            }
+                            return Err(format!(
+                                "failed to create CSM layer {layer} view: {err:?}"
+                            ));
+                        }
+                    };
             }
 
             // Comparison sampler.
@@ -284,10 +333,21 @@ impl VkCsmShadowResources {
                 .max_lod(0.0)
                 .min_lod(0.0);
 
-            let csm_sampler = unsafe {
-                device
-                    .create_sampler(&sampler_info, None)
-                    .map_err(|e| format!("failed to create CSM sampler: {e:?}"))?
+            let csm_sampler = match unsafe { device.create_sampler(&sampler_info, None) } {
+                Ok(sampler) => sampler,
+                Err(err) => {
+                    destroy_partial_csm_frame(
+                        device,
+                        &allocator,
+                        &mut csm_image,
+                        csm_array_view,
+                        &csm_layer_views,
+                    );
+                    for frame in &mut frames {
+                        frame.destroy(device, &allocator);
+                    }
+                    return Err(format!("failed to create CSM sampler: {err:?}"));
+                }
             };
 
             frames.push(VkCsmShadowFrame {
@@ -433,83 +493,70 @@ pub fn compute_cascade_light_view_proj(
 
     let direction_to_light = light_dir.normalize();
 
-    // Light position: move far enough to encompass the sphere.
-    let light_pos = center + direction_to_light * (radius * 2.0 + 1.0);
     let up = if direction_to_light.dot(Vec3::Y).abs() < 0.99 {
         Vec3::Y
     } else {
         Vec3::X
     };
-    let view = Mat4::look_at_rh(light_pos, center, up);
 
-    // Project frustum corners into light space.
-    let (light_min, light_max) = frustum_corners.iter().fold(
-        (
-            Vec3::splat(f32::INFINITY),
-            Vec3::splat(f32::NEG_INFINITY),
-        ),
-        |(min, max), corner| {
-            let view_corner = view.transform_point3(*corner);
-            (min.min(view_corner), max.max(view_corner))
-        },
+    // Quantize a stable square receiver extent, then snap the center in a
+    // fixed light-space basis. Snapping world components would drift whenever
+    // the light is not axis-aligned.
+    let quantized_radius = (radius * 16.0).ceil() / 16.0;
+    let world_units_per_texel = (2.0 * quantized_radius) / cascade_dim as f32;
+    let basis_view = Mat4::look_at_rh(Vec3::ZERO, -direction_to_light, up);
+    let center_ls = basis_view.transform_point3(center);
+    let snapped_center_ls = Vec3::new(
+        (center_ls.x / world_units_per_texel).round() * world_units_per_texel,
+        (center_ls.y / world_units_per_texel).round() * world_units_per_texel,
+        center_ls.z,
     );
-
-    // Extend Z range to include casters.
-    let (z_min, z_max) = caster_aabbs.iter().fold(
-        (light_min.z, light_max.z),
-        |(zmin, zmax), aabb| {
-            let corners = aabb_corners_vec(aabb.min, aabb.max);
-            let (cmin, cmax) = corners.iter().fold(
-                (f32::INFINITY, f32::NEG_INFINITY),
-                |(mn, mx), c| {
-                    let vc = view.transform_point3(*c);
-                    (mn.min(vc.z), mx.max(vc.z))
-                },
-            );
-            (zmin.min(cmin), zmax.max(cmax))
-        },
-    );
-
-    // Quantize and snap.
-    let world_units_per_texel = (light_max.x - light_min.x) / cascade_dim as f32;
-    let quantized_radius = (radius / world_units_per_texel).ceil() * world_units_per_texel;
-    let snapped_center_x = (center.x / world_units_per_texel).floor() * world_units_per_texel;
-    let snapped_center_y = (center.y / world_units_per_texel).floor() * world_units_per_texel;
-    let snapped_center_z = (center.z / world_units_per_texel).floor() * world_units_per_texel;
-    let snapped_center = Vec3::new(snapped_center_x, snapped_center_y, snapped_center_z);
-
-    let snapped_light_pos = snapped_center + direction_to_light * (quantized_radius * 2.0 + 1.0);
+    let snapped_center = basis_view.inverse().transform_point3(snapped_center_ls);
+    let snapped_light_pos =
+        snapped_center + direction_to_light * (quantized_radius * 2.0 + 1.0);
     let snapped_view = Mat4::look_at_rh(snapped_light_pos, snapped_center, up);
 
-    let (snapped_min, snapped_max) = frustum_corners.iter().fold(
-        (
-            Vec3::splat(f32::INFINITY),
-            Vec3::splat(f32::NEG_INFINITY),
-        ),
+    let (receiver_min, receiver_max) = frustum_corners.iter().fold(
+        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
         |(min, max), corner| {
-            let view_corner = snapped_view.transform_point3(*corner);
-            (min.min(view_corner), max.max(view_corner))
+            let point = snapped_view.transform_point3(*corner);
+            (min.min(point), max.max(point))
         },
     );
+    let left = -quantized_radius;
+    let right = quantized_radius;
+    let bottom = -quantized_radius;
+    let top = quantized_radius;
 
-    let xy_margin = (snapped_max - snapped_min).truncate().length().max(1.0) * 0.05;
+    // Only casters overlapping this cascade's receiver footprint may extend
+    // its depth range. Unknown/conservative AABBs remain included.
+    let mut z_min = receiver_min.z;
+    let mut z_max = receiver_max.z;
+    for aabb in caster_aabbs {
+        let (caster_min, caster_max) = aabb_corners_vec(aabb.min, aabb.max)
+            .iter()
+            .fold(
+                (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+                |(min, max), corner| {
+                    let point = snapped_view.transform_point3(*corner);
+                    (min.min(point), max.max(point))
+                },
+            );
+        let overlaps_xy = caster_max.x >= left
+            && caster_min.x <= right
+            && caster_max.y >= bottom
+            && caster_min.y <= top;
+        if overlaps_xy {
+            z_min = z_min.min(caster_min.z);
+            z_max = z_max.max(caster_max.z);
+        }
+    }
+
     let depth_margin = (z_max - z_min).max(1.0) * DEPTH_GUARD_BAND;
+    let near = (-z_max - depth_margin).max(MIN_CASCADE_NEAR);
+    let far = (-z_min + depth_margin).max(near + 0.01);
 
-    // Add caster depth extension.
-    let caster_z_min = z_min.min(snapped_min.z);
-    let caster_z_max = z_max.max(snapped_max.z);
-
-    let near = (caster_z_max + depth_margin).max(MIN_CASCADE_NEAR);
-    let far = (caster_z_min - depth_margin).max(near + 0.01);
-
-    let projection = Mat4::orthographic_rh(
-        snapped_min.x - xy_margin,
-        snapped_max.x + xy_margin,
-        snapped_min.y - xy_margin,
-        snapped_max.y + xy_margin,
-        near,
-        far,
-    );
+    let projection = Mat4::orthographic_rh(left, right, bottom, top, near, far);
 
     let view_projection = projection * snapped_view;
     Some((snapped_view, view_projection))
@@ -542,13 +589,14 @@ pub fn caster_overlaps_cascade_light_footprint(
         },
     );
 
-    // Test overlap with light-space NDC [-1, 1] in XY and [-1, 1] in Z (depth range).
+    // The fitted projection's depth interval already includes every caster
+    // that overlaps this receiver footprint. Cull on XY only so numeric
+    // guard-band differences cannot reject an otherwise valid off-camera
+    // caster at the near/far boundary.
     clip_max.x >= -1.0
         && clip_min.x <= 1.0
         && clip_max.y >= -1.0
         && clip_min.y <= 1.0
-        && clip_max.z >= -1.0
-        && clip_min.z <= 1.0
 }
 
 /// Cull known rigid casters independently per cascade using conservative light-space AABB overlap.
@@ -694,7 +742,43 @@ pub fn compute_csm_cascades(
     }
 
     let splits = compute_cascade_splits(camera_near, camera_far, CSM_LAMBDA);
-    let full_corners = frustum_corners_from_vp(&view_proj)?;
+    let mut full_corners = frustum_corners_from_vp(&view_proj)?;
+    // Glam's Vulkan perspective matrices use reverse depth. Normalize the
+    // corner ordering by measured view-space depth instead of assuming NDC
+    // z=0 is always the near plane.
+    let plane0_depth = full_corners[..4]
+        .iter()
+        .map(|corner| -view.transform_point3(*corner).z)
+        .sum::<f32>()
+        / 4.0;
+    let plane1_depth = full_corners[4..]
+        .iter()
+        .map(|corner| -view.transform_point3(*corner).z)
+        .sum::<f32>()
+        / 4.0;
+    if plane0_depth > plane1_depth {
+        for index in 0..4 {
+            full_corners.swap(index, index + 4);
+        }
+    }
+    let matrix_near = full_corners[..4]
+        .iter()
+        .map(|corner| -view.transform_point3(*corner).z)
+        .sum::<f32>()
+        / 4.0;
+    let matrix_far = full_corners[4..]
+        .iter()
+        .map(|corner| -view.transform_point3(*corner).z)
+        .sum::<f32>()
+        / 4.0;
+    if camera_far < matrix_far && matrix_far > matrix_near {
+        let far_ratio = ((camera_far - matrix_near) / (matrix_far - matrix_near))
+            .clamp(0.0, 1.0);
+        for index in 0..4 {
+            full_corners[index + 4] = full_corners[index]
+                + (full_corners[index + 4] - full_corners[index]) * far_ratio;
+        }
+    }
 
     let mut cascades = Vec::with_capacity(CSM_CASCADE_COUNT as usize);
 
@@ -809,15 +893,23 @@ fn compute_slice_corners_from_splits(
 }
 
 /// Derive camera near/far from the frustum corners (conservative).
-pub fn derive_camera_near_far_from_corners(corners: &[Vec3; 8]) -> (f32, f32) {
-    let center = corners.iter().sum::<Vec3>() / 8.0;
-    let max_dist = corners
-        .iter()
-        .map(|c| (*c - center).length())
-        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(100.0);
-
-    (MIN_CASCADE_NEAR, max_dist.max(10.0))
+pub fn derive_camera_near_far_from_corners(
+    view: &Mat4,
+    corners: &[Vec3; 8],
+) -> (f32, f32) {
+    let mut near = f32::INFINITY;
+    let mut far = f32::NEG_INFINITY;
+    for corner in corners {
+        let depth = -view.transform_point3(*corner).z;
+        if depth.is_finite() && depth > 0.0 {
+            near = near.min(depth);
+            far = far.max(depth);
+        }
+    }
+    if !near.is_finite() || !far.is_finite() || far <= near {
+        return (MIN_CASCADE_NEAR, 10.0);
+    }
+    (near.max(MIN_CASCADE_NEAR), far)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

@@ -800,7 +800,13 @@ fn init_instanced_pipelines(
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
-    let pbr_instanced = pbr_builder.build_pipeline(device)?;
+    let pbr_instanced = match pbr_builder.build_pipeline(device) {
+        Ok(pipeline) => pipeline,
+        Err(err) => {
+            unsafe { device.destroy_pipeline_layout(layout, None) };
+            return Err(err);
+        }
+    };
 
     // Unlit opaque instanced
     let mut unlit_builder = PipelineBuilder::default()
@@ -815,7 +821,16 @@ fn init_instanced_pipelines(
         .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
         .set_pipeline_layout(layout);
 
-    let unlit_instanced = unlit_builder.build_pipeline(device)?;
+    let unlit_instanced = match unlit_builder.build_pipeline(device) {
+        Ok(pipeline) => pipeline,
+        Err(err) => {
+            unsafe {
+                device.destroy_pipeline(pbr_instanced, None);
+                device.destroy_pipeline_layout(layout, None);
+            }
+            return Err(err);
+        }
+    };
 
     Ok((
         VkPipeline::new(pbr_instanced, layout),

@@ -47,6 +47,7 @@ pub enum LodGroupError {
     NonFiniteThreshold { index: usize, value: f32 },
     NegativeThreshold { index: usize, value: f32 },
     NonDescendingThreshold { index: usize, this: f32, prev: f32 },
+    InvalidHysteresis { value: f32 },
 }
 
 impl MeshLodGroup {
@@ -54,6 +55,9 @@ impl MeshLodGroup {
     pub fn new(levels: Vec<MeshLodLevel>, hysteresis: f32) -> Result<Self, LodGroupError> {
         if levels.is_empty() {
             return Err(LodGroupError::Empty);
+        }
+        if !hysteresis.is_finite() || !(0.0..=1.0).contains(&hysteresis) {
+            return Err(LodGroupError::InvalidHysteresis { value: hysteresis });
         }
 
         for (i, level) in levels.iter().enumerate() {
@@ -161,7 +165,8 @@ impl MeshLodGroup {
 /// Uses the camera's projection matrix to compute the projected extent of the
 /// sphere in normalized device coordinates (NDC), independent of viewport pixels.
 ///
-/// Returns 0.0 if the sphere is behind the camera.
+/// Returns infinity (highest-detail selection) when projection is undefined or
+/// the sphere is behind the camera; visibility remains the culler's responsibility.
 pub fn projected_screen_radius(
     sphere_center: Vec3,
     sphere_radius: f32,
@@ -174,9 +179,10 @@ pub fn projected_screen_radius(
     let clip_pos = view_proj * Vec4::from((sphere_center, 1.0));
     let w = clip_pos.w;
 
-    if w <= 0.0 {
-        // Behind camera or at camera plane.
-        return 0.0;
+    if !w.is_finite() || w <= 0.0 || !sphere_radius.is_finite() {
+        // Conservatively retain highest detail when projection is undefined or
+        // the sphere intersects the camera plane. Culling owns visibility.
+        return f32::INFINITY;
     }
 
     // Compute the screen-space extent of the sphere.
@@ -325,6 +331,16 @@ mod tests {
         assert_eq!(group.levels.len(), 3);
     }
 
+    #[test]
+    fn invalid_hysteresis_rejected() {
+        for value in [f32::NAN, f32::INFINITY, -0.01, 1.01] {
+            assert!(matches!(
+                MeshLodGroup::new(vec![mk_level(0, 0.5)], value),
+                Err(LodGroupError::InvalidHysteresis { .. })
+            ));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Selection without hysteresis
     // -----------------------------------------------------------------------
@@ -445,11 +461,11 @@ mod tests {
     }
 
     #[test]
-    fn projected_radius_behind_camera_is_zero() {
+    fn projected_radius_behind_camera_is_conservative() {
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
         let proj = Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0);
         let r = projected_screen_radius(Vec3::new(0.0, 0.0, 10.0), 1.0, &view, &proj);
-        assert_eq!(r, 0.0);
+        assert_eq!(r, f32::INFINITY);
     }
 
     #[test]
@@ -469,5 +485,34 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(group.select_level(0.3, Some(level)), level);
         }
+    }
+
+    #[test]
+    fn authored_fixture_contains_three_distinct_valid_levels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/lod");
+        let mut counts = Vec::new();
+        for name in ["high", "medium", "low"] {
+            let gltf = gltf::Gltf::open(root.join(format!("{name}.gltf")))
+                .unwrap_or_else(|err| panic!("invalid {name}.gltf: {err}"));
+            let primitive = gltf
+                .meshes()
+                .next()
+                .and_then(|mesh| mesh.primitives().next())
+                .unwrap_or_else(|| panic!("{name}.gltf has no mesh primitive"));
+            let positions = primitive
+                .get(&gltf::Semantic::Positions)
+                .unwrap_or_else(|| panic!("{name}.gltf has no POSITION accessor"))
+                .count();
+            let indices = primitive
+                .indices()
+                .unwrap_or_else(|| panic!("{name}.gltf has no index accessor"))
+                .count();
+            assert!(positions >= 3 && indices >= 3);
+            counts.push((positions, indices));
+        }
+        counts.sort_unstable();
+        counts.dedup();
+        assert_eq!(counts.len(), 3, "LOD levels must have distinct geometry");
     }
 }

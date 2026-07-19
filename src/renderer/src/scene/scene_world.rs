@@ -20,7 +20,7 @@ use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
 use crate::scene::render_submission::{
     FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight,
-    RenderSubmission, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
+    RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -453,20 +453,26 @@ impl SceneWorld {
         let mut submission = RenderSubmission::new(self.camera, 400);
         submission.skybox_env_id = self.skybox_env_id;
 
-        // Collect the scene's single directional light.
-        // Collect the scene's single directional light, with shadow flag from tracked state.
+        // Collect the bounded directional-light set while retaining the first
+        // entry in the legacy compatibility field.
         let shadow_caster_id = self.shadow_casting_directional;
-        submission.directional_light =
-            self.get_active_directional_light()
-                .map(|light| {
-                    let light_id = self.current_directional_light_id();
-                    FrameDirectionalLight {
-                        direction: light.direction,
-                        color: light.color,
-                        intensity: light.intensity,
-                        enable_shadows: light_id == shadow_caster_id,
-                    }
-                });
+        for (slot, entry) in self.directional_lights.iter().enumerate() {
+            if submission.directional_lights.len() >= MAX_DIRECTIONAL_LIGHTS_GPU {
+                break;
+            }
+            let Some(light) = entry.light else { continue };
+            let light_id = DirectionalLightId {
+                slot: slot as u32,
+                generation: entry.generation,
+            };
+            submission.directional_lights.push(FrameDirectionalLight {
+                direction: light.direction,
+                color: light.color,
+                intensity: light.intensity,
+                enable_shadows: Some(light_id) == shadow_caster_id,
+            });
+        }
+        submission.directional_light = submission.directional_lights.first().copied();
 
         // Collect first N active lights (not first N slots) so sparse slot churn
         // does not accidentally submit zero lights.
@@ -989,6 +995,9 @@ impl SceneWorld {
         entry.light = None;
         entry.generation = entry.generation.wrapping_add(1);
         self.free_directional_light_slots.push(id.slot);
+        if self.shadow_casting_directional == Some(id) {
+            self.shadow_casting_directional = None;
+        }
         true
     }
 
@@ -1002,11 +1011,16 @@ impl SceneWorld {
         self.directional_lights.iter().filter_map(|entry| entry.light).collect()
     }
 
-    /// Returns the ID of the active directional light, if any.
-    fn current_directional_light_id(&self) -> Option<DirectionalLightId> {
-        self.directional_lights.iter().enumerate().find_map(|(slot, entry)| {
-            entry.light.map(|_| DirectionalLightId { slot: slot as u32, generation: entry.generation })
-        })
+    pub(crate) fn active_directional_light_count(&self) -> usize {
+        self.directional_lights.iter().filter(|entry| entry.light.is_some()).count()
+    }
+
+    pub(crate) fn active_point_light_count(&self) -> usize {
+        self.point_lights.iter().filter(|entry| entry.light.is_some()).count()
+    }
+
+    pub(crate) fn active_spot_light_count(&self) -> usize {
+        self.spot_lights.iter().filter(|entry| entry.light.is_some()).count()
     }
 
     pub(crate) fn set_shadow_casting_directional(&mut self, id: Option<DirectionalLightId>) {

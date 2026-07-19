@@ -85,13 +85,21 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     }
 
     drop(assets);
-    scene
+    let directional = scene
         .create_directional_light(DirectionalLight {
             direction: Vec3::new(-0.55, 1.0, 0.45),
             color: Vec3::new(1.0, 0.95, 0.85),
             intensity: 7.0,
         })
         .expect("directional light");
+
+    #[cfg(feature = "csm")]
+    scene
+        .set_directional_shadow_config(
+            directional,
+            renderer::prelude::DirectionalShadowConfig { enabled: true },
+        )
+        .expect("enable CSM shadows");
 
     scene
 }

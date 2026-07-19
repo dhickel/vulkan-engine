@@ -465,10 +465,13 @@ pub(crate) fn acquire_frame_slot(
                 image_index,
                 err
             );
-            ctx.presentation.rewind_frame();
-            ctx.swapchain_owner
-                .request_resize(ctx.window_state.get_curr_extent());
-            return Ok(None);
+            // Acquisition may already have signaled the slot semaphore and
+            // transferred image ownership. Do not rewind and reuse that slot:
+            // return a terminal backend error so the renderer is poisoned and
+            // teardown retires the unresolved WSI resources as one unit.
+            return Err(format!(
+                "acquired swapchain image {image_index} has no bindable present target; renderer recreation is required: {err:?}"
+            ));
         }
         (image_index, acquire_suboptimal, swapchain_acquire_ms)
     };

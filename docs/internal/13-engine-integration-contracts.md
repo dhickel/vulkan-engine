@@ -26,8 +26,8 @@ associate submitted work with the slot fence until explicit serial tracking exis
 | Resource | Required transition | Current evidence |
 |---|---|---|
 | Fence | Once reset, queue a real or drain submit that signals it. | Fence reset follows successful acquire. |
-| Acquire semaphore | Consume it in a queue wait. | Rendergraph-failure drain does this, but present-target bind failure currently rewinds before fence reset without consuming an already-signaled acquire semaphore. This is retained as Phase 03 hardening evidence, not claimed fixed here. |
-| Render semaphore / image | Signal render semaphore and present/release the acquired image, or recreate the affected sync/image ownership as a unit. | The recording-failure drain submits and presents; bind failure is the known gap above. |
+| Acquire semaphore | Consume it in a queue wait. | Rendergraph-failure drain does this. The Phase 0 baseline rewound on present-target bind failure after acquisition; final integration closes that unsafe reuse path by returning a terminal backend error, poisoning later operations, and requiring renderer teardown/recreation. |
+| Render semaphore / image | Signal render semaphore and present/release the acquired image, or recreate the affected sync/image ownership as a unit. | The recording-failure drain submits and presents. An unbindable acquired image is terminal: the slot is not rewound or reused, and teardown retires the unresolved WSI resources as one unit. |
 | Descriptor pool | Do not reset again until the drain/real submit fence signals. | Frame pool was reset before acquire and is next reset after the slot fence. |
 | Serial / retirement | Publish a serial only for a successful submit. | No explicit serial exists yet. |
 

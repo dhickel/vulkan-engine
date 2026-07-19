@@ -1,4 +1,5 @@
 target/
+assets/
 src/renderer/src/assets/
 debug_textures/
 .internal-dev/*

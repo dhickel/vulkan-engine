@@ -34,8 +34,13 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
 
     // ── Camera ──────────────────────────────────────────────────────────
     // Position camera looking down a long corridor to span near/far depths.
-    let eye = Vec3::new(0.0, 3.5, 8.0);
-    let target = Vec3::new(0.0, 1.0, -20.0);
+    let camera_offset_x = std::env::var("CAPTURE_CSM_CAMERA_OFFSET_X")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    let eye = Vec3::new(camera_offset_x, 3.5, 8.0);
+    let target = Vec3::new(camera_offset_x, 1.0, -20.0);
     set_default_camera(renderer, &mut scene, eye, target, 55.0);
 
     let root = scene.create_node_default(None).expect("csm root");

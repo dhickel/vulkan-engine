@@ -8,7 +8,9 @@ use crate::api::assets::{AssetManager, EnvironmentSource};
 use crate::data::handles::{EnvironmentHandle, MeshHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use crate::scene::command::{Command, CommandHistory, CommandResult};
-use crate::scene::render_submission::RenderSubmission;
+use crate::scene::render_submission::{
+    RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
+};
 use crate::scene::scene_world::{
     DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError,
     SceneWorld, SpotLightRefError,
@@ -1017,6 +1019,11 @@ impl Scene {
     /// May Stall: No
     pub fn create_point_light(&mut self, light: PointLight) -> Result<PointLightId, SceneError> {
         light.validate()?;
+        if self.world.active_point_light_count() >= MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "point-light cap ({MAX_POINT_LIGHTS_GPU}) reached"
+            )));
+        }
         let sanitized = PointLight {
             color: light.sanitize_color(),
             ..light
@@ -1080,7 +1087,12 @@ impl Scene {
             color: light.sanitize_color(),
             ..light
         };
-        Ok(self.world.add_directional_light(sanitized))
+        let id = self.world.add_directional_light(sanitized);
+        // Preserve the pre-CSM zero/one route: in default builds its single
+        // directional light continues to cast the legacy shadow automatically.
+        #[cfg(not(feature = "csm"))]
+        self.world.set_shadow_casting_directional(Some(id));
+        Ok(id)
     }
 
     /// Thread: Any
@@ -1146,6 +1158,11 @@ impl Scene {
     /// shadow casting remains limited to at most one.
     pub fn add_directional_light(&mut self, light: DirectionalLight) -> Result<DirectionalLightId, SceneError> {
         light.validate()?;
+        if self.world.active_directional_light_count() >= MAX_DIRECTIONAL_LIGHTS_GPU {
+            return Err(SceneError::InvalidDirectionalLight(format!(
+                "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
+            )));
+        }
         let sanitized = DirectionalLight { color: light.sanitize_color(), ..light };
         Ok(self.world.add_directional_light(sanitized))
     }
@@ -1184,9 +1201,10 @@ impl Scene {
     /// enabling them returns `UnsupportedLightFeature`.
     pub fn set_spot_light_shadow_config(
         &mut self,
-        _id: SpotLightId,
+        id: SpotLightId,
         enabled: bool,
     ) -> Result<(), SceneError> {
+        self.validate_spot_light(id)?;
         if enabled {
             return Err(SceneError::UnsupportedLightFeature(
                 "spot-light shadow rendering is not yet supported".into(),
@@ -1199,9 +1217,10 @@ impl Scene {
     /// enabling them returns `UnsupportedLightFeature`.
     pub fn set_point_light_shadow_config(
         &mut self,
-        _id: PointLightId,
+        id: PointLightId,
         enabled: bool,
     ) -> Result<(), SceneError> {
+        self.validate_point_light(id)?;
         if enabled {
             return Err(SceneError::UnsupportedLightFeature(
                 "point-light shadow rendering is not yet supported".into(),
@@ -1213,6 +1232,11 @@ impl Scene {
     /// Create a spot light.
     pub fn create_spot_light(&mut self, light: SpotLight) -> Result<SpotLightId, SceneError> {
         light.validate()?;
+        if self.world.active_spot_light_count() >= MAX_SPOT_LIGHTS_GPU {
+            return Err(SceneError::InvalidSpotLight(format!(
+                "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
+            )));
+        }
         let sanitized = SpotLight { color: light.sanitize_color(), ..light };
         Ok(self.world.add_spot_light(sanitized))
     }
@@ -2859,13 +2883,15 @@ fn default_editor_metadata() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_scene_str, validate_scene_str_with_options, DirectionalLight, PointLight, Scene,
-        SceneAssetLoader, SceneAssetReference, SceneFragment, SceneFragmentNode,
-        SceneFragmentNodeId, SceneValidationOptions, SerializedScene,
+        validate_scene_str, validate_scene_str_with_options, DirectionalLight,
+        DirectionalShadowConfig, PointLight, Scene, SceneAssetLoader, SceneAssetReference,
+        SceneFragment, SceneFragmentNode, SceneFragmentNodeId, SceneValidationOptions,
+        SerializedScene,
     };
     use crate::api::errors::{AssetError, RendererError, SceneError};
     use crate::data::handles::{EnvironmentHandle, MeshHandle};
     use crate::scene::command::{CommandHistory, PlaceAssetCommand};
+    use crate::scene::render_submission::MAX_DIRECTIONAL_LIGHTS_GPU;
     use glam::{Mat4, Quat, Vec3};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2982,6 +3008,45 @@ mod tests {
             Err(SceneError::StaleDirectionalLight(_))
         ));
         assert!(scene.create_directional_light(light).is_ok());
+    }
+
+    #[test]
+    fn additive_directionals_are_bounded_and_only_one_owns_shadows() {
+        let mut scene = Scene::new();
+        let light = DirectionalLight {
+            direction: Vec3::Y,
+            color: Vec3::ONE,
+            intensity: 1.0,
+        };
+        let first = scene.create_directional_light(light).unwrap();
+        let second = scene.add_directional_light(light).unwrap();
+        scene.add_directional_light(light).unwrap();
+        scene.add_directional_light(light).unwrap();
+        assert!(matches!(
+            scene.add_directional_light(light),
+            Err(SceneError::InvalidDirectionalLight(_))
+        ));
+
+        scene
+            .set_directional_shadow_config(first, DirectionalShadowConfig { enabled: true })
+            .unwrap();
+        assert!(matches!(
+            scene.set_directional_shadow_config(
+                second,
+                DirectionalShadowConfig { enabled: true }
+            ),
+            Err(SceneError::UnsupportedLightFeature(_))
+        ));
+        let submission = scene.build_submission();
+        assert_eq!(submission.directional_lights.len(), MAX_DIRECTIONAL_LIGHTS_GPU);
+        assert_eq!(
+            submission
+                .directional_lights
+                .iter()
+                .filter(|light| light.enable_shadows)
+                .count(),
+            1
+        );
     }
 
     #[test]
