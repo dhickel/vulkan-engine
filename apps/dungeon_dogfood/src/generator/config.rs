@@ -362,8 +362,136 @@ impl NormalizedGeneratorConfig {
         (self.width, self.height, self.layers)
     }
 
+    pub(super) const fn width(&self) -> u16 {
+        self.width
+    }
+
+    pub(super) const fn height(&self) -> u16 {
+        self.height
+    }
+
+    pub(super) const fn layers(&self) -> (u16, u16, u16) {
+        (self.width, self.height, self.layers)
+    }
+
     pub(super) const fn qualification(&self) -> Qualification {
         self.qualification
+    }
+
+    pub(super) const fn region_min(&self) -> u32 {
+        self.region_min
+    }
+
+    pub(super) const fn region_max(&self) -> u32 {
+        self.region_max
+    }
+
+    pub(super) const fn required_route_min(&self) -> u32 {
+        self.required_route_min
+    }
+
+    pub(super) const fn required_route_max(&self) -> u32 {
+        self.required_route_max
+    }
+
+    pub(super) const fn per_layer_cycles_min(&self) -> u32 {
+        self.per_layer_cycles_min
+    }
+
+    pub(super) const fn per_layer_cycles_max(&self) -> u32 {
+        self.per_layer_cycles_max
+    }
+
+    pub(super) const fn branch_depth_min(&self) -> u32 {
+        self.branch_depth_min
+    }
+
+    pub(super) const fn branch_depth_max(&self) -> u32 {
+        self.branch_depth_max
+    }
+
+    pub(super) const fn articulation_max(&self) -> u32 {
+        self.articulation_max
+    }
+
+    pub(super) const fn intentional_dead_ends_min(&self) -> u32 {
+        self.intentional_dead_ends_min
+    }
+
+    pub(super) const fn intentional_dead_ends_max(&self) -> u32 {
+        self.intentional_dead_ends_max
+    }
+
+    pub(super) const fn optional_mergers_max(&self) -> u32 {
+        self.optional_mergers_max
+    }
+
+    pub(super) const fn optional_shortcuts_max(&self) -> u32 {
+        self.optional_shortcuts_max
+    }
+
+    pub(super) const fn crossings_max(&self) -> u32 {
+        self.crossings_max
+    }
+
+    pub(super) const fn components_max(&self) -> u32 {
+        self.components_max
+    }
+
+    pub(super) const fn edge_disjoint_routes(&self) -> u32 {
+        self.edge_disjoint_routes
+    }
+
+    pub(super) const fn transitions_per_adjacent_pair(&self) -> u32 {
+        self.transitions_per_adjacent_pair
+    }
+
+    pub(super) const fn corridor_width(&self) -> u32 {
+        self.corridor_width
+    }
+
+    pub(super) const fn hall_width(&self) -> u32 {
+        self.hall_width
+    }
+
+    pub(super) const fn spacing(&self) -> u32 {
+        self.spacing
+    }
+
+    pub(super) const fn placement_attempts(&self) -> u32 {
+        self.placement_attempts
+    }
+
+    pub(super) const fn routing_attempts(&self) -> u32 {
+        self.routing_attempts
+    }
+
+    pub(super) const fn generation_attempts(&self) -> u32 {
+        self.generation_attempts
+    }
+
+    pub(super) const fn reroute_budget(&self) -> u32 {
+        self.reroute_budget
+    }
+
+    pub(super) const fn marker_relocation_budget(&self) -> u32 {
+        self.marker_relocation_budget
+    }
+
+    pub(super) const fn optional_edge_removal_budget(&self) -> u32 {
+        self.optional_edge_removal_budget
+    }
+
+    pub(super) const fn ordinary_prefab_ratio_numerator(&self) -> u32 {
+        self.ordinary_prefab_ratio_numerator
+    }
+
+    pub(super) const fn ordinary_prefab_ratio_denominator(&self) -> u32 {
+        self.ordinary_prefab_ratio_denominator
+    }
+
+    pub(super) const fn model_marker_cap(&self) -> u32 {
+        self.model_marker_cap
     }
 
     pub(super) fn canonical_bytes(&self) -> Vec<u8> {

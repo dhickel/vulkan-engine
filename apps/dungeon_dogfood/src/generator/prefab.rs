@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -20,7 +20,7 @@ const ALLOWED_ROTATIONS: [u16; 4] = [0, 90, 180, 270];
 // ─── Direction ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Direction {
+pub(crate) enum Direction {
     North,
     East,
     South,
@@ -37,7 +37,7 @@ impl Direction {
         }
     }
 
-    fn rotate(self, quarter_turns: u8) -> Self {
+    pub(super) fn rotate(self, quarter_turns: u8) -> Self {
         let mut d = self;
         for _ in 0..(quarter_turns % 4) {
             d = d.rotate_cw();
@@ -52,6 +52,15 @@ impl Direction {
             "south" => Some(Self::South),
             "west" => Some(Self::West),
             _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::North => "north",
+            Self::East => "east",
+            Self::South => "south",
+            Self::West => "west",
         }
     }
 
@@ -88,7 +97,7 @@ impl Direction {
 // ─── Tile ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tile {
+pub(crate) enum Tile {
     Wall,
     Floor,
     Void,
@@ -96,20 +105,16 @@ enum Tile {
 }
 
 impl Tile {
-    fn is_walkable(self) -> bool {
+    pub(super) fn is_walkable(self) -> bool {
         matches!(self, Self::Floor | Self::Ramp { .. })
     }
 
-    fn is_void(self) -> bool {
+    pub(super) fn is_void(self) -> bool {
         matches!(self, Self::Void)
     }
 
-    fn is_ramp(self) -> bool {
+    pub(super) fn is_ramp(self) -> bool {
         matches!(self, Self::Ramp { .. })
-    }
-
-    fn is_wall(self) -> bool {
-        matches!(self, Self::Wall)
     }
 
     /// Parse a single token from the beginning of a row string.
@@ -175,11 +180,17 @@ macro_rules! enum_from_str {
                     _ => None,
                 }
             }
+
+            fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $str,)+
+                }
+            }
         }
     };
 }
 
-enum_from_str!(enum SocketRole {
+enum_from_str!(pub(crate) enum SocketRole {
     Corridor => "corridor",
     Hall => "hall",
     Doorway => "doorway",
@@ -227,10 +238,10 @@ impl ReservationKind {
 // ─── Coordinates ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Cell {
-    layer: u16,
-    x: u16,
-    y: u16,
+pub(crate) struct Cell {
+    pub(crate) layer: u16,
+    pub(crate) x: u16,
+    pub(crate) y: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,9 +255,9 @@ struct CellBox {
 
 impl CellBox {
     fn cells(self) -> Vec<Cell> {
-        let mut out = Vec::with_capacity(
-            (self.x_max - self.x_min + 1) as usize * (self.y_max - self.y_min + 1) as usize,
-        );
+        let box_width = self.x_max as usize - self.x_min as usize + 1;
+        let box_height = self.y_max as usize - self.y_min as usize + 1;
+        let mut out = Vec::with_capacity(box_width.saturating_mul(box_height));
         for y in self.y_min..=self.y_max {
             for x in self.x_min..=self.x_max {
                 out.push(Cell { layer: self.layer, x, y });
@@ -254,36 +265,14 @@ impl CellBox {
         }
         out
     }
-
-    fn from_cells(cells: &[Cell]) -> Option<Self> {
-        if cells.is_empty() {
-            return None;
-        }
-        let layer = cells[0].layer;
-        let mut x_min = cells[0].x;
-        let mut x_max = cells[0].x;
-        let mut y_min = cells[0].y;
-        let mut y_max = cells[0].y;
-        for c in &cells[1..] {
-            if c.layer != layer {
-                return None;
-            }
-            x_min = x_min.min(c.x);
-            x_max = x_max.max(c.x);
-            y_min = y_min.min(c.y);
-            y_max = y_max.max(c.y);
-        }
-        Some(Self { layer, x_min, y_min, x_max, y_max })
-    }
 }
 
 // ─── Reservation owner ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum ReservationOwner {
+pub(crate) enum ReservationOwner {
     Self_,
-    Socket(String),
-    Transition(String),
+    Reference(String),
 }
 
 impl ReservationOwner {
@@ -291,9 +280,16 @@ impl ReservationOwner {
         if s == "self" {
             Self::Self_
         } else {
-            // Could be a socket id or transition id; we keep as-is.
-            // The string "self" is the only reserved keyword.
-            Self::Socket(s.to_owned())
+            // Socket and transition owners share one globally unique stable-ID
+            // namespace, so preserving the reference string is sufficient.
+            Self::Reference(s.to_owned())
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Self_ => "self",
+            Self::Reference(id) => id,
         }
     }
 }
@@ -398,68 +394,68 @@ struct PrefabToml {
 // ─── Validated domain types ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Socket {
-    id: String,
-    anchor: Cell,
-    direction: Direction,
-    width: u16,
-    role: SocketRole,
+pub(crate) struct Socket {
+    pub(crate) id: String,
+    pub(crate) anchor: Cell,
+    pub(crate) direction: Direction,
+    pub(crate) width: u16,
+    pub(crate) role: SocketRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Marker {
-    id: String,
-    position: Cell,
-    facing: Direction,
-    kind: MarkerKind,
+pub(crate) struct Marker {
+    pub(crate) id: String,
+    pub(crate) position: Cell,
+    pub(crate) facing: Direction,
+    pub(crate) kind: MarkerKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Reservation {
-    owner: ReservationOwner,
-    kind: ReservationKind,
-    cells: Vec<Cell>, // sorted, unique
+pub(crate) struct Reservation {
+    pub(crate) owner: ReservationOwner,
+    pub(crate) kind: ReservationKind,
+    pub(crate) cells: Vec<Cell>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Transition {
-    id: String,
-    lower_approach_socket: String,
-    upper_landing_socket: String,
-    upper_layer: u16,
+pub(crate) struct Transition {
+    pub(crate) id: String,
+    pub(crate) lower_approach_socket: String,
+    pub(crate) upper_landing_socket: String,
+    pub(crate) upper_layer: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Prefab {
-    id: String,
-    format_version: u32,
-    layer_count: u16,
-    tags: Vec<String>,
-    width: u16,
-    height: u16,
-    layers: Vec<Vec<Vec<Tile>>>, // [layer][y][x]
-    origin: Cell,
-    rotations: Vec<u16>,
-    sockets: Vec<Socket>,
-    markers: Vec<Marker>,
-    reservations: Vec<Reservation>,
-    transitions: Vec<Transition>,
+    pub(crate) id: String,
+    pub(crate) format_version: u32,
+    pub(crate) layer_count: u16,
+    pub(crate) tags: Vec<String>,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) layers: Vec<Vec<Vec<Tile>>>,
+    pub(crate) origin: Cell,
+    pub(crate) rotations: Vec<u16>,
+    pub(crate) sockets: Vec<Socket>,
+    pub(crate) markers: Vec<Marker>,
+    pub(crate) reservations: Vec<Reservation>,
+    pub(crate) transitions: Vec<Transition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrefabVariant {
-    base_id: String,
-    rotation_degrees: u16,
-    width: u16,
-    height: u16,
-    layer_count: u16,
-    layers: Vec<Vec<Vec<Tile>>>,
-    origin: Cell,
-    sockets: Vec<Socket>,
-    markers: Vec<Marker>,
-    reservations: Vec<Reservation>,
-    transitions: Vec<Transition>,
-    tags: Vec<String>,
+    pub(crate) base_id: String,
+    pub(crate) rotation_degrees: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) layer_count: u16,
+    pub(crate) layers: Vec<Vec<Vec<Tile>>>,
+    pub(crate) origin: Cell,
+    pub(crate) sockets: Vec<Socket>,
+    pub(crate) markers: Vec<Marker>,
+    pub(crate) reservations: Vec<Reservation>,
+    pub(crate) transitions: Vec<Transition>,
+    pub(crate) tags: Vec<String>,
 }
 
 // ─── Ramp inference types ───────────────────────────────────────────────────
@@ -468,7 +464,6 @@ pub(crate) struct PrefabVariant {
 struct InferredRamp {
     /// (x, y) of R0, R1, R2 on the lower layer
     cells: [(u16, u16); 3],
-    direction: Direction,
     lower_layer: u16,
 }
 
@@ -735,6 +730,9 @@ fn validate_sockets(
         if ix >= width || iy >= height {
             return Err(prefab_err(context, "socket_no_inward_cell"));
         }
+        if layers[anchor.layer as usize][iy as usize][ix as usize] == Tile::Wall {
+            return Err(prefab_err(context, "socket_inward_blocked"));
+        }
 
         // For width > 1, check the additional aperture cells are walkable
         // and have inward cells in-bounds.
@@ -752,7 +750,9 @@ fn validate_sockets(
             if iix < 0 || iiy < 0 || iix as u16 >= width || iiy as u16 >= height {
                 return Err(prefab_err(context, "socket_no_inward_cell"));
             }
-            // Inward cell bounds checked; walkability not required.
+            if layers[anchor.layer as usize][iiy as usize][iix as usize] == Tile::Wall {
+                return Err(prefab_err(context, "socket_inward_blocked"));
+            }
         }
 
         sockets.push(Socket { id: sd.id.clone(), anchor, direction, width: sd.width, role });
@@ -791,7 +791,13 @@ fn validate_markers(
     Ok(markers)
 }
 
-fn expand_reservation(def: &ReservationDef, context: &str) -> Result<Vec<Cell>, GeneratorError> {
+fn expand_reservation(
+    def: &ReservationDef,
+    width: u16,
+    height: u16,
+    layer_count: u16,
+    context: &str,
+) -> Result<Vec<Cell>, GeneratorError> {
     match (&def.cells, &def.box_def) {
         (Some(_), Some(_)) => Err(prefab_err(context, "reservation_cells_and_box")),
         (None, None) => Err(prefab_err(context, "reservation_no_cells_or_box")),
@@ -811,6 +817,11 @@ fn expand_reservation(def: &ReservationDef, context: &str) -> Result<Vec<Cell>, 
         (None, Some(b)) => {
             if b.x_min > b.x_max || b.y_min > b.y_max {
                 return Err(prefab_err(context, "reservation_invalid_box"));
+            }
+            // Reject before expansion so malformed boxes cannot trigger huge
+            // allocations or integer overflow.
+            if b.layer >= layer_count || b.x_max >= width || b.y_max >= height {
+                return Err(prefab_err(context, "reservation_out_of_bounds"));
             }
             Ok(CellBox {
                 layer: b.layer,
@@ -838,7 +849,7 @@ fn validate_reservations(
         let kind = ReservationKind::from_str(&rd.kind)
             .ok_or_else(|| prefab_err(context, "invalid_reservation_kind"))?;
         let owner = ReservationOwner::from_str(&rd.owner);
-        let cells = expand_reservation(rd, context)?;
+        let cells = expand_reservation(rd, width, height, layer_count, context)?;
 
         // Check bounds and tile types
         for c in &cells {
@@ -922,7 +933,6 @@ fn infer_ramps(layers: &[Vec<Vec<Tile>>]) -> Vec<InferredRamp> {
                                     (x1 as u16, y1 as u16),
                                     (x2 as u16, y2 as u16),
                                 ],
-                                direction,
                                 lower_layer: li,
                             });
                         }
@@ -935,20 +945,81 @@ fn infer_ramps(layers: &[Vec<Vec<Tile>>]) -> Vec<InferredRamp> {
     ramps
 }
 
+fn validate_ramp_patterns(
+    layers: &[Vec<Vec<Tile>>],
+    context: &str,
+) -> Result<Vec<InferredRamp>, GeneratorError> {
+    let inferred = infer_ramps(layers);
+    let mut covered = BTreeSet::new();
+    for ramp in &inferred {
+        for &(x, y) in &ramp.cells {
+            if !covered.insert((ramp.lower_layer, x, y)) {
+                return Err(prefab_err(context, "overlapping_ramp_patterns"));
+            }
+        }
+    }
+    for (layer, grid) in layers.iter().enumerate() {
+        for (y, row) in grid.iter().enumerate() {
+            for (x, tile) in row.iter().enumerate() {
+                if tile.is_ramp() && !covered.contains(&(layer as u16, x as u16, y as u16)) {
+                    return Err(prefab_err(context, "incomplete_ramp_pattern"));
+                }
+            }
+        }
+    }
+    Ok(inferred)
+}
+
+fn reservation_connects_approach(
+    reservations: &[Reservation],
+    transition_id: &str,
+    layer: u16,
+    inward: (i32, i32),
+    ramp_start: (i32, i32),
+) -> bool {
+    let cells: BTreeSet<(i32, i32)> = reservations
+        .iter()
+        .filter(|reservation| {
+            reservation.kind == ReservationKind::CorridorApproach
+                && reservation.owner.as_str() == transition_id
+        })
+        .flat_map(|reservation| reservation.cells.iter())
+        .filter(|cell| cell.layer == layer)
+        .map(|cell| (cell.x as i32, cell.y as i32))
+        .collect();
+    if !cells.contains(&inward) {
+        return false;
+    }
+    let mut frontier = vec![inward];
+    let mut visited = BTreeSet::from([inward]);
+    while let Some(cell) = frontier.pop() {
+        if (cell.0 - ramp_start.0).abs() + (cell.1 - ramp_start.1).abs() <= 1 {
+            return true;
+        }
+        for delta in [(0, -1), (1, 0), (0, 1), (-1, 0)] {
+            let next = (cell.0 + delta.0, cell.1 + delta.1);
+            if cells.contains(&next) && visited.insert(next) {
+                frontier.push(next);
+            }
+        }
+    }
+    false
+}
+
 fn validate_transitions(
     transition_defs: &[TransitionDef],
     sockets: &[Socket],
+    reservations: &[Reservation],
     layers: &[Vec<Vec<Tile>>],
     _width: u16,
     _height: u16,
     _layer_count: u16,
     context: &str,
 ) -> Result<Vec<Transition>, GeneratorError> {
-    let inferred = infer_ramps(layers);
+    let inferred = validate_ramp_patterns(layers, context)?;
     let mut ids = BTreeSet::new();
+    let mut used_ramps = BTreeSet::new();
     let mut transitions = Vec::with_capacity(transition_defs.len());
-
-    // Build socket lookup
     let socket_map: BTreeMap<&str, &Socket> = sockets.iter().map(|s| (s.id.as_str(), s)).collect();
 
     for td in transition_defs {
@@ -968,16 +1039,13 @@ fn validate_transitions(
         let upper_sock = socket_map
             .get(td.upper_landing_socket.as_str())
             .ok_or_else(|| prefab_err(context, "transition_upper_socket_not_found"))?;
-
-        // Lower socket must be on the lower layer and have correct role
         let lower_layer = lower_sock.anchor.layer;
-        if lower_layer >= td.upper_layer {
+        if lower_layer.checked_add(1) != Some(td.upper_layer) {
             return Err(prefab_err(context, "transition_layer_order"));
         }
         if lower_sock.role != SocketRole::LowerRampApproach {
             return Err(prefab_err(context, "transition_lower_socket_role"));
         }
-        // Upper socket must be on upper_layer and have correct role
         if upper_sock.anchor.layer != td.upper_layer {
             return Err(prefab_err(context, "transition_upper_socket_layer"));
         }
@@ -985,40 +1053,50 @@ fn validate_transitions(
             return Err(prefab_err(context, "transition_upper_socket_role"));
         }
 
-        // Find a matching inferred ramp on the lower layer.
-        // The R0 cell must be at or adjacent to the inward cell from the
-        // lower approach socket (supports both straight and L-shaped approaches).
-        let matching = inferred.iter().filter(|ir| {
-            if ir.lower_layer != lower_layer {
-                return false;
-            }
-            let (sx, sy) = (lower_sock.anchor.x as i32, lower_sock.anchor.y as i32);
-            let (dx, dy) = lower_sock.direction.delta();
-            let inward = (sx - dx, sy - dy);
-            let r0 = (ir.cells[0].0 as i32, ir.cells[0].1 as i32);
-            // R0 must be at the inward cell or within 1 step (Manhattan) of it
-            (r0.0 - inward.0).abs() <= 1 && (r0.1 - inward.1).abs() <= 1
-        }).collect::<Vec<_>>();
-
-        if matching.is_empty() {
+        let (dx, dy) = lower_sock.direction.delta();
+        let inward = (
+            lower_sock.anchor.x as i32 - dx,
+            lower_sock.anchor.y as i32 - dy,
+        );
+        let candidates: Vec<usize> = inferred
+            .iter()
+            .enumerate()
+            .filter_map(|(index, ramp)| {
+                let r0 = (ramp.cells[0].0 as i32, ramp.cells[0].1 as i32);
+                let approach_distance = (r0.0 - inward.0).abs() + (r0.1 - inward.1).abs();
+                let connected = approach_distance <= 1
+                    || reservation_connects_approach(
+                        reservations,
+                        &td.id,
+                        lower_layer,
+                        inward,
+                        r0,
+                    );
+                (ramp.lower_layer == lower_layer && connected).then_some(index)
+            })
+            .collect();
+        if candidates.is_empty() {
             return Err(prefab_err(context, "transition_no_matching_ramp"));
         }
-
-        // Validate upper layer: check for Void opening and Floor landing
+        if candidates.len() != 1 {
+            return Err(prefab_err(context, "transition_ambiguous_ramp"));
+        }
+        let ramp_index = candidates[0];
+        if !used_ramps.insert(ramp_index) {
+            return Err(prefab_err(context, "transition_ramp_reused"));
+        }
+        let ramp = &inferred[ramp_index];
         let upper_grid = &layers[td.upper_layer as usize];
-        // The cell on upper layer above R2 should be Void (opening)
-        for ir in &matching {
-            let (rx2, ry2) = ir.cells[2]; // R2 = top of ramp
-            let above = upper_grid[ry2 as usize][rx2 as usize];
-            if !above.is_void() {
-                return Err(prefab_err(context, "transition_upper_opening_not_void"));
-            }
-            // The upper landing socket anchor should be Floor
-            let us_anchor = upper_sock.anchor;
-            let landing_tile = upper_grid[us_anchor.y as usize][us_anchor.x as usize];
-            if landing_tile != Tile::Floor {
-                return Err(prefab_err(context, "transition_upper_landing_not_floor"));
-            }
+        if ramp
+            .cells
+            .iter()
+            .any(|&(x, y)| !upper_grid[y as usize][x as usize].is_void())
+        {
+            return Err(prefab_err(context, "transition_upper_opening_not_void"));
+        }
+        let anchor = upper_sock.anchor;
+        if upper_grid[anchor.y as usize][anchor.x as usize] != Tile::Floor {
+            return Err(prefab_err(context, "transition_upper_landing_not_floor"));
         }
 
         transitions.push(Transition {
@@ -1029,7 +1107,43 @@ fn validate_transitions(
         });
     }
 
+    if used_ramps.len() != inferred.len() {
+        return Err(prefab_err(context, "ramp_without_transition"));
+    }
     Ok(transitions)
+}
+
+fn validate_component_ids_and_owners(
+    sockets: &[Socket],
+    markers: &[Marker],
+    reservations: &[Reservation],
+    transitions: &[Transition],
+    context: &str,
+) -> Result<(), GeneratorError> {
+    let mut component_ids = BTreeSet::new();
+    for id in sockets
+        .iter()
+        .map(|socket| socket.id.as_str())
+        .chain(markers.iter().map(|marker| marker.id.as_str()))
+        .chain(transitions.iter().map(|transition| transition.id.as_str()))
+    {
+        if !component_ids.insert(id) {
+            return Err(prefab_err(context, "duplicate_component_id"));
+        }
+    }
+    let valid_owners: BTreeSet<&str> = sockets
+        .iter()
+        .map(|socket| socket.id.as_str())
+        .chain(transitions.iter().map(|transition| transition.id.as_str()))
+        .collect();
+    for reservation in reservations {
+        if let ReservationOwner::Reference(owner) = &reservation.owner {
+            if !valid_owners.contains(owner.as_str()) {
+                return Err(prefab_err(context, "reservation_owner_not_found"));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ─── Full prefab validation ─────────────────────────────────────────────────
@@ -1056,10 +1170,18 @@ fn validate_prefab(toml: PrefabToml, context: &str) -> Result<Prefab, GeneratorE
     let transitions = validate_transitions(
         &toml.transitions,
         &sockets,
+        &reservations,
         &layers,
         width,
         height,
         layer_count,
+        context,
+    )?;
+    validate_component_ids_and_owners(
+        &sockets,
+        &markers,
+        &reservations,
+        &transitions,
         context,
     )?;
 
@@ -1159,15 +1281,33 @@ fn rotate_grid(
     (new_grid, new_w as u16, new_h as u16)
 }
 
-fn rotate_socket(
-    socket: &Socket,
-    old_w: u16,
-    old_h: u16,
-    q: u8,
-) -> Socket {
+fn rotate_socket(socket: &Socket, old_w: u16, old_h: u16, q: u8) -> Socket {
+    // A socket anchor is the minimum coordinate of its boundary aperture, not
+    // an oriented endpoint. Rotate every aperture cell and normalize the
+    // anchor so widths greater than one remain correct at 180° and 270°.
+    let rotated_aperture: Vec<Cell> = (0..socket.width)
+        .map(|offset| {
+            let source = match socket.direction {
+                Direction::North | Direction::South => Cell {
+                    x: socket.anchor.x + offset,
+                    ..socket.anchor
+                },
+                Direction::East | Direction::West => Cell {
+                    y: socket.anchor.y + offset,
+                    ..socket.anchor
+                },
+            };
+            rotate_cell(source, old_w, old_h, q)
+        })
+        .collect();
+    let anchor = Cell {
+        layer: socket.anchor.layer,
+        x: rotated_aperture.iter().map(|cell| cell.x).min().unwrap_or(socket.anchor.x),
+        y: rotated_aperture.iter().map(|cell| cell.y).min().unwrap_or(socket.anchor.y),
+    };
     Socket {
         id: socket.id.clone(),
-        anchor: rotate_cell(socket.anchor, old_w, old_h, q),
+        anchor,
         direction: rotate_direction(socket.direction, q),
         width: socket.width,
         role: socket.role,
@@ -1191,126 +1331,143 @@ fn rotate_reservation(res: &Reservation, old_w: u16, old_h: u16, q: u8) -> Reser
     }
 }
 
-/// Generate a single rotated variant. Re-validates the result.
+/// Generate a single rotated variant and run the same domain validation used
+/// for source prefabs over every transformed component.
 fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVariant, GeneratorError> {
     let quarter_turns = match rotation_degrees {
         0 => 0,
         90 => 1,
         180 => 2,
         270 => 3,
-        _ => unreachable!(),
+        _ => return Err(prefab_err(&prefab.id, "invalid_rotation")),
     };
 
-    let (rotated_layers, new_w, new_h) = if quarter_turns == 0 {
-        (prefab.layers.clone(), prefab.width, prefab.height)
-    } else {
-        let mut all_layers = Vec::with_capacity(prefab.layers.len());
-        let mut w = 0u16;
-        let mut h = 0u16;
-        for layer_grid in &prefab.layers {
-            let (g, gw, gh) = rotate_grid(layer_grid, quarter_turns);
-            w = gw;
-            h = gh;
-            all_layers.push(g);
-        }
-        (all_layers, w, h)
-    };
-
+    let mut rotated_layers = Vec::with_capacity(prefab.layers.len());
+    let mut new_w = prefab.width;
+    let mut new_h = prefab.height;
+    for layer_grid in &prefab.layers {
+        let (grid, width, height) = rotate_grid(layer_grid, quarter_turns);
+        new_w = width;
+        new_h = height;
+        rotated_layers.push(grid);
+    }
     let origin = rotate_cell(prefab.origin, prefab.width, prefab.height, quarter_turns);
+    if origin.x >= new_w || origin.y >= new_h {
+        return Err(prefab_err(&prefab.id, "origin_out_of_bounds_after_rotation"));
+    }
 
-    let sockets: Vec<Socket> = prefab
+    let rotated_sockets: Vec<Socket> = prefab
         .sockets
         .iter()
-        .map(|s| rotate_socket(s, prefab.width, prefab.height, quarter_turns))
+        .map(|socket| rotate_socket(socket, prefab.width, prefab.height, quarter_turns))
         .collect();
+    let socket_defs: Vec<SocketDef> = rotated_sockets
+        .iter()
+        .map(|socket| SocketDef {
+            id: socket.id.clone(),
+            anchor: CellDef {
+                layer: socket.anchor.layer,
+                x: socket.anchor.x,
+                y: socket.anchor.y,
+            },
+            direction: socket.direction.as_str().to_owned(),
+            width: socket.width,
+            role: socket.role.as_str().to_owned(),
+        })
+        .collect();
+    let sockets = validate_sockets(
+        &socket_defs,
+        new_w,
+        new_h,
+        prefab.layer_count,
+        &rotated_layers,
+        &prefab.id,
+    )?;
 
-    let markers: Vec<Marker> = prefab
+    let rotated_markers: Vec<Marker> = prefab
         .markers
         .iter()
-        .map(|m| rotate_marker(m, prefab.width, prefab.height, quarter_turns))
+        .map(|marker| rotate_marker(marker, prefab.width, prefab.height, quarter_turns))
         .collect();
+    let marker_defs: Vec<MarkerDef> = rotated_markers
+        .iter()
+        .map(|marker| MarkerDef {
+            id: marker.id.clone(),
+            position: CellDef {
+                layer: marker.position.layer,
+                x: marker.position.x,
+                y: marker.position.y,
+            },
+            facing: marker.facing.as_str().to_owned(),
+            kind: marker.kind.as_str().to_owned(),
+        })
+        .collect();
+    let markers = validate_markers(
+        &marker_defs,
+        new_w,
+        new_h,
+        prefab.layer_count,
+        &prefab.id,
+    )?;
 
-    let reservations: Vec<Reservation> = prefab
+    let rotated_reservations: Vec<Reservation> = prefab
         .reservations
         .iter()
-        .map(|r| rotate_reservation(r, prefab.width, prefab.height, quarter_turns))
+        .map(|reservation| {
+            rotate_reservation(reservation, prefab.width, prefab.height, quarter_turns)
+        })
         .collect();
+    let reservation_defs: Vec<ReservationDef> = rotated_reservations
+        .iter()
+        .map(|reservation| ReservationDef {
+            owner: reservation.owner.as_str().to_owned(),
+            kind: reservation.kind.as_str().to_owned(),
+            cells: Some(
+                reservation
+                    .cells
+                    .iter()
+                    .map(|cell| CellDef { layer: cell.layer, x: cell.x, y: cell.y })
+                    .collect(),
+            ),
+            box_def: None,
+        })
+        .collect();
+    let reservations = validate_reservations(
+        &reservation_defs,
+        new_w,
+        new_h,
+        prefab.layer_count,
+        &rotated_layers,
+        &prefab.id,
+    )?;
 
-    // Re-validate the rotated variant fully
-    // Validate sockets against rotated grid
-    let mut socket_ids = BTreeSet::new();
-    for s in &sockets {
-        if !socket_ids.insert(&s.id) {
-            // Duplicate IDs after rotation shouldn't happen since rotation
-            // preserves IDs and input was validated.
-            return Err(prefab_err(&prefab.id, "duplicate_socket_id"));
-        }
-        if s.anchor.layer >= prefab.layer_count
-            || s.anchor.x >= new_w
-            || s.anchor.y >= new_h
-        {
-            return Err(prefab_err(&prefab.id, "socket_anchor_out_of_bounds_after_rotation"));
-        }
-        let on_boundary = match s.direction {
-            Direction::North => s.anchor.y == 0,
-            Direction::South => s.anchor.y == new_h.saturating_sub(1),
-            Direction::West => s.anchor.x == 0,
-            Direction::East => s.anchor.x == new_w.saturating_sub(1),
-        };
-        if !on_boundary {
-            return Err(prefab_err(&prefab.id, "socket_not_on_boundary_after_rotation"));
-        }
-        // Check walkable
-        let tile = rotated_layers[s.anchor.layer as usize][s.anchor.y as usize][s.anchor.x as usize];
-        if !tile.is_walkable() {
-            return Err(prefab_err(&prefab.id, "socket_anchor_not_walkable_after_rotation"));
-        }
-        // Verify inward cell is in bounds; walkability not required.
-        let (dx, dy) = s.direction.delta();
-        let ix = s.anchor.x as i32 - dx;
-        let iy = s.anchor.y as i32 - dy;
-        if ix < 0 || iy < 0 || (ix as u16) >= new_w || (iy as u16) >= new_h {
-            // Socket without inward cell — only allowed for degenerate small prefabs.
-            // Acceptable; the anchor itself was walkable.
-        }
-    }
-
-    // Validate reservations
-    for res in &reservations {
-        for c in &res.cells {
-            if c.layer >= prefab.layer_count || c.x >= new_w || c.y >= new_h {
-                return Err(prefab_err(&prefab.id, "reservation_out_of_bounds_after_rotation"));
-            }
-        }
-    }
-
-    // Validate markers
-    for m in &markers {
-        if m.position.layer >= prefab.layer_count
-            || m.position.x >= new_w
-            || m.position.y >= new_h
-        {
-            return Err(prefab_err(&prefab.id, "marker_out_of_bounds_after_rotation"));
-        }
-    }
-
-    // Re-validate ramp transitions
-    let transitions: Vec<Transition> = prefab.transitions.clone(); // transition strings don't rotate (they're IDs)
-    if !transitions.is_empty() {
-        let inferred = infer_ramps(&rotated_layers);
-        for t in &transitions {
-            let lower_sock = sockets.iter().find(|s| s.id == t.lower_approach_socket)
-                .ok_or_else(|| prefab_err(&prefab.id, "transition_lower_socket_not_found_after_rotation"))?;
-            let _upper_sock = sockets.iter().find(|s| s.id == t.upper_landing_socket)
-                .ok_or_else(|| prefab_err(&prefab.id, "transition_upper_socket_not_found_after_rotation"))?;
-            let matching = inferred.iter().any(|ir| {
-                ir.lower_layer == lower_sock.anchor.layer
-            });
-            if !matching && !inferred.is_empty() {
-                // Allow if ramp still exists on the correct layer
-            }
-        }
-    }
+    let transition_defs: Vec<TransitionDef> = prefab
+        .transitions
+        .iter()
+        .map(|transition| TransitionDef {
+            id: transition.id.clone(),
+            lower_approach_socket: transition.lower_approach_socket.clone(),
+            upper_landing_socket: transition.upper_landing_socket.clone(),
+            upper_layer: transition.upper_layer,
+        })
+        .collect();
+    let transitions = validate_transitions(
+        &transition_defs,
+        &sockets,
+        &reservations,
+        &rotated_layers,
+        new_w,
+        new_h,
+        prefab.layer_count,
+        &prefab.id,
+    )?;
+    validate_component_ids_and_owners(
+        &sockets,
+        &markers,
+        &reservations,
+        &transitions,
+        &prefab.id,
+    )?;
 
     Ok(PrefabVariant {
         base_id: prefab.id.clone(),
@@ -1330,6 +1487,12 @@ fn generate_variant(prefab: &Prefab, rotation_degrees: u16) -> Result<PrefabVari
 
 // ─── Catalog ────────────────────────────────────────────────────────────────
 
+struct CatalogFile {
+    relative_path: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
 pub(crate) struct PrefabCatalog {
     identity_hex: String,
     identity_bytes: [u8; 32],
@@ -1339,12 +1502,16 @@ pub(crate) struct PrefabCatalog {
 
 impl PrefabCatalog {
     pub(crate) fn load(root: &Path) -> Result<Self, GeneratorError> {
+        let root_metadata = fs::symlink_metadata(root)
+            .map_err(|_| prefab_err("catalog_root", "metadata_failed"))?;
+        if root_metadata.file_type().is_symlink() {
+            return Err(prefab_err("catalog_root", "symlink_rejected"));
+        }
         let canonical_root = root
             .canonicalize()
             .map_err(|_| prefab_err("catalog_root", "canonicalize_failed"))?;
 
-        // Collect .toml files recursively
-        let mut entries: Vec<(PathBuf, String)> = Vec::new();
+        let mut entries = Vec::new();
         collect_toml_files(&canonical_root, &canonical_root, &mut entries)?;
 
         if entries.is_empty() {
@@ -1352,11 +1519,13 @@ impl PrefabCatalog {
         }
 
         // Sort by relative path bytes (canonical order)
-        entries.sort_by(|a, b| a.1.as_bytes().cmp(b.1.as_bytes()));
+        entries.sort_by(|a, b| {
+            a.relative_path.as_bytes().cmp(b.relative_path.as_bytes())
+        });
 
         // Check for duplicate relative paths (shouldn't happen after canonicalization)
         for w in entries.windows(2) {
-            if w[0].1 == w[1].1 {
+            if w[0].relative_path == w[1].relative_path {
                 return Err(prefab_err("catalog", "duplicate_path"));
             }
         }
@@ -1365,19 +1534,18 @@ impl PrefabCatalog {
         let mut base_prefabs: Vec<Prefab> = Vec::with_capacity(entries.len());
         let mut seen_ids = BTreeSet::new();
 
-        for (abs_path, rel_path) in &entries {
-            let content = fs::read_to_string(abs_path).map_err(|_| {
+        for entry in &entries {
+            let content = std::str::from_utf8(&entry.bytes).map_err(|_| {
                 GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
-                    context: rel_path.clone(),
-                    reason: "read_failed",
+                    context: entry.relative_path.clone(),
+                    reason: "toml_parse_failed",
                 }
             })?;
-
-            let toml: PrefabToml = toml::from_str(&content).map_err(|_e| {
+            let toml: PrefabToml = toml::from_str(content).map_err(|_| {
                 GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
-                    context: rel_path.clone(),
+                    context: entry.relative_path.clone(),
                     reason: "toml_parse_failed",
                 }
             })?;
@@ -1386,12 +1554,12 @@ impl PrefabCatalog {
             if !seen_ids.insert(toml.id.clone()) {
                 return Err(GeneratorError::PrefabIntegrity {
                     stage: ErrorStage::Prefab,
-                    context: rel_path.clone(),
+                    context: entry.relative_path.clone(),
                     reason: "duplicate_prefab_id",
                 });
             }
 
-            let prefab = validate_prefab(toml, rel_path)?;
+            let prefab = validate_prefab(toml, &entry.relative_path)?;
             base_prefabs.push(prefab);
         }
 
@@ -1450,100 +1618,69 @@ impl PrefabCatalog {
 
 // ─── File collection ────────────────────────────────────────────────────────
 
+fn catalog_relative_path(canonical_root: &Path, path: &Path) -> Result<String, GeneratorError> {
+    let relative = path
+        .strip_prefix(canonical_root)
+        .map_err(|_| prefab_err("catalog_entry", "path_escape"))?;
+    let text = relative
+        .to_str()
+        .ok_or_else(|| prefab_err("catalog_entry", "non_utf8_path"))?;
+    Ok(text.replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
 fn collect_toml_files(
     canonical_root: &Path,
     dir: &Path,
-    entries: &mut Vec<(PathBuf, String)>,
+    entries: &mut Vec<CatalogFile>,
 ) -> Result<(), GeneratorError> {
     let read_dir = dir.read_dir().map_err(|_| prefab_err("catalog", "read_dir_failed"))?;
 
     for entry in read_dir {
         let entry = entry.map_err(|_| prefab_err("catalog", "read_entry_failed"))?;
         let path = entry.path();
-
-        // Reject symlinks
-        if path.is_symlink() {
-            return Err(GeneratorError::PrefabIntegrity {
-                stage: ErrorStage::Prefab,
-                context: path.display().to_string(),
-                reason: "symlink_rejected",
-            });
+        let context = catalog_relative_path(canonical_root, &path)?;
+        let file_type = entry.file_type().map_err(|_| {
+            prefab_err(&context, "file_type_failed")
+        })?;
+        if file_type.is_symlink() {
+            return Err(prefab_err(&context, "symlink_rejected"));
         }
-
-        let file_type = entry.file_type().map_err(|_| prefab_err("catalog", "file_type_failed"))?;
-
         if file_type.is_dir() {
             collect_toml_files(canonical_root, &path, entries)?;
         } else if file_type.is_file() {
-            // Only .toml files
-            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                return Err(GeneratorError::PrefabIntegrity {
-                    stage: ErrorStage::Prefab,
-                    context: path.display().to_string(),
-                    reason: "bad_extension",
-                });
+            if path.extension().and_then(|extension| extension.to_str()) != Some("toml") {
+                return Err(prefab_err(&context, "bad_extension"));
             }
-
-            // Canonicalize and compute relative path
-            let abs = path.canonicalize().map_err(|_| {
-                GeneratorError::PrefabIntegrity {
-                    stage: ErrorStage::Prefab,
-                    context: path.display().to_string(),
-                    reason: "canonicalize_failed",
-                }
-            })?;
-
-            // Path escape check: must start with canonical_root
-            if !abs.starts_with(canonical_root) {
-                return Err(GeneratorError::PrefabIntegrity {
-                    stage: ErrorStage::Prefab,
-                    context: path.display().to_string(),
-                    reason: "path_escape",
-                });
+            let absolute_path = path
+                .canonicalize()
+                .map_err(|_| prefab_err(&context, "canonicalize_failed"))?;
+            if !absolute_path.starts_with(canonical_root) {
+                return Err(prefab_err(&context, "path_escape"));
             }
-
-            let rel_str = abs
-                .strip_prefix(canonical_root)
-                .map_err(|_| GeneratorError::PrefabIntegrity {
-                    stage: ErrorStage::Prefab,
-                    context: path.display().to_string(),
-                    reason: "strip_prefix_failed",
-                })?
-                .to_str()
-                .ok_or_else(|| GeneratorError::PrefabIntegrity {
-                    stage: ErrorStage::Prefab,
-                    context: path.display().to_string(),
-                    reason: "non_utf8_path",
-                })?
-                .to_owned();
-
-            entries.push((abs, rel_str));
+            let relative_path = catalog_relative_path(canonical_root, &absolute_path)?;
+            let bytes = fs::read(&absolute_path)
+                .map_err(|_| prefab_err(&relative_path, "read_failed"))?;
+            entries.push(CatalogFile { relative_path, bytes });
+        } else {
+            return Err(prefab_err(&context, "unsupported_file_type"));
         }
     }
-
     Ok(())
 }
 
 // ─── Catalog hash ───────────────────────────────────────────────────────────
 
-fn compute_catalog_hash(entries: &[(PathBuf, String)]) -> [u8; 32] {
+fn compute_catalog_hash(entries: &[CatalogFile]) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    // Domain tag
-    hasher.update(&(CATALOG_DOMAIN.len() as u64).to_be_bytes());
     hasher.update(CATALOG_DOMAIN);
-    // Version
-    hasher.update(&CATALOG_VERSION.to_be_bytes());
-    // File count
-    hasher.update(&(entries.len() as u64).to_be_bytes());
-    // For each file: path_len, path_bytes, file_len, file_bytes
-    for (abs_path, rel_path) in entries {
-        let path_bytes = rel_path.as_bytes();
-        hasher.update(&(path_bytes.len() as u64).to_be_bytes());
+    hasher.update(CATALOG_VERSION.to_be_bytes());
+    hasher.update((entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        let path_bytes = entry.relative_path.as_bytes();
+        hasher.update((path_bytes.len() as u64).to_be_bytes());
         hasher.update(path_bytes);
-        // Read file bytes for content hash
-        let file_bytes = fs::read(abs_path).unwrap_or_default();
-        hasher.update(&(file_bytes.len() as u64).to_be_bytes());
-        hasher.update(&file_bytes);
+        hasher.update((entry.bytes.len() as u64).to_be_bytes());
+        hasher.update(&entry.bytes);
     }
     hasher.finalize().into()
 }
@@ -1554,6 +1691,7 @@ fn compute_catalog_hash(entries: &[(PathBuf, String)]) -> [u8; 32] {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -1875,6 +2013,32 @@ y = {mid_y}
     }
 
     #[test]
+    fn malformed_socket_width_and_aperture_clearance() {
+        let cases = [
+            "[[sockets]]\nid = \"s\"\nanchor = { layer = 0, x = 1, y = 0 }\ndirection = \"north\"\nwidth = 0\nrole = \"corridor\"\n",
+            "[[sockets]]\nid = \"s\"\nanchor = { layer = 0, x = 1, y = 0 }\ndirection = \"north\"\nwidth = 3\nrole = \"corridor\"\n",
+        ];
+        for (index, extra) in cases.iter().enumerate() {
+            let dir = temp_dir();
+            let content = format!(
+                "format_version = 1\nid = \"socket-{index}\"\nrotations = [0]\n[[layers]]\nrows = [\"###\",\"#.#\",\"###\"]\n{extra}"
+            );
+            write_prefab(dir.path(), "bad.toml", &content);
+            let error = PrefabCatalog::load(dir.path()).unwrap_err();
+            assert!(matches!(
+                error.reason_code(),
+                "socket_width_zero" | "socket_width_exceeds_boundary"
+            ));
+        }
+
+        let dir = temp_dir();
+        let blocked = "format_version = 1\nid = \"blocked\"\nrotations = [0]\n[[layers]]\nrows = [\"#.\",\"##\"]\n[[sockets]]\nid = \"s\"\nanchor = { layer = 0, x = 1, y = 0 }\ndirection = \"north\"\nwidth = 1\nrole = \"corridor\"\n";
+        write_prefab(dir.path(), "bad.toml", blocked);
+        let error = PrefabCatalog::load(dir.path()).unwrap_err();
+        assert_eq!(error.reason_code(), "socket_inward_blocked");
+    }
+
+    #[test]
     fn malformed_bad_marker() {
         let dir = temp_dir();
         let extra = "[[markers]]\nid = \"m\"\nposition = { layer = 0, x = 99, y = 99 }\nfacing = \"north\"\nkind = \"prop\"\n";
@@ -1888,6 +2052,21 @@ y = {mid_y}
         let extra = "[[reservations]]\nowner = \"self\"\nkind = \"footprint\"\ncells = [{ layer = 0, x = 1, y = 1 }]\n[[reservations]]\nowner = \"other\"\nkind = \"footprint\"\ncells = [{ layer = 0, x = 1, y = 1 }]\n";
         write_prefab(dir.path(), "bad.toml", &simple_toml("overlap", extra));
         assert!(PrefabCatalog::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn malformed_unknown_reservation_owner_and_cross_kind_id_collision() {
+        let dir = temp_dir();
+        let unknown_owner = "format_version = 1\nid = \"owner\"\nrotations = [0]\n[[layers]]\nrows = [\"###\",\"#.#\",\"###\"]\n[[reservations]]\nowner = \"missing\"\nkind = \"footprint\"\ncells = [{ layer = 0, x = 1, y = 1 }]\n";
+        write_prefab(dir.path(), "bad.toml", unknown_owner);
+        let error = PrefabCatalog::load(dir.path()).unwrap_err();
+        assert_eq!(error.reason_code(), "reservation_owner_not_found");
+
+        let dir = temp_dir();
+        let duplicate = "format_version = 1\nid = \"ids\"\nrotations = [0]\n[[layers]]\nrows = [\"#.\",\"#.\"]\n[[sockets]]\nid = \"shared\"\nanchor = { layer = 0, x = 1, y = 0 }\ndirection = \"north\"\nwidth = 1\nrole = \"corridor\"\n[[markers]]\nid = \"shared\"\nposition = { layer = 0, x = 1, y = 1 }\nfacing = \"north\"\nkind = \"prop\"\n";
+        write_prefab(dir.path(), "bad.toml", duplicate);
+        let error = PrefabCatalog::load(dir.path()).unwrap_err();
+        assert_eq!(error.reason_code(), "duplicate_component_id");
     }
 
     #[test]
@@ -2034,6 +2213,20 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
         let v = &cat.variants()[0];
         assert_eq!(v.transitions.len(), 1);
         assert_eq!(v.transitions[0].id, "ramp-north");
+    }
+
+    #[test]
+    fn ramp_upper_opening_requires_void_above_all_three_substeps() {
+        let assets_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs");
+        let content = fs::read_to_string(assets_root.join("ramp-hub-straight.toml")).unwrap();
+        let malformed = content.replacen("#___#", "#_._#", 1);
+        let dir = temp_dir();
+        write_prefab(dir.path(), "bad.toml", &malformed);
+        let error = PrefabCatalog::load(dir.path()).unwrap_err();
+        assert!(matches!(
+            error.reason_code(),
+            "reservation_wrong_tile" | "transition_upper_opening_not_void"
+        ));
     }
 
     #[test]
@@ -2219,6 +2412,88 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
         }
     }
 
+    #[test]
+    fn catalog_hash_matches_canonical_framing_golden() {
+        let entries = vec![CatalogFile {
+            relative_path: "a.toml".to_owned(),
+            bytes: b"abc".to_vec(),
+        }];
+        assert_eq!(
+            lowercase_hex(&compute_catalog_hash(&entries)),
+            "8f20ad22edd7c0ccfbb9434599161cec52387a1da3b42a23e1fa6f1168044ccc"
+        );
+    }
+
+    #[test]
+    fn legacy_grid_tokens_are_rejected() {
+        for token in ["S", "M", "L"] {
+            let dir = temp_dir();
+            let toml = format!(
+                "format_version = 1\nid = \"legacy-{token}\"\n[[layers]]\nrows = [\"{token}\"]\nrotations = [0]\n"
+            );
+            write_prefab(dir.path(), "bad.toml", &toml);
+            assert!(PrefabCatalog::load(dir.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_layer_and_reservation_classes_are_rejected_without_panicking() {
+        let cases = [
+            "format_version = 1\nid = \"layers\"\nlayer_count = 2\n[[layers]]\nrows = [\".\"]\nrotations = [0]\n",
+            "format_version = 1\nid = \"box\"\n[[layers]]\nrows = [\".\"]\nrotations = [0]\n[[reservations]]\nowner = \"self\"\nkind = \"footprint\"\nbox = { layer = 0, x_min = 0, y_min = 0, x_max = 65535, y_max = 65535 }\n",
+            "format_version = 1\nid = \"wall\"\n[[layers]]\nrows = [\".\"]\nrotations = [0]\n[[reservations]]\nowner = \"self\"\nkind = \"wall_shell\"\ncells = [{ layer = 0, x = 0, y = 0 }]\n",
+            "format_version = 1\nid = \"opening\"\n[[layers]]\nrows = [\".\"]\nrotations = [0]\n[[reservations]]\nowner = \"self\"\nkind = \"upper_opening\"\ncells = [{ layer = 0, x = 0, y = 0 }]\n",
+            "format_version = 1\nid = \"landing\"\n[[layers]]\nrows = [\"#\"]\nrotations = [0]\n[[reservations]]\nowner = \"self\"\nkind = \"upper_landing\"\ncells = [{ layer = 0, x = 0, y = 0 }]\n",
+            "format_version = 1\nid = \"approach\"\n[[layers]]\nrows = [\"#\"]\nrotations = [0]\n[[reservations]]\nowner = \"self\"\nkind = \"corridor_approach\"\ncells = [{ layer = 0, x = 0, y = 0 }]\n",
+        ];
+        for (index, content) in cases.iter().enumerate() {
+            let dir = temp_dir();
+            write_prefab(dir.path(), &format!("bad-{index}.toml"), content);
+            let result = std::panic::catch_unwind(|| PrefabCatalog::load(dir.path()));
+            assert!(result.is_ok(), "malformed input panicked: {index}");
+            assert!(result.unwrap().is_err(), "malformed input loaded: {index}");
+        }
+    }
+
+    #[test]
+    fn wide_socket_rotation_normalizes_aperture_anchor() {
+        let socket = Socket {
+            id: "wide".to_owned(),
+            anchor: Cell { layer: 0, x: 1, y: 0 },
+            direction: Direction::North,
+            width: 2,
+            role: SocketRole::Hall,
+        };
+        let rotated = rotate_socket(&socket, 5, 3, 2);
+        assert_eq!(rotated.direction, Direction::South);
+        assert_eq!(rotated.anchor, Cell { layer: 0, x: 2, y: 2 });
+        assert_eq!(rotated.width, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_rejected_without_absolute_host_paths_in_errors() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir();
+        let outside = temp_dir();
+        write_prefab(outside.path(), "outside.toml", &basic_room_toml("outside", 3, 3));
+        symlink(outside.path().join("outside.toml"), dir.path().join("linked.toml")).unwrap();
+        let error = PrefabCatalog::load(dir.path()).unwrap_err();
+        let rendered = error.to_string();
+        assert_eq!(error.reason_code(), "symlink_rejected");
+        assert!(rendered.contains("context=linked.toml"));
+        assert!(!rendered.contains(&dir.path().display().to_string()));
+        assert!(!rendered.contains(&outside.path().display().to_string()));
+    }
+
+    #[test]
+    fn lexical_path_escape_is_rejected() {
+        let root = Path::new("catalog");
+        let error = catalog_relative_path(root, Path::new("outside/file.toml")).unwrap_err();
+        assert_eq!(error.reason_code(), "path_escape");
+    }
+
     // ── Asset validation ──────────────────────────────────────────────
 
     #[test]
@@ -2231,7 +2506,30 @@ rotations = [0]\norigin = { x = 1, y = 2 }\n\
         let cat = PrefabCatalog::load(&assets_root).unwrap();
         // We expect exactly 8 base prefabs
         let base_ids: BTreeSet<&str> = cat.variants().iter().map(|v| v.base_id.as_str()).collect();
-        assert_eq!(base_ids.len(), 8, "expected 8 distinct prefab IDs, got {:?}", base_ids);
+        let expected: BTreeSet<&str> = [
+            "small-room-square",
+            "small-room-offset",
+            "major-hall",
+            "doorway-arch",
+            "junction-cross",
+            "dead-end-reward-nook",
+            "ramp-hub-straight",
+            "ramp-hub-turn",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(base_ids, expected);
+        let small_shapes: BTreeSet<(u16, u16)> = cat
+            .variants()
+            .iter()
+            .filter(|variant| {
+                variant.rotation_degrees == 0
+                    && (variant.base_id == "small-room-square"
+                        || variant.base_id == "small-room-offset")
+            })
+            .map(|variant| (variant.width, variant.height))
+            .collect();
+        assert_eq!(small_shapes.len(), 2, "small rooms must be distinct assets");
         // Every variant must have the tags from its base prefab
         for v in cat.variants() {
             assert!(!v.tags.is_empty(), "variant {} rotation={} has no tags", v.base_id, v.rotation_degrees);

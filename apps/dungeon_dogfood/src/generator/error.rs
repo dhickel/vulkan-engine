@@ -1,12 +1,15 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ErrorStage {
+pub(crate) enum ErrorStage {
     Configuration,
     CanonicalConfiguration,
     Rng,
     Diagnostics,
     Prefab,
+    Placement,
+    Topology,
+    Ir,
 }
 
 impl ErrorStage {
@@ -17,12 +20,15 @@ impl ErrorStage {
             Self::Rng => "rng",
             Self::Diagnostics => "diagnostics",
             Self::Prefab => "prefab",
+            Self::Placement => "placement",
+            Self::Topology => "topology",
+            Self::Ir => "ir",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum GeneratorError {
+pub(crate) enum GeneratorError {
     UnsupportedConfiguration {
         stage: ErrorStage,
         reason: &'static str,
@@ -53,6 +59,27 @@ pub(super) enum GeneratorError {
         context: String,
         reason: &'static str,
     },
+    PlacementExhausted {
+        stage: ErrorStage,
+        reason: &'static str,
+        attempted: u64,
+        placed: u64,
+        target: u64,
+    },
+    TopologyInfeasible {
+        stage: ErrorStage,
+        constraint: &'static str,
+        required: u64,
+        available: u64,
+    },
+    IrInvariant {
+        stage: ErrorStage,
+        detail: String,
+    },
+    OccupancyConflict {
+        stage: ErrorStage,
+        detail: String,
+    },
 }
 
 impl GeneratorError {
@@ -63,18 +90,25 @@ impl GeneratorError {
             | Self::MandatoryInfeasibility { stage, .. }
             | Self::InvalidRngRange { stage, .. }
             | Self::CanonicalSerialization { stage, .. }
-            | Self::PrefabIntegrity { stage, .. } => *stage,
+            | Self::PrefabIntegrity { stage, .. }
+            | Self::PlacementExhausted { stage, .. }
+            | Self::TopologyInfeasible { stage, .. }
+            | Self::IrInvariant { stage, .. }
+            | Self::OccupancyConflict { stage, .. } => *stage,
         }
     }
 
-    pub(super) const fn reason_code(&self) -> &'static str {
+    pub(super) fn reason_code(&self) -> &str {
         match self {
             Self::UnsupportedConfiguration { reason, .. }
             | Self::InvalidRngRange { reason, .. }
             | Self::CanonicalSerialization { reason, .. }
-            | Self::PrefabIntegrity { reason, .. } => reason,
+            | Self::PrefabIntegrity { reason, .. }
+            | Self::PlacementExhausted { reason, .. } => reason,
             Self::ArithmeticOverflow { operation, .. } => operation,
-            Self::MandatoryInfeasibility { constraint, .. } => constraint,
+            Self::MandatoryInfeasibility { constraint, .. }
+            | Self::TopologyInfeasible { constraint, .. } => constraint,
+            Self::IrInvariant { detail, .. } | Self::OccupancyConflict { detail, .. } => detail.as_str(),
         }
     }
 }
@@ -122,6 +156,26 @@ impl fmt::Display for GeneratorError {
                 "generator error stage={} context={} reason={}",
                 stage.code(), context, reason
             ),
+            Self::PlacementExhausted { stage, reason, attempted, placed, target } => write!(
+                f,
+                "generator error stage={} reason={} attempted={} placed={} target={}",
+                stage.code(), reason, attempted, placed, target
+            ),
+            Self::TopologyInfeasible { stage, constraint, required, available } => write!(
+                f,
+                "generator error stage={} constraint={} required={} available={}",
+                stage.code(), constraint, required, available
+            ),
+            Self::IrInvariant { stage, detail } => write!(
+                f,
+                "generator error stage={} detail={}",
+                stage.code(), detail
+            ),
+            Self::OccupancyConflict { stage, detail } => write!(
+                f,
+                "generator error stage={} detail={}",
+                stage.code(), detail
+            ),
         }
     }
 }
@@ -164,6 +218,27 @@ mod tests {
                 stage: ErrorStage::Prefab,
                 context: "small-room-square".into(),
                 reason: "invalid_token",
+            },
+            GeneratorError::PlacementExhausted {
+                stage: ErrorStage::Placement,
+                reason: "grid_exhausted",
+                attempted: 10,
+                placed: 5,
+                target: 20,
+            },
+            GeneratorError::TopologyInfeasible {
+                stage: ErrorStage::Topology,
+                constraint: "spine_distance",
+                required: 100,
+                available: 50,
+            },
+            GeneratorError::IrInvariant {
+                stage: ErrorStage::Ir,
+                detail: "duplicate_region_id".into(),
+            },
+            GeneratorError::OccupancyConflict {
+                stage: ErrorStage::Placement,
+                detail: "reservation_overlap self region_0".into(),
             },
         ];
         for error in errors {
