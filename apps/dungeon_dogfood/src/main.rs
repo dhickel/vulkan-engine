@@ -21,6 +21,7 @@ use engine::frame::{FixedStepClock, FixedStepConfig, FrameClock};
 use engine::input::{
     ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
 };
+use generator::{generate, GeneratorConfig, GeneratorError};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
 use mesh_collider_bridge::MeshColliderBridge;
 use physics::BodyKind;
@@ -31,7 +32,7 @@ use renderer::prelude::{
     AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
 };
 use renderer::{FrameRenderOutcome, RendererConfig, RendererError};
-use scene_seed::{renderer_visual_tuning, LevelScene};
+use scene_seed::{renderer_visual_tuning, LevelScene, SceneSeedError};
 use thiserror::Error;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -39,8 +40,13 @@ use winit::keyboard::KeyCode;
 use winit::window::WindowBuilder;
 
 const APP_WINDOW_TITLE: &str = "Dungeon Dogfood - Phase 07";
-const DEFAULT_LEVEL_ID: &str = LEVEL_01_PATH;
+const GENERATED_SELECTOR: &str = "generated_sprawl";
+const DEFAULT_LEVEL_ID: &str = GENERATED_SELECTOR;
 const LEVEL_SELECT_ENV: &str = "DUNGEON_DOGFOOD_LEVEL";
+const GENERATOR_SEED_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_SEED";
+const GENERATOR_WIDTH_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_WIDTH";
+const GENERATOR_HEIGHT_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_HEIGHT";
+const GENERATOR_LAYERS_ENV: &str = "DUNGEON_DOGFOOD_GENERATOR_LAYERS";
 const LEVEL_01_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_01.txt";
 const LEVEL_02_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_02_ramps.txt";
 const LEVEL_03_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_03_lighting.txt";
@@ -136,6 +142,10 @@ impl HeadlessOptions {
                 "--level" => {
                     i += 2;
                 }
+                // Skip --seed and its value.
+                "--seed" => {
+                    i += 2;
+                }
                 "--validate-colliders" => {
                     opts.validate_colliders = true;
                     i += 1;
@@ -159,6 +169,8 @@ fn main() {
         eprintln!("{err}");
         if matches!(err, AppError::LevelLoad { .. }) {
             print_level_load_help();
+        } else if matches!(err, AppError::GeneratedLevel { .. }) {
+            print_generated_level_help();
         }
         std::process::exit(1);
     }
@@ -185,6 +197,12 @@ enum AppError {
     RendererInit(#[source] RendererError),
     #[error("failed to seed level scene before entering event loop: {0}")]
     SceneSeed(#[from] scene_seed::SceneSeedError),
+    #[error("failed to generate level (seed={seed}): {source}")]
+    GeneratedLevel {
+        seed: u64,
+        #[source]
+        source: GeneratorError,
+    },
 }
 
 fn run() -> Result<(), AppError> {
@@ -683,6 +701,13 @@ fn seed_collider_bridge(
 struct LevelSelection {
     label: String,
     path: PathBuf,
+    source: LevelSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LevelSource {
+    Generated(u64),
+    Authored(PathBuf),
 }
 
 struct LoadedLevel {
@@ -701,11 +726,24 @@ fn selected_level() -> LevelSelection {
         }
     }
 
+    // Default: generated with seed 0.
     resolve_level_selector(DEFAULT_LEVEL_ID)
 }
 
 fn resolve_level_selector(selector: impl AsRef<str>) -> LevelSelection {
     let selector = selector.as_ref().trim();
+
+    // Exact generated_sprawl → generated with CLI seed or env seed or 0.
+    if selector == GENERATED_SELECTOR {
+        let seed = parse_seed_arg().unwrap_or_else(|| {
+            read_env_u64(GENERATOR_SEED_ENV).unwrap_or(0)
+        });
+        return LevelSelection {
+            label: GENERATED_SELECTOR.to_string(),
+            path: PathBuf::from(GENERATED_SELECTOR),
+            source: LevelSource::Generated(seed),
+        };
+    }
 
     let (label, path) = match selector {
         "level_01" | "level_01.txt" | LEVEL_01_PATH => ("level_01", LEVEL_01_PATH),
@@ -721,20 +759,56 @@ fn resolve_level_selector(selector: impl AsRef<str>) -> LevelSelection {
     LevelSelection {
         label: label.to_string(),
         path: PathBuf::from(path),
+        source: LevelSource::Authored(PathBuf::from(path)),
     }
 }
 
 fn load_selected_level(selection: &LevelSelection) -> Result<LoadedLevel, AppError> {
-    let resolved_level_path = resolve_content_path(&selection.path);
-    let level = load_level_file(&resolved_level_path).map_err(|source| AppError::LevelLoad {
-        selection: selection.clone(),
-        source,
-    })?;
+    match &selection.source {
+        LevelSource::Generated(seed) => {
+            let config = build_generator_config();
+            let catalog = generator::prefab::PrefabCatalog::load(
+                &std::path::PathBuf::from("apps/dungeon_dogfood/assets/prefabs"),
+            )
+            .map_err(|source| AppError::GeneratedLevel {
+                seed: *seed,
+                source,
+            })?;
 
-    Ok(LoadedLevel {
-        level,
-        source_description: resolved_level_path.display().to_string(),
-    })
+            let result = generate(config, &catalog, *seed).map_err(|source| {
+                AppError::GeneratedLevel {
+                    seed: *seed,
+                    source,
+                }
+            })?;
+
+            let source_description = format!(
+                "generated sprawl (seed={} config_hash={} lights={} models={})",
+                result.seed,
+                &crate::generator::determinism::lowercase_hex(&catalog.identity_bytes())[..16],
+                result.level.light_markers.len(),
+                result.level.model_markers.len(),
+            );
+
+            Ok(LoadedLevel {
+                level: result.level,
+                source_description,
+            })
+        }
+        LevelSource::Authored(path) => {
+            let resolved_level_path = resolve_content_path(path);
+            let level =
+                load_level_file(&resolved_level_path).map_err(|source| AppError::LevelLoad {
+                    selection: selection.clone(),
+                    source,
+                })?;
+
+            Ok(LoadedLevel {
+                level,
+                source_description: resolved_level_path.display().to_string(),
+            })
+        }
+    }
 }
 
 fn parse_level_arg() -> Option<String> {
@@ -749,17 +823,80 @@ fn parse_level_arg() -> Option<String> {
             eprintln!("--level requires a path argument");
             std::process::exit(1);
         }
-
+        // Skip --seed and its value.
+        if args[i] == "--seed" {
+            i += 2;
+            continue;
+        }
         i += 1;
     }
 
     None
 }
 
+fn parse_seed_arg() -> Option<u64> {
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+
+    while i < args.len() {
+        if args[i] == "--seed" {
+            if let Some(value) = args.get(i + 1) {
+                return Some(value.parse().unwrap_or_else(|_| {
+                    eprintln!("--seed expects a non-negative integer");
+                    std::process::exit(1);
+                }));
+            }
+            eprintln!("--seed requires a value");
+            std::process::exit(1);
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn read_env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok().and_then(|v| {
+        let v = v.trim();
+        if v.is_empty() {
+            None
+        } else {
+            v.parse().ok()
+        }
+    })
+}
+
+fn build_generator_config() -> GeneratorConfig {
+    let mut config = GeneratorConfig::default();
+    if let Some(w) = read_env_u64(GENERATOR_WIDTH_ENV) {
+        config.width = Some(w);
+    }
+    if let Some(h) = read_env_u64(GENERATOR_HEIGHT_ENV) {
+        config.height = Some(h);
+    }
+    if let Some(l) = read_env_u64(GENERATOR_LAYERS_ENV) {
+        config.layers = Some(l);
+    }
+    config
+}
+
+fn print_generated_level_help() {
+    eprintln!();
+    eprintln!("Generated level selection:");
+    eprintln!("  --level {}  (or no argument — default)", GENERATED_SELECTOR);
+    eprintln!("  --seed <N>            Override generation seed");
+    eprintln!();
+    eprintln!("Generator environment overrides (generated only):");
+    eprintln!("  {}=<N>   Seed (default: 0)", GENERATOR_SEED_ENV);
+    eprintln!("  {}=<N>   Width (default: 96)", GENERATOR_WIDTH_ENV);
+    eprintln!("  {}=<N>   Height (default: 96)", GENERATOR_HEIGHT_ENV);
+    eprintln!("  {}=<N>   Layers (default: 3)", GENERATOR_LAYERS_ENV);
+}
+
 fn print_level_load_help() {
     eprintln!();
     eprintln!("Built-in level selectors:");
-    eprintln!("  {}", DEFAULT_LEVEL_ID);
+    eprintln!("  {}", GENERATED_SELECTOR);
     eprintln!("  level_01");
     eprintln!("  level_02_ramps");
     eprintln!("  level_03_lighting");
@@ -1138,7 +1275,8 @@ mod tests {
     #[test]
     fn resolve_level_01_path_as_default() {
         let selection = resolve_level_selector(DEFAULT_LEVEL_ID);
-        assert_eq!(selection.label, "level_01");
+        assert_eq!(selection.label, "generated_sprawl");
+        assert!(matches!(selection.source, LevelSource::Generated(_)));
     }
 
     #[test]

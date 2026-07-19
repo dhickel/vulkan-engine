@@ -169,11 +169,16 @@ impl PropSpec {
         if !self.yaw_degrees.is_finite() {
             return None;
         }
-        Some(PropPlacementEnvelope {
+        let envelope = PropPlacementEnvelope {
             half_extents_local: local,
             scale: self.scale,
             yaw_degrees: self.yaw_degrees,
-        })
+        };
+        envelope
+            .world_half_extents()
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(envelope)
     }
 }
 
@@ -382,6 +387,14 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
                 pack_path,
                 format!("{key}.yaw_degrees"),
                 "yaw_degrees must be finite",
+            ));
+        }
+
+        if prop.placement_envelope().is_none() {
+            return Err(validation_err(
+                pack_path,
+                format!("{key}.placement_half_extents"),
+                "transformed placement envelope must remain finite",
             ));
         }
 
@@ -761,6 +774,34 @@ y_offset = 0.0
             LightPresetId::Warm,
         ];
         assert_eq!(sequence, expected);
+    }
+
+    #[test]
+    fn transformed_prop_envelope_overflow_is_rejected() {
+        let canonical = include_str!("../assets/content_pack.toml");
+        let broken = canonical
+            .replacen(
+                "scale = [1.0, 1.0, 1.0]",
+                "scale = [3.0e38, 1.0, 3.0e38]",
+                1,
+            )
+            .replacen(
+                "placement_half_extents = [0.3, 0.5, 0.3]",
+                "placement_half_extents = [3.0e38, 0.5, 3.0e38]",
+                1,
+            );
+        let temp = write_temp_toml(&broken);
+
+        let err = load_content_pack(&temp).expect_err("overflowing envelope should fail");
+        match err {
+            ContentError::Validation { key, message, .. } => {
+                assert_eq!(key, "props[0].placement_half_extents");
+                assert!(message.contains("remain finite"));
+            }
+            other => panic!("expected validation error, got {other:?}"),
+        }
+
+        let _ = fs::remove_file(temp);
     }
 
     #[test]

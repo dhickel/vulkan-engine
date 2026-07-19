@@ -29,12 +29,16 @@ const LOCKED_IBL_AMBIENT_SCALE: f32 = 0.45;
 const LOCKED_POINT_LIGHT_INTENSITY: f32 = 30.0;
 const LOCKED_POINT_LIGHT_RANGE: f32 = 6.0;
 
+const MAX_POINT_LIGHTS: usize = 16;
+
 #[derive(Debug, Error)]
 pub enum SceneSeedError {
     #[error("asset error: {0}")]
     Asset(#[from] renderer::AssetError),
     #[error("scene error: {0}")]
     Scene(#[from] renderer::SceneError),
+    #[error("point light budget exceeded: {count} markers, limit is {limit}")]
+    PointLightBudgetExceeded { count: usize, limit: usize },
 }
 
 /// A mesh handle paired with its assigned collider policy.
@@ -194,6 +198,14 @@ impl LevelScene {
         };
 
         // Spawn point lights from markers using deterministic 7/2/1 preset mapping.
+        // Transactional preflight: check count before creating any light.
+        if level.light_markers.len() > MAX_POINT_LIGHTS {
+            return Err(SceneSeedError::PointLightBudgetExceeded {
+                count: level.light_markers.len(),
+                limit: MAX_POINT_LIGHTS,
+            });
+        }
+
         let mut light_ids = Vec::with_capacity(level.light_markers.len());
         for (marker_idx, &TileCoord { layer, x, y }) in level.light_markers.iter().enumerate() {
             let preset_id = light_preset_for_marker_index(marker_idx);

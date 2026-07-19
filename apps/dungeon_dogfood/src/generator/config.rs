@@ -15,7 +15,7 @@ const CONFIG_FORMAT_TAG: &[u8] = b"dungeon-generator/config/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum QualifiedProfile {
+pub enum QualifiedProfile {
     Minimum,
     Primary,
     Maximum,
@@ -50,61 +50,61 @@ impl Qualification {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct GeneratorConfig {
-    pub(super) profile: Option<QualifiedProfile>,
-    pub(super) width: Option<u64>,
-    pub(super) height: Option<u64>,
-    pub(super) layers: Option<u64>,
-    pub(super) single_bottleneck: bool,
-    pub(super) relax_route_redundancy: bool,
-    pub(super) relax_transition_redundancy: bool,
-    pub(super) region_min: Option<u32>,
-    pub(super) region_max: Option<u32>,
-    pub(super) required_route_min: Option<u32>,
-    pub(super) required_route_max: Option<u32>,
-    pub(super) per_layer_cycles_min: Option<u32>,
-    pub(super) per_layer_cycles_max: Option<u32>,
-    pub(super) branch_depth_min: Option<u32>,
-    pub(super) branch_depth_max: Option<u32>,
-    pub(super) articulation_max: Option<u32>,
-    pub(super) intentional_dead_ends_min: Option<u32>,
-    pub(super) intentional_dead_ends_max: Option<u32>,
-    pub(super) optional_mergers_max: Option<u32>,
-    pub(super) optional_shortcuts_max: Option<u32>,
-    pub(super) crossings_max: Option<u32>,
-    pub(super) components_max: Option<u32>,
-    pub(super) edge_disjoint_routes: Option<u32>,
-    pub(super) transitions_per_adjacent_pair: Option<u32>,
-    pub(super) corridor_width: Option<u32>,
-    pub(super) hall_width: Option<u32>,
-    pub(super) spacing: Option<u32>,
-    pub(super) placement_attempts: Option<u32>,
-    pub(super) routing_attempts: Option<u32>,
-    pub(super) generation_attempts: Option<u32>,
-    pub(super) reroute_budget: Option<u32>,
-    pub(super) marker_relocation_budget: Option<u32>,
-    pub(super) optional_edge_removal_budget: Option<u32>,
-    pub(super) ordinary_prefab_ratio_numerator: Option<u32>,
-    pub(super) ordinary_prefab_ratio_denominator: Option<u32>,
-    pub(super) model_marker_cap: Option<u32>,
-    pub(super) max_lights: Option<u32>,
-    pub(super) max_chunks: Option<u32>,
-    pub(super) max_static_bodies: Option<u32>,
-    pub(super) max_total_bodies: Option<u32>,
-    pub(super) max_vertices: Option<u32>,
-    pub(super) max_indices: Option<u32>,
-    pub(super) max_tiles: Option<u32>,
+pub struct GeneratorConfig {
+    pub profile: Option<QualifiedProfile>,
+    pub width: Option<u64>,
+    pub height: Option<u64>,
+    pub layers: Option<u64>,
+    pub single_bottleneck: bool,
+    pub relax_route_redundancy: bool,
+    pub relax_transition_redundancy: bool,
+    pub region_min: Option<u32>,
+    pub region_max: Option<u32>,
+    pub required_route_min: Option<u32>,
+    pub required_route_max: Option<u32>,
+    pub per_layer_cycles_min: Option<u32>,
+    pub per_layer_cycles_max: Option<u32>,
+    pub branch_depth_min: Option<u32>,
+    pub branch_depth_max: Option<u32>,
+    pub articulation_max: Option<u32>,
+    pub intentional_dead_ends_min: Option<u32>,
+    pub intentional_dead_ends_max: Option<u32>,
+    pub optional_mergers_max: Option<u32>,
+    pub optional_shortcuts_max: Option<u32>,
+    pub crossings_max: Option<u32>,
+    pub components_max: Option<u32>,
+    pub edge_disjoint_routes: Option<u32>,
+    pub transitions_per_adjacent_pair: Option<u32>,
+    pub corridor_width: Option<u32>,
+    pub hall_width: Option<u32>,
+    pub spacing: Option<u32>,
+    pub placement_attempts: Option<u32>,
+    pub routing_attempts: Option<u32>,
+    pub generation_attempts: Option<u32>,
+    pub reroute_budget: Option<u32>,
+    pub marker_relocation_budget: Option<u32>,
+    pub optional_edge_removal_budget: Option<u32>,
+    pub ordinary_prefab_ratio_numerator: Option<u32>,
+    pub ordinary_prefab_ratio_denominator: Option<u32>,
+    pub model_marker_cap: Option<u32>,
+    pub max_lights: Option<u32>,
+    pub max_chunks: Option<u32>,
+    pub max_static_bodies: Option<u32>,
+    pub max_total_bodies: Option<u32>,
+    pub max_vertices: Option<u32>,
+    pub max_indices: Option<u32>,
+    pub max_tiles: Option<u32>,
 }
 
 impl GeneratorConfig {
-    pub(super) fn qualified(profile: QualifiedProfile) -> Self {
+    pub fn qualified(profile: QualifiedProfile) -> Self {
         Self {
             profile: Some(profile),
             ..Self::default()
         }
     }
 
-    pub(super) fn custom(width: u64, height: u64, layers: u64) -> Self {
+    pub fn custom(width: u64, height: u64, layers: u64) -> Self {
         Self {
             width: Some(width),
             height: Some(height),
@@ -113,7 +113,7 @@ impl GeneratorConfig {
         }
     }
 
-    pub(super) fn normalize(&self) -> Result<NormalizedGeneratorConfig, GeneratorError> {
+    pub fn normalize(&self) -> Result<NormalizedGeneratorConfig, GeneratorError> {
         NormalizedGeneratorConfig::from_raw(self)
     }
 }

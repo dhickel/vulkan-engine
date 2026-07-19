@@ -1,7 +1,7 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ErrorStage {
+pub enum ErrorStage {
     Configuration,
     CanonicalConfiguration,
     Rng,
@@ -30,7 +30,7 @@ impl ErrorStage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GeneratorError {
+pub enum GeneratorError {
     UnsupportedConfiguration {
         stage: ErrorStage,
         reason: &'static str,
@@ -133,7 +133,7 @@ pub(crate) enum GeneratorError {
 }
 
 impl GeneratorError {
-    pub(super) const fn stage(&self) -> ErrorStage {
+    pub fn stage(&self) -> ErrorStage {
         match self {
             Self::UnsupportedConfiguration { stage, .. }
             | Self::ArithmeticOverflow { stage, .. }
@@ -157,7 +157,7 @@ impl GeneratorError {
         }
     }
 
-    pub(super) fn reason_code(&self) -> &str {
+    pub fn reason_code(&self) -> &str {
         match self {
             Self::UnsupportedConfiguration { reason, .. }
             | Self::InvalidRngRange { reason, .. }

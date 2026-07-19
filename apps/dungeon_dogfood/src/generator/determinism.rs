@@ -25,7 +25,7 @@ fn digest(parts: &[&[u8]]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-pub(super) fn lowercase_hex(bytes: &[u8]) -> String {
+pub fn lowercase_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {

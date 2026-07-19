@@ -1493,7 +1493,7 @@ struct CatalogFile {
 }
 
 #[derive(Debug)]
-pub(crate) struct PrefabCatalog {
+pub struct PrefabCatalog {
     identity_hex: String,
     identity_bytes: [u8; 32],
     variants: Vec<PrefabVariant>,
@@ -1501,7 +1501,7 @@ pub(crate) struct PrefabCatalog {
 }
 
 impl PrefabCatalog {
-    pub(crate) fn load(root: &Path) -> Result<Self, GeneratorError> {
+    pub fn load(root: &Path) -> Result<Self, GeneratorError> {
         let root_metadata = fs::symlink_metadata(root)
             .map_err(|_| prefab_err("catalog_root", "metadata_failed"))?;
         if root_metadata.file_type().is_symlink() {
@@ -1587,7 +1587,7 @@ impl PrefabCatalog {
         })
     }
 
-    pub(crate) fn identity_bytes(&self) -> [u8; 32] {
+    pub fn identity_bytes(&self) -> [u8; 32] {
         self.identity_bytes
     }
 
