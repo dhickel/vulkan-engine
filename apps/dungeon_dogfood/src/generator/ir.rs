@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::config::NormalizedGeneratorConfig;
 use super::error::{ErrorStage, GeneratorError};
@@ -91,12 +90,23 @@ impl GridCoord {
 
     /// Reconstruct from flat index: `layer = idx / (w*h)`, `remainder = idx % (w*h)`,
     /// `y = remainder / w`, `x = remainder % w`.
+    /// Returns error on out-of-range or zero-dimension.
     pub(super) fn from_flat_index(
         idx: usize,
         width: u16,
         height: u16,
         layers: u16,
     ) -> Result<Self, GeneratorError> {
+        // Guard against zero dimensions which would cause division by zero.
+        if width == 0 || height == 0 || layers == 0 {
+            return Err(GeneratorError::IrInvariant {
+                stage: ErrorStage::Ir,
+                detail: format!(
+                    "from_flat_index_zero_dimensions w={} h={} l={}",
+                    width, height, layers
+                ),
+            });
+        }
         let idx = u64::try_from(idx).map_err(|_| GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Ir,
             operation: "grid_index_u64_convert",
@@ -107,6 +117,7 @@ impl GridCoord {
             stage: ErrorStage::Ir,
             operation: "grid_index_layer_dim_inverse",
         })?;
+        // The division by layer_dim is safe because layer_dim > 0 (width>0 && height>0).
         let max_idx = u64::from(layers)
             .checked_mul(layer_dim)
             .ok_or_else(|| GeneratorError::ArithmeticOverflow {
@@ -121,6 +132,7 @@ impl GridCoord {
         }
         let layer = (idx / layer_dim) as u16;
         let remainder = idx % layer_dim;
+        // Division by w is safe because w > 0 (width > 0 guarded above)
         let y = (remainder / w) as u16;
         let x = (remainder % w) as u16;
         Ok(Self { layer, x, y })
@@ -133,50 +145,141 @@ impl fmt::Display for GridCoord {
     }
 }
 
-// ─── Newtype ID generation ──────────────────────────────────────────────────
+// ─── Attempt-local ID allocator ─────────────────────────────────────────────
 
-macro_rules! define_id {
-    ($vis:vis struct $name:ident) => {
-        define_id!($vis struct $name => concat!(module_path!(), "::", stringify!($name)));
-    };
-    ($vis:vis struct $name:ident => $label:expr) => {
-        #[doc = concat!("Stable typed newtype ID for ", stringify!($name), ".")]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        $vis struct $name(pub(super) u32);
-
-        impl $name {
-            #[doc = concat!("Generate a new unique ", stringify!($name), ".")]
-            pub(super) fn new() -> Self {
-                static COUNTER: AtomicU32 = AtomicU32::new(0);
-                let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-                // Saturate at u32::MAX to avoid incrementing a newtype beyond
-                // its representation. Real generators will never exhaust this
-                // namespace — a generator must exceed 2³² regions before the
-                // panic guard trips; profiles are capped at 64 regions.
-                if id == u32::MAX {
-                    panic!("{} counter exhausted", $label);
-                }
-                Self(id)
-            }
-
-            /// Return the raw u32 value.
-            pub(super) const fn raw(self) -> u32 {
-                self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}({})", stringify!($name), self.0)
-            }
-        }
-    };
+/// An attempt-local checked allocator for typed IDs.
+/// No global atomics, no panics. Returns errors on overflow,
+/// which can never happen in practice with real profiles.
+#[derive(Debug, Clone)]
+pub(super) struct IdAllocator {
+    next_region: u32,
+    next_socket: u32,
+    next_edge: u32,
+    next_transition: u32,
 }
 
-define_id!(pub(super) struct RegionId);
-define_id!(pub(super) struct SocketId);
-define_id!(pub(super) struct EdgeId);
-define_id!(pub(super) struct TransitionId);
+impl IdAllocator {
+    /// Create a fresh allocator for a generation attempt.
+    pub(super) fn new() -> Self {
+        Self {
+            next_region: 0,
+            next_socket: 0,
+            next_edge: 0,
+            next_transition: 0,
+        }
+    }
+
+    pub(super) fn next_region(&mut self) -> Result<RegionId, GeneratorError> {
+        let id = self.next_region;
+        // Allow allocating u32::MAX; subsequent allocation returns error.
+        self.next_region = self.next_region.checked_add(1).ok_or_else(|| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "region_id_overflow",
+            }
+        })?;
+        Ok(RegionId(id))
+    }
+
+    pub(super) fn next_socket(&mut self) -> Result<SocketId, GeneratorError> {
+        let id = self.next_socket;
+        self.next_socket = self.next_socket.checked_add(1).ok_or_else(|| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "socket_id_overflow",
+            }
+        })?;
+        Ok(SocketId(id))
+    }
+
+    pub(super) fn next_edge(&mut self) -> Result<EdgeId, GeneratorError> {
+        let id = self.next_edge;
+        self.next_edge = self.next_edge.checked_add(1).ok_or_else(|| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "edge_id_overflow",
+            }
+        })?;
+        Ok(EdgeId(id))
+    }
+
+    pub(super) fn next_transition(&mut self) -> Result<TransitionId, GeneratorError> {
+        let id = self.next_transition;
+        self.next_transition = self.next_transition.checked_add(1).ok_or_else(|| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "transition_id_overflow",
+            }
+        })?;
+        Ok(TransitionId(id))
+    }
+}
+
+// ─── Newtype IDs ────────────────────────────────────────────────────────────
+
+/// Stable typed newtype ID for regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct RegionId(pub(super) u32);
+
+impl RegionId {
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for RegionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RegionId({})", self.0)
+    }
+}
+
+/// Stable typed newtype ID for sockets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct SocketId(pub(super) u32);
+
+impl SocketId {
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for SocketId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SocketId({})", self.0)
+    }
+}
+
+/// Stable typed newtype ID for edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct EdgeId(pub(super) u32);
+
+impl EdgeId {
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for EdgeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EdgeId({})", self.0)
+    }
+}
+
+/// Stable typed newtype ID for transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) struct TransitionId(pub(super) u32);
+
+impl TransitionId {
+    pub(super) const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for TransitionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TransitionId({})", self.0)
+    }
+}
 
 // ─── Region role ────────────────────────────────────────────────────────────
 
@@ -241,15 +344,15 @@ impl RegionRole {
 pub(super) enum OccupancyClass {
     /// Not yet occupied.
     Empty,
-    /// Reserved by a transition (transition ID). Transitions are immutable
+    /// Reserved by a transition (transition ID raw value). Transitions are immutable
     /// and always win over ordinary footprint claims.
     Transition(u32),
     /// Reserved by a placed region footprint.
-    Region(RegionId),
+    Region(u32),
     /// Reserved as a socket funnel / approach corridor approach.
-    Socket(SocketId),
+    Socket(u32),
     /// Spacing cushion around a placed footprint.
-    Spacing(RegionId),
+    Spacing(u32),
 }
 
 /// Occupancy grid tracking per-cell ownership across all layers.
@@ -265,14 +368,34 @@ pub(super) struct OccupancyGrid {
 }
 
 impl OccupancyGrid {
-    pub(super) fn new(width: u16, height: u16, layers: u16) -> Self {
-        let capacity = width as usize * height as usize * layers as usize;
-        Self {
+    /// Create a new occupancy grid. Returns error on overflow or zero dimensions.
+    pub(super) fn new(
+        width: u16,
+        height: u16,
+        layers: u16,
+    ) -> Result<Self, GeneratorError> {
+        if width == 0 || height == 0 || layers == 0 {
+            return Err(GeneratorError::IrInvariant {
+                stage: ErrorStage::Ir,
+                detail: format!(
+                    "occupancy_grid_zero_dimensions w={} h={} l={}",
+                    width, height, layers
+                ),
+            });
+        }
+        let capacity = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|v| v.checked_mul(layers as usize))
+            .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "occupancy_grid_capacity",
+            })?;
+        Ok(Self {
             width,
             height,
             layers,
             cells: vec![OccupancyClass::Empty; capacity],
-        }
+        })
     }
 
     #[allow(dead_code)]
@@ -313,6 +436,7 @@ impl OccupancyGrid {
     }
 
     /// Test whether a rectangle of cells is entirely `Empty`.
+    /// Uses checked arithmetic for coordinate additions.
     pub(super) fn is_rect_empty(
         &self,
         layer: u16,
@@ -323,7 +447,20 @@ impl OccupancyGrid {
     ) -> Result<bool, GeneratorError> {
         for dy in 0..h {
             for dx in 0..w {
-                let coord = GridCoord::new(layer, x + dx, y + dy, self.width, self.height, self.layers)?;
+                let cx = x.checked_add(dx).ok_or_else(|| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Ir,
+                        operation: "is_rect_empty_x_add",
+                    }
+                })?;
+                let cy = y.checked_add(dy).ok_or_else(|| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Ir,
+                        operation: "is_rect_empty_y_add",
+                    }
+                })?;
+                let coord =
+                    GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
                 if self.get(coord) != Some(OccupancyClass::Empty) {
                     return Ok(false);
                 }
@@ -333,7 +470,7 @@ impl OccupancyGrid {
     }
 
     /// Mark a rectangle as occupied, returning an error if any cell is
-    /// already non-Empty.
+    /// already non-Empty. Uses checked arithmetic.
     pub(super) fn reserve_rect(
         &mut self,
         layer: u16,
@@ -345,7 +482,20 @@ impl OccupancyGrid {
     ) -> Result<(), GeneratorError> {
         for dy in 0..h {
             for dx in 0..w {
-                let coord = GridCoord::new(layer, x + dx, y + dy, self.width, self.height, self.layers)?;
+                let cx = x.checked_add(dx).ok_or_else(|| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Ir,
+                        operation: "reserve_rect_x_add",
+                    }
+                })?;
+                let cy = y.checked_add(dy).ok_or_else(|| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Ir,
+                        operation: "reserve_rect_y_add",
+                    }
+                })?;
+                let coord =
+                    GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
                 let prev = self.get(coord);
                 if prev != Some(OccupancyClass::Empty) {
                     return Err(GeneratorError::OccupancyConflict {
@@ -360,7 +510,20 @@ impl OccupancyGrid {
         }
         for dy in 0..h {
             for dx in 0..w {
-                let coord = GridCoord::new(layer, x + dx, y + dy, self.width, self.height, self.layers)?;
+                let cx = x.checked_add(dx).ok_or_else(|| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Ir,
+                        operation: "reserve_rect_x_add2",
+                    }
+                })?;
+                let cy = y.checked_add(dy).ok_or_else(|| {
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Ir,
+                        operation: "reserve_rect_y_add2",
+                    }
+                })?;
+                let coord =
+                    GridCoord::new(layer, cx, cy, self.width, self.height, self.layers)?;
                 self.set(coord, class)?;
             }
         }
@@ -394,27 +557,28 @@ impl OccupancyGrid {
 
 // ─── Transition reservation ─────────────────────────────────────────────────
 
-/// Dimension of a transition ramp covering a complete layer crossing.
+/// A validated transition between two adjacent layers, materialized from a
+/// prefab variant's reservation and transition definitions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TransitionReservation {
     /// Unique transition ID.
     pub(super) id: TransitionId,
     /// The lower-layer region acting as the ramp-hub origin.
     pub(super) lower_layer: u16,
-    /// Hub footprint rectangle on the lower layer (layer, x, y, w, h).
+    /// Hub footprint rectangle on the lower layer (x, y, w, h).
     pub(super) hub_footprint: (u16, u16, u16, u16),
     /// The three ramp-run cells on the lower layer [(x0,y0),(x1,y1),(x2,y2)].
-    pub(super) ramp_run: [(u16, u16); 3],
-    /// Upper-layer opening rectangle (must be void — layer+1, x, y, w, h).
-    pub(super) upper_opening: (u16, u16, u16, u16),
-    /// Upper-layer landing (must be floor — layer+1, x, y).
-    pub(super) landing: (u16, u16),
+    pub(super) ramp_run_cells: Vec<GridCoord>,
+    /// Upper-layer opening cells (must be void — layer+1).
+    pub(super) upper_opening_cells: Vec<GridCoord>,
+    /// Upper-layer landing cells (must be floor — layer+1).
+    pub(super) landing_cells: Vec<GridCoord>,
     /// Upper-layer headroom cells that must remain void.
-    pub(super) headroom: Vec<(u16, u16)>,
+    pub(super) headroom_cells: Vec<GridCoord>,
     /// Lower-layer funnel cells approaching the ramp base.
-    pub(super) lower_funnel: Vec<(u16, u16)>,
+    pub(super) lower_funnel_cells: Vec<GridCoord>,
     /// Lower-layer approach corridor cells.
-    pub(super) lower_approach: Vec<(u16, u16)>,
+    pub(super) lower_approach_cells: Vec<GridCoord>,
 }
 
 // ─── Placed socket ──────────────────────────────────────────────────────────
@@ -519,11 +683,12 @@ pub(super) struct IntendedEdge {
     /// Whether this edge is required or optional in the selected topology.
     pub(super) required: bool,
     /// A deterministic A* path witness: sequence of GridCoord from source socket
-    /// to target socket (excluding the socket apertures themselves).
+    /// inward cell to target socket inward cell.
     pub(super) path_witness: Vec<GridCoord>,
-    /// The bounding rectangle of the path plus clearance.
-    pub(super) allowed_envelope: (u16, u16, u16, u16),
-    /// Path cost (Manhattan distance or weighted cells).
+    /// Cell-level allowed envelope: the set of cells the corridor covers
+    /// (path cells plus width clearance on each side).
+    pub(super) allowed_envelope_cells: Vec<GridCoord>,
+    /// Path cost (Manhattan distance).
     pub(super) cost: u64,
     /// Width of the corridor/hall this edge represents.
     pub(super) width: u16,
@@ -540,7 +705,7 @@ pub(super) struct IntendedTopology {
     pub(super) edges: Vec<IntendedEdge>,
     /// Reserved transitions (ramp hubs) across layer pairs.
     pub(super) transitions: Vec<TransitionReservation>,
-    /// Route distance metrics (total Manhattan distance of required spine).
+    /// Route distance metric: shortest-path distance from spawn to distant-landmark.
     pub(super) route_distance: u64,
     /// Number of cycles detected per layer.
     pub(super) per_layer_cycles: Vec<u32>,
@@ -548,7 +713,7 @@ pub(super) struct IntendedTopology {
     pub(super) max_branch_depth: u32,
     /// Number of intentional dead-end regions.
     pub(super) dead_end_count: u32,
-    /// Number of articulation points.
+    /// Number of articulation points (proper detection).
     pub(super) articulation_count: u32,
     /// Number of edge-crossings that do not share a region.
     pub(super) crossing_count: u32,
@@ -578,8 +743,7 @@ impl IntendedTopology {
         Ok(())
     }
 
-    /// Verify that every edge ID and socket ID referenced is unique across
-    /// the topology.
+    /// Verify that every edge ID referenced is unique across the topology.
     pub(super) fn validate_unique_edge_ids(&self) -> Result<(), GeneratorError> {
         let mut seen = BTreeMap::new();
         for e in &self.edges {
@@ -629,6 +793,54 @@ impl IntendedTopology {
 mod tests {
     use super::*;
 
+    // ── IdAllocator ────────────────────────────────────────────────────
+
+    #[test]
+    fn id_allocator_sequential_u32_ids() {
+        let mut alloc = IdAllocator::new();
+        let r0 = alloc.next_region().unwrap();
+        let r1 = alloc.next_region().unwrap();
+        assert_eq!(r0.raw(), 0);
+        assert_eq!(r1.raw(), 1);
+        assert!(r0 < r1);
+
+        let s0 = alloc.next_socket().unwrap();
+        let s1 = alloc.next_socket().unwrap();
+        assert_eq!(s0.raw(), 0);
+        assert_eq!(s1.raw(), 1);
+
+        // Counters are independent
+        let r2 = alloc.next_region().unwrap();
+        assert_eq!(r2.raw(), 2);
+    }
+
+    #[test]
+    fn id_allocator_wraps_to_error() {
+        let mut alloc = IdAllocator {
+            next_region: u32::MAX,
+            next_socket: 0,
+            next_edge: 0,
+            next_transition: 0,
+        };
+        // next_region at u32::MAX means we've exhausted the namespace
+        assert!(alloc.next_region().is_err());
+    }
+
+    #[test]
+    fn id_allocator_last_valid_id() {
+        let mut alloc = IdAllocator {
+            next_region: u32::MAX - 1,
+            next_socket: 0,
+            next_edge: 0,
+            next_transition: 0,
+        };
+        // Can allocate u32::MAX-1
+        let r = alloc.next_region().unwrap();
+        assert_eq!(r.raw(), u32::MAX - 1);
+        // Next allocation overflows
+        assert!(alloc.next_region().is_err());
+    }
+
     // ── GridCoord ───────────────────────────────────────────────────────
 
     #[test]
@@ -650,52 +862,39 @@ mod tests {
     }
 
     #[test]
-    fn coord_flat_index_overflow_rejected() {
-        // Test that overflow is caught: a coordinate at max reasonable values
-        // Large grids can overflow usize if width*height*layer > usize::MAX
-        // But our grid sizes are bounded by the profile system
-        let coord = GridCoord::new(0, 0, 0, 64, 64, 4).unwrap();
-        assert!(coord.to_flat_index(64, 64).is_ok());
-    }
-
-    #[test]
     fn coord_from_flat_index_rejects_out_of_range() {
         assert!(GridCoord::from_flat_index(200, 10, 10, 2).is_err());
         assert!(GridCoord::from_flat_index(0, 10, 10, 2).is_ok());
     }
 
-    // ── ID generation ───────────────────────────────────────────────────
-
     #[test]
-    fn region_ids_are_unique_and_monotonic() {
-        let a = RegionId::new();
-        let b = RegionId::new();
-        let c = RegionId::new();
-        assert!(a != b);
-        assert!(b != c);
-        assert!(a != c);
-        assert!(a.raw() < b.raw());
-        assert!(b.raw() < c.raw());
+    fn coord_from_flat_index_rejects_zero_dimensions() {
+        assert!(GridCoord::from_flat_index(0, 0, 10, 2).is_err());
+        assert!(GridCoord::from_flat_index(0, 10, 0, 2).is_err());
+        assert!(GridCoord::from_flat_index(0, 10, 10, 0).is_err());
     }
 
     #[test]
-    fn socket_ids_are_independent_counters() {
-        let r1 = RegionId::new();
-        let s1 = SocketId::new();
-        let r2 = RegionId::new();
-        let s2 = SocketId::new();
-        // Each counter is independent
-        assert!(s1.raw() < s2.raw());
-        assert!(r1.raw() < r2.raw());
+    fn coord_to_flat_index_handles_large_grids() {
+        let coord = GridCoord::new(0, 0, 0, 64, 64, 4).unwrap();
+        assert!(coord.to_flat_index(64, 64).is_ok());
     }
 
     // ── Occupancy grid ──────────────────────────────────────────────────
 
     #[test]
+    fn occupancy_grid_zero_dimensions_rejected() {
+        assert!(OccupancyGrid::new(0, 10, 2).is_err());
+        assert!(OccupancyGrid::new(10, 0, 2).is_err());
+        assert!(OccupancyGrid::new(10, 10, 0).is_err());
+    }
+
+    #[test]
     fn occupancy_grid_rect_basics() {
-        let mut grid = OccupancyGrid::new(10, 10, 2);
+        let mut grid = OccupancyGrid::new(10, 10, 2).unwrap();
         assert!(grid.is_rect_empty(0, 0, 0, 3, 3).unwrap());
-        grid.reserve_rect(0, 0, 0, 2, 2, OccupancyClass::Region(RegionId::new()))
+        let region_id: u32 = 42;
+        grid.reserve_rect(0, 0, 0, 2, 2, OccupancyClass::Region(region_id))
             .unwrap();
         assert!(!grid.is_rect_empty(0, 0, 0, 3, 3).unwrap());
         assert!(grid.is_rect_empty(0, 2, 0, 1, 2).unwrap());
@@ -703,12 +902,10 @@ mod tests {
 
     #[test]
     fn occupancy_grid_rejects_overlap() {
-        let mut grid = OccupancyGrid::new(10, 10, 2);
-        let r0 = RegionId::new();
-        grid.reserve_rect(0, 1, 1, 3, 3, OccupancyClass::Region(r0))
+        let mut grid = OccupancyGrid::new(10, 10, 2).unwrap();
+        grid.reserve_rect(0, 1, 1, 3, 3, OccupancyClass::Region(100))
             .unwrap();
-        let r1 = RegionId::new();
-        let result = grid.reserve_rect(0, 2, 2, 2, 2, OccupancyClass::Region(r1));
+        let result = grid.reserve_rect(0, 2, 2, 2, 2, OccupancyClass::Region(200));
         assert!(result.is_err());
         match result {
             Err(GeneratorError::OccupancyConflict { .. }) => {}
@@ -718,21 +915,33 @@ mod tests {
 
     #[test]
     fn occupancy_grid_out_of_bounds_rejected() {
-        let mut grid = OccupancyGrid::new(5, 5, 1);
+        let mut grid = OccupancyGrid::new(5, 5, 1).unwrap();
         assert!(grid
-            .reserve_rect(0, 3, 0, 3, 5, OccupancyClass::Region(RegionId::new()))
+            .reserve_rect(0, 3, 0, 3, 5, OccupancyClass::Region(1))
             .is_err());
         assert!(grid.reserve_rect(1, 0, 0, 1, 1, OccupancyClass::Empty).is_err());
+    }
+
+    #[test]
+    fn occupancy_grid_coord_overflow_rejected() {
+        let mut grid = OccupancyGrid::new(64, 64, 2).unwrap();
+        // x + w overflow
+        let result = grid.reserve_rect(0, u16::MAX, 0, 1, 1, OccupancyClass::Region(1));
+        assert!(result.is_err());
     }
 
     // ── IntendedTopology validators ─────────────────────────────────────
 
     #[test]
     fn validate_unique_region_ids() {
+        let mut alloc = IdAllocator::new();
+        let id0 = alloc.next_region().unwrap();
+        let id1 = alloc.next_region().unwrap();
+
         let mut topology = IntendedTopology {
             regions: vec![
                 PlacedRegion {
-                    id: RegionId::new(),
+                    id: id0,
                     role: RegionRole::Spawn,
                     variant_index: 0,
                     layer: 0,
@@ -742,7 +951,7 @@ mod tests {
                     marker_variant_indices: vec![],
                 },
                 PlacedRegion {
-                    id: RegionId::new(),
+                    id: id1,
                     role: RegionRole::DistantLandmark,
                     variant_index: 0,
                     layer: 0,

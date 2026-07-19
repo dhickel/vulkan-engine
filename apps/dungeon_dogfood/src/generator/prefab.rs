@@ -210,7 +210,7 @@ enum_from_str!(enum MarkerKind {
     Landmark => "landmark",
 });
 
-enum_from_str!(enum ReservationKind {
+enum_from_str!(pub(crate) enum ReservationKind {
     Footprint => "footprint",
     WallShell => "wall_shell",
     SocketFunnel => "socket_funnel",
