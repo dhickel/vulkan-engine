@@ -1889,10 +1889,11 @@ pub enum CoreShaderType {
     EnvEquirectToCubeFrag,
     ShadowDepthVert,
     ShadowDepthFrag,
+    MetRoughInstancedVert,
 }
 
 impl CoreShaderType {
-    const COUNT: usize = 13;
+    const COUNT: usize = 14;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -1909,6 +1910,7 @@ impl CoreShaderType {
             "EnvEquirectToCubeFrag" => Some(Self::EnvEquirectToCubeFrag),
             "ShadowDepthVert" => Some(Self::ShadowDepthVert),
             "ShadowDepthFrag" => Some(Self::ShadowDepthFrag),
+            "MetRoughInstancedVert" => Some(Self::MetRoughInstancedVert),
             _ => None,
         }
     }
@@ -2040,10 +2042,12 @@ pub enum VkPipelineType {
     EnvIrradiance,
     EnvEquirectToCube,
     ShadowDepth,
+    PbrMetRoughOpaqueInstanced,
+    UnlitOpaqueInstanced,
 }
 
 impl VkPipelineType {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 12;
 }
 
 //#[derive(Clone, Copy)]
@@ -2107,10 +2111,11 @@ pub enum VkDescType {
     EnvPreFilter,
     EnvEquirect,
     Empty,
+    SceneDataInstanced,
 }
 
 impl VkDescType {
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 }
 
 pub struct VkDescLayoutCache {
@@ -2151,6 +2156,7 @@ impl VkDescLayoutCache {
                 7 => VkDescType::EnvPreFilter,
                 8 => VkDescType::EnvEquirect,
                 9 => VkDescType::Empty,
+                10 => VkDescType::SceneDataInstanced,
                 _ => panic!(),
             };
             debug!("\t{:?} : {:?}", typ, *set)

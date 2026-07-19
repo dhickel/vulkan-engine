@@ -8,6 +8,7 @@ engine = { path = "../.." }
 renderer = { path = "../../src/renderer" }
 input = { path = "../../src/input" }
 audio = { path = "../../src/audio" }
+physics = { path = "../../src/physics" }
 glam = "0.28"
 log = "0.4"
 env_logger = "0.11"

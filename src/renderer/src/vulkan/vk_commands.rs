@@ -29,7 +29,10 @@ use crate::vulkan::vk_frame::{
     imgui_pass_plan, ImguiPassPlan,
 };
 use crate::vulkan::vk_render::VkRenderCore;
-use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
+use crate::vulkan::vk_shadow::{
+    compute_csm_cascades, compute_draw_light_view_projection,
+    frustum_corners_from_vp, derive_camera_near_far_from_corners,
+};
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
@@ -373,11 +376,62 @@ fn draw_geometry_from_submission_impl(
                 .chain(draw_lists.unlit_opaque.iter()),
         )
     });
+
+    // Compute CSM cascade UBO data when shadows are enabled for the directional light.
+    let csm_data: Option<CsmUboData> =
+        submission.directional_light.as_ref().and_then(|light| {
+            if !light.enable_shadows {
+                return None;
+            }
+            // Collect all non-blended draw objects as potential casters.
+            let casters: Vec<RenderObject> = draw_lists
+                .pbr_opaque
+                .iter()
+                .chain(draw_lists.unlit_opaque.iter())
+                .chain(draw_lists.pbr_mask.iter())
+                .chain(draw_lists.unlit_mask.iter())
+                .copied()
+                .collect();
+            if casters.is_empty() {
+                return None;
+            }
+            let vp = scene_data.projection * scene_data.view;
+            let corners = frustum_corners_from_vp(&vp)?;
+            let (camera_near, camera_far) = derive_camera_near_far_from_corners(&corners);
+            let cascades = compute_csm_cascades(
+                &scene_data.view,
+                &scene_data.projection,
+                light.direction,
+                camera_near,
+                camera_far,
+                &casters,
+            )?;
+            let mut cascade_view_proj = [glam::Vec4::ZERO; 12];
+            let mut cascade_splits = glam::Vec4::ZERO;
+            for (i, c) in cascades.iter().enumerate() {
+                if i < 3 {
+                    let base = i * 4;
+                    cascade_view_proj[base] = c.light_view_proj.x_axis;
+                    cascade_view_proj[base + 1] = c.light_view_proj.y_axis;
+                    cascade_view_proj[base + 2] = c.light_view_proj.z_axis;
+                    cascade_view_proj[base + 3] = c.light_view_proj.w_axis;
+                }
+                cascade_splits[i.min(3)] = c.split_far;
+            }
+            Some(CsmUboData {
+                cascade_view_proj,
+                cascade_splits,
+                cascade_count: cascades.len().min(3) as u32,
+                blend_fraction: crate::vulkan::vk_shadow::CSM_BLEND_FRACTION,
+            })
+        });
+
     let frame_env_ubo = build_frame_environment_ubo(
         &base_env_ubo,
         submission,
         visual_tuning,
         light_view_projection,
+        csm_data.as_ref(),
     );
 
     unsafe {
@@ -1133,13 +1187,23 @@ fn end_gpu_pass_timing(
 // build_frame_environment_ubo (pure policy, no Vulkan)
 // ---------------------------------------------------------------------------
 
+/// Pre-computed CSM cascade data ready for UBO upload.
+#[derive(Clone)]
+pub(crate) struct CsmUboData {
+    pub cascade_view_proj: [glam::Vec4; 12],
+    pub cascade_splits: glam::Vec4,
+    pub cascade_count: u32,
+    pub blend_fraction: f32,
+}
+
 pub(crate) fn build_frame_environment_ubo(
     base: &EnvironmentUBO,
     submission: &RenderSubmission,
     visual_tuning: VisualTuning,
     light_view_projection: Option<glam::Mat4>,
+    csm_data: Option<&CsmUboData>,
 ) -> EnvironmentUBO {
-    use crate::data::gpu_data::{GpuPointLight, MAX_POINT_LIGHTS_GPU};
+    use crate::data::gpu_data::{GpuPointLight, GpuSpotLight, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU, CSM_CASCADE_COUNT};
 
     let mut env = *base;
     env.exposure = visual_tuning.exposure;
@@ -1164,6 +1228,22 @@ pub(crate) fn build_frame_environment_ubo(
         env.light_view_proj = [glam::Vec4::X, glam::Vec4::Y, glam::Vec4::Z, glam::Vec4::W];
     }
 
+    // CSM cascade data — when present, the shader samples the cascade array.
+    if let Some(csm) = csm_data {
+        env.cascade_count = csm.cascade_count.min(CSM_CASCADE_COUNT);
+        env.cascade_splits = csm.cascade_splits;
+        env.blend_fraction = csm.blend_fraction;
+        let max_matrices = (CSM_CASCADE_COUNT as usize) * 4;
+        let copy_len = csm.cascade_view_proj.len().min(max_matrices);
+        env.cascade_view_proj = [glam::Vec4::ZERO; 12];
+        env.cascade_view_proj[..copy_len].copy_from_slice(&csm.cascade_view_proj[..copy_len]);
+    } else {
+        env.cascade_count = 0;
+        env.cascade_splits = glam::Vec4::ZERO;
+        env.cascade_view_proj = [glam::Vec4::ZERO; 12];
+        env.blend_fraction = 0.1;
+    }
+
     let light_count = submission.point_lights.len().min(MAX_POINT_LIGHTS_GPU);
     env.point_light_count = light_count as u32;
     env.point_lights = [GpuPointLight {
@@ -1183,6 +1263,33 @@ pub(crate) fn build_frame_environment_ubo(
                 .color
                 .max(glam::Vec3::ZERO)
                 .extend(light.intensity.max(0.0)),
+        };
+    }
+
+    // Spot light data — always populated, shader reads count to decide.
+    let spot_count = submission.spot_lights.len().min(MAX_SPOT_LIGHTS_GPU);
+    env.spot_light_count = spot_count as u32;
+    env.spot_lights = [GpuSpotLight {
+        position_range: glam::Vec4::ZERO,
+        direction_inner_cos: glam::Vec4::ZERO,
+        color_intensity: glam::Vec4::ZERO,
+        outer_cos: glam::Vec4::ZERO,
+    }; MAX_SPOT_LIGHTS_GPU];
+
+    for (i, light) in submission
+        .spot_lights
+        .iter()
+        .take(MAX_SPOT_LIGHTS_GPU)
+        .enumerate()
+    {
+        env.spot_lights[i] = GpuSpotLight {
+            position_range: light.position.extend(light.range.max(0.001)),
+            direction_inner_cos: light.direction.extend(light.inner_cos),
+            color_intensity: light
+                .color
+                .max(glam::Vec3::ZERO)
+                .extend(light.intensity.max(0.0)),
+            outer_cos: glam::Vec4::new(light.outer_cos, 0.0, 0.0, 0.0),
         };
     }
 
@@ -1217,6 +1324,7 @@ mod tests {
             &submission,
             VisualTuning::default(),
             Some(light_view_projection),
+            None,
         );
 
         assert_eq!(env.light_dir, glam::Vec4::Y);
@@ -1293,6 +1401,7 @@ mod tests {
             &EnvironmentUBO::default(),
             &submission,
             VisualTuning::default(),
+            None,
             None,
         );
 

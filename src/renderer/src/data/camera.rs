@@ -66,6 +66,11 @@ impl Aabb {
         self.min.x <= self.max.x && self.min.y <= self.max.y && self.min.z <= self.max.z
     }
 
+    /// Center point of the AABB.
+    pub fn center(&self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+
     /// The eight corners of this AABB.
     pub fn corners(&self) -> [Vec3; 8] {
         [

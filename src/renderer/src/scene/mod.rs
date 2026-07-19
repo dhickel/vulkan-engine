@@ -8,4 +8,9 @@ pub mod debug_scenarios;
 pub mod render_submission;
 pub mod scene_world;
 
+#[cfg(feature = "scene-bvh")]
+pub mod bvh;
+#[cfg(feature = "scene-bvh")]
+pub mod lod;
+
 pub use scene_world::SceneNodeId;

@@ -10,6 +10,8 @@ pub mod vk_descriptor;
 mod vk_device_budget;
 pub(crate) mod vk_frame;
 pub mod vk_init;
+#[cfg(feature = "instancing")]
+pub mod vk_instancing;
 pub mod vk_pipeline;
 pub mod vk_render;
 pub mod vk_shadow;

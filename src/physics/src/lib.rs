@@ -30,6 +30,13 @@ pub struct BodyDescriptor {
     pub translation: [f32; 3],
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct BodyPose {
+    pub translation: [f32; 3],
+    /// Quaternion in `[x, y, z, w]` order.
+    pub rotation: [f32; 4],
+}
+
 impl BodyDescriptor {
     pub fn new(id: impl Into<PhysicsBodyId>, kind: BodyKind, translation: [f32; 3]) -> Self {
         Self {
@@ -68,6 +75,7 @@ pub struct ColliderDescriptor {
     pub shape: ColliderShape,
     pub is_trigger: bool,
     pub translation: [f32; 3],
+    pub rotation: [f32; 4],
 }
 
 impl ColliderDescriptor {
@@ -82,6 +90,7 @@ impl ColliderDescriptor {
             shape,
             is_trigger: false,
             translation: [0.0, 0.0, 0.0],
+            rotation: [0.0, 0.0, 0.0, 1.0],
         }
     }
 
@@ -92,6 +101,11 @@ impl ColliderDescriptor {
 
     pub fn translation(mut self, translation: [f32; 3]) -> Self {
         self.translation = translation;
+        self
+    }
+
+    pub fn rotation(mut self, rotation: [f32; 4]) -> Self {
+        self.rotation = rotation;
         self
     }
 }
@@ -105,6 +119,7 @@ pub enum PhysicsError {
     NonPositiveDimension { field: &'static str },
     NonPositiveDeltaTime,
     ZeroDirection,
+    InvalidRotation,
     TrimeshNonFiniteVertex { index: usize },
     TrimeshIndexOutOfBounds { index: usize, vertex_count: usize },
     TrimeshEmpty,
@@ -128,6 +143,9 @@ impl std::fmt::Display for PhysicsError {
             }
             PhysicsError::NonPositiveDeltaTime => write!(f, "non-positive delta time"),
             PhysicsError::ZeroDirection => write!(f, "zero direction"),
+            PhysicsError::InvalidRotation => {
+                write!(f, "rotation quaternion must be finite and non-zero")
+            }
             PhysicsError::TrimeshNonFiniteVertex { index } => {
                 write!(f, "non-finite trimesh vertex at index {index}")
             }
@@ -335,6 +353,7 @@ impl PhysicsWorld {
         descriptor: ColliderDescriptor,
     ) -> Result<PhysicsColliderId, PhysicsError> {
         validate_vec3("collider.translation", descriptor.translation)?;
+        validate_rotation(descriptor.rotation)?;
         if self.collider_handles.contains_key(&descriptor.id) {
             return Err(PhysicsError::DuplicateColliderId(descriptor.id));
         }
@@ -352,9 +371,18 @@ impl PhysicsWorld {
             }
         }
 
+        let rotation = na::UnitQuaternion::new_normalize(na::Quaternion::new(
+            descriptor.rotation[3],
+            descriptor.rotation[0],
+            descriptor.rotation[1],
+            descriptor.rotation[2],
+        ));
         let mut builder = shape_builder(descriptor.shape)?
             .sensor(descriptor.is_trigger)
-            .translation(vec3(descriptor.translation));
+            .position(na::Isometry::from_parts(
+                vec3(descriptor.translation).into(),
+                rotation,
+            ));
         builder = builder.active_events(ActiveEvents::COLLISION_EVENTS);
 
         let id = descriptor.id;
@@ -368,9 +396,67 @@ impl PhysicsWorld {
     }
 
     pub fn body_position_by_id(&self, id: &PhysicsBodyId) -> Option<[f32; 3]> {
-        self.body_handles
-            .get(id)
-            .and_then(|handle| self.body_position_for_handle(*handle))
+        self.body_pose_by_id(id).map(|pose| pose.translation)
+    }
+
+    pub fn body_pose_by_id(&self, id: &PhysicsBodyId) -> Option<BodyPose> {
+        let handle = *self.body_handles.get(id)?;
+        let body = self.bodies.get(handle)?;
+        let translation = body.translation();
+        let rotation = body.rotation().quaternion();
+        Some(BodyPose {
+            translation: [translation.x, translation.y, translation.z],
+            rotation: [rotation.i, rotation.j, rotation.k, rotation.w],
+        })
+    }
+
+    /// Removes a collider and its durable-ID mapping. Missing IDs are idempotent.
+    pub fn remove_collider(&mut self, id: &PhysicsColliderId) -> bool {
+        let Some(handle) = self.collider_handles.remove(id) else {
+            return false;
+        };
+        self.colliders
+            .remove(handle, &mut self.island_manager, &mut self.bodies, true);
+        self.collider_ids.retain(|(candidate, _)| *candidate != handle);
+        self.active_pairs.clear();
+        self.last_contacts.clear();
+        self.query_pipeline.update(&self.colliders);
+        true
+    }
+
+    /// Removes a body, its attached colliders, and all durable-ID mappings.
+    pub fn remove_body(&mut self, id: &PhysicsBodyId) -> bool {
+        let Some(handle) = self.body_handles.remove(id) else {
+            return false;
+        };
+        let attached: Vec<_> = self
+            .collider_ids
+            .iter()
+            .filter_map(|(collider_handle, collider_id)| {
+                self.colliders.get(*collider_handle).and_then(|collider| {
+                    (collider.parent() == Some(handle)).then(|| collider_id.clone())
+                })
+            })
+            .collect();
+        self.bodies.remove(
+            handle,
+            &mut self.island_manager,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            true,
+        );
+        self.body_ids.retain(|(candidate, _)| *candidate != handle);
+        for collider_id in attached {
+            if let Some(collider_handle) = self.collider_handles.remove(&collider_id) {
+                self.collider_ids
+                    .retain(|(candidate, _)| *candidate != collider_handle);
+            }
+        }
+        self.active_pairs.clear();
+        self.last_contacts.clear();
+        self.query_pipeline.update(&self.colliders);
+        true
     }
 
     pub fn collider_exists(&self, id: &PhysicsColliderId) -> bool {
@@ -434,12 +520,6 @@ impl PhysicsWorld {
         &self.last_contacts
     }
 
-    fn body_position_for_handle(&self, handle: RigidBodyHandle) -> Option<[f32; 3]> {
-        self.bodies.get(handle).map(|b| {
-            let t = b.translation();
-            [t.x, t.y, t.z]
-        })
-    }
 
     fn collect_contact_records(&mut self) -> Vec<PhysicsContactRecord> {
         let mut current = BTreeMap::new();
@@ -538,6 +618,17 @@ fn record(
         a: key.0.clone(),
         b: key.1.clone(),
     }
+}
+
+/// Validates shape geometry and body-kind compatibility without mutating a world.
+pub fn validate_collider_shape(
+    shape: &ColliderShape,
+    body_kind: BodyKind,
+) -> Result<(), PhysicsError> {
+    if matches!(shape, ColliderShape::TriMeshStatic { .. }) && body_kind != BodyKind::Static {
+        return Err(PhysicsError::TrimeshOnDynamicBody);
+    }
+    shape_builder(shape.clone()).map(|_| ())
 }
 
 fn shape_builder(shape: ColliderShape) -> Result<ColliderBuilder, PhysicsError> {
@@ -731,6 +822,17 @@ fn validate_convex_hull(points: &[[f32; 3]]) -> Result<Vec<[f32; 3]>, PhysicsErr
 fn validate_vec3(field: &'static str, value: [f32; 3]) -> Result<(), PhysicsError> {
     if value.iter().any(|component| !component.is_finite()) {
         return Err(PhysicsError::NonFiniteValue { field });
+    }
+    Ok(())
+}
+
+fn validate_rotation(value: [f32; 4]) -> Result<(), PhysicsError> {
+    if value.iter().any(|component| !component.is_finite()) {
+        return Err(PhysicsError::InvalidRotation);
+    }
+    let norm_squared = value.iter().map(|component| component * component).sum::<f32>();
+    if norm_squared <= f32::EPSILON {
+        return Err(PhysicsError::InvalidRotation);
     }
     Ok(())
 }
@@ -2203,5 +2305,47 @@ mod tests {
             },
         ));
         assert!(result.is_ok(), "tiny-scale convex hull should succeed");
+    }
+
+    #[test]
+    fn collider_rotation_rejects_non_finite_and_zero_quaternions_transactionally() {
+        let mut world = PhysicsWorld::new();
+        world
+            .create_body(BodyDescriptor::new("body.rotation", BodyKind::Static, [0.0; 3]))
+            .unwrap();
+        for rotation in [[0.0; 4], [f32::NAN, 0.0, 0.0, 1.0]] {
+            let result = world.create_collider(
+                ColliderDescriptor::new(
+                    "collider.rotation",
+                    "body.rotation",
+                    ColliderShape::Sphere { radius: 1.0 },
+                )
+                .rotation(rotation),
+            );
+            assert_eq!(result, Err(PhysicsError::InvalidRotation));
+            assert!(!world.collider_exists(&PhysicsColliderId::new("collider.rotation")));
+        }
+    }
+
+    #[test]
+    fn body_pose_and_removal_keep_durable_maps_consistent() {
+        let mut world = PhysicsWorld::new();
+        let body = world
+            .create_body(BodyDescriptor::new("body.remove", BodyKind::Dynamic, [1.0, 2.0, 3.0]))
+            .unwrap();
+        let collider = world
+            .create_collider(ColliderDescriptor::new(
+                "collider.remove",
+                body.clone(),
+                ColliderShape::Sphere { radius: 1.0 },
+            ))
+            .unwrap();
+        let pose = world.body_pose_by_id(&body).unwrap();
+        assert_eq!(pose.translation, [1.0, 2.0, 3.0]);
+        assert_eq!(pose.rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert!(world.remove_body(&body));
+        assert!(world.body_pose_by_id(&body).is_none());
+        assert!(!world.collider_exists(&collider));
+        assert!(!world.remove_body(&body));
     }
 }

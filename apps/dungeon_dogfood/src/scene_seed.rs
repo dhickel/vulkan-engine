@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use glam::Mat4;
 use renderer::prelude::{
-    EnvironmentSource, MeshHandle, PbrMaterialDesc, TextureHandle, TextureLoadOptions,
+    EnvironmentSource, MeshHandle, PbrMaterialDesc, ProceduralMeshData, ProceduralVertex,
+    SceneFragmentNodeId, TextureHandle, TextureLoadOptions,
 };
 use renderer::{AssetManager, DirectionalLight, PointLight, PointLightId, Scene, SceneNodeId};
 use thiserror::Error;
@@ -15,6 +16,7 @@ use crate::content::{
 };
 use crate::geometry::build_level_chunks;
 use crate::layout::{tile_to_world, ParsedLevel, TileCoord};
+use crate::mesh_collider_bridge::ColliderPolicy;
 
 const WALL_MATERIAL_ID: &str = "stone_wall";
 const FLOOR_MATERIAL_ID: &str = "stone_floor";
@@ -35,15 +37,27 @@ pub enum SceneSeedError {
     Scene(#[from] renderer::SceneError),
 }
 
+/// A mesh handle paired with its assigned collider policy.
+#[derive(Debug, Clone)]
+pub struct MeshColliderPolicyAssignment {
+    pub mesh: MeshHandle,
+    pub policy: ColliderPolicy,
+}
+
 /// Scene resources created from level data
 pub struct LevelScene {
     pub wall_material: renderer::MaterialHandle,
     pub floor_material: renderer::MaterialHandle,
     pub chunk_meshes: Vec<MeshHandle>,
     pub chunk_nodes: Vec<SceneNodeId>,
+    pub chunk_transforms: Vec<Mat4>,
     pub light_ids: Vec<PointLightId>,
     pub directional_light_id: Option<renderer::DirectionalLightId>,
     pub prop_roots: Vec<SceneNodeId>,
+    /// Explicit collider policy assignments for meshes that need recipes.
+    pub collider_policies: Vec<MeshColliderPolicyAssignment>,
+    /// Handle for the small dynamic convex-hull proof mesh.
+    pub dynamic_proof_mesh: Option<(MeshHandle, SceneNodeId)>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -110,6 +124,8 @@ impl LevelScene {
         let chunks = build_level_chunks(level, floor_material, wall_material);
         let mut chunk_meshes = Vec::with_capacity(chunks.len());
         let mut chunk_nodes = Vec::with_capacity(chunks.len());
+        let mut chunk_transforms = Vec::with_capacity(chunks.len());
+        let mut collider_policies = Vec::with_capacity(chunks.len() + 1);
         let level_root = scene.create_node(None, Mat4::IDENTITY)?;
 
         for chunk in chunks {
@@ -119,11 +135,63 @@ impl LevelScene {
                 log::warn!("Chunk mesh bounds lookup failed: {err}; using conservative-visible fallback.");
                 renderer::SceneBounds::ConservativeVisible(renderer::BoundsUnknownReason::StaleHandle)
             });
-            let node = scene.create_node(Some(level_root), Mat4::from_translation(world_origin))?;
+            let model_to_instance = Mat4::from_translation(world_origin);
+            let node = scene.create_node(Some(level_root), model_to_instance)?;
             scene.add_mesh_with_bounds(node, mesh, bounds)?;
             chunk_meshes.push(mesh);
             chunk_nodes.push(node);
+            chunk_transforms.push(model_to_instance);
+            // Static dungeon chunk geometry → StaticTrimesh.
+            collider_policies.push(MeshColliderPolicyAssignment {
+                mesh,
+                policy: ColliderPolicy::StaticTrimesh,
+            });
         }
+
+        // Create a small dynamic convex-hull proof mesh at the spawn location.
+        let dynamic_proof_mesh = {
+            let spawn_world = tile_to_world(level.spawn.x, level.spawn.y);
+            // A small tetrahedron positioned above the floor.
+            let proof_verts: Vec<ProceduralVertex> = vec![
+                // Base triangle
+                make_proof_vertex([-0.3, 0.0, 0.3], [0.0, 1.0, 0.0]),
+                make_proof_vertex([0.3, 0.0, 0.3], [0.0, 1.0, 0.0]),
+                make_proof_vertex([0.0, 0.0, -0.3], [0.0, 1.0, 0.0]),
+                // Apex
+                make_proof_vertex([0.0, 0.6, 0.0], [0.0, 1.0, 0.0]),
+            ];
+            let proof_indices: Vec<u32> = vec![
+                0, 2, 1, // base
+                0, 1, 3, // face 1
+                1, 2, 3, // face 2
+                2, 0, 3, // face 3
+            ];
+            let proof_mesh_data = ProceduralMeshData {
+                name: "dynamic_proof".to_string(),
+                vertices: proof_verts,
+                indices: proof_indices,
+                material: Some(floor_material),
+            };
+            let proof_mesh = assets.upload_procedural_mesh(proof_mesh_data)?;
+            let proof_node = scene.create_node(
+                Some(level_root),
+                Mat4::from_translation(glam::Vec3::new(
+                    spawn_world.x + 1.5,
+                    2.5, // elevated above floor
+                    spawn_world.z,
+                )),
+            )?;
+            let proof_bounds = assets.mesh_scene_bounds(proof_mesh).unwrap_or_else(|err| {
+                log::warn!("Dynamic proof mesh bounds lookup failed: {err}; using conservative-visible fallback.");
+                renderer::SceneBounds::ConservativeVisible(renderer::BoundsUnknownReason::StaleHandle)
+            });
+            scene.add_mesh_with_bounds(proof_node, proof_mesh, proof_bounds)?;
+            collider_policies.push(MeshColliderPolicyAssignment {
+                mesh: proof_mesh,
+                policy: ColliderPolicy::ConvexHull,
+            });
+            Some((proof_mesh, proof_node))
+        };
 
         // Spawn point lights from markers using deterministic 7/2/1 preset mapping.
         let mut light_ids = Vec::with_capacity(level.light_markers.len());
@@ -191,6 +259,10 @@ impl LevelScene {
                     }
                 };
 
+                let visual_only_meshes: Vec<MeshHandle> = (0..fragment.node_count())
+                    .filter_map(|index| fragment.node(SceneFragmentNodeId::new(index as u32)))
+                    .flat_map(|node| node.meshes.iter().copied())
+                    .collect();
                 let mount = match scene.merge_fragment(Some(level_root), fragment) {
                     Ok(mount) => mount,
                     Err(err) => {
@@ -229,6 +301,12 @@ impl LevelScene {
                     continue;
                 }
 
+                collider_policies.extend(visual_only_meshes.into_iter().map(|mesh| {
+                    MeshColliderPolicyAssignment {
+                        mesh,
+                        policy: ColliderPolicy::None,
+                    }
+                }));
                 prop_roots.push(mount.mounted_root);
             }
         } else {
@@ -269,9 +347,12 @@ impl LevelScene {
             floor_material,
             chunk_meshes,
             chunk_nodes,
+            chunk_transforms,
             light_ids,
             directional_light_id,
             prop_roots,
+            collider_policies,
+            dynamic_proof_mesh,
         })
     }
 }
@@ -560,6 +641,17 @@ fn load_optional_texture(
             );
             None
         }
+    }
+}
+
+fn make_proof_vertex(pos: [f32; 3], normal: [f32; 3]) -> ProceduralVertex {
+    ProceduralVertex {
+        position: glam::Vec3::from_array(pos),
+        normal: glam::Vec3::from_array(normal),
+        tangent: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+        uv0: glam::Vec2::ZERO,
+        uv1: glam::Vec2::ZERO,
+        color: glam::Vec4::ONE,
     }
 }
 

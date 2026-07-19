@@ -347,7 +347,8 @@ pub fn init_pipeline_cache(
 
     let shadow_depth_pipeline = init_shadow_depth_pipeline(device, shader_cache)?;
 
-    VkPipelineCache::new(vec![
+    #[allow(unused_mut)]
+    let mut pipelines = vec![
         (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
         (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
         (VkPipelineType::UnlitOpaque, unlit_opaque),
@@ -358,7 +359,22 @@ pub fn init_pipeline_cache(
         (VkPipelineType::EnvPreFilter, env_prefilter_pipeline),
         (VkPipelineType::EnvEquirectToCube, env_equirect_pipeline),
         (VkPipelineType::ShadowDepth, shadow_depth_pipeline),
-    ])
+    ];
+
+    #[cfg(feature = "instancing")]
+    {
+        let (pbr_instanced, unlit_instanced) = init_instanced_pipelines(
+            device,
+            desc_layout_cache,
+            shader_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        pipelines.push((VkPipelineType::PbrMetRoughOpaqueInstanced, pbr_instanced));
+        pipelines.push((VkPipelineType::UnlitOpaqueInstanced, unlit_instanced));
+    }
+
+    VkPipelineCache::new(pipelines)
 }
 
 fn init_met_rough_pipelines(
@@ -731,4 +747,78 @@ fn init_shadow_depth_pipeline(
     })?;
 
     Ok(VkPipeline::new(pipeline, layout))
+}
+
+// ---------------------------------------------------------------------------
+// Instanced pipeline initialization (behind `instancing` feature flag)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "instancing")]
+fn init_instanced_pipelines(
+    device: &ash::Device,
+    desc_layout_cache: &VkDescLayoutCache,
+    shader_cache: &VkShaderCache,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+) -> Result<(VkPipeline, VkPipeline), String> {
+    let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughInstancedVert);
+    let pbr_frag = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
+    let unlit_frag = shader_cache.get_core_shader(CoreShaderType::MetRoughFragUnlit);
+
+    // Instanced push constants: 32 bytes (no model matrix).
+    let push_const_size = 32u32;
+    let push_constant_range = [vk::PushConstantRange::default()
+        .offset(0)
+        .size(push_const_size)
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
+
+    let layouts = [
+        desc_layout_cache.get(VkDescType::SceneDataInstanced),
+        desc_layout_cache.get(VkDescType::SkinData),
+        desc_layout_cache.get(VkDescType::PbrSamplers),
+    ];
+
+    let mesh_layout_info = vk_util::pipeline_layout_create_info()
+        .set_layouts(&layouts)
+        .push_constant_ranges(&push_constant_range);
+
+    let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
+        .map_err(|err| format!("failed to create instanced pipeline layout: {err:?}"))?;
+
+    let entry = c"main";
+
+    // PBR opaque instanced
+    let mut pbr_builder = PipelineBuilder::default()
+        .set_shaders(vert_shader, entry, pbr_frag, entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_color_attachment_format(color_format)
+        .set_depth_format(depth_format)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
+        .set_pipeline_layout(layout);
+
+    let pbr_instanced = pbr_builder.build_pipeline(device)?;
+
+    // Unlit opaque instanced
+    let mut unlit_builder = PipelineBuilder::default()
+        .set_shaders(vert_shader, entry, unlit_frag, entry)
+        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .set_color_attachment_format(color_format)
+        .set_depth_format(depth_format)
+        .set_polygon_mode(vk::PolygonMode::FILL)
+        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
+        .set_multisample_none()
+        .disable_blending()
+        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
+        .set_pipeline_layout(layout);
+
+    let unlit_instanced = unlit_builder.build_pipeline(device)?;
+
+    Ok((
+        VkPipeline::new(pbr_instanced, layout),
+        VkPipeline::new(unlit_instanced, layout),
+    ))
 }

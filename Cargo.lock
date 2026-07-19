@@ -864,6 +864,7 @@ dependencies = [
  "glam 0.28.0",
  "input",
  "log",
+ "physics",
  "renderer",
  "serde",
  "thiserror 1.0.69",

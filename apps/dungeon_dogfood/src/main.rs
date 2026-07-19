@@ -4,6 +4,7 @@ mod content;
 mod events;
 mod geometry;
 mod layout;
+mod mesh_collider_bridge;
 mod player;
 mod scene_seed;
 
@@ -20,8 +21,11 @@ use engine::input::{
     ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
 };
 use layout::{load_level_file, tile_to_world, ParsedLevel};
+use mesh_collider_bridge::MeshColliderBridge;
+use physics::BodyKind;
 use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
+use renderer::api::FrameSerial;
 use renderer::prelude::{
     AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
 };
@@ -52,6 +56,7 @@ struct HeadlessOptions {
     capture_frame_start: Option<u32>,
     capture_frame_interval: Option<u32>,
     capture_dir: Option<PathBuf>,
+    validate_colliders: bool,
 }
 
 impl HeadlessOptions {
@@ -129,6 +134,10 @@ impl HeadlessOptions {
                 // Skip --level and its value (handled by parse_level_arg)
                 "--level" => {
                     i += 2;
+                }
+                "--validate-colliders" => {
+                    opts.validate_colliders = true;
+                    i += 1;
                 }
                 _ => {
                     i += 1;
@@ -272,6 +281,9 @@ fn run() -> Result<(), AppError> {
         LevelScene::from_level(&level, &content_pack, &mut scene, &mut assets)?
     };
 
+    // Seed collider recipes from explicit policy assignments.
+    let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
+
     let spawn_world = tile_to_world(level.spawn.x, level.spawn.y);
     let spawn_position = spawn_world
         + glam::Vec3::new(
@@ -363,6 +375,7 @@ fn run() -> Result<(), AppError> {
                                 &mut renderer,
                                 &mut scene,
                                 &collision_world,
+                                &mut bridge,
                                 &mut player,
                                 &mut previous_player_position,
                                 &mut app_camera,
@@ -446,6 +459,7 @@ fn render_frame(
     renderer: &mut renderer::Renderer,
     scene: &mut renderer::Scene,
     collision_world: &CollisionWorld,
+    bridge: &mut MeshColliderBridge,
     player: &mut PlayerState,
     previous_player_position: &mut glam::Vec3,
     camera: &mut Camera,
@@ -504,6 +518,15 @@ fn render_frame(
                         .to_string(),
                 ));
             }
+            // Step the physics world in sync with gameplay ticks.
+            if let Err(err) = bridge.world.step(FIXED_DT) {
+                log::warn!("Physics step failed: {}", err);
+            }
+        }
+        // Record contacts for observability.
+        let contacts = bridge.world.last_contact_records();
+        if !contacts.is_empty() {
+            log::debug!("Physics contacts this frame: {}", contacts.len());
         }
     }
     camera.set_position(player.position);
@@ -539,6 +562,16 @@ fn render_frame(
     let end_report = engine::frame::end_app_frame(events, begin_report.frame.index);
     log_dispatch_failures(end_report.frame_ended, "dogfood lifecycle");
 
+    let serials = renderer.retirement_serials();
+    if let Err(err) = bridge.reap_retired(FrameSerial::new(serials.latest_completed)) {
+        log::warn!("Collider recipe reaping failed: {}", err);
+    }
+
+    // Write back dynamic/kinematic physics body poses to scene nodes.
+    if let Err(err) = bridge.writeback_dynamic_transforms(scene) {
+        log::warn!("Transform writeback failed: {}", err);
+    }
+
     Ok(outcome)
 }
 
@@ -548,6 +581,101 @@ fn interpolated_player_position(
     alpha: f32,
 ) -> glam::Vec3 {
     previous.lerp(current, alpha.clamp(0.0, 1.0))
+}
+
+fn seed_collider_bridge(
+    renderer: &mut renderer::Renderer,
+    level_scene: &LevelScene,
+    level: &ParsedLevel,
+) -> MeshColliderBridge {
+    let mut bridge = MeshColliderBridge::new();
+    let assets = renderer.assets();
+
+    for assignment in &level_scene.collider_policies {
+        match assets.mesh_geometry(assignment.mesh) {
+            Ok(dto) => {
+                match bridge.register_policy(&dto, assignment.policy) {
+                    Ok(Some(handle)) => log::info!(
+                        "Collider recipe registered: mesh_slot={} policy={:?} recipe_slot={}",
+                        assignment.mesh.slot,
+                        assignment.policy,
+                        handle.slot,
+                    ),
+                    Ok(None) => log::info!(
+                        "Collider policy recorded without recipe: mesh_slot={} policy=None",
+                        assignment.mesh.slot,
+                    ),
+                    Err(err) => log::warn!(
+                        "Failed to register collider recipe for mesh slot {}: {}",
+                        assignment.mesh.slot,
+                        err,
+                    ),
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "Skipping collider recipe for mesh slot {} (no DTO): {}",
+                    assignment.mesh.slot,
+                    err,
+                );
+            }
+        }
+    }
+
+    // Instantiate static trimesh bodies for dungeon chunks.
+    for (idx, &mesh) in level_scene.chunk_meshes.iter().enumerate() {
+        if let Ok(recipe) = bridge.recipe_for_mesh(mesh) {
+            let body_id_str = format!("body.chunk_{idx}");
+            let collider_id_str = format!("collider.chunk_{idx}");
+            let node_id = level_scene.chunk_nodes.get(idx).copied();
+            if let Err(err) = bridge.instantiate_collider(
+                recipe.handle,
+                BodyKind::Static,
+                &body_id_str,
+                &collider_id_str,
+                level_scene.chunk_transforms[idx],
+                node_id,
+            ) {
+                log::warn!("Failed to instantiate chunk collider {idx}: {}", err);
+            }
+        }
+    }
+
+    // Dynamic convex-hull proof body.
+    if let Some((proof_mesh, proof_node)) = level_scene.dynamic_proof_mesh {
+        if let Ok(recipe) = bridge.recipe_for_mesh(proof_mesh) {
+            let recipe_handle = recipe.handle;
+            let proof_idx = bridge.next_body_index();
+            let body_id_str = format!("body.dynamic_proof_{proof_idx}");
+            let collider_id_str = format!("collider.dynamic_proof_{proof_idx}");
+            match bridge.instantiate_collider(
+                recipe_handle,
+                BodyKind::Dynamic,
+                &body_id_str,
+                &collider_id_str,
+                glam::Mat4::from_translation(glam::Vec3::new(
+                    tile_to_world(level.spawn.x, level.spawn.y).x + 1.5,
+                    2.5,
+                    tile_to_world(level.spawn.x, level.spawn.y).z,
+                )),
+                Some(proof_node),
+            ) {
+                Ok((body_id, collider_id)) => {
+                    log::info!(
+                        "Dynamic proof body instantiated: body={body_id} collider={collider_id}"
+                    );
+                }
+                Err(err) => log::warn!("Failed to instantiate dynamic proof collider: {}", err),
+            }
+        }
+    }
+
+    log::info!(
+        "Mesh collider bridge ready: {} recipes",
+        bridge.recipe_count(),
+    );
+
+    bridge
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +785,7 @@ fn print_level_load_help() {
     eprintln!("  --capture_frame_start <n>      Frame to start capturing (default: 0)");
     eprintln!("  --capture_frame_interval <n>   Frames between captures (default: 1)");
     eprintln!("  --capture_dir <dir>            Output directory for captures");
+    eprintln!("  --validate-colliders           Enable deterministic collider validation logging");
 }
 
 fn run_headless(
@@ -711,6 +840,64 @@ fn run_headless(
         let mut assets = renderer.assets();
         LevelScene::from_level(level, content_pack, &mut scene, &mut assets)?
     };
+
+    if headless_opts.validate_colliders {
+        log::info!(
+            "[Collider Validation] Level seeded: {} chunk meshes, {} collider policies",
+            _level_scene.chunk_meshes.len(),
+            _level_scene.collider_policies.len(),
+        );
+    }
+
+    // Seed collider bridge (headless path).
+    let mut bridge = seed_collider_bridge(&mut renderer, &_level_scene, level);
+
+    if headless_opts.validate_colliders {
+        log::info!(
+            "[Collider Validation] Bridge seeded: {} recipes, bridge ready",
+            bridge.recipe_count(),
+        );
+        // Log all body-node mappings.
+        for (body_id, node_id) in bridge.body_node_map().iter() {
+            if let Some(pos) = bridge.world.body_position_by_id(body_id) {
+                log::info!(
+                    "[Collider Validation] Body mapping: body={body_id} node_slot={} position=[{:.3}, {:.3}, {:.3}]",
+                    node_id.slot,
+                    pos[0], pos[1], pos[2],
+                );
+            }
+        }
+
+        // Deterministic proof independent of wall-clock frame pacing.
+        for _ in 0..180 {
+            bridge
+                .world
+                .step(FIXED_DT)
+                .map_err(|error| AppError::RendererInit(RendererError::InvalidState(error.to_string())))?;
+        }
+        let contacts = bridge.world.last_contact_records();
+        log::info!(
+            "[Collider Validation] Contact proof: count={} records={:?}",
+            contacts.len(),
+            contacts,
+        );
+        if contacts.is_empty() {
+            return Err(AppError::RendererInit(RendererError::InvalidState(
+                "collider validation produced no contact".to_string(),
+            )));
+        }
+        let writes = bridge
+            .writeback_dynamic_transforms(&mut scene)
+            .map_err(|error| AppError::RendererInit(RendererError::InvalidState(error.to_string())))?;
+        log::info!(
+            "[Collider Validation] Transform writeback proof: updated_nodes={writes}"
+        );
+        if writes == 0 {
+            return Err(AppError::RendererInit(RendererError::InvalidState(
+                "collider validation produced no transform writeback".to_string(),
+            )));
+        }
+    }
 
     let spawn_world = tile_to_world(level.spawn.x, level.spawn.y);
     let spawn_position = spawn_world
@@ -785,6 +972,7 @@ fn run_headless(
             &mut renderer,
             &mut scene,
             collision_world,
+            &mut bridge,
             &mut player,
             &mut previous_player_position,
             &mut app_camera,

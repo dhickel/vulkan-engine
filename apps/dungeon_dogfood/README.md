@@ -131,3 +131,31 @@ The app passes these through `RendererConfig::visual_tuning`, so the demo owns i
 - The torch prop is an intentional fallback marker, not the PBR quality target.
 - `game_state.rs` is a placeholder struct not wired into the active game loop.
 - Runtime validation currently blocked by a build environment incompatibility (libclang 22 vs clang-sys 1.8.1 in russimp-sys). Code changes are implemented and reviewed for correctness.
+
+## Mesh Collider Bridge (Phase 09)
+
+Dogfood owns a `MeshColliderBridge` in `src/mesh_collider_bridge.rs` that converts renderer-neutral `MeshGeometryDto` into physics collider recipes using three explicit policies:
+
+- `StaticTrimesh` — static triangle-mesh colliders for dungeon chunk geometry (static bodies only)
+- `ConvexHull` — convex-hull colliders valid on static, dynamic, or kinematic bodies
+- `None` — intentional absence (no recipe allocated)
+
+The bridge owns a `physics::PhysicsWorld` and manages recipe lifecycle (synchronous registration, deferred completion, unload, cancellation/failure, immediate stale-handle rejection, and fence-aware retirement). `None` consumes no recipe handle. Recipe geometry stays in model space; instance transforms reject shear/non-invertible/non-finite matrices, bake scale only into a temporary physics vertex copy, and apply translation/rotation as collider pose.
+
+Dynamic/kinematic body translation and rotation are composed with the original model rotation/scale and written back to scene nodes through `BodyNodeMap`. Recipe slots are reused only after `Renderer::retirement_serials()` reports the consuming frame complete.
+
+### Collider Validation Mode
+
+```bash
+# Run headless collider validation with deterministic logging
+RUST_LOG=info timeout --signal=INT 30s cargo run -p dungeon_dogfood -- \
+  --level level_01 \
+  --headless \
+  --validate-colliders \
+  --capture_target draw \
+  --capture_frames 1 \
+  --capture_frame_start 10 \
+  --capture_dir .internal-dev/captures/engine-integration-sprint/phase-09
+```
+
+With `--validate-colliders`, the app emits structured log lines for mesh identity, policy, recipe generation, body/collider IDs, contact records, and scene transform updates — suitable for automated CI validation.

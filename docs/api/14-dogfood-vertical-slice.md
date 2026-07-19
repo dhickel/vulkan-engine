@@ -9,6 +9,7 @@
 - A validation target for engine project/package/scene contracts
 - The integration proof for the app-owned input/event/camera path in the root `engine` facade
 - A headless draw capture source for engine-owned visual evidence
+- An app-owned `PhysicsWorld` consumer with explicit mesh collider recipes and transform writeback
 
 ## What Dogfood Is Not
 

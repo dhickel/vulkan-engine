@@ -192,6 +192,18 @@ pub struct SpotLightId {
     pub generation: u32,
 }
 
+/// Shadow configuration for a directional light.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct DirectionalShadowConfig {
+    pub enabled: bool,
+}
+
+impl Default for DirectionalShadowConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 /// Spot light definition.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpotLight {
@@ -1127,6 +1139,75 @@ impl Scene {
     /// Returns the ID of the shadow-casting directional light, if any.
     pub fn shadow_casting_directional_light_id(&self) -> Option<DirectionalLightId> {
         self.world.shadow_casting_directional()
+    }
+
+    /// Add a directional light without enforcing the legacy single-light cap.
+    /// Multiple directional lights are supported for direct illumination;
+    /// shadow casting remains limited to at most one.
+    pub fn add_directional_light(&mut self, light: DirectionalLight) -> Result<DirectionalLightId, SceneError> {
+        light.validate()?;
+        let sanitized = DirectionalLight { color: light.sanitize_color(), ..light };
+        Ok(self.world.add_directional_light(sanitized))
+    }
+
+    /// Returns all active directional lights.
+    pub fn directional_lights(&self) -> Vec<DirectionalLight> {
+        self.world.get_active_directional_lights()
+    }
+
+    /// Enable or disable shadows for a directional light.
+    /// At most one directional light may cast shadows. Returns
+    /// `UnsupportedLightFeature` if a second directional is enabled.
+    pub fn set_directional_shadow_config(
+        &mut self,
+        id: DirectionalLightId,
+        config: DirectionalShadowConfig,
+    ) -> Result<(), SceneError> {
+        self.validate_directional_light(id)?;
+        if config.enabled {
+            // If a different directional is already the shadow caster, reject.
+            if let Some(existing) = self.world.shadow_casting_directional() {
+                if existing != id {
+                    return Err(SceneError::UnsupportedLightFeature(
+                        "at most one directional light may cast shadows at a time".into(),
+                    ));
+                }
+            }
+            self.world.set_shadow_casting_directional(Some(id));
+        } else if self.world.shadow_casting_directional() == Some(id) {
+            self.world.set_shadow_casting_directional(None);
+        }
+        Ok(())
+    }
+
+    /// Configure spot-light shadow intent. Spot shadows are not yet supported;
+    /// enabling them returns `UnsupportedLightFeature`.
+    pub fn set_spot_light_shadow_config(
+        &mut self,
+        _id: SpotLightId,
+        enabled: bool,
+    ) -> Result<(), SceneError> {
+        if enabled {
+            return Err(SceneError::UnsupportedLightFeature(
+                "spot-light shadow rendering is not yet supported".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Configure point-light shadow intent. Point shadows are not yet supported;
+    /// enabling them returns `UnsupportedLightFeature`.
+    pub fn set_point_light_shadow_config(
+        &mut self,
+        _id: PointLightId,
+        enabled: bool,
+    ) -> Result<(), SceneError> {
+        if enabled {
+            return Err(SceneError::UnsupportedLightFeature(
+                "point-light shadow rendering is not yet supported".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Create a spot light.

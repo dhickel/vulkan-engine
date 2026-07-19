@@ -56,6 +56,13 @@ pub enum FrameRenderOutcome {
     PresentedSuboptimal,
 }
 
+/// Fence-derived serials used by app-owned stores that retain data referenced by rendered frames.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RetirementSerials {
+    pub latest_submitted: u64,
+    pub latest_completed: u64,
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum RendererInputSuppression {
     None,
@@ -773,6 +780,17 @@ impl Renderer {
             &mut self.asset_loads,
             &self.asset_policy,
         )
+    }
+
+    /// Returns the latest successful submit and fence-observed completion serials.
+    ///
+    /// App-owned generation stores use these values to invalidate handles immediately while
+    /// delaying payload destruction and slot reuse until the consuming frame completes.
+    pub fn retirement_serials(&self) -> RetirementSerials {
+        RetirementSerials {
+            latest_submitted: self.runtime.core.latest_submitted_serial,
+            latest_completed: self.runtime.core.latest_completed_serial,
+        }
     }
 
     /// Thread: Main

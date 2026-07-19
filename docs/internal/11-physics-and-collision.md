@@ -31,7 +31,7 @@ The alpha `physics` crate wraps Rapier while exposing engine-owned IDs:
 
 - `PhysicsBodyId` and `PhysicsColliderId` are durable strings used by authored/app code.
 - `BodyDescriptor` supports `Static`, `Dynamic`, and `Kinematic` bodies.
-- `ColliderDescriptor` supports cuboid, sphere, Y-capsule, convex hull, and static triangle mesh shapes.
+- `ColliderDescriptor` supports cuboid, sphere, Y-capsule, convex hull, and static triangle mesh shapes, with explicit translation and rotation (applied as a Rapier `UnitQuaternion` isometry).
 - `PhysicsWorld::create_body` and `create_collider` validate duplicate IDs, missing parents, finite transforms, and positive dimensions.
 - `PhysicsWorld::cast_ray` returns `RayHit` using durable body/collider IDs.
 - `PhysicsWorld::step` records collision and trigger `Enter`, `Stay`, and `Exit` transitions.
@@ -119,6 +119,20 @@ The following are intentionally outside the current foundation:
 - runtime fixed-step scheduling and interpolation;
 - physics debug drawing;
 - broad gameplay collision/audio/script event orchestration.
+
+Dogfood now has an app-owned `MeshColliderBridge` that consumes DTO recipes and
+runs `PhysicsWorld` steps synchronized with gameplay ticks. Recipe handles invalidate
+immediately on unload/cancellation/failure; generic renderer fence serials delay payload
+release and slot reuse. Dynamic writeback preserves body translation/rotation plus the
+model's original scale/orientation. This is a proof of integration, not a replacement for
+the bespoke `CollisionWorld`.
+
+### 6.1 Collider Rotation
+
+`ColliderDescriptor` supports `rotation: [f32; 4]` (quaternion `[x, y, z, w]`) with a
+`rotation()` builder method. The pose is applied through `na::UnitQuaternion` in
+`create_collider`, enabling colliders to be instantiated with explicit orientation
+independent of the parent body's translation.
 
 Dogfood migration currently remains a debt item because the app has bespoke capsule, tile, ramp, step, and camera-intent collision behavior that needs a focused migration plan before replacement.
 

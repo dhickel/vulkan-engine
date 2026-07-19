@@ -50,7 +50,6 @@ impl VkShadowFrame {
     pub fn destroy(&mut self, device: &ash::Device, allocator: &Allocator) {
         unsafe {
             device.destroy_sampler(self.shadow_sampler, None);
-            device.destroy_image_view(self.shadow_map_view, None);
         }
         VkDestroyable::destroy(&mut self.shadow_map, device, allocator);
     }
@@ -107,7 +106,10 @@ impl VkShadowResources {
 
         let mut frames: Vec<VkShadowFrame> = Vec::with_capacity(frame_count as usize);
         for _ in 0..frame_count {
-            let (mut shadow_map, shadow_map_view) = match vk_util::create_image(
+            // Binding 5 is a sampler2DArrayShadow in both modes. Keep the
+            // legacy image single-layered, but expose it through a 2D-array
+            // view so the disabled-CSM descriptor remains shader-compatible.
+            let (mut shadow_map, shadow_map_view) = match vk_util::create_array_image(
                 device,
                 &allocator,
                 vk::Extent3D {
@@ -115,6 +117,7 @@ impl VkShadowResources {
                     height: Self::SHADOW_MAP_DIM,
                     depth: 1,
                 },
+                1,
                 vk::Format::D32_SFLOAT,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
                 1,
@@ -148,7 +151,6 @@ impl VkShadowResources {
                 Ok(sampler) => sampler,
                 Err(err) => {
                     VkDestroyable::destroy(&mut shadow_map, device, &allocator);
-                    unsafe { device.destroy_image_view(shadow_map_view, None); }
                     for frame in &mut frames {
                         frame.destroy(device, &allocator);
                     }

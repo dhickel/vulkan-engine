@@ -188,7 +188,7 @@ impl SceneWorld {
             skybox_env_id: EnvironmentHandle::new(0, 0),
             point_lights: Vec::with_capacity(16),
             free_point_light_slots: Vec::new(),
-            directional_lights: Vec::with_capacity(1),
+            directional_lights: Vec::with_capacity(4),
             free_directional_light_slots: Vec::new(),
             spot_lights: Vec::with_capacity(16),
             free_spot_light_slots: Vec::new(),
@@ -995,6 +995,11 @@ impl SceneWorld {
     /// Returns the active directional light (the public facade enforces one).
     pub(crate) fn get_active_directional_light(&self) -> Option<DirectionalLight> {
         self.directional_lights.iter().find_map(|entry| entry.light)
+    }
+
+    /// Returns all active directional lights.
+    pub(crate) fn get_active_directional_lights(&self) -> Vec<DirectionalLight> {
+        self.directional_lights.iter().filter_map(|entry| entry.light).collect()
     }
 
     /// Returns the ID of the active directional light, if any.

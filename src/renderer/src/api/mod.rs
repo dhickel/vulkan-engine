@@ -23,6 +23,9 @@ pub use crate::data::asset_registry::{
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
 pub use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto, MeshLocalAabb};
+pub use crate::data::retirement::{
+    FrameSerial, GpuRetirementQueue, RetirementClass, RetirementError, RetirementRecord,
+};
 pub use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 pub use crate::debug_ui::{
     AppUiCallback, DebugTimingRow, DebugTimingSnapshot, DebugUiFrameContext, DebugViewCallback,
@@ -60,11 +63,12 @@ pub use input::{
 pub use loading::{LoadStatus, LoadTicket};
 pub use renderer::{
     CameraView, EnvironmentRuntimeStatus, FrameContext, FrameRenderOutcome, Renderer,
-    RendererInputRouting, RendererInputSuppression,
+    RendererInputRouting, RendererInputSuppression, RetirementSerials,
 };
 pub use scene::{
     validate_scene_file, validate_scene_file_with_options, validate_scene_str,
     validate_scene_str_with_options, BoundsUnknownReason, DirectionalLight, DirectionalLightId,
+    DirectionalShadowConfig,
     MeshBoundsEntry, PointLight, PointLightId, SpotLight, SpotLightId, Scene,
     SceneAssetReference, SceneBounds,
     SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeSummary,
