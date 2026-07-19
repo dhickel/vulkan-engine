@@ -1,0 +1,59 @@
+format_version = 1
+id = "doorway-arch"
+layer_count = 1
+tags = ["threshold", "doorway", "connector"]
+rotations = [0, 90, 180, 270]
+
+[[layers]]
+rows = [
+  "#.#",
+  "#.#",
+  "#.#",
+  "#.#",
+  "#.#"
+]
+
+[origin]
+x = 1
+y = 2
+
+[[sockets]]
+id = "s-north"
+anchor = { layer = 0, x = 1, y = 0 }
+direction = "north"
+width = 1
+role = "doorway"
+
+[[sockets]]
+id = "s-south"
+anchor = { layer = 0, x = 1, y = 4 }
+direction = "south"
+width = 1
+role = "doorway"
+
+[[reservations]]
+owner = "self"
+kind = "footprint"
+cells = [
+  { layer = 0, x = 1, y = 0 },
+  { layer = 0, x = 1, y = 1 },
+  { layer = 0, x = 1, y = 2 },
+  { layer = 0, x = 1, y = 3 },
+  { layer = 0, x = 1, y = 4 }
+]
+
+[[reservations]]
+owner = "self"
+kind = "wall_shell"
+cells = [
+  { layer = 0, x = 0, y = 0 },
+  { layer = 0, x = 2, y = 0 },
+  { layer = 0, x = 0, y = 1 },
+  { layer = 0, x = 2, y = 1 },
+  { layer = 0, x = 0, y = 2 },
+  { layer = 0, x = 2, y = 2 },
+  { layer = 0, x = 0, y = 3 },
+  { layer = 0, x = 2, y = 3 },
+  { layer = 0, x = 0, y = 4 },
+  { layer = 0, x = 2, y = 4 }
+]

@@ -1,0 +1,51 @@
+format_version = 1
+id = "junction-cross"
+layer_count = 1
+tags = ["junction", "connector", "cross"]
+rotations = [0]
+
+[[layers]]
+rows = [
+  "##.##",
+  "#...#",
+  ".....",
+  "#...#",
+  "##.##"
+]
+
+[origin]
+x = 2
+y = 2
+
+[[sockets]]
+id = "s-north"
+anchor = { layer = 0, x = 2, y = 0 }
+direction = "north"
+width = 1
+role = "junction"
+
+[[sockets]]
+id = "s-south"
+anchor = { layer = 0, x = 2, y = 4 }
+direction = "south"
+width = 1
+role = "junction"
+
+[[sockets]]
+id = "s-east"
+anchor = { layer = 0, x = 4, y = 2 }
+direction = "east"
+width = 1
+role = "junction"
+
+[[sockets]]
+id = "s-west"
+anchor = { layer = 0, x = 0, y = 2 }
+direction = "west"
+width = 1
+role = "junction"
+
+[[reservations]]
+owner = "self"
+kind = "footprint"
+box = { layer = 0, x_min = 1, y_min = 1, x_max = 3, y_max = 3 }

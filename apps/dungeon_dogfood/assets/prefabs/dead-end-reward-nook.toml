@@ -1,0 +1,41 @@
+format_version = 1
+id = "dead-end-reward-nook"
+layer_count = 1
+tags = ["dead_end", "reward", "nook", "small"]
+rotations = [0, 90, 180, 270]
+
+[[layers]]
+rows = [
+  "###",
+  "#.#",
+  "#.#",
+  "#.#",
+  "#.#"
+]
+
+[origin]
+x = 1
+y = 2
+
+[[sockets]]
+id = "s-south"
+anchor = { layer = 0, x = 1, y = 4 }
+direction = "south"
+width = 1
+role = "dead_end"
+
+[[markers]]
+id = "m-reward"
+position = { layer = 0, x = 1, y = 1 }
+facing = "south"
+kind = "loot"
+
+[[reservations]]
+owner = "self"
+kind = "footprint"
+cells = [
+  { layer = 0, x = 1, y = 1 },
+  { layer = 0, x = 1, y = 2 },
+  { layer = 0, x = 1, y = 3 },
+  { layer = 0, x = 1, y = 4 }
+]

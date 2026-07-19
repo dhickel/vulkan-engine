@@ -1,0 +1,39 @@
+format_version = 1
+id = "small-room-offset"
+layer_count = 1
+tags = ["room", "small", "ordinary"]
+rotations = [0, 90, 180, 270]
+
+[[layers]]
+rows = [
+  "###.###",
+  "#.....#",
+  "#......",
+  "#.....#",
+  "#.#.###"
+]
+
+[origin]
+x = 1
+y = 2
+
+[[sockets]]
+id = "s-north"
+anchor = { layer = 0, x = 3, y = 0 }
+direction = "north"
+width = 1
+role = "corridor"
+
+[[sockets]]
+id = "s-south"
+anchor = { layer = 0, x = 1, y = 4 }
+direction = "south"
+width = 1
+role = "corridor"
+
+[[sockets]]
+id = "s-east"
+anchor = { layer = 0, x = 6, y = 2 }
+direction = "east"
+width = 1
+role = "corridor"

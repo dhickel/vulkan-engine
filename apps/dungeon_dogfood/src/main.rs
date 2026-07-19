@@ -2,6 +2,7 @@ mod audio_bridge;
 mod collision;
 mod content;
 mod events;
+mod generator;
 mod geometry;
 mod layout;
 mod mesh_collider_bridge;

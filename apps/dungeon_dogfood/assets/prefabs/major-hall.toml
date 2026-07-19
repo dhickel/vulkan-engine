@@ -1,0 +1,59 @@
+format_version = 1
+id = "major-hall"
+layer_count = 1
+tags = ["room", "hall", "landmark", "grand"]
+rotations = [0, 90, 180, 270]
+
+[[layers]]
+rows = [
+  "###..####",
+  "#.......#",
+  "#.......#",
+  ".........",
+  "#.......#",
+  "#.......#",
+  "###..####"
+]
+
+[origin]
+x = 4
+y = 3
+
+[[sockets]]
+id = "s-north"
+anchor = { layer = 0, x = 3, y = 0 }
+direction = "north"
+width = 2
+role = "hall"
+
+[[sockets]]
+id = "s-south"
+anchor = { layer = 0, x = 3, y = 6 }
+direction = "south"
+width = 2
+role = "hall"
+
+[[sockets]]
+id = "s-east"
+anchor = { layer = 0, x = 8, y = 3 }
+direction = "east"
+width = 1
+role = "corridor"
+
+[[sockets]]
+id = "s-west"
+anchor = { layer = 0, x = 0, y = 3 }
+direction = "west"
+width = 1
+role = "corridor"
+
+[[markers]]
+id = "m-centerpiece"
+position = { layer = 0, x = 4, y = 3 }
+facing = "north"
+kind = "landmark"
+
+[[reservations]]
+owner = "self"
+kind = "footprint"
+box = { layer = 0, x_min = 1, y_min = 1, x_max = 7, y_max = 5 }

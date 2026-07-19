@@ -1,0 +1,77 @@
+format_version = 1
+id = "ramp-hub-turn"
+layer_count = 2
+tags = ["ramp", "hub", "transition", "turn", "l-shaped"]
+rotations = [0, 90, 180, 270]
+
+[[layers]]
+rows = [
+  "#####",
+  "##R2^##",
+  "##R1^##",
+  "##R0^##",
+  "....#"
+]
+
+[[layers]]
+rows = [
+  "##.##",
+  "#___#",
+  "#___#",
+  "#___#",
+  "#####"
+]
+
+[origin]
+x = 2
+y = 2
+
+[[sockets]]
+id = "s-west"
+anchor = { layer = 0, x = 0, y = 4 }
+direction = "west"
+width = 1
+role = "lower_ramp_approach"
+
+[[sockets]]
+id = "s-north"
+anchor = { layer = 1, x = 2, y = 0 }
+direction = "north"
+width = 1
+role = "upper_landing"
+
+[[transitions]]
+id = "ramp-turn-north"
+lower_approach_socket = "s-west"
+upper_landing_socket = "s-north"
+upper_layer = 1
+
+[[reservations]]
+owner = "ramp-turn-north"
+kind = "ramp_volume"
+cells = [
+  { layer = 0, x = 2, y = 1 },
+  { layer = 0, x = 2, y = 2 },
+  { layer = 0, x = 2, y = 3 }
+]
+
+[[reservations]]
+owner = "ramp-turn-north"
+kind = "upper_opening"
+box = { layer = 1, x_min = 2, y_min = 1, x_max = 2, y_max = 3 }
+
+[[reservations]]
+owner = "ramp-turn-north"
+kind = "upper_landing"
+cells = [
+  { layer = 1, x = 2, y = 0 }
+]
+
+[[reservations]]
+owner = "ramp-turn-north"
+kind = "corridor_approach"
+cells = [
+  { layer = 0, x = 1, y = 4 },
+  { layer = 0, x = 2, y = 4 },
+  { layer = 0, x = 3, y = 4 }
+]
