@@ -12,7 +12,7 @@ use super::ir::{
 use super::prefab::{
     PrefabCatalog, PrefabVariant, ReservationKind, ReservationOwner, SocketRole as PrefabSocketRole,
 };
-use super::topology::route_socket_pair;
+use super::topology::{ordinary_socket_compatibility, route_socket_pair};
 
 // ─── Role manifest ──────────────────────────────────────────────────────────
 
@@ -595,7 +595,8 @@ fn commit_transition(
     grid: &mut OccupancyGrid,
     alloc: &mut IdAllocator,
     config: &NormalizedGeneratorConfig,
-) -> Result<(TransitionReservation, PlacedRegion, PlacedRegion), GeneratorError> {
+    committed_endpoints: &[PlacedRegion],
+) -> Result<Option<(TransitionReservation, PlacedRegion, PlacedRegion)>, GeneratorError> {
     let variant = catalog
         .variants()
         .get(usize::from(materialized.variant_index))
@@ -740,9 +741,30 @@ fn commit_transition(
         lower_approach_cells: materialized.lower_approach_cells.clone(),
     };
 
+    // Transition endpoints are core regions too. The first endpoint on a layer
+    // bootstraps that layer; every later endpoint must connect to the already
+    // committed non-dead-end backbone before this atomic staged state publishes.
+    let backbone = collect_backbone_sockets(committed_endpoints);
+    for endpoint in [&lower_region, &upper_region] {
+        if let Some(layer_backbone) = backbone
+            .get(&endpoint.layer)
+            .filter(|items| !items.is_empty())
+        {
+            if !can_connect_to_backbone(
+                endpoint,
+                &endpoint.sockets,
+                &staged_grid,
+                layer_backbone,
+                config,
+            )? {
+                return Ok(None);
+            }
+        }
+    }
+
     *grid = staged_grid;
     *alloc = staged_alloc;
-    Ok((reservation, lower_region, upper_region))
+    Ok(Some((reservation, lower_region, upper_region)))
 }
 
 fn reserve_transitions_and_endpoints(
@@ -796,8 +818,22 @@ fn reserve_transitions_and_endpoints(
                 )?;
                 continue;
             }
-            let (transition, lower, upper) =
-                commit_transition(&materialized, catalog, grid, alloc, config)?;
+            let Some((transition, lower, upper)) = commit_transition(
+                &materialized,
+                catalog,
+                grid,
+                alloc,
+                config,
+                &endpoints,
+            )? else {
+                rejected = rejected.checked_add(1).ok_or(
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "transition_connectivity_rejection_count",
+                    },
+                )?;
+                continue;
+            };
             transitions.push(transition);
             endpoints.push(lower);
             endpoints.push(upper);
@@ -1064,7 +1100,7 @@ fn can_connect_to_backbone(
 ) -> Result<bool, GeneratorError> {
     for staged_socket in staged_sockets {
         for (backbone_region, backbone_socket) in backbone {
-            if staged_socket.global_anchor.layer != backbone_socket.global_anchor.layer {
+            if ordinary_socket_compatibility(staged_socket, backbone_socket).is_none() {
                 continue;
             }
             let width = if staged_socket.width >= 2 && backbone_socket.width >= 2 {
@@ -1076,12 +1112,6 @@ fn can_connect_to_backbone(
                 stage: ErrorStage::Placement,
                 operation: "backbone_connectivity_width_convert",
             })?;
-            // Require same width; relaxed compatibility for connectivity gating
-            // does not require opposite directions — only that a legal A* path
-            // exists through valid occupancy.
-            if staged_socket.width == 0 || staged_socket.width != backbone_socket.width {
-                continue;
-            }
             if route_socket_pair(
                 staged_region,
                 staged_socket,
@@ -1566,25 +1596,23 @@ fn place_role_regions(
                         detail: "placement_variant_missing".into(),
                     })?;
                 // Stage the candidate in a temporary occupancy view.
-                let staged = stage_candidate_region(
-                    variant,
-                    candidate.variant_index,
-                    candidate.layer,
-                    candidate.x,
-                    candidate.y,
-                    role,
-                    grid,
-                    config,
-                    alloc,
-                );
                 let (staged_grid, staged_alloc, staged_sockets, staged_region) =
-                    match staged {
-                        Ok(value) => value,
-                        Err(_) => continue, // spacing or other conflict; try next
-                    };
+                    stage_candidate_region(
+                        variant,
+                        candidate.variant_index,
+                        candidate.layer,
+                        candidate.x,
+                        candidate.y,
+                        role,
+                        grid,
+                        config,
+                        alloc,
+                    )?;
                 // First region on an otherwise empty layer requires no gate.
                 let layer_backbone = backbone.get(&candidate.layer);
-                let connected = if layer_backbone.is_none() || layer_backbone.is_some_and(|b| b.is_empty()) {
+                let connected = if layer_backbone.is_none()
+                    || layer_backbone.is_some_and(|items| items.is_empty())
+                {
                     true
                 } else {
                     can_connect_to_backbone(
@@ -1920,8 +1948,10 @@ mod tests {
             &mut grid,
             &mut allocator,
             &config,
+            &[],
         )
-        .expect("transition commit");
+        .expect("transition commit")
+        .expect("first transition bootstraps both layers");
         assert_eq!(
             grid.get(approach),
             Some(OccupancyClass::TransitionHub(transition.id.raw()))
@@ -2063,6 +2093,71 @@ mod tests {
         let layer0 = backbone.get(&0).expect("layer 0 backbone");
         assert_eq!(layer0.len(), 1);
         assert_eq!(layer0[0].1.id, core.sockets[0].id);
+    }
+
+    #[test]
+    fn rejected_staged_transition_does_not_consume_ids_or_occupancy() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let materialized = materialize_transition(
+            enumerate_ramp_candidates(&catalog, &config)
+                .expect("ramp candidates")[0],
+            &catalog,
+            &config,
+        )
+        .expect("materialized transition");
+        let mut grid = OccupancyGrid::new(
+            config.width(),
+            config.height(),
+            config.layers().2,
+        )
+        .expect("grid");
+        grid.reserve_borders();
+        let original_grid = grid.clone();
+        let mut allocator = IdAllocator::new();
+        let incompatible_backbone = PlacedRegion {
+            id: super::super::ir::RegionId(999),
+            role: RegionRole::Spawn,
+            variant_index: 0,
+            layer: materialized.lower_layer,
+            footprint: (1, 1, 1, 1),
+            sockets: vec![PlacedSocket {
+                id: super::super::ir::SocketId(999),
+                variant_socket_index: 0,
+                global_anchor: GridCoord::new(
+                    materialized.lower_layer,
+                    1,
+                    1,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )
+                .expect("backbone socket"),
+                direction: Direction::North,
+                width: 2,
+                role: SocketRole::Hall,
+                paired_socket_id: None,
+            }],
+            transitions: vec![],
+            marker_variant_indices: vec![],
+        };
+
+        let committed = commit_transition(
+            &materialized,
+            &catalog,
+            &mut grid,
+            &mut allocator,
+            &config,
+            &[incompatible_backbone],
+        )
+        .expect("staged rejection is not an integrity error");
+        assert!(committed.is_none());
+        assert_eq!(grid, original_grid, "rejected staging changed occupancy");
+        assert_eq!(allocator.next_region().unwrap().raw(), 0);
+        assert_eq!(allocator.next_socket().unwrap().raw(), 0);
+        assert_eq!(allocator.next_transition().unwrap().raw(), 0);
     }
 
     #[test]
