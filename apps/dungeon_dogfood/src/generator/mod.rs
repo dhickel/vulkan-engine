@@ -364,32 +364,38 @@ mod qualification_tests {
         PrefabCatalog::load(&path).expect("prefab catalog must load")
     }
 
-    /// Smoke test: run seed 0 at the Primary profile with the current
-    /// supported workaround path (single_bottleneck +
-    /// relax_transition_redundancy) matching `build_generator_config()`.
     #[test]
-    fn seed_matrix_harness_smoke() {
+    fn primary_seed_77_known_feasible_attempt_is_accepted() {
+        const SEED: u64 = 77;
+        const FEASIBLE_ATTEMPT: u32 = 79;
+
         let catalog = prefab_catalog();
-        let mut config = GeneratorConfig::qualified(QualifiedProfile::Primary);
-        // Current supported path requires single-bottleneck mode until
-        // topology coverage repair is complete (Phase 4 exit gate not met).
-        config.single_bottleneck = true;
-        config.relax_transition_redundancy = true;
-        match generate(config, &catalog, 0) {
-            Ok(result) => {
-                assert!(result.level.width > 0);
-                assert!(result.level.height > 0);
-                assert!(result.level.layer_count() > 0);
-                eprintln!(
-                    "Harness smoke: seed=0 OK, attempt_index={}",
-                    result.attempt_index
-                );
-            }
-            Err(e) => {
-                eprintln!("Harness smoke: seed=0 FAILED: {e}");
-                panic!("seed 0 at Primary profile (relaxed) must succeed: {e}");
-            }
-        }
+        let config = GeneratorConfig::qualified(QualifiedProfile::Primary)
+            .normalize()
+            .expect("primary config");
+        let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), SEED);
+        let attempt = AttemptIdentity::new(identity, FEASIBLE_ATTEMPT);
+        let result = generate_attempt(
+            &config,
+            &catalog,
+            SEED,
+            attempt,
+            SemanticStreamFactory::new(attempt),
+        )
+        .expect("seed 77 feasible attempt must pass generation and acceptance");
+
+        super::ascii::round_trip_exact(&result.level)
+            .expect("marker-complete seed 77 output must round-trip exactly");
+        assert_eq!(result.seed, SEED);
+        assert_eq!(result.attempt_index, FEASIBLE_ATTEMPT);
+        assert_eq!(result.level.width, usize::from(config.width()));
+        assert_eq!(result.level.height, usize::from(config.height()));
+        assert_eq!(result.level.layer_count(), usize::from(config.layers().2));
+        assert!(!result.level.light_markers.is_empty());
+        assert!(
+            result.level.light_markers.len()
+                <= usize::try_from(config.max_lights()).expect("light cap fits usize")
+        );
     }
 
     /// Full seed matrix: unrelaxed Primary profile, seeds 0..99.

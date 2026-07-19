@@ -106,6 +106,60 @@ impl TileBuffer {
                 detail: format!("tile_buffer_ownership_missing {cell}"),
             })
     }
+
+    fn clear_transition_cell(
+        &mut self,
+        cell: GridCoord,
+        transition: TransitionId,
+    ) -> Result<(), GeneratorError> {
+        let index = self.cell_index(cell.layer, cell.x, cell.y)?;
+        let slot = self
+            .cells
+            .get_mut(usize::from(cell.layer))
+            .and_then(|cells| cells.get_mut(index))
+            .ok_or_else(|| {
+                materialization_error("transition_clearance_cell_missing", cell.to_string())
+            })?;
+        if !matches!(*slot, crate::layout::Tile::Void | crate::layout::Tile::Wall) {
+            return Err(materialization_error(
+                "transition_clearance_blocked",
+                format!("transition={} cell={cell} tile={slot:?}", transition.raw()),
+            ));
+        }
+        *slot = crate::layout::Tile::Void;
+        self.ownership_mut(cell)?.transition = Some(transition);
+        Ok(())
+    }
+
+    fn seal_borders(&mut self) -> Result<(), GeneratorError> {
+        for layer in 0..self.layers {
+            for x in 0..self.width {
+                self.seal_border_cell(layer, x, 0)?;
+                self.seal_border_cell(layer, x, self.height - 1)?;
+            }
+            for y in 0..self.height {
+                self.seal_border_cell(layer, 0, y)?;
+                self.seal_border_cell(layer, self.width - 1, y)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn seal_border_cell(&mut self, layer: u16, x: u16, y: u16) -> Result<(), GeneratorError> {
+        match self.get_tile(layer, x, y) {
+            Some(crate::layout::Tile::Void | crate::layout::Tile::Wall) => {
+                self.set_tile(layer, x, y, crate::layout::Tile::Wall)
+            }
+            Some(tile) => Err(materialization_error(
+                "border_not_sealable",
+                format!("l={layer} x={x} y={y} tile={tile:?}"),
+            )),
+            None => Err(materialization_error(
+                "border_cell_missing",
+                format!("l={layer} x={x} y={y}"),
+            )),
+        }
+    }
 }
 
 impl TileBufferWrite for TileBuffer {
@@ -1039,6 +1093,64 @@ fn materialization_error(constraint: &'static str, detail: String) -> GeneratorE
     }
 }
 
+/// Open the lower-layer cell beneath each upper landing. Leaving the prefab's
+/// wall support there blocks the runtime capsule before it can finish climbing
+/// R2 and step onto the upper floor.
+fn clear_transition_crest_exits(
+    transitions: &[super::ir::TransitionReservation],
+    buffer: &mut TileBuffer,
+    config: &NormalizedGeneratorConfig,
+) -> Result<(), GeneratorError> {
+    for transition in transitions {
+        let mut crest = None;
+        for cell in &transition.ramp_run_cells {
+            let direction = match buffer.get_tile(cell.layer, cell.x, cell.y) {
+                Some(crate::layout::Tile::RampNorth(2)) => Some(Direction::North),
+                Some(crate::layout::Tile::RampEast(2)) => Some(Direction::East),
+                Some(crate::layout::Tile::RampSouth(2)) => Some(Direction::South),
+                Some(crate::layout::Tile::RampWest(2)) => Some(Direction::West),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                if crest.replace((*cell, direction)).is_some() {
+                    return Err(materialization_error(
+                        "transition_crest_duplicate",
+                        format!("transition={}", transition.id.raw()),
+                    ));
+                }
+            }
+        }
+        let (crest, direction) = crest.ok_or_else(|| {
+            materialization_error(
+                "transition_crest_missing",
+                format!("transition={}", transition.id.raw()),
+            )
+        })?;
+        let exit = offset(crest, direction, config).ok_or_else(|| {
+            materialization_error(
+                "transition_crest_exit_oob",
+                format!("transition={} crest={crest}", transition.id.raw()),
+            )
+        })?;
+        let upper_layer = transition.lower_layer.checked_add(1).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Materialization,
+                operation: "transition_crest_exit_upper_layer",
+            },
+        )?;
+        if !transition.landing_cells.iter().any(|landing| {
+            landing.layer == upper_layer && landing.x == exit.x && landing.y == exit.y
+        }) {
+            return Err(materialization_error(
+                "transition_crest_exit_landing_mismatch",
+                format!("transition={} exit={exit}", transition.id.raw()),
+            ));
+        }
+        buffer.clear_transition_cell(exit, transition.id)?;
+    }
+    Ok(())
+}
+
 /// Full attempt transaction. A failure drops the local buffer; no caller state
 /// is mutated.
 pub(super) fn materialize_topology(
@@ -1060,6 +1172,8 @@ pub(super) fn materialize_topology(
     }
     carve_corridors(topology, &mut buffer, config)?;
     super::ramps::materialize_all_transitions(&topology.transitions, config, &mut buffer)?;
+    clear_transition_crest_exits(&topology.transitions, &mut buffer, config)?;
+    buffer.seal_borders()?;
     Ok(buffer)
 }
 
@@ -1165,7 +1279,46 @@ mod tests {
                 edge.id.raw()
             );
         }
-        materialize_topology(&topology, &catalog, &config)
-            .expect("seed 77 topology should materialize after border reservation");
+        let level = materialize_topology(&topology, &catalog, &config)
+            .expect("seed 77 topology should materialize after border reservation")
+            .into_parsed_level((1, 1));
+        let lookup = |layer, x, y| {
+            (layer < config.layers().2 && x < config.width() && y < config.height())
+                .then(|| level.tile_at_3d(usize::from(layer), usize::from(x), usize::from(y)))
+        };
+        let inferred = super::super::ramps::scan_transitions(
+            config.width(),
+            config.height(),
+            config.layers().2,
+            &lookup,
+        );
+        assert_eq!(inferred.len(), topology.transitions.len());
+        for ramp in inferred {
+            assert_eq!(
+                level.tile_at_3d(
+                    usize::from(ramp.lower_layer),
+                    usize::from(ramp.upper_landing.1),
+                    usize::from(ramp.upper_landing.2),
+                ),
+                crate::layout::Tile::Void,
+                "lower crest exit must be open beneath the upper landing",
+            );
+        }
+        for layer in 0..level.layer_count() {
+            for x in 0..level.width {
+                assert_eq!(level.tile_at_3d(layer, x, 0), crate::layout::Tile::Wall);
+                assert_eq!(
+                    level.tile_at_3d(layer, x, level.height - 1),
+                    crate::layout::Tile::Wall
+                );
+            }
+            for y in 0..level.height {
+                assert_eq!(level.tile_at_3d(layer, 0, y), crate::layout::Tile::Wall);
+                assert_eq!(
+                    level.tile_at_3d(layer, level.width - 1, y),
+                    crate::layout::Tile::Wall
+                );
+            }
+        }
     }
 }

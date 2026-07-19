@@ -729,26 +729,32 @@ pub(super) fn validate_topology(
         }
     }
 
-    // Verify every inferred transition matches a transition reservation.
-    let mut ramp_by_anchor: BTreeMap<(u16, u16, u16), &InferredTransition> = BTreeMap::new();
-    for ramp in inferred {
-        ramp_by_anchor.insert(ramp.lower_anchor, ramp);
-    }
-
+    // Match reservations by their complete ramp/opening masks. Reservation
+    // cells are canonically coordinate-sorted, so the first ramp cell is not
+    // necessarily R0 for north- or west-facing ramps.
     for transition in &topology.transitions {
-        // The anchor is the first ramp cell.
-        if let Some(r0) = transition.ramp_run_cells.first() {
-            let anchor = (r0.layer, r0.x, r0.y);
-            if !ramp_by_anchor.contains_key(&anchor) {
-                errors.push(validation_error(
-                    "topology",
-                    format!(
-                        "transition_{}_not_inferred anchor=({},{},{})",
-                        transition.id.raw(),
-                        anchor.0, anchor.1, anchor.2,
-                    ),
-                ));
-            }
+        let reserved_ramp: BTreeSet<_> = transition
+            .ramp_run_cells
+            .iter()
+            .map(|cell| (cell.layer, cell.x, cell.y))
+            .collect();
+        let reserved_opening: BTreeSet<_> = transition
+            .upper_opening_cells
+            .iter()
+            .map(|cell| (cell.layer, cell.x, cell.y))
+            .collect();
+        let matched = inferred.iter().any(|ramp| {
+            ramp.ramp_cells.into_iter().collect::<BTreeSet<_>>() == reserved_ramp
+                && ramp.opening_cells.into_iter().collect::<BTreeSet<_>>() == reserved_opening
+                && transition.landing_cells.iter().any(|cell| {
+                    (cell.layer, cell.x, cell.y) == ramp.upper_landing
+                })
+        });
+        if !matched {
+            errors.push(validation_error(
+                "topology",
+                format!("transition_{}_not_inferred", transition.id.raw()),
+            ));
         }
     }
 
@@ -817,6 +823,7 @@ pub(super) fn validate_movement_probes(
         route.extend(ramp.ramp_cells);
         route.push(ramp.upper_landing);
         if let Err(error) = probe_tile_route(
+            level,
             &collision,
             &route,
             format!("ramp_forward anchor={:?}", ramp.lower_anchor),
@@ -825,6 +832,7 @@ pub(super) fn validate_movement_probes(
         }
         route.reverse();
         if let Err(error) = probe_tile_route(
+            level,
             &collision,
             &route,
             format!("ramp_reverse anchor={:?}", ramp.lower_anchor),
@@ -840,20 +848,29 @@ pub(super) fn validate_movement_probes(
         .iter()
         .filter(|edge| edge.required && edge.transition.is_none())
     {
-        let route: Vec<_> = edge
+        let full_route: Vec<_> = edge
             .path_witness
             .iter()
             .map(|cell| (cell.layer, cell.x, cell.y))
             .collect();
+        let Some(route) = trim_to_walkable_route(level, &full_route) else {
+            errors.push(validation_error(
+                "movement_probe",
+                format!("corridor_edge_{}: no walkable connector", edge.id.raw()),
+            ));
+            continue;
+        };
         if let Err(error) = probe_tile_route(
+            level,
             &collision,
-            &route,
+            route,
             format!("corridor_edge_{}_forward", edge.id.raw()),
         ) {
             errors.push(error);
         }
-        let reverse: Vec<_> = route.into_iter().rev().collect();
+        let reverse: Vec<_> = route.iter().copied().rev().collect();
         if let Err(error) = probe_tile_route(
+            level,
             &collision,
             &reverse,
             format!("corridor_edge_{}_reverse", edge.id.raw()),
@@ -865,7 +882,24 @@ pub(super) fn validate_movement_probes(
     Ok(errors)
 }
 
+fn trim_to_walkable_route<'a>(
+    level: &ParsedLevel,
+    route: &'a [(u16, u16, u16)],
+) -> Option<&'a [(u16, u16, u16)]> {
+    let is_walkable = |(layer, x, y): &(u16, u16, u16)| {
+        tile_is_walkable(level.tile_at_3d(
+            usize::from(*layer),
+            usize::from(*x),
+            usize::from(*y),
+        ))
+    };
+    let first = route.iter().position(is_walkable)?;
+    let last = route.iter().rposition(is_walkable)?;
+    Some(&route[first..=last])
+}
+
 fn probe_tile_route(
+    level: &ParsedLevel,
     collision: &CollisionWorld,
     route: &[(u16, u16, u16)],
     context: String,
@@ -873,10 +907,17 @@ fn probe_tile_route(
     let Some(&first) = route.first() else {
         return Err(validation_error("movement_probe", format!("{context}: empty route")));
     };
-    let mut start = tile_to_world_coord(first);
+    let mut previous = first;
+    let mut start = tile_to_world_coord(level, first);
     for &cell in &route[1..] {
-        let goal = tile_to_world_coord(cell);
-        probe_movement(collision, start, goal, context.clone())?;
+        let goal = tile_to_world_coord(level, cell);
+        probe_movement(
+            collision,
+            start,
+            goal,
+            format!("{context} segment={previous:?}->{cell:?}"),
+        )?;
+        previous = cell;
         start = goal;
     }
     Ok(())
@@ -916,7 +957,12 @@ fn probe_movement(
     } else {
         Err(validation_error(
             "movement_probe",
-            format!("{context}: could not reach goal"),
+            format!(
+                "{context}: could not reach goal final={:?} target={:?} distance={}",
+                player.position,
+                target,
+                player.position.distance(target),
+            ),
         ))
     }
 }
@@ -990,12 +1036,43 @@ fn validate_edge_witness(
         if !envelope.contains(cell) {
             return Err(format!("cell_outside_envelope {cell}"));
         }
+    }
+
+    // Materialization connects the first and last Floor cells in the witness;
+    // socket terminals can intentionally be non-walkable aperture/opening
+    // cells. Validate the same contiguous connector rather than rejecting a
+    // legal terminal before reaching it.
+    let first_walkable = edge
+        .path_witness
+        .iter()
+        .position(|cell| index.contains_key(&MovementNode::from_coord(cell.layer, cell.x, cell.y)))
+        .ok_or_else(|| "no_walkable_connector".to_owned())?;
+    let last_walkable = edge
+        .path_witness
+        .iter()
+        .rposition(|cell| index.contains_key(&MovementNode::from_coord(cell.layer, cell.x, cell.y)))
+        .ok_or_else(|| "no_walkable_connector".to_owned())?;
+    let connector = &edge.path_witness[first_walkable..=last_walkable];
+    let connector_start = MovementNode::from_coord(
+        connector[0].layer,
+        connector[0].x,
+        connector[0].y,
+    );
+    let connector_end = MovementNode::from_coord(
+        connector[connector.len() - 1].layer,
+        connector[connector.len() - 1].x,
+        connector[connector.len() - 1].y,
+    );
+    if !node_in_region(connector_start, source) || !node_in_region(connector_end, target) {
+        return Err("connector_endpoints_outside_regions".into());
+    }
+    for cell in connector {
         let node = MovementNode::from_coord(cell.layer, cell.x, cell.y);
         if !index.contains_key(&node) {
             return Err(format!("cell_not_walkable {cell}"));
         }
     }
-    for pair in edge.path_witness.windows(2) {
+    for pair in connector.windows(2) {
         let a = MovementNode::from_coord(pair[0].layer, pair[0].x, pair[0].y);
         let b = MovementNode::from_coord(pair[1].layer, pair[1].x, pair[1].y);
         let ai = index[&a];
@@ -1077,13 +1154,18 @@ fn connected_components(movement: &MovementGraph) -> Vec<BTreeSet<usize>> {
     components
 }
 
-fn tile_to_world_coord((layer, x, y): (u16, u16, u16)) -> (f32, f32, f32) {
+fn tile_to_world_coord(
+    level: &ParsedLevel,
+    (layer, x, y): (u16, u16, u16),
+) -> (f32, f32, f32) {
     let world = crate::layout::tile_to_world(usize::from(x), usize::from(y));
-    let eye_y = f32::from(layer) * crate::collision::WALL_HEIGHT
-        + crate::player::PLAYER_EYE_HEIGHT;
+    let layer_floor = f32::from(layer) * crate::collision::WALL_HEIGHT;
+    let tile = level.tile_at_3d(usize::from(layer), usize::from(x), usize::from(y));
+    let ground = crate::collision::ramp_height(tile, 0.5, 0.5, layer_floor)
+        .unwrap_or(layer_floor);
     (
         world.x + crate::layout::TILE_SIZE * 0.5,
-        eye_y,
+        ground + crate::player::PLAYER_EYE_HEIGHT,
         world.z - crate::layout::TILE_SIZE * 0.5,
     )
 }

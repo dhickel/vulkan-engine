@@ -498,6 +498,7 @@ struct LightCandidate {
     coord: GridCoord,
     /// Required intents rank first.
     required: bool,
+    role: Option<RegionRole>,
     /// Semantic priority: lower = higher priority.
     semantic_rank: u8,
     /// Distance from spawn.
@@ -575,7 +576,6 @@ pub(super) fn place_lights(
             .min_by_key(|r| r.ordinal())
             .copied();
 
-        let required = is_required_light_role(primary_role);
         let intent_label = primary_role.map_or("scenery", |r| r.label());
 
         // Semantic rank: required-route first, junctions, ramp entries, room interiors, dead ends, optional branches last.
@@ -584,7 +584,8 @@ pub(super) fn place_lights(
 
         candidates.push(LightCandidate {
             coord,
-            required,
+            required: false,
+            role: primary_role,
             semantic_rank,
             distance_rank,
             class_ordinal: class_ordinal(class),
@@ -593,8 +594,7 @@ pub(super) fn place_lights(
         });
     }
 
-    // Sort: required first, then semantic priority, then distance, then canonical.
-    candidates.sort_by(|a, b| {
+    let candidate_order = |a: &LightCandidate, b: &LightCandidate| {
         b.required
             .cmp(&a.required)
             .then_with(|| a.semantic_rank.cmp(&b.semantic_rank))
@@ -604,11 +604,53 @@ pub(super) fn place_lights(
             .then_with(|| a.coord.layer.cmp(&b.coord.layer))
             .then_with(|| a.coord.y.cmp(&b.coord.y))
             .then_with(|| a.coord.x.cmp(&b.coord.x))
-    });
+    };
+    candidates.sort_by(candidate_order);
+
+    // Required lighting is one deterministic navigational intent per semantic
+    // role class, not one light for every floor cell in matching regions.
+    let required_roles: BTreeSet<RegionRole> = topology
+        .regions
+        .iter()
+        .map(|region| region.role)
+        .filter(|role| is_required_light_role(Some(*role)))
+        .collect();
+    if required_roles.len() > max_lights {
+        let required = u64::try_from(required_roles.len()).map_err(|_| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "required_light_role_count",
+            }
+        })?;
+        let available = u64::try_from(max_lights).map_err(|_| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Ir,
+                operation: "required_light_capacity",
+            }
+        })?;
+        return Err(GeneratorError::MandatoryInfeasibility {
+            stage: ErrorStage::Ir,
+            constraint: "required_light_capacity",
+            required,
+            available,
+        });
+    }
+    for role in &required_roles {
+        let candidate = candidates
+            .iter_mut()
+            .find(|candidate| candidate.role == Some(*role))
+            .ok_or(GeneratorError::MandatoryInfeasibility {
+                stage: ErrorStage::Ir,
+                constraint: "required_light_unplaced",
+                required: 1,
+                available: 0,
+            })?;
+        candidate.required = true;
+    }
+    candidates.sort_by(candidate_order);
 
     let mut lights = Vec::new();
     let mut omissions = Vec::new();
-    let mut required_count = 0u32;
     let mut placed = BTreeSet::new();
 
     for (idx, candidate) in candidates.iter().enumerate() {
@@ -627,23 +669,6 @@ pub(super) fn place_lights(
         // Skip co-location with spawn or already-placed markers.
         if placed.contains(&candidate.coord) {
             continue;
-        }
-
-        if candidate.required {
-            required_count = required_count.saturating_add(1);
-        }
-
-        // Check required count doesn't exceed capacity.
-        if candidate.required
-            && lights.len() + (candidates.iter().skip(idx).filter(|c| c.required).count())
-                > max_lights
-        {
-            return Err(GeneratorError::MandatoryInfeasibility {
-                stage: ErrorStage::Ir,
-                constraint: "required_light_capacity",
-                required: u64::from(required_count),
-                available: u64::try_from(max_lights).unwrap_or(u64::MAX),
-            });
         }
 
         let preset = light_preset_for_marker_index(lights.len());
@@ -666,6 +691,13 @@ pub(super) fn place_lights(
                 available: 0,
             });
         }
+    }
+
+    // ParsedLevel marker arrays are canonical by coordinate. Reassign the
+    // index-derived preset after sorting so runtime and serialized order agree.
+    lights.sort_by_key(|light| (light.coord.layer, light.coord.y, light.coord.x));
+    for (index, light) in lights.iter_mut().enumerate() {
+        light.preset = light_preset_for_marker_index(index);
     }
 
     Ok((lights, omissions))
@@ -1209,6 +1241,37 @@ mod tests {
                 ),
                 _ => unreachable!(),
             }
+        }
+    }
+
+    #[test]
+    fn required_light_intent_is_per_role_not_per_floor_cell() {
+        let config = tiny_config();
+        let level = tiny_level();
+        let mut topology = tiny_topology();
+        topology.regions[0].role = RegionRole::RequiredRoute;
+        let (movement, _inferred) = reconstruct_movement_graph(&level, &topology).unwrap();
+        let spawn = GridCoord::new(0, 1, 1, config.width(), config.height(), config.layers().2)
+            .unwrap();
+
+        let (lights, _omissions) = place_lights(
+            &level,
+            &topology,
+            &movement,
+            &BTreeMap::new(),
+            spawn,
+            &config,
+        )
+        .expect("many floor cells in one required role must fit the light budget");
+
+        assert_eq!(lights.iter().filter(|light| light.required).count(), 1);
+        assert_eq!(lights.len(), usize::try_from(config.max_lights()).unwrap());
+        assert!(lights.windows(2).all(|pair| {
+            (pair[0].coord.layer, pair[0].coord.y, pair[0].coord.x)
+                < (pair[1].coord.layer, pair[1].coord.y, pair[1].coord.x)
+        }));
+        for (index, light) in lights.iter().enumerate() {
+            assert_eq!(light.preset, light_preset_for_marker_index(index));
         }
     }
 
