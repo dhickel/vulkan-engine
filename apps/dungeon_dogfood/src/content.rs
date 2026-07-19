@@ -51,6 +51,7 @@ pub struct PropSpec {
     pub scale: [f32; 3],
     pub yaw_degrees: f32,
     pub y_offset: f32,
+    pub placement_half_extents: [f32; 3],
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,6 +151,62 @@ impl PropSpec {
             y_offset: self.y_offset,
             prefer_unlit_fallback: self.prefer_unlit_fallback,
         }
+    }
+
+    /// Build a validated placement envelope from spec data.
+    /// Returns `None` when half-extents are non-positive, non-finite, or overflow.
+    pub fn placement_envelope(&self) -> Option<PropPlacementEnvelope> {
+        let local = self.placement_half_extents;
+        if local[0] <= 0.0 || local[1] <= 0.0 || local[2] <= 0.0 {
+            return None;
+        }
+        if !local.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        if !self.scale.iter().all(|v| v.is_finite() && *v > 0.0) {
+            return None;
+        }
+        if !self.yaw_degrees.is_finite() {
+            return None;
+        }
+        Some(PropPlacementEnvelope {
+            half_extents_local: local,
+            scale: self.scale,
+            yaw_degrees: self.yaw_degrees,
+        })
+    }
+}
+
+/// App-local normalized prop placement envelope.
+/// Combines declared half-extents with the existing scale and yaw.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropPlacementEnvelope {
+    pub half_extents_local: [f32; 3],
+    pub scale: [f32; 3],
+    pub yaw_degrees: f32,
+}
+
+impl PropPlacementEnvelope {
+    /// Conservative horizontal half-extents in world space.
+    /// For yaw θ, using the formula:
+    /// hx = |cos θ| * |sx| * lx + |sin θ| * |sz| * lz
+    /// hz = |sin θ| * |sx| * lx + |cos θ| * |sz| * lz
+    /// hy = |sy| * ly
+    pub fn world_half_extents(&self) -> [f32; 3] {
+        let theta = self.yaw_degrees.to_radians();
+        let cos = theta.cos().abs();
+        let sin = theta.sin().abs();
+        let sx = self.scale[0].abs();
+        let sy = self.scale[1].abs();
+        let sz = self.scale[2].abs();
+        let lx = self.half_extents_local[0];
+        let ly = self.half_extents_local[1];
+        let lz = self.half_extents_local[2];
+        [
+            cos * sx * lx + sin * sz * lz,
+            sy * ly,
+            sin * sx * lx + cos * sz * lz,
+        ]
     }
 }
 
@@ -306,6 +363,16 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
                     pack_path,
                     format!("{key}.scale.{axis}"),
                     "scale values must be finite and > 0",
+                ));
+            }
+        }
+
+        for (axis, value) in ["x", "y", "z"].into_iter().zip(prop.placement_half_extents) {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(validation_err(
+                    pack_path,
+                    format!("{key}.placement_half_extents.{axis}"),
+                    "placement_half_extents must be finite and > 0",
                 ));
             }
         }

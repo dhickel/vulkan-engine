@@ -31,7 +31,7 @@ pub struct TileCoord {
     pub y: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParsedLevel {
     pub width: usize,
     pub height: usize,
