@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use renderer::prelude::{MaterialHandle, ProceduralMeshData, ProceduralVertex};
 
 use crate::collision::{ramp_height, CEILING_HEIGHT, CHUNK_SIZE, TILE_SIZE, WALL_HEIGHT};
+use crate::generator::ramps::scan_transitions;
 use crate::layout::{tile_to_world, ParsedLevel, Tile};
 use glam::{Vec2, Vec3, Vec4};
 
@@ -23,6 +26,7 @@ pub fn build_level_chunks(
     floor_material: MaterialHandle,
     wall_material: MaterialHandle,
 ) -> Vec<ChunkBuild> {
+    let suppressed_ceiling_cells = inferred_ramp_ceiling_openings(level);
     let mut out = Vec::new();
 
     for layer_idx in 0..level.layer_count() {
@@ -36,6 +40,7 @@ pub fn build_level_chunks(
             level.width,
             level.height,
             &format!("floor_l{}", layer_idx),
+            &suppressed_ceiling_cells,
             &mut out,
         );
 
@@ -49,11 +54,38 @@ pub fn build_level_chunks(
             level.width,
             level.height,
             &format!("struct_l{}", layer_idx),
+            &suppressed_ceiling_cells,
             &mut out,
         );
     }
 
     out
+}
+
+/// Return lower-layer cells whose ceilings are removed by complete shared ramp
+/// inference. Generic upper-layer `Void` never enters this set.
+fn inferred_ramp_ceiling_openings(level: &ParsedLevel) -> BTreeSet<(usize, usize, usize)> {
+    let Ok(width) = u16::try_from(level.width) else {
+        return BTreeSet::new();
+    };
+    let Ok(height) = u16::try_from(level.height) else {
+        return BTreeSet::new();
+    };
+    let Ok(layers) = u16::try_from(level.layer_count()) else {
+        return BTreeSet::new();
+    };
+    let lookup = |layer: u16, x: u16, y: u16| {
+        Some(level.tile_at_3d(
+            usize::from(layer),
+            usize::from(x),
+            usize::from(y),
+        ))
+    };
+    scan_transitions(width, height, layers, &lookup)
+        .into_iter()
+        .flat_map(|transition| transition.ramp_cells)
+        .map(|(layer, x, y)| (usize::from(layer), usize::from(x), usize::from(y)))
+        .collect()
 }
 
 fn emit_chunk(
@@ -66,6 +98,7 @@ fn emit_chunk(
     x1: usize,
     y1: usize,
     base_name: &str,
+    opening_cells: &BTreeSet<(usize, usize, usize)>,
     out: &mut Vec<ChunkBuild>,
 ) {
     let width = x1 - x0;
@@ -77,7 +110,7 @@ fn emit_chunk(
 
         for y in y0..y1 {
             for x in x0..x1 {
-                emit_tile(level, layer_idx, x, y, sub_layer, &mut verts, &mut inds);
+                emit_tile(level, layer_idx, x, y, sub_layer, opening_cells, &mut verts, &mut inds);
             }
         }
 
@@ -118,6 +151,7 @@ fn emit_chunk(
                 mid,
                 y1,
                 &format!("{base_name}_a"),
+                opening_cells,
                 out,
             );
             emit_chunk(
@@ -130,6 +164,7 @@ fn emit_chunk(
                 x1,
                 y1,
                 &format!("{base_name}_b"),
+                opening_cells,
                 out,
             );
             return;
@@ -147,6 +182,7 @@ fn emit_chunk(
                 x1,
                 mid,
                 &format!("{base_name}_a"),
+                opening_cells,
                 out,
             );
             emit_chunk(
@@ -159,6 +195,7 @@ fn emit_chunk(
                 x1,
                 y1,
                 &format!("{base_name}_b"),
+                opening_cells,
                 out,
             );
             return;
@@ -172,6 +209,7 @@ fn emit_tile(
     x: usize,
     y: usize,
     sub_layer: SubLayer,
+    opening_cells: &BTreeSet<(usize, usize, usize)>,
     verts: &mut Vec<ProceduralVertex>,
     inds: &mut Vec<u32>,
 ) {
@@ -198,9 +236,11 @@ fn emit_tile(
                     Tile::RampNorth(_) | Tile::RampEast(_) | Tile::RampSouth(_) | Tile::RampWest(_)
                 ) {
                     emit_ramp_caps(level, layer_idx, x, y, y_offset, tile, verts, inds);
-                } else {
+                }
+                if !opening_cells.contains(&(layer_idx, x, y)) {
                     emit_ceiling_for_tile(level, layer_idx, x, y, y_offset, verts, inds);
                 }
+                // Complete inferred ramp opening: suppress exactly this ceiling.
             }
 
             if !is_solid(tile) {
@@ -991,12 +1031,14 @@ mod tests {
     ) -> Vec<ProceduralVertex> {
         let mut verts = Vec::new();
         let mut inds = Vec::new();
+        let empty_openings = BTreeSet::new();
         emit_tile(
             level,
             layer_idx,
             x,
             y,
             SubLayer::Structure,
+            &empty_openings,
             &mut verts,
             &mut inds,
         );
@@ -1166,8 +1208,9 @@ mod tests {
         let level = parsed_level(2, 1, vec![Tile::RampEast(0), Tile::RampEast(1)]);
         let mut verts = Vec::new();
         let mut inds = Vec::new();
-        emit_tile(&level, 0, 0, 0, SubLayer::Structure, &mut verts, &mut inds);
-        emit_tile(&level, 0, 1, 0, SubLayer::Structure, &mut verts, &mut inds);
+        let empty_openings = BTreeSet::new();
+        emit_tile(&level, 0, 0, 0, SubLayer::Structure, &empty_openings, &mut verts, &mut inds);
+        emit_tile(&level, 0, 1, 0, SubLayer::Structure, &empty_openings, &mut verts, &mut inds);
 
         let quads: Vec<&[ProceduralVertex]> = verts.chunks_exact(4).collect();
         assert!(!quads.iter().any(|quad| {
@@ -1264,5 +1307,79 @@ mod tests {
             }),
             "upper same-layer boundary wall should emit when it is not over lower open space"
         );
+    }
+
+    #[test]
+    fn complete_ramp_inference_suppresses_exactly_run_ceilings() {
+        let level = parsed_level_layers(
+            7,
+            1,
+            vec![
+                vec![
+                    Tile::Wall,
+                    Tile::Floor,
+                    Tile::RampEast(0),
+                    Tile::RampEast(1),
+                    Tile::RampEast(2),
+                    Tile::Wall,
+                    Tile::Wall,
+                ],
+                vec![
+                    Tile::Wall,
+                    Tile::Wall,
+                    Tile::Void,
+                    Tile::Void,
+                    Tile::Void,
+                    Tile::Floor,
+                    Tile::Wall,
+                ],
+            ],
+        );
+        let openings = inferred_ramp_ceiling_openings(&level);
+        assert_eq!(openings, BTreeSet::from([(0, 2, 0), (0, 3, 0), (0, 4, 0)]));
+
+        for x in 2..=4 {
+            let mut verts = Vec::new();
+            let mut inds = Vec::new();
+            emit_tile(
+                &level,
+                0,
+                x,
+                0,
+                SubLayer::Structure,
+                &openings,
+                &mut verts,
+                &mut inds,
+            );
+            assert!(!verts.chunks_exact(4).any(|quad| quad[0].normal == -Vec3::Y));
+        }
+    }
+
+    #[test]
+    fn malformed_ramp_and_generic_void_preserve_ceilings() {
+        let malformed = parsed_level_layers(
+            6,
+            1,
+            vec![
+                vec![
+                    Tile::Floor,
+                    Tile::RampEast(0),
+                    Tile::RampEast(2),
+                    Tile::RampEast(1),
+                    Tile::Wall,
+                    Tile::Floor,
+                ],
+                vec![Tile::Void, Tile::Void, Tile::Void, Tile::Void, Tile::Floor, Tile::Void],
+            ],
+        );
+        assert!(inferred_ramp_ceiling_openings(&malformed).is_empty());
+        let generic_void = parsed_level_layers(
+            1,
+            1,
+            vec![vec![Tile::Floor], vec![Tile::Void]],
+        );
+        assert!(inferred_ramp_ceiling_openings(&generic_void).is_empty());
+        let verts = emit_structure_tile(&generic_void, 0, 0, 0);
+        assert!(verts.chunks_exact(4).any(|quad| quad[0].normal == -Vec3::Y));
     }
 }

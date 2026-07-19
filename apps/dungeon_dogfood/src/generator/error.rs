@@ -9,6 +9,7 @@ pub(crate) enum ErrorStage {
     Prefab,
     Placement,
     Topology,
+    Materialization,
     Ir,
 }
 
@@ -22,6 +23,7 @@ impl ErrorStage {
             Self::Prefab => "prefab",
             Self::Placement => "placement",
             Self::Topology => "topology",
+            Self::Materialization => "materialization",
             Self::Ir => "ir",
         }
     }
@@ -72,12 +74,60 @@ pub(crate) enum GeneratorError {
         required: u64,
         available: u64,
     },
+    TransitionInfeasible {
+        stage: ErrorStage,
+        lower_layer: u16,
+        upper_layer: u16,
+        required: u64,
+        available: u64,
+        rejected: u64,
+    },
+    TransitionBinding {
+        stage: ErrorStage,
+        transition: u32,
+        reason: &'static str,
+    },
+    GraphBoundViolation {
+        stage: ErrorStage,
+        constraint: &'static str,
+        minimum: u64,
+        maximum: u64,
+        actual: u64,
+    },
+    SearchExhausted {
+        stage: ErrorStage,
+        search: &'static str,
+        attempted: u64,
+        budget: u64,
+    },
     IrInvariant {
         stage: ErrorStage,
         detail: String,
     },
     OccupancyConflict {
         stage: ErrorStage,
+        detail: String,
+    },
+    TileBufferOverflow {
+        stage: ErrorStage,
+        detail: String,
+    },
+    TileBufferConflict {
+        stage: ErrorStage,
+        detail: String,
+    },
+    CorridorNoPath {
+        stage: ErrorStage,
+        edge: u32,
+    },
+    CorridorInvariant {
+        stage: ErrorStage,
+        edge: u32,
+        detail: String,
+    },
+    MaterializationInfeasible {
+        stage: ErrorStage,
+        constraint: &'static str,
         detail: String,
     },
 }
@@ -93,8 +143,17 @@ impl GeneratorError {
             | Self::PrefabIntegrity { stage, .. }
             | Self::PlacementExhausted { stage, .. }
             | Self::TopologyInfeasible { stage, .. }
+            | Self::TransitionInfeasible { stage, .. }
+            | Self::TransitionBinding { stage, .. }
+            | Self::GraphBoundViolation { stage, .. }
+            | Self::SearchExhausted { stage, .. }
             | Self::IrInvariant { stage, .. }
-            | Self::OccupancyConflict { stage, .. } => *stage,
+            | Self::OccupancyConflict { stage, .. }
+            | Self::TileBufferOverflow { stage, .. }
+            | Self::TileBufferConflict { stage, .. }
+            | Self::CorridorNoPath { stage, .. }
+            | Self::CorridorInvariant { stage, .. }
+            | Self::MaterializationInfeasible { stage, .. } => *stage,
         }
     }
 
@@ -107,8 +166,18 @@ impl GeneratorError {
             | Self::PlacementExhausted { reason, .. } => reason,
             Self::ArithmeticOverflow { operation, .. } => operation,
             Self::MandatoryInfeasibility { constraint, .. }
-            | Self::TopologyInfeasible { constraint, .. } => constraint,
-            Self::IrInvariant { detail, .. } | Self::OccupancyConflict { detail, .. } => detail.as_str(),
+            | Self::TopologyInfeasible { constraint, .. }
+            | Self::GraphBoundViolation { constraint, .. } => constraint,
+            Self::TransitionInfeasible { .. } => "transition_infeasible",
+            Self::TransitionBinding { reason, .. } => reason,
+            Self::SearchExhausted { search, .. } => search,
+            Self::IrInvariant { detail, .. }
+            | Self::OccupancyConflict { detail, .. }
+            | Self::TileBufferOverflow { detail, .. }
+            | Self::TileBufferConflict { detail, .. }
+            | Self::CorridorInvariant { detail, .. } => detail.as_str(),
+            Self::CorridorNoPath { .. } => "corridor_no_path",
+            Self::MaterializationInfeasible { constraint, .. } => constraint,
         }
     }
 }
@@ -166,6 +235,39 @@ impl fmt::Display for GeneratorError {
                 "generator error stage={} constraint={} required={} available={}",
                 stage.code(), constraint, required, available
             ),
+            Self::TransitionInfeasible {
+                stage,
+                lower_layer,
+                upper_layer,
+                required,
+                available,
+                rejected,
+            } => write!(
+                f,
+                "generator error stage={} reason=transition_infeasible lower_layer={} upper_layer={} required={} available={} rejected={}",
+                stage.code(), lower_layer, upper_layer, required, available, rejected
+            ),
+            Self::TransitionBinding { stage, transition, reason } => write!(
+                f,
+                "generator error stage={} transition={} reason={}",
+                stage.code(), transition, reason
+            ),
+            Self::GraphBoundViolation {
+                stage,
+                constraint,
+                minimum,
+                maximum,
+                actual,
+            } => write!(
+                f,
+                "generator error stage={} constraint={} minimum={} maximum={} actual={}",
+                stage.code(), constraint, minimum, maximum, actual
+            ),
+            Self::SearchExhausted { stage, search, attempted, budget } => write!(
+                f,
+                "generator error stage={} search={} attempted={} budget={}",
+                stage.code(), search, attempted, budget
+            ),
             Self::IrInvariant { stage, detail } => write!(
                 f,
                 "generator error stage={} detail={}",
@@ -175,6 +277,31 @@ impl fmt::Display for GeneratorError {
                 f,
                 "generator error stage={} detail={}",
                 stage.code(), detail
+            ),
+            Self::TileBufferOverflow { stage, detail } => write!(
+                f,
+                "generator error stage={} detail={}",
+                stage.code(), detail
+            ),
+            Self::TileBufferConflict { stage, detail } => write!(
+                f,
+                "generator error stage={} detail={}",
+                stage.code(), detail
+            ),
+            Self::CorridorNoPath { stage, edge } => write!(
+                f,
+                "generator error stage={} reason=corridor_no_path edge={}",
+                stage.code(), edge
+            ),
+            Self::CorridorInvariant { stage, edge, detail } => write!(
+                f,
+                "generator error stage={} reason=corridor_invariant edge={} detail={}",
+                stage.code(), edge, detail
+            ),
+            Self::MaterializationInfeasible { stage, constraint, detail } => write!(
+                f,
+                "generator error stage={} constraint={} detail={}",
+                stage.code(), constraint, detail
             ),
         }
     }
@@ -232,6 +359,32 @@ mod tests {
                 required: 100,
                 available: 50,
             },
+            GeneratorError::TransitionInfeasible {
+                stage: ErrorStage::Placement,
+                lower_layer: 0,
+                upper_layer: 1,
+                required: 2,
+                available: 1,
+                rejected: 9,
+            },
+            GeneratorError::TransitionBinding {
+                stage: ErrorStage::Ir,
+                transition: 4,
+                reason: "missing_endpoint",
+            },
+            GeneratorError::GraphBoundViolation {
+                stage: ErrorStage::Topology,
+                constraint: "cycle_bounds",
+                minimum: 1,
+                maximum: 4,
+                actual: 0,
+            },
+            GeneratorError::SearchExhausted {
+                stage: ErrorStage::Topology,
+                search: "topology_search",
+                attempted: 32,
+                budget: 32,
+            },
             GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,
                 detail: "duplicate_region_id".into(),
@@ -239,6 +392,28 @@ mod tests {
             GeneratorError::OccupancyConflict {
                 stage: ErrorStage::Placement,
                 detail: "reservation_overlap self region_0".into(),
+            },
+            GeneratorError::TileBufferOverflow {
+                stage: ErrorStage::Materialization,
+                detail: "buffer_capacity_exceeded".into(),
+            },
+            GeneratorError::TileBufferConflict {
+                stage: ErrorStage::Materialization,
+                detail: "overlapping_write at (0,5,5)".into(),
+            },
+            GeneratorError::CorridorNoPath {
+                stage: ErrorStage::Materialization,
+                edge: 7,
+            },
+            GeneratorError::CorridorInvariant {
+                stage: ErrorStage::Materialization,
+                edge: 7,
+                detail: "legal_connector_missing".into(),
+            },
+            GeneratorError::MaterializationInfeasible {
+                stage: ErrorStage::Materialization,
+                constraint: "ramp_approach_blocked",
+                detail: "lower approach cell not walkable".into(),
             },
         ];
         for error in errors {

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use super::config::NormalizedGeneratorConfig;
@@ -6,16 +5,16 @@ use super::determinism::{Pcg32V1, SemanticComponent, SemanticStage, SemanticStre
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
     Direction, GridCoord, IdAllocator, IntendedTopology, OccupancyClass, OccupancyGrid,
-    PlacedRegion, PlacedSocket, RegionId, RegionRole, SocketId, SocketRole, TransitionId,
+    PlacedRegion, PlacedSocket, RegionRole, SocketRole,
     TransitionReservation,
 };
-use super::prefab::{PrefabCatalog, PrefabVariant};
+use super::prefab::{
+    PrefabCatalog, PrefabVariant, ReservationKind, ReservationOwner, SocketRole as PrefabSocketRole,
+};
 
 // ─── Role manifest ──────────────────────────────────────────────────────────
 
-/// A deterministic assignment of roles to target counts, derived from the
-/// normalized configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RoleManifest {
     spawn_count: u32,
     distant_landmark_count: u32,
@@ -33,92 +32,150 @@ impl RoleManifest {
         config: &NormalizedGeneratorConfig,
         rng: &mut Pcg32V1,
     ) -> Result<Self, GeneratorError> {
-        let total = rng.gen_range(config.region_min(), config.region_max().saturating_add(1))?;
-
-        // Mandatories: 1 spawn, 1 distant landmark
-        let _allocated: u32 = 2;
-
-        let layer_pairs = config.layers().2.saturating_sub(1) as u32;
-        let transitions_min = config.transitions_per_adjacent_pair();
-        let vertical_hubs_needed = layer_pairs
-            .checked_mul(transitions_min)
-            .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+        let upper = config.region_max().checked_add(1).ok_or(
+            GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
-                operation: "vertical_hub_count",
-            })?;
-
-        let mandatory_minimum = 2u32
-            .checked_add(vertical_hubs_needed)
-            .and_then(|v| v.checked_add(3)) // at least 1 major, 1 junction, 1 dead_end
-            .ok_or_else(|| GeneratorError::ArithmeticOverflow {
+                operation: "role_region_upper",
+            },
+        )?;
+        let total = rng.gen_range(config.region_min(), upper)?;
+        let layer_pairs = u32::from(config.layers().2.checked_sub(1).ok_or(
+            GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Placement,
-                operation: "mandatory_minimum",
+                operation: "role_layer_pairs",
+            },
+        )?);
+        let transitions = layer_pairs
+            .checked_mul(config.transitions_per_adjacent_pair())
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_transition_count",
             })?;
-
-        if total < mandatory_minimum {
-            return Err(GeneratorError::MandatoryInfeasibility {
+        let vertical_hub_count = transitions.checked_mul(2).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_transition_endpoint_count",
+            },
+        )?;
+        let mandatory = 5u32
+            .checked_add(vertical_hub_count)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_mandatory_count",
+            })?;
+        let remaining = total.checked_sub(mandatory).ok_or(
+            GeneratorError::MandatoryInfeasibility {
                 stage: ErrorStage::Placement,
                 constraint: "mandatory_role_minimum",
-                required: u64::from(mandatory_minimum),
+                required: u64::from(mandatory),
                 available: u64::from(total),
-            });
-        }
+            },
+        )?;
 
-        let remaining = total - mandatory_minimum;
-        let remaining = remaining as u64;
-        let proportions = [20u64, 20, 15, 15, 15, 15];
-        let prop_sum: u64 = proportions.iter().sum();
-        let mut shares = [0u64; 6];
-        let mut allocated_prop: u64 = 0;
-        for (i, &p) in proportions.iter().enumerate() {
-            let share = (remaining * p + prop_sum / 2) / prop_sum;
-            shares[i] = share;
-            allocated_prop += share;
+        // Extra major, junction, dead-end, required-route, optional, ordinary.
+        let weights = [20u64, 20, 15, 15, 15, 15];
+        let weight_sum = 100u64;
+        let mut shares = [0u32; 6];
+        let mut allocated = 0u32;
+        for (index, weight) in weights.iter().copied().enumerate() {
+            let value = u64::from(remaining)
+                .checked_mul(weight)
+                .ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_share_mul",
+                })?
+                / weight_sum;
+            let share = u32::try_from(value).map_err(|_| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_share_convert",
+            })?;
+            shares[index] = share;
+            allocated = allocated.checked_add(share).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_share_sum",
+                },
+            )?;
         }
-        let mut remainder = remaining.saturating_sub(allocated_prop);
-        for i in 0..6 {
-            if remainder == 0 {
-                break;
-            }
-            shares[i] += 1;
-            remainder -= 1;
+        let mut remainder = remaining.checked_sub(allocated).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_share_remainder",
+            },
+        )?;
+        let mut index = 0usize;
+        while remainder > 0 {
+            let share = shares.get_mut(index).ok_or(GeneratorError::IrInvariant {
+                stage: ErrorStage::Placement,
+                detail: "role_share_index_out_of_bounds".into(),
+            })?;
+            *share = share.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_share_remainder_add",
+            })?;
+            remainder = remainder.checked_sub(1).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "role_share_remainder_sub",
+                },
+            )?;
+            index = index.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_share_index_add",
+            })? % shares.len();
         }
-
-        let major_landmark_count = 1u32 + shares[0] as u32;
-        let junction_count = 1u32 + shares[1] as u32;
-        let dead_end_count = 1u32 + shares[2] as u32;
-        let required_route_count = 0u32 + shares[3] as u32;
-        let optional_branch_count = 0u32 + shares[4] as u32;
-        let ordinary_count = 0u32 + shares[5] as u32;
 
         Ok(Self {
             spawn_count: 1,
             distant_landmark_count: 1,
-            major_landmark_count,
-            junction_count,
-            dead_end_count,
-            vertical_hub_count: vertical_hubs_needed,
-            required_route_count,
-            optional_branch_count,
-            ordinary_count,
+            major_landmark_count: 1u32.checked_add(shares[0]).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "major_role_count",
+                },
+            )?,
+            junction_count: 1u32.checked_add(shares[1]).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "junction_role_count",
+                },
+            )?,
+            dead_end_count: 1u32.checked_add(shares[2]).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "dead_end_role_count",
+                },
+            )?,
+            vertical_hub_count,
+            required_route_count: shares[3],
+            optional_branch_count: shares[4],
+            ordinary_count: shares[5],
         })
     }
 
-    fn total_regions(&self) -> u32 {
-        self.spawn_count
-            .checked_add(self.distant_landmark_count)
-            .and_then(|v| v.checked_add(self.major_landmark_count))
-            .and_then(|v| v.checked_add(self.junction_count))
-            .and_then(|v| v.checked_add(self.dead_end_count))
-            .and_then(|v| v.checked_add(self.vertical_hub_count))
-            .and_then(|v| v.checked_add(self.required_route_count))
-            .and_then(|v| v.checked_add(self.optional_branch_count))
-            .and_then(|v| v.checked_add(self.ordinary_count))
-            .unwrap_or(u32::MAX)
+    fn total_regions(&self) -> Result<u32, GeneratorError> {
+        [
+            self.spawn_count,
+            self.distant_landmark_count,
+            self.major_landmark_count,
+            self.junction_count,
+            self.dead_end_count,
+            self.vertical_hub_count,
+            self.required_route_count,
+            self.optional_branch_count,
+            self.ordinary_count,
+        ]
+        .into_iter()
+        .try_fold(0u32, |sum, value| {
+            sum.checked_add(value).ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "role_total",
+            })
+        })
     }
 
-    fn role_counts(&self) -> Vec<(RegionRole, u32)> {
-        vec![
+    fn role_counts(&self) -> [(RegionRole, u32); 9] {
+        [
             (RegionRole::Spawn, self.spawn_count),
             (RegionRole::DistantLandmark, self.distant_landmark_count),
             (RegionRole::MajorLandmark, self.major_landmark_count),
@@ -132,59 +189,47 @@ impl RoleManifest {
     }
 }
 
-// ─── Prefab role compatibility ──────────────────────────────────────────────
-
 fn variant_supports_role(variant: &PrefabVariant, role: RegionRole) -> bool {
+    let has_tag = |choices: &[&str]| {
+        variant
+            .tags
+            .iter()
+            .any(|tag| choices.iter().any(|choice| tag == choice))
+    };
     match role {
-        RegionRole::Spawn => variant
-            .tags
-            .iter()
-            .any(|t| t == "spawn" || t == "ordinary" || t == "room"),
-        RegionRole::DistantLandmark => variant
-            .tags
-            .iter()
-            .any(|t| t == "landmark" || t == "major" || t == "room"),
-        RegionRole::MajorLandmark => variant
-            .tags
-            .iter()
-            .any(|t| t == "landmark" || t == "major" || t == "room" || t == "hall"),
-        RegionRole::Junction => variant
-            .tags
-            .iter()
-            .any(|t| t == "junction" || t == "hall" || t == "room"),
-        RegionRole::DeadEnd => variant
-            .tags
-            .iter()
-            .any(|t| t == "dead_end" || t == "room"),
-        RegionRole::VerticalHub => variant
-            .tags
-            .iter()
-            .any(|t| t == "ramp" || t == "vertical" || t == "hub"),
-        RegionRole::RequiredRoute => variant
-            .tags
-            .iter()
-            .any(|t| t == "ordinary" || t == "room" || t == "hall" || t == "corridor"),
-        RegionRole::OptionalBranch => variant
-            .tags
-            .iter()
-            .any(|t| t == "ordinary" || t == "room" || t == "dead_end"),
-        RegionRole::OrdinaryRoom => variant
-            .tags
-            .iter()
-            .any(|t| t == "ordinary" || t == "room" || t == "small"),
+        RegionRole::Spawn => has_tag(&["spawn", "ordinary", "room"]),
+        RegionRole::DistantLandmark => has_tag(&["landmark", "major", "room"]),
+        RegionRole::MajorLandmark => has_tag(&["landmark", "major", "room", "hall"]),
+        RegionRole::Junction => has_tag(&["junction", "hall", "room"]),
+        RegionRole::DeadEnd => has_tag(&["dead_end", "room"]),
+        RegionRole::VerticalHub => {
+            has_tag(&["ramp", "vertical", "hub"]) && !variant.transitions.is_empty()
+        }
+        RegionRole::RequiredRoute => has_tag(&["ordinary", "room", "hall", "corridor"]),
+        RegionRole::OptionalBranch => has_tag(&["ordinary", "room"]),
+        RegionRole::OrdinaryRoom => has_tag(&["ordinary", "room", "small"]),
     }
 }
 
-fn variants_for_role<'a>(
-    catalog: &'a PrefabCatalog,
+fn variants_for_role(
+    catalog: &PrefabCatalog,
     role: RegionRole,
-) -> Vec<(u16, &'a PrefabVariant)> {
+) -> Result<Vec<(u16, &PrefabVariant)>, GeneratorError> {
     catalog
         .variants()
         .iter()
         .enumerate()
-        .filter(|(_, v)| variant_supports_role(v, role))
-        .map(|(i, v)| (i as u16, v))
+        .filter(|(_, variant)| {
+            variant_supports_role(variant, role)
+                && (role == RegionRole::VerticalHub || variant.layer_count == 1)
+        })
+        .map(|(index, variant)| {
+            let index = u16::try_from(index).map_err(|_| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "variant_index_convert",
+            })?;
+            Ok((index, variant))
+        })
         .collect()
 }
 
@@ -193,458 +238,597 @@ fn verify_mandatory_coverage(
     manifest: &RoleManifest,
 ) -> Result<(), GeneratorError> {
     for (role, count) in manifest.role_counts() {
-        if count > 0 {
-            let candidates = variants_for_role(catalog, role);
-            if candidates.is_empty() {
-                return Err(GeneratorError::MandatoryInfeasibility {
-                    stage: ErrorStage::Placement,
-                    constraint: "prefab_role_coverage",
-                    required: u64::from(count),
-                    available: 0,
-                });
-            }
+        if count > 0 && variants_for_role(catalog, role)?.is_empty() {
+            return Err(GeneratorError::MandatoryInfeasibility {
+                stage: ErrorStage::Placement,
+                constraint: "prefab_role_coverage",
+                required: u64::from(count),
+                available: 0,
+            });
         }
     }
     Ok(())
 }
 
-// ─── Transition reservation ─────────────────────────────────────────────────
+// ─── Transition reservation and endpoint placement ─────────────────────────
 
-/// Materialize transition reservations from validated prefab reservations.
-/// Consumes the variant's Reservation and Transition definitions to produce
-/// complete TransitionReservation records.
-fn materialize_transition_reservation(
-    variant: &PrefabVariant,
-    _variant_index: u16,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RampCandidate {
+    variant_index: u16,
+    transition_index: u16,
     lower_layer: u16,
-    origin_x: u16,
-    origin_y: u16,
+    x: u16,
+    y: u16,
+}
+
+#[derive(Debug, Clone)]
+struct MaterializedTransition {
+    variant_index: u16,
+    lower_layer: u16,
+    hub_footprint: (u16, u16, u16, u16),
+    ramp_run_cells: Vec<GridCoord>,
+    upper_opening_cells: Vec<GridCoord>,
+    landing_cells: Vec<GridCoord>,
+    headroom_cells: Vec<GridCoord>,
+    lower_funnel_cells: Vec<GridCoord>,
+    lower_approach_cells: Vec<GridCoord>,
+    lower_socket_index: usize,
+    upper_socket_index: usize,
+}
+
+fn enumerate_ramp_candidates(
+    catalog: &PrefabCatalog,
     config: &NormalizedGeneratorConfig,
-    alloc: &mut IdAllocator,
-) -> Result<TransitionReservation, GeneratorError> {
-    let id = alloc.next_transition()?;
-    let w = variant.width;
-    let h = variant.height;
-
-    let hub_footprint = (origin_x, origin_y, w, h);
-
-    // Collect ramp run cells from the variant's lower layer
-    let lower_grid = &variant.layers[0];
-    let mut ramp_run_cells = Vec::new();
-    let mut lower_funnel_cells = Vec::new();
-    let mut lower_approach_cells = Vec::new();
-
-    for (ly, row) in lower_grid.iter().enumerate() {
-        for (lx, tile) in row.iter().enumerate() {
-            let gx = origin_x.checked_add(lx as u16).ok_or_else(|| {
+) -> Result<Vec<RampCandidate>, GeneratorError> {
+    let mut candidates = Vec::new();
+    let layer_pairs = config.layers().2.checked_sub(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "ramp_candidate_layer_pairs",
+        },
+    )?;
+    for (variant_index, variant) in catalog.variants().iter().enumerate() {
+        if !variant_supports_role(variant, RegionRole::VerticalHub)
+            || variant.width > config.width()
+            || variant.height > config.height()
+        {
+            continue;
+        }
+        let variant_index = u16::try_from(variant_index).map_err(|_| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "ramp_variant_index_convert",
+            }
+        })?;
+        let max_x = config.width().checked_sub(variant.width).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "ramp_candidate_max_x",
+            },
+        )?;
+        let max_y = config.height().checked_sub(variant.height).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "ramp_candidate_max_y",
+            },
+        )?;
+        for transition_index in 0..variant.transitions.len() {
+            let transition_index = u16::try_from(transition_index).map_err(|_| {
                 GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
-                    operation: "ramp_origin_x_add",
+                    operation: "ramp_transition_index_convert",
                 }
             })?;
-            let gy = origin_y.checked_add(ly as u16).ok_or_else(|| {
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "ramp_origin_y_add",
+            for lower_layer in 0..layer_pairs {
+                for y in 1..max_y {
+                    for x in 1..max_x {
+                        candidates.push(RampCandidate {
+                            variant_index,
+                            transition_index,
+                            lower_layer,
+                            x,
+                            y,
+                        });
+                    }
                 }
-            })?;
-            let coord = GridCoord::new(
-                lower_layer,
-                gx,
-                gy,
-                config.width(),
-                config.height(),
-                config.layers().2,
-            )?;
-
-            match tile {
-                super::prefab::Tile::Ramp { .. } => {
-                    ramp_run_cells.push(coord);
-                }
-                _ => {}
             }
         }
     }
+    candidates.sort();
+    Ok(candidates)
+}
 
-    // Consume reservations from the validated variant
+fn materialize_transition(
+    candidate: RampCandidate,
+    catalog: &PrefabCatalog,
+    config: &NormalizedGeneratorConfig,
+) -> Result<MaterializedTransition, GeneratorError> {
+    let variant = catalog
+        .variants()
+        .get(usize::from(candidate.variant_index))
+        .ok_or(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: u32::from(candidate.transition_index),
+            reason: "variant_not_found",
+        })?;
+    let transition = variant
+        .transitions
+        .get(usize::from(candidate.transition_index))
+        .ok_or(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: u32::from(candidate.transition_index),
+            reason: "prefab_transition_not_found",
+        })?;
+    let lower_socket_index = variant
+        .sockets
+        .iter()
+        .position(|socket| socket.id == transition.lower_approach_socket)
+        .ok_or(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: u32::from(candidate.transition_index),
+            reason: "lower_prefab_socket_not_found",
+        })?;
+    let upper_socket_index = variant
+        .sockets
+        .iter()
+        .position(|socket| socket.id == transition.upper_landing_socket)
+        .ok_or(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: u32::from(candidate.transition_index),
+            reason: "upper_prefab_socket_not_found",
+        })?;
+
+    let mut ramp_run_cells = Vec::new();
     let mut upper_opening_cells = Vec::new();
     let mut landing_cells = Vec::new();
     let mut headroom_cells = Vec::new();
+    let mut lower_funnel_cells = Vec::new();
+    let mut lower_approach_cells = Vec::new();
 
     for reservation in &variant.reservations {
+        if reservation.owner != ReservationOwner::Reference(transition.id.clone()) {
+            continue;
+        }
+        let target = match reservation.kind {
+            ReservationKind::RampVolume => &mut ramp_run_cells,
+            ReservationKind::UpperOpening => &mut upper_opening_cells,
+            ReservationKind::UpperLanding => &mut landing_cells,
+            ReservationKind::Headroom => &mut headroom_cells,
+            ReservationKind::SocketFunnel => &mut lower_funnel_cells,
+            ReservationKind::CorridorApproach => &mut lower_approach_cells,
+            ReservationKind::Footprint | ReservationKind::WallShell => continue,
+        };
         for cell in &reservation.cells {
-            let gx = origin_x.checked_add(cell.x).ok_or_else(|| {
+            let layer = candidate.lower_layer.checked_add(cell.layer).ok_or(
                 GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
-                    operation: "reservation_x_add",
-                }
-            })?;
-            let gy = origin_y.checked_add(cell.y).ok_or_else(|| {
+                    operation: "transition_cell_layer",
+                },
+            )?;
+            let x = candidate.x.checked_add(cell.x).ok_or(
                 GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
-                    operation: "reservation_y_add",
-                }
-            })?;
-            let global_layer = if cell.layer == 0 {
-                lower_layer
-            } else {
-                lower_layer.checked_add(1).ok_or_else(|| {
-                    GeneratorError::ArithmeticOverflow {
-                        stage: ErrorStage::Placement,
-                        operation: "upper_layer_add",
-                    }
-                })?
-            };
-
-            let coord = GridCoord::new(
-                global_layer,
-                gx,
-                gy,
+                    operation: "transition_cell_x",
+                },
+            )?;
+            let y = candidate.y.checked_add(cell.y).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "transition_cell_y",
+                },
+            )?;
+            target.push(GridCoord::new(
+                layer,
+                x,
+                y,
                 config.width(),
                 config.height(),
                 config.layers().2,
-            )?;
-
-            match reservation.kind {
-                super::prefab::ReservationKind::UpperOpening => {
-                    upper_opening_cells.push(coord);
-                }
-                super::prefab::ReservationKind::UpperLanding => {
-                    landing_cells.push(coord);
-                }
-                super::prefab::ReservationKind::Headroom => {
-                    headroom_cells.push(coord);
-                }
-                super::prefab::ReservationKind::SocketFunnel
-                | super::prefab::ReservationKind::CorridorApproach => {
-                    if cell.layer == 0 {
-                        // Determine if it's funnel or approach based on proximity to ramp
-                        if ramp_run_cells.is_empty()
-                            || ramp_run_cells
-                                .iter()
-                                .any(|rc| {
-                                    rc.layer == coord.layer
-                                        && (rc.x as i32 - coord.x as i32).abs() <= 1
-                                        && (rc.y as i32 - coord.y as i32).abs() <= 1
-                                })
-                        {
-                            lower_funnel_cells.push(coord);
-                        } else {
-                            lower_approach_cells.push(coord);
-                        }
-                    }
-                }
-                _ => {}
-            }
+            )?);
         }
     }
 
-    // Sort all cell vectors for determinism
-    ramp_run_cells.sort();
-    ramp_run_cells.dedup();
-    upper_opening_cells.sort();
-    upper_opening_cells.dedup();
-    landing_cells.sort();
-    landing_cells.dedup();
-    headroom_cells.sort();
-    headroom_cells.dedup();
-    lower_funnel_cells.sort();
-    lower_funnel_cells.dedup();
-    lower_approach_cells.sort();
-    lower_approach_cells.dedup();
+    for cells in [
+        &mut ramp_run_cells,
+        &mut upper_opening_cells,
+        &mut landing_cells,
+        &mut headroom_cells,
+        &mut lower_funnel_cells,
+        &mut lower_approach_cells,
+    ] {
+        cells.sort();
+        cells.dedup();
+    }
+    if ramp_run_cells.is_empty() || upper_opening_cells.is_empty() || landing_cells.is_empty() {
+        return Err(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: u32::from(candidate.transition_index),
+            reason: "required_transition_mask_empty",
+        });
+    }
 
-    Ok(TransitionReservation {
-        id,
-        lower_layer,
-        hub_footprint,
+    Ok(MaterializedTransition {
+        variant_index: candidate.variant_index,
+        lower_layer: candidate.lower_layer,
+        hub_footprint: (candidate.x, candidate.y, variant.width, variant.height),
         ramp_run_cells,
         upper_opening_cells,
         landing_cells,
         headroom_cells,
         lower_funnel_cells,
         lower_approach_cells,
+        lower_socket_index,
+        upper_socket_index,
     })
 }
 
-/// Enumerate candidate transition reservations from ramp-hub prefab variants.
-fn enumerate_ramp_candidates(
-    catalog: &PrefabCatalog,
+fn projected_hub_cells(
+    materialized: &MaterializedTransition,
     config: &NormalizedGeneratorConfig,
-    alloc: &mut IdAllocator,
-) -> Result<Vec<TransitionReservation>, GeneratorError> {
-    let mut candidates = Vec::new();
-    let layers = config.layers().2;
-
-    for (vi, variant) in catalog.variants().iter().enumerate() {
-        if !variant
-            .tags
-            .iter()
-            .any(|t| t == "ramp" || t == "hub" || t == "vertical")
-        {
-            continue;
-        }
-        // Only consider ramp-hub variants that have transitions defined
-        if variant.transitions.is_empty() {
-            continue;
-        }
-        for lower_layer in 0..layers.saturating_sub(1) {
-            let max_x = config.width().saturating_sub(variant.width);
-            let max_y = config.height().saturating_sub(variant.height);
-            for y in 0..=max_y {
-                for x in 0..=max_x {
-                    let reservation = materialize_transition_reservation(
-                        variant,
-                        vi as u16,
-                        lower_layer,
-                        x,
-                        y,
-                        config,
-                        alloc,
-                    )?;
-                    candidates.push(reservation);
-                }
-            }
-        }
-    }
-
-    // Canonical order: by (layer, y, x, id)
-    candidates.sort_by(|a, b| {
-        a.lower_layer
-            .cmp(&b.lower_layer)
-            .then_with(|| a.hub_footprint.1.cmp(&b.hub_footprint.1))
-            .then_with(|| a.hub_footprint.0.cmp(&b.hub_footprint.0))
-            .then_with(|| a.id.raw().cmp(&b.id.raw()))
-    });
-
-    Ok(candidates)
-}
-
-/// Reserve ramp transitions deterministically. Reserves complete volume:
-/// hub footprint, ramp run, upper opening, landing, headroom, funnels, approaches.
-fn reserve_ramps(
-    candidates: &[TransitionReservation],
-    config: &NormalizedGeneratorConfig,
-    grid: &mut OccupancyGrid,
-    factory: &SemanticStreamFactory,
-) -> Result<Vec<TransitionReservation>, GeneratorError> {
-    let layers = config.layers().2;
-    let required_per_pair = config.transitions_per_adjacent_pair();
-
-    let mut selected: Vec<TransitionReservation> = Vec::new();
-    let mut per_pair_counts: BTreeMap<(u16, u16), u32> = BTreeMap::new();
-
-    // Group candidates by layer pair
-    let mut by_pair: BTreeMap<(u16, u16), Vec<usize>> = BTreeMap::new();
-    for (i, cand) in candidates.iter().enumerate() {
-        let upper = cand.lower_layer.checked_add(1).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "upper_layer_increment",
-            }
+) -> Result<Vec<GridCoord>, GeneratorError> {
+    let upper = materialized.lower_layer.checked_add(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "hub_upper_layer",
+        },
+    )?;
+    let (x, y, width, height) = materialized.hub_footprint;
+    let capacity = usize::from(width)
+        .checked_mul(usize::from(height))
+        .and_then(|value| value.checked_mul(2))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "hub_cell_capacity",
         })?;
-        by_pair
-            .entry((cand.lower_layer, upper))
-            .or_default()
-            .push(i);
-    }
-
-    for lower in 0..layers.saturating_sub(1) {
-        let pair = (lower, lower + 1);
-        let cand_indices = by_pair.get(&pair).cloned().unwrap_or_default();
-
-        let mut indices: Vec<usize> = cand_indices;
-        let mut stream = factory.stream(
-            SemanticStage::RampReservations,
-            &[SemanticComponent::Index(lower as u32)],
-        );
-        stream.shuffle(&mut indices)?;
-
-        let mut placed_for_pair: u32 = 0;
-        for idx in indices {
-            if placed_for_pair >= required_per_pair {
-                break;
+    let mut cells = Vec::with_capacity(capacity);
+    for layer in [materialized.lower_layer, upper] {
+        for dy in 0..height {
+            for dx in 0..width {
+                let cell_x = x.checked_add(dx).ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "hub_cell_x",
+                })?;
+                let cell_y = y.checked_add(dy).ok_or(GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "hub_cell_y",
+                })?;
+                cells.push(GridCoord::new(
+                    layer,
+                    cell_x,
+                    cell_y,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )?);
             }
-            let cand = &candidates[idx];
-
-            // Check and reserve complete transition volume
-            if !can_reserve_transition(cand, grid, config)? {
-                continue;
-            }
-
-            // Reserve hub footprint (all cells on lower layer bounded by hub_footprint)
-            reserve_transition_volume(cand, grid, config)?;
-
-            selected.push(cand.clone());
-            placed_for_pair += 1;
-            *per_pair_counts.entry(pair).or_insert(0) += 1;
-        }
-
-        if placed_for_pair < required_per_pair {
-            return Err(GeneratorError::MandatoryInfeasibility {
-                stage: ErrorStage::Placement,
-                constraint: "ramp_reservation_count",
-                required: u64::from(required_per_pair),
-                available: u64::from(placed_for_pair),
-            });
         }
     }
-
-    Ok(selected)
+    cells.sort();
+    cells.dedup();
+    Ok(cells)
 }
 
-/// Check whether all cells in a transition reservation are empty.
-fn can_reserve_transition(
-    cand: &TransitionReservation,
+fn transition_fits(
+    materialized: &MaterializedTransition,
     grid: &OccupancyGrid,
-    _config: &NormalizedGeneratorConfig,
+    config: &NormalizedGeneratorConfig,
 ) -> Result<bool, GeneratorError> {
-    // Check hub footprint rectangle
-    if !grid.is_rect_empty(
-        cand.lower_layer,
-        cand.hub_footprint.0,
-        cand.hub_footprint.1,
-        cand.hub_footprint.2,
-        cand.hub_footprint.3,
-    )? {
-        return Ok(false);
-    }
-
-    // Check ramp run cells
-    for coord in &cand.ramp_run_cells {
-        if grid.get(*coord) != Some(OccupancyClass::Empty) {
+    for cell in projected_hub_cells(materialized, config)? {
+        if grid.get(cell) != Some(OccupancyClass::Empty) {
             return Ok(false);
         }
     }
-
-    // Check upper opening cells
-    for coord in &cand.upper_opening_cells {
-        if grid.get(*coord) != Some(OccupancyClass::Empty) {
+    for cell in materialized
+        .ramp_run_cells
+        .iter()
+        .chain(&materialized.upper_opening_cells)
+        .chain(&materialized.landing_cells)
+        .chain(&materialized.headroom_cells)
+    {
+        if grid.get(*cell) != Some(OccupancyClass::Empty) {
             return Ok(false);
         }
     }
-
-    // Check landing cells
-    for coord in &cand.landing_cells {
-        if grid.get(*coord) != Some(OccupancyClass::Empty) {
-            return Ok(false);
-        }
-    }
-
-    // Check headroom cells
-    for coord in &cand.headroom_cells {
-        if grid.get(*coord) != Some(OccupancyClass::Empty) {
-            return Ok(false);
-        }
-    }
-
-    // Check lower funnel cells
-    for coord in &cand.lower_funnel_cells {
-        if grid.get(*coord) != Some(OccupancyClass::Empty) {
-            return Ok(false);
-        }
-    }
-
-    // Check lower approach cells
-    for coord in &cand.lower_approach_cells {
-        if grid.get(*coord) != Some(OccupancyClass::Empty) {
-            return Ok(false);
-        }
-    }
-
     Ok(true)
 }
 
-/// Reserve all cells of a transition at once.
-/// Ramp cells are reserved BEFORE the hub footprint to prevent self-conflict:
-/// ramp run cells occupy cells inside the hub footprint rectangle.
-fn reserve_transition_volume(
-    cand: &TransitionReservation,
+fn placed_sockets_for_endpoint(
+    variant: &PrefabVariant,
+    variant_layer: u16,
+    global_layer: u16,
+    origin_x: u16,
+    origin_y: u16,
+    alloc: &mut IdAllocator,
+    config: &NormalizedGeneratorConfig,
+) -> Result<Vec<(usize, PlacedSocket)>, GeneratorError> {
+    let mut sockets = Vec::new();
+    for (index, socket) in variant.sockets.iter().enumerate() {
+        if socket.anchor.layer != variant_layer {
+            continue;
+        }
+        let x = origin_x.checked_add(socket.anchor.x).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "endpoint_socket_x",
+            },
+        )?;
+        let y = origin_y.checked_add(socket.anchor.y).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "endpoint_socket_y",
+            },
+        )?;
+        let variant_socket_index = u16::try_from(index).map_err(|_| {
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "endpoint_socket_index",
+            }
+        })?;
+        sockets.push((
+            index,
+            PlacedSocket {
+                id: alloc.next_socket()?,
+                variant_socket_index,
+                global_anchor: GridCoord::new(
+                    global_layer,
+                    x,
+                    y,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )?,
+                direction: map_direction_from_variant(socket.direction),
+                width: socket.width,
+                role: map_socket_role_from_variant(socket.role),
+                paired_socket_id: None,
+            },
+        ));
+    }
+    Ok(sockets)
+}
+
+fn commit_transition(
+    materialized: &MaterializedTransition,
+    catalog: &PrefabCatalog,
     grid: &mut OccupancyGrid,
-    _config: &NormalizedGeneratorConfig,
-) -> Result<(), GeneratorError> {
-    let class = OccupancyClass::Transition(cand.id.raw());
+    alloc: &mut IdAllocator,
+    config: &NormalizedGeneratorConfig,
+) -> Result<(TransitionReservation, PlacedRegion, PlacedRegion), GeneratorError> {
+    let variant = catalog
+        .variants()
+        .get(usize::from(materialized.variant_index))
+        .ok_or(GeneratorError::IrInvariant {
+            stage: ErrorStage::Placement,
+            detail: "selected_transition_variant_missing".into(),
+        })?;
+    let mut staged_grid = grid.clone();
+    let mut staged_alloc = alloc.clone();
+    let transition_id = staged_alloc.next_transition()?;
+    let lower_region_id = staged_alloc.next_region()?;
+    let upper_region_id = staged_alloc.next_region()?;
+    let upper_layer = materialized.lower_layer.checked_add(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "commit_transition_upper_layer",
+        },
+    )?;
+    let (origin_x, origin_y, width, height) = materialized.hub_footprint;
 
-    // Phase 1: Reserve all discrete cell sets BEFORE the hub footprint rect.
-    // This prevents the rect reservation from conflicting with ramp-run,
-    // funnel, approach, opening, landing, and headroom cells that may overlap
-    // the rect bounds.
-
-    // Reserve ramp run cells first (these are inside the hub footprint)
-    if !cand.ramp_run_cells.is_empty() {
-        grid.reserve_cells(&cand.ramp_run_cells, class)?;
+    let mut lower_sockets = placed_sockets_for_endpoint(
+        variant,
+        0,
+        materialized.lower_layer,
+        origin_x,
+        origin_y,
+        &mut staged_alloc,
+        config,
+    )?;
+    let mut upper_sockets = placed_sockets_for_endpoint(
+        variant,
+        1,
+        upper_layer,
+        origin_x,
+        origin_y,
+        &mut staged_alloc,
+        config,
+    )?;
+    let lower_socket = lower_sockets
+        .iter()
+        .find(|(index, _)| *index == materialized.lower_socket_index)
+        .map(|(_, socket)| socket.id)
+        .ok_or(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: transition_id.raw(),
+            reason: "lower_endpoint_socket_missing",
+        })?;
+    let upper_socket = upper_sockets
+        .iter()
+        .find(|(index, _)| *index == materialized.upper_socket_index)
+        .map(|(_, socket)| socket.id)
+        .ok_or(GeneratorError::TransitionBinding {
+            stage: ErrorStage::Placement,
+            transition: transition_id.raw(),
+            reason: "upper_endpoint_socket_missing",
+        })?;
+    for (_, socket) in &mut lower_sockets {
+        if socket.id == lower_socket {
+            socket.paired_socket_id = Some(upper_socket);
+        }
+    }
+    for (_, socket) in &mut upper_sockets {
+        if socket.id == upper_socket {
+            socket.paired_socket_id = Some(lower_socket);
+        }
     }
 
-    // Reserve lower funnel cells (may overlap hub footprint edges)
-    if !cand.lower_funnel_cells.is_empty() {
-        grid.reserve_cells(&cand.lower_funnel_cells, class)?;
+    let hub_class = OccupancyClass::TransitionHub(transition_id.raw());
+    for cell in projected_hub_cells(materialized, config)? {
+        if staged_grid.get(cell) != Some(OccupancyClass::Empty) {
+            return Err(GeneratorError::OccupancyConflict {
+                stage: ErrorStage::Placement,
+                detail: format!("transition_hub_conflict {}", cell),
+            });
+        }
+        staged_grid.set(cell, hub_class)?;
     }
-
-    // Reserve lower approach cells
-    if !cand.lower_approach_cells.is_empty() {
-        grid.reserve_cells(&cand.lower_approach_cells, class)?;
-    }
-
-    // Reserve upper opening cells (layer+1, may overlap projected footprint)
-    if !cand.upper_opening_cells.is_empty() {
-        grid.reserve_cells(&cand.upper_opening_cells, class)?;
-    }
-
-    // Reserve landing cells
-    if !cand.landing_cells.is_empty() {
-        grid.reserve_cells(&cand.landing_cells, class)?;
-    }
-
-    // Reserve headroom cells
-    if !cand.headroom_cells.is_empty() {
-        grid.reserve_cells(&cand.headroom_cells, class)?;
-    }
-
-    // Phase 2: Reserve hub footprint rect, skipping cells already claimed by
-    // the discrete cell sets above.
-    let (hx, hy, hw, hh) = cand.hub_footprint;
-    let hub_class = class;
-    for dy in 0..hh {
-        for dx in 0..hw {
-            let cx = hx.checked_add(dx).ok_or_else(|| {
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "transition_hub_x_add",
-                }
-            })?;
-            let cy = hy.checked_add(dy).ok_or_else(|| {
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "transition_hub_y_add",
-                }
-            })?;
-            let coord = GridCoord::new(
-                cand.lower_layer,
-                cx,
-                cy,
-                _config.width(),
-                _config.height(),
-                _config.layers().2,
-            )?;
-            // Only set if currently empty (cell sets were reserved first)
-            let prev = grid.get(coord);
-            if prev == Some(OccupancyClass::Empty) {
-                grid.set(coord, hub_class)?;
-            } else if prev != Some(hub_class) {
+    let transition_class = OccupancyClass::Transition(transition_id.raw());
+    let mut protected_cells: Vec<GridCoord> = materialized
+        .ramp_run_cells
+        .iter()
+        .chain(&materialized.upper_opening_cells)
+        .chain(&materialized.landing_cells)
+        .chain(&materialized.headroom_cells)
+        .copied()
+        .collect();
+    protected_cells.sort();
+    protected_cells.dedup();
+    for cell in protected_cells {
+        match staged_grid.get(cell) {
+            Some(OccupancyClass::TransitionHub(owner)) if owner == transition_id.raw() => {
+                staged_grid.set(cell, transition_class)?;
+            }
+            other => {
                 return Err(GeneratorError::OccupancyConflict {
                     stage: ErrorStage::Placement,
                     detail: format!(
-                        "transition_hub_cell_conflict {} was={:?} wanted={:?}",
-                        coord, prev, hub_class
+                        "transition_protected_cell_conflict {} existing={:?}",
+                        cell, other
                     ),
                 });
             }
         }
     }
 
-    Ok(())
+    let lower_marker_indices = marker_indices_for_layer(variant, 0)?;
+    let upper_marker_indices = marker_indices_for_layer(variant, 1)?;
+    let lower_region = PlacedRegion {
+        id: lower_region_id,
+        role: RegionRole::VerticalHub,
+        variant_index: materialized.variant_index,
+        layer: materialized.lower_layer,
+        footprint: (origin_x, origin_y, width, height),
+        sockets: lower_sockets.into_iter().map(|(_, socket)| socket).collect(),
+        transitions: vec![transition_id],
+        marker_variant_indices: lower_marker_indices,
+    };
+    let upper_region = PlacedRegion {
+        id: upper_region_id,
+        role: RegionRole::VerticalHub,
+        variant_index: materialized.variant_index,
+        layer: upper_layer,
+        footprint: (origin_x, origin_y, width, height),
+        sockets: upper_sockets.into_iter().map(|(_, socket)| socket).collect(),
+        transitions: vec![transition_id],
+        marker_variant_indices: upper_marker_indices,
+    };
+    let reservation = TransitionReservation {
+        id: transition_id,
+        variant_index: materialized.variant_index,
+        lower_layer: materialized.lower_layer,
+        hub_footprint: materialized.hub_footprint,
+        lower_region: lower_region_id,
+        upper_region: upper_region_id,
+        lower_socket,
+        upper_socket,
+        ramp_run_cells: materialized.ramp_run_cells.clone(),
+        upper_opening_cells: materialized.upper_opening_cells.clone(),
+        landing_cells: materialized.landing_cells.clone(),
+        headroom_cells: materialized.headroom_cells.clone(),
+        lower_funnel_cells: materialized.lower_funnel_cells.clone(),
+        lower_approach_cells: materialized.lower_approach_cells.clone(),
+    };
+
+    *grid = staged_grid;
+    *alloc = staged_alloc;
+    Ok((reservation, lower_region, upper_region))
 }
 
-// ─── Footprint placement ────────────────────────────────────────────────────
+fn reserve_transitions_and_endpoints(
+    candidates: &[RampCandidate],
+    catalog: &PrefabCatalog,
+    config: &NormalizedGeneratorConfig,
+    grid: &mut OccupancyGrid,
+    alloc: &mut IdAllocator,
+    factory: SemanticStreamFactory,
+) -> Result<(Vec<TransitionReservation>, Vec<PlacedRegion>), GeneratorError> {
+    let layer_pairs = config.layers().2.checked_sub(1).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "reserve_transition_layer_pairs",
+        },
+    )?;
+    let required = config.transitions_per_adjacent_pair();
+    let mut transitions = Vec::new();
+    let mut endpoints = Vec::new();
+
+    for lower_layer in 0..layer_pairs {
+        let upper_layer = lower_layer.checked_add(1).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "reserve_transition_upper_layer",
+            },
+        )?;
+        let mut pair_candidates: Vec<RampCandidate> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.lower_layer == lower_layer)
+            .collect();
+        let mut stream = factory.stream(
+            SemanticStage::RampReservations,
+            &[SemanticComponent::Index(u32::from(lower_layer))],
+        );
+        stream.shuffle(&mut pair_candidates)?;
+        let mut placed = 0u32;
+        let mut rejected = 0u64;
+        for candidate in pair_candidates {
+            if placed >= required {
+                break;
+            }
+            let materialized = materialize_transition(candidate, catalog, config)?;
+            if !transition_fits(&materialized, grid, config)? {
+                rejected = rejected.checked_add(1).ok_or(
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "transition_rejection_count",
+                    },
+                )?;
+                continue;
+            }
+            let (transition, lower, upper) =
+                commit_transition(&materialized, catalog, grid, alloc, config)?;
+            transitions.push(transition);
+            endpoints.push(lower);
+            endpoints.push(upper);
+            placed = placed.checked_add(1).ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "transition_placed_count",
+            })?;
+        }
+        if placed < required {
+            return Err(GeneratorError::TransitionInfeasible {
+                stage: ErrorStage::Placement,
+                lower_layer,
+                upper_layer,
+                required: u64::from(required),
+                available: u64::from(placed),
+                rejected,
+            });
+        }
+    }
+    transitions.sort_by_key(|transition| transition.id.raw());
+    endpoints.sort_by_key(|region| region.id.raw());
+    Ok((transitions, endpoints))
+}
+
+// ─── Ordinary region placement ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PlacementScore {
+    separation_distance: u32,
+    layer_population: u32,
+    required_route_distance: u32,
+    variant_usage: u32,
+}
 
 #[derive(Debug, Clone)]
 struct PlacementCandidate {
@@ -655,270 +839,6 @@ struct PlacementCandidate {
     score: PlacementScore,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct PlacementScore {
-    /// Distance to nearest already-placed region (larger is better — more spread).
-    separation_distance: u32,
-    /// Layer distribution: prefer layers with fewer regions.
-    layer_rank: u32,
-    /// Required-route support: how many existing required-route regions are nearby.
-    required_route_proximity: u32,
-    /// Prefab diversity: lower rank = more distinct from already-placed variants.
-    diversity_rank: u32,
-}
-
-/// Place role-assigned regions into the grid, returning the IntendedTopology
-/// with placed regions and the populated occupancy grid.
-pub(super) fn place_regions(
-    config: &NormalizedGeneratorConfig,
-    catalog: &PrefabCatalog,
-    rng: &mut Pcg32V1,
-    factory: SemanticStreamFactory,
-) -> Result<(IntendedTopology, OccupancyGrid), GeneratorError> {
-    let mut alloc = IdAllocator::new();
-
-    // 1. Role manifest
-    let manifest = RoleManifest::from_config(config, rng)?;
-    verify_mandatory_coverage(catalog, &manifest)?;
-
-    let width = config.width();
-    let height = config.height();
-    let layers = config.layers().2;
-
-    // 2. Initialize occupancy grid
-    let mut grid = OccupancyGrid::new(width, height, layers)?;
-
-    // 3. Reserve ramp transitions
-    let ramp_candidates = enumerate_ramp_candidates(catalog, config, &mut alloc)?;
-    let transitions = reserve_ramps(&ramp_candidates, config, &mut grid, &factory)?;
-
-    // 4. Place regions role by role
-    let mut placed_regions: Vec<PlacedRegion> = Vec::new();
-    let role_order: Vec<(RegionRole, u32)> = {
-        let mut roles = manifest.role_counts();
-        roles.sort_by_key(|(r, _)| r.ordinal());
-        roles
-    };
-
-    for (role, target_count) in role_order {
-        if target_count == 0 {
-            continue;
-        }
-        let candidates = variants_for_role(catalog, role);
-        if candidates.is_empty() {
-            return Err(GeneratorError::MandatoryInfeasibility {
-                stage: ErrorStage::Placement,
-                constraint: "prefab_variants_for_role",
-                required: u64::from(target_count),
-                available: 0,
-            });
-        }
-
-        let placed_for_role = place_role_regions(
-            role,
-            target_count,
-            &candidates,
-            config,
-            &mut grid,
-            &placed_regions,
-            &factory,
-            &mut alloc,
-        )?;
-
-        placed_regions.extend(placed_for_role);
-    }
-
-    // 5. Sort regions by ID for stable ordering
-    placed_regions.sort_by_key(|r| r.id.raw());
-
-    // 6. Build the IntendedTopology
-    let topology = IntendedTopology {
-        regions: placed_regions,
-        edges: Vec::new(),
-        transitions,
-        route_distance: 0,
-        per_layer_cycles: vec![0; layers as usize],
-        max_branch_depth: 0,
-        dead_end_count: 0,
-        articulation_count: 0,
-        crossing_count: 0,
-        config: config.clone(),
-    };
-
-    topology.validate_unique_region_ids()?;
-
-    Ok((topology, grid))
-}
-
-/// Place target_count regions with the given role.
-fn place_role_regions(
-    role: RegionRole,
-    target_count: u32,
-    candidates: &[(u16, &PrefabVariant)],
-    config: &NormalizedGeneratorConfig,
-    grid: &mut OccupancyGrid,
-    placed: &[PlacedRegion],
-    factory: &SemanticStreamFactory,
-    alloc: &mut IdAllocator,
-) -> Result<Vec<PlacedRegion>, GeneratorError> {
-    let width = config.width();
-    let height = config.height();
-    let layers = config.layers().2;
-    let spacing = config.spacing();
-
-    let mut placed_this_role: Vec<PlacedRegion> = Vec::new();
-
-    for _ in 0..target_count {
-        let mut scored_candidates: Vec<PlacementCandidate> = Vec::new();
-
-        for layer in 0..layers {
-            for &(variant_index, variant) in candidates {
-                let max_x = width.saturating_sub(variant.width);
-                let max_y = height.saturating_sub(variant.height);
-
-                // If variant doesn't fit at all, skip
-                if variant.width > width || variant.height > height {
-                    continue;
-                }
-
-                for y in 0..=max_y {
-                    for x in 0..=max_x {
-                        if !can_place_footprint(variant, layer, x, y, grid, config) {
-                            continue;
-                        }
-                        if !check_spacing_multi(
-                            layer,
-                            x,
-                            y,
-                            variant.width,
-                            variant.height,
-                            placed,
-                            &placed_this_role,
-                            spacing,
-                        ) {
-                            continue;
-                        }
-
-                        let score = compute_placement_score(
-                            layer,
-                            x,
-                            y,
-                            variant_index,
-                            placed,
-                            &placed_this_role,
-                            config,
-                        );
-
-                        scored_candidates.push(PlacementCandidate {
-                            variant_index,
-                            layer,
-                            x,
-                            y,
-                            score,
-                        });
-                    }
-                }
-            }
-        }
-
-        if scored_candidates.is_empty() {
-            return Err(GeneratorError::PlacementExhausted {
-                stage: ErrorStage::Placement,
-                reason: "no_valid_placement",
-                attempted: u64::from(config.placement_attempts()),
-                placed: placed_this_role.len() as u64,
-                target: u64::from(target_count),
-            });
-        }
-
-        // Sort by score (lower layer_rank/diversity_rank is better, higher separation is better)
-        scored_candidates.sort_by(|a, b| {
-            b.score
-                .separation_distance
-                .cmp(&a.score.separation_distance)
-                .then_with(|| a.score.layer_rank.cmp(&b.score.layer_rank))
-                .then_with(|| {
-                    b.score
-                        .required_route_proximity
-                        .cmp(&a.score.required_route_proximity)
-                })
-                .then_with(|| a.score.diversity_rank.cmp(&b.score.diversity_rank))
-                .then_with(|| a.variant_index.cmp(&b.variant_index))
-                .then_with(|| a.layer.cmp(&b.layer))
-                .then_with(|| a.x.cmp(&b.x))
-                .then_with(|| a.y.cmp(&b.y))
-        });
-
-        // Tie-break within equal-score class using semantic stream
-        let best = &scored_candidates[0];
-        let equal_class: Vec<usize> = scored_candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| {
-                c.score == best.score
-                    && c.variant_index == best.variant_index
-                    && c.layer == best.layer
-            })
-            .map(|(i, _)| i)
-            .collect();
-
-        let chosen_idx = if equal_class.len() > 1 {
-            let mut tie_rng = factory.stream(
-                SemanticStage::Placement,
-                &[
-                    SemanticComponent::StableId(role.label().as_bytes()),
-                    SemanticComponent::Index(placed_this_role.len() as u32),
-                ],
-            );
-            let upper =
-                NonZeroU32::new(equal_class.len() as u32).ok_or_else(|| {
-                    GeneratorError::InvalidRngRange {
-                        stage: ErrorStage::Placement,
-                        reason: "tie_break_empty_class",
-                        lower: 0,
-                        upper: 0,
-                    }
-                })?;
-            let pick = tie_rng.gen_bounded(upper) as usize;
-            equal_class[pick]
-        } else {
-            equal_class[0]
-        };
-
-        let chosen = &scored_candidates[chosen_idx];
-        let variant = candidates
-            .iter()
-            .find(|(vi, _)| *vi == chosen.variant_index)
-            .map(|(_, v)| *v)
-            .ok_or_else(|| GeneratorError::IrInvariant {
-                stage: ErrorStage::Placement,
-                detail: format!(
-                    "variant_not_found_in_candidates vi={}",
-                    chosen.variant_index
-                ),
-            })?;
-
-        // Single atomic commit: allocate region ID, reserve footprint, reserve spacing,
-        // reserve socket funnel/approach cells, build PlacedRegion — all with one RegionId.
-        let region = commit_placement_atomic(
-            variant,
-            chosen.variant_index,
-            chosen.layer,
-            chosen.x,
-            chosen.y,
-            role,
-            grid,
-            config,
-            alloc,
-        )?;
-
-        placed_this_role.push(region);
-    }
-
-    Ok(placed_this_role)
-}
-
-/// Check whether a variant footprint fits at a given position.
 fn can_place_footprint(
     variant: &PrefabVariant,
     layer: u16,
@@ -926,152 +846,160 @@ fn can_place_footprint(
     y: u16,
     grid: &OccupancyGrid,
     config: &NormalizedGeneratorConfig,
-) -> bool {
-    let w = variant.width;
-    let h = variant.height;
-    let layers = config.layers().2;
-
-    if x.checked_add(w).map_or(true, |ex| ex > config.width()) {
-        return false;
+) -> Result<bool, GeneratorError> {
+    let end_x = x.checked_add(variant.width).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "footprint_end_x",
+        },
+    )?;
+    let end_y = y.checked_add(variant.height).ok_or(
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "footprint_end_y",
+        },
+    )?;
+    if layer >= config.layers().2
+        || x == 0
+        || y == 0
+        || end_x >= config.width()
+        || end_y >= config.height()
+    {
+        return Ok(false);
     }
-    if y.checked_add(h).map_or(true, |ey| ey > config.height()) {
-        return false;
-    }
-    if layer >= layers {
-        return false;
-    }
-
-    for vy in 0..h {
-        for vx in 0..w {
-            let cx = match x.checked_add(vx) {
-                Some(v) => v,
-                None => return false,
-            };
-            let cy = match y.checked_add(vy) {
-                Some(v) => v,
-                None => return false,
-            };
-            let coord = match GridCoord::new(layer, cx, cy, config.width(), config.height(), layers)
-            {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            match grid.get(coord) {
-                Some(OccupancyClass::Empty) => {}
-                _ => return false,
+    for dy in 0..variant.height {
+        for dx in 0..variant.width {
+            let cell_x = x.checked_add(dx).ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "footprint_cell_x",
+            })?;
+            let cell_y = y.checked_add(dy).ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "footprint_cell_y",
+            })?;
+            let cell = GridCoord::new(
+                layer,
+                cell_x,
+                cell_y,
+                config.width(),
+                config.height(),
+                config.layers().2,
+            )?;
+            if grid.get(cell) != Some(OccupancyClass::Empty) {
+                return Ok(false);
             }
         }
     }
-    true
+    Ok(true)
 }
 
-/// Check spacing against already-placed regions.
-fn check_spacing_multi(
-    layer: u16,
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-    placed_prev: &[PlacedRegion],
-    placed_current: &[PlacedRegion],
-    spacing: u32,
-) -> bool {
-    let spacing = spacing as i32;
-    let x_min = (x as i32).saturating_sub(spacing);
-    let y_min = (y as i32).saturating_sub(spacing);
-    let x_max = ((x as i32).saturating_add(w as i32)).saturating_add(spacing).saturating_sub(1);
-    let y_max = ((y as i32).saturating_add(h as i32)).saturating_add(spacing).saturating_sub(1);
-
-    for r in placed_prev.iter().chain(placed_current.iter()) {
-        if r.layer != layer {
-            continue;
-        }
-        let rx_min = (r.footprint.0 as i32).saturating_sub(spacing);
-        let ry_min = (r.footprint.1 as i32).saturating_sub(spacing);
-        let rx_max = ((r.footprint.0 as i32).saturating_add(r.footprint.2 as i32))
-            .saturating_add(spacing)
-            .saturating_sub(1);
-        let ry_max = ((r.footprint.1 as i32).saturating_add(r.footprint.3 as i32))
-            .saturating_add(spacing)
-            .saturating_sub(1);
-
-        if x_min <= rx_max && x_max >= rx_min && y_min <= ry_max && y_max >= ry_min {
-            return false;
-        }
-    }
-    true
-}
-
-/// Compute a deterministic placement score using actual candidate coordinates.
-fn compute_placement_score(
+fn placement_score(
+    role: RegionRole,
     layer: u16,
     x: u16,
     y: u16,
     variant_index: u16,
-    placed_prev: &[PlacedRegion],
-    placed_current: &[PlacedRegion],
-    _config: &NormalizedGeneratorConfig,
-) -> PlacementScore {
-    // Separation: find minimum Manhattan distance to any placed region center
-    let mut min_dist = u32::MAX;
-    let cx = x as i64 + 0; // Use corner for simplicity
-    let cy = y as i64 + 0;
-
-    for r in placed_prev.iter().chain(placed_current.iter()) {
-        let rx = r.footprint.0 as i64 + (r.footprint.2 as i64 / 2);
-        let ry = r.footprint.1 as i64 + (r.footprint.3 as i64 / 2);
-        let dist = ((cx - rx).unsigned_abs() + (cy - ry).unsigned_abs()) as u32;
-        min_dist = min_dist.min(dist);
-    }
-
-    let separation_distance = if min_dist == u32::MAX {
-        // No regions placed yet — this is the first region. Use a mid-range score.
-        500
-    } else {
-        min_dist.min(1000)
-    };
-
-    // Layer distribution: count regions per layer, prefer layers with fewer
-    let mut layer_counts: BTreeMap<u16, u32> = BTreeMap::new();
-    for r in placed_prev.iter().chain(placed_current.iter()) {
-        *layer_counts.entry(r.layer).or_default() += 1;
-    }
-    let layer_rank = layer_counts.get(&layer).copied().unwrap_or(0);
-
-    // Required-route proximity: count how many required-route regions exist nearby
-    let mut required_route_proximity = 0u32;
-    for r in placed_prev.iter().chain(placed_current.iter()) {
-        if matches!(r.role, RegionRole::RequiredRoute) {
-            let rx = r.footprint.0 as i64 + (r.footprint.2 as i64 / 2);
-            let ry = r.footprint.1 as i64 + (r.footprint.3 as i64 / 2);
-            let dist = ((cx - rx).unsigned_abs() + (cy - ry).unsigned_abs()) as u32;
-            if dist < 50 {
-                required_route_proximity += 1;
-            }
-        }
-    }
-
-    // Diversity: count how many of this variant are already placed
+    placed: &[PlacedRegion],
+) -> Result<PlacementScore, GeneratorError> {
+    let mut separation = u32::MAX;
+    let mut required_distance = u32::MAX;
+    let mut layer_population = 0u32;
     let mut variant_usage = 0u32;
-    for r in placed_prev.iter().chain(placed_current.iter()) {
-        if r.variant_index == variant_index {
-            variant_usage += 1;
+    for region in placed {
+        if region.layer == layer {
+            layer_population = layer_population.checked_add(1).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "placement_layer_population",
+                },
+            )?;
+        }
+        if region.variant_index == variant_index {
+            variant_usage = variant_usage.checked_add(1).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "placement_variant_usage",
+                },
+            )?;
+        }
+        if region.layer != layer {
+            continue;
+        }
+        let distance = u32::from(x.abs_diff(region.footprint.0))
+            .checked_add(u32::from(y.abs_diff(region.footprint.1)))
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "placement_distance_add",
+            })?;
+        separation = separation.min(distance);
+        if matches!(
+            region.role,
+            RegionRole::Spawn
+                | RegionRole::DistantLandmark
+                | RegionRole::MajorLandmark
+                | RegionRole::RequiredRoute
+                | RegionRole::VerticalHub
+        ) {
+            required_distance = required_distance.min(distance);
         }
     }
-    let diversity_rank = variant_usage;
-
-    PlacementScore {
-        separation_distance,
-        layer_rank,
-        required_route_proximity,
-        diversity_rank,
+    if separation == u32::MAX {
+        separation = 0;
     }
+    if required_distance == u32::MAX {
+        required_distance = 0;
+    }
+    // Keep the distant landmark on the spawn layer. Otherwise a purely
+    // population-balanced placement can put both at the same x/y on adjacent
+    // layers and force every legal route through a remote transition, making
+    // the configured route maximum unreachable before topology search starts.
+    if role == RegionRole::DistantLandmark {
+        let spawn_layer = placed
+            .iter()
+            .find(|region| region.role == RegionRole::Spawn)
+            .map(|region| region.layer);
+        if spawn_layer == Some(layer) {
+            layer_population = 0;
+            if let Some(spawn) = placed.iter().find(|region| region.role == RegionRole::Spawn) {
+                separation = u32::from(x.abs_diff(spawn.footprint.0))
+                    .checked_add(u32::from(y.abs_diff(spawn.footprint.1)))
+                    .ok_or(GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "spawn_landmark_distance_add",
+                    })?;
+            }
+        } else {
+            separation = 0;
+            layer_population = u32::MAX;
+        }
+    }
+    Ok(PlacementScore {
+        separation_distance: separation,
+        layer_population,
+        required_route_distance: required_distance,
+        variant_usage,
+    })
 }
 
-/// Single atomic commit: validate placement, allocate IDs, then in one phase commit
-/// to the grid. No grid mutation occurs before all validation passes so that failures
-/// leave the grid uncorrupted.
-fn commit_placement_atomic(
+fn marker_indices_for_layer(
+    variant: &PrefabVariant,
+    layer: u16,
+) -> Result<Vec<u16>, GeneratorError> {
+    variant
+        .markers
+        .iter()
+        .enumerate()
+        .filter(|(_, marker)| marker.position.layer == layer)
+        .map(|(index, _)| {
+            u16::try_from(index).map_err(|_| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "marker_index_convert",
+            })
+        })
+        .collect()
+}
+
+fn commit_region(
     variant: &PrefabVariant,
     variant_index: u16,
     layer: u16,
@@ -1082,176 +1010,418 @@ fn commit_placement_atomic(
     config: &NormalizedGeneratorConfig,
     alloc: &mut IdAllocator,
 ) -> Result<PlacedRegion, GeneratorError> {
-    let width = config.width();
-    let height = config.height();
-    let layers = config.layers().2;
-    let spacing = config.spacing();
-
-    // ── Phase 1: Validate and allocate IDs (no grid mutation) ──────────────
-
-    // Validate that the footprint rect is available
-    for dy in 0..variant.height {
-        for dx in 0..variant.width {
-            let cx = origin_x.checked_add(dx).ok_or_else(|| {
+    if !can_place_footprint(variant, layer, origin_x, origin_y, grid, config)? {
+        return Err(GeneratorError::OccupancyConflict {
+            stage: ErrorStage::Placement,
+            detail: "region_footprint_unavailable".into(),
+        });
+    }
+    let mut staged_grid = grid.clone();
+    let mut staged_alloc = alloc.clone();
+    let region_id = staged_alloc.next_region()?;
+    let mut sockets = Vec::with_capacity(variant.sockets.len());
+    for (index, socket) in variant.sockets.iter().enumerate() {
+        let global_layer = layer.checked_add(socket.anchor.layer).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "region_socket_layer",
+            },
+        )?;
+        let global_x = origin_x.checked_add(socket.anchor.x).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "region_socket_x",
+            },
+        )?;
+        let global_y = origin_y.checked_add(socket.anchor.y).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "region_socket_y",
+            },
+        )?;
+        sockets.push(PlacedSocket {
+            id: staged_alloc.next_socket()?,
+            variant_socket_index: u16::try_from(index).map_err(|_| {
                 GeneratorError::ArithmeticOverflow {
                     stage: ErrorStage::Placement,
-                    operation: "commit_footprint_x",
+                    operation: "region_socket_index",
                 }
-            })?;
-            let cy = origin_y.checked_add(dy).ok_or_else(|| {
-                GeneratorError::ArithmeticOverflow {
-                    stage: ErrorStage::Placement,
-                    operation: "commit_footprint_y",
-                }
-            })?;
-            let coord = GridCoord::new(layer, cx, cy, width, height, layers)?;
-            if grid.get(coord) != Some(OccupancyClass::Empty) {
+            })?,
+            global_anchor: GridCoord::new(
+                global_layer,
+                global_x,
+                global_y,
+                config.width(),
+                config.height(),
+                config.layers().2,
+            )?,
+            direction: map_direction_from_variant(socket.direction),
+            width: socket.width,
+            role: map_socket_role_from_variant(socket.role),
+            paired_socket_id: None,
+        });
+    }
+
+    staged_grid.reserve_rect(
+        layer,
+        origin_x,
+        origin_y,
+        variant.width,
+        variant.height,
+        OccupancyClass::Region(region_id.raw()),
+    )?;
+    for socket in &sockets {
+        match staged_grid.get(socket.global_anchor) {
+            Some(OccupancyClass::Region(owner)) if owner == region_id.raw() => {
+                staged_grid.set(
+                    socket.global_anchor,
+                    OccupancyClass::Socket(socket.id.raw()),
+                )?;
+            }
+            other => {
                 return Err(GeneratorError::OccupancyConflict {
                     stage: ErrorStage::Placement,
                     detail: format!(
-                        "commit_footprint_occupied {} existing={:?}",
-                        coord,
-                        grid.get(coord)
+                        "socket_anchor_not_owned {} existing={:?}",
+                        socket.global_anchor, other
                     ),
                 });
             }
         }
     }
 
-    // Validate socket coordinates
-    let sock_spacing_i32 = spacing as i32;
-    let width_i32 = width as i32;
-    let height_i32 = height as i32;
-    let origin_x_i32 = origin_x as i32;
-    let origin_y_i32 = origin_y as i32;
-    let variant_w_i32 = variant.width as i32;
-    let variant_h_i32 = variant.height as i32;
-
-    let sx_min = (origin_x_i32 - sock_spacing_i32).max(0) as u16;
-    let sy_min = (origin_y_i32 - sock_spacing_i32).max(0) as u16;
-    let sx_max = (origin_x_i32 + variant_w_i32 + sock_spacing_i32 - 1).min(width_i32 - 1).max(0) as u16;
-    let sy_max = (origin_y_i32 + variant_h_i32 + sock_spacing_i32 - 1).min(height_i32 - 1).max(0) as u16;
-
-    // Validate spacing cushion cells are either empty or already spacing
-    for dy in sy_min..=sy_max {
-        for dx in sx_min..=sx_max {
-            if dx >= origin_x
-                && dx < origin_x + variant.width
-                && dy >= origin_y
-                && dy < origin_y + variant.height
-            {
-                continue;
-            }
-            let coord = GridCoord::new(layer, dx, dy, width, height, layers)?;
-            match grid.get(coord) {
-                Some(OccupancyClass::Empty) | Some(OccupancyClass::Spacing(_)) => {}
-                other => {
-                    return Err(GeneratorError::OccupancyConflict {
-                        stage: ErrorStage::Placement,
-                        detail: format!(
-                            "commit_spacing_occupied {} existing={:?}",
-                            coord, other
-                        ),
-                    });
-                }
+    let spacing = i32::try_from(config.spacing()).map_err(|_| {
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_convert",
+        }
+    })?;
+    let min_x = i32::from(origin_x)
+        .checked_sub(spacing)
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_min_x",
+        })?
+        .max(0);
+    let min_y = i32::from(origin_y)
+        .checked_sub(spacing)
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_min_y",
+        })?
+        .max(0);
+    let max_x = (i32::from(origin_x)
+        .checked_add(i32::from(variant.width))
+        .and_then(|value| value.checked_add(spacing))
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_max_x",
+        })?)
+    .min(
+        i32::from(config.width())
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "spacing_grid_max_x",
+            })?,
+    );
+    let max_y = (i32::from(origin_y)
+        .checked_add(i32::from(variant.height))
+        .and_then(|value| value.checked_add(spacing))
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "spacing_max_y",
+        })?)
+    .min(
+        i32::from(config.height())
+            .checked_sub(1)
+            .ok_or(GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Placement,
+                operation: "spacing_grid_max_y",
+            })?,
+    );
+    for cell_y in min_y..=max_y {
+        for cell_x in min_x..=max_x {
+            let cell = GridCoord::new(
+                layer,
+                u16::try_from(cell_x).map_err(|_| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "spacing_x_convert",
+                })?,
+                u16::try_from(cell_y).map_err(|_| GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "spacing_y_convert",
+                })?,
+                config.width(),
+                config.height(),
+                config.layers().2,
+            )?;
+            if staged_grid.get(cell) == Some(OccupancyClass::Empty) {
+                staged_grid.set(cell, OccupancyClass::Spacing(region_id.raw()))?;
             }
         }
     }
 
-    // Pre-validate and build socket list (allocate IDs)
-    let mut sockets = Vec::with_capacity(variant.sockets.len());
-    for (si, sock) in variant.sockets.iter().enumerate() {
-        let gx = origin_x.checked_add(sock.anchor.x).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "socket_x_add",
-            }
-        })?;
-        let gy = origin_y.checked_add(sock.anchor.y).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "socket_y_add",
-            }
-        })?;
-        let gl = layer.checked_add(sock.anchor.layer).ok_or_else(|| {
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "socket_layer_add",
-            }
-        })?;
-
-        let global_anchor = GridCoord::new(gl, gx, gy, width, height, layers)?;
-
-        let direction = map_direction_from_variant(sock.direction);
-        let sok_role = map_socket_role_from_variant(sock.role);
-        let socket_id = alloc.next_socket()?;
-
-        sockets.push(PlacedSocket {
-            id: socket_id,
-            variant_socket_index: si as u16,
-            global_anchor,
-            direction,
-            width: sock.width,
-            role: sok_role,
-            paired_socket_id: None,
-        });
-    }
-
-    // ── Phase 2: All validation passed; commit to grid atomically ─────────
-    let id = alloc.next_region()?;
-
-    // Reserve footprint
-    grid.reserve_rect(
-        layer,
-        origin_x,
-        origin_y,
-        variant.width,
-        variant.height,
-        OccupancyClass::Region(id.raw()),
-    )?;
-
-    // Reserve spacing cushion
-    for dy in sy_min..=sy_max {
-        for dx in sx_min..=sx_max {
-            if dx >= origin_x
-                && dx < origin_x + variant.width
-                && dy >= origin_y
-                && dy < origin_y + variant.height
-            {
-                continue;
-            }
-            let coord = GridCoord::new(layer, dx, dy, width, height, layers)?;
-            let existing = grid.get(coord);
-            if existing == Some(OccupancyClass::Empty) {
-                grid.set(coord, OccupancyClass::Spacing(id.raw()))?;
-            }
-        }
-    }
-
-    // Collect transition IDs: match footprint against reserved transition cells.
-    // A vertical-hub region is associated with transitions whose hub_footprint
-    // overlaps this region's footprint.
-    let mut transition_ids: Vec<TransitionId> = Vec::new();
-    // Transitions are resolved during topology selection where the full
-    // transition reservation list is available. The PlacedRegion records
-    // empty here; the binding is completed in select_topology.
-
-    let marker_variant_indices: Vec<u16> = (0..variant.markers.len() as u16).collect();
-
-    Ok(PlacedRegion {
-        id,
+    let region = PlacedRegion {
+        id: region_id,
         role,
         variant_index,
         layer,
         footprint: (origin_x, origin_y, variant.width, variant.height),
         sockets,
-        transitions: transition_ids,
-        marker_variant_indices,
-    })
+        transitions: Vec::new(),
+        marker_variant_indices: marker_indices_for_layer(variant, 0)?,
+    };
+    *grid = staged_grid;
+    *alloc = staged_alloc;
+    Ok(region)
 }
 
-fn map_direction_from_variant(d: super::prefab::Direction) -> Direction {
-    match d {
+fn place_role_regions(
+    role: RegionRole,
+    target_count: u32,
+    candidates: &[(u16, &PrefabVariant)],
+    config: &NormalizedGeneratorConfig,
+    grid: &mut OccupancyGrid,
+    placed: &mut Vec<PlacedRegion>,
+    factory: SemanticStreamFactory,
+    alloc: &mut IdAllocator,
+) -> Result<(), GeneratorError> {
+    for ordinal in 0..target_count {
+        let mut scored = Vec::new();
+        for layer in 0..config.layers().2 {
+            for (variant_index, variant) in candidates.iter().copied() {
+                if variant.width > config.width() || variant.height > config.height() {
+                    continue;
+                }
+                let max_x = config.width().checked_sub(variant.width).ok_or(
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "placement_max_x",
+                    },
+                )?;
+                let max_y = config.height().checked_sub(variant.height).ok_or(
+                    GeneratorError::ArithmeticOverflow {
+                        stage: ErrorStage::Placement,
+                        operation: "placement_max_y",
+                    },
+                )?;
+                for y in 0..=max_y {
+                    for x in 0..=max_x {
+                        if can_place_footprint(variant, layer, x, y, grid, config)? {
+                            scored.push(PlacementCandidate {
+                                variant_index,
+                                layer,
+                                x,
+                                y,
+                                score: placement_score(
+                                    role,
+                                    layer,
+                                    x,
+                                    y,
+                                    variant_index,
+                                    placed,
+                                )?,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if scored.is_empty() {
+            return Err(GeneratorError::PlacementExhausted {
+                stage: ErrorStage::Placement,
+                reason: "no_valid_placement",
+                attempted: u64::from(config.placement_attempts()),
+                placed: u64::from(ordinal),
+                target: u64::from(target_count),
+            });
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .separation_distance
+                .cmp(&left.score.separation_distance)
+                .then_with(|| left.score.layer_population.cmp(&right.score.layer_population))
+                .then_with(|| {
+                    right
+                        .score
+                        .required_route_distance
+                        .cmp(&left.score.required_route_distance)
+                })
+                .then_with(|| left.score.variant_usage.cmp(&right.score.variant_usage))
+                .then_with(|| left.variant_index.cmp(&right.variant_index))
+                .then_with(|| left.layer.cmp(&right.layer))
+                .then_with(|| left.y.cmp(&right.y))
+                .then_with(|| left.x.cmp(&right.x))
+        });
+        let best_score = scored
+            .first()
+            .map(|candidate| candidate.score)
+            .ok_or(GeneratorError::IrInvariant {
+                stage: ErrorStage::Placement,
+                detail: "sorted_placement_candidates_empty".into(),
+            })?;
+        let equal_count = scored
+            .iter()
+            .take_while(|candidate| candidate.score == best_score)
+            .count();
+        let chosen_index = if equal_count > 1 {
+            let upper = NonZeroU32::new(u32::try_from(equal_count).map_err(|_| {
+                GeneratorError::InvalidRngRange {
+                    stage: ErrorStage::Placement,
+                    reason: "placement_tie_count_unrepresentable",
+                    lower: 0,
+                    upper: u64::MAX,
+                }
+            })?)
+            .ok_or(GeneratorError::InvalidRngRange {
+                stage: ErrorStage::Placement,
+                reason: "placement_tie_empty",
+                lower: 0,
+                upper: 0,
+            })?;
+            let mut stream = factory.stream(
+                SemanticStage::Placement,
+                &[
+                    SemanticComponent::StableId(role.label().as_bytes()),
+                    SemanticComponent::Index(ordinal),
+                ],
+            );
+            usize::try_from(stream.gen_bounded(upper)).map_err(|_| {
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "placement_tie_index_convert",
+                }
+            })?
+        } else {
+            0
+        };
+        let chosen = scored
+            .get(chosen_index)
+            .ok_or(GeneratorError::IrInvariant {
+                stage: ErrorStage::Placement,
+                detail: "placement_choice_out_of_bounds".into(),
+            })?;
+        let variant = candidates
+            .iter()
+            .find(|(index, _)| *index == chosen.variant_index)
+            .map(|(_, variant)| *variant)
+            .ok_or(GeneratorError::IrInvariant {
+                stage: ErrorStage::Placement,
+                detail: "placement_variant_missing".into(),
+            })?;
+        let region = commit_region(
+            variant,
+            chosen.variant_index,
+            chosen.layer,
+            chosen.x,
+            chosen.y,
+            role,
+            grid,
+            config,
+            alloc,
+        )?;
+        placed.push(region);
+    }
+    Ok(())
+}
+
+/// Place transition endpoints first, then ordinary role regions. Candidate
+/// topology is deliberately not built here; it consumes this exact committed
+/// occupancy grid through `topology::build_candidate_graph`.
+pub(super) fn place_regions(
+    config: &NormalizedGeneratorConfig,
+    catalog: &PrefabCatalog,
+    rng: &mut Pcg32V1,
+    factory: SemanticStreamFactory,
+) -> Result<(IntendedTopology, OccupancyGrid), GeneratorError> {
+    let manifest = RoleManifest::from_config(config, rng)?;
+    verify_mandatory_coverage(catalog, &manifest)?;
+    let expected_total = manifest.total_regions()?;
+    let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)?;
+    grid.reserve_borders();
+    let mut alloc = IdAllocator::new();
+
+    let ramp_candidates = enumerate_ramp_candidates(catalog, config)?;
+    let (transitions, mut regions) = reserve_transitions_and_endpoints(
+        &ramp_candidates,
+        catalog,
+        config,
+        &mut grid,
+        &mut alloc,
+        factory,
+    )?;
+    let endpoint_count = u32::try_from(regions.len()).map_err(|_| {
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "endpoint_region_count_convert",
+        }
+    })?;
+    if endpoint_count != manifest.vertical_hub_count {
+        return Err(GeneratorError::MandatoryInfeasibility {
+            stage: ErrorStage::Placement,
+            constraint: "transition_endpoint_count",
+            required: u64::from(manifest.vertical_hub_count),
+            available: u64::from(endpoint_count),
+        });
+    }
+
+    let mut roles = manifest.role_counts();
+    roles.sort_by_key(|(role, _)| role.ordinal());
+    for (role, count) in roles {
+        if count == 0 || role == RegionRole::VerticalHub {
+            continue;
+        }
+        let candidates = variants_for_role(catalog, role)?;
+        place_role_regions(
+            role,
+            count,
+            &candidates,
+            config,
+            &mut grid,
+            &mut regions,
+            factory,
+            &mut alloc,
+        )?;
+    }
+    regions.sort_by_key(|region| region.id.raw());
+    let actual_total = u32::try_from(regions.len()).map_err(|_| {
+        GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Placement,
+            operation: "placed_region_count_convert",
+        }
+    })?;
+    if actual_total != expected_total {
+        return Err(GeneratorError::MandatoryInfeasibility {
+            stage: ErrorStage::Placement,
+            constraint: "placed_region_total",
+            required: u64::from(expected_total),
+            available: u64::from(actual_total),
+        });
+    }
+
+    let topology = IntendedTopology {
+        regions,
+        edges: Vec::new(),
+        transitions,
+        route_distance: 0,
+        per_layer_cycles: vec![0; usize::from(config.layers().2)],
+        max_branch_depth: 0,
+        dead_end_count: 0,
+        articulation_count: 0,
+        crossing_count: 0,
+        config: config.clone(),
+    };
+    topology.validate_unique_region_ids()?;
+    topology.validate_transition_bindings()?;
+    Ok((topology, grid))
+}
+
+fn map_direction_from_variant(direction: super::prefab::Direction) -> Direction {
+    match direction {
         super::prefab::Direction::North => Direction::North,
         super::prefab::Direction::East => Direction::East,
         super::prefab::Direction::South => Direction::South,
@@ -1259,303 +1429,212 @@ fn map_direction_from_variant(d: super::prefab::Direction) -> Direction {
     }
 }
 
-fn map_socket_role_from_variant(r: super::prefab::SocketRole) -> SocketRole {
-    match r {
-        super::prefab::SocketRole::Corridor => SocketRole::Corridor,
-        super::prefab::SocketRole::Hall => SocketRole::Hall,
-        super::prefab::SocketRole::Doorway => SocketRole::Doorway,
-        super::prefab::SocketRole::Junction => SocketRole::Junction,
-        super::prefab::SocketRole::DeadEnd => SocketRole::DeadEnd,
-        super::prefab::SocketRole::LandmarkApproach => SocketRole::LandmarkApproach,
-        super::prefab::SocketRole::LowerRampApproach => SocketRole::LowerRampApproach,
-        super::prefab::SocketRole::UpperLanding => SocketRole::UpperLanding,
+fn map_socket_role_from_variant(role: PrefabSocketRole) -> SocketRole {
+    match role {
+        PrefabSocketRole::Corridor => SocketRole::Corridor,
+        PrefabSocketRole::Hall => SocketRole::Hall,
+        PrefabSocketRole::Doorway => SocketRole::Doorway,
+        PrefabSocketRole::Junction => SocketRole::Junction,
+        PrefabSocketRole::DeadEnd => SocketRole::DeadEnd,
+        PrefabSocketRole::LandmarkApproach => SocketRole::LandmarkApproach,
+        PrefabSocketRole::LowerRampApproach => SocketRole::LowerRampApproach,
+        PrefabSocketRole::UpperLanding => SocketRole::UpperLanding,
     }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
     use super::*;
     use super::super::config::{GeneratorConfig, QualifiedProfile};
+    use super::super::determinism::{AttemptIdentity, GeneratorIdentity};
+
+    fn catalog() -> PrefabCatalog {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs");
+        PrefabCatalog::load(&root).expect("bundled prefab catalog")
+    }
+
+    fn factory(
+        config: &NormalizedGeneratorConfig,
+        catalog: &PrefabCatalog,
+        seed: u64,
+    ) -> SemanticStreamFactory {
+        let generator = GeneratorIdentity::new(config, catalog.identity_bytes(), seed);
+        SemanticStreamFactory::new(AttemptIdentity::new(generator, 0))
+    }
 
     #[test]
-    fn role_manifest_is_deterministic() {
+    fn role_manifest_allocates_two_regions_per_transition() {
         let config = GeneratorConfig::qualified(QualifiedProfile::Primary)
             .normalize()
-            .unwrap();
-        let mut rng = Pcg32V1::new(12345, 67890);
-        let manifest = RoleManifest::from_config(&config, &mut rng).unwrap();
-        let total = manifest.total_regions();
-        assert!(total >= config.region_min());
-        assert!(total <= config.region_max());
-        assert_eq!(manifest.spawn_count, 1);
-        assert_eq!(manifest.distant_landmark_count, 1);
-        assert_eq!(manifest.vertical_hub_count, 4);
+            .expect("primary config");
+        let mut rng = Pcg32V1::new(1, 2);
+        let manifest = RoleManifest::from_config(&config, &mut rng).expect("manifest");
+        assert_eq!(manifest.vertical_hub_count, 8);
+        let total = manifest.total_regions().expect("role total");
+        assert!((config.region_min()..=config.region_max()).contains(&total));
     }
 
     #[test]
-    fn role_manifest_total_regions_uses_checked_add() {
-        let manifest = RoleManifest {
-            spawn_count: 1,
-            distant_landmark_count: 1,
-            major_landmark_count: 2,
-            junction_count: 3,
-            dead_end_count: 2,
-            vertical_hub_count: 4,
-            required_route_count: 3,
-            optional_branch_count: 2,
-            ordinary_count: 6,
-        };
-        assert_eq!(manifest.total_regions(), 24);
-    }
-
-    #[test]
-    fn placement_score_uses_candidate_coordinates() {
-        let config = GeneratorConfig::qualified(QualifiedProfile::Primary)
-            .normalize()
-            .unwrap();
-
-        let placed = Vec::new();
-        let current = Vec::new();
-
-        // Two candidates at different positions should get different separation scores
-        let score_a = compute_placement_score(0, 5, 5, 0, &placed, &current, &config);
-        let score_b = compute_placement_score(0, 50, 50, 0, &placed, &current, &config);
-        // When no regions are placed, both get default 500
-        assert_eq!(score_a.separation_distance, 500);
-        assert_eq!(score_b.separation_distance, 500);
-
-        // With a region placed, scores should differ
-        let mut alloc = IdAllocator::new();
-        let placed_region = PlacedRegion {
-            id: alloc.next_region().unwrap(),
-            role: RegionRole::Spawn,
-            variant_index: 0,
-            layer: 0,
-            footprint: (5, 5, 5, 5),
-            sockets: vec![],
-            transitions: vec![],
-            marker_variant_indices: vec![],
-        };
-        let placed = vec![placed_region];
-        let score_near = compute_placement_score(0, 7, 7, 0, &placed, &current, &config);
-        let score_far = compute_placement_score(0, 50, 50, 0, &placed, &current, &config);
-        // Near score should have smaller separation_distance than far
-        assert!(score_near.separation_distance < score_far.separation_distance);
-    }
-
-    #[test]
-    fn placement_score_is_total_order() {
-        let a = PlacementScore {
-            separation_distance: 5,
-            layer_rank: 3,
-            required_route_proximity: 0,
-            diversity_rank: 1,
-        };
-        let b = PlacementScore {
-            separation_distance: 5,
-            layer_rank: 3,
-            required_route_proximity: 0,
-            diversity_rank: 1,
-        };
-        assert_eq!(a, b);
-
-        let c = PlacementScore {
-            separation_distance: 5,
-            layer_rank: 3,
-            required_route_proximity: 0,
-            diversity_rank: 2,
-        };
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn spacing_check_non_overlapping_layers() {
-        let mut alloc = IdAllocator::new();
-        let r1 = PlacedRegion {
-            id: alloc.next_region().unwrap(),
-            role: RegionRole::Spawn,
-            variant_index: 0,
-            layer: 0,
-            footprint: (0, 0, 10, 10),
-            sockets: vec![],
-            transitions: vec![],
-            marker_variant_indices: vec![],
-        };
-        let r2 = PlacedRegion {
-            id: alloc.next_region().unwrap(),
-            role: RegionRole::DistantLandmark,
-            variant_index: 0,
-            layer: 1,
-            footprint: (0, 0, 10, 10),
-            sockets: vec![],
-            transitions: vec![],
-            marker_variant_indices: vec![],
-        };
-        let placed = vec![r2];
-        assert!(check_spacing_multi(0, 0, 0, 10, 10, &placed, &[], 2));
-    }
-
-    #[test]
-    fn spacing_check_overlapping() {
-        let mut alloc = IdAllocator::new();
-        let r1 = PlacedRegion {
-            id: alloc.next_region().unwrap(),
-            role: RegionRole::Spawn,
-            variant_index: 0,
-            layer: 0,
-            footprint: (5, 5, 10, 10),
-            sockets: vec![],
-            transitions: vec![],
-            marker_variant_indices: vec![],
-        };
-        let placed = vec![r1];
-        assert!(!check_spacing_multi(0, 3, 3, 2, 2, &placed, &[], 2));
-        assert!(check_spacing_multi(0, 0, 0, 1, 1, &placed, &[], 2));
-    }
-
-    /// Atomic rollback: when commit_placement_atomic fails after ID allocation
-    /// but before grid mutation, the grid must remain uncorrupted.
-    #[test]
-    fn atomic_rollback_does_not_corrupt_grid() {
+    fn transition_materialization_filters_by_transition_owner() {
         let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
             .normalize()
-            .unwrap();
-        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
-            .unwrap();
-
-        // Pre-reserve some cells to force a conflict
-        grid.reserve_rect(0, 0, 0, 10, 10, OccupancyClass::Region(99))
-            .unwrap();
-
-        // Now try to place a region at the same spot — should fail
-        // We directly test the validation phase: the function checks availability
-        // before allocating the region ID.
-        let grid_clone = grid.clone();
-
-        // Verify grid is unchanged after a failed placement attempt
-        let mut alloc = IdAllocator::new();
-        use super::super::prefab::{Cell, PrefabVariant, Tile};
-        let variant = PrefabVariant {
-            base_id: "test".into(),
-            rotation_degrees: 0,
-            width: 5,
-            height: 5,
-            layer_count: 1,
-            layers: vec![vec![vec![Tile::Floor; 5]; 5]],
-            origin: Cell { layer: 0, x: 0, y: 0 },
-            sockets: vec![],
-            markers: vec![],
-            reservations: vec![],
-            transitions: vec![],
-            tags: vec!["room".to_string()],
-        };
-        let result = commit_placement_atomic(
-            &variant,
-            0,
-            0,
-            0,
-            0,
-            RegionRole::Spawn,
-            &mut grid,
-            &config,
-            &mut alloc,
-        );
-        assert!(result.is_err());
-        // Grid cells should be unchanged from the original (except any prior state)
-        // Verify the footprint area still has the pre-reserved Region(99)
-        assert_eq!(
-            grid.get(GridCoord::new(0, 0, 0, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(OccupancyClass::Region(99))
-        );
-    }
-
-    /// Complete transition-mask: all 7 reservation parts (ramp_run, upper_opening,
-    /// landing, headroom, lower_funnel, lower_approach, hub_footprint) must be
-    /// reserved in the grid when a transition is placed.
-    #[test]
-    fn transition_mask_all_parts_reserved() {
-        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
-            .normalize()
-            .unwrap();
-        let mut grid = OccupancyGrid::new(config.width(), config.height(), config.layers().2)
-            .unwrap();
-
-        let mut alloc = IdAllocator::new();
-        let tid = alloc.next_transition().unwrap();
-
-        let cells = |coords: &[(u16, u16)]| -> Vec<GridCoord> {
-            coords
-                .iter()
-                .map(|&(x, y)| {
-                    GridCoord::new(0, x, y, config.width(), config.height(), config.layers().2)
-                        .unwrap()
-                })
-                .collect()
-        };
-
-        let upper_cells = |coords: &[(u16, u16)]| -> Vec<GridCoord> {
-            coords
-                .iter()
-                .map(|&(x, y)| {
-                    GridCoord::new(1, x, y, config.width(), config.height(), config.layers().2)
-                        .unwrap()
-                })
-                .collect()
-        };
-
-        let reservation = TransitionReservation {
-            id: tid,
+            .expect("minimum config");
+        let catalog = catalog();
+        let variant_index = catalog
+            .variants()
+            .iter()
+            .position(|variant| {
+                variant.base_id == "ramp-hub-straight" && variant.rotation_degrees == 0
+            })
+            .expect("straight ramp variant");
+        let candidate = RampCandidate {
+            variant_index: u16::try_from(variant_index).expect("variant index"),
+            transition_index: 0,
             lower_layer: 0,
-            hub_footprint: (5, 5, 5, 5),
-            ramp_run_cells: cells(&[(6, 6), (7, 6), (8, 6)]),
-            upper_opening_cells: upper_cells(&[(6, 5)]),
-            landing_cells: upper_cells(&[(6, 6), (7, 6)]),
-            headroom_cells: upper_cells(&[(6, 7)]),
-            lower_funnel_cells: cells(&[(4, 6)]),
-            lower_approach_cells: cells(&[(3, 6)]),
+            x: 10,
+            y: 10,
         };
+        let materialized =
+            materialize_transition(candidate, &catalog, &config).expect("materialized transition");
+        assert_eq!(materialized.ramp_run_cells.len(), 3);
+        assert_eq!(materialized.upper_opening_cells.len(), 3);
+        assert_eq!(materialized.landing_cells.len(), 1);
+        assert!(materialized.lower_approach_cells.is_empty());
+        assert!(materialized.lower_funnel_cells.is_empty());
+    }
 
-        // Reserve the transition
-        reserve_transition_volume(&reservation, &mut grid, &config).unwrap();
+    #[test]
+    fn transition_approach_is_hub_space_not_protected_transition_volume() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let variant_index = catalog
+            .variants()
+            .iter()
+            .position(|variant| {
+                variant.base_id == "ramp-hub-turn" && variant.rotation_degrees == 0
+            })
+            .expect("turn ramp variant");
+        let materialized = materialize_transition(
+            RampCandidate {
+                variant_index: u16::try_from(variant_index).expect("variant index"),
+                transition_index: 0,
+                lower_layer: 0,
+                x: 10,
+                y: 10,
+            },
+            &catalog,
+            &config,
+        )
+        .expect("materialized transition");
+        assert!(!materialized.lower_approach_cells.is_empty());
+        let approach = materialized.lower_approach_cells[0];
+        let protected: BTreeMap<GridCoord, ()> = materialized
+            .ramp_run_cells
+            .iter()
+            .chain(&materialized.upper_opening_cells)
+            .chain(&materialized.landing_cells)
+            .chain(&materialized.headroom_cells)
+            .copied()
+            .map(|cell| (cell, ()))
+            .collect();
+        assert!(!protected.contains_key(&approach));
 
-        // Verify all 7 parts are reserved
-        let class = OccupancyClass::Transition(tid.raw());
-        // Hub footprint
+        let mut grid = OccupancyGrid::new(
+            config.width(),
+            config.height(),
+            config.layers().2,
+        )
+        .expect("grid");
+        let mut allocator = IdAllocator::new();
+        let (transition, _, _) = commit_transition(
+            &materialized,
+            &catalog,
+            &mut grid,
+            &mut allocator,
+            &config,
+        )
+        .expect("transition commit");
         assert_eq!(
-            grid.get(GridCoord::new(0, 5, 5, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
+            grid.get(approach),
+            Some(OccupancyClass::TransitionHub(transition.id.raw()))
         );
-        // Ramp run
-        assert_eq!(
-            grid.get(GridCoord::new(0, 6, 6, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
-        );
-        // Upper opening
-        assert_eq!(
-            grid.get(GridCoord::new(1, 6, 5, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
-        );
-        // Landing
-        assert_eq!(
-            grid.get(GridCoord::new(1, 6, 6, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
-        );
-        // Headroom
-        assert_eq!(
-            grid.get(GridCoord::new(1, 6, 7, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
-        );
-        // Lower funnel
-        assert_eq!(
-            grid.get(GridCoord::new(0, 4, 6, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
-        );
-        // Lower approach
-        assert_eq!(
-            grid.get(GridCoord::new(0, 3, 6, config.width(), config.height(), config.layers().2).unwrap()),
-            Some(class)
-        );
+        for cell in materialized
+            .ramp_run_cells
+            .iter()
+            .chain(&materialized.upper_opening_cells)
+            .chain(&materialized.landing_cells)
+            .chain(&materialized.headroom_cells)
+        {
+            assert_eq!(
+                grid.get(*cell),
+                Some(OccupancyClass::Transition(transition.id.raw()))
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_regions_are_placed_first_and_keep_hub_ownership() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let factory = factory(&config, &catalog, 17);
+        let mut role_rng = factory.stream(SemanticStage::Roles, &[]);
+        let (topology, grid) =
+            place_regions(&config, &catalog, &mut role_rng, factory).expect("placement");
+        assert_eq!(topology.transitions.len(), 2);
+        topology
+            .validate_transition_bindings()
+            .expect("transition bindings");
+        for transition in &topology.transitions {
+            assert!(transition.lower_region.raw() < 4);
+            assert!(transition.upper_region.raw() < 4);
+            let lower = topology
+                .regions
+                .iter()
+                .find(|region| region.id == transition.lower_region)
+                .expect("lower endpoint");
+            let upper = topology
+                .regions
+                .iter()
+                .find(|region| region.id == transition.upper_region)
+                .expect("upper endpoint");
+            assert_eq!(lower.transitions, vec![transition.id]);
+            assert_eq!(upper.transitions, vec![transition.id]);
+            let probe = GridCoord::new(
+                transition.lower_layer,
+                transition.hub_footprint.0,
+                transition.hub_footprint.1,
+                config.width(),
+                config.height(),
+                config.layers().2,
+            )
+            .expect("hub probe");
+            assert!(matches!(
+                grid.get(probe),
+                Some(OccupancyClass::TransitionHub(owner))
+                    | Some(OccupancyClass::Transition(owner))
+                    if owner == transition.id.raw()
+            ));
+        }
+    }
+
+    #[test]
+    fn placement_is_reproducible_through_real_entrypoint() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let factory = factory(&config, &catalog, 99);
+        let mut rng_a = factory.stream(SemanticStage::Roles, &[]);
+        let mut rng_b = factory.stream(SemanticStage::Roles, &[]);
+        let a = place_regions(&config, &catalog, &mut rng_a, factory).expect("placement a");
+        let b = place_regions(&config, &catalog, &mut rng_b, factory).expect("placement b");
+        assert_eq!(a.0, b.0);
     }
 }

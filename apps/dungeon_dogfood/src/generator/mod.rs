@@ -1,3 +1,4 @@
+pub(crate) mod ascii;
 mod config;
 mod determinism;
 mod diagnostics;
@@ -5,4 +6,8 @@ mod error;
 pub(crate) mod ir;
 pub(crate) mod placement;
 pub(crate) mod prefab;
+pub(crate) mod ramps;
+pub(crate) mod repair;
+pub(crate) mod routing;
 pub(crate) mod topology;
+pub(crate) mod validation;

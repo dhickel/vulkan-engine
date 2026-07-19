@@ -344,8 +344,11 @@ impl RegionRole {
 pub(super) enum OccupancyClass {
     /// Not yet occupied.
     Empty,
-    /// Reserved by a transition (transition ID raw value). Transitions are immutable
-    /// and always win over ordinary footprint claims.
+    /// Projection of a transition prefab's hub footprint. This is not ordinary
+    /// floor/wall occupancy: only endpoint regions owned by this transition may
+    /// be placed over it.
+    TransitionHub(u32),
+    /// Reserved ramp run, upper opening, landing, or headroom cell.
     Transition(u32),
     /// Reserved by a placed region footprint.
     Region(u32),
@@ -353,13 +356,15 @@ pub(super) enum OccupancyClass {
     Socket(u32),
     /// Spacing cushion around a placed footprint.
     Spacing(u32),
+    /// Border wall cell (outer perimeter of each layer).
+    Border,
 }
 
 /// Occupancy grid tracking per-cell ownership across all layers.
 ///
 /// Backed by a flat vector per layer for fast probing; coordinates are
 /// clamped to grid bounds through the `GridCoord` constructor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OccupancyGrid {
     width: u16,
     height: u16,
@@ -401,6 +406,24 @@ impl OccupancyGrid {
     #[allow(dead_code)]
     pub(super) const fn dimensions(&self) -> (u16, u16, u16) {
         (self.width, self.height, self.layers)
+    }
+
+    /// Reserve border cells on every layer as Border occupancy.
+    /// These are never walkable and corridors may not route through them.
+    pub(super) fn reserve_borders(&mut self) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        for layer in 0..self.layers as usize {
+            let base = layer * w * h;
+            for x in 0..w {
+                self.cells[base + x] = OccupancyClass::Border; // y=0
+                self.cells[base + (h - 1) * w + x] = OccupancyClass::Border; // y=last
+            }
+            for y in 0..h {
+                self.cells[base + y * w] = OccupancyClass::Border; // x=0
+                self.cells[base + y * w + (w - 1)] = OccupancyClass::Border; // x=last
+            }
+        }
     }
 
     fn flat_index(&self, coord: GridCoord) -> Result<usize, GeneratorError> {
@@ -563,10 +586,18 @@ impl OccupancyGrid {
 pub(super) struct TransitionReservation {
     /// Unique transition ID.
     pub(super) id: TransitionId,
-    /// The lower-layer region acting as the ramp-hub origin.
+    /// Prefab variant that supplied the transition contract.
+    pub(super) variant_index: u16,
+    /// The lower layer in the adjacent-layer pair.
     pub(super) lower_layer: u16,
-    /// Hub footprint rectangle on the lower layer (x, y, w, h).
+    /// Hub footprint projection (x, y, w, h) on both endpoint layers.
     pub(super) hub_footprint: (u16, u16, u16, u16),
+    /// Explicit lower and upper endpoint regions allocated before ordinary rooms.
+    pub(super) lower_region: RegionId,
+    pub(super) upper_region: RegionId,
+    /// Concrete placed sockets that form the vertical candidate edge.
+    pub(super) lower_socket: SocketId,
+    pub(super) upper_socket: SocketId,
     /// The three ramp-run cells on the lower layer [(x0,y0),(x1,y1),(x2,y2)].
     pub(super) ramp_run_cells: Vec<GridCoord>,
     /// Upper-layer opening cells (must be void — layer+1).
@@ -670,9 +701,34 @@ impl PlacedRegion {
     }
 }
 
-// ─── Intended edge ──────────────────────────────────────────────────────────
+// ─── Candidate and intended edges ──────────────────────────────────────────
 
-/// A candidate connection between two placed sockets.
+/// A geometrically realizable candidate connection between two placed sockets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CandidateEdge {
+    pub(super) id: EdgeId,
+    pub(super) source_socket: SocketId,
+    pub(super) target_socket: SocketId,
+    pub(super) source_region: RegionId,
+    pub(super) target_region: RegionId,
+    pub(super) path_witness: Vec<GridCoord>,
+    pub(super) allowed_envelope_cells: Vec<GridCoord>,
+    pub(super) cost: u64,
+    pub(super) width: u16,
+    /// Present only for the reservation-bound vertical edge of this transition.
+    pub(super) transition: Option<TransitionId>,
+}
+
+/// Canonically ordered candidate graph built from the committed occupancy grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CandidateGraph {
+    pub(super) edges: Vec<CandidateEdge>,
+    /// Exact committed placement occupancy used to reroute a selected witness
+    /// around already-selected corridors during bounded topology search.
+    pub(super) occupancy: OccupancyGrid,
+}
+
+/// A selected connection between two placed sockets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IntendedEdge {
     pub(super) id: EdgeId,
@@ -692,6 +748,8 @@ pub(super) struct IntendedEdge {
     pub(super) cost: u64,
     /// Width of the corridor/hall this edge represents.
     pub(super) width: u16,
+    /// Reservation bound to a vertical edge; absent for ordinary corridors.
+    pub(super) transition: Option<TransitionId>,
 }
 
 // ─── Intended topology ──────────────────────────────────────────────────────
@@ -770,16 +828,78 @@ impl IntendedTopology {
             .flat_map(|r| r.sockets.iter().map(move |s| (s.id, r.id)))
             .collect();
         for e in &self.edges {
-            if !socket_map.contains_key(&e.source_socket) {
+            if socket_map.get(&e.source_socket) != Some(&e.source_region) {
                 return Err(GeneratorError::IrInvariant {
                     stage: ErrorStage::Ir,
-                    detail: format!("dangling_source_socket {}", e.source_socket.raw()),
+                    detail: format!("dangling_or_misowned_source_socket {}", e.source_socket.raw()),
                 });
             }
-            if !socket_map.contains_key(&e.target_socket) {
+            if socket_map.get(&e.target_socket) != Some(&e.target_region) {
                 return Err(GeneratorError::IrInvariant {
                     stage: ErrorStage::Ir,
-                    detail: format!("dangling_target_socket {}", e.target_socket.raw()),
+                    detail: format!("dangling_or_misowned_target_socket {}", e.target_socket.raw()),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify explicit transition endpoint region/socket bindings.
+    pub(super) fn validate_transition_bindings(&self) -> Result<(), GeneratorError> {
+        let regions: BTreeMap<RegionId, &PlacedRegion> =
+            self.regions.iter().map(|region| (region.id, region)).collect();
+        for transition in &self.transitions {
+            let lower = regions.get(&transition.lower_region).ok_or_else(|| {
+                GeneratorError::TransitionBinding {
+                    stage: ErrorStage::Ir,
+                    transition: transition.id.raw(),
+                    reason: "missing_lower_endpoint_region",
+                }
+            })?;
+            let upper = regions.get(&transition.upper_region).ok_or_else(|| {
+                GeneratorError::TransitionBinding {
+                    stage: ErrorStage::Ir,
+                    transition: transition.id.raw(),
+                    reason: "missing_upper_endpoint_region",
+                }
+            })?;
+            let expected_upper = transition.lower_layer.checked_add(1).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Ir,
+                    operation: "transition_binding_upper_layer",
+                },
+            )?;
+            if lower.layer != transition.lower_layer || upper.layer != expected_upper {
+                return Err(GeneratorError::TransitionBinding {
+                    stage: ErrorStage::Ir,
+                    transition: transition.id.raw(),
+                    reason: "endpoint_layer_mismatch",
+                });
+            }
+            if !lower.transitions.contains(&transition.id)
+                || !upper.transitions.contains(&transition.id)
+            {
+                return Err(GeneratorError::TransitionBinding {
+                    stage: ErrorStage::Ir,
+                    transition: transition.id.raw(),
+                    reason: "endpoint_region_missing_transition",
+                });
+            }
+            let lower_socket = lower
+                .sockets
+                .iter()
+                .find(|socket| socket.id == transition.lower_socket);
+            let upper_socket = upper
+                .sockets
+                .iter()
+                .find(|socket| socket.id == transition.upper_socket);
+            if !matches!(lower_socket, Some(socket) if socket.role == SocketRole::LowerRampApproach)
+                || !matches!(upper_socket, Some(socket) if socket.role == SocketRole::UpperLanding)
+            {
+                return Err(GeneratorError::TransitionBinding {
+                    stage: ErrorStage::Ir,
+                    transition: transition.id.raw(),
+                    reason: "endpoint_socket_mismatch",
                 });
             }
         }
