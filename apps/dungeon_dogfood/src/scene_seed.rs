@@ -424,6 +424,7 @@ fn build_manifest_material(
             &[
                 "_diff_",
                 "_basecolor_",
+                "_basecolor",
                 "_base_color_",
                 "_albedo_",
                 "_color_",
@@ -432,14 +433,22 @@ fn build_manifest_material(
         normal: if fast_startup {
             None
         } else {
-            find_texture_map(&material_base_path, &["_nor_gl_", "_normal_", "_nor_"])
+            find_texture_map(
+                &material_base_path,
+                &["_nor_gl_", "_normal_", "_normal", "_nor_"],
+            )
         },
         arm: if fast_startup {
             None
         } else {
             find_texture_map(
                 &material_base_path,
-                &["_arm_", "_occlusionroughnessmetallic_", "_orm_"],
+                &[
+                    "_arm_",
+                    "_arm",
+                    "_occlusionroughnessmetallic_",
+                    "_orm_",
+                ],
             )
         },
     };

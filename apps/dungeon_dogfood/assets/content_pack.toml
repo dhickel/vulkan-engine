@@ -27,12 +27,12 @@ placement_half_extents = [0.5, 0.6, 0.5]
 [[materials]]
 id = "stone_wall"
 family = "pbr"
-base_path = "apps/dungeon_dogfood/assets/textures/pbr/stone_rough"
+base_path = "assets/dungeon_crawler_png/KB3D_DGC_STDarkCastleWall"
 
 [[materials]]
 id = "stone_floor"
 family = "pbr"
-base_path = "apps/dungeon_dogfood/assets/textures/pbr/stone_floor"
+base_path = "assets/dungeon_crawler_png/KB3D_DGC_STDarkPolishRectFloor"
 
 [[environments]]
 id = "env_dungeon_neutral"
