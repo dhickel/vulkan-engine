@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use super::config::NormalizedGeneratorConfig;
+use super::context::AttemptContext;
 use super::determinism::{lowercase_hex, SemanticComponent, SemanticStage, SemanticStreamFactory};
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::IntendedTopology;
@@ -303,7 +304,9 @@ impl RepairEngine {
     pub(super) fn new(
         config: &NormalizedGeneratorConfig,
         factory: SemanticStreamFactory,
+        ctx: &mut AttemptContext,
     ) -> Self {
+        let _ = ctx; // reserved for future telemetry
         let repair_stream = factory.stream(
             SemanticStage::Repair,
             &[SemanticComponent::Index(0)],
@@ -553,6 +556,7 @@ fn violation_tuple(report: &ValidationReport) -> (usize, usize, usize, usize) {
 mod tests {
     use super::*;
     use super::super::config::GeneratorConfig;
+    use super::super::context::{AttemptContext, TelemetryMode};
     use super::super::determinism::{AttemptIdentity, GeneratorIdentity};
     use super::super::ir::IdAllocator;
 
@@ -611,7 +615,7 @@ mod tests {
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), 0);
         let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
 
-        let engine = RepairEngine::new(&config, factory);
+        let engine = RepairEngine::new(&config, factory, &mut AttemptContext::new(TelemetryMode::Off));
         // With a fresh engine, the budgets should be non-zero.
         assert!(!engine.budgets.is_exhausted());
         assert!(engine.rejected.is_empty());
@@ -667,7 +671,7 @@ mod tests {
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), 0);
         let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
 
-        let mut engine = RepairEngine::new(&config, factory);
+        let mut engine = RepairEngine::new(&config, factory, &mut AttemptContext::new(TelemetryMode::Off));
         let action = RepairAction {
             reason: GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,

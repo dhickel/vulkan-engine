@@ -26,9 +26,11 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use generator::{
-    alloc_metrics, compute_config_hash, error_stage_code, generate, GeneratorConfig,
-    GeneratorError, GenerationResult, QualifiedProfile,
+    alloc_metrics, compute_config_hash, error_stage_code, generate, generate_with_telemetry,
+    GeneratorConfig, GeneratorError, GenerationResult, QualifiedProfile,
 };
+use generator::context::AttemptContext;
+use generator::telemetry::serialize_telemetry;
 use generator::prefab::PrefabCatalog;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -331,6 +333,15 @@ struct WorkerRecord {
     /// Allocation snapshot — only Some when compiled with generator-bench-alloc.
     #[serde(skip_serializing_if = "Option::is_none")]
     alloc_snapshot: Option<AllocRecord>,
+    /// Telemetry payload (if telemetry mode is not Off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    telemetry: Option<TelemetryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TelemetryRecord {
+    mode: String,
+    json_bytes_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,7 +572,17 @@ fn cmd_freeze() -> Result<(), String> {
 // ─── worker ────────────────────────────────────────────────────────────────
 
 fn cmd_worker(seed: u64) -> Result<(), String> {
-    eprintln!("[worker] seed={seed} loading catalog...");
+    // Parse optional --telemetry <mode> from remaining args
+    let args: Vec<String> = std::env::args().collect();
+    let telemetry_mode = if let Some(pos) = args.iter().position(|a| a == "--telemetry") {
+        let mode_str = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("off");
+        generator::context::TelemetryMode::from_str(mode_str)
+            .unwrap_or(generator::context::TelemetryMode::Off)
+    } else {
+        generator::context::TelemetryMode::Off
+    };
+
+    eprintln!("[worker] seed={seed} telemetry={telemetry_mode:?} loading catalog...");
     let catalog_path = prefab_catalog_path();
     let catalog = PrefabCatalog::load(&catalog_path)
         .map_err(|e| format!("catalog load: {e:?}"))?;
@@ -577,7 +598,7 @@ fn cmd_worker(seed: u64) -> Result<(), String> {
 
     // Time exactly one generate() call
     let started = Instant::now();
-    let result = generate(config, &catalog, seed);
+    let result = generate_with_telemetry(config, &catalog, seed, telemetry_mode);
     let elapsed = started.elapsed();
     eprintln!("[worker] seed={seed} generate completed in {}ms", elapsed.as_millis());
 
@@ -589,13 +610,15 @@ fn cmd_worker(seed: u64) -> Result<(), String> {
 
     let duration_ns = elapsed.as_nanos() as u64;
 
-    let (outcome, attempt_index, replay_hex) = match &result {
-        Ok(gen_result) => {
+    let (outcome, attempt_index, replay_hex, telemetry) = match &result {
+        Ok((gen_result, ctx)) => {
             let replay_bytes = build_replay_success(gen_result)?;
+            let telemetry = telemetry_record(ctx);
             (
                 "success".to_string(),
                 Some(gen_result.attempt_index),
                 Some(hex::encode(&replay_bytes)),
+                telemetry,
             )
         }
         Err(e) => {
@@ -604,6 +627,7 @@ fn cmd_worker(seed: u64) -> Result<(), String> {
                 "exhausted".to_string(),
                 None,
                 Some(hex::encode(&replay_bytes)),
+                None, // No telemetry for exhausted through public API
             )
         }
     };
@@ -619,6 +643,7 @@ fn cmd_worker(seed: u64) -> Result<(), String> {
         replay_hex,
         vm_hwm_kb,
         alloc_snapshot: alloc_snapshot_for_record(&alloc_snap),
+        telemetry,
     };
 
     let json = serde_json::to_string(&record).map_err(|e| format!("json: {e}"))?;
@@ -1194,6 +1219,43 @@ fn alloc_snapshot_for_record(snap: &alloc_metrics::AllocSnapshot) -> Option<Allo
     }
 }
 
+/// Build an optional TelemetryRecord from a finalized context.
+fn telemetry_record(ctx: &AttemptContext) -> Option<TelemetryRecord> {
+    if ctx.mode() == generator::context::TelemetryMode::Off {
+        return None;
+    }
+    let json_bytes = serialize_telemetry(ctx).ok()?;
+    Some(TelemetryRecord {
+        mode: format!("{:?}", ctx.mode()).to_lowercase(),
+        json_bytes_base64: base64_encode(&json_bytes),
+    })
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    use std::fmt::Write;
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        let _ = write!(result, "{}", CHARS[((triple >> 18) & 0x3f) as usize] as char);
+        let _ = write!(result, "{}", CHARS[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() >= 2 {
+            let _ = write!(result, "{}", CHARS[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() >= 3 {
+            let _ = write!(result, "{}", CHARS[(triple & 0x3f) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
 /// Seal a file by making it read-only (mode 0o444).
 fn seal_file(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -1345,6 +1407,7 @@ mod tests {
             replay_hex: None,
             vm_hwm_kb: None,
             alloc_snapshot: None,
+            telemetry: None,
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"duration_ns\":12345"));

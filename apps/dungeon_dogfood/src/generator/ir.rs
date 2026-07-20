@@ -369,7 +369,7 @@ pub(super) struct OccupancyGrid {
     width: u16,
     height: u16,
     layers: u16,
-    cells: Vec<OccupancyClass>,
+    pub(super) cells: Vec<OccupancyClass>,
 }
 
 impl OccupancyGrid {

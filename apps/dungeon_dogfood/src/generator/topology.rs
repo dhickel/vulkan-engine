@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use super::config::NormalizedGeneratorConfig;
+use super::context::{AttemptContext, RouteOutcome, RouteSearchKind};
 use super::determinism::Pcg32V1;
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
@@ -48,8 +49,11 @@ pub(super) fn route_socket_pair(
     grid: &OccupancyGrid,
     config: &NormalizedGeneratorConfig,
     width: u16,
+    ctx: &mut AttemptContext,
+    search_kind: RouteSearchKind,
 ) -> Result<Option<(Vec<GridCoord>, Vec<GridCoord>, u64)>, GeneratorError> {
-    if let Some((path, envelope)) = find_path_with_envelope(
+    ctx.route_started(search_kind);
+    let (result, expansions, capped) = find_path_with_envelope(
         source_region,
         source_socket,
         target_region,
@@ -57,14 +61,24 @@ pub(super) fn route_socket_pair(
         grid,
         config,
         width,
-    )? {
-        let cost = u64::try_from(path.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "route_socket_pair_cost",
-        })?;
-        Ok(Some((path, envelope, cost)))
-    } else {
-        Ok(None)
+    )?;
+    match result {
+        Some((path, envelope)) => {
+            let cost = u64::try_from(path.len()).map_err(|_| GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "route_socket_pair_cost",
+            })?;
+            ctx.route_finished(search_kind, RouteOutcome::Path, path.len());
+            Ok(Some((path, envelope, cost)))
+        }
+        None if capped => {
+            ctx.route_finished(search_kind, RouteOutcome::Cap, expansions);
+            Ok(None)
+        }
+        None => {
+            ctx.route_finished(search_kind, RouteOutcome::NoPath, expansions);
+            Ok(None)
+        }
     }
 }
 
@@ -115,6 +129,7 @@ pub(super) fn ordinary_socket_compatibility(
 pub(super) fn build_candidate_graph(
     topology: &IntendedTopology,
     grid: &OccupancyGrid,
+    ctx: &mut AttemptContext,
 ) -> Result<CandidateGraph, GeneratorError> {
     topology.validate_transition_bindings()?;
     let config = &topology.config;
@@ -182,9 +197,12 @@ pub(super) fn build_candidate_graph(
                     else {
                         continue;
                     };
+                    ctx.candidate_pair_considered();
                     let width = corridor_width_for_sockets(left_socket, right_socket, config)?;
                     if let Some((path, envelope, cost)) = route_socket_pair(
                         left, left_socket, right, right_socket, grid, config, width,
+                        ctx,
+                        RouteSearchKind::CandidateConstruction,
                     )? {
                         pending.push(PendingEdge {
                             source_socket: left_socket.id,
@@ -225,7 +243,7 @@ pub(super) fn build_candidate_graph(
         edges,
         occupancy: grid.clone(),
     };
-    validate_candidate_graph(topology, &graph)?;
+    validate_candidate_graph(topology, &graph, ctx)?;
     Ok(graph)
 }
 
@@ -261,6 +279,7 @@ fn transition_for_socket_pair<'a>(
 fn validate_candidate_graph(
     topology: &IntendedTopology,
     graph: &CandidateGraph,
+    ctx: &mut AttemptContext,
 ) -> Result<(), GeneratorError> {
     let region_layers: BTreeMap<RegionId, u16> = topology
         .regions
@@ -399,6 +418,8 @@ fn validate_candidate_graph(
                 &graph.occupancy,
                 &topology.config,
                 edge.width,
+                ctx,
+                RouteSearchKind::CandidateValidation,
             )?;
             if routed.as_ref().is_none_or(|(path, envelope, cost)| {
                 path != &edge.path_witness
@@ -778,7 +799,8 @@ fn find_path_with_envelope(
     grid: &OccupancyGrid,
     config: &NormalizedGeneratorConfig,
     width: u16,
-) -> Result<Option<(Vec<GridCoord>, Vec<GridCoord>)>, GeneratorError> {
+) -> Result<(Option<(Vec<GridCoord>, Vec<GridCoord>)>, usize, bool), GeneratorError> {
+    // Returns (result, expansions, capped)
     let source_inward = socket_inward_cells(source_socket, config)?;
     let target_inward = socket_inward_cells(target_socket, config)?;
     let start = source_inward.first().copied().ok_or(GeneratorError::IrInvariant {
@@ -790,7 +812,7 @@ fn find_path_with_envelope(
         detail: "target_socket_has_no_inward_cell".into(),
     })?;
     if start.layer != goal.layer {
-        return Ok(None);
+        return Ok((None, 0, false));
     }
     let source_terminal = terminal_cells(source_socket, config)?;
     let target_terminal = terminal_cells(target_socket, config)?;
@@ -821,7 +843,7 @@ fn find_path_with_envelope(
             operation: "astar_expansion_count",
         })?;
         if expansions > max_expansions {
-            return Ok(None);
+            return Ok((None, expansions, true));
         }
         let best = distances.get(&current.coord).copied().unwrap_or(u64::MAX);
         if current.distance != best {
@@ -847,10 +869,10 @@ fn find_path_with_envelope(
                 target_socket,
                 config,
             )? {
-                return Ok(None);
+                return Ok((None, expansions, false));
             }
             let envelope = compute_cell_envelope(&path, width, config)?;
-            return Ok(Some((path, envelope)));
+            return Ok((Some((path, envelope)), expansions, false));
         }
         for movement in directions {
             let x = i32::from(current.coord.x)
@@ -919,7 +941,7 @@ fn find_path_with_envelope(
             }
         }
     }
-    Ok(None)
+    Ok((None, expansions, false))
 }
 
 fn route_has_wall_normal_endpoints(
@@ -1213,7 +1235,7 @@ fn reroute_candidate(
             }
         }
     }
-    let Some((path, envelope)) = find_path_with_envelope(
+    let (result, _expansions, _capped) = find_path_with_envelope(
         source_region,
         source_socket,
         target_region,
@@ -1221,7 +1243,8 @@ fn reroute_candidate(
         &overlay,
         &topology.config,
         candidate.width,
-    )? else {
+    )?;
+    let Some((path, envelope)) = result else {
         return Ok(None);
     };
     let mut rerouted = candidate.clone();
@@ -2727,6 +2750,7 @@ pub(super) fn select_topology(
     config: &NormalizedGeneratorConfig,
     graph: &CandidateGraph,
     rng: &mut Pcg32V1,
+    ctx: &mut AttemptContext,
 ) -> Result<IntendedTopology, GeneratorError> {
     if topology.config != *config {
         return Err(GeneratorError::IrInvariant {
@@ -2734,11 +2758,14 @@ pub(super) fn select_topology(
             detail: "selection_config_mismatch".into(),
         });
     }
-    validate_candidate_graph(&topology, graph)?;
+    ctx.begin_scope(super::context::TelemetryScope::CandidateValidation);
+    validate_candidate_graph(&topology, graph, ctx)?;
+    ctx.end_scope(super::context::TelemetryScope::CandidateValidation);
     let budget = config.reroute_budget().max(1);
     let mut last_error = None;
     for _ in 0..budget {
         let nonce = rng.next_u32();
+        ctx.topology_nonce();
         let mut working_graph = graph.clone();
         let ordered = edge_order(&working_graph, nonce);
         match assemble_topology(&topology, &mut working_graph, &ordered) {
@@ -3383,6 +3410,7 @@ mod tests {
 
     use super::*;
     use super::super::config::{GeneratorConfig, QualifiedProfile};
+    use super::super::context::{AttemptContext, TelemetryMode};
     use super::super::determinism::{
         AttemptIdentity, GeneratorIdentity, SemanticStage, SemanticStreamFactory,
     };
@@ -3576,7 +3604,7 @@ mod tests {
         grid.set(blocked, OccupancyClass::Transition(999))
             .expect("transition obstacle");
 
-        let (path, _) = find_path_with_envelope(
+        let (result, _, _) = find_path_with_envelope(
             &source,
             &source_socket,
             &target,
@@ -3585,8 +3613,8 @@ mod tests {
             &config,
             1,
         )
-        .expect("path search")
-        .expect("routed path");
+        .expect("path search");
+        let (path, _) = result.expect("routed path");
         let goal = GridCoord::new(
             0,
             16,
@@ -3613,8 +3641,8 @@ mod tests {
         let factory = factory(&config, &catalog, 5);
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
         let (topology, grid) =
-            place_regions(&config, &catalog, &mut roles, factory).expect("placement");
-        let graph = build_candidate_graph(&topology, &grid).expect("candidate graph");
+            place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
+        let graph = build_candidate_graph(&topology, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
         let vertical: Vec<_> = graph
             .edges
             .iter()
@@ -3638,10 +3666,10 @@ mod tests {
         let factory = factory(&config, &catalog, 23);
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
         let (placed, grid) =
-            place_regions(&config, &catalog, &mut roles, factory).expect("placement");
-        let graph = build_candidate_graph(&placed, &grid).expect("candidate graph");
+            place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
+        let graph = build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
         let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-        let selected = select_topology(placed, &config, &graph, &mut topology_rng)
+        let selected = select_topology(placed, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off))
             .expect("topology selection");
         assert!(!selected.edges.is_empty());
         assert_eq!(
@@ -4491,10 +4519,10 @@ mod tests {
         let factory = factory(&config, &catalog, 23);
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
         let (topology, grid) =
-            place_regions(&config, &catalog, &mut roles, factory).expect("placement");
-        let graph = build_candidate_graph(&topology, &grid).expect("candidate graph");
+            place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
+        let graph = build_candidate_graph(&topology, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
         let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-        let selected = select_topology(topology, &config, &graph, &mut topology_rng)
+        let selected = select_topology(topology, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off))
             .expect("topology selection");
         let dead_ends: Vec<_> = selected
             .regions
@@ -4521,11 +4549,11 @@ mod tests {
         let run = || {
             let factory = factory(&config, &catalog, 23);
             let mut roles = factory.stream(SemanticStage::Roles, &[]);
-            let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory)
+            let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off))
                 .expect("placement");
-            let graph = build_candidate_graph(&placed, &grid).expect("candidate graph");
+            let graph = build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("candidate graph");
             let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-            select_topology(placed, &config, &graph, &mut topology_rng)
+            select_topology(placed, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off))
                 .expect("topology selection")
         };
         assert_eq!(run(), run());

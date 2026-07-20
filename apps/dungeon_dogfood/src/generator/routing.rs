@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use super::config::NormalizedGeneratorConfig;
+use super::context::AttemptContext;
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
     Direction, EdgeId, GridCoord, IntendedEdge, IntendedTopology, PlacedRegion, PlacedSocket,
@@ -1157,6 +1158,7 @@ pub(super) fn materialize_topology(
     topology: &IntendedTopology,
     catalog: &PrefabCatalog,
     config: &NormalizedGeneratorConfig,
+    ctx: &mut AttemptContext,
 ) -> Result<TileBuffer, GeneratorError> {
     let mut buffer = TileBuffer::new(config.width(), config.height(), config.layers().2)?;
     let upper_endpoint_ids: BTreeSet<RegionId> =
@@ -1169,8 +1171,10 @@ pub(super) fn materialize_topology(
     regions.sort_by_key(|region| region.id);
     for region in regions {
         stamp_prefab_region(region, catalog, &mut buffer, config)?;
+        ctx.region_stamped();
     }
     carve_corridors(topology, &mut buffer, config)?;
+    ctx.corridor_carved();
     super::ramps::materialize_all_transitions(&topology.transitions, config, &mut buffer)?;
     clear_transition_crest_exits(&topology.transitions, &mut buffer, config)?;
     buffer.seal_borders()?;
@@ -1183,6 +1187,7 @@ mod tests {
 
     use super::*;
     use super::super::config::GeneratorConfig;
+    use super::super::context::{AttemptContext, TelemetryMode};
     use super::super::determinism::{
         AttemptIdentity, GeneratorIdentity, SemanticStage, SemanticStreamFactory,
     };
@@ -1218,10 +1223,10 @@ mod tests {
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), seed);
         let factory = SemanticStreamFactory::new(AttemptIdentity::new(identity, 0));
         let mut roles = factory.stream(SemanticStage::Roles, &[]);
-        let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory).expect("placement");
-        let graph = build_candidate_graph(&placed, &grid).expect("graph");
+        let (placed, grid) = place_regions(&config, &catalog, &mut roles, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement");
+        let graph = build_candidate_graph(&placed, &grid, &mut AttemptContext::new(TelemetryMode::Off)).expect("graph");
         let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-        let topology = select_topology(placed, &config, &graph, &mut topology_rng).expect("topology");
+        let topology = select_topology(placed, &config, &graph, &mut topology_rng, &mut AttemptContext::new(TelemetryMode::Off)).expect("topology");
         (config, catalog, topology)
     }
 
@@ -1279,7 +1284,7 @@ mod tests {
                 edge.id.raw()
             );
         }
-        let level = materialize_topology(&topology, &catalog, &config)
+        let level = materialize_topology(&topology, &catalog, &config, &mut AttemptContext::new(TelemetryMode::Off))
             .expect("seed 77 topology should materialize after border reservation")
             .into_parsed_level((1, 1));
         let lookup = |layer, x, y| {

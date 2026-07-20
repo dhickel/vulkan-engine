@@ -1,6 +1,7 @@
 pub(crate) mod alloc_metrics;
 pub(crate) mod ascii;
 mod config;
+pub(crate) mod context;
 pub mod determinism;
 mod diagnostics;
 mod error;
@@ -12,6 +13,7 @@ pub(crate) mod ramps;
 pub(crate) mod repair;
 pub(crate) mod resources;
 pub(crate) mod routing;
+pub(crate) mod telemetry;
 pub(crate) mod topology;
 pub(crate) mod validation;
 pub mod capture_views;
@@ -24,6 +26,7 @@ use self::prefab::PrefabCatalog;
 
 use self::capture_views::derive_capture_views;
 use self::config::NormalizedGeneratorConfig;
+use self::context::{AttemptContext, TelemetryMode};
 use self::determinism::{AttemptIdentity, GeneratorIdentity, SemanticStage, SemanticStreamFactory};
 use self::diagnostics::GeneratorDiagnostics;
 use self::markers::place_all_markers;
@@ -94,38 +97,59 @@ pub struct GenerationResult {
 /// failure (configuration, prefab, serialization, binding, IR invariant)
 /// is returned immediately. Exhaustion produces a single
 /// `GenerationExhausted` error with aggregate failure-category counts.
+///
+/// Telemetry is disabled (Off) through the public API. The benchmark
+/// path may select Counters or Timing via the package-local entrypoint.
 pub fn generate(
     config: GeneratorConfig,
     catalog: &PrefabCatalog,
     seed: u64,
 ) -> Result<GenerationResult, GeneratorError> {
+    generate_with_telemetry(config, catalog, seed, TelemetryMode::Off)
+        .map(|(result, _ctx)| result)
+}
+
+/// Internal entrypoint that accepts a telemetry mode. The context is returned
+/// alongside the result so the benchmark path can serialize it.
+pub(crate) fn generate_with_telemetry(
+    config: GeneratorConfig,
+    catalog: &PrefabCatalog,
+    seed: u64,
+    telemetry_mode: TelemetryMode,
+) -> Result<(GenerationResult, AttemptContext), GeneratorError> {
     let normalized = config.normalize()?;
     let identity = GeneratorIdentity::new(&normalized, catalog.identity_bytes(), seed);
     run_generation_attempts(normalized.generation_attempts(), identity, |attempt, factory| {
-        generate_attempt(&normalized, catalog, seed, attempt, factory)
+        generate_attempt(&normalized, catalog, seed, attempt, factory, telemetry_mode)
     })
 }
 
 fn run_generation_attempts<T>(
     attempts: u32,
     identity: GeneratorIdentity,
-    mut run: impl FnMut(AttemptIdentity, SemanticStreamFactory) -> Result<T, GeneratorError>,
-) -> Result<T, GeneratorError> {
+    mut run: impl FnMut(AttemptIdentity, SemanticStreamFactory) -> (Result<T, GeneratorError>, AttemptContext),
+) -> Result<(T, AttemptContext), GeneratorError> {
     debug_assert!(attempts > 0, "normalized attempt budget must be nonzero");
     let mut last_error: Option<GeneratorError> = None;
+    let mut _last_ctx: Option<AttemptContext> = None;
     let mut category_counts = std::collections::BTreeMap::new();
 
     for index in 0..attempts {
         let attempt_identity = AttemptIdentity::new(identity, index);
         let factory = SemanticStreamFactory::new(attempt_identity);
-        match run(attempt_identity, factory) {
-            Ok(result) => return Ok(result),
-            Err(error) if !error.is_retryable() => return Err(error),
+        let (result, mut ctx) = run(attempt_identity, factory);
+        match result {
+            Ok(result) => return Ok((result, ctx)),
+            Err(error) if !error.is_retryable() => {
+                ctx.finish_attempt();
+                return Err(error);
+            }
             Err(error) => {
                 *category_counts
                     .entry(error.reason_code().to_owned())
                     .or_insert(0) += 1;
                 last_error = Some(error);
+                _last_ctx = Some(ctx);
             }
         }
     }
@@ -140,31 +164,59 @@ fn run_generation_attempts<T>(
 }
 
 /// Single clean attempt at the full generator pipeline.
+/// Always returns the `AttemptContext` even on failure (already finalized).
 fn generate_attempt(
     config: &NormalizedGeneratorConfig,
     catalog: &PrefabCatalog,
     seed: u64,
     attempt_identity: AttemptIdentity,
     factory: SemanticStreamFactory,
-) -> Result<GenerationResult, GeneratorError> {
+    telemetry_mode: TelemetryMode,
+) -> (Result<GenerationResult, GeneratorError>, AttemptContext) {
+    let mut ctx = AttemptContext::new(telemetry_mode);
+
+    // Helper to convert ? errors into early return with finalized context.
+    macro_rules! try_ctx {
+        ($expr:expr) => {
+            match $expr {
+                Ok(v) => v,
+                Err(e) => {
+                    ctx.finish_attempt();
+                    return (Err(e), ctx);
+                }
+            }
+        };
+    }
+
     let diagnostics = GeneratorDiagnostics::new(config, catalog.identity_bytes(), seed);
 
     // Phase 02 — Placement.
+    ctx.begin_scope(context::TelemetryScope::Placement);
     let mut roles_rng = factory.stream(SemanticStage::Roles, &[]);
-    let (placed_topology, grid) = place_regions(config, catalog, &mut roles_rng, factory)?;
+    let (placed_topology, grid) = try_ctx!(place_regions(config, catalog, &mut roles_rng, factory, &mut ctx));
+    ctx.end_scope(context::TelemetryScope::Placement);
 
     // Phase 03 — Topology.
-    let candidate_graph = build_candidate_graph(&placed_topology, &grid)?;
+    ctx.begin_scope(context::TelemetryScope::CandidateConstruction);
+    let candidate_graph = try_ctx!(build_candidate_graph(&placed_topology, &grid, &mut ctx));
+    ctx.candidate_edges = u64::try_from(candidate_graph.edges.len()).unwrap_or(u64::MAX);
+    ctx.end_scope(context::TelemetryScope::CandidateConstruction);
+
+    ctx.begin_scope(context::TelemetryScope::TopologySelection);
     let mut topology_rng = factory.stream(SemanticStage::Topology, &[]);
-    let selected_topology = select_topology(
+    let selected_topology = try_ctx!(select_topology(
         placed_topology,
         config,
         &candidate_graph,
         &mut topology_rng,
-    )?;
+        &mut ctx,
+    ));
+    ctx.end_scope(context::TelemetryScope::TopologySelection);
 
     // Phase 04 — Materialization.
-    let tile_buffer = materialize_topology(&selected_topology, catalog, config)?;
+    ctx.begin_scope(context::TelemetryScope::Materialization);
+    let tile_buffer = try_ctx!(materialize_topology(&selected_topology, catalog, config, &mut ctx));
+    ctx.end_scope(context::TelemetryScope::Materialization);
 
     // Build a bare ParsedLevel (no markers yet).
     let spawn_region = selected_topology
@@ -174,7 +226,8 @@ fn generate_attempt(
         .ok_or(GeneratorError::IrInvariant {
             stage: self::error::ErrorStage::Ir,
             detail: "generate_no_spawn_region".into(),
-        })?;
+        });
+    let spawn_region = try_ctx!(spawn_region);
     let initial_spawn_x = spawn_region.footprint.0.checked_add(spawn_region.footprint.2.checked_div(2).unwrap_or(1)).unwrap_or(spawn_region.footprint.0);
     let initial_spawn_y = spawn_region.footprint.1.checked_add(spawn_region.footprint.3.checked_div(2).unwrap_or(1)).unwrap_or(spawn_region.footprint.1);
     let bare_level = tile_buffer.clone().into_parsed_level((initial_spawn_x, initial_spawn_y));
@@ -190,27 +243,35 @@ fn generate_attempt(
     let crossing_count = selected_topology.crossing_count;
     let per_layer_cycles = selected_topology.per_layer_cycles.clone();
 
-    let mut repair_engine = RepairEngine::new(config, factory);
-    let accepted = repair_engine.repair_until_valid(
+    ctx.begin_scope(context::TelemetryScope::Repair);
+    let mut repair_engine = RepairEngine::new(config, factory, &mut ctx);
+    let accepted = try_ctx!(repair_engine.repair_until_valid(
         selected_topology,
         tile_buffer,
         &bare_level,
-    )?;
+    ));
+    ctx.end_scope(context::TelemetryScope::Repair);
     let post_repair_topology = accepted.topology().clone();
     let level = accepted.lower_to_parsed_level();
 
     // Phase 05a — Reconstruct movement graph from final level.
-    let (movement, _inferred) = reconstruct_movement_graph(&level, &post_repair_topology)?;
+    let (movement, _inferred) = try_ctx!(reconstruct_movement_graph(&level, &post_repair_topology));
 
     // Phase 06 — Marker placement.
+    ctx.begin_scope(context::TelemetryScope::MarkerPlacement);
     let envelopes: Vec<_> = std::iter::empty().collect();
-    let marker_placement = place_all_markers(
+    let marker_placement = try_ctx!(place_all_markers(
         &level,
         &post_repair_topology,
         &movement,
         &envelopes,
         config,
-    )?;
+    ));
+    ctx.markers_placed = u64::try_from(marker_placement.lights.len() + marker_placement.models.len() + 1)
+        .unwrap_or(u64::MAX);
+    ctx.lights_count(u64::try_from(marker_placement.lights.len()).unwrap_or(u64::MAX));
+    ctx.models_count(u64::try_from(marker_placement.models.len()).unwrap_or(u64::MAX));
+    ctx.end_scope(context::TelemetryScope::MarkerPlacement);
 
     // Write markers back into the ParsedLevel.
     let mut final_level = level;
@@ -239,29 +300,46 @@ fn generate_attempt(
         .collect();
 
     // Phase 06 — Resource counting.
-    let resource_counts = count_resources(
+    ctx.begin_scope(context::TelemetryScope::ResourceCounting);
+    let resource_counts = try_ctx!(count_resources(
         &final_level,
         &post_repair_topology,
         marker_placement.lights.len() as u32,
         marker_placement.models.len() as u32,
         config,
-    )?;
-    enforce_budgets(&resource_counts, config)?;
+    ));
+    ctx.resource_tiles_count(resource_counts.total_tiles);
+    ctx.resource_chunks_count(u64::from(resource_counts.non_empty_chunks));
+    ctx.resource_static_bodies_count(u64::from(resource_counts.static_body_count));
+    ctx.resource_total_bodies_count(u64::from(resource_counts.total_body_count));
+    ctx.resource_vertices_count(resource_counts.estimated_vertices);
+    ctx.resource_indices_count(resource_counts.estimated_indices);
+    try_ctx!(enforce_budgets(&resource_counts, config));
+    ctx.end_scope(context::TelemetryScope::ResourceCounting);
 
     // Phase 07 — Capture views.
-    let capture_views = derive_capture_views(
+    ctx.begin_scope(context::TelemetryScope::CaptureViewDerivation);
+    let capture_views = try_ctx!(derive_capture_views(
         &final_level,
         &post_repair_topology,
         &movement,
         config,
-    )?;
+    ));
+    ctx.capture_views_generated_count(u64::try_from(capture_views.len()).unwrap_or(u64::MAX));
+    ctx.end_scope(context::TelemetryScope::CaptureViewDerivation);
 
     // Canonical diagnostics.
-    let diagnostics_bytes = diagnostics
+    ctx.begin_scope(context::TelemetryScope::Diagnostics);
+    let diagnostics_bytes = try_ctx!(diagnostics
         .with_attempt(attempt_identity)
-        .canonical_json_bytes()?;
+        .canonical_json_bytes());
+    ctx.diagnostics_bytes_count(u64::try_from(diagnostics_bytes.len()).unwrap_or(u64::MAX));
+    ctx.end_scope(context::TelemetryScope::Diagnostics);
 
-    Ok(GenerationResult {
+    // Finalize telemetry AFTER canonical outcome is determined.
+    ctx.finish_attempt();
+
+    (Ok(GenerationResult {
         level: final_level,
         diagnostics: diagnostics_bytes,
         capture_views,
@@ -276,7 +354,7 @@ fn generate_attempt(
         articulation_count,
         crossing_count,
         per_layer_cycles,
-    })
+    }), ctx)
 }
 
 /// Convenience: generate with the default primary profile and given seed.
@@ -308,17 +386,21 @@ mod attempt_tests {
         }
     }
 
+    fn ctx() -> AttemptContext {
+        AttemptContext::new(TelemetryMode::Off)
+    }
+
     #[test]
     fn retry_loop_uses_fresh_deterministic_attempt_identities_and_records_winner() {
         let generator = identity();
         let mut observed = Vec::new();
-        let winning = run_generation_attempts(3, generator, |attempt, factory| {
+        let (winning, _) = run_generation_attempts(3, generator, |attempt, factory| {
             let mut stream = factory.stream(SemanticStage::Roles, &[]);
             observed.push((attempt.index(), attempt.bytes(), stream.next_u32()));
             if attempt.index() < 2 {
-                Err(retryable("placement_retry"))
+                (Err(retryable("placement_retry")), ctx())
             } else {
-                Ok(attempt.index())
+                (Ok(attempt.index()), ctx())
             }
         })
         .unwrap();
@@ -337,9 +419,9 @@ mod attempt_tests {
     #[test]
     fn index_zero_success_preserves_single_attempt_behavior() {
         let mut calls = 0;
-        let winner = run_generation_attempts(4, identity(), |attempt, _| {
+        let (winner, _) = run_generation_attempts(4, identity(), |attempt, _| {
             calls += 1;
-            Ok(attempt.index())
+            (Ok(attempt.index()), ctx())
         })
         .unwrap();
         assert_eq!(winner, 0);
@@ -351,10 +433,10 @@ mod attempt_tests {
         let mut calls = 0;
         let error = run_generation_attempts::<()>(4, identity(), |_, _| {
             calls += 1;
-            Err(GeneratorError::IrInvariant {
+            (Err(GeneratorError::IrInvariant {
                 stage: ErrorStage::Ir,
                 detail: "broken_ir".into(),
-            })
+            }), ctx())
         })
         .unwrap_err();
         assert_eq!(calls, 1);
@@ -366,11 +448,11 @@ mod attempt_tests {
         let mut calls = 0;
         let error = run_generation_attempts::<()>(3, identity(), |attempt, _| {
             calls += 1;
-            Err(if attempt.index() == 1 {
+            (Err(if attempt.index() == 1 {
                 retryable("candidate_disconnected")
             } else {
                 retryable("placement_retry")
-            })
+            }), ctx())
         })
         .unwrap_err();
 
@@ -422,14 +504,15 @@ mod qualification_tests {
             .expect("primary config");
         let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), SEED);
         let attempt = AttemptIdentity::new(identity, FEASIBLE_ATTEMPT);
-        let result = generate_attempt(
+        let (gen_result, _ctx) = generate_attempt(
             &config,
             &catalog,
             SEED,
             attempt,
             SemanticStreamFactory::new(attempt),
-        )
-        .expect("seed 77 feasible attempt must pass generation and acceptance");
+            TelemetryMode::Off,
+        );
+        let result = gen_result.expect("seed 77 feasible attempt must pass generation and acceptance");
 
         super::ascii::round_trip_exact(&result.level)
             .expect("marker-complete seed 77 output must round-trip exactly");
@@ -527,5 +610,74 @@ mod qualification_tests {
         } else {
             eprintln!("GATE MET: 100/100 accepted, {attempt_zero}/100 attempt-zero.");
         }
+    }
+
+    /// Off/Counters/Timing equivalence: all three modes produce exact same
+    /// canonical artifacts for a known-success Primary configuration.
+    /// Ignored by default due to execution time; run with:
+    ///   cargo test --release -p dungeon_dogfood -- --ignored telemetry_modes
+    #[test]
+    #[ignore]
+    fn telemetry_modes_produce_identical_canonical_artifacts() {
+        let catalog = prefab_catalog();
+
+        const SEED: u64 = 77;
+
+        let modes = [
+            TelemetryMode::Off,
+            TelemetryMode::Counters,
+            TelemetryMode::Timing,
+        ];
+
+        let mut results: Vec<(TelemetryMode, GenerationResult)> = Vec::new();
+        for &mode in &modes {
+            let (result, _ctx) = generate_with_telemetry(
+                GeneratorConfig::qualified(QualifiedProfile::Primary),
+                &catalog,
+                SEED,
+                mode,
+            )
+            .expect(&format!("seed {} must succeed in {:?} mode", SEED, mode));
+            results.push((mode, result));
+        }
+
+        // Compare all pairs — confirm exact equality of canonical artifacts.
+        for i in 0..results.len() {
+            for j in (i + 1)..results.len() {
+                let (mode_a, ref a) = results[i];
+                let (mode_b, ref b) = results[j];
+
+                assert_eq!(
+                    a.seed, b.seed,
+                    "seed differs between {:?} and {:?}", mode_a, mode_b
+                );
+                assert_eq!(
+                    a.attempt_index, b.attempt_index,
+                    "attempt_index differs between {:?} and {:?}", mode_a, mode_b
+                );
+                assert_eq!(
+                    a.diagnostics, b.diagnostics,
+                    "diagnostics differ between {:?} and {:?}", mode_a, mode_b
+                );
+
+                // Also compare the level ASCII
+                let ascii_a = super::ascii::serialize_level(&a.level).expect("serialize a");
+                let ascii_b = super::ascii::serialize_level(&b.level).expect("serialize b");
+                assert_eq!(
+                    ascii_a, ascii_b,
+                    "level ASCII differs between {:?} and {:?}", mode_a, mode_b
+                );
+            }
+        }
+
+        // Timing mode must produce timing data.
+        let (_timing_result, timing_ctx) = generate_with_telemetry(
+            GeneratorConfig::qualified(QualifiedProfile::Primary),
+            &catalog,
+            SEED,
+            TelemetryMode::Timing,
+        )
+        .expect("timing re-run");
+        assert!(!timing_ctx.timing_ns.is_empty(), "timing mode should have timing data");
     }
 }

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 
 use super::config::NormalizedGeneratorConfig;
+use super::context::AttemptContext;
 use super::determinism::{Pcg32V1, SemanticComponent, SemanticStage, SemanticStreamFactory};
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
@@ -596,6 +597,7 @@ fn commit_transition(
     alloc: &mut IdAllocator,
     config: &NormalizedGeneratorConfig,
     committed_endpoints: &[PlacedRegion],
+    ctx: &mut AttemptContext,
 ) -> Result<Option<(TransitionReservation, PlacedRegion, PlacedRegion)>, GeneratorError> {
     let variant = catalog
         .variants()
@@ -606,6 +608,11 @@ fn commit_transition(
         })?;
     let mut staged_grid = grid.clone();
     let mut staged_alloc = alloc.clone();
+    ctx.cloned(
+        super::context::CloneKind::Occupancy,
+        staged_grid.cells.len(),
+        staged_grid.cells.capacity(),
+    );
     let transition_id = staged_alloc.next_transition()?;
     let lower_region_id = staged_alloc.next_region()?;
     let upper_region_id = staged_alloc.next_region()?;
@@ -756,6 +763,7 @@ fn commit_transition(
                 &staged_grid,
                 layer_backbone,
                 config,
+                ctx,
             )? {
                 return Ok(None);
             }
@@ -774,6 +782,7 @@ fn reserve_transitions_and_endpoints(
     grid: &mut OccupancyGrid,
     alloc: &mut IdAllocator,
     factory: SemanticStreamFactory,
+    ctx: &mut AttemptContext,
 ) -> Result<(Vec<TransitionReservation>, Vec<PlacedRegion>), GeneratorError> {
     let layer_pairs = config.layers().2.checked_sub(1).ok_or(
         GeneratorError::ArithmeticOverflow {
@@ -825,6 +834,7 @@ fn reserve_transitions_and_endpoints(
                 alloc,
                 config,
                 &endpoints,
+                ctx,
             )? else {
                 rejected = rejected.checked_add(1).ok_or(
                     GeneratorError::ArithmeticOverflow {
@@ -911,6 +921,7 @@ fn stage_candidate_region(
     grid: &OccupancyGrid,
     config: &NormalizedGeneratorConfig,
     alloc: &IdAllocator,
+    ctx: &mut AttemptContext,
 ) -> Result<
     (
         OccupancyGrid,
@@ -928,6 +939,11 @@ fn stage_candidate_region(
     }
     let mut staged_grid = grid.clone();
     let mut staged_alloc = alloc.clone();
+    ctx.cloned(
+        super::context::CloneKind::Occupancy,
+        staged_grid.cells.len(),
+        staged_grid.cells.capacity(),
+    );
     let region_id = staged_alloc.next_region()?;
     let mut sockets = Vec::with_capacity(variant.sockets.len());
     for (index, socket) in variant.sockets.iter().enumerate() {
@@ -1097,6 +1113,7 @@ fn can_connect_to_backbone(
     staged_grid: &OccupancyGrid,
     backbone: &[(PlacedRegion, PlacedSocket)],
     config: &NormalizedGeneratorConfig,
+    ctx: &mut AttemptContext,
 ) -> Result<bool, GeneratorError> {
     for staged_socket in staged_sockets {
         for (backbone_region, backbone_socket) in backbone {
@@ -1120,6 +1137,8 @@ fn can_connect_to_backbone(
                 staged_grid,
                 config,
                 width,
+                ctx,
+                super::context::RouteSearchKind::PlacementConnectivity,
             )?
             .is_some()
             {
@@ -1332,6 +1351,7 @@ fn commit_region(
     grid: &mut OccupancyGrid,
     config: &NormalizedGeneratorConfig,
     alloc: &mut IdAllocator,
+    ctx: &mut AttemptContext,
 ) -> Result<PlacedRegion, GeneratorError> {
     if !can_place_footprint(variant, layer, origin_x, origin_y, grid, config)? {
         return Err(GeneratorError::OccupancyConflict {
@@ -1341,6 +1361,11 @@ fn commit_region(
     }
     let mut staged_grid = grid.clone();
     let mut staged_alloc = alloc.clone();
+    ctx.cloned(
+        super::context::CloneKind::Occupancy,
+        staged_grid.cells.len(),
+        staged_grid.cells.capacity(),
+    );
     let region_id = staged_alloc.next_region()?;
     let mut sockets = Vec::with_capacity(variant.sockets.len());
     for (index, socket) in variant.sockets.iter().enumerate() {
@@ -1511,6 +1536,7 @@ fn place_role_regions(
     placed: &mut Vec<PlacedRegion>,
     factory: SemanticStreamFactory,
     alloc: &mut IdAllocator,
+    ctx: &mut AttemptContext,
 ) -> Result<(), GeneratorError> {
     let gated = is_core_role(role) || role == RegionRole::DeadEnd;
     for ordinal in 0..target_count {
@@ -1535,6 +1561,7 @@ fn place_role_regions(
                 for y in 0..=max_y {
                     for x in 0..=max_x {
                         if can_place_footprint(variant, layer, x, y, grid, config)? {
+                            ctx.placement_scan();
                             scored.push(PlacementCandidate {
                                 variant_index,
                                 layer,
@@ -1587,6 +1614,7 @@ fn place_role_regions(
             let backbone = collect_backbone_sockets(placed);
             let mut region_placed = false;
             for candidate in &scored {
+                ctx.candidate_evaluated();
                 let variant = candidates
                     .iter()
                     .find(|(index, _)| *index == candidate.variant_index)
@@ -1607,6 +1635,7 @@ fn place_role_regions(
                         grid,
                         config,
                         alloc,
+                        ctx,
                     )?;
                 // First region on an otherwise empty layer requires no gate.
                 let layer_backbone = backbone.get(&candidate.layer);
@@ -1621,6 +1650,7 @@ fn place_role_regions(
                         &staged_grid,
                         layer_backbone.unwrap(),
                         config,
+                        ctx,
                     )?
                 };
                 if connected {
@@ -1632,6 +1662,7 @@ fn place_role_regions(
                         alloc,
                     );
                     placed.push(region);
+                    ctx.region_placed();
                     region_placed = true;
                     break;
                 }
@@ -1713,21 +1744,23 @@ fn place_role_regions(
                 grid,
                 config,
                 alloc,
+                ctx,
             )?;
+            ctx.region_placed();
             placed.push(region);
         }
     }
     Ok(())
 }
 
-/// Place transition endpoints first, then ordinary role regions. Candidate
-/// topology is deliberately not built here; it consumes this exact committed
-/// occupancy grid through `topology::build_candidate_graph`.
+/// Placement attempts. Each scan is a full grid sweep for a single
+/// variant/layer combination.
 pub(super) fn place_regions(
     config: &NormalizedGeneratorConfig,
     catalog: &PrefabCatalog,
     rng: &mut Pcg32V1,
     factory: SemanticStreamFactory,
+    ctx: &mut AttemptContext,
 ) -> Result<(IntendedTopology, OccupancyGrid), GeneratorError> {
     let manifest = RoleManifest::from_config(config, rng)?;
     verify_mandatory_coverage(catalog, &manifest)?;
@@ -1737,6 +1770,7 @@ pub(super) fn place_regions(
     let mut alloc = IdAllocator::new();
 
     let ramp_candidates = enumerate_ramp_candidates(catalog, config)?;
+    ctx.begin_scope(super::context::TelemetryScope::TransitionReservation);
     let (transitions, mut regions) = reserve_transitions_and_endpoints(
         &ramp_candidates,
         catalog,
@@ -1744,7 +1778,10 @@ pub(super) fn place_regions(
         &mut grid,
         &mut alloc,
         factory,
+        ctx,
     )?;
+    ctx.transitions_reserved = u64::try_from(transitions.len()).unwrap_or(u64::MAX);
+    ctx.end_scope(super::context::TelemetryScope::TransitionReservation);
     let endpoint_count = u32::try_from(regions.len()).map_err(|_| {
         GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
@@ -1762,6 +1799,7 @@ pub(super) fn place_regions(
 
     let mut roles = manifest.role_counts();
     roles.sort_by_key(|(role, _)| role.ordinal());
+    ctx.begin_scope(super::context::TelemetryScope::RolePlacement);
     for (role, count) in roles {
         if count == 0 || role == RegionRole::VerticalHub {
             continue;
@@ -1776,8 +1814,10 @@ pub(super) fn place_regions(
             &mut regions,
             factory,
             &mut alloc,
+            ctx,
         )?;
     }
+    ctx.end_scope(super::context::TelemetryScope::RolePlacement);
     regions.sort_by_key(|region| region.id.raw());
     let actual_total = u32::try_from(regions.len()).map_err(|_| {
         GeneratorError::ArithmeticOverflow {
@@ -1840,6 +1880,7 @@ mod tests {
 
     use super::*;
     use super::super::config::{GeneratorConfig, QualifiedProfile};
+    use super::super::context::TelemetryMode;
     use super::super::determinism::{AttemptIdentity, GeneratorIdentity};
 
     fn catalog() -> PrefabCatalog {
@@ -1949,6 +1990,7 @@ mod tests {
             &mut allocator,
             &config,
             &[],
+            &mut AttemptContext::new(TelemetryMode::Off),
         )
         .expect("transition commit")
         .expect("first transition bootstraps both layers");
@@ -1978,8 +2020,9 @@ mod tests {
         let catalog = catalog();
         let factory = factory(&config, &catalog, 17);
         let mut role_rng = factory.stream(SemanticStage::Roles, &[]);
+        let mut ctx = AttemptContext::new(TelemetryMode::Off);
         let (topology, grid) =
-            place_regions(&config, &catalog, &mut role_rng, factory).expect("placement");
+            place_regions(&config, &catalog, &mut role_rng, factory, &mut ctx).expect("placement");
         assert_eq!(topology.transitions.len(), 2);
         topology
             .validate_transition_bindings()
@@ -2026,8 +2069,8 @@ mod tests {
         let factory = factory(&config, &catalog, 99);
         let mut rng_a = factory.stream(SemanticStage::Roles, &[]);
         let mut rng_b = factory.stream(SemanticStage::Roles, &[]);
-        let a = place_regions(&config, &catalog, &mut rng_a, factory).expect("placement a");
-        let b = place_regions(&config, &catalog, &mut rng_b, factory).expect("placement b");
+        let a = place_regions(&config, &catalog, &mut rng_a, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement a");
+        let b = place_regions(&config, &catalog, &mut rng_b, factory, &mut AttemptContext::new(TelemetryMode::Off)).expect("placement b");
         assert_eq!(a.0, b.0);
     }
 
@@ -2151,6 +2194,7 @@ mod tests {
             &mut allocator,
             &config,
             &[incompatible_backbone],
+            &mut AttemptContext::new(TelemetryMode::Off),
         )
         .expect("staged rejection is not an integrity error");
         assert!(committed.is_none());
@@ -2193,6 +2237,7 @@ mod tests {
             &grid,
             &config,
             &alloc,
+            &mut AttemptContext::new(TelemetryMode::Off),
         );
         let (staged_grid, _staged_alloc, staged_sockets, staged_region) =
             staged.expect("stage succeeds");
@@ -2293,6 +2338,7 @@ mod tests {
                 &grid,
                 &config,
                 &alloc,
+                &mut AttemptContext::new(TelemetryMode::Off),
             )
             .expect("stage candidate");
 
@@ -2303,6 +2349,7 @@ mod tests {
             &staged_grid,
             &backbone_list,
             &config,
+            &mut AttemptContext::new(TelemetryMode::Off),
         )
         .expect("connectivity check");
         assert!(connected, "staged region should connect to backbone");
@@ -2380,6 +2427,7 @@ mod tests {
             &grid,
             &config,
             &alloc,
+            &mut AttemptContext::new(TelemetryMode::Off),
         );
         // Staging might fail if spacing overlaps blocked cells; that's fine.
         if let Ok((staged_grid, _, staged_sockets, staged_region)) = staged_result {
@@ -2389,6 +2437,7 @@ mod tests {
                 &staged_grid,
                 &backbone_list,
                 &config,
+                &mut AttemptContext::new(TelemetryMode::Off),
             )
             .expect("connectivity check");
             assert!(!connected, "isolated candidate should not connect");
