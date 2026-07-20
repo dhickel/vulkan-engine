@@ -1609,45 +1609,130 @@ fn component_labels(
     Ok(labels)
 }
 
+fn topology_search_step_budget(config: &NormalizedGeneratorConfig) -> u64 {
+    // Generation attempts are the outer retry; recursive search only gets the
+    // per-attempt reroute allowance.
+    u64::from(config.reroute_budget()).max(1)
+}
+
+fn connect_layer_core_greedy(
+    topology: &IntendedTopology,
+    graph: &mut CandidateGraph,
+    ordered: &[CandidateEdge],
+    selected: &mut BTreeSet<EdgeId>,
+    layer: u16,
+) -> Result<bool, GeneratorError> {
+    loop {
+        let labels = component_labels(topology, graph, selected, Some(layer), true)?;
+        if labels.values().copied().collect::<BTreeSet<_>>().len() <= 1 {
+            return Ok(true);
+        }
+        let mut added = false;
+        for edge in ordered {
+            if edge.transition.is_some()
+                || selected.contains(&edge.id)
+                || is_dead_end(topology, edge.source_region)
+                || is_dead_end(topology, edge.target_region)
+            {
+                continue;
+            }
+            let source_label = labels.get(&edge.source_region);
+            let target_label = labels.get(&edge.target_region);
+            if source_label.is_none() || target_label.is_none() || source_label == target_label {
+                continue;
+            }
+            if add_edge_if_legal(topology, graph, selected, edge, true)? {
+                added = true;
+                break;
+            }
+        }
+        if !added {
+            return Ok(false);
+        }
+    }
+}
+
 fn connect_layer_cores(
     topology: &IntendedTopology,
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
 ) -> Result<(), GeneratorError> {
-    let budget = u64::from(topology.config.routing_attempts())
-        .checked_mul(u64::from(topology.config.reroute_budget()))
-        .ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "layer_core_search_budget",
-        })?;
+    let max_search_steps = topology_search_step_budget(&topology.config);
     for layer in 0..topology.config.layers().2 {
-        let mut attempts = 0u64;
+        // Keep the original greedy selection as the common fast path. Its
+        // partial mutations are rolled back only when bounded search is needed.
+        let original_edges = graph.edges.clone();
+        let original_selected = selected.clone();
+        if connect_layer_core_greedy(topology, graph, ordered, selected, layer)? {
+            continue;
+        }
+
+        graph.edges = original_edges;
+        *selected = original_selected;
+        let mut search_steps = 0u64;
         if !layer_core_search(
             topology,
             graph,
             ordered,
             selected,
             layer,
-            &mut attempts,
-            budget,
+            &mut search_steps,
+            max_search_steps,
         )? {
-            let labels = component_labels(topology, graph, selected, Some(layer), true)?;
-            let component_count = labels.values().copied().collect::<BTreeSet<_>>().len();
             return Err(GeneratorError::SearchExhausted {
                 stage: ErrorStage::Topology,
                 search: "layer_core_connectivity",
-                attempted: attempts,
-                budget: budget.max(u64::try_from(component_count).map_err(|_| {
-                    GeneratorError::ArithmeticOverflow {
-                        stage: ErrorStage::Topology,
-                        operation: "layer_component_count_convert",
-                    }
-                })?),
+                attempted: search_steps,
+                budget: max_search_steps,
             });
         }
     }
     Ok(())
+}
+
+fn ordered_layer_core_candidates<'a>(
+    topology: &IntendedTopology,
+    ordered: &'a [CandidateEdge],
+    selected: &BTreeSet<EdgeId>,
+    labels: &BTreeMap<RegionId, u32>,
+    sizes: &BTreeMap<u32, usize>,
+    target_component: u32,
+) -> Vec<&'a CandidateEdge> {
+    let mut candidates: Vec<(usize, &CandidateEdge, usize)> = ordered
+        .iter()
+        .enumerate()
+        .filter_map(|(position, edge)| {
+            if edge.transition.is_some()
+                || selected.contains(&edge.id)
+                || is_dead_end(topology, edge.source_region)
+                || is_dead_end(topology, edge.target_region)
+            {
+                return None;
+            }
+            let source_label = labels.get(&edge.source_region).copied()?;
+            let target_label = labels.get(&edge.target_region).copied()?;
+            if source_label == target_label
+                || (source_label != target_component && target_label != target_component)
+            {
+                return None;
+            }
+            let other_component = if source_label == target_component {
+                target_label
+            } else {
+                source_label
+            };
+            Some((position, edge, sizes.get(&other_component).copied()?))
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        right
+            .2
+            .cmp(&left.2)
+            .then_with(|| left.1.cost.cmp(&right.1.cost))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    candidates.into_iter().map(|(_, edge, _)| edge).collect()
 }
 
 fn layer_core_search(
@@ -1656,16 +1741,13 @@ fn layer_core_search(
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
     layer: u16,
-    attempts: &mut u64,
-    budget: u64,
+    search_steps: &mut u64,
+    max_search_steps: u64,
 ) -> Result<bool, GeneratorError> {
     let labels = component_labels(topology, graph, selected, Some(layer), true)?;
     let components: BTreeSet<u32> = labels.values().copied().collect();
     if components.len() <= 1 {
         return Ok(true);
-    }
-    if *attempts >= budget {
-        return Ok(false);
     }
     let mut sizes: BTreeMap<u32, usize> = BTreeMap::new();
     for label in labels.values() {
@@ -1683,30 +1765,28 @@ fn layer_core_search(
             stage: ErrorStage::Topology,
             detail: "layer_core_target_component_missing".into(),
         })?;
-    for edge in ordered {
-        if edge.transition.is_some()
-            || selected.contains(&edge.id)
-            || is_dead_end(topology, edge.source_region)
-            || is_dead_end(topology, edge.target_region)
-        {
-            continue;
-        }
-        let source_label = labels.get(&edge.source_region).copied();
-        let target_label = labels.get(&edge.target_region).copied();
-        if source_label.is_none()
-            || target_label.is_none()
-            || source_label == target_label
-            || (source_label != Some(target_component)
-                && target_label != Some(target_component))
-        {
-            continue;
-        }
-        *attempts = attempts.checked_add(1).ok_or(
+    for edge in ordered_layer_core_candidates(
+        topology,
+        ordered,
+        selected,
+        &labels,
+        &sizes,
+        target_component,
+    ) {
+        *search_steps = search_steps.checked_add(1).ok_or(
             GeneratorError::ArithmeticOverflow {
                 stage: ErrorStage::Topology,
-                operation: "layer_core_search_attempts",
+                operation: "layer_core_search_steps",
             },
         )?;
+        if *search_steps > max_search_steps {
+            return Err(GeneratorError::SearchExhausted {
+                stage: ErrorStage::Topology,
+                search: "layer_core_connectivity",
+                attempted: *search_steps,
+                budget: max_search_steps,
+            });
+        }
         let mut branch_graph = graph.clone();
         let mut branch_selected = selected.clone();
         if !add_edge_if_legal(
@@ -1724,8 +1804,8 @@ fn layer_core_search(
             ordered,
             &mut branch_selected,
             layer,
-            attempts,
-            budget,
+            search_steps,
+            max_search_steps,
         )? {
             *graph = branch_graph;
             *selected = branch_selected;
@@ -1858,17 +1938,60 @@ fn connect_global_core(
     })
 }
 
+fn attach_dead_ends_greedy(
+    topology: &IntendedTopology,
+    graph: &mut CandidateGraph,
+    ordered: &[CandidateEdge],
+    selected: &mut BTreeSet<EdgeId>,
+) -> Result<bool, GeneratorError> {
+    for region in topology
+        .regions
+        .iter()
+        .filter(|region| region.role == RegionRole::DeadEnd)
+    {
+        let mut attached = false;
+        for edge in ordered {
+            let incident = edge.source_region == region.id || edge.target_region == region.id;
+            let other = if edge.source_region == region.id {
+                edge.target_region
+            } else {
+                edge.source_region
+            };
+            if selected.contains(&edge.id) || !incident || is_dead_end(topology, other) {
+                continue;
+            }
+            if add_edge_if_legal(topology, graph, selected, edge, true)? {
+                attached = true;
+                break;
+            }
+        }
+        if !attached {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn attach_dead_ends(
     topology: &IntendedTopology,
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
 ) -> Result<(), GeneratorError> {
+    // Try the original ordered greedy assignment before cloning branches.
+    let original_edges = graph.edges.clone();
+    let original_selected = selected.clone();
+    if attach_dead_ends_greedy(topology, graph, ordered, selected)? {
+        return Ok(());
+    }
+    graph.edges = original_edges;
+    *selected = original_selected;
+
     let mut dead_end_entries: Vec<(RegionId, Vec<usize>)> = Vec::new();
     for region in topology
         .regions
         .iter()
-        .filter(|r| r.role == RegionRole::DeadEnd)
+        .filter(|region| region.role == RegionRole::DeadEnd)
     {
         let candidates: Vec<usize> = ordered
             .iter()
@@ -1895,15 +2018,10 @@ fn attach_dead_ends(
         }
         dead_end_entries.push((region.id, candidates));
     }
-    // Sort by fewest candidates (most constrained first), then stable region ID.
+    // Backtracking starts with the most constrained dead end, then stable ID.
     dead_end_entries.sort_by_key(|(region, candidates)| (candidates.len(), *region));
-    let budget = u64::from(topology.config.routing_attempts())
-        .checked_mul(u64::from(topology.config.reroute_budget()))
-        .ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Topology,
-            operation: "dead_end_search_budget",
-        })?;
-    let mut attempts = 0u64;
+    let max_search_steps = topology_search_step_budget(&topology.config);
+    let mut search_steps = 0u64;
     if !dead_end_search(
         topology,
         graph,
@@ -1911,14 +2029,14 @@ fn attach_dead_ends(
         selected,
         &dead_end_entries,
         0,
-        &mut attempts,
-        budget,
+        &mut search_steps,
+        max_search_steps,
     )? {
         return Err(GeneratorError::SearchExhausted {
             stage: ErrorStage::Topology,
             search: "dead_end_attachment",
-            attempted: attempts,
-            budget: budget.max(1),
+            attempted: search_steps,
+            budget: max_search_steps,
         });
     }
     Ok(())
@@ -1931,26 +2049,31 @@ fn dead_end_search(
     selected: &mut BTreeSet<EdgeId>,
     entries: &[(RegionId, Vec<usize>)],
     index: usize,
-    attempts: &mut u64,
-    budget: u64,
+    search_steps: &mut u64,
+    max_search_steps: u64,
 ) -> Result<bool, GeneratorError> {
     if index >= entries.len() {
         return Ok(true);
     }
-    if *attempts >= budget {
-        return Ok(false);
-    }
     let (_dead_end_id, candidate_indices) = &entries[index];
     for &candidate_idx in candidate_indices {
-        *attempts = attempts.checked_add(1).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "dead_end_search_attempts",
-            },
-        )?;
         let edge = &ordered[candidate_idx];
         if selected.contains(&edge.id) {
             continue;
+        }
+        *search_steps = search_steps.checked_add(1).ok_or(
+            GeneratorError::ArithmeticOverflow {
+                stage: ErrorStage::Topology,
+                operation: "dead_end_search_steps",
+            },
+        )?;
+        if *search_steps > max_search_steps {
+            return Err(GeneratorError::SearchExhausted {
+                stage: ErrorStage::Topology,
+                search: "dead_end_attachment",
+                attempted: *search_steps,
+                budget: max_search_steps,
+            });
         }
         let mut branch_graph = graph.clone();
         let mut branch_selected = selected.clone();
@@ -1970,8 +2093,8 @@ fn dead_end_search(
             &mut branch_selected,
             entries,
             index + 1,
-            attempts,
-            budget,
+            search_steps,
+            max_search_steps,
         )? {
             *graph = branch_graph;
             *selected = branch_selected;
@@ -3645,6 +3768,256 @@ mod tests {
         raw.intentional_dead_ends_min = Some(1);
         raw.intentional_dead_ends_max = Some(4);
         raw.normalize().expect("zero-crossing config")
+    }
+
+    fn minimal_topology(
+        regions: Vec<PlacedRegion>,
+        config: NormalizedGeneratorConfig,
+    ) -> IntendedTopology {
+        IntendedTopology {
+            regions,
+            transitions: vec![],
+            config,
+            edges: vec![],
+            route_distance: 0,
+            per_layer_cycles: vec![],
+            max_branch_depth: 0,
+            dead_end_count: 0,
+            articulation_count: 0,
+            crossing_count: 0,
+        }
+    }
+
+    fn short_edge(mut edge: CandidateEdge, cost: u64, x: u16) -> CandidateEdge {
+        let cell = GridCoord::new(0, x, 80, 96, 96, 3).expect("short edge cell");
+        edge.cost = cost;
+        edge.path_witness = vec![cell];
+        edge.allowed_envelope_cells = vec![cell];
+        edge
+    }
+
+    #[test]
+    fn topology_backtracking_budget_excludes_routing_attempts() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Primary)
+            .normalize()
+            .expect("primary config");
+        let max_search_steps = topology_search_step_budget(&config);
+        assert_eq!(max_search_steps, u64::from(config.reroute_budget()));
+        assert!(
+            max_search_steps
+                < u64::from(config.routing_attempts()) * u64::from(config.reroute_budget())
+        );
+    }
+
+    #[test]
+    fn layer_core_heuristic_prefers_largest_component_then_lower_cost() {
+        let topology = minimal_topology(
+            vec![
+                minimal_region(0, RegionRole::Spawn, 0, 0, 0, Direction::East),
+                minimal_region(1, RegionRole::DistantLandmark, 0, 10, 0, Direction::West),
+                minimal_region(2, RegionRole::OrdinaryRoom, 0, 20, 0, Direction::West),
+                minimal_region(3, RegionRole::OrdinaryRoom, 0, 30, 0, Direction::West),
+            ],
+            GeneratorConfig::qualified(QualifiedProfile::Minimum)
+                .normalize()
+                .expect("minimum config"),
+        );
+        let small_to_small = short_edge(
+            minimal_edge(1, RegionId(2), RegionId(3), SocketId(20), SocketId(30)),
+            1,
+            80,
+        );
+        let expensive_to_large = short_edge(
+            minimal_edge(2, RegionId(2), RegionId(0), SocketId(20), SocketId(0)),
+            50,
+            81,
+        );
+        let cheap_to_large = short_edge(
+            minimal_edge(3, RegionId(2), RegionId(1), SocketId(20), SocketId(10)),
+            10,
+            82,
+        );
+        let ordered = vec![small_to_small, cheap_to_large, expensive_to_large];
+        let selected = BTreeSet::new();
+        let labels = BTreeMap::from([
+            (RegionId(0), 1),
+            (RegionId(1), 1),
+            (RegionId(2), 2),
+            (RegionId(3), 3),
+        ]);
+        let sizes = BTreeMap::from([(1, 2), (2, 1), (3, 1)]);
+
+        let candidates = ordered_layer_core_candidates(
+            &topology,
+            &ordered,
+            &selected,
+            &labels,
+            &sizes,
+            2,
+        );
+        assert_eq!(
+            candidates.iter().map(|edge| edge.id).collect::<Vec<_>>(),
+            vec![EdgeId(3), EdgeId(2), EdgeId(1)]
+        );
+    }
+
+    #[test]
+    fn layer_core_wrapper_preserves_successful_greedy_selection() {
+        let topology = minimal_topology(
+            vec![
+                minimal_region(0, RegionRole::Spawn, 0, 0, 0, Direction::East),
+                minimal_region(1, RegionRole::DistantLandmark, 0, 10, 0, Direction::West),
+                minimal_region(2, RegionRole::OrdinaryRoom, 0, 20, 0, Direction::West),
+                minimal_region(3, RegionRole::OrdinaryRoom, 0, 30, 0, Direction::West),
+            ],
+            GeneratorConfig::qualified(QualifiedProfile::Minimum)
+                .normalize()
+                .expect("minimum config"),
+        );
+        let spine = minimal_edge(0, RegionId(0), RegionId(1), SocketId(0), SocketId(10));
+        let cheapest = short_edge(
+            minimal_edge(1, RegionId(3), RegionId(0), SocketId(30), SocketId(0)),
+            1,
+            80,
+        );
+        let small_bridge = short_edge(
+            minimal_edge(2, RegionId(2), RegionId(3), SocketId(20), SocketId(30)),
+            2,
+            81,
+        );
+        let largest_bridge = short_edge(
+            minimal_edge(3, RegionId(2), RegionId(0), SocketId(20), SocketId(0)),
+            3,
+            82,
+        );
+        let mut graph = CandidateGraph {
+            edges: vec![spine, cheapest, small_bridge, largest_bridge],
+            occupancy: minimal_grid(),
+        };
+        let ordered = edge_order(&graph, 0);
+        let mut selected = BTreeSet::from([EdgeId(0)]);
+
+        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected)
+            .expect("greedy layer connection");
+
+        assert!(selected.contains(&EdgeId(1)));
+        assert!(selected.contains(&EdgeId(2)));
+        assert!(!selected.contains(&EdgeId(3)));
+    }
+
+    #[test]
+    fn layer_core_search_stops_immediately_after_step_budget() {
+        let topology = minimal_topology(
+            vec![
+                minimal_region(0, RegionRole::Spawn, 0, 0, 0, Direction::East),
+                minimal_region(1, RegionRole::OrdinaryRoom, 0, 10, 0, Direction::West),
+                minimal_region(2, RegionRole::DistantLandmark, 0, 20, 0, Direction::West),
+            ],
+            GeneratorConfig::qualified(QualifiedProfile::Minimum)
+                .normalize()
+                .expect("minimum config"),
+        );
+        let first = short_edge(
+            minimal_edge(0, RegionId(0), RegionId(1), SocketId(0), SocketId(10)),
+            1,
+            80,
+        );
+        let second = short_edge(
+            minimal_edge(1, RegionId(0), RegionId(1), SocketId(0), SocketId(10)),
+            2,
+            81,
+        );
+        let mut graph = CandidateGraph {
+            edges: vec![first, second],
+            occupancy: minimal_grid(),
+        };
+        let ordered = edge_order(&graph, 0);
+        let mut selected = BTreeSet::new();
+        let mut search_steps = 0;
+
+        let result = layer_core_search(
+            &topology,
+            &mut graph,
+            &ordered,
+            &mut selected,
+            0,
+            &mut search_steps,
+            1,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GeneratorError::SearchExhausted {
+                search: "layer_core_connectivity",
+                attempted: 2,
+                budget: 1,
+                ..
+            })
+        ));
+        assert_eq!(search_steps, 2);
+        assert!(selected.is_empty(), "failed branches must stay isolated");
+    }
+
+    #[test]
+    fn dead_end_search_stops_immediately_after_step_budget() {
+        let topology = minimal_topology(
+            vec![
+                minimal_region(0, RegionRole::Spawn, 0, 0, 0, Direction::East),
+                minimal_region(1, RegionRole::DistantLandmark, 0, 10, 0, Direction::West),
+                minimal_region(2, RegionRole::DeadEnd, 0, 20, 0, Direction::West),
+                minimal_region(3, RegionRole::DeadEnd, 0, 30, 0, Direction::West),
+            ],
+            GeneratorConfig::qualified(QualifiedProfile::Minimum)
+                .normalize()
+                .expect("minimum config"),
+        );
+        let spine = minimal_edge(0, RegionId(0), RegionId(1), SocketId(0), SocketId(10));
+        let first = short_edge(
+            minimal_edge(1, RegionId(2), RegionId(0), SocketId(20), SocketId(0)),
+            1,
+            80,
+        );
+        let second = short_edge(
+            minimal_edge(2, RegionId(2), RegionId(1), SocketId(20), SocketId(10)),
+            2,
+            81,
+        );
+        let mut graph = CandidateGraph {
+            edges: vec![spine, first, second],
+            occupancy: minimal_grid(),
+        };
+        let ordered = edge_order(&graph, 0);
+        let candidate_indices = [EdgeId(1), EdgeId(2)]
+            .into_iter()
+            .map(|id| ordered.iter().position(|edge| edge.id == id).expect("edge index"))
+            .collect::<Vec<_>>();
+        let entries = vec![(RegionId(2), candidate_indices), (RegionId(3), vec![])];
+        let mut selected = BTreeSet::from([EdgeId(0)]);
+        let original_selected = selected.clone();
+        let mut search_steps = 0;
+
+        let result = dead_end_search(
+            &topology,
+            &mut graph,
+            &ordered,
+            &mut selected,
+            &entries,
+            0,
+            &mut search_steps,
+            1,
+        );
+
+        assert!(matches!(
+            result,
+            Err(GeneratorError::SearchExhausted {
+                search: "dead_end_attachment",
+                attempted: 2,
+                budget: 1,
+                ..
+            })
+        ));
+        assert_eq!(search_steps, 2);
+        assert_eq!(selected, original_selected, "failed branches must stay isolated");
     }
 
     #[test]
