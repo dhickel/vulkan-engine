@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "runtime")]
 use audio::AudioClipId;
 use serde::Deserialize;
 use thiserror::Error;
@@ -251,6 +252,7 @@ pub enum ContentError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[cfg(feature = "runtime")]
     #[error("failed to parse content pack '{path}': {source}")]
     Parse {
         path: PathBuf,
@@ -264,6 +266,7 @@ pub enum ContentError {
     },
 }
 
+#[cfg(feature = "runtime")]
 pub fn load_content_pack(path: impl AsRef<Path>) -> Result<ContentPack, ContentError> {
     let requested_path = path.as_ref().to_path_buf();
     let resolved_path = resolve_content_path(&requested_path);
@@ -283,6 +286,7 @@ pub fn load_content_pack(path: impl AsRef<Path>) -> Result<ContentPack, ContentE
     Ok(pack)
 }
 
+#[cfg(feature = "runtime")]
 fn validate_required_runtime_content(
     pack: &ContentPack,
     pack_path: &Path,
@@ -316,6 +320,7 @@ pub fn light_preset_for_marker_index(marker_idx: usize) -> LightPresetId {
     }
 }
 
+#[cfg(feature = "runtime")]
 fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), ContentError> {
     if pack.version != CONTENT_PACK_VERSION {
         return Err(validation_err(
@@ -560,6 +565,7 @@ fn validate_content_pack(pack: &ContentPack, pack_path: &Path) -> Result<(), Con
     Ok(())
 }
 
+#[cfg(feature = "runtime")]
 fn validate_audio_clip_id(id: &str, key: &str, pack_path: &Path) -> Result<(), ContentError> {
     AudioClipId::new(id.to_string()).map_err(|err| {
         validation_err(
@@ -581,6 +587,7 @@ fn validate_audio_clip_id(id: &str, key: &str, pack_path: &Path) -> Result<(), C
     Ok(())
 }
 
+#[cfg(feature = "runtime")]
 fn validate_id(id: &str, key: &str, pack_path: &Path) -> Result<(), ContentError> {
     let valid = !id.is_empty()
         && id
@@ -598,6 +605,7 @@ fn validate_id(id: &str, key: &str, pack_path: &Path) -> Result<(), ContentError
     Ok(())
 }
 
+#[cfg(feature = "runtime")]
 fn require_existing_path(
     path: &Path,
     key: &str,
@@ -615,6 +623,7 @@ fn require_existing_path(
     ))
 }
 
+#[cfg(feature = "runtime")]
 pub fn resolve_content_path(path: &Path) -> PathBuf {
     if path.is_absolute() || path.exists() {
         return path.to_path_buf();
@@ -632,6 +641,7 @@ pub fn resolve_content_path(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(feature = "runtime")]
 fn validation_err(
     pack_path: &Path,
     key: impl Into<String>,
@@ -644,7 +654,7 @@ fn validation_err(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

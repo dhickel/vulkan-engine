@@ -1,3 +1,4 @@
+pub mod alloc_metrics;
 pub(crate) mod ascii;
 mod config;
 pub mod determinism;
@@ -14,10 +15,12 @@ pub(crate) mod routing;
 pub(crate) mod topology;
 pub(crate) mod validation;
 pub mod capture_views;
+pub(crate) mod replay;
 
 use std::path::Path;
 
 use crate::layout::{ParsedLevel, TileCoord};
+use self::prefab::PrefabCatalog;
 
 use self::capture_views::derive_capture_views;
 use self::config::NormalizedGeneratorConfig;
@@ -25,7 +28,6 @@ use self::determinism::{AttemptIdentity, GeneratorIdentity, SemanticStage, Seman
 use self::diagnostics::GeneratorDiagnostics;
 use self::markers::place_all_markers;
 use self::placement::place_regions;
-use self::prefab::PrefabCatalog;
 use self::repair::RepairEngine;
 use self::resources::{count_resources, enforce_budgets};
 use self::routing::materialize_topology;
@@ -40,6 +42,17 @@ pub use self::config::QualifiedProfile;
 pub use self::error::{ErrorStage, GeneratorError};
 pub use self::resources::ResourceCounts;
 pub use self::capture_views::{CaptureView, CaptureViewCategory};
+
+/// Compute the canonical hash of the normalized configuration.
+pub(crate) fn compute_config_hash(config: &GeneratorConfig) -> Result<String, GeneratorError> {
+    let normalized = config.normalize()?;
+    Ok(normalized.canonical_hash())
+}
+
+/// Return the error stage code string for a generator error.
+pub(crate) fn error_stage_code(error: &GeneratorError) -> &'static str {
+    error.stage().code()
+}
 
 /// Complete result of a successful generation attempt.
 #[derive(Debug, Clone)]
@@ -56,6 +69,22 @@ pub struct GenerationResult {
     pub seed: u64,
     /// Zero-based index of the winning attempt.
     pub attempt_index: u32,
+    /// Topology region count from the selected topology.
+    pub topology_region_count: u32,
+    /// Topology edge count from the selected topology.
+    pub topology_edge_count: u32,
+    /// Route distance from spawn to distant landmark.
+    pub route_distance: u64,
+    /// Maximum branch depth from spawn.
+    pub max_branch_depth: u32,
+    /// Number of intentional dead-end regions.
+    pub dead_end_count: u32,
+    /// Number of articulation points.
+    pub articulation_count: u32,
+    /// Number of edge-crossings not sharing a region.
+    pub crossing_count: u32,
+    /// Per-layer cycle counts.
+    pub per_layer_cycles: Vec<u32>,
 }
 
 /// Run the complete generator pipeline and return a validated level.
@@ -151,6 +180,16 @@ fn generate_attempt(
     let bare_level = tile_buffer.clone().into_parsed_level((initial_spawn_x, initial_spawn_y));
 
     // Phase 05 — Repair + validation.
+    // Capture topology data before selected_topology is moved into repair.
+    let topology_region_count = selected_topology.regions.len() as u32;
+    let topology_edge_count = selected_topology.edges.len() as u32;
+    let route_distance = selected_topology.route_distance;
+    let max_branch_depth = selected_topology.max_branch_depth;
+    let dead_end_count = selected_topology.dead_end_count;
+    let articulation_count = selected_topology.articulation_count;
+    let crossing_count = selected_topology.crossing_count;
+    let per_layer_cycles = selected_topology.per_layer_cycles.clone();
+
     let mut repair_engine = RepairEngine::new(config, factory);
     let accepted = repair_engine.repair_until_valid(
         selected_topology,
@@ -229,6 +268,14 @@ fn generate_attempt(
         resource_counts,
         seed,
         attempt_index: attempt_identity.index(),
+        topology_region_count,
+        topology_edge_count,
+        route_distance,
+        max_branch_depth,
+        dead_end_count,
+        articulation_count,
+        crossing_count,
+        per_layer_cycles,
     })
 }
 
