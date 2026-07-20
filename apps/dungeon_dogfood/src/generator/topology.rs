@@ -2351,7 +2351,11 @@ fn ensure_route_redundancy(
 ) -> Result<(), GeneratorError> {
     let required = topology.config.edge_disjoint_routes();
     let (spawn, landmark) = spawn_and_landmark(topology)?;
-    while edge_disjoint_route_count(graph, selected, spawn, landmark)? < required {
+    loop {
+        let count = edge_disjoint_route_count(graph, selected, spawn, landmark)?;
+        if count >= required {
+            return Ok(());
+        }
         let Some(primary) = selected_region_path(topology, graph, selected, spawn, landmark)? else {
             return Err(GeneratorError::TopologyInfeasible {
                 stage: ErrorStage::Topology,
@@ -2388,8 +2392,16 @@ fn ensure_route_redundancy(
                 )?),
             });
         }
+        let next_count = edge_disjoint_route_count(graph, selected, spawn, landmark)?;
+        if next_count <= count {
+            return Err(GeneratorError::TopologyInfeasible {
+                stage: ErrorStage::Topology,
+                constraint: "edge_disjoint_route_no_progress",
+                required: u64::from(required),
+                available: u64::from(next_count),
+            });
+        }
     }
-    Ok(())
 }
 
 fn layer_cycle_rank(
@@ -3278,8 +3290,18 @@ fn edge_disjoint_route_count(
     let mut residual: BTreeMap<(RegionId, RegionId), i32> = BTreeMap::new();
     let mut neighbors: BTreeMap<RegionId, BTreeSet<RegionId>> = BTreeMap::new();
     for edge in selected_edges(graph, selected) {
-        residual.insert((edge.source_region, edge.target_region), 1);
-        residual.insert((edge.target_region, edge.source_region), 1);
+        for endpoints in [
+            (edge.source_region, edge.target_region),
+            (edge.target_region, edge.source_region),
+        ] {
+            let capacity = residual.entry(endpoints).or_default();
+            *capacity = capacity.checked_add(1).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "edge_disjoint_parallel_capacity",
+                },
+            )?;
+        }
         neighbors
             .entry(edge.source_region)
             .or_default()
@@ -4059,6 +4081,24 @@ mod tests {
         edge.path_witness = vec![cell];
         edge.allowed_envelope_cells = vec![cell];
         edge
+    }
+
+    #[test]
+    fn edge_disjoint_route_count_preserves_parallel_edge_capacity() {
+        let graph = CandidateGraph {
+            edges: vec![
+                minimal_edge(0, RegionId(0), RegionId(1), SocketId(0), SocketId(10)),
+                minimal_edge(1, RegionId(0), RegionId(1), SocketId(1), SocketId(11)),
+            ],
+            occupancy: minimal_grid(),
+        };
+        let selected = BTreeSet::from([EdgeId(0), EdgeId(1)]);
+
+        assert_eq!(
+            edge_disjoint_route_count(&graph, &selected, RegionId(0), RegionId(1))
+                .expect("parallel edge max flow"),
+            2
+        );
     }
 
     #[test]

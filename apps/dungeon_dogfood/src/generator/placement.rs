@@ -1756,7 +1756,13 @@ fn place_role_regions(
             // Build the backbone from already-committed non-dead-end regions.
             let backbone = collect_backbone_sockets(placed);
             let mut region_placed = false;
-            for candidate in &scored {
+            let candidate_budget = usize::try_from(config.placement_attempts()).map_err(|_| {
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Placement,
+                    operation: "placement_attempt_budget_convert",
+                }
+            })?;
+            for candidate in scored.iter().take(candidate_budget) {
                 ctx.candidate_evaluated();
                 let variant = candidates
                     .iter()
@@ -2090,6 +2096,34 @@ mod tests {
         assert!(free.can_place_rect(1, 62, 0, 4, 1));
         assert!(!free.can_place_rect(2, 0, 0, 1, 1));
         assert!(!free.can_place_rect(1, 69, 0, 2, 1));
+    }
+
+    #[test]
+    fn placement_connectivity_gate_honors_configured_attempt_budget() {
+        let mut raw = GeneratorConfig::default();
+        raw.single_bottleneck = true;
+        raw.relax_transition_redundancy = true;
+        let config = raw.normalize().expect("primary-like config");
+        let catalog = catalog();
+        let identity = GeneratorIdentity::new(&config, catalog.identity_bytes(), 42);
+        let attempt = AttemptIdentity::new(identity, 4);
+        let factory = SemanticStreamFactory::new(attempt);
+        let mut roles = factory.stream(SemanticStage::Roles, &[]);
+        let mut ctx = AttemptContext::new(TelemetryMode::Counters);
+
+        let result = place_regions(&config, &catalog, &mut roles, factory, &mut ctx);
+
+        assert!(matches!(
+            result,
+            Err(GeneratorError::TopologyInfeasible {
+                constraint: "connectivity_gate",
+                ..
+            })
+        ));
+        assert_eq!(
+            ctx.candidates_evaluated,
+            u64::from(config.placement_attempts())
+        );
     }
 
     #[test]
