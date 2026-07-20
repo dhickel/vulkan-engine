@@ -47,6 +47,7 @@ pub enum ReplayError {
     InvalidTag { position: usize, tag: u8 },
     OversizedLength { position: usize, length: usize, maximum: usize },
     DecodeUtf8 { position: usize },
+    UnsupportedSchema { expected: u32, actual: u32 },
     DecodeSemantics { reason: String },
 }
 
@@ -70,6 +71,9 @@ impl std::fmt::Display for ReplayError {
             }
             Self::DecodeUtf8 { position } => {
                 write!(f, "invalid UTF-8 at position {position}")
+            }
+            Self::UnsupportedSchema { expected, actual } => {
+                write!(f, "unsupported replay schema {actual}; expected {expected}")
             }
             Self::DecodeSemantics { reason } => {
                 write!(f, "semantic error: {reason}")
@@ -519,7 +523,13 @@ impl<'a> ReplayDecoder<'a> {
                 tag,
             });
         }
-        let _schema_version = self.read_u32()?;
+        let schema_version = self.read_u32()?;
+        if schema_version != REPLAY_SCHEMA_VERSION {
+            return Err(ReplayError::UnsupportedSchema {
+                expected: REPLAY_SCHEMA_VERSION,
+                actual: schema_version,
+            });
+        }
 
         let mut seed: Option<u64> = None;
         let mut attempt_index: Option<u32> = None;
@@ -863,6 +873,19 @@ mod tests {
             }
             _ => panic!("expected exhausted"),
         }
+    }
+
+    #[test]
+    fn reject_old_schema_frame() {
+        let mut bytes = make_success_bytes();
+        bytes[1..5].copy_from_slice(&0u32.to_be_bytes());
+        assert!(matches!(
+            ReplayDecoder::new(&bytes).decode(),
+            Err(ReplayError::UnsupportedSchema {
+                expected: REPLAY_SCHEMA_VERSION,
+                actual: 0,
+            })
+        ));
     }
 
     #[test]

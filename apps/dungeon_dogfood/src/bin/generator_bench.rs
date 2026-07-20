@@ -21,6 +21,7 @@ mod content;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -733,6 +734,29 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
         compute_config_hash(&config).map_err(|e| format!("config hash: {e:?}"))?;
     let catalog_hash = hex::encode(&catalog.identity_bytes());
 
+    if manifest.executable_hash != exe_hash
+        || manifest.config_hash != config_hash
+        || manifest.catalog_hash != catalog_hash
+        || manifest.lockfile_hash != lockfile_hash_hex()
+        || manifest.build_profile != build_profile()
+    {
+        return Err("current worker identities do not match the frozen manifest".into());
+    }
+    if cohort.derivation_hash != cohort.hash() {
+        return Err("cohort derivation hash does not match its seed framing".into());
+    }
+    let frozen_cohort = manifest
+        .cohorts
+        .iter()
+        .find(|entry| entry.label == cohort_label)
+        .ok_or_else(|| format!("cohort '{cohort_label}' is absent from manifest"))?;
+    if frozen_cohort.seed_count != cohort.seeds.len()
+        || frozen_cohort.derivation_hash != cohort.derivation_hash
+        || frozen_cohort.sealed != cohort.sealed
+    {
+        return Err(format!("cohort '{cohort_label}' does not match the frozen manifest"));
+    }
+
     let run_id = format!(
         "run-{}-{}",
         cohort_label,
@@ -768,13 +792,35 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
         cmd.arg("worker")
             .arg(seed.to_string())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Make the worker the leader of an isolated process group so a
+            // negative PID targets the complete worker tree.
+            .process_group(0);
 
-        // Spawn and wait with timeout using thread+channel pattern
+        // Drain both pipes concurrently. Waiting before draining can deadlock
+        // when a worker fills either OS pipe buffer.
         let mut child = cmd.spawn().map_err(|e| format!("spawn worker: {e}"))?;
         let pid = child.id();
-        let child_stdout = child.stdout.take();
-        let child_stderr = child.stderr.take();
+        let stdout_thread = child.stdout.take().map(|mut out| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = out.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
+        });
+        let stderr_thread = child.stderr.take().map(|mut err| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = err.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
+        });
+
+        enum WaitOutcome {
+            Exited(std::process::ExitStatus),
+            TimedOut,
+            ProcessLost,
+        }
 
         let (tx, rx) = std::sync::mpsc::channel();
         let wait_thread = std::thread::spawn(move || {
@@ -783,56 +829,47 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
         });
 
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
-        let wait_result: Option<std::process::ExitStatus> = match rx.recv_timeout(timeout_dur) {
-            Ok(Ok(status)) => Some(status),
-            Ok(Err(_)) => None, // wait error = process loss
+        let wait_result = match rx.recv_timeout(timeout_dur) {
+            Ok(Ok(status)) => WaitOutcome::Exited(status),
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                WaitOutcome::ProcessLost
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Kill the process group
+                let group = format!("-{pid}");
                 let _ = Command::new("kill")
-                    .arg("-TERM")
-                    .arg("--")
-                    .arg(format!("-{pid}"))
+                    .args(["-TERM", "--", &group])
                     .status();
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 let _ = Command::new("kill")
-                    .arg("-KILL")
-                    .arg("--")
-                    .arg(format!("-{pid}"))
+                    .args(["-KILL", "--", &group])
                     .status();
-                // Wait for the thread to join (child should be dead after SIGKILL)
-                let _ = wait_thread.join();
-                None // timeout
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                None // process loss
+                WaitOutcome::TimedOut
             }
         };
+        let _ = wait_thread.join();
 
-        let stdout = child_stdout.map(|out| {
-            let mut s = String::new();
-            let _ = BufReader::new(out).read_to_string(&mut s);
-            s
-        });
-        let stderr = child_stderr.map(|err| {
-            let mut s = String::new();
-            let _ = BufReader::new(err).read_to_string(&mut s);
-            s
-        });
+        let stdout = stdout_thread.map(|thread| thread.join().unwrap_or_default());
+        let stderr = stderr_thread.map(|thread| thread.join().unwrap_or_default());
 
         let (worker_status, duration_ns, attempt_index, outcome, replay_hex, exit_code) =
             match wait_result {
-                None => {
-                    // Timeout or process loss
-                    (
-                        "timeout".to_string(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                }
-                Some(exit_status) => {
+                WaitOutcome::TimedOut => (
+                    "timeout".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                WaitOutcome::ProcessLost => (
+                    "process_loss".to_string(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                WaitOutcome::Exited(exit_status) => {
                     let code = exit_status.code();
                     if code != Some(0) {
                         if exit_status.success() {
@@ -849,15 +886,22 @@ fn cmd_run(cohort_label: &str) -> Result<(), String> {
                     } else if let Some(ref stdout_str) = stdout {
                         // Parse worker record
                         match serde_json::from_str::<WorkerRecord>(stdout_str.trim()) {
-                            Ok(record) => (
-                                "success".to_string(),
-                                record.duration_ns,
-                                record.attempt_index,
-                                Some(record.outcome),
-                                record.replay_hex,
-                                Some(0),
-                            ),
-                            Err(_) => {
+                            Ok(record)
+                                if record.schema_version == WORKER_SCHEMA_VERSION
+                                    && record.seed == seed
+                                    && record.config_hash == config_hash
+                                    && record.catalog_hash == catalog_hash =>
+                            {
+                                (
+                                    "success".to_string(),
+                                    record.duration_ns,
+                                    record.attempt_index,
+                                    Some(record.outcome),
+                                    record.replay_hex,
+                                    Some(0),
+                                )
+                            }
+                            Ok(_) | Err(_) => {
                                 ("parse_failure".to_string(), None, None, None, None, Some(0))
                             }
                         }
@@ -1096,10 +1140,20 @@ fn prefab_catalog_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/prefabs")
 }
 
+/// Create the benchmark config matching the production dogfood app's
+/// `build_generator_config()` (no env overrides).
+///
+/// Uses `GeneratorConfig::default()` (profile: None) so normalize() falls
+/// through to `interpolate_custom` using Primary's 96×96×3 dimensions.
+/// This matches the production path exactly — dimension overrides produce
+/// a different normalized config than `qualified(Primary)` because profile=None
+/// triggers the interpolation branch.
 fn primary_config() -> GeneratorConfig {
-    let mut config = GeneratorConfig::qualified(QualifiedProfile::Primary);
+    let mut config = GeneratorConfig::default();
     config.single_bottleneck = true;
     config.relax_transition_redundancy = true;
+    // No dimension overrides — normalize() defaults to Primary's 96x96x3
+    // with interpolated budget values matching the production path.
     config
 }
 

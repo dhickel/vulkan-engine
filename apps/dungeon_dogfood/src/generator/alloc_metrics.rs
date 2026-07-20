@@ -27,6 +27,7 @@ mod inner {
     static DEALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
     static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
     static DEALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+    static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
     static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn reset() {
@@ -34,6 +35,7 @@ mod inner {
         DEALLOC_COUNT.store(0, Ordering::SeqCst);
         ALLOC_BYTES.store(0, Ordering::SeqCst);
         DEALLOC_BYTES.store(0, Ordering::SeqCst);
+        LIVE_BYTES.store(0, Ordering::SeqCst);
         PEAK_BYTES.store(0, Ordering::SeqCst);
     }
 
@@ -55,8 +57,8 @@ mod inner {
     /// Called by the allocator hook on allocation.
     pub(super) fn record_alloc(size: usize) {
         ALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
-        let prev = ALLOC_BYTES.fetch_add(size as u64, Ordering::SeqCst);
-        let current = prev + size as u64;
+        ALLOC_BYTES.fetch_add(size as u64, Ordering::SeqCst);
+        let current = LIVE_BYTES.fetch_add(size as u64, Ordering::SeqCst) + size as u64;
         // Update peak (best-effort; not truly atomic with fetch_add).
         let mut peak = PEAK_BYTES.load(Ordering::SeqCst);
         while current > peak {
@@ -76,8 +78,11 @@ mod inner {
     pub(super) fn record_dealloc(size: usize) {
         DEALLOC_COUNT.fetch_add(1, Ordering::SeqCst);
         DEALLOC_BYTES.fetch_add(size as u64, Ordering::SeqCst);
-        // Subtract from current bytes
-        ALLOC_BYTES.fetch_sub(size as u64, Ordering::SeqCst);
+        // Deallocations of allocations made before reset must not underflow the
+        // reset-scoped live-byte gauge.
+        let _ = LIVE_BYTES.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |live| {
+            Some(live.saturating_sub(size as u64))
+        });
     }
 }
 
@@ -180,7 +185,7 @@ mod tests {
         let snap = snapshot();
         assert_eq!(snap.allocations, 2);
         assert_eq!(snap.deallocations, 1);
-        assert_eq!(snap.bytes_allocated, 1024); // 3072 - 1024 - 1024 = 1024
+        assert_eq!(snap.bytes_allocated, 3072);
         assert_eq!(snap.bytes_deallocated, 1024);
         assert_eq!(snap.peak_bytes, 3072);
     }

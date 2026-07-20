@@ -1,4 +1,4 @@
-pub mod alloc_metrics;
+pub(crate) mod alloc_metrics;
 pub(crate) mod ascii;
 mod config;
 pub mod determinism;
@@ -70,21 +70,21 @@ pub struct GenerationResult {
     /// Zero-based index of the winning attempt.
     pub attempt_index: u32,
     /// Topology region count from the selected topology.
-    pub topology_region_count: u32,
+    pub(crate) topology_region_count: u32,
     /// Topology edge count from the selected topology.
-    pub topology_edge_count: u32,
+    pub(crate) topology_edge_count: u32,
     /// Route distance from spawn to distant landmark.
-    pub route_distance: u64,
+    pub(crate) route_distance: u64,
     /// Maximum branch depth from spawn.
-    pub max_branch_depth: u32,
+    pub(crate) max_branch_depth: u32,
     /// Number of intentional dead-end regions.
-    pub dead_end_count: u32,
+    pub(crate) dead_end_count: u32,
     /// Number of articulation points.
-    pub articulation_count: u32,
+    pub(crate) articulation_count: u32,
     /// Number of edge-crossings not sharing a region.
-    pub crossing_count: u32,
+    pub(crate) crossing_count: u32,
     /// Per-layer cycle counts.
-    pub per_layer_cycles: Vec<u32>,
+    pub(crate) per_layer_cycles: Vec<u32>,
 }
 
 /// Run the complete generator pipeline and return a validated level.
