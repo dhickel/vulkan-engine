@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 
 use super::config::NormalizedGeneratorConfig;
-use super::context::{AttemptContext, RouteOutcome, RouteSearchKind};
+use super::context::{AStarWorkspace, AttemptContext, RouteOutcome, RouteSearchKind};
 use super::determinism::Pcg32V1;
 use super::error::{ErrorStage, GeneratorError};
 use super::ir::{
@@ -61,6 +61,7 @@ pub(super) fn route_socket_pair(
         grid,
         config,
         width,
+        ctx.astar_workspace(),
     )?;
     match result {
         Some((path, envelope)) => {
@@ -790,6 +791,25 @@ fn clearance_walkable(
     Ok(true)
 }
 
+fn astar_cell_index(
+    cell: GridCoord,
+    config: &NormalizedGeneratorConfig,
+) -> Result<usize, GeneratorError> {
+    if cell.x >= config.width() || cell.y >= config.height() {
+        return Err(GeneratorError::IrInvariant {
+            stage: ErrorStage::Topology,
+            detail: format!("astar_cell_out_of_bounds {cell}"),
+        });
+    }
+    usize::from(cell.y)
+        .checked_mul(usize::from(config.width()))
+        .and_then(|row| row.checked_add(usize::from(cell.x)))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Topology,
+            operation: "astar_cell_index",
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn find_path_with_envelope(
     source_region: &PlacedRegion,
@@ -799,6 +819,7 @@ fn find_path_with_envelope(
     grid: &OccupancyGrid,
     config: &NormalizedGeneratorConfig,
     width: u16,
+    workspace: &mut AStarWorkspace,
 ) -> Result<(Option<(Vec<GridCoord>, Vec<GridCoord>)>, usize, bool), GeneratorError> {
     // Returns (result, expansions, capped)
     let source_inward = socket_inward_cells(source_socket, config)?;
@@ -816,10 +837,21 @@ fn find_path_with_envelope(
     }
     let source_terminal = terminal_cells(source_socket, config)?;
     let target_terminal = terminal_cells(target_socket, config)?;
+    let cell_count = usize::from(config.width())
+        .checked_mul(usize::from(config.height()))
+        .ok_or(GeneratorError::ArithmeticOverflow {
+            stage: ErrorStage::Topology,
+            operation: "astar_workspace_cell_count",
+        })?;
+    workspace.begin_query(cell_count);
+    let start_index = astar_cell_index(start, config)?;
+    workspace
+        .set(start_index, 0, None)
+        .ok_or_else(|| GeneratorError::IrInvariant {
+            stage: ErrorStage::Topology,
+            detail: "astar_start_workspace_slot_missing".into(),
+        })?;
     let mut open = BinaryHeap::new();
-    let mut distances = BTreeMap::new();
-    let mut parents = BTreeMap::new();
-    distances.insert(start, 0u64);
     let direction_bias = astar_direction_bias(source_socket.id, target_socket.id)?;
     open.push(AStarNode {
         coord: start,
@@ -845,7 +877,13 @@ fn find_path_with_envelope(
         if expansions > max_expansions {
             return Ok((None, expansions, true));
         }
-        let best = distances.get(&current.coord).copied().unwrap_or(u64::MAX);
+        let current_index = astar_cell_index(current.coord, config)?;
+        let best = workspace
+            .distance(current_index)
+            .ok_or_else(|| GeneratorError::IrInvariant {
+                stage: ErrorStage::Topology,
+                detail: "astar_current_workspace_slot_missing".into(),
+            })?;
         if current.distance != best {
             continue;
         }
@@ -853,13 +891,13 @@ fn find_path_with_envelope(
             let mut path = vec![goal];
             let mut cursor = goal;
             while cursor != start {
-                let Some(parent) = parents.get(&cursor).copied() else {
-                    return Err(GeneratorError::IrInvariant {
+                let cursor_index = astar_cell_index(cursor, config)?;
+                cursor = workspace.parent(cursor_index).ok_or_else(|| {
+                    GeneratorError::IrInvariant {
                         stage: ErrorStage::Topology,
                         detail: "astar_parent_missing".into(),
-                    });
-                };
-                cursor = parent;
+                    }
+                })?;
                 path.push(cursor);
             }
             path.reverse();
@@ -924,9 +962,20 @@ fn find_path_with_envelope(
                     operation: "astar_distance",
                 },
             )?;
-            if distance < distances.get(&next).copied().unwrap_or(u64::MAX) {
-                distances.insert(next, distance);
-                parents.insert(next, current.coord);
+            let next_index = astar_cell_index(next, config)?;
+            let previous_distance = workspace
+                .distance(next_index)
+                .ok_or_else(|| GeneratorError::IrInvariant {
+                    stage: ErrorStage::Topology,
+                    detail: "astar_neighbor_workspace_slot_missing".into(),
+                })?;
+            if distance < previous_distance {
+                workspace
+                    .set(next_index, distance, Some(current.coord))
+                    .ok_or_else(|| GeneratorError::IrInvariant {
+                        stage: ErrorStage::Topology,
+                        detail: "astar_neighbor_workspace_write_missing".into(),
+                    })?;
                 open.push(AStarNode {
                     coord: next,
                     distance,
@@ -1172,11 +1221,76 @@ fn candidate_coexists(
     Ok(true)
 }
 
+#[derive(Debug)]
+struct EdgeMutation {
+    position: usize,
+    previous: CandidateEdge,
+}
+
+struct TopologySearchWorkspace<'a> {
+    edge_undo: Vec<EdgeMutation>,
+    astar: &'a mut AStarWorkspace,
+}
+
+impl<'a> TopologySearchWorkspace<'a> {
+    fn new(astar: &'a mut AStarWorkspace) -> Self {
+        Self {
+            edge_undo: Vec::new(),
+            astar,
+        }
+    }
+
+    fn checkpoint(&self) -> usize {
+        self.edge_undo.len()
+    }
+
+    fn record_edge(&mut self, position: usize, previous: CandidateEdge) {
+        self.edge_undo.push(EdgeMutation { position, previous });
+    }
+
+    fn rollback_edges(
+        &mut self,
+        graph: &mut CandidateGraph,
+        checkpoint: usize,
+    ) -> Result<(), GeneratorError> {
+        while self.edge_undo.len() > checkpoint {
+            let mutation = self
+                .edge_undo
+                .pop()
+                .ok_or_else(|| GeneratorError::IrInvariant {
+                    stage: ErrorStage::Topology,
+                    detail: "edge_undo_stack_underflow".into(),
+                })?;
+            let slot = graph.edges.get_mut(mutation.position).ok_or_else(|| {
+                GeneratorError::IrInvariant {
+                    stage: ErrorStage::Topology,
+                    detail: "edge_undo_slot_missing".into(),
+                }
+            })?;
+            *slot = mutation.previous;
+        }
+        Ok(())
+    }
+}
+
+fn rollback_topology_trial(
+    graph: &mut CandidateGraph,
+    selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
+    edge_checkpoint: usize,
+    selected_checkpoint: BTreeSet<EdgeId>,
+) -> Result<(), GeneratorError> {
+    search.rollback_edges(graph, edge_checkpoint)?;
+    *selected = selected_checkpoint;
+    Ok(())
+}
+
 fn reroute_candidate(
     topology: &IntendedTopology,
     graph: &CandidateGraph,
     selected: &BTreeSet<EdgeId>,
     candidate: &CandidateEdge,
+    workspace: &mut AStarWorkspace,
 ) -> Result<Option<CandidateEdge>, GeneratorError> {
     if candidate.transition.is_some() {
         return Ok(None);
@@ -1243,6 +1357,7 @@ fn reroute_candidate(
         &overlay,
         &topology.config,
         candidate.width,
+        workspace,
     )?;
     let Some((path, envelope)) = result else {
         return Ok(None);
@@ -1269,42 +1384,12 @@ fn add_edge_if_legal(
     selected: &mut BTreeSet<EdgeId>,
     edge: &CandidateEdge,
     preserve_route_min: bool,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<bool, GeneratorError> {
     if selected.contains(&edge.id) {
         return Ok(true);
     }
-    let original = edge_by_id(graph, edge.id)?.clone();
-    let realized = if candidate_coexists(topology, graph, selected, &original)? {
-        original.clone()
-    } else if let Some(rerouted) = reroute_candidate(topology, graph, selected, &original)? {
-        rerouted
-    } else {
-        // A configured crossing is a bounded fallback after deterministic
-        // rerouting fails. Every conflicting witness pair is counted and the
-        // final verifier enforces the profile maximum.
-        let mut conflicts = 0u32;
-        for existing in selected_edges(graph, selected) {
-            if !edges_coexist(topology, existing, &original)? {
-                conflicts = conflicts.checked_add(1).ok_or(
-                    GeneratorError::ArithmeticOverflow {
-                        stage: ErrorStage::Topology,
-                        operation: "candidate_crossing_count",
-                    },
-                )?;
-            }
-        }
-        let existing_crossings = crossing_count(topology, graph, selected)?;
-        let projected = existing_crossings.checked_add(conflicts).ok_or(
-            GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Topology,
-                operation: "projected_crossing_count",
-            },
-        )?;
-        if projected > topology.config.crossings_max() {
-            return Ok(false);
-        }
-        original.clone()
-    };
+    let edge_checkpoint = search.checkpoint();
     let position = graph
         .edges
         .iter()
@@ -1313,26 +1398,71 @@ fn add_edge_if_legal(
             stage: ErrorStage::Topology,
             detail: "realized_candidate_position_missing".into(),
         })?;
+    let original = graph
+        .edges
+        .get(position)
+        .cloned()
+        .ok_or_else(|| GeneratorError::IrInvariant {
+            stage: ErrorStage::Topology,
+            detail: "realized_candidate_slot_missing".into(),
+        })?;
+    let realized = if candidate_coexists(topology, graph, selected, &original)? {
+        original.clone()
+    } else {
+        // Record the exact pre-trial witness before rerouting can derive a
+        // replacement. Any caller that rejects this branch rolls back to its
+        // checkpoint, including nested reroutes in recursive searches.
+        search.record_edge(position, original.clone());
+        if let Some(rerouted) = reroute_candidate(
+            topology,
+            graph,
+            selected,
+            &original,
+            search.astar,
+        )? {
+            rerouted
+        } else {
+            // A configured crossing is a bounded fallback after deterministic
+            // rerouting fails. Every conflicting witness pair is counted and
+            // the final verifier enforces the profile maximum.
+            let mut conflicts = 0u32;
+            for existing in selected_edges(graph, selected) {
+                if !edges_coexist(topology, existing, &original)? {
+                    conflicts = conflicts.checked_add(1).ok_or(
+                        GeneratorError::ArithmeticOverflow {
+                            stage: ErrorStage::Topology,
+                            operation: "candidate_crossing_count",
+                        },
+                    )?;
+                }
+            }
+            let existing_crossings = crossing_count(topology, graph, selected)?;
+            let projected = existing_crossings.checked_add(conflicts).ok_or(
+                GeneratorError::ArithmeticOverflow {
+                    stage: ErrorStage::Topology,
+                    operation: "projected_crossing_count",
+                },
+            )?;
+            if projected > topology.config.crossings_max() {
+                search.rollback_edges(graph, edge_checkpoint)?;
+                return Ok(false);
+            }
+            original.clone()
+        }
+    };
     let slot = graph.edges.get_mut(position).ok_or(GeneratorError::IrInvariant {
         stage: ErrorStage::Topology,
         detail: "realized_candidate_slot_missing".into(),
     })?;
     *slot = realized;
     selected.insert(edge.id);
-    if preserve_route_min {
-        if let Some(distance) = spawn_landmark_distance(topology, graph, selected)? {
-            if distance < u64::from(topology.config.required_route_min()) {
-                selected.remove(&edge.id);
-                let restore = graph.edges.get_mut(position).ok_or(
-                    GeneratorError::IrInvariant {
-                        stage: ErrorStage::Topology,
-                        detail: "candidate_restore_slot_missing".into(),
-                    },
-                )?;
-                *restore = original;
-                return Ok(false);
-            }
-        }
+    if preserve_route_min
+        && spawn_landmark_distance(topology, graph, selected)?
+            .is_some_and(|distance| distance < u64::from(topology.config.required_route_min()))
+    {
+        selected.remove(&edge.id);
+        search.rollback_edges(graph, edge_checkpoint)?;
+        return Ok(false);
     }
     Ok(true)
 }
@@ -1547,9 +1677,10 @@ fn add_path(
     selected: &mut BTreeSet<EdgeId>,
     path: &[EdgeId],
     preserve_route_min: bool,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<bool, GeneratorError> {
-    let original_selected = selected.clone();
-    let original_edges = graph.edges.clone();
+    let selected_checkpoint = selected.clone();
+    let edge_checkpoint = search.checkpoint();
     for id in path {
         let edge = edge_by_id(graph, *id)?.clone();
         if !add_edge_if_legal(
@@ -1558,9 +1689,15 @@ fn add_path(
             selected,
             &edge,
             preserve_route_min,
+            search,
         )? {
-            *selected = original_selected;
-            graph.edges = original_edges;
+            rollback_topology_trial(
+                graph,
+                selected,
+                search,
+                edge_checkpoint,
+                selected_checkpoint,
+            )?;
             return Ok(false);
         }
     }
@@ -1644,6 +1781,7 @@ fn connect_layer_core_greedy(
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
     layer: u16,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<bool, GeneratorError> {
     loop {
         let labels = component_labels(topology, graph, selected, Some(layer), true)?;
@@ -1664,7 +1802,7 @@ fn connect_layer_core_greedy(
             if source_label.is_none() || target_label.is_none() || source_label == target_label {
                 continue;
             }
-            if add_edge_if_legal(topology, graph, selected, edge, true)? {
+            if add_edge_if_legal(topology, graph, selected, edge, true, search)? {
                 added = true;
                 break;
             }
@@ -1680,19 +1818,25 @@ fn connect_layer_cores(
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<(), GeneratorError> {
     let max_search_steps = topology_search_step_budget(&topology.config);
     for layer in 0..topology.config.layers().2 {
         // Keep the original greedy selection as the common fast path. Its
         // partial mutations are rolled back only when bounded search is needed.
-        let original_edges = graph.edges.clone();
-        let original_selected = selected.clone();
-        if connect_layer_core_greedy(topology, graph, ordered, selected, layer)? {
+        let edge_checkpoint = search.checkpoint();
+        let selected_checkpoint = selected.clone();
+        if connect_layer_core_greedy(topology, graph, ordered, selected, layer, search)? {
             continue;
         }
 
-        graph.edges = original_edges;
-        *selected = original_selected;
+        rollback_topology_trial(
+            graph,
+            selected,
+            search,
+            edge_checkpoint,
+            selected_checkpoint,
+        )?;
         let mut search_steps = 0u64;
         if !layer_core_search(
             topology,
@@ -1702,6 +1846,7 @@ fn connect_layer_cores(
             layer,
             &mut search_steps,
             max_search_steps,
+            search,
         )? {
             return Err(GeneratorError::SearchExhausted {
                 stage: ErrorStage::Topology,
@@ -1766,6 +1911,7 @@ fn layer_core_search(
     layer: u16,
     search_steps: &mut u64,
     max_search_steps: u64,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<bool, GeneratorError> {
     let labels = component_labels(topology, graph, selected, Some(layer), true)?;
     let components: BTreeSet<u32> = labels.values().copied().collect();
@@ -1810,29 +1956,40 @@ fn layer_core_search(
                 budget: max_search_steps,
             });
         }
-        let mut branch_graph = graph.clone();
-        let mut branch_selected = selected.clone();
-        if !add_edge_if_legal(
-            topology,
-            &mut branch_graph,
-            &mut branch_selected,
-            edge,
-            true,
-        )? {
+        let edge_checkpoint = search.checkpoint();
+        let selected_checkpoint = selected.clone();
+        if !add_edge_if_legal(topology, graph, selected, edge, true, search)? {
             continue;
         }
-        if layer_core_search(
+        let branch_result = layer_core_search(
             topology,
-            &mut branch_graph,
+            graph,
             ordered,
-            &mut branch_selected,
+            selected,
             layer,
             search_steps,
             max_search_steps,
-        )? {
-            *graph = branch_graph;
-            *selected = branch_selected;
-            return Ok(true);
+            search,
+        );
+        match branch_result {
+            Ok(true) => return Ok(true),
+            Ok(false) => rollback_topology_trial(
+                graph,
+                selected,
+                search,
+                edge_checkpoint,
+                selected_checkpoint,
+            )?,
+            Err(error) => {
+                rollback_topology_trial(
+                    graph,
+                    selected,
+                    search,
+                    edge_checkpoint,
+                    selected_checkpoint,
+                )?;
+                return Err(error);
+            }
         }
     }
     Ok(false)
@@ -1843,6 +2000,7 @@ fn connect_global_core(
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
+    search_workspace: &mut TopologySearchWorkspace<'_>,
 ) -> Result<(), GeneratorError> {
     fn search(
         topology: &IntendedTopology,
@@ -1851,6 +2009,7 @@ fn connect_global_core(
         selected: &mut BTreeSet<EdgeId>,
         attempts: &mut u64,
         budget: u64,
+        search_workspace: &mut TopologySearchWorkspace<'_>,
     ) -> Result<bool, GeneratorError> {
         let labels = component_labels(topology, graph, selected, None, true)?;
         let components: BTreeSet<u32> = labels.values().copied().collect();
@@ -1899,28 +2058,46 @@ fn connect_global_core(
                     operation: "connectivity_search_attempts",
                 },
             )?;
-            let mut branch_graph = graph.clone();
-            let mut branch_selected = selected.clone();
+            let edge_checkpoint = search_workspace.checkpoint();
+            let selected_checkpoint = selected.clone();
             if !add_edge_if_legal(
                 topology,
-                &mut branch_graph,
-                &mut branch_selected,
+                graph,
+                selected,
                 edge,
                 true,
+                search_workspace,
             )? {
                 continue;
             }
-            if search(
+            let branch_result = search(
                 topology,
-                &mut branch_graph,
+                graph,
                 ordered,
-                &mut branch_selected,
+                selected,
                 attempts,
                 budget,
-            )? {
-                *graph = branch_graph;
-                *selected = branch_selected;
-                return Ok(true);
+                search_workspace,
+            );
+            match branch_result {
+                Ok(true) => return Ok(true),
+                Ok(false) => rollback_topology_trial(
+                    graph,
+                    selected,
+                    search_workspace,
+                    edge_checkpoint,
+                    selected_checkpoint,
+                )?,
+                Err(error) => {
+                    rollback_topology_trial(
+                        graph,
+                        selected,
+                        search_workspace,
+                        edge_checkpoint,
+                        selected_checkpoint,
+                    )?;
+                    return Err(error);
+                }
             }
         }
         Ok(false)
@@ -1940,6 +2117,7 @@ fn connect_global_core(
         selected,
         &mut attempts,
         budget,
+        search_workspace,
     )? {
         return Ok(());
     }
@@ -1966,6 +2144,7 @@ fn attach_dead_ends_greedy(
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<bool, GeneratorError> {
     for region in topology
         .regions
@@ -1983,7 +2162,7 @@ fn attach_dead_ends_greedy(
             if selected.contains(&edge.id) || !incident || is_dead_end(topology, other) {
                 continue;
             }
-            if add_edge_if_legal(topology, graph, selected, edge, true)? {
+            if add_edge_if_legal(topology, graph, selected, edge, true, search)? {
                 attached = true;
                 break;
             }
@@ -2000,15 +2179,21 @@ fn attach_dead_ends(
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<(), GeneratorError> {
-    // Try the original ordered greedy assignment before cloning branches.
-    let original_edges = graph.edges.clone();
-    let original_selected = selected.clone();
-    if attach_dead_ends_greedy(topology, graph, ordered, selected)? {
+    // Try the original ordered greedy assignment before backtracking.
+    let edge_checkpoint = search.checkpoint();
+    let selected_checkpoint = selected.clone();
+    if attach_dead_ends_greedy(topology, graph, ordered, selected, search)? {
         return Ok(());
     }
-    graph.edges = original_edges;
-    *selected = original_selected;
+    rollback_topology_trial(
+        graph,
+        selected,
+        search,
+        edge_checkpoint,
+        selected_checkpoint,
+    )?;
 
     let mut dead_end_entries: Vec<(RegionId, Vec<usize>)> = Vec::new();
     for region in topology
@@ -2054,6 +2239,7 @@ fn attach_dead_ends(
         0,
         &mut search_steps,
         max_search_steps,
+        search,
     )? {
         return Err(GeneratorError::SearchExhausted {
             stage: ErrorStage::Topology,
@@ -2074,6 +2260,7 @@ fn dead_end_search(
     index: usize,
     search_steps: &mut u64,
     max_search_steps: u64,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<bool, GeneratorError> {
     if index >= entries.len() {
         return Ok(true);
@@ -2098,30 +2285,41 @@ fn dead_end_search(
                 budget: max_search_steps,
             });
         }
-        let mut branch_graph = graph.clone();
-        let mut branch_selected = selected.clone();
-        if !add_edge_if_legal(
-            topology,
-            &mut branch_graph,
-            &mut branch_selected,
-            edge,
-            true,
-        )? {
+        let edge_checkpoint = search.checkpoint();
+        let selected_checkpoint = selected.clone();
+        if !add_edge_if_legal(topology, graph, selected, edge, true, search)? {
             continue;
         }
-        if dead_end_search(
+        let branch_result = dead_end_search(
             topology,
-            &mut branch_graph,
+            graph,
             ordered,
-            &mut branch_selected,
+            selected,
             entries,
             index + 1,
             search_steps,
             max_search_steps,
-        )? {
-            *graph = branch_graph;
-            *selected = branch_selected;
-            return Ok(true);
+            search,
+        );
+        match branch_result {
+            Ok(true) => return Ok(true),
+            Ok(false) => rollback_topology_trial(
+                graph,
+                selected,
+                search,
+                edge_checkpoint,
+                selected_checkpoint,
+            )?,
+            Err(error) => {
+                rollback_topology_trial(
+                    graph,
+                    selected,
+                    search,
+                    edge_checkpoint,
+                    selected_checkpoint,
+                )?;
+                return Err(error);
+            }
         }
     }
     Ok(false)
@@ -2149,6 +2347,7 @@ fn ensure_route_redundancy(
     topology: &IntendedTopology,
     graph: &mut CandidateGraph,
     selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<(), GeneratorError> {
     let required = topology.config.edge_disjoint_routes();
     let (spawn, landmark) = spawn_and_landmark(topology)?;
@@ -2179,7 +2378,7 @@ fn ensure_route_redundancy(
                 )?),
             });
         };
-        if !add_path(topology, graph, selected, &alternate, true)? {
+        if !add_path(topology, graph, selected, &alternate, true, search)? {
             return Err(GeneratorError::TopologyInfeasible {
                 stage: ErrorStage::Topology,
                 constraint: "edge_disjoint_route_coexistence",
@@ -2275,6 +2474,7 @@ fn add_required_layer_cycles(
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<(), GeneratorError> {
     let minimum = topology.config.per_layer_cycles_min();
     let maximum = topology.config.per_layer_cycles_max();
@@ -2308,9 +2508,17 @@ fn add_required_layer_cycles(
                 if labels.get(&edge.source_region) != labels.get(&edge.target_region) {
                     continue;
                 }
-                if add_edge_if_legal(topology, graph, selected, edge, true)? {
+                let edge_checkpoint = search.checkpoint();
+                let selected_checkpoint = selected.clone();
+                if add_edge_if_legal(topology, graph, selected, edge, true, search)? {
                     if layer_cycle_rank(topology, graph, selected, layer)? > maximum {
-                        selected.remove(&edge.id);
+                        rollback_topology_trial(
+                            graph,
+                            selected,
+                            search,
+                            edge_checkpoint,
+                            selected_checkpoint,
+                        )?;
                         continue;
                     }
                     added = true;
@@ -2376,32 +2584,34 @@ fn add_required_layer_cycles(
                     )? else {
                         continue;
                     };
-                    let mut branch_graph = graph.clone();
-                    let mut branch_selected = selected.clone();
-                    if add_path(
+                    let edge_checkpoint = search.checkpoint();
+                    let selected_checkpoint = selected.clone();
+                    let accepted = add_path(
                         topology,
-                        &mut branch_graph,
-                        &mut branch_selected,
+                        graph,
+                        selected,
                         &path,
                         true,
+                        search,
                     )? && add_edge_if_legal(
                         topology,
-                        &mut branch_graph,
-                        &mut branch_selected,
+                        graph,
+                        selected,
                         closing_edge,
                         true,
-                    )? && layer_cycle_rank(
-                        topology,
-                        &branch_graph,
-                        &branch_selected,
-                        layer,
-                    )? <= maximum
-                    {
-                        *graph = branch_graph;
-                        *selected = branch_selected;
+                        search,
+                    )? && layer_cycle_rank(topology, graph, selected, layer)? <= maximum;
+                    if accepted {
                         added = true;
                         break;
                     }
+                    rollback_topology_trial(
+                        graph,
+                        selected,
+                        search,
+                        edge_checkpoint,
+                        selected_checkpoint,
+                    )?;
                 }
                 if !added {
                     return Err(GeneratorError::TopologyInfeasible {
@@ -2438,6 +2648,7 @@ fn reduce_articulations(
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
     selected: &mut BTreeSet<EdgeId>,
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<(), GeneratorError> {
     loop {
         let current = articulation_count(topology, graph, selected)?;
@@ -2453,8 +2664,9 @@ fn reduce_articulations(
             {
                 continue;
             }
-            let before = selected.clone();
-            if !add_edge_if_legal(topology, graph, selected, edge, true)? {
+            let edge_checkpoint = search.checkpoint();
+            let selected_checkpoint = selected.clone();
+            if !add_edge_if_legal(topology, graph, selected, edge, true, search)? {
                 continue;
             }
             let source_layer = topology
@@ -2466,7 +2678,13 @@ fn reduce_articulations(
                 if layer_cycle_rank(topology, graph, selected, layer)?
                     > topology.config.per_layer_cycles_max()
                 {
-                    *selected = before;
+                    rollback_topology_trial(
+                        graph,
+                        selected,
+                        search,
+                        edge_checkpoint,
+                        selected_checkpoint,
+                    )?;
                     continue;
                 }
             }
@@ -2474,7 +2692,13 @@ fn reduce_articulations(
                 improved = true;
                 break;
             }
-            *selected = before;
+            rollback_topology_trial(
+                graph,
+                selected,
+                search,
+                edge_checkpoint,
+                selected_checkpoint,
+            )?;
         }
         if !improved {
             return Err(GeneratorError::GraphBoundViolation {
@@ -2684,6 +2908,7 @@ fn assemble_topology(
     topology: &IntendedTopology,
     graph: &mut CandidateGraph,
     ordered: &[CandidateEdge],
+    search: &mut TopologySearchWorkspace<'_>,
 ) -> Result<BTreeSet<EdgeId>, GeneratorError> {
     // Reject structurally infeasible graphs early with specific diagnostics.
     check_topology_feasibility(topology, graph)?;
@@ -2692,7 +2917,7 @@ fn assemble_topology(
 
     // Required spawn-to-landmark spine first.
     let spine = bounded_spine(topology, graph)?;
-    if !add_path(topology, graph, &mut selected, &spine, false)? {
+    if !add_path(topology, graph, &mut selected, &spine, false, search)? {
         return Err(GeneratorError::TopologyInfeasible {
             stage: ErrorStage::Topology,
             constraint: "spine_witness_coexistence",
@@ -2709,7 +2934,7 @@ fn assemble_topology(
         .cloned()
         .collect();
     for edge in &vertical_edges {
-        if !add_edge_if_legal(topology, graph, &mut selected, edge, true)? {
+        if !add_edge_if_legal(topology, graph, &mut selected, edge, true, search)? {
             return Err(GeneratorError::TopologyInfeasible {
                 stage: ErrorStage::Topology,
                 constraint: "required_transition_edge_coexistence",
@@ -2721,19 +2946,19 @@ fn assemble_topology(
 
     // Intentional dead ends are mandatory leaves; secure their only incident
     // witnesses before core connectivity consumes crossing capacity.
-    attach_dead_ends(topology, graph, ordered, &mut selected)?;
+    attach_dead_ends(topology, graph, ordered, &mut selected, search)?;
 
     // Connect non-dead-end cores on each layer and globally.
-    connect_layer_cores(topology, graph, ordered, &mut selected)?;
-    connect_global_core(topology, graph, ordered, &mut selected)?;
+    connect_layer_cores(topology, graph, ordered, &mut selected, search)?;
+    connect_global_core(topology, graph, ordered, &mut selected, search)?;
 
     // Secure one useful cycle on each layer on top of the connected core.
-    add_required_layer_cycles(topology, graph, ordered, &mut selected)?;
+    add_required_layer_cycles(topology, graph, ordered, &mut selected, search)?;
 
     // Establish required route redundancy after the core is connected.
-    ensure_route_redundancy(topology, graph, &mut selected)?;
+    ensure_route_redundancy(topology, graph, &mut selected, search)?;
 
-    reduce_articulations(topology, graph, ordered, &mut selected)?;
+    reduce_articulations(topology, graph, ordered, &mut selected, search)?;
 
     // Optional merger/shortcut lower bounds are zero. We deliberately add none;
     // their configured upper bounds are still checked below.
@@ -2768,7 +2993,11 @@ pub(super) fn select_topology(
         ctx.topology_nonce();
         let mut working_graph = graph.clone();
         let ordered = edge_order(&working_graph, nonce);
-        match assemble_topology(&topology, &mut working_graph, &ordered) {
+        let assembly = {
+            let mut search = TopologySearchWorkspace::new(ctx.astar_workspace());
+            assemble_topology(&topology, &mut working_graph, &ordered, &mut search)
+        };
+        match assembly {
             Ok(selected) => {
                 let selected_candidates = selected_edges(&working_graph, &selected);
                 let metrics = compute_metrics(&topology, &working_graph, &selected)?;
@@ -3423,6 +3652,13 @@ mod tests {
         PrefabCatalog::load(&root).expect("bundled prefab catalog")
     }
 
+    macro_rules! topology_search_workspace {
+        ($workspace:ident, $astar:ident) => {
+            let mut $astar = AStarWorkspace::default();
+            let mut $workspace = TopologySearchWorkspace::new(&mut $astar);
+        };
+    }
+
     fn factory(
         config: &NormalizedGeneratorConfig,
         catalog: &PrefabCatalog,
@@ -3612,6 +3848,7 @@ mod tests {
             &grid,
             &config,
             1,
+            &mut AStarWorkspace::default(),
         )
         .expect("path search");
         let (path, _) = result.expect("routed path");
@@ -3825,6 +4062,163 @@ mod tests {
     }
 
     #[test]
+    fn rejected_reroute_trial_restores_exact_candidate_graph() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let socket = |id, x, direction| PlacedSocket {
+            id: SocketId(id),
+            variant_socket_index: 0,
+            global_anchor: GridCoord {
+                layer: 0,
+                x,
+                y: 10,
+            },
+            direction,
+            width: 1,
+            role: SocketRole::Corridor,
+            paired_socket_id: None,
+        };
+        let source_socket = socket(0, 7, Direction::East);
+        let target_socket = socket(1, 20, Direction::West);
+        let blocker_socket = socket(2, 30, Direction::West);
+        let regions = vec![
+            PlacedRegion {
+                id: RegionId(0),
+                role: RegionRole::Spawn,
+                variant_index: 0,
+                layer: 0,
+                footprint: (5, 9, 3, 3),
+                sockets: vec![source_socket.clone()],
+                transitions: vec![],
+                marker_variant_indices: vec![],
+            },
+            PlacedRegion {
+                id: RegionId(1),
+                role: RegionRole::DistantLandmark,
+                variant_index: 0,
+                layer: 0,
+                footprint: (20, 9, 3, 3),
+                sockets: vec![target_socket.clone()],
+                transitions: vec![],
+                marker_variant_indices: vec![],
+            },
+            PlacedRegion {
+                id: RegionId(2),
+                role: RegionRole::OrdinaryRoom,
+                variant_index: 0,
+                layer: 0,
+                footprint: (30, 9, 3, 3),
+                sockets: vec![blocker_socket.clone()],
+                transitions: vec![],
+                marker_variant_indices: vec![],
+            },
+        ];
+        let topology = minimal_topology(regions, config.clone());
+        let mut occupancy = OccupancyGrid::new(
+            config.width(),
+            config.height(),
+            config.layers().2,
+        )
+        .expect("occupancy");
+        occupancy
+            .reserve_rect(0, 5, 9, 3, 3, OccupancyClass::Region(0))
+            .expect("source region");
+        occupancy
+            .reserve_rect(0, 20, 9, 3, 3, OccupancyClass::Region(1))
+            .expect("target region");
+        occupancy
+            .set(source_socket.global_anchor, OccupancyClass::Socket(0))
+            .expect("source socket");
+        occupancy
+            .set(target_socket.global_anchor, OccupancyClass::Socket(1))
+            .expect("target socket");
+
+        let conflict = GridCoord::new(
+            0,
+            13,
+            10,
+            config.width(),
+            config.height(),
+            config.layers().2,
+        )
+        .expect("conflict cell");
+        let original_path: Vec<_> = (6..=21)
+            .map(|x| {
+                GridCoord::new(
+                    0,
+                    x,
+                    10,
+                    config.width(),
+                    config.height(),
+                    config.layers().2,
+                )
+                .expect("path cell")
+            })
+            .collect();
+        let blocking_edge = CandidateEdge {
+            id: EdgeId(0),
+            source_socket: source_socket.id,
+            target_socket: blocker_socket.id,
+            source_region: RegionId(0),
+            target_region: RegionId(2),
+            path_witness: vec![conflict],
+            allowed_envelope_cells: vec![conflict],
+            cost: 1,
+            width: 1,
+            transition: None,
+        };
+        let trial_edge = CandidateEdge {
+            id: EdgeId(1),
+            source_socket: source_socket.id,
+            target_socket: target_socket.id,
+            source_region: RegionId(0),
+            target_region: RegionId(1),
+            path_witness: original_path.clone(),
+            allowed_envelope_cells: original_path,
+            cost: 16,
+            width: 1,
+            transition: None,
+        };
+        let mut graph = CandidateGraph {
+            edges: vec![blocking_edge, trial_edge.clone()],
+            occupancy,
+        };
+        let original_graph = graph.clone();
+        let mut selected = BTreeSet::from([EdgeId(0)]);
+        let selected_checkpoint = selected.clone();
+        topology_search_workspace!(search, astar);
+        let edge_checkpoint = search.checkpoint();
+
+        assert!(
+            add_edge_if_legal(
+                &topology,
+                &mut graph,
+                &mut selected,
+                &trial_edge,
+                false,
+                &mut search,
+            )
+            .expect("rerouted trial")
+        );
+        assert_ne!(graph, original_graph, "fixture must realize a rerouted witness");
+        assert!(selected.contains(&trial_edge.id));
+
+        rollback_topology_trial(
+            &mut graph,
+            &mut selected,
+            &mut search,
+            edge_checkpoint,
+            selected_checkpoint.clone(),
+        )
+        .expect("reject trial");
+
+        assert_eq!(graph, original_graph);
+        assert_eq!(selected, selected_checkpoint);
+        assert_eq!(search.checkpoint(), edge_checkpoint);
+    }
+
+    #[test]
     fn topology_backtracking_budget_excludes_routing_attempts() {
         let config = GeneratorConfig::qualified(QualifiedProfile::Primary)
             .normalize()
@@ -3925,7 +4319,8 @@ mod tests {
         let ordered = edge_order(&graph, 0);
         let mut selected = BTreeSet::from([EdgeId(0)]);
 
-        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected)
+        topology_search_workspace!(search, astar);
+        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected, &mut search)
             .expect("greedy layer connection");
 
         assert!(selected.contains(&EdgeId(1)));
@@ -3963,6 +4358,7 @@ mod tests {
         let mut selected = BTreeSet::new();
         let mut search_steps = 0;
 
+        topology_search_workspace!(search, astar);
         let result = layer_core_search(
             &topology,
             &mut graph,
@@ -3971,6 +4367,7 @@ mod tests {
             0,
             &mut search_steps,
             1,
+            &mut search,
         );
 
         assert!(matches!(
@@ -4024,6 +4421,7 @@ mod tests {
         let original_selected = selected.clone();
         let mut search_steps = 0;
 
+        topology_search_workspace!(search, astar);
         let result = dead_end_search(
             &topology,
             &mut graph,
@@ -4033,6 +4431,7 @@ mod tests {
             0,
             &mut search_steps,
             1,
+            &mut search,
         );
 
         assert!(matches!(
@@ -4272,7 +4671,14 @@ mod tests {
         };
         let mut selected = BTreeSet::new();
         let ordered = edge_order(&graph, 0);
-        let result = attach_dead_ends(&topology, &mut graph, &ordered, &mut selected);
+        topology_search_workspace!(search, astar);
+        let result = attach_dead_ends(
+            &topology,
+            &mut graph,
+            &ordered,
+            &mut selected,
+            &mut search,
+        );
         assert!(result.is_err());
         match result {
             Err(GeneratorError::TopologyInfeasible { constraint, .. }) => {
@@ -4323,8 +4729,15 @@ mod tests {
         let ordered = edge_order(&graph, 0);
         // Pre-select the spine so route minimum is already satisfied.
         selected.insert(EdgeId(0));
-        attach_dead_ends(&topology, &mut graph, &ordered, &mut selected)
-            .expect("should attach dead-end via one candidate");
+        topology_search_workspace!(search, astar);
+        attach_dead_ends(
+            &topology,
+            &mut graph,
+            &ordered,
+            &mut selected,
+            &mut search,
+        )
+        .expect("should attach dead-end via one candidate");
         assert_eq!(selected.len(), 2);
         let dead_edge = selected.iter().find(|e| **e != EdgeId(0)).unwrap();
         assert!(graph.edges.iter().any(|e| e.id == *dead_edge));
@@ -4372,8 +4785,15 @@ mod tests {
         let ordered = edge_order(&graph, 0);
         let mut selected = BTreeSet::from([EdgeId(0)]);
 
-        attach_dead_ends(&topology, &mut graph, &ordered, &mut selected)
-            .expect("backtracking assignment");
+        topology_search_workspace!(search, astar);
+        attach_dead_ends(
+            &topology,
+            &mut graph,
+            &ordered,
+            &mut selected,
+            &mut search,
+        )
+        .expect("backtracking assignment");
 
         assert!(selected.contains(&EdgeId(2)), "constrained dead end first");
         assert!(selected.contains(&EdgeId(3)), "fallback selected after conflict");
@@ -4411,7 +4831,8 @@ mod tests {
         };
         let mut selected = BTreeSet::new();
         let ordered = edge_order(&graph, 0);
-        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected)
+        topology_search_workspace!(search, astar);
+        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected, &mut search)
             .expect("should connect layer cores");
         assert_eq!(selected.len(), 1);
     }
@@ -4457,7 +4878,8 @@ mod tests {
         let ordered = edge_order(&graph, 0);
         let mut selected = BTreeSet::from([EdgeId(0)]);
 
-        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected)
+        topology_search_workspace!(search, astar);
+        connect_layer_cores(&topology, &mut graph, &ordered, &mut selected, &mut search)
             .expect("backtracking core search");
 
         assert!(selected.contains(&EdgeId(2)), "fallback bridge selected");
@@ -4498,8 +4920,14 @@ mod tests {
         };
         let mut selected = BTreeSet::new();
         let ordered = edge_order(&graph, 0);
-        let result =
-            connect_layer_cores(&topology, &mut graph, &ordered, &mut selected);
+        topology_search_workspace!(search, astar);
+        let result = connect_layer_cores(
+            &topology,
+            &mut graph,
+            &ordered,
+            &mut selected,
+            &mut search,
+        );
         assert!(result.is_err());
         match result {
             Err(GeneratorError::SearchExhausted { search, .. }) => {

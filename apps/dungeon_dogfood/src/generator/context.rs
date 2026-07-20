@@ -16,6 +16,82 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use super::error::ErrorStage;
+use super::ir::GridCoord;
+
+// ─── Reusable A* workspace ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+struct AStarCell {
+    generation: u32,
+    distance: u64,
+    parent: Option<GridCoord>,
+}
+
+impl Default for AStarCell {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            distance: u64::MAX,
+            parent: None,
+        }
+    }
+}
+
+/// Attempt-local flat storage for topology A* queries. A generation stamp
+/// makes untouched cells read as absent without clearing the vectors between
+/// searches.
+#[derive(Debug, Clone, Default)]
+pub(super) struct AStarWorkspace {
+    generation: u32,
+    cells: Vec<AStarCell>,
+}
+
+impl AStarWorkspace {
+    pub(super) fn begin_query(&mut self, cell_count: usize) {
+        if self.cells.len() != cell_count {
+            self.cells.resize(cell_count, AStarCell::default());
+        }
+        if self.generation == u32::MAX {
+            for cell in &mut self.cells {
+                cell.generation = 0;
+            }
+            self.generation = 1;
+        } else {
+            self.generation += 1;
+        }
+    }
+
+    pub(super) fn distance(&self, index: usize) -> Option<u64> {
+        let cell = self.cells.get(index)?;
+        Some(if cell.generation == self.generation {
+            cell.distance
+        } else {
+            u64::MAX
+        })
+    }
+
+    pub(super) fn parent(&self, index: usize) -> Option<GridCoord> {
+        let cell = self.cells.get(index)?;
+        (cell.generation == self.generation)
+            .then_some(cell.parent)
+            .flatten()
+    }
+
+    pub(super) fn set(
+        &mut self,
+        index: usize,
+        distance: u64,
+        parent: Option<GridCoord>,
+    ) -> Option<()> {
+        let cell = self.cells.get_mut(index)?;
+        *cell = AStarCell {
+            generation: self.generation,
+            distance,
+            parent,
+        };
+        Some(())
+    }
+}
 
 // ─── Telemetry mode ────────────────────────────────────────────────────────
 
@@ -133,6 +209,7 @@ pub(crate) struct AttemptContext {
     scope_started: [Option<Instant>; TelemetryScope::ALL.len()],
     timing_ns: [u64; TelemetryScope::ALL.len()],
     timing_present: [bool; TelemetryScope::ALL.len()],
+    astar_workspace: AStarWorkspace,
 
     // ── Placement ───────────────────────────────────────────────────────
     pub placement_scans: u64,
@@ -213,6 +290,7 @@ impl AttemptContext {
             scope_started: [None; TelemetryScope::ALL.len()],
             timing_ns: [0; TelemetryScope::ALL.len()],
             timing_present: [false; TelemetryScope::ALL.len()],
+            astar_workspace: AStarWorkspace::default(),
             placement_scans: 0,
             occupancy_clones: 0,
             occupancy_clone_elements: 0,
@@ -275,6 +353,10 @@ impl AttemptContext {
 
     pub(super) fn overflow(&self) -> bool {
         self.overflow
+    }
+
+    pub(super) fn astar_workspace(&mut self) -> &mut AStarWorkspace {
+        &mut self.astar_workspace
     }
 
     // ── Scope timing ─────────────────────────────────────────────────────
@@ -726,6 +808,46 @@ impl AttemptContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn astar_workspace_generation_hides_previous_query_state() {
+        let mut workspace = AStarWorkspace::default();
+        let parent = GridCoord {
+            layer: 0,
+            x: 1,
+            y: 1,
+        };
+        workspace.begin_query(4);
+        workspace.set(2, 7, Some(parent)).expect("workspace slot");
+        assert_eq!(workspace.distance(2), Some(7));
+        assert_eq!(workspace.parent(2), Some(parent));
+
+        workspace.begin_query(4);
+        assert_eq!(workspace.distance(2), Some(u64::MAX));
+        assert_eq!(workspace.parent(2), None);
+    }
+
+    #[test]
+    fn astar_workspace_stamp_wrap_clears_old_generations() {
+        let mut workspace = AStarWorkspace {
+            generation: u32::MAX,
+            cells: vec![AStarCell {
+                generation: u32::MAX,
+                distance: 3,
+                parent: Some(GridCoord {
+                    layer: 0,
+                    x: 0,
+                    y: 0,
+                }),
+            }],
+        };
+
+        workspace.begin_query(1);
+
+        assert_eq!(workspace.generation, 1);
+        assert_eq!(workspace.distance(0), Some(u64::MAX));
+        assert_eq!(workspace.parent(0), None);
+    }
 
     #[test]
     fn off_mode_does_not_allocate_or_count() {
