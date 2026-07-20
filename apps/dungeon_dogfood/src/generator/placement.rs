@@ -15,6 +15,130 @@ use super::prefab::{
 };
 use super::topology::{ordinary_socket_compatibility, route_socket_pair};
 
+// ─── Free-cell tracker ──────────────────────────────────────────────────────
+
+/// Compact mirror of the occupancy grid's `Empty` cells used by the placement
+/// sweeps. A set bit means the corresponding flat occupancy cell is free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FreeCells {
+    bits: Vec<u64>,
+    width: usize,
+    height: usize,
+    layers: usize,
+}
+
+impl FreeCells {
+    fn new(width: u16, height: u16, layers: u16, grid: &OccupancyGrid) -> Self {
+        debug_assert_eq!(grid.dimensions(), (width, height, layers));
+        let mut free = Self {
+            bits: vec![0; grid.cells.len().div_ceil(64)],
+            width: usize::from(width),
+            height: usize::from(height),
+            layers: usize::from(layers),
+        };
+        free.rebuild(grid);
+        free
+    }
+
+    fn can_place_rect(&self, layer: u16, x: u16, y: u16, w: u16, h: u16) -> bool {
+        let layer = usize::from(layer);
+        let x = usize::from(x);
+        let y = usize::from(y);
+        let w = usize::from(w);
+        let h = usize::from(h);
+        if layer >= self.layers
+            || x.checked_add(w).is_none_or(|end| end > self.width)
+            || y.checked_add(h).is_none_or(|end| end > self.height)
+        {
+            return false;
+        }
+
+        let layer_start = layer * self.width * self.height;
+        (0..h).all(|dy| {
+            let row_start = layer_start + (y + dy) * self.width + x;
+            self.range_is_free(row_start, w)
+        })
+    }
+
+    fn occupy_rect(&mut self, layer: u16, x: u16, y: u16, w: u16, h: u16) {
+        let layer = usize::from(layer);
+        let x = usize::from(x);
+        let y = usize::from(y);
+        let w = usize::from(w);
+        let h = usize::from(h);
+        if layer >= self.layers
+            || x.checked_add(w).is_none_or(|end| end > self.width)
+            || y.checked_add(h).is_none_or(|end| end > self.height)
+        {
+            debug_assert!(false, "free-cell occupation rectangle is out of bounds");
+            return;
+        }
+
+        let layer_start = layer * self.width * self.height;
+        for dy in 0..h {
+            let row_start = layer_start + (y + dy) * self.width + x;
+            self.clear_range(row_start, w);
+        }
+    }
+
+    fn rebuild(&mut self, grid: &OccupancyGrid) {
+        debug_assert_eq!(
+            grid.cells.len(),
+            self.width * self.height * self.layers,
+            "free-cell and occupancy dimensions diverged"
+        );
+        self.bits.fill(0);
+        for (word, cells) in self.bits.iter_mut().zip(grid.cells.chunks(64)) {
+            *word = cells
+                .iter()
+                .enumerate()
+                .fold(0u64, |bits, (offset, class)| {
+                    if *class == OccupancyClass::Empty {
+                        bits | (1u64 << offset)
+                    } else {
+                        bits
+                    }
+                });
+        }
+    }
+
+    #[inline]
+    fn range_is_free(&self, mut start: usize, mut len: usize) -> bool {
+        while len > 0 {
+            let offset = start % 64;
+            let take = len.min(64 - offset);
+            let mask = bit_mask(offset, take);
+            if self.bits[start / 64] & mask != mask {
+                return false;
+            }
+            start += take;
+            len -= take;
+        }
+        true
+    }
+
+    #[inline]
+    fn clear_range(&mut self, mut start: usize, mut len: usize) {
+        while len > 0 {
+            let offset = start % 64;
+            let take = len.min(64 - offset);
+            self.bits[start / 64] &= !bit_mask(offset, take);
+            start += take;
+            len -= take;
+        }
+    }
+}
+
+#[inline]
+fn bit_mask(offset: usize, len: usize) -> u64 {
+    let low_bits = if len == 64 {
+        u64::MAX
+    } else {
+        (1u64 << len) - 1
+    };
+    low_bits << offset
+}
+
 // ─── Role manifest ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -919,6 +1043,7 @@ fn stage_candidate_region(
     origin_y: u16,
     role: RegionRole,
     grid: &OccupancyGrid,
+    free_cells: &FreeCells,
     config: &NormalizedGeneratorConfig,
     alloc: &IdAllocator,
     ctx: &mut AttemptContext,
@@ -931,7 +1056,7 @@ fn stage_candidate_region(
     ),
     GeneratorError,
 > {
-    if !can_place_footprint(variant, layer, origin_x, origin_y, grid, config)? {
+    if !can_place_footprint(variant, layer, origin_x, origin_y, free_cells, config)? {
         return Err(GeneratorError::OccupancyConflict {
             stage: ErrorStage::Placement,
             detail: "stage_candidate_footprint_unavailable".into(),
@@ -1186,7 +1311,7 @@ fn can_place_footprint(
     layer: u16,
     x: u16,
     y: u16,
-    grid: &OccupancyGrid,
+    free_cells: &FreeCells,
     config: &NormalizedGeneratorConfig,
 ) -> Result<bool, GeneratorError> {
     let end_x = x.checked_add(variant.width).ok_or(
@@ -1209,30 +1334,45 @@ fn can_place_footprint(
     {
         return Ok(false);
     }
-    for dy in 0..variant.height {
-        for dx in 0..variant.width {
-            let cell_x = x.checked_add(dx).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "footprint_cell_x",
-            })?;
-            let cell_y = y.checked_add(dy).ok_or(GeneratorError::ArithmeticOverflow {
-                stage: ErrorStage::Placement,
-                operation: "footprint_cell_y",
-            })?;
-            let cell = GridCoord::new(
-                layer,
-                cell_x,
-                cell_y,
-                config.width(),
-                config.height(),
-                config.layers().2,
-            )?;
-            if grid.get(cell) != Some(OccupancyClass::Empty) {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
+    Ok(free_cells.can_place_rect(
+        layer,
+        x,
+        y,
+        variant.width,
+        variant.height,
+    ))
+}
+
+fn occupy_placement(
+    free_cells: &mut FreeCells,
+    variant: &PrefabVariant,
+    layer: u16,
+    origin_x: u16,
+    origin_y: u16,
+    config: &NormalizedGeneratorConfig,
+) {
+    let spacing = u16::try_from(config.spacing()).unwrap_or(u16::MAX);
+    let min_x = origin_x.saturating_sub(spacing);
+    let min_y = origin_y.saturating_sub(spacing);
+    let end_x = origin_x
+        .saturating_add(variant.width)
+        .saturating_add(spacing)
+        .min(config.width());
+    let end_y = origin_y
+        .saturating_add(variant.height)
+        .saturating_add(spacing)
+        .min(config.height());
+    free_cells.occupy_rect(
+        layer,
+        min_x,
+        min_y,
+        end_x.saturating_sub(min_x),
+        end_y.saturating_sub(min_y),
+    );
+}
+
+fn rollback_placement(free_cells: &mut FreeCells, grid: &OccupancyGrid) {
+    free_cells.rebuild(grid);
 }
 
 fn placement_score(
@@ -1349,11 +1489,12 @@ fn commit_region(
     origin_y: u16,
     role: RegionRole,
     grid: &mut OccupancyGrid,
+    free_cells: &mut FreeCells,
     config: &NormalizedGeneratorConfig,
     alloc: &mut IdAllocator,
     ctx: &mut AttemptContext,
 ) -> Result<PlacedRegion, GeneratorError> {
-    if !can_place_footprint(variant, layer, origin_x, origin_y, grid, config)? {
+    if !can_place_footprint(variant, layer, origin_x, origin_y, free_cells, config)? {
         return Err(GeneratorError::OccupancyConflict {
             stage: ErrorStage::Placement,
             detail: "region_footprint_unavailable".into(),
@@ -1524,6 +1665,7 @@ fn commit_region(
     };
     *grid = staged_grid;
     *alloc = staged_alloc;
+    occupy_placement(free_cells, variant, layer, origin_x, origin_y, config);
     Ok(region)
 }
 
@@ -1533,6 +1675,7 @@ fn place_role_regions(
     candidates: &[(u16, &PrefabVariant)],
     config: &NormalizedGeneratorConfig,
     grid: &mut OccupancyGrid,
+    free_cells: &mut FreeCells,
     placed: &mut Vec<PlacedRegion>,
     factory: SemanticStreamFactory,
     alloc: &mut IdAllocator,
@@ -1560,7 +1703,7 @@ fn place_role_regions(
                 )?;
                 for y in 0..=max_y {
                     for x in 0..=max_x {
-                        if can_place_footprint(variant, layer, x, y, grid, config)? {
+                        if can_place_footprint(variant, layer, x, y, free_cells, config)? {
                             ctx.placement_scan();
                             scored.push(PlacementCandidate {
                                 variant_index,
@@ -1633,16 +1776,25 @@ fn place_role_regions(
                         candidate.y,
                         role,
                         grid,
+                        free_cells,
                         config,
                         alloc,
                         ctx,
                     )?;
+                occupy_placement(
+                    free_cells,
+                    variant,
+                    candidate.layer,
+                    candidate.x,
+                    candidate.y,
+                    config,
+                );
                 // First region on an otherwise empty layer requires no gate.
                 let layer_backbone = backbone.get(&candidate.layer);
                 let connected = if layer_backbone.is_none()
                     || layer_backbone.is_some_and(|items| items.is_empty())
                 {
-                    true
+                    Ok(true)
                 } else {
                     can_connect_to_backbone(
                         &staged_region,
@@ -1651,22 +1803,32 @@ fn place_role_regions(
                         layer_backbone.unwrap(),
                         config,
                         ctx,
-                    )?
+                    )
                 };
-                if connected {
-                    let region = publish_staged_region(
-                        staged_grid,
-                        staged_alloc,
-                        staged_region,
-                        grid,
-                        alloc,
-                    );
-                    placed.push(region);
-                    ctx.region_placed();
-                    region_placed = true;
-                    break;
+                match connected {
+                    Ok(true) => {
+                        let region = publish_staged_region(
+                            staged_grid,
+                            staged_alloc,
+                            staged_region,
+                            grid,
+                            alloc,
+                        );
+                        placed.push(region);
+                        ctx.region_placed();
+                        region_placed = true;
+                        break;
+                    }
+                    Ok(false) => {
+                        // Connectivity failed; discard the staged data and
+                        // restore the exact committed free-cell snapshot.
+                        rollback_placement(free_cells, grid);
+                    }
+                    Err(error) => {
+                        rollback_placement(free_cells, grid);
+                        return Err(error);
+                    }
                 }
-                // Connectivity failed; discard the staged data and try next.
             }
             if !region_placed {
                 return Err(GeneratorError::TopologyInfeasible {
@@ -1742,6 +1904,7 @@ fn place_role_regions(
                 chosen.y,
                 role,
                 grid,
+                free_cells,
                 config,
                 alloc,
                 ctx,
@@ -1782,6 +1945,12 @@ pub(super) fn place_regions(
     )?;
     ctx.transitions_reserved = u64::try_from(transitions.len()).unwrap_or(u64::MAX);
     ctx.end_scope(super::context::TelemetryScope::TransitionReservation);
+    let mut free_cells = FreeCells::new(
+        config.width(),
+        config.height(),
+        config.layers().2,
+        &grid,
+    );
     let endpoint_count = u32::try_from(regions.len()).map_err(|_| {
         GeneratorError::ArithmeticOverflow {
             stage: ErrorStage::Placement,
@@ -1811,6 +1980,7 @@ pub(super) fn place_regions(
             &candidates,
             config,
             &mut grid,
+            &mut free_cells,
             &mut regions,
             factory,
             &mut alloc,
@@ -1895,6 +2065,85 @@ mod tests {
     ) -> SemanticStreamFactory {
         let generator = GeneratorIdentity::new(config, catalog.identity_bytes(), seed);
         SemanticStreamFactory::new(AttemptIdentity::new(generator, 0))
+    }
+
+    #[test]
+    fn free_cells_tracks_cross_word_rectangles_and_rebuilds_after_rollback() {
+        let mut grid = OccupancyGrid::new(70, 3, 2).expect("grid");
+        grid.set(
+            GridCoord::new(0, 63, 0, 70, 3, 2).expect("occupied cell"),
+            OccupancyClass::Region(7),
+        )
+        .expect("occupy grid");
+        let mut free = FreeCells::new(70, 3, 2, &grid);
+
+        assert_eq!(free.bits.len(), grid.cells.len().div_ceil(64));
+        assert!(!free.can_place_rect(0, 62, 0, 4, 1));
+        assert!(free.can_place_rect(1, 62, 0, 4, 1));
+
+        free.occupy_rect(1, 62, 0, 4, 1);
+        assert!(!free.can_place_rect(1, 62, 0, 4, 1));
+        assert!(free.can_place_rect(1, 61, 0, 1, 1));
+        assert!(free.can_place_rect(1, 66, 0, 1, 1));
+
+        rollback_placement(&mut free, &grid);
+        assert!(free.can_place_rect(1, 62, 0, 4, 1));
+        assert!(!free.can_place_rect(2, 0, 0, 1, 1));
+        assert!(!free.can_place_rect(1, 69, 0, 2, 1));
+    }
+
+    #[test]
+    fn committed_region_keeps_free_cells_identical_to_occupancy() {
+        let config = GeneratorConfig::qualified(QualifiedProfile::Minimum)
+            .normalize()
+            .expect("minimum config");
+        let catalog = catalog();
+        let variant_index = catalog
+            .variants()
+            .iter()
+            .position(|variant| variant.tags.iter().any(|tag| tag == "ordinary"))
+            .expect("ordinary variant");
+        let variant = &catalog.variants()[variant_index];
+        let variant_index = u16::try_from(variant_index).expect("variant index");
+        let mut grid = OccupancyGrid::new(
+            config.width(),
+            config.height(),
+            config.layers().2,
+        )
+        .expect("grid");
+        grid.reserve_borders();
+        let mut free = FreeCells::new(
+            config.width(),
+            config.height(),
+            config.layers().2,
+            &grid,
+        );
+        let mut alloc = IdAllocator::new();
+
+        commit_region(
+            variant,
+            variant_index,
+            0,
+            10,
+            10,
+            RegionRole::OrdinaryRoom,
+            &mut grid,
+            &mut free,
+            &config,
+            &mut alloc,
+            &mut AttemptContext::new(TelemetryMode::Off),
+        )
+        .expect("commit region");
+
+        assert_eq!(
+            free,
+            FreeCells::new(
+                config.width(),
+                config.height(),
+                config.layers().2,
+                &grid,
+            )
+        );
     }
 
     #[test]
@@ -2235,6 +2484,7 @@ mod tests {
             2,
             RegionRole::OrdinaryRoom,
             &grid,
+            &FreeCells::new(config.width(), config.height(), config.layers().2, &grid),
             &config,
             &alloc,
             &mut AttemptContext::new(TelemetryMode::Off),
@@ -2336,6 +2586,7 @@ mod tests {
                 4,
                 RegionRole::MajorLandmark,
                 &grid,
+                &FreeCells::new(config.width(), config.height(), config.layers().2, &grid),
                 &config,
                 &alloc,
                 &mut AttemptContext::new(TelemetryMode::Off),
@@ -2425,6 +2676,7 @@ mod tests {
             2,
             RegionRole::MajorLandmark,
             &grid,
+            &FreeCells::new(config.width(), config.height(), config.layers().2, &grid),
             &config,
             &alloc,
             &mut AttemptContext::new(TelemetryMode::Off),
