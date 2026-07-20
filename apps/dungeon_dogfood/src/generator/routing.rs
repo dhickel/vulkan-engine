@@ -128,7 +128,26 @@ impl TileBuffer {
             ));
         }
         *slot = crate::layout::Tile::Void;
-        self.ownership_mut(cell)?.transition = Some(transition);
+        self.mark_transition_cell(cell, transition)
+    }
+
+    fn mark_transition_cell(
+        &mut self,
+        cell: GridCoord,
+        transition: TransitionId,
+    ) -> Result<(), GeneratorError> {
+        let owner = &mut self.ownership_mut(cell)?.transition;
+        if owner.is_some_and(|existing| existing != transition) {
+            return Err(materialization_error(
+                "transition_ownership_conflict",
+                format!(
+                    "transition={} cell={cell} existing={:?}",
+                    transition.raw(),
+                    owner.map(TransitionId::raw)
+                ),
+            ));
+        }
+        *owner = Some(transition);
         Ok(())
     }
 
@@ -160,6 +179,45 @@ impl TileBuffer {
                 format!("l={layer} x={x} y={y}"),
             )),
         }
+    }
+
+    /// After all rooms, corridors, ramps, and borders are materialized, fill
+    /// void cells orthogonal-adjacent to walkable tiles with Wall tiles so
+    /// corridors and room exteriors produce wall geometry.
+    pub(super) fn seal_corridor_walls(&mut self) -> Result<(), GeneratorError> {
+        let mut walls = Vec::new();
+        for layer in 0..self.layers {
+            for y in 1..self.height.saturating_sub(1) {
+                for x in 1..self.width.saturating_sub(1) {
+                    if self.get_tile(layer, x, y) != Some(crate::layout::Tile::Void) {
+                        continue;
+                    }
+                    let cell = GridCoord { layer, x, y };
+                    if self
+                        .ownership(cell)
+                        .is_some_and(|ownership| ownership.transition.is_some())
+                        || layer.checked_sub(1).is_some_and(|lower_layer| {
+                            self.get_tile(lower_layer, x, y).is_some_and(|tile| {
+                                tile == crate::layout::Tile::Void || layout_tile_is_ramp(tile)
+                            })
+                        })
+                    {
+                        continue;
+                    }
+                    let neighbors = [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)];
+                    if neighbors.into_iter().any(|(neighbor_x, neighbor_y)| {
+                        self.get_tile(layer, neighbor_x, neighbor_y)
+                            .is_some_and(layout_tile_is_walkable)
+                    }) {
+                        walls.push(cell);
+                    }
+                }
+            }
+        }
+        for cell in walls {
+            self.set_tile(cell.layer, cell.x, cell.y, crate::layout::Tile::Wall)?;
+        }
+        Ok(())
     }
 }
 
@@ -833,6 +891,10 @@ fn layout_tile_is_ramp(tile: crate::layout::Tile) -> bool {
     )
 }
 
+fn layout_tile_is_walkable(tile: crate::layout::Tile) -> bool {
+    tile == crate::layout::Tile::Floor || layout_tile_is_ramp(tile)
+}
+
 fn expanded_path(
     path: &[GridCoord],
     width: u16,
@@ -1094,6 +1156,42 @@ fn materialization_error(constraint: &'static str, detail: String) -> GeneratorE
     }
 }
 
+/// Tag every reserved transition cell plus inferred landing headroom so final
+/// wall sealing cannot close a vertical opening.
+fn mark_transition_ownership(
+    transitions: &[super::ir::TransitionReservation],
+    buffer: &mut TileBuffer,
+) -> Result<(), GeneratorError> {
+    for transition in transitions {
+        for cell in transition
+            .ramp_run_cells
+            .iter()
+            .chain(&transition.upper_opening_cells)
+            .chain(&transition.landing_cells)
+            .chain(&transition.headroom_cells)
+        {
+            buffer.mark_transition_cell(*cell, transition.id)?;
+        }
+        for landing in &transition.landing_cells {
+            if let Some(headroom_layer) = landing
+                .layer
+                .checked_add(1)
+                .filter(|layer| *layer < buffer.layers)
+            {
+                buffer.mark_transition_cell(
+                    GridCoord {
+                        layer: headroom_layer,
+                        x: landing.x,
+                        y: landing.y,
+                    },
+                    transition.id,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Open the lower-layer cell beneath each upper landing. Leaving the prefab's
 /// wall support there blocks the runtime capsule before it can finish climbing
 /// R2 and step onto the upper floor.
@@ -1176,8 +1274,10 @@ pub(super) fn materialize_topology(
     carve_corridors(topology, &mut buffer, config)?;
     ctx.corridor_carved();
     super::ramps::materialize_all_transitions(&topology.transitions, config, &mut buffer)?;
+    mark_transition_ownership(&topology.transitions, &mut buffer)?;
     clear_transition_crest_exits(&topology.transitions, &mut buffer, config)?;
     buffer.seal_borders()?;
+    buffer.seal_corridor_walls()?;
     Ok(buffer)
 }
 
@@ -1239,6 +1339,79 @@ mod tests {
         assert!(buffer.set_tile(0, 1, 1, crate::layout::Tile::Wall).is_err());
         assert!(buffer.set_tile(2, 0, 0, crate::layout::Tile::Floor).is_err());
         assert_eq!(buffer.get_tile(2, 0, 0), None);
+    }
+
+    #[test]
+    fn corridor_wall_sealing_is_orthogonal_walkable_and_border_scoped() {
+        let mut buffer = TileBuffer::new(7, 7, 1).expect("buffer");
+        buffer
+            .set_tile(0, 3, 3, crate::layout::Tile::Floor)
+            .expect("floor");
+        buffer
+            .set_tile(0, 5, 5, crate::layout::Tile::RampNorth(0))
+            .expect("ramp");
+
+        buffer.seal_corridor_walls().expect("seal corridor walls");
+
+        for (x, y) in [(3, 2), (4, 3), (3, 4), (2, 3), (5, 4), (4, 5)] {
+            assert_eq!(buffer.get_tile(0, x, y), Some(crate::layout::Tile::Wall));
+        }
+        assert_eq!(buffer.get_tile(0, 2, 2), Some(crate::layout::Tile::Void));
+        assert_eq!(buffer.get_tile(0, 6, 5), Some(crate::layout::Tile::Void));
+    }
+
+    #[test]
+    fn corridor_wall_sealing_preserves_vertical_openings() {
+        let mut buffer = TileBuffer::new(7, 7, 3).expect("buffer");
+        buffer
+            .set_tile(0, 3, 3, crate::layout::Tile::RampEast(1))
+            .expect("lower ramp");
+        buffer
+            .set_tile(1, 3, 2, crate::layout::Tile::Floor)
+            .expect("upper floor beside ramp opening");
+        buffer
+            .set_tile(2, 4, 3, crate::layout::Tile::Floor)
+            .expect("floor beside stacked void opening");
+        let headroom = GridCoord {
+            layer: 2,
+            x: 5,
+            y: 5,
+        };
+        buffer
+            .set_tile(2, 5, 4, crate::layout::Tile::Floor)
+            .expect("floor beside transition headroom");
+        buffer
+            .mark_transition_cell(headroom, TransitionId(0))
+            .expect("headroom ownership");
+
+        let transition_owned = GridCoord {
+            layer: 0,
+            x: 2,
+            y: 3,
+        };
+        buffer
+            .mark_transition_cell(transition_owned, TransitionId(0))
+            .expect("transition ownership");
+        buffer
+            .set_tile(0, 1, 3, crate::layout::Tile::Floor)
+            .expect("floor beside transition-owned opening");
+
+        buffer.seal_corridor_walls().expect("seal corridor walls");
+
+        assert_eq!(buffer.get_tile(1, 3, 3), Some(crate::layout::Tile::Void));
+        assert_eq!(buffer.get_tile(2, 3, 3), Some(crate::layout::Tile::Void));
+        assert_eq!(
+            buffer.get_tile(headroom.layer, headroom.x, headroom.y),
+            Some(crate::layout::Tile::Void)
+        );
+        assert_eq!(
+            buffer.get_tile(
+                transition_owned.layer,
+                transition_owned.x,
+                transition_owned.y
+            ),
+            Some(crate::layout::Tile::Void)
+        );
     }
 
     #[test]

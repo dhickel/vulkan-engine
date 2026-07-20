@@ -167,6 +167,8 @@ Light presets (from content_pack.toml):
 | `level_02_ramps` | Authored | All 4 ramp directions + multi-layer |
 | `level_03_lighting` | Authored | Dense light marker placement |
 
+Procedural corridor floors and ramps are enclosed by orthogonally adjacent wall tiles during final topology materialization. Multi-layer ramp openings and landing headroom remain open.
+
 ## Known Limitations (Sprint 11)
 
 1. PBR material definitions (texture set naming, base_path discovery) live in content_pack.toml, not in the engine PackageManifest

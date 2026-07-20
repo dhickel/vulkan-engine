@@ -840,7 +840,7 @@ y_offset = 0.0
     fn missing_required_material_id_is_fatal() {
         let canonical = include_str!("../assets/content_pack.toml");
         let broken = canonical.replace(
-            "[[materials]]\nid = \"stone_floor\"\nfamily = \"pbr\"\nbase_path = \"apps/dungeon_dogfood/assets/textures/pbr/stone_floor\"\n",
+            "[[materials]]\nid = \"stone_floor\"\nfamily = \"pbr\"\nbase_path = \"assets/dungeon_crawler_png/KB3D_DGC_STDarkPolishRectFloor\"\n",
             "",
         );
         let temp = write_temp_toml(&broken);

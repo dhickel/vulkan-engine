@@ -409,7 +409,7 @@ fn build_manifest_material(
     let mut desc = fallback_desc.clone();
     let material_base_path = resolve_content_path(material_spec.base_path.as_path());
 
-    let fast_startup = env_flag_or(FAST_STARTUP_ENV, true);
+    let fast_startup = env_flag_or(FAST_STARTUP_ENV, false);
     if fast_startup {
         log::info!(
             "Fast startup enabled ({}=1): loading base-color maps only for material '{}'.",
