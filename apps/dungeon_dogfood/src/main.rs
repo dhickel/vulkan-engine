@@ -11,7 +11,7 @@ mod scene_seed;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use collision::CollisionWorld;
 use content::{load_content_pack, resolve_content_path};
@@ -19,7 +19,7 @@ use engine::camera::{Camera, FPSController};
 use engine::events::{runtime_event_bus, DispatchReport, EventBus};
 use engine::frame::{FixedStepClock, FixedStepConfig, FrameClock};
 use engine::input::{
-    ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
+    ActionId, ActionMap, InputActionEventEmitter, InputSystem, LayerDescriptor, LayerPriority,
 };
 use generator::{generate, GeneratorConfig, GeneratorError};
 use layout::{load_level_file, tile_to_world, ParsedLevel};
@@ -29,7 +29,8 @@ use player::{CameraIntentGuard, PlayerState, PLAYER_EYE_HEIGHT};
 use renderer::api::config::{CompressionConfig, TextureCompressionMode};
 use renderer::api::FrameSerial;
 use renderer::prelude::{
-    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureStatus,
+    AssetManifestMode, AssetPolicyConfig, CaptureTarget, FrameCaptureSequence, FrameCaptureSource,
+    FrameCaptureStatus,
 };
 use renderer::{FrameRenderOutcome, RendererConfig, RendererError};
 use scene_seed::{renderer_visual_tuning, LevelScene};
@@ -51,6 +52,8 @@ const LEVEL_01_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_01.txt";
 const LEVEL_02_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_02_ramps.txt";
 const LEVEL_03_PATH: &str = "apps/dungeon_dogfood/assets/levels/level_03_lighting.txt";
 const CONTENT_PACK_PATH: &str = "apps/dungeon_dogfood/assets/content_pack.toml";
+const NOCLIP_TOGGLE_ACTION: &str = "noclip.toggle";
+const CAPTURE_SCREENSHOT_ACTION: &str = "capture.screenshot";
 
 /// Fixed simulation timestep for physics and gameplay logic (60 Hz).
 const FIXED_DT: f32 = 1.0 / 60.0;
@@ -195,6 +198,12 @@ enum AppError {
     Window(#[from] winit::error::OsError),
     #[error("failed to initialize renderer: {0}")]
     RendererInit(#[source] RendererError),
+    #[error("failed to create capture directory '{}': {source}", path.display())]
+    CaptureDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to seed level scene before entering event loop: {0}")]
     SceneSeed(#[from] scene_seed::SceneSeedError),
     #[error("failed to generate level (seed={seed}): {source}")]
@@ -276,6 +285,18 @@ fn run() -> Result<(), AppError> {
     };
 
     let mut renderer = renderer::Renderer::new(config, &window).map_err(AppError::RendererInit)?;
+    let manual_capture_dir = manual_capture_run_dir();
+    std::fs::create_dir_all(&manual_capture_dir).map_err(|source| AppError::CaptureDirectory {
+        path: manual_capture_dir.clone(),
+        source,
+    })?;
+    renderer
+        .configure_manual_frame_capture_dir(Some(manual_capture_dir.clone()))
+        .map_err(AppError::RendererInit)?;
+    log::info!(
+        "Manual draw captures will be saved under {}",
+        manual_capture_dir.display()
+    );
     let mut app_events = runtime_event_bus();
     events::install_dogfood_event_logger(&mut app_events);
     let audio_report = audio_bridge::run_startup_audio_probe(
@@ -326,6 +347,7 @@ fn run() -> Result<(), AppError> {
 
     let mut last_window_size = window.inner_size();
     let mut resize_pending = false;
+    let mut reported_manual_captures = HashSet::new();
     window.request_redraw();
 
     event_loop
@@ -404,6 +426,7 @@ fn run() -> Result<(), AppError> {
                                 &mut app_events,
                                 &mut frame_clock,
                                 &mut fixed_clock,
+                                &mut reported_manual_captures,
                                 current_size.width,
                                 current_size.height,
                                 false,
@@ -455,6 +478,8 @@ fn install_app_fps_input(input: &mut InputSystem) -> FPSController {
     map.bind_key("move.right", KeyCode::KeyD);
     map.bind_key("move.up", KeyCode::Space);
     map.bind_key("move.down", KeyCode::ShiftLeft);
+    map.bind_key(NOCLIP_TOGGLE_ACTION, KeyCode::KeyF);
+    map.bind_key(CAPTURE_SCREENSHOT_ACTION, KeyCode::KeyC);
 
     input.add_layer(
         LayerDescriptor::new("dogfood-fps-actions", LayerPriority(10)),
@@ -489,6 +514,7 @@ fn render_frame(
     events: &mut EventBus,
     frame_clock: &mut FrameClock,
     fixed_clock: &mut FixedStepClock,
+    reported_manual_captures: &mut HashSet<PathBuf>,
     viewport_width: u32,
     viewport_height: u32,
     headless: bool,
@@ -496,6 +522,26 @@ fn render_frame(
     let begin_report = engine::frame::begin_app_frame(input, action_events, events, frame_clock);
     log_dispatch_failures(begin_report.input_dispatch, "dogfood input");
     log_dispatch_failures(begin_report.frame_started, "dogfood lifecycle");
+
+    let noclip_toggle = input
+        .snapshot()
+        .action_just_pressed(&ActionId::from(NOCLIP_TOGGLE_ACTION));
+    let capture_screenshot = input
+        .snapshot()
+        .action_just_pressed(&ActionId::from(CAPTURE_SCREENSHOT_ACTION));
+
+    if noclip_toggle {
+        player.noclip = !player.noclip;
+        log::info!(
+            "Noclip {}",
+            if player.noclip { "enabled" } else { "disabled" }
+        );
+    }
+
+    if capture_screenshot {
+        renderer.queue_manual_frame_capture(CaptureTarget::Draw)?;
+        log::info!("Manual draw capture triggered");
+    }
 
     // Accumulate real time, sample display-frame input once, then advance the
     // authoritative player state in fixed simulation steps. Applying the FPS
@@ -579,6 +625,7 @@ fn render_frame(
     } else {
         renderer.render_scene_with_view(scene, view)?
     };
+    log_manual_capture_status(renderer, reported_manual_captures);
     let end_report = engine::frame::end_app_frame(events, begin_report.frame.index);
     log_dispatch_failures(end_report.frame_ended, "dogfood lifecycle");
 
@@ -593,6 +640,57 @@ fn render_frame(
     }
 
     Ok(outcome)
+}
+
+fn log_manual_capture_status(
+    renderer: &renderer::Renderer,
+    reported_paths: &mut HashSet<PathBuf>,
+) {
+    match renderer.last_frame_capture_status() {
+        Some(FrameCaptureStatus::Succeeded {
+            output_path,
+            source: FrameCaptureSource::Manual,
+            ..
+        }) if reported_paths.insert(output_path.clone()) => {
+            log::info!("Manual draw capture completed: {}", output_path.display());
+        }
+        Some(FrameCaptureStatus::Failed {
+            output_path,
+            message,
+            source: FrameCaptureSource::Manual,
+            ..
+        }) if reported_paths.insert(output_path.clone()) => {
+            log::error!(
+                "Manual draw capture failed for {}: {}",
+                output_path.display(),
+                message
+            );
+        }
+        Some(FrameCaptureStatus::BackendNotImplemented {
+            output_path,
+            target,
+            source: FrameCaptureSource::Manual,
+            ..
+        }) if reported_paths.insert(output_path.clone()) => {
+            log::error!(
+                "Manual capture target '{}' is not implemented for {}",
+                target.as_label(),
+                output_path.display()
+            );
+        }
+        _ => {}
+    }
+}
+
+fn manual_capture_run_dir() -> PathBuf {
+    let timestamp_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    PathBuf::from("captures").join(format!(
+        "dungeon-dogfood-{timestamp_millis}-pid{}",
+        std::process::id()
+    ))
 }
 
 fn interpolated_player_position(
@@ -1120,6 +1218,7 @@ fn run_headless(
         last_frame.saturating_add(120).max(180)
     };
     let mut succeeded_paths = HashSet::new();
+    let mut reported_manual_captures = HashSet::new();
 
     for frame_num in 0..frame_budget {
         match render_frame(
@@ -1136,6 +1235,7 @@ fn run_headless(
             &mut app_events,
             &mut frame_clock,
             &mut fixed_clock,
+            &mut reported_manual_captures,
             1280,
             720,
             true,

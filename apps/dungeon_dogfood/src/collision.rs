@@ -112,6 +112,11 @@ pub fn resolve_player_step(player: &mut PlayerState, world: &CollisionWorld, dt:
     }
 
     let desired = player.velocity * dt;
+    if player.noclip {
+        player.position += desired;
+        return;
+    }
+
     let mut pos = player.position + Vec3::new(desired.x, 0.0, desired.z);
 
     for _ in 0..COLLISION_MAX_ITERS {
@@ -450,6 +455,19 @@ mod tests {
                 wall.tile
             );
         }
+    }
+
+    #[test]
+    fn noclip_applies_raw_velocity_without_collision_or_ground_resolution() {
+        let level = parsed_level(1, 1, vec![Tile::Wall]);
+        let world = CollisionWorld::from_level(&level);
+        let mut player = PlayerState::new(Vec3::new(0.5, PLAYER_EYE_HEIGHT, -0.5));
+        player.noclip = true;
+        player.velocity = Vec3::new(2.0, 3.0, -4.0);
+
+        resolve_player_step(&mut player, &world, 0.25);
+
+        assert_eq!(player.position, Vec3::new(1.0, PLAYER_EYE_HEIGHT + 0.75, -1.5));
     }
 
     #[test]

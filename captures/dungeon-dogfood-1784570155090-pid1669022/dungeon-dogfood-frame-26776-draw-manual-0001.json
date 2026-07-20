@@ -1,0 +1,16 @@
+{
+  "capture_target": "draw",
+  "captured_at_unix_ms": 1784570215301,
+  "color_conversion": "rgba16f-linear-clamped-to-rgba8",
+  "extent": {
+    "height": 720,
+    "width": 1280
+  },
+  "format": "R16G16B16A16_SFLOAT",
+  "frame_number": 26776,
+  "png_path": "captures/dungeon-dogfood-1784570155090-pid1669022/dungeon-dogfood-frame-26776-draw-manual-0001.png",
+  "row_layout": "vkCmdCopyImageToBuffer tightly packed (buffer_row_length=0)",
+  "sequence_index": null,
+  "source": "Manual",
+  "status": "succeeded"
+}

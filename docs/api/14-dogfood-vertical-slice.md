@@ -81,7 +81,8 @@ main.rs
   └── Run event loop (windowed) or headless capture loop
         ├── engine::input::route_platform_input_to_app → app-owned input queue
         ├── engine::frame::begin_app_frame → input dispatch, action events, FrameStarted
-        ├── FPS camera intent → player collision (player.rs, collision.rs)
+        ├── FPS camera intent → player collision or noclip movement (player.rs, collision.rs)
+        ├── C action → renderer manual draw capture
         ├── engine::render::camera_view_for_size from the corrected app-owned camera
         ├── Render scene frame through render_scene_with_view / render_scene_headless_with_view
         ├── engine::frame::end_app_frame → FrameEnded
@@ -92,8 +93,11 @@ The active dogfood path now uses `engine::input::route_platform_input_to_app`, `
 
 ## Controls (Windowed)
 
-- **WASD** or **Arrow Keys**: Move
+- **WASD**: Move
+- **Space / Left Shift**: Move up/down
 - **Mouse**: Look around
+- **F**: Toggle noclip fly mode (bypasses walls, floors, and ramps)
+- **C**: Capture the draw target to a timestamped run directory under `captures/`
 - **Esc**: Exit
 
 ## Headless Draw Capture

@@ -3,7 +3,7 @@ use glam::{Vec2, Vec3};
 pub const PLAYER_HEIGHT: f32 = 1.8;
 pub const PLAYER_RADIUS: f32 = 0.3;
 pub const PLAYER_EYE_HEIGHT: f32 = 1.6;
-pub const MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME: f32 = 1.0;
+pub const MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME: f32 = 3.0;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CameraIntentGuard {
@@ -19,6 +19,7 @@ pub enum CameraIntentGuard {
 pub struct PlayerState {
     pub position: Vec3,
     pub velocity: Vec3,
+    pub noclip: bool,
 }
 
 impl PlayerState {
@@ -26,6 +27,7 @@ impl PlayerState {
         Self {
             position: spawn_eye_position,
             velocity: Vec3::ZERO,
+            noclip: false,
         }
     }
 
@@ -54,7 +56,12 @@ impl PlayerState {
             horizontal_delta
         };
 
-        self.velocity = Vec3::new(applied_horizontal.x / dt, 0.0, applied_horizontal.y / dt);
+        let vertical_velocity = if self.noclip { delta.y / dt } else { 0.0 };
+        self.velocity = Vec3::new(
+            applied_horizontal.x / dt,
+            vertical_velocity,
+            applied_horizontal.y / dt,
+        );
 
         if attempted_displacement > MAX_HORIZONTAL_DISPLACEMENT_PER_FRAME {
             CameraIntentGuard::Clamped {
@@ -85,11 +92,11 @@ mod tests {
             guard,
             CameraIntentGuard::Clamped {
                 attempted_displacement: 5.0,
-                applied_displacement: 1.0,
+                applied_displacement: 3.0,
             }
         );
-        assert!((player.velocity.x - 0.6).abs() < 1e-6);
-        assert!((player.velocity.z - 0.8).abs() < 1e-6);
+        assert!((player.velocity.x - 1.8).abs() < 1e-6);
+        assert!((player.velocity.z - 2.4).abs() < 1e-6);
     }
 
     #[test]
@@ -100,5 +107,16 @@ mod tests {
 
         assert_eq!(guard, CameraIntentGuard::RejectedNonFinite);
         assert_eq!(player.velocity, Vec3::ZERO);
+    }
+
+    #[test]
+    fn noclip_preserves_vertical_camera_intent() {
+        let mut player = PlayerState::new(Vec3::ZERO);
+        player.noclip = true;
+
+        let guard = player.ingest_camera_intent(Vec3::new(0.0, 2.0, 0.0), 0.5);
+
+        assert_eq!(guard, CameraIntentGuard::Accepted);
+        assert_eq!(player.velocity, Vec3::new(0.0, 4.0, 0.0));
     }
 }
