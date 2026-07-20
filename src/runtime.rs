@@ -257,6 +257,7 @@ fn run_headless(
     for _ in 0..plan.frame_budget {
         match renderer.render_scene_headless(&mut scene) {
             Ok(FrameRenderOutcome::Rendered)
+            | Ok(FrameRenderOutcome::SkippedAcquireUnavailable)
             | Ok(FrameRenderOutcome::SkippedResizePending)
             | Ok(FrameRenderOutcome::SubmittedNotPresented)
             | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}

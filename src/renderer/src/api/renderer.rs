@@ -48,6 +48,9 @@ pub struct EnvironmentRuntimeStatus {
 pub enum FrameRenderOutcome {
     /// Frame was rendered and presented successfully.
     Rendered,
+    /// Frame was skipped because no swapchain image became available within the bounded acquire
+    /// budget. This is transient and does not request a swapchain rebuild.
+    SkippedAcquireUnavailable,
     /// Frame was skipped because a resize is pending.
     SkippedResizePending,
     /// Frame reached GPU submission, but an out-of-date swapchain prevented presentation.
@@ -530,6 +533,12 @@ impl Renderer {
         }
 
         let new_extent = Extent2D::default().width(width).height(height);
+        if !self.runtime.resize_requested()
+            && self.runtime.core.swapchain_owner.installed_extent() == Some(new_extent)
+        {
+            return Ok(());
+        }
+
         self.runtime.core.swapchain_owner.request_resize(new_extent);
         if width == 0 || height == 0 {
             return Ok(());
@@ -1461,6 +1470,9 @@ fn renderer_error_from_backend(err: vk_render::VkRenderError) -> RendererError {
 fn frame_outcome_from_backend(outcome: vk_render::VkFrameRenderOutcome) -> FrameRenderOutcome {
     match outcome {
         vk_render::VkFrameRenderOutcome::Rendered => FrameRenderOutcome::Rendered,
+        vk_render::VkFrameRenderOutcome::SkippedAcquireUnavailable => {
+            FrameRenderOutcome::SkippedAcquireUnavailable
+        }
         vk_render::VkFrameRenderOutcome::SkippedResizePending => {
             FrameRenderOutcome::SkippedResizePending
         }
@@ -1654,6 +1666,10 @@ mod tests {
         assert_eq!(
             frame_outcome_from_backend(BackendOutcome::PresentedSuboptimal),
             FrameRenderOutcome::PresentedSuboptimal
+        );
+        assert_eq!(
+            frame_outcome_from_backend(BackendOutcome::SkippedAcquireUnavailable),
+            FrameRenderOutcome::SkippedAcquireUnavailable
         );
         assert_eq!(
             frame_outcome_from_backend(BackendOutcome::SkippedResizePending),

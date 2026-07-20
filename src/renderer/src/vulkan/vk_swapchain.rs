@@ -294,6 +294,11 @@ impl SwapchainOwner {
         self.state.is_usable() && self.swapchain.is_some()
     }
 
+    /// Extent of the currently installed swapchain, if any.
+    pub(crate) fn installed_extent(&self) -> Option<vk::Extent2D> {
+        self.swapchain.as_ref().map(|swapchain| swapchain.extent)
+    }
+
     /// Returns the current swapchain generation, if any.
     #[allow(dead_code)]
     pub(crate) fn current_generation(&self) -> Option<SwapchainGeneration> {

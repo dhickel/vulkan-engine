@@ -24,6 +24,7 @@ This chapter is for students, hobbyists, and indie developers using the facade r
   dispatching renderer-owned input/camera/lifecycle state.
 - `FrameRenderOutcome` must be handled exhaustively:
   - `Rendered`
+  - `SkippedAcquireUnavailable`
   - `SkippedResizePending`
   - `SubmittedNotPresented`
   - `PresentedSuboptimal`
@@ -63,6 +64,9 @@ renderer.end_frame(frame)?;
 match outcome {
     FrameRenderOutcome::Rendered => {
         // normal frame bookkeeping
+    }
+    FrameRenderOutcome::SkippedAcquireUnavailable => {
+        // no image became available within the bounded acquire budget; retry next frame
     }
     FrameRenderOutcome::SkippedResizePending => {
         // wait for resize handling and keep loop alive
@@ -117,7 +121,7 @@ Every loop tick:
   or route_platform_input + queue_routed_input_event for app-owned input
   if resize event: call renderer.resize
   render one frame (single-call, explicit API, or caller-view API)
-  handle Rendered vs SkippedResizePending
+  handle Rendered vs transient acquire skips vs SkippedResizePending
 ```
 
 ## 5. Best Practices
@@ -134,6 +138,7 @@ Every loop tick:
 - Calling `render_scene(...)` while an explicit frame is open returns `RendererError::InvalidState`.
 - Calling `begin_frame(...)` twice without `end_frame(...)` returns invalid state.
 - Calling `render_scene_in_frame(...)` twice for one `FrameContext` is invalid.
+- `SkippedAcquireUnavailable` is transient and does not request a resize or rebuild; keep the loop alive and retry a later frame.
 - Resize flow can produce repeated `SkippedResizePending` outcomes until resize is serviced.
 - `SubmittedNotPresented` means queue submission succeeded but presentation did not reach the
   presentation engine because the swapchain was out of date.

@@ -34,8 +34,9 @@ Defined at [`renderer.rs:145`](../src/renderer/src/api/renderer.rs:145). Pumps a
 
 ```rust
 pub enum FrameRenderOutcome {
-    Rendered,              // frame completed (and presented when windowed)
-    SkippedResizePending,  // skipped because swapchain needs rebuild
+    Rendered,                    // frame completed (and presented when windowed)
+    SkippedAcquireUnavailable,   // bounded acquire timed out; retry a later frame
+    SkippedResizePending,        // skipped because swapchain needs rebuild
     SubmittedNotPresented, // GPU submit succeeded; out-of-date swapchain was not presented
     PresentedSuboptimal,   // presented, but acquire/present requested a rebuild
 }

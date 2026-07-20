@@ -713,6 +713,7 @@ fn run_headless_demo(
     for _ in 0..frame_budget {
         match renderer.render_scene_headless(&mut scene) {
             Ok(FrameRenderOutcome::Rendered)
+            | Ok(FrameRenderOutcome::SkippedAcquireUnavailable)
             | Ok(FrameRenderOutcome::SkippedResizePending)
             | Ok(FrameRenderOutcome::SubmittedNotPresented)
             | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}

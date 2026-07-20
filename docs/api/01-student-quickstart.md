@@ -29,6 +29,7 @@ author/validate project package data -> run the root launcher with `cargo run --
 - App-owned render path: `render_scene_with_view(...)` or `render_scene_headless_with_view(...)` with a caller-provided `CameraView`
 - Frame outcomes are explicit:
   - `FrameRenderOutcome::Rendered`
+  - `FrameRenderOutcome::SkippedAcquireUnavailable`
   - `FrameRenderOutcome::SkippedResizePending`
   - `FrameRenderOutcome::SubmittedNotPresented`
   - `FrameRenderOutcome::PresentedSuboptimal`

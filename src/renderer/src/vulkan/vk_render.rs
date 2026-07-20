@@ -185,6 +185,7 @@ pub struct VkRender {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum VkFrameRenderOutcome {
     Rendered,
+    SkippedAcquireUnavailable,
     SkippedResizePending,
     SubmittedNotPresented,
     PresentedSuboptimal,
@@ -2311,7 +2312,7 @@ impl VkRenderCore {
 
         // 2. Acquire frame resources, synchronize ownership, and bind present target.
         let acquire_start = Instant::now();
-        let Some(frame) = (|| {
+        let frame = (|| {
             let mut ctx = FrameLifecycleContext {
                 device: &self.device,
                 queues: &self.vulkan_cache.queues,
@@ -2327,27 +2328,42 @@ impl VkRenderCore {
                 gpu_timing: &mut self.gpu_timing,
             };
             frame_mod::acquire_frame_slot(&mut ctx)
-        })()? else {
-            self.frame_timing_snapshot = DebugTimingSnapshot {
-                gpu_supported: self.gpu_timing.supported,
-                frame_cpu_ms: elapsed_ms(frame_start),
-                frame_gpu_ms: self.gpu_timing.latest_frame_gpu_ms,
-                descriptor_stats: Some(frame_mod::aggregate_descriptor_stats(&self.presentation)),
-                stage_timings: vec![
-                    DebugTimingRow {
-                        label: "transfer_prepare",
-                        cpu_ms: transfer_ms,
-                        gpu_ms: None,
-                    },
-                    DebugTimingRow {
-                        label: "acquire_frame",
-                        cpu_ms: elapsed_ms(acquire_start),
-                        gpu_ms: None,
-                    },
-                ],
-                pass_timings: Vec::new(),
-            };
-            return Ok(VkFrameRenderOutcome::SkippedResizePending);
+        })()?;
+        let frame = match frame {
+            frame_mod::FrameSlotAcquireOutcome::Acquired(frame) => frame,
+            frame_mod::FrameSlotAcquireOutcome::TransientUnavailable
+            | frame_mod::FrameSlotAcquireOutcome::ResizePending => {
+                self.frame_timing_snapshot = DebugTimingSnapshot {
+                    gpu_supported: self.gpu_timing.supported,
+                    frame_cpu_ms: elapsed_ms(frame_start),
+                    frame_gpu_ms: self.gpu_timing.latest_frame_gpu_ms,
+                    descriptor_stats: Some(frame_mod::aggregate_descriptor_stats(
+                        &self.presentation,
+                    )),
+                    stage_timings: vec![
+                        DebugTimingRow {
+                            label: "transfer_prepare",
+                            cpu_ms: transfer_ms,
+                            gpu_ms: None,
+                        },
+                        DebugTimingRow {
+                            label: "acquire_frame",
+                            cpu_ms: elapsed_ms(acquire_start),
+                            gpu_ms: None,
+                        },
+                    ],
+                    pass_timings: Vec::new(),
+                };
+                return Ok(match frame {
+                    frame_mod::FrameSlotAcquireOutcome::TransientUnavailable => {
+                        VkFrameRenderOutcome::SkippedAcquireUnavailable
+                    }
+                    frame_mod::FrameSlotAcquireOutcome::ResizePending => {
+                        VkFrameRenderOutcome::SkippedResizePending
+                    }
+                    frame_mod::FrameSlotAcquireOutcome::Acquired(_) => unreachable!(),
+                });
+            }
         };
         let acquire_ms = elapsed_ms(acquire_start);
         let frame_fence_wait_ms = frame.frame_fence_wait_ms;

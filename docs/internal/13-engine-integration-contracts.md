@@ -159,7 +159,7 @@ Mapping summary:
 | `AcquireClass::DeviceLost` | `wsi_outcome class=device_lost operation=acquire` | `RendererError::DeviceLost` | Require renderer recreation |
 | `PresentClass::DeviceLost` | `wsi_outcome class=device_lost operation=present` | `RendererError::DeviceLost` | Require renderer recreation |
 
-**Compatibility note:** The public `FrameRenderOutcome` variants (`Rendered`,
-`SkippedResizePending`, `SubmittedNotPresented`, `PresentedSuboptimal`) are
-unchanged. Surface-lost and device-lost errors surface through the existing
-`RendererError` variants rather than introducing new outcome codes.
+**Compatibility note:** Existing public `FrameRenderOutcome` variants are retained. A bounded
+`SkippedAcquireUnavailable` outcome distinguishes transient `NOT_READY`/`TIMEOUT` exhaustion from
+`SkippedResizePending`; transient exhaustion never requests a swapchain rebuild. Surface-lost and
+device-lost errors still surface through the existing `RendererError` variants.

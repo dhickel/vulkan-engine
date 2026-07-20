@@ -423,7 +423,8 @@ fn run() -> Result<(), AppError> {
                                         );
                                     }
                                 }
-                                Ok(FrameRenderOutcome::SubmittedNotPresented)
+                                Ok(FrameRenderOutcome::SkippedAcquireUnavailable)
+                                | Ok(FrameRenderOutcome::SubmittedNotPresented)
                                 | Ok(FrameRenderOutcome::PresentedSuboptimal) => {
                                     // Continue rendering; presentation suboptimality is not a fatal state.
                                 }
@@ -1140,6 +1141,7 @@ fn run_headless(
             true,
         ) {
             Ok(FrameRenderOutcome::Rendered)
+            | Ok(FrameRenderOutcome::SkippedAcquireUnavailable)
             | Ok(FrameRenderOutcome::SkippedResizePending)
             | Ok(FrameRenderOutcome::SubmittedNotPresented)
             | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}

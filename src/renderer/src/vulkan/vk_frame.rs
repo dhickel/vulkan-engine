@@ -36,6 +36,13 @@ pub(crate) struct FrameAcquire {
     pub swapchain_acquire_ms: f32,
 }
 
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum FrameSlotAcquireOutcome {
+    Acquired(FrameAcquire),
+    TransientUnavailable,
+    ResizePending,
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum FrameTransactionState {
     Acquired,
@@ -144,7 +151,7 @@ impl PresentFrameOutcome {
 // ---------------------------------------------------------------------------
 
 pub(crate) const ACQUIRE_STAGE_SPIKE_WARN_MS: f32 = 20.0;
-pub(crate) const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 1_000_000;
+pub(crate) const SWAPCHAIN_ACQUIRE_TIMEOUT_NS: u64 = 16_000_000;
 pub(crate) const SWAPCHAIN_ACQUIRE_MAX_RETRIES_PER_FRAME: u32 = 3;
 
 // ---------------------------------------------------------------------------
@@ -322,11 +329,12 @@ pub(crate) unsafe fn acquire_swapchain_image_index(
 // Frame slot acquisition
 // ---------------------------------------------------------------------------
 
-/// Reserve frame resources, synchronize CPU/GPU ownership, and bind acquired present target.
-/// Returns Ok(Some(FrameAcquire)) on success, Ok(None) on retry/skip, Err on terminal failure.
+/// Reserve frame resources, synchronize CPU/GPU ownership, and bind an acquired present target.
+/// Transient acquire timeouts skip only the current frame; only an out-of-date result requests a
+/// swapchain rebuild.
 pub(crate) fn acquire_frame_slot(
     ctx: &mut FrameLifecycleContext,
-) -> Result<Option<FrameAcquire>, String> {
+) -> Result<FrameSlotAcquireOutcome, String> {
     let frame_index = {
         let frame_data = ctx.presentation.get_next_frame();
         frame_data.index
@@ -427,19 +435,17 @@ pub(crate) fn acquire_frame_slot(
             } => (image_index, suboptimal),
             AcquireClass::Retry => {
                 warn!(
-                    "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); requesting rebuild",
+                    "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); skipping this frame without rebuilding",
                     acquire_retries, swapchain_acquire_ms
                 );
                 ctx.presentation.rewind_frame();
-                ctx.swapchain_owner
-                    .request_resize(ctx.window_state.get_curr_extent());
-                return Ok(None);
+                return Ok(FrameSlotAcquireOutcome::TransientUnavailable);
             }
             AcquireClass::OutOfDate => {
                 ctx.presentation.rewind_frame();
                 ctx.swapchain_owner
                     .request_resize(ctx.window_state.get_curr_extent());
-                return Ok(None);
+                return Ok(FrameSlotAcquireOutcome::ResizePending);
             }
             AcquireClass::SurfaceLost => {
                 ctx.presentation.rewind_frame();
@@ -479,7 +485,7 @@ pub(crate) fn acquire_frame_slot(
     // Reset only when we have a frame to submit; on retry/skip paths leave signaled.
     unsafe { reset_frame_fence(ctx.device, frame_sync)? };
 
-    Ok(Some(FrameAcquire {
+    Ok(FrameSlotAcquireOutcome::Acquired(FrameAcquire {
         queue,
         cmd_buffer,
         frame_sync,
