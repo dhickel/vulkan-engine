@@ -113,11 +113,10 @@ impl TelemetryPayload {
         };
 
         let timing_entries = ctx
-            .timing_ns
-            .iter()
+            .timing_entries()
             .map(|(scope, nanos)| TimingEntry {
                 scope: format!("{scope:?}"),
-                nanos: *nanos,
+                nanos,
             })
             .collect();
 

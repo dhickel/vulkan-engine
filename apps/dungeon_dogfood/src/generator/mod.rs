@@ -678,6 +678,6 @@ mod qualification_tests {
             TelemetryMode::Timing,
         )
         .expect("timing re-run");
-        assert!(!timing_ctx.timing_ns.is_empty(), "timing mode should have timing data");
+        assert!(timing_ctx.timing_entries().next().is_some(), "timing mode should have timing data");
     }
 }

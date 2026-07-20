@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use super::error::{ErrorStage, GeneratorError};
+use super::error::ErrorStage;
 
 // ─── Telemetry mode ────────────────────────────────────────────────────────
 
@@ -42,6 +42,7 @@ impl TelemetryMode {
 // ─── Scope kind ────────────────────────────────────────────────────────────
 
 /// Named telemetry scopes used for timing accumulators.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(super) enum TelemetryScope {
     // Placement
@@ -72,6 +73,20 @@ pub(super) enum TelemetryScope {
     CaptureViewDerivation,
     // Diagnostics
     Diagnostics,
+}
+
+impl TelemetryScope {
+    pub(super) const ALL: [Self; 19] = [
+        Self::Placement, Self::TransitionReservation, Self::RolePlacement,
+        Self::CandidateConstruction, Self::CandidateValidation, Self::TopologySelection,
+        Self::TopologyReroute, Self::Materialization, Self::CorridorCarve,
+        Self::TransitionMaterialization, Self::Repair, Self::ValidationStructural,
+        Self::ValidationConnectivity, Self::ValidationTopology, Self::ValidationMovementProbe,
+        Self::MarkerPlacement, Self::ResourceCounting, Self::CaptureViewDerivation,
+        Self::Diagnostics,
+    ];
+
+    const fn index(self) -> usize { self as usize }
 }
 
 // ─── Route search kind ─────────────────────────────────────────────────────
@@ -114,11 +129,10 @@ pub(super) enum CloneKind {
 pub(crate) struct AttemptContext {
     mode: TelemetryMode,
     overflow: bool,
-    // ── Scope timing stack (Timing mode only) ───────────────────────────
-    scope_stack: Vec<(TelemetryScope, Instant)>,
-
-    // ── Timing accumulators (per-scope nanos) ───────────────────────────
-    pub timing_ns: Vec<(TelemetryScope, u64)>,
+    // Fixed-size timing state; event paths never allocate.
+    scope_started: [Option<Instant>; TelemetryScope::ALL.len()],
+    timing_ns: [u64; TelemetryScope::ALL.len()],
+    timing_present: [bool; TelemetryScope::ALL.len()],
 
     // ── Placement ───────────────────────────────────────────────────────
     pub placement_scans: u64,
@@ -196,8 +210,9 @@ impl AttemptContext {
         Self {
             mode,
             overflow: false,
-            scope_stack: Vec::new(),
-            timing_ns: Vec::new(),
+            scope_started: [None; TelemetryScope::ALL.len()],
+            timing_ns: [0; TelemetryScope::ALL.len()],
+            timing_present: [false; TelemetryScope::ALL.len()],
             placement_scans: 0,
             occupancy_clones: 0,
             occupancy_clone_elements: 0,
@@ -264,32 +279,41 @@ impl AttemptContext {
 
     // ── Scope timing ─────────────────────────────────────────────────────
 
-    /// Begin a named timing scope. Returns `()` — the scope is tracked
-    /// internally on a stack. Only acquires a clock in `Timing` mode.
+    /// Begin a named timing scope. The clock is acquired only in Timing mode.
     pub(super) fn begin_scope(&mut self, scope: TelemetryScope) {
-        if self.mode == TelemetryMode::Timing {
-            self.scope_stack.push((scope, Instant::now()));
+        if self.mode != TelemetryMode::Timing { return; }
+        let slot = &mut self.scope_started[scope.index()];
+        if slot.is_some() {
+            self.overflow = true;
+        } else {
+            *slot = Some(Instant::now());
         }
     }
 
-    /// End the most recently started scope. Elapsed nanos are accumulated.
-    /// In `Off` and `Counters` modes this is a no-op. Panics if the scope
-    /// stack is empty — that indicates a logic error, not a telemetry fault,
-    /// and the plan requires it never happens in production.
+    /// Complete a scope without panicking or influencing canonical flow.
     pub(super) fn end_scope(&mut self, scope: TelemetryScope) {
-        if self.mode == TelemetryMode::Timing {
-            let (expected, started) = self
-                .scope_stack
-                .pop()
-                .expect("telemetry scope stack underflow");
-            debug_assert_eq!(
-                expected, scope,
-                "telemetry scope mismatch: expected {expected:?}, got {scope:?}"
-            );
-            let elapsed = started.elapsed().as_nanos();
-            let nanos = u64::try_from(elapsed).unwrap_or(u64::MAX);
-            self.timing_ns.push((scope, nanos));
-        }
+        if self.mode != TelemetryMode::Timing { return; }
+        let Some(started) = self.scope_started[scope.index()].take() else {
+            self.overflow = true;
+            return;
+        };
+        self.accumulate_timing(scope, started);
+    }
+
+    fn accumulate_timing(&mut self, scope: TelemetryScope, started: Instant) {
+        let elapsed = started.elapsed().as_nanos();
+        let nanos = u64::try_from(elapsed).unwrap_or(u64::MAX);
+        let slot = &mut self.timing_ns[scope.index()];
+        let (sum, overflowed) = slot.overflowing_add(nanos);
+        *slot = if overflowed { u64::MAX } else { sum };
+        self.timing_present[scope.index()] = true;
+        self.overflow |= overflowed || elapsed > u128::from(u64::MAX);
+    }
+
+    pub(super) fn timing_entries(&self) -> impl Iterator<Item = (TelemetryScope, u64)> + '_ {
+        TelemetryScope::ALL.into_iter().filter_map(|scope| {
+            self.timing_present[scope.index()].then_some((scope, self.timing_ns[scope.index()]))
+        })
     }
 
     // ── Clone volume ─────────────────────────────────────────────────────
@@ -688,13 +712,10 @@ impl AttemptContext {
     /// Finish the attempt. Any unclosed scopes are drained without panic.
     /// Called after the canonical outcome is independently determined.
     pub(super) fn finish_attempt(&mut self) {
-        // Drain any remaining scopes (shouldn't happen in correct code,
-        // but must not panic or affect canonical control flow).
-        if self.mode == TelemetryMode::Timing {
-            while let Some((scope, started)) = self.scope_stack.pop() {
-                let elapsed = started.elapsed().as_nanos();
-                let nanos = u64::try_from(elapsed).unwrap_or(u64::MAX);
-                self.timing_ns.push((scope, nanos));
+        if self.mode != TelemetryMode::Timing { return; }
+        for scope in TelemetryScope::ALL {
+            if let Some(started) = self.scope_started[scope.index()].take() {
+                self.accumulate_timing(scope, started);
             }
         }
     }
@@ -757,8 +778,8 @@ mod tests {
         assert_eq!(ctx.repair_actions, 0);
         assert_eq!(ctx.lights_placed, 0);
         assert_eq!(ctx.overflow, true); // mark_overflow sets it
-        assert!(ctx.timing_ns.is_empty());
-        assert!(ctx.scope_stack.is_empty());
+        assert_eq!(ctx.timing_entries().count(), 0);
+        assert!(ctx.scope_started.iter().all(Option::is_none));
     }
 
     #[test]
@@ -798,7 +819,7 @@ mod tests {
         assert_eq!(ctx.candidate_validation_paths, 1);
         assert_eq!(ctx.candidate_validation_expansions, 7);
         assert_eq!(ctx.candidate_pairs_considered, 2);
-        assert!(ctx.timing_ns.is_empty());
+        assert_eq!(ctx.timing_entries().count(), 0);
     }
 
     #[test]
@@ -814,11 +835,12 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_micros(50));
         ctx.end_scope(TelemetryScope::CandidateConstruction);
 
-        assert_eq!(ctx.timing_ns.len(), 2);
-        assert_eq!(ctx.timing_ns[0].0, TelemetryScope::Placement);
-        assert_eq!(ctx.timing_ns[1].0, TelemetryScope::CandidateConstruction);
-        assert!(ctx.timing_ns[0].1 > 0);
-        assert!(ctx.timing_ns[1].1 > 0);
+        let entries: Vec<_> = ctx.timing_entries().collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, TelemetryScope::Placement);
+        assert_eq!(entries[1].0, TelemetryScope::CandidateConstruction);
+        assert!(entries[0].1 > 0);
+        assert!(entries[1].1 > 0);
     }
 
     #[test]
@@ -828,8 +850,8 @@ mod tests {
         ctx.begin_scope(TelemetryScope::RolePlacement);
         // Don't close them — finish_attempt should drain
         ctx.finish_attempt();
-        assert_eq!(ctx.timing_ns.len(), 2);
-        assert!(ctx.scope_stack.is_empty());
+        assert_eq!(ctx.timing_entries().count(), 2);
+        assert!(ctx.scope_started.iter().all(Option::is_none));
     }
 
     #[test]
@@ -837,8 +859,8 @@ mod tests {
         let mut ctx = AttemptContext::new(TelemetryMode::Counters);
         ctx.begin_scope(TelemetryScope::Placement);
         ctx.end_scope(TelemetryScope::Placement);
-        assert!(ctx.timing_ns.is_empty());
-        assert!(ctx.scope_stack.is_empty());
+        assert_eq!(ctx.timing_entries().count(), 0);
+        assert!(ctx.scope_started.iter().all(Option::is_none));
     }
 
     #[test]
@@ -846,8 +868,8 @@ mod tests {
         let mut ctx = AttemptContext::new(TelemetryMode::Off);
         ctx.begin_scope(TelemetryScope::Placement);
         ctx.end_scope(TelemetryScope::Placement);
-        assert!(ctx.timing_ns.is_empty());
-        assert!(ctx.scope_stack.is_empty());
+        assert_eq!(ctx.timing_entries().count(), 0);
+        assert!(ctx.scope_started.iter().all(Option::is_none));
     }
 
     #[test]
