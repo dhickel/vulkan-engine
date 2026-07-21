@@ -4196,6 +4196,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "voxel_demo"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "env_logger 0.11.9",
+ "glam 0.28.0",
+ "log",
+ "renderer",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+ "winit",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

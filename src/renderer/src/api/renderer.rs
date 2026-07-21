@@ -1252,11 +1252,17 @@ impl Renderer {
             } else {
                 winit::window::CursorGrabMode::None
             };
-            window.set_cursor_grab(mode).map_err(|err| {
-                let action = if request_grab { "grab" } else { "release" };
-                map_frame_input_err(format!("cursor {action} failed: {err}"))
-            })?;
-            self.cursor_grab_requested = request_grab;
+            match window.set_cursor_grab(mode) {
+                Ok(()) => {
+                    self.cursor_grab_requested = request_grab;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "cursor {} failed: {err}",
+                        if request_grab { "grab" } else { "release" }
+                    );
+                }
+            }
         }
 
         window.set_cursor_visible(!should_grab);

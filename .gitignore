@@ -8,5 +8,9 @@ apps/*
 !apps/editor/Cargo.toml
 !apps/editor/src/
 !apps/editor/src/**
+!apps/voxel_demo/
+!apps/voxel_demo/Cargo.toml
+!apps/voxel_demo/src/
+!apps/voxel_demo/src/**
 CLAUDE.md
 *.jsonl

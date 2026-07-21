@@ -1,0 +1,35 @@
+{
+  "sites": [
+    {
+      "label": "spawn",
+      "x": 34,
+      "y": 23,
+      "z": 6
+    },
+    {
+      "label": "junction",
+      "x": 40,
+      "y": 33,
+      "z": 21
+    },
+    {
+      "label": "grand_cavern",
+      "x": 24,
+      "y": 49,
+      "z": 10
+    },
+    {
+      "label": "shaft",
+      "x": 50,
+      "y": 14,
+      "z": 9
+    },
+    {
+      "label": "destination",
+      "x": 31,
+      "y": 5,
+      "z": 51
+    }
+  ],
+  "spawn_index": 0
+}
