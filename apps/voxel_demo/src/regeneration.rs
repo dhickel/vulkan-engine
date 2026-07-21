@@ -1,5 +1,5 @@
 //! Regeneration state machine: latest-wins coalescing worker, rollback-safe commit,
-//! material cache, and serial-gated resource retirement.
+//! material cache, and grace-gated resource retirement.
 //!
 //! # Architecture
 //! - One CPU worker builds `CpuScenePackage` (owned `Send` data only).
@@ -7,10 +7,9 @@
 //! - The active package remains authoritative until a still-latest candidate has
 //!   staged every resource and passed a rollback-safe commit.
 //! - Mesh retirement is renderer-owned after `unload_mesh`.
-//! - Material/texture unload is deferred until the captured last-reference
-//!   submission serial completes.
+//! - Material/texture unload is deferred for a minimum frame grace period.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::thread::JoinHandle;
 
 use glam::{Vec3, Vec4};
@@ -25,8 +24,8 @@ use crate::scene_package::{CpuLightDescriptor, CpuMesh, CpuScenePackage};
 
 // ─── Constants ─────────────────────────────────────────────────────────────
 
-/// Number of frames to retain old materials after removal before unloading.
-pub const MATERIAL_RETIREMENT_FRAME_DELAY: u64 = 2;
+/// Minimum number of completed frame boundaries before retired materials may unload.
+pub const FRAME_GRACE_PERIOD: u64 = 3;
 
 // ─── Presentation ──────────────────────────────────────────────────────────
 
@@ -89,13 +88,15 @@ pub struct RegenerationState {
     pub latest_request: Option<RegenRequest>,
     /// Handle to the active CPU worker, if one is running.
     pub worker_handle: Option<JoinHandle<RegenResult>>,
-    /// Monotonically increasing request ID counter.
-    pub next_request_id: u64,
+    /// Snapshot owned by the active worker, retained for panic attribution.
+    active_worker_request: Option<RegenRequest>,
+    /// ID of the most recently submitted request.
+    pub latest_request_id: u64,
     /// Frame counter since startup.
     pub frame_index: u64,
     /// Material cache keyed by resolved asset identity.
     pub material_cache: MaterialCache,
-    /// Deferred material retirement records: `(bundle, retire_after_frame)`.
+    /// Deferred material retirement records: `(bundle, last_active_frame)`.
     pub retired_materials: Vec<(MaterialBundle, u64)>,
 }
 
@@ -106,7 +107,8 @@ impl RegenerationState {
             active: None,
             latest_request: None,
             worker_handle: None,
-            next_request_id: 1,
+            active_worker_request: None,
+            latest_request_id: 0,
             frame_index: 0,
             material_cache: MaterialCache::new(),
             retired_materials: Vec::new(),
@@ -121,12 +123,14 @@ impl RegenerationState {
     /// Submit a new regeneration request, superseding any pending request.
     /// If no worker is active, spawn one immediately.
     pub fn submit_request(&mut self, config: ResolvedAppConfig) {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
+        self.latest_request_id = self
+            .latest_request_id
+            .checked_add(1)
+            .expect("regeneration request ID exhausted");
 
         let request = RegenRequest {
             config,
-            request_id,
+            request_id: self.latest_request_id,
         };
 
         self.latest_request = Some(request.clone());
@@ -139,12 +143,13 @@ impl RegenerationState {
 
     /// Spawn a CPU worker for the given request.
     fn spawn_worker(&mut self, request: RegenRequest) {
+        let worker_request = request.clone();
         let handle = std::thread::spawn(move || {
-            let config = request.config.clone();
-            let package_result = crate::scene_package::build_scene_package(&request.config);
+            let config = worker_request.config.clone();
+            let package_result = crate::scene_package::build_scene_package(&worker_request.config);
             match package_result {
                 Ok(pkg) => RegenResult {
-                    request_id: request.request_id,
+                    request_id: worker_request.request_id,
                     config,
                     package: Some(pkg),
                     wall_material: None,
@@ -152,7 +157,7 @@ impl RegenerationState {
                     error: None,
                 },
                 Err(e) => RegenResult {
-                    request_id: request.request_id,
+                    request_id: worker_request.request_id,
                     config,
                     package: None,
                     wall_material: None,
@@ -161,6 +166,7 @@ impl RegenerationState {
                 },
             }
         });
+        self.active_worker_request = Some(request);
         self.worker_handle = Some(handle);
     }
 
@@ -171,16 +177,17 @@ impl RegenerationState {
         let handle = match self.worker_handle.take() {
             Some(h) if h.is_finished() => h,
             Some(h) => {
-                // Worker still running — put it back.
                 self.worker_handle = Some(h);
                 return None;
             }
             None => return None,
         };
+        let worker_request = self.active_worker_request.take();
 
-        // Join the finished worker.
+        // A panic does not carry a result, so attribute it to the immutable
+        // snapshot that was assigned to this worker, never to a newer request.
         let result = match handle.join() {
-            Ok(r) => r,
+            Ok(result) => result,
             Err(panic_payload) => {
                 let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
                     s.clone()
@@ -189,56 +196,42 @@ impl RegenerationState {
                 } else {
                     "worker panicked with non-string payload".to_string()
                 };
-                // Determine the request_id from latest_request (the panic may
-                // have been for the latest or a superseded request).
-                let id = self.latest_request.as_ref().map(|r| r.request_id).unwrap_or(0);
-                // Use the latest request's config for the error path
-                let default_config = self
-                    .latest_request
-                    .as_ref()
-                    .map(|r| r.config.clone());
-                match default_config {
-                    Some(config) => RegenResult {
-                        request_id: id,
-                        config,
-                        package: None,
-                        wall_material: None,
-                        floor_material: None,
-                        error: Some(format!("worker panic: {msg}")),
-                    },
-                    None => {
-                        // No pending request — this is unexpected. Log and return None.
-                        log::error!("Worker panicked but no latest_request exists");
-                        return None;
-                    }
+                let Some(request) = worker_request else {
+                    log::error!("Worker panicked without an attributed request snapshot");
+                    return None;
+                };
+                RegenResult {
+                    request_id: request.request_id,
+                    config: request.config,
+                    package: None,
+                    wall_material: None,
+                    floor_material: None,
+                    error: Some(format!("worker panic: {msg}")),
                 }
             }
         };
 
-        // Check staleness: only accept if this result matches the latest request.
-        let is_latest = self
-            .latest_request
-            .as_ref()
-            .map(|r| r.request_id == result.request_id)
-            .unwrap_or(false);
-
-        if !is_latest {
+        if result.request_id != self.latest_request_id {
             log::info!(
                 "Discarding stale result request_id={} (latest={})",
                 result.request_id,
-                self.latest_request.as_ref().map(|r| r.request_id).unwrap_or(0)
+                self.latest_request_id
             );
-            // If a newer pending request exists, start working on it.
-            if let Some(ref next_req) = self.latest_request {
-                if self.worker_handle.is_none() {
-                    self.spawn_worker(next_req.clone());
-                }
+            if let Some(next_request) = self.latest_request.clone() {
+                self.spawn_worker(next_request);
             }
             return None;
         }
 
-        // Clear latest_request — this result is being processed.
-        self.latest_request = None;
+        // This accepted result is no longer pending, but latest_request_id stays
+        // intact so commit can reject it if a newer request is submitted first.
+        if self
+            .latest_request
+            .as_ref()
+            .is_some_and(|request| request.request_id == result.request_id)
+        {
+            self.latest_request = None;
+        }
 
         Some(result)
     }
@@ -339,103 +332,103 @@ fn load_materials_for_package(
     Ok((wall_bundle, floor_bundle))
 }
 
+fn verify_latest_request_id(
+    state: &RegenerationState,
+    result_id: u64,
+    expected_request_id: u64,
+) -> Result<(), RegenError> {
+    if result_id != expected_request_id || expected_request_id != state.latest_request_id {
+        return Err(RegenError::StaleRequest {
+            result_id,
+            latest_id: state.latest_request_id,
+        });
+    }
+    Ok(())
+}
+
+fn descriptor_to_point_light(descriptor: &CpuLightDescriptor) -> PointLight {
+    PointLight {
+        position: Vec3::new(
+            descriptor.position[0],
+            descriptor.position[1],
+            descriptor.position[2],
+        ),
+        color: Vec3::new(
+            descriptor.color[0],
+            descriptor.color[1],
+            descriptor.color[2],
+        ),
+        intensity: descriptor.intensity,
+        range: descriptor.range,
+    }
+}
+
+fn restore_lights(
+    scene: &mut Scene,
+    light_ids: &[renderer::prelude::PointLightId],
+    descriptors: &[CpuLightDescriptor],
+) {
+    for (index, (light_id, descriptor)) in light_ids.iter().zip(descriptors).enumerate() {
+        if let Err(error) =
+            scene.update_point_light(*light_id, descriptor_to_point_light(descriptor))
+        {
+            log::error!(
+                "Failed to restore point light {index} intensity/range/descriptor: {error}"
+            );
+        }
+    }
+}
+
+fn cleanup_candidate(
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+    candidate_node: SceneNodeId,
+    wall_mesh: Option<MeshHandle>,
+    floor_mesh: Option<MeshHandle>,
+) {
+    if let Err(error) = scene.remove_node(candidate_node) {
+        log::error!("Failed to remove regeneration candidate during rollback: {error}");
+    }
+
+    let mut assets = renderer.assets();
+    for (label, mesh) in [("wall", wall_mesh), ("floor", floor_mesh)] {
+        if let Some(mesh) = mesh {
+            if let Err(error) = assets.unload_mesh(mesh) {
+                log::error!(
+                    "Failed to unload candidate {label} mesh slot={} during rollback: {error}",
+                    mesh.slot
+                );
+            }
+        }
+    }
+}
+
 /// Stage and commit a replacement scene package.
 ///
+/// `expected_request_id` is the accepted ID returned by worker polling.
 /// `frame_index` is the current frame when the commit is attempted.
-///
-/// # Flow
-/// 1. Validate the result is still latest.
-/// 2. Load materials (cached when possible).
-/// 3. Upload non-empty wall/floor meshes.
-/// 4. Snapshot current light descriptors.
-/// 5. Create candidate node, attach meshes.
-/// 6. Update light descriptors in-place.
-/// 7. Remove old node.
-/// 8. On success: promote candidate, retire old resources.
-/// 9. On failure: remove candidate, restore lights, keep old package.
+/// Candidate resources are removed on every recoverable failure, and the old
+/// package remains authoritative until light updates and old-node removal pass.
 pub fn commit_replacement(
     renderer: &mut Renderer,
     scene: &mut Scene,
     state: &mut RegenerationState,
     result: RegenResult,
+    expected_request_id: u64,
     frame_index: u64,
 ) -> Result<(), RegenError> {
-    // ── 1. Validate result ────────────────────────────────────────────
-    if let Some(ref error) = result.error {
-        return Err(RegenError::PackageFailed(error.clone()));
-    }
+    // This check must precede every material, asset, or scene side effect.
+    verify_latest_request_id(state, result.request_id, expected_request_id)?;
 
+    if let Some(error) = result.error {
+        return Err(RegenError::PackageFailed(error));
+    }
     let package = result
         .package
         .ok_or_else(|| RegenError::PackageFailed("no package in result".into()))?;
+    let config = result.config;
 
-    let active = state
-        .active
-        .as_ref()
-        .ok_or(RegenError::NoActivePackage)?;
-
-    let config = &result.config;
-
-    // ── 2. Load materials ─────────────────────────────────────────────
-    let (wall_bundle, floor_bundle) =
-        load_materials_for_package(renderer, &mut state.material_cache, config)?;
-
-    // ── 3. Upload meshes ──────────────────────────────────────────────
-    let mut assets = renderer.assets();
-
-    let wall_mesh: Option<MeshHandle> = if let Some(ref cpu_mesh) = package.wall_mesh {
-        let verts = cpu_mesh_to_procedural(cpu_mesh);
-        let data = ProceduralMeshData {
-            name: format!(
-                "cave_wall_s{}_r{}",
-                config.document.generator.seed, config.document.generator.resolution
-            ),
-            vertices: verts,
-            indices: cpu_mesh.indices.clone(),
-            material: Some(wall_bundle.material),
-        };
-        let handle = assets
-            .upload_procedural_mesh(data)
-            .map_err(|e| RegenError::MeshUpload(e.to_string()))?;
-        log::info!(
-            "Wall mesh uploaded: {} triangles (handle slot={})",
-            package.wall_triangles,
-            handle.slot
-        );
-        Some(handle)
-    } else {
-        None
-    };
-
-    let floor_mesh: Option<MeshHandle> = if let Some(ref cpu_mesh) = package.floor_mesh {
-        let verts = cpu_mesh_to_procedural(cpu_mesh);
-        let data = ProceduralMeshData {
-            name: format!(
-                "cave_floor_s{}_r{}",
-                config.document.generator.seed, config.document.generator.resolution
-            ),
-            vertices: verts,
-            indices: cpu_mesh.indices.clone(),
-            material: Some(floor_bundle.material),
-        };
-        let handle = assets
-            .upload_procedural_mesh(data)
-            .map_err(|e| RegenError::MeshUpload(e.to_string()))?;
-        log::info!(
-            "Floor mesh uploaded: {} triangles (handle slot={})",
-            package.floor_triangles,
-            handle.slot
-        );
-        Some(handle)
-    } else {
-        None
-    };
-
-    // ── 4. Snapshot current light descriptors ─────────────────────────
-    let old_light_descriptors: Vec<CpuLightDescriptor> =
-        active.light_descriptors.clone();
-
-    // Validate light count
+    let active = state.active.as_ref().ok_or(RegenError::NoActivePackage)?;
     if package.lights.len() > active.light_ids.len() {
         return Err(RegenError::LightCountMismatch {
             expected: active.light_ids.len(),
@@ -443,91 +436,113 @@ pub fn commit_replacement(
         });
     }
 
-    // ── 5. Create candidate node ──────────────────────────────────────
-    let root = scene
-        .root()
-        .ok_or(SceneError::InvalidNode(active.cave_node))?;
-    let candidate_node = scene.create_node(Some(root), glam::Mat4::IDENTITY)?;
-
-    // Attach uploaded meshes to candidate node
-    if let Some(wm) = wall_mesh {
-        let wall_child = scene.create_node(Some(candidate_node), glam::Mat4::IDENTITY)?;
-        scene.add_mesh(wall_child, wm)?;
-    }
-    if let Some(fm) = floor_mesh {
-        let floor_child = scene.create_node(Some(candidate_node), glam::Mat4::IDENTITY)?;
-        scene.add_mesh(floor_child, fm)?;
-    }
-
-    // ── 6. Update light descriptors in-place ──────────────────────────
-    let mut updated_count = 0;
-    let mut new_descriptors: Vec<CpuLightDescriptor> = Vec::with_capacity(active.light_ids.len());
-
-    for (i, light_id) in active.light_ids.iter().enumerate() {
-        if i < package.lights.len() {
-            let new_light = &package.lights[i];
-            // Update in-place
-            if let Err(e) = scene.update_point_light(
-                *light_id,
-                PointLight {
-                    position: Vec3::new(
-                        new_light.position[0],
-                        new_light.position[1],
-                        new_light.position[2],
-                    ),
-                    color: Vec3::new(
-                        new_light.color[0],
-                        new_light.color[1],
-                        new_light.color[2],
-                    ),
-                    intensity: new_light.intensity,
-                    range: new_light.range,
-                },
-            ) {
-                // Rollback: restore lights that were already updated
-                log::error!("Light update {i} failed: {e}; rolling back");
-                for (j, desc) in old_light_descriptors.iter().enumerate().take(updated_count) {
-                    let _ = scene.update_point_light(
-                        active.light_ids[j],
-                        PointLight {
-                            position: Vec3::new(
-                                desc.position[0],
-                                desc.position[1],
-                                desc.position[2],
-                            ),
-                            color: Vec3::new(
-                                desc.color[0],
-                                desc.color[1],
-                                desc.color[2],
-                            ),
-                            intensity: desc.intensity,
-                            range: desc.range,
-                        },
-                    );
-                }
-                // Remove candidate node and its children
-                let _ = scene.remove_node(candidate_node);
-                return Err(RegenError::Scene(SceneError::InvalidNode(active.cave_node)));
-            }
-            updated_count += 1;
-            new_descriptors.push(new_light.clone());
-        } else {
-            // Keep old descriptor for unused slots
-            new_descriptors.push(old_light_descriptors[i].clone());
-        }
-    }
-
-    // ── 7. Remove old node (detaches meshes) ──────────────────────────
+    // Snapshot every old-package value needed after state mutations.
     let old_node = active.cave_node;
-    let old_wall_mat = active.wall_material.clone();
-    let old_floor_mat = active.floor_material.clone();
+    let old_wall_material = active.wall_material.clone();
+    let old_floor_material = active.floor_material.clone();
     let old_light_ids = active.light_ids.clone();
+    let old_light_descriptors = active.light_descriptors.clone();
     let old_wall_mesh = active.wall_mesh;
     let old_floor_mesh = active.floor_mesh;
-    scene.remove_node(old_node)?;
 
-    // ── 8. Success: promote candidate ─────────────────────────────────
-    let new_presented = PresentedPackage {
+    let (wall_bundle, floor_bundle) =
+        load_materials_for_package(renderer, &mut state.material_cache, &config)?;
+
+    let root = scene.root().ok_or(SceneError::InvalidNode(old_node))?;
+    let candidate_node = scene.create_node(Some(root), glam::Mat4::IDENTITY)?;
+    let mut wall_mesh = None;
+    let mut floor_mesh = None;
+
+    // Stage uploads and attachments as one rollback boundary.
+    let staging_result = (|| -> Result<(), RegenError> {
+        if let Some(cpu_mesh) = &package.wall_mesh {
+            let data = ProceduralMeshData {
+                name: format!(
+                    "cave_wall_s{}_r{}",
+                    config.document.generator.seed, config.document.generator.resolution
+                ),
+                vertices: cpu_mesh_to_procedural(cpu_mesh),
+                indices: cpu_mesh.indices.clone(),
+                material: Some(wall_bundle.material),
+            };
+            let handle = renderer
+                .assets()
+                .upload_procedural_mesh(data)
+                .map_err(|error| RegenError::MeshUpload(error.to_string()))?;
+            wall_mesh = Some(handle);
+            let child = scene.create_node(Some(candidate_node), glam::Mat4::IDENTITY)?;
+            scene.add_mesh(child, handle)?;
+            log::info!(
+                "Wall mesh uploaded: {} triangles (handle slot={})",
+                package.wall_triangles,
+                handle.slot
+            );
+        }
+
+        if let Some(cpu_mesh) = &package.floor_mesh {
+            let data = ProceduralMeshData {
+                name: format!(
+                    "cave_floor_s{}_r{}",
+                    config.document.generator.seed, config.document.generator.resolution
+                ),
+                vertices: cpu_mesh_to_procedural(cpu_mesh),
+                indices: cpu_mesh.indices.clone(),
+                material: Some(floor_bundle.material),
+            };
+            let handle = renderer
+                .assets()
+                .upload_procedural_mesh(data)
+                .map_err(|error| RegenError::MeshUpload(error.to_string()))?;
+            floor_mesh = Some(handle);
+            let child = scene.create_node(Some(candidate_node), glam::Mat4::IDENTITY)?;
+            scene.add_mesh(child, handle)?;
+            log::info!(
+                "Floor mesh uploaded: {} triangles (handle slot={})",
+                package.floor_triangles,
+                handle.slot
+            );
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = staging_result {
+        cleanup_candidate(renderer, scene, candidate_node, wall_mesh, floor_mesh);
+        return Err(error);
+    }
+
+    // A request may only become stale between polling and this main-thread
+    // transaction if another submission was made explicitly; reject it before
+    // touching the stable lights.
+    if let Err(error) = verify_latest_request_id(state, result.request_id, expected_request_id) {
+        cleanup_candidate(renderer, scene, candidate_node, wall_mesh, floor_mesh);
+        return Err(error);
+    }
+
+    let mut new_descriptors = Vec::with_capacity(old_light_ids.len());
+    for (index, light_id) in old_light_ids.iter().enumerate() {
+        let descriptor = package
+            .lights
+            .get(index)
+            .unwrap_or(&old_light_descriptors[index]);
+        if let Err(error) =
+            scene.update_point_light(*light_id, descriptor_to_point_light(descriptor))
+        {
+            log::error!("Light update {index} failed: {error}; rolling back");
+            restore_lights(scene, &old_light_ids, &old_light_descriptors);
+            cleanup_candidate(renderer, scene, candidate_node, wall_mesh, floor_mesh);
+            return Err(RegenError::Scene(error));
+        }
+        new_descriptors.push(descriptor.clone());
+    }
+
+    if let Err(error) = scene.remove_node(old_node) {
+        log::error!("Old cave node removal failed: {error}; rolling back candidate");
+        restore_lights(scene, &old_light_ids, &old_light_descriptors);
+        cleanup_candidate(renderer, scene, candidate_node, wall_mesh, floor_mesh);
+        return Err(RegenError::Scene(error));
+    }
+
+    state.active = Some(PresentedPackage {
         cave_node: candidate_node,
         wall_mesh,
         floor_mesh,
@@ -537,15 +552,10 @@ pub fn commit_replacement(
         light_descriptors: new_descriptors,
         identity: package.scene_config_identity.clone(),
         frame_staged: frame_index,
-    };
+    });
 
-    // Retire old resources
-    retire_old_resources(state, &old_wall_mat, &old_floor_mat, frame_index);
-    // Unload old meshes through renderer's fence-aware queue
+    retire_old_resources(state, &old_wall_material, &old_floor_material, frame_index);
     unload_old_meshes(renderer, old_wall_mesh, old_floor_mesh);
-
-    // Activate new package
-    state.active = Some(new_presented);
 
     log::info!(
         "Regeneration committed: frame={} wall_tris={} floor_tris={} lights={}",
@@ -558,62 +568,89 @@ pub fn commit_replacement(
     Ok(())
 }
 
-/// Move old material bundles to the retirement list.
+fn active_references_material(
+    state: &RegenerationState,
+    material: renderer::prelude::MaterialHandle,
+) -> bool {
+    state.active.as_ref().is_some_and(|active| {
+        active.wall_material.material == material || active.floor_material.material == material
+    })
+}
+
+fn active_references_texture(
+    state: &RegenerationState,
+    texture: renderer::prelude::TextureHandle,
+) -> bool {
+    state.active.as_ref().is_some_and(|active| {
+        [&active.wall_material, &active.floor_material]
+            .into_iter()
+            .any(|bundle| {
+                bundle.albedo == texture
+                    || bundle.normal == Some(texture)
+                    || bundle.roughness == texture
+                    || bundle.ao == texture
+            })
+    })
+}
+
+/// Record the current frame as the old package's last active frame.
 fn retire_old_resources(
     state: &mut RegenerationState,
     old_wall: &MaterialBundle,
     old_floor: &MaterialBundle,
-    frame_index: u64,
+    retire_frame: u64,
 ) {
-    let retire_frame = frame_index + MATERIAL_RETIREMENT_FRAME_DELAY;
+    for bundle in [old_wall, old_floor] {
+        // Cache hits can make the candidate reuse the old handles. Such a
+        // bundle is still active and must not enter retirement at all.
+        if active_references_material(state, bundle.material) {
+            continue;
+        }
 
-    // Retire old wall material
-    state.retired_materials.push((
-        MaterialBundle {
-            albedo: old_wall.albedo,
-            normal: old_wall.normal,
-            roughness: old_wall.roughness,
-            ao: old_wall.ao,
-            material: old_wall.material,
-            cache_key: old_wall.cache_key.clone(),
-        },
-        retire_frame,
-    ));
+        // Transfer ownership out of the reusable cache before retirement. Do
+        // not remove a newer bundle that happens to have the same cache key.
+        let cached_is_retired = state
+            .material_cache
+            .get(&bundle.cache_key)
+            .is_some_and(|cached| cached.material == bundle.material);
+        if cached_is_retired {
+            state.material_cache.remove(&bundle.cache_key);
+        }
 
-    // Retire old floor material
-    state.retired_materials.push((
-        MaterialBundle {
-            albedo: old_floor.albedo,
-            normal: old_floor.normal,
-            roughness: old_floor.roughness,
-            ao: old_floor.ao,
-            material: old_floor.material,
-            cache_key: old_floor.cache_key.clone(),
-        },
-        retire_frame,
-    ));
+        if state
+            .retired_materials
+            .iter()
+            .any(|(retired, _)| retired.material == bundle.material)
+        {
+            continue;
+        }
+        state.retired_materials.push((bundle.clone(), retire_frame));
+    }
 
     log::info!(
-        "Retired materials queued for unload at frame {retire_frame}"
+        "Retired materials recorded at frame {retire_frame}; grace={FRAME_GRACE_PERIOD} frames"
     );
 }
 
-/// Reap retired materials whose `retire_after_frame` has passed.
+/// Reap materials after the frame grace period has elapsed.
 ///
-/// Call once per frame (after rendering). Unloads material handles then
-/// each unique texture exactly once.
-pub fn reap_retired_materials(
-    renderer: &mut Renderer,
-    state: &mut RegenerationState,
-) {
+/// The retirement frame is the old package's last active frame. Handles still
+/// referenced by the active package or material cache are never unloaded.
+pub fn reap_retired_materials(renderer: &mut Renderer, state: &mut RegenerationState) {
     let current_frame = state.frame_index;
+    let mut keep = Vec::new();
+    let mut reap = Vec::new();
 
-    // Partition: keep still-pending, drain ready-to-reap
-    let (keep, reap): (Vec<_>, Vec<_>) = state
-        .retired_materials
-        .drain(..)
-        .partition(|(_, retire_frame)| *retire_frame > current_frame);
-
+    for (bundle, retire_frame) in std::mem::take(&mut state.retired_materials) {
+        let grace_elapsed = current_frame.saturating_sub(retire_frame) >= FRAME_GRACE_PERIOD;
+        let material_protected = active_references_material(state, bundle.material)
+            || state.material_cache.contains_material(bundle.material);
+        if grace_elapsed && !material_protected {
+            reap.push((bundle, retire_frame));
+        } else {
+            keep.push((bundle, retire_frame));
+        }
+    }
     state.retired_materials = keep;
 
     if reap.is_empty() {
@@ -625,36 +662,35 @@ pub fn reap_retired_materials(
         reap.len()
     );
 
-    let mut assets = renderer.assets();
-    let mut unloaded_textures: HashMap<renderer::prelude::TextureHandle, bool> = HashMap::new();
-
-    for (bundle, _frame) in &reap {
-        // Unload material
-        if let Err(e) = assets.unload_material(bundle.material) {
+    let mut unloaded_textures = HashSet::new();
+    for (bundle, _) in &reap {
+        if let Err(error) = renderer.assets().unload_material(bundle.material) {
             log::warn!(
-                "Failed to unload retired material slot={}: {e}",
+                "Failed to unload retired material slot={}: {error}",
                 bundle.material.slot
             );
         }
 
-        // Unload each unique texture exactly once
         let textures = [
             Some(bundle.albedo),
             bundle.normal,
             Some(bundle.roughness),
             Some(bundle.ao),
         ];
-        for tex in textures.into_iter().flatten() {
-            if unloaded_textures.contains_key(&tex) {
+        for texture in textures.into_iter().flatten() {
+            if unloaded_textures.contains(&texture)
+                || active_references_texture(state, texture)
+                || state.material_cache.contains_texture(texture)
+            {
                 continue;
             }
-            if let Err(e) = assets.unload_texture(tex) {
+            if let Err(error) = renderer.assets().unload_texture(texture) {
                 log::warn!(
-                    "Failed to unload retired texture slot={}: {e}",
-                    tex.slot
+                    "Failed to unload retired texture slot={}: {error}",
+                    texture.slot
                 );
             }
-            unloaded_textures.insert(tex, true);
+            unloaded_textures.insert(texture);
         }
     }
 }
@@ -895,25 +931,61 @@ mod tests {
     }
 
     #[test]
-    fn stale_result_rejected() {
+    fn request_id_verification_rejects_superseded_result() {
         let mut state = RegenerationState::new();
 
-        // Submit request A
-        let config_a = make_test_config(10, 64);
-        state.submit_request(config_a);
-        let id_a = state.latest_request.as_ref().unwrap().request_id;
+        state.submit_request(make_test_config(10, 64));
+        let stale_id = state.latest_request_id;
+        assert!(verify_latest_request_id(&state, stale_id, stale_id).is_ok());
 
-        // Submit request B (supersedes A before A's worker finishes)
-        let config_b = make_test_config(20, 64);
-        state.submit_request(config_b);
-        let id_b = state.latest_request.as_ref().unwrap().request_id;
-        assert!(id_b > id_a);
+        state.submit_request(make_test_config(20, 64));
+        let latest_id = state.latest_request_id;
+        assert!(latest_id > stale_id);
 
-        // Worker finishes with id_a — should be discarded
-        // (We can't easily test this without a real worker, but we can
-        //  test the poll_worker staleness check indirectly.)
-        // The poll_worker method checks request_id against latest_request.
-        assert_eq!(state.latest_request.as_ref().unwrap().request_id, id_b);
+        assert!(matches!(
+            verify_latest_request_id(&state, stale_id, stale_id),
+            Err(RegenError::StaleRequest {
+                result_id,
+                latest_id: observed_latest,
+            }) if result_id == stale_id && observed_latest == latest_id
+        ));
+        assert!(verify_latest_request_id(&state, latest_id, latest_id).is_ok());
+    }
+
+    #[test]
+    fn request_id_verification_rejects_unexpected_result_id() {
+        let mut state = RegenerationState::new();
+        state.submit_request(make_test_config(10, 64));
+        let expected_id = state.latest_request_id;
+
+        assert!(matches!(
+            verify_latest_request_id(&state, expected_id - 1, expected_id),
+            Err(RegenError::StaleRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn worker_panic_is_attributed_to_its_request() {
+        let mut state = RegenerationState::new();
+        let request = RegenRequest {
+            config: make_test_config(77, 64),
+            request_id: 41,
+        };
+        state.latest_request_id = request.request_id;
+        state.latest_request = Some(request.clone());
+        state.active_worker_request = Some(request);
+        state.worker_handle = Some(std::thread::spawn(|| -> RegenResult {
+            panic!("attributed panic fixture")
+        }));
+
+        while !state.worker_handle.as_ref().unwrap().is_finished() {
+            std::thread::yield_now();
+        }
+        let result = state.poll_worker().expect("latest panic should be reported");
+
+        assert_eq!(result.request_id, 41);
+        assert_eq!(result.config.document.generator.seed, 77);
+        assert!(result.error.as_deref().unwrap().contains("attributed panic fixture"));
     }
 
     // ── Worker builds valid package ────────────────────────────────────
@@ -998,36 +1070,12 @@ mod tests {
     // ── Material retirement ────────────────────────────────────────────
 
     #[test]
-    fn material_retirement_after_delay() {
-        let mut state = RegenerationState::new();
+    fn material_retirement_observes_three_frame_grace() {
+        let retire_frame = 7_u64;
 
-        // Simulate adding a retired material bundle (using dummy handles)
-        // We just test the reap timing, not actual GPU unload.
-        let dummy_key = MaterialCacheKey {
-            albedo: crate::config::ResolvedAssetRef::Catalog("test/albedo".into()),
-            normal: crate::config::ResolvedAssetRef::Catalog("test/normal".into()),
-            roughness: crate::config::ResolvedAssetRef::Catalog("test/roughness".into()),
-            ao: crate::config::ResolvedAssetRef::Catalog("test/ao".into()),
-        };
-
-        // We can't easily create real handles in unit tests, so we test
-        // the retirement list mechanics only.
-        let retire_frame = state.frame_index + MATERIAL_RETIREMENT_FRAME_DELAY;
-
-        // Push a dummy entry - we just test the timing, not actual unload.
-        // The actual handle-based test requires a running renderer.
-        assert_eq!(retire_frame, 2, "retirement delay should be 2 frames from frame 0");
-        state.frame_index = 0;
-        // At frame 0, retire_frame is 2, so nothing should reap at frame 0 or 1.
-        assert!(2 > 0);
-        assert!(2 > 1);
-        // After frame_index advances past 2, it should be ready.
-        state.frame_index = 2;
-        // 2 is not > 2, so it's still pending.
-        assert!(!(2 > 2));
-        state.frame_index = 3;
-        // Now 3 > 2, so it should reap.
-        assert!(3 > 2);
+        assert!(9_u64.saturating_sub(retire_frame) < FRAME_GRACE_PERIOD);
+        assert!(10_u64.saturating_sub(retire_frame) >= FRAME_GRACE_PERIOD);
+        assert_eq!(FRAME_GRACE_PERIOD, 3);
     }
 
     #[test]

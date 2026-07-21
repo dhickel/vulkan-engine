@@ -1438,11 +1438,13 @@ fn run_windowed_v2(
                             );
                         } else {
                             let frame = regen_state.frame_index;
+                            let expected_request_id = regen_state.latest_request_id;
                             match regeneration::commit_replacement(
                                 &mut renderer,
                                 &mut scene,
                                 &mut regen_state,
                                 result,
+                                expected_request_id,
                                 frame,
                             ) {
                                 Ok(()) => {

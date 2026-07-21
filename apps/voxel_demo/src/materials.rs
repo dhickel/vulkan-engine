@@ -83,6 +83,23 @@ impl MaterialCache {
         self.entries.remove(key)
     }
 
+    /// Return whether any cached bundle references this material handle.
+    pub fn contains_material(&self, material: MaterialHandle) -> bool {
+        self.entries
+            .values()
+            .any(|bundle| bundle.material == material)
+    }
+
+    /// Return whether any cached bundle references this texture handle.
+    pub fn contains_texture(&self, texture: TextureHandle) -> bool {
+        self.entries.values().any(|bundle| {
+            bundle.albedo == texture
+                || bundle.normal == Some(texture)
+                || bundle.roughness == texture
+                || bundle.ao == texture
+        })
+    }
+
     /// Number of cached entries.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
