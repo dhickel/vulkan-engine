@@ -11,6 +11,7 @@ mod cli;
 mod config;
 mod materials;
 mod meshers;
+mod regeneration;
 mod scene_package;
 mod validate;
 
@@ -383,7 +384,8 @@ fn run_v2(args: &cli::CliArgs) -> Result<(), AppError> {
     if resolved.runtime.headless {
         run_headless_v2(&resolved, package)?;
     } else {
-        run_windowed_v2(&resolved, package)?;
+        let regen_after = args.regen_after_frames;
+        run_windowed_v2(&resolved, package, regen_after)?;
     }
 
     Ok(())
@@ -1257,6 +1259,7 @@ fn write_enriched_sidecar(
 fn run_windowed_v2(
     resolved: &crate::config::ResolvedAppConfig,
     package: scene_package::CpuScenePackage,
+    regen_after_frames: Option<u64>,
 ) -> Result<(), AppError> {
     let gen_config = &resolved.document.generator;
 
@@ -1302,7 +1305,7 @@ fn run_windowed_v2(
     let mut renderer = Renderer::new(config, &window)?;
     let mut scene = Scene::new();
 
-    // Load materials
+    // Load initial materials
     let (wall_mat, floor_mat) = materials::create_wall_floor_materials(
         &mut renderer,
         &resolved.resolved_wall_albedo,
@@ -1324,107 +1327,20 @@ fn run_windowed_v2(
         floor_mat.material
     );
 
-    // Upload meshes
-    let mut assets = renderer.assets();
-    let root = scene.create_node(None, glam::Mat4::IDENTITY)?;
-    let cave_node = scene.create_node(Some(root), glam::Mat4::IDENTITY)?;
+    // Stage initial scene using the regeneration infrastructure
+    let presented = regeneration::stage_initial_scene(
+        &mut renderer,
+        &mut scene,
+        &package,
+        &wall_mat,
+        &floor_mat,
+        resolved.runtime.env_path.as_ref(),
+    )
+    .map_err(|e| AppError::Validation(format!("initial scene staging failed: {e}")))?;
 
-    if let Some(ref cpu_mesh) = package.wall_mesh {
-        let proc_verts: Vec<ProceduralVertex> = cpu_mesh
-            .positions
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| {
-                let n = cpu_mesh.normals[i];
-                let t = cpu_mesh.tangents[i];
-                let uv = cpu_mesh.uvs[i];
-                let c = cpu_mesh.colors[i];
-                ProceduralVertex {
-                    position: Vec3::new(p[0], p[1], p[2]),
-                    normal: Vec3::new(n[0], n[1], n[2]),
-                    tangent: Vec4::new(t[0], t[1], t[2], t[3]),
-                    uv0: glam::Vec2::new(uv[0], uv[1]),
-                    uv1: glam::Vec2::ZERO,
-                    color: Vec4::new(c[0], c[1], c[2], c[3]),
-                }
-            })
-            .collect();
-        let mesh_data = ProceduralMeshData {
-            name: format!("cave_wall_s{}", gen_config.seed),
-            vertices: proc_verts,
-            indices: cpu_mesh.indices.clone(),
-            material: Some(wall_mat.material),
-        };
-        let handle = assets.upload_procedural_mesh(mesh_data)?;
-        let wall_node = scene.create_node(Some(cave_node), glam::Mat4::IDENTITY)?;
-        scene.add_mesh(wall_node, handle)?;
-        log::info!("Wall mesh uploaded: {} triangles", package.wall_triangles);
-    }
-
-    if let Some(ref cpu_mesh) = package.floor_mesh {
-        let proc_verts: Vec<ProceduralVertex> = cpu_mesh
-            .positions
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| {
-                let n = cpu_mesh.normals[i];
-                let t = cpu_mesh.tangents[i];
-                let uv = cpu_mesh.uvs[i];
-                let c = cpu_mesh.colors[i];
-                ProceduralVertex {
-                    position: Vec3::new(p[0], p[1], p[2]),
-                    normal: Vec3::new(n[0], n[1], n[2]),
-                    tangent: Vec4::new(t[0], t[1], t[2], t[3]),
-                    uv0: glam::Vec2::new(uv[0], uv[1]),
-                    uv1: glam::Vec2::ZERO,
-                    color: Vec4::new(c[0], c[1], c[2], c[3]),
-                }
-            })
-            .collect();
-        let mesh_data = ProceduralMeshData {
-            name: format!("cave_floor_s{}", gen_config.seed),
-            vertices: proc_verts,
-            indices: cpu_mesh.indices.clone(),
-            material: Some(floor_mat.material),
-        };
-        let handle = assets.upload_procedural_mesh(mesh_data)?;
-        let floor_node = scene.create_node(Some(cave_node), glam::Mat4::IDENTITY)?;
-        scene.add_mesh(floor_node, handle)?;
-        log::info!("Floor mesh uploaded: {} triangles", package.floor_triangles);
-    }
-
-    // Place point lights
-    for light in &package.lights {
-        scene.create_point_light(PointLight {
-            position: Vec3::new(light.position[0], light.position[1], light.position[2]),
-            color: Vec3::new(light.color[0], light.color[1], light.color[2]),
-            intensity: light.intensity,
-            range: light.range,
-        })?;
-    }
-    log::info!("{} point lights placed", package.lights.len());
-
-    // Environment
-    let env_path = resolved
-        .runtime
-        .env_path
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr"));
-    if env_path.exists() {
-        match assets.load_environment(EnvironmentSource::Auto(env_path.clone())) {
-            Ok(env_handle) => {
-                scene.set_skybox(env_handle);
-                log::info!("IBL environment loaded: {}", env_path.display());
-            }
-            Err(e) => {
-                log::warn!("Failed to load environment {}: {e}", env_path.display());
-                scene.set_skybox(assets.default_environment());
-            }
-        }
-    } else {
-        log::warn!("Environment file not found: {}", env_path.display());
-        scene.set_skybox(assets.default_environment());
-    }
+    // Initialize regeneration state with the active package
+    let mut regen_state = regeneration::RegenerationState::new();
+    regen_state.active = Some(presented);
 
     // Set up manual capture directory
     let manual_capture_dir = manual_capture_run_dir();
@@ -1455,7 +1371,14 @@ fn run_windowed_v2(
     let mut noclip = true;
     let mut reported_manual_captures: HashSet<PathBuf> = HashSet::new();
 
-    log::info!("Voxel demo v2 initialized, starting event loop");
+    // For auto-regen: alternate seed (seed + 1000)
+    let regen_seed_alt = resolved.document.generator.seed.wrapping_add(1000);
+    let resolved_for_regen = resolved.clone();
+
+    log::info!(
+        "Voxel demo v2 initialized (regen_after_frames={:?}), starting event loop",
+        regen_after_frames
+    );
     window.request_redraw();
 
     event_loop.run(move |event, elwt| {
@@ -1488,6 +1411,54 @@ fn run_windowed_v2(
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    // ── Regeneration lifecycle ──────────────────────────
+                    regen_state.advance_frame();
+
+                    // Auto-regen trigger
+                    if let Some(n) = regen_after_frames {
+                        if regen_state.frame_index == n && !regen_state.has_pending_work() {
+                            log::info!(
+                                "Auto-triggering regeneration at frame {} (seed={})",
+                                n,
+                                regen_seed_alt
+                            );
+                            let mut alt_config = resolved_for_regen.clone();
+                            alt_config.document.generator.seed = regen_seed_alt;
+                            regen_state.submit_request(alt_config);
+                        }
+                    }
+
+                    // Poll worker completion
+                    if let Some(result) = regen_state.poll_worker() {
+                        if result.error.is_some() {
+                            log::error!(
+                                "Regeneration failed (request_id={}): {}",
+                                result.request_id,
+                                result.error.as_ref().unwrap()
+                            );
+                        } else {
+                            let frame = regen_state.frame_index;
+                            match regeneration::commit_replacement(
+                                &mut renderer,
+                                &mut scene,
+                                &mut regen_state,
+                                result,
+                                frame,
+                            ) {
+                                Ok(()) => {
+                                    log::info!("Regeneration committed at frame {frame}");
+                                }
+                                Err(e) => {
+                                    log::error!("Regeneration commit failed: {e}");
+                                }
+                            }
+                        }
+                    }
+
+                    // Reap retired materials
+                    regeneration::reap_retired_materials(&mut renderer, &mut regen_state);
+
+                    // ── Input ───────────────────────────────────────────
                     let snapshot = app_input.snapshot();
 
                     let noclip_toggle = snapshot

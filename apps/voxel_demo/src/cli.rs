@@ -34,6 +34,8 @@ pub struct CliArgs {
     pub headless: bool,
     pub capture_dir: Option<PathBuf>,
     pub env_path: Option<PathBuf>,
+    /// Auto-trigger regeneration after N frames with a different seed.
+    pub regen_after_frames: Option<u64>,
 
     /// True when a v2-only selector or override was present. Shared legacy
     /// flags alone continue to select the unchanged v1 command route.
@@ -227,6 +229,10 @@ impl CliArgs {
                 "--env" => {
                     parsed.env_path = Some(PathBuf::from(require_value(&args, &mut i, flag)?));
                 }
+                "--regen-after-frames" => {
+                    parsed.regen_after_frames = Some(value!("a non-negative integer", u64));
+                    parsed.is_v2 = true;
+                }
                 other => return Err(CliError::UnknownArgument(other.into())),
             }
         }
@@ -301,6 +307,7 @@ impl Default for CliArgs {
             headless: false,
             capture_dir: None,
             env_path: None,
+            regen_after_frames: None,
             is_v2: false,
         }
     }
@@ -316,6 +323,7 @@ fn print_help() {
     println!("           --maze-twistiness --maze-radius --maze-retries --maze-search-budget");
     println!("           --floor-threshold --wall-uv-scale --floor-uv-scale");
     println!("RUNTIME: --light-budget <9-16> --headless --capture-dir <PATH> --env <PATH>");
+    println!("         --regen-after-frames <N>");
 }
 
 #[cfg(test)]

@@ -6,12 +6,17 @@
 //!
 //! Rules (per Phase 04 spec):
 //! - basecolor → sRGB, repeat, linear filter
-//! - normal → linear, repeat, linear filter
-//! - arm.png → NEVER loaded
-//! - Roughness → R channel of separate roughness texture
-//! - AO → G channel of separate AO texture (or from ARM if no separate)
+//! - normal, roughness, and AO → linear, repeat, linear filter
+//! - `_roughness.png` → metallic-roughness texture slot (grayscale G = roughness)
+//! - `_ao.png` → AO texture slot (grayscale R = occlusion)
+//! - `_arm.png`, `_metallic.png`, and `_height.png` → never loaded
 //! - metallic factor → 0 always
+//!
+//! # Material Cache (Phase 05)
+//! A `MaterialCache` deduplicates loaded material bundles by `MaterialCacheKey`
+//! and supports reactivation of cached entries during regeneration.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use renderer::prelude::{
@@ -34,12 +39,61 @@ pub struct MaterialCacheKey {
 }
 
 /// A loaded PBR material with its component textures and cache key.
+#[derive(Clone, Debug)]
 pub struct MaterialBundle {
     pub albedo: TextureHandle,
     pub normal: Option<TextureHandle>,
-    pub roughness_ao: TextureHandle,
+    pub roughness: TextureHandle,
+    pub ao: TextureHandle,
     pub material: MaterialHandle,
     pub cache_key: MaterialCacheKey,
+}
+
+// ─── Material cache ────────────────────────────────────────────────────────
+
+/// Cache of loaded material bundles, keyed by resolved asset identity.
+///
+/// During regeneration, cached bundles can be reactivated instead of
+/// reloading identical textures and creating duplicate GPU materials.
+pub struct MaterialCache {
+    entries: HashMap<MaterialCacheKey, MaterialBundle>,
+}
+
+impl MaterialCache {
+    /// Create an empty material cache.
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Look up a cached material bundle by key.
+    pub fn get(&self, key: &MaterialCacheKey) -> Option<&MaterialBundle> {
+        self.entries.get(key)
+    }
+
+    /// Insert a material bundle into the cache.
+    pub fn insert(&mut self, key: MaterialCacheKey, bundle: MaterialBundle) {
+        self.entries.insert(key, bundle);
+    }
+
+    /// Remove and return a cached bundle by key.
+    #[allow(dead_code, reason = "reactivation API consumed by Phase 06 editor")]
+    pub fn remove(&mut self, key: &MaterialCacheKey) -> Option<MaterialBundle> {
+        self.entries.remove(key)
+    }
+
+    /// Number of cached entries.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true if the cache is empty.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 // ─── KB3D catalog mapping ──────────────────────────────────────────────────
@@ -120,6 +174,12 @@ fn repeat_linear_opts() -> TextureLoadOptions {
     }
 }
 
+fn texture_opts(force_srgb: bool) -> TextureLoadOptions {
+    let mut opts = repeat_linear_opts();
+    opts.force_srgb = Some(force_srgb);
+    opts
+}
+
 /// Load a basecolor texture: sRGB, repeat, linear filter.
 fn load_basecolor(
     assets: &mut renderer::AssetManager,
@@ -128,9 +188,7 @@ fn load_basecolor(
     let path = find_texture_in_dir(dir, "basecolor").ok_or_else(|| {
         AssetError::Internal(format!("basecolor texture not found in {}", dir.display()))
     })?;
-    let mut opts = repeat_linear_opts();
-    opts.force_srgb = Some(true);
-    assets.load_texture_with_options(&path, opts)
+    assets.load_texture_with_options(&path, texture_opts(true))
 }
 
 /// Load a normal texture: linear, repeat, linear filter.
@@ -138,62 +196,62 @@ fn load_normal(
     assets: &mut renderer::AssetManager,
     dir: &Path,
 ) -> Result<TextureHandle, AssetError> {
-    let path = match find_texture_in_dir(dir, "normal") {
-        Some(p) => p,
-        None => {
-            return Err(AssetError::Internal(format!(
-                "normal texture not found in {}",
-                dir.display()
-            )));
-        }
-    };
-    let mut opts = repeat_linear_opts();
-    opts.force_srgb = Some(false);
-    assets.load_texture_with_options(&path, opts)
+    let path = find_texture_in_dir(dir, "normal").ok_or_else(|| {
+        AssetError::Internal(format!("normal texture not found in {}", dir.display()))
+    })?;
+    assets.load_texture_with_options(&path, texture_opts(false))
 }
 
-/// Load a roughness texture: linear, repeat, linear filter.
-/// Reads from the separate roughness file (R channel = roughness).
+/// Load the separate grayscale roughness texture as linear data.
+///
+/// The renderer samples roughness from G in its glTF metallic-roughness slot;
+/// grayscale decoding replicates the authored value into R, G, and B.
 fn load_roughness(
     assets: &mut renderer::AssetManager,
     dir: &Path,
 ) -> Result<TextureHandle, AssetError> {
-    let path = match find_texture_in_dir(dir, "roughness") {
-        Some(p) => p,
-        None => {
-            return Err(AssetError::Internal(format!(
-                "roughness texture not found in {}",
-                dir.display()
-            )));
-        }
-    };
-    let mut opts = repeat_linear_opts();
-    opts.force_srgb = Some(false);
-    assets.load_texture_with_options(&path, opts)
+    let path = find_texture_in_dir(dir, "roughness").ok_or_else(|| {
+        AssetError::Internal(format!("roughness texture not found in {}", dir.display()))
+    })?;
+    assets.load_texture_with_options(&path, texture_opts(false))
 }
 
-/// Load an AO texture: linear, repeat, linear filter.
-/// Reads from the separate AO file (G channel = AO).
+/// Load the separate grayscale AO texture as linear data.
+///
+/// The renderer samples occlusion from R in its dedicated AO slot.
 fn load_ao(assets: &mut renderer::AssetManager, dir: &Path) -> Result<TextureHandle, AssetError> {
-    let path = match find_texture_in_dir(dir, "ao") {
-        Some(p) => p,
-        None => {
-            return Err(AssetError::Internal(format!(
-                "ao texture not found in {}",
-                dir.display()
-            )));
-        }
-    };
-    let mut opts = repeat_linear_opts();
-    opts.force_srgb = Some(false);
-    assets.load_texture_with_options(&path, opts)
+    let path = find_texture_in_dir(dir, "ao").ok_or_else(|| {
+        AssetError::Internal(format!("ao texture not found in {}", dir.display()))
+    })?;
+    assets.load_texture_with_options(&path, texture_opts(false))
+}
+
+fn pbr_desc(
+    base_color: glam::Vec4,
+    roughness_factor: f32,
+    albedo: TextureHandle,
+    normal: Option<TextureHandle>,
+    roughness: TextureHandle,
+    ao: TextureHandle,
+) -> PbrMaterialDesc {
+    PbrMaterialDesc {
+        base_color,
+        metallic: 0.0,
+        roughness: roughness_factor,
+        base_color_tex: Some(albedo),
+        normal_tex: normal,
+        metallic_roughness_tex: Some(roughness),
+        ao_tex: Some(ao),
+        ..Default::default()
+    }
 }
 
 /// Create wall and floor material bundles from KB3D catalog references.
 ///
-/// Uses `assets.create_material_pbr()` with base_color texture, normal texture,
-/// and combined roughness+AO as metallic_roughness_tex. Metallic factor is
-/// always 0. ARM textures are never loaded.
+/// Uses `assets.create_material_pbr()` with base-color and normal textures,
+/// the separate grayscale roughness texture in `metallic_roughness_tex`, and
+/// the separate grayscale AO texture in `ao_tex`. Metallic factor is always
+/// zero. ARM, metallic, and height textures are never loaded.
 ///
 /// # Arguments
 /// * `renderer` - The renderer instance (for asset manager access).
@@ -254,23 +312,22 @@ pub fn create_wall_floor_materials(
     let wall_roughness_tex = load_roughness(&mut assets, &wall_dir)?;
     let wall_ao = load_ao(&mut assets, &wall_dir)?;
 
-    // Create wall material: use roughness texture as metallic_roughness_tex
-    // (R=roughness, G=from AO texture, metallic=0 always)
-    let wall_material = assets.create_material_pbr(PbrMaterialDesc {
-        base_color: glam::Vec4::new(0.8, 0.7, 0.6, 1.0),
-        metallic: 0.0,
-        roughness: wall_roughness,
-        base_color_tex: Some(wall_albedo),
-        normal_tex: wall_normal,
-        metallic_roughness_tex: Some(wall_roughness_tex),
-        ao_tex: Some(wall_ao),
-        ..Default::default()
-    })?;
+    // The grayscale roughness texture supplies the renderer's G roughness
+    // channel; AO remains a separate texture sampled from R.
+    let wall_material = assets.create_material_pbr(pbr_desc(
+        glam::Vec4::new(0.8, 0.7, 0.6, 1.0),
+        wall_roughness,
+        wall_albedo,
+        wall_normal,
+        wall_roughness_tex,
+        wall_ao,
+    ))?;
 
     let wall_bundle = MaterialBundle {
         albedo: wall_albedo,
         normal: wall_normal,
-        roughness_ao: wall_roughness_tex,
+        roughness: wall_roughness_tex,
+        ao: wall_ao,
         material: wall_material,
         cache_key: MaterialCacheKey {
             albedo: wall_albedo_ref.clone(),
@@ -286,21 +343,20 @@ pub fn create_wall_floor_materials(
     let floor_roughness_tex = load_roughness(&mut assets, &floor_dir)?;
     let floor_ao = load_ao(&mut assets, &floor_dir)?;
 
-    let floor_material = assets.create_material_pbr(PbrMaterialDesc {
-        base_color: glam::Vec4::new(0.6, 0.55, 0.5, 1.0),
-        metallic: 0.0,
-        roughness: floor_roughness,
-        base_color_tex: Some(floor_albedo),
-        normal_tex: floor_normal,
-        metallic_roughness_tex: Some(floor_roughness_tex),
-        ao_tex: Some(floor_ao),
-        ..Default::default()
-    })?;
+    let floor_material = assets.create_material_pbr(pbr_desc(
+        glam::Vec4::new(0.6, 0.55, 0.5, 1.0),
+        floor_roughness,
+        floor_albedo,
+        floor_normal,
+        floor_roughness_tex,
+        floor_ao,
+    ))?;
 
     let floor_bundle = MaterialBundle {
         albedo: floor_albedo,
         normal: floor_normal,
-        roughness_ao: floor_roughness_tex,
+        roughness: floor_roughness_tex,
+        ao: floor_ao,
         material: floor_material,
         cache_key: MaterialCacheKey {
             albedo: floor_albedo_ref.clone(),
@@ -354,6 +410,29 @@ mod tests {
         assert_eq!(sampler.wrap_u, Some(WrapMode::Repeat));
         assert_eq!(sampler.wrap_v, Some(WrapMode::Repeat));
         assert_eq!(sampler.wrap_w, Some(WrapMode::Repeat));
+        assert_eq!(sampler.min_filter, Some(FilterMode::LinearMipmapLinear));
+        assert_eq!(sampler.mag_filter, Some(FilterMode::Linear));
+    }
+
+    #[test]
+    fn texture_color_spaces_are_explicit() {
+        assert_eq!(texture_opts(true).force_srgb, Some(true));
+        assert_eq!(texture_opts(false).force_srgb, Some(false));
+    }
+
+    #[test]
+    fn pbr_slots_keep_roughness_and_ao_separate() {
+        let albedo = TextureHandle::new(1, 1);
+        let normal = TextureHandle::new(2, 1);
+        let roughness = TextureHandle::new(3, 1);
+        let ao = TextureHandle::new(4, 1);
+        let desc = pbr_desc(glam::Vec4::ONE, 0.8, albedo, Some(normal), roughness, ao);
+
+        assert_eq!(desc.base_color_tex, Some(albedo));
+        assert_eq!(desc.normal_tex, Some(normal));
+        assert_eq!(desc.metallic_roughness_tex, Some(roughness));
+        assert_eq!(desc.ao_tex, Some(ao));
+        assert_eq!(desc.metallic, 0.0);
     }
 
     #[test]
@@ -372,8 +451,14 @@ mod tests {
                 "should end with _basecolor.png"
             );
 
+            let roughness = find_texture_in_dir(&wall_dir, "roughness").unwrap();
+            let ao = find_texture_in_dir(&wall_dir, "ao").unwrap();
+            assert!(roughness.to_string_lossy().ends_with("_roughness.png"));
+            assert!(ao.to_string_lossy().ends_with("_ao.png"));
+            assert_ne!(roughness, ao, "roughness and AO must remain separate");
+
             let arm = find_texture_in_dir(&wall_dir, "arm");
-            assert!(arm.is_some(), "arm texture exists but we never load it");
+            assert!(arm.is_some(), "ARM exists only as a forbidden-load fixture");
         }
     }
 }

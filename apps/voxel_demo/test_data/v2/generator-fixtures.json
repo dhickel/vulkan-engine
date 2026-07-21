@@ -17,8 +17,8 @@
       "sha256_edges": "3b4c3f9cddf2da665d7a0aeb8e639266a5f932a8352507e24e6c72832ad69d78",
       "sha256_viewpoints": "a9e340c50cedd71009e4647d2c163489f73934e0a000dcb78d93016f2657df08",
       "sha256_light_anchors": "3d53c679de8c4b471973d5c13991eee87e1b6aeabd61f482244a2f27e873778d",
-      "geometry_identity": "3bd9bae9e6f567345df98b3bbb732275be9886ca9ecb3741675929b42f980ffb",
-      "scene_config_identity": "bf9ddec989286d97ad7135add844694195021146a913221ab916258309f9daf1"
+      "geometry_identity": "f65ad57ec3885feabc55b3af6de0ade136c44ce8f926ebdc75f76e8707fed82e",
+      "scene_config_identity": "ccc6123dc8432991c61492aca0f598989711c4eac1398defda716ce0f3f8f00a"
     },
     {
       "preset": "cavernous",

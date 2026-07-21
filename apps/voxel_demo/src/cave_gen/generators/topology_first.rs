@@ -2243,6 +2243,25 @@ mod tests {
     }
 
     #[test]
+    fn default_preset_plans_native_resolution_maze_target() {
+        let document: PresetDocument =
+            toml::from_str(include_str!("../../../presets/default.toml")).unwrap();
+        let config = document.generator;
+        let mut world = VoxelWorld::new(config.resolution, config.resolution, config.resolution);
+        world.fill_solid();
+
+        let result = generate_v2(&config, &mut world, config.seed).unwrap();
+        assert_eq!(
+            result
+                .serializable_edges
+                .iter()
+                .filter(|edge| edge.kind == RouteKind::Maze)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn v2_failure_is_atomic() {
         let mut config = v2_default_config();
         config.maze_density = 1.0;
