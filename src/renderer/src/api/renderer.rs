@@ -183,6 +183,7 @@ pub struct Renderer {
     camera: Camera,
     fps_plugin: Option<FpsInputPlugin>,
     cursor_in_window: bool,
+    cursor_grab_active: bool,
 }
 
 impl Renderer {
@@ -226,6 +227,7 @@ impl Renderer {
             camera: Camera::default(),
             fps_plugin: None,
             cursor_in_window: true,
+            cursor_grab_active: false,
         })
     }
 
@@ -269,6 +271,7 @@ impl Renderer {
             camera: Camera::default(),
             fps_plugin: None,
             cursor_in_window: true,
+            cursor_grab_active: false,
         })
     }
 

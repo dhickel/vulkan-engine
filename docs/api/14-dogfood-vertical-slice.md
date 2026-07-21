@@ -74,7 +74,7 @@ main.rs
   ├── Create app-owned EventBus, InputSystem, FrameClock, Camera, and FPSController
   ├── Build Scene via LevelScene::from_level() (scene_seed.rs)
   │     ├── PBR materials from content pack
-  │     ├── Chunked dungeon mesh (geometry.rs)
+  │     ├── Chunked dungeon mesh (geometry.rs) — volumetric primitives (floor slabs, wall boxes, ramp wedges, ceiling closures)
   │     ├── Point lights with 7/2/1 preset mapping
   │     ├── Model props (optional)
   │     └── Custom environment (optional)

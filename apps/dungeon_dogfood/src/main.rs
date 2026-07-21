@@ -4,6 +4,8 @@ mod content;
 mod events;
 mod generator;
 mod geometry;
+#[cfg(test)]
+mod geometry_fixtures;
 mod layout;
 mod mesh_collider_bridge;
 mod player;

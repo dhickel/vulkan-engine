@@ -12,8 +12,7 @@
 //! - Produce a pure preflight manifest without creating physics state.
 //! - Transactional: no scene mutation before markers+resources pass.
 
-use std::collections::BTreeMap;
-
+use crate::geometry::build_chunk_geometry_plan;
 use crate::layout::{ParsedLevel, Tile};
 
 use super::config::NormalizedGeneratorConfig;
@@ -71,10 +70,10 @@ pub(super) struct ColliderPreflightManifest {
 
 // ─── Resource counting ──────────────────────────────────────────────────────
 
-/// Count resources from the materialized level.
+/// Count resources from the materialized level using the exact geometry plan.
 pub(super) fn count_resources(
     level: &ParsedLevel,
-    topology: &IntendedTopology,
+    _topology: &IntendedTopology,
     light_count: u32,
     model_count: u32,
     config: &NormalizedGeneratorConfig,
@@ -109,48 +108,27 @@ pub(super) fn count_resources(
         }
     }
 
-    // Estimate chunk count: each layer gets floor + structure chunks.
-    // Non-empty chunks are those that contain at least one non-void non-wall cell.
-    // Use the 16×16 chunk partition that geometry.rs uses.
-    let chunk_dim = 16u64;
-    let chunks_x = width.div_ceil(chunk_dim);
-    let chunks_z = height.div_ceil(chunk_dim);
-    let chunks_per_layer = chunks_x
-        .checked_mul(chunks_z)
-        .and_then(|v| v.checked_mul(2)) // floor + structure per layer
-        .ok_or(GeneratorError::ArithmeticOverflow {
-            stage: ErrorStage::Ir,
-            operation: "resource_chunks_per_layer",
-        })?;
+    // Build the exact geometry plan to get precise vertex/index/chunk counts.
+    let plan = build_chunk_geometry_plan(level);
 
-    // Count non-empty chunks by checking if each 16×16 region has any floor/wall/ramp.
     let mut non_empty = 0u32;
-    for layer_idx in 0..(layers as usize) {
-        for sub in [SubLayerKind::Floor, SubLayerKind::Structure] {
-            for cz in 0..chunks_z {
-                for cx in 0..chunks_x {
-                    if chunk_has_content(level, layer_idx, cx, cz, chunk_dim, sub, width, height) {
-                        non_empty = non_empty.saturating_add(1);
-                    }
-                }
-            }
+    let mut exact_vertices = 0u64;
+    let mut exact_indices = 0u64;
+
+    for leaf in &plan.leaves {
+        if !leaf.floor_verts.is_empty() {
+            non_empty = non_empty.saturating_add(1);
+            exact_vertices = exact_vertices.saturating_add(leaf.floor_verts.len() as u64);
+            exact_indices = exact_indices.saturating_add(leaf.floor_indices.len() as u64);
+        }
+        if !leaf.wall_verts.is_empty() {
+            non_empty = non_empty.saturating_add(1);
+            exact_vertices = exact_vertices.saturating_add(leaf.wall_verts.len() as u64);
+            exact_indices = exact_indices.saturating_add(leaf.wall_indices.len() as u64);
         }
     }
 
-    // Estimate vertices: each floor tile → 4 vertices, wall → 4-8 depending.
-    // Conservative: floor×4 + wall×4 + ramp×4.
-    let estimated_vertices = floor_tiles
-        .checked_mul(4)
-        .and_then(|v| v.checked_add(wall_tiles.saturating_mul(4)))
-        .and_then(|v| v.checked_add(ramp_tiles.saturating_mul(4)))
-        .unwrap_or(u64::MAX);
-    let estimated_indices = floor_tiles
-        .checked_mul(6)
-        .and_then(|v| v.checked_add(wall_tiles.saturating_mul(6)))
-        .and_then(|v| v.checked_add(ramp_tiles.saturating_mul(6)))
-        .unwrap_or(u64::MAX);
-
-    // Static body count: one per non-empty floor chunk + one per non-empty structure chunk.
+    // Static body count: one per non-empty output mesh.
     let static_body_count = non_empty;
 
     // Total body count = static bodies + 1 proof body.
@@ -163,61 +141,13 @@ pub(super) fn count_resources(
         void_tiles,
         ramp_tiles,
         non_empty_chunks: non_empty,
-        estimated_vertices,
-        estimated_indices,
+        estimated_vertices: exact_vertices,
+        estimated_indices: exact_indices,
         light_count,
         model_count,
         static_body_count,
         total_body_count,
     })
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SubLayerKind {
-    Floor,
-    Structure,
-}
-
-fn chunk_has_content(
-    level: &ParsedLevel,
-    layer_idx: usize,
-    chunk_x: u64,
-    chunk_z: u64,
-    chunk_dim: u64,
-    sub: SubLayerKind,
-    width: u64,
-    height: u64,
-) -> bool {
-    let start_x = chunk_x * chunk_dim;
-    let start_z = chunk_z * chunk_dim;
-    let end_x = (start_x + chunk_dim).min(width);
-    let end_z = (start_z + chunk_dim).min(height);
-
-    for z in start_z..end_z {
-        for x in start_x..end_x {
-            let tile = level.tile_at_3d(layer_idx, x as usize, z as usize);
-            match sub {
-                SubLayerKind::Floor => {
-                    if matches!(
-                        tile,
-                        Tile::Floor
-                            | Tile::RampNorth(_)
-                            | Tile::RampEast(_)
-                            | Tile::RampSouth(_)
-                            | Tile::RampWest(_)
-                    ) {
-                        return true;
-                    }
-                }
-                SubLayerKind::Structure => {
-                    if matches!(tile, Tile::Wall) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
 }
 
 // ─── Budget enforcement ─────────────────────────────────────────────────────
@@ -318,57 +248,43 @@ pub(super) fn enforce_budgets(
 
 // ─── Collider preflight manifest ────────────────────────────────────────────
 
-/// Build a pure preflight manifest from a parsed level.
+/// Build a pure preflight manifest from the exact geometry plan.
 /// Does not create any renderer handle, physics body, or collider.
 pub(super) fn build_preflight_manifest(
     level: &ParsedLevel,
-    config: &NormalizedGeneratorConfig,
+    _config: &NormalizedGeneratorConfig,
 ) -> Result<ColliderPreflightManifest, GeneratorError> {
-    let width = u64::from(config.width());
-    let height = u64::from(config.height());
-    let layers = u64::from(config.layers().2);
-    let chunk_dim = 16u64;
-    let chunks_x = width.div_ceil(chunk_dim);
-    let chunks_z = height.div_ceil(chunk_dim);
+    let plan = build_chunk_geometry_plan(level);
 
     let mut entries = Vec::new();
     let mut total_vertices = 0u64;
     let mut total_indices = 0u64;
     let mut chunk_count = 0u32;
 
-    for layer_idx in 0..layers {
-        for sub in [SubLayerKind::Floor, SubLayerKind::Structure] {
-            for cz in 0..chunks_z {
-                for cx in 0..chunks_x {
-                    let name = format!(
-                        "{}_l{}_{}_{}",
-                        match sub {
-                            SubLayerKind::Floor => "floor",
-                            SubLayerKind::Structure => "struct",
-                        },
-                        layer_idx,
-                        cx,
-                        cz,
-                    );
-
-                    // Count actual geometry for this chunk.
-                    let (verts, indices, tris) = count_chunk_geometry(
-                        level, layer_idx, cx, cz, chunk_dim, sub, width, height,
-                    )?;
-
-                    if verts > 0 {
-                        entries.push(ChunkPreflightEntry {
-                            chunk_name: name,
-                            vertex_count: verts,
-                            index_count: indices,
-                            triangle_count: tris,
-                        });
-                        total_vertices = total_vertices.saturating_add(verts as u64);
-                        total_indices = total_indices.saturating_add(indices as u64);
-                        chunk_count = chunk_count.saturating_add(1);
-                    }
-                }
-            }
+    for leaf in &plan.leaves {
+        if !leaf.floor_verts.is_empty() {
+            let name = format!("floor_{}", leaf.leaf_name);
+            entries.push(ChunkPreflightEntry {
+                chunk_name: name,
+                vertex_count: leaf.floor_verts.len(),
+                index_count: leaf.floor_indices.len(),
+                triangle_count: leaf.floor_indices.len() / 3,
+            });
+            total_vertices = total_vertices.saturating_add(leaf.floor_verts.len() as u64);
+            total_indices = total_indices.saturating_add(leaf.floor_indices.len() as u64);
+            chunk_count = chunk_count.saturating_add(1);
+        }
+        if !leaf.wall_verts.is_empty() {
+            let name = format!("struct_{}", leaf.leaf_name);
+            entries.push(ChunkPreflightEntry {
+                chunk_name: name,
+                vertex_count: leaf.wall_verts.len(),
+                index_count: leaf.wall_indices.len(),
+                triangle_count: leaf.wall_indices.len() / 3,
+            });
+            total_vertices = total_vertices.saturating_add(leaf.wall_verts.len() as u64);
+            total_indices = total_indices.saturating_add(leaf.wall_indices.len() as u64);
+            chunk_count = chunk_count.saturating_add(1);
         }
     }
 
@@ -391,51 +307,6 @@ pub(super) fn build_preflight_manifest(
         total_indices,
         chunk_count,
     })
-}
-
-fn count_chunk_geometry(
-    level: &ParsedLevel,
-    layer_idx: u64,
-    chunk_x: u64,
-    chunk_z: u64,
-    chunk_dim: u64,
-    sub: SubLayerKind,
-    width: u64,
-    height: u64,
-) -> Result<(usize, usize, usize), GeneratorError> {
-    let start_x = chunk_x * chunk_dim;
-    let start_z = chunk_z * chunk_dim;
-    let end_x = (start_x + chunk_dim).min(width);
-    let end_z = (start_z + chunk_dim).min(height);
-
-    let mut tile_count = 0usize;
-
-    for z in start_z..end_z {
-        for x in start_x..end_x {
-            let tile = level.tile_at_3d(layer_idx as usize, x as usize, z as usize);
-            let relevant = match sub {
-                SubLayerKind::Floor => matches!(
-                    tile,
-                    Tile::Floor
-                        | Tile::RampNorth(_)
-                        | Tile::RampEast(_)
-                        | Tile::RampSouth(_)
-                        | Tile::RampWest(_)
-                ),
-                SubLayerKind::Structure => matches!(tile, Tile::Wall),
-            };
-            if relevant {
-                tile_count = tile_count.saturating_add(1);
-            }
-        }
-    }
-
-    // Conservative: each relevant tile contributes at most one quad = 4 verts, 6 indices.
-    let verts = tile_count.saturating_mul(4);
-    let indices = tile_count.saturating_mul(6);
-    let tris = tile_count * 2;
-
-    Ok((verts, indices, tris))
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -461,6 +332,21 @@ mod tests {
         }
     }
 
+    fn empty_topology(config: NormalizedGeneratorConfig) -> IntendedTopology {
+        IntendedTopology {
+            regions: vec![],
+            edges: vec![],
+            transitions: vec![],
+            route_distance: 0,
+            per_layer_cycles: vec![0; usize::from(config.layers().2)],
+            max_branch_depth: 0,
+            dead_end_count: 0,
+            articulation_count: 0,
+            crossing_count: 0,
+            config,
+        }
+    }
+
     #[test]
     fn resource_count_total_tiles_matches_dimensions() {
         let config = GeneratorConfig::custom(64, 64, 2).normalize().unwrap();
@@ -482,18 +368,7 @@ mod tests {
             model_markers: Vec::new(),
             light_markers: Vec::new(),
         };
-        let topology = IntendedTopology {
-            regions: vec![],
-            edges: vec![],
-            transitions: vec![],
-            route_distance: 0,
-            per_layer_cycles: vec![0; 2],
-            max_branch_depth: 0,
-            dead_end_count: 0,
-            articulation_count: 0,
-            crossing_count: 0,
-            config: config.clone(),
-        };
+        let topology = empty_topology(config.clone());
         let counts = count_resources(&level, &topology, 0, 0, &config).unwrap();
         assert_eq!(counts.total_tiles, 64 * 64 * 2);
         assert_eq!(counts.wall_tiles, 64 * 64 * 2);
@@ -611,7 +486,60 @@ mod tests {
             light_markers: Vec::new(),
         };
         let manifest = build_preflight_manifest(&level, &config).unwrap();
-        // At most 2 layers × 2 sub-layers × (ceil(64/16))² = 2×2×16 = 64 max chunks.
+        // At most 2 layers × 2 material domains × (ceil(64/16))² = 64 meshes.
         assert!(manifest.chunk_count <= 64);
+    }
+
+    #[test]
+    fn resource_preflight_exactly_matches_production_meshes() {
+        let config = GeneratorConfig::custom(64, 64, 2).normalize().unwrap();
+        let mut tiles = vec![Tile::Void; 64 * 64];
+        tiles[1 * 64 + 1] = Tile::Floor;
+        tiles[1 * 64 + 2] = Tile::RampEast(0);
+        tiles[2 * 64 + 1] = Tile::Wall;
+        let level = ParsedLevel {
+            width: 64,
+            height: 64,
+            layers: vec![tiles.clone(), tiles],
+            spawn: TileCoord {
+                layer: 0,
+                x: 1,
+                y: 1,
+            },
+            model_markers: Vec::new(),
+            light_markers: Vec::new(),
+        };
+        let topology = empty_topology(config.clone());
+        let counts = count_resources(&level, &topology, 0, 0, &config).unwrap();
+        let manifest = build_preflight_manifest(&level, &config).unwrap();
+        let material = renderer::MaterialHandle::new(0, 0);
+        let chunks = crate::geometry::build_level_chunks(&level, material, material);
+
+        assert_eq!(usize::try_from(counts.non_empty_chunks).unwrap(), chunks.len());
+        assert_eq!(usize::try_from(manifest.chunk_count).unwrap(), chunks.len());
+        assert_eq!(
+            counts.estimated_vertices,
+            chunks
+                .iter()
+                .map(|chunk| chunk.mesh.vertices.len() as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(
+            counts.estimated_indices,
+            chunks
+                .iter()
+                .map(|chunk| chunk.mesh.indices.len() as u64)
+                .sum::<u64>()
+        );
+        assert_eq!(manifest.total_vertices, counts.estimated_vertices);
+        assert_eq!(manifest.total_indices, counts.estimated_indices);
+
+        for (entry, chunk) in manifest.entries.iter().zip(&chunks) {
+            assert_eq!(entry.chunk_name, chunk.name);
+            assert_eq!(entry.vertex_count, chunk.mesh.vertices.len());
+            assert_eq!(entry.index_count, chunk.mesh.indices.len());
+            assert_eq!(entry.triangle_count, chunk.mesh.indices.len() / 3);
+            assert!(chunk.mesh.material.is_some());
+        }
     }
 }
