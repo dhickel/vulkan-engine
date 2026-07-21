@@ -183,7 +183,9 @@ pub struct Renderer {
     camera: Camera,
     fps_plugin: Option<FpsInputPlugin>,
     cursor_in_window: bool,
-    cursor_grab_active: bool,
+    /// Last grab mode successfully requested from winit. This tracks the persistent request, not
+    /// whether the compositor is currently activating the constraint for a focused pointer.
+    cursor_grab_requested: bool,
 }
 
 impl Renderer {
@@ -227,7 +229,7 @@ impl Renderer {
             camera: Camera::default(),
             fps_plugin: None,
             cursor_in_window: true,
-            cursor_grab_active: false,
+            cursor_grab_requested: false,
         })
     }
 
@@ -271,7 +273,7 @@ impl Renderer {
             camera: Camera::default(),
             fps_plugin: None,
             cursor_in_window: true,
-            cursor_grab_active: false,
+            cursor_grab_requested: false,
         })
     }
 
@@ -1239,17 +1241,25 @@ impl Renderer {
     }
 
     fn apply_cursor_policy(&mut self, window: &Window) -> Result<(), RendererError> {
-        if self.imgui_capture_active() || !self.cursor_in_window {
-            window
-                .set_cursor_grab(winit::window::CursorGrabMode::None)
-                .map_err(|err| map_frame_input_err(format!("cursor release failed: {err}")))?;
-            window.set_cursor_visible(true);
-        } else {
-            window
-                .set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                .map_err(|err| map_frame_input_err(format!("cursor grab failed: {err}")))?;
-            window.set_cursor_visible(false);
+        let should_grab = !self.imgui_capture_active();
+        if let Some(request_grab) = cursor_grab_transition(
+            self.cursor_in_window,
+            self.cursor_grab_requested,
+            should_grab,
+        ) {
+            let mode = if request_grab {
+                winit::window::CursorGrabMode::Confined
+            } else {
+                winit::window::CursorGrabMode::None
+            };
+            window.set_cursor_grab(mode).map_err(|err| {
+                let action = if request_grab { "grab" } else { "release" };
+                map_frame_input_err(format!("cursor {action} failed: {err}"))
+            })?;
+            self.cursor_grab_requested = request_grab;
         }
+
+        window.set_cursor_visible(!should_grab);
         Ok(())
     }
 
@@ -1351,6 +1361,21 @@ fn build_submission_with_camera_view(
 ) -> crate::scene::render_submission::RenderSubmission {
     scene.update_camera(view.view, view.projection, view.position);
     scene.build_submission()
+}
+
+/// Returns the next persistent grab request, if one can safely be sent to winit.
+///
+/// Wayland removes the pointer from winit's surface pointer list before delivering
+/// `CursorLeft`. Releasing at that point can update winit's requested mode without destroying the
+/// existing protocol object. Re-acquiring on `CursorEntered` then creates a second constraint for
+/// the same surface, which is a fatal protocol error. Keep the persistent request across pointer
+/// leave/enter and defer genuine policy changes until the pointer is in the window.
+fn cursor_grab_transition(
+    cursor_in_window: bool,
+    grab_requested: bool,
+    should_grab: bool,
+) -> Option<bool> {
+    (cursor_in_window && grab_requested != should_grab).then_some(should_grab)
 }
 
 fn scroll_delta_to_lines(delta: &MouseScrollDelta) -> f32 {
@@ -1501,9 +1526,32 @@ mod tests {
     use crate::api::Scene;
 
     use super::{
-        build_submission_with_camera_view, emit_input_action_events_from_snapshot,
-        frame_outcome_from_backend, renderer_error_from_backend, CameraView, FrameRenderOutcome,
+        build_submission_with_camera_view, cursor_grab_transition,
+        emit_input_action_events_from_snapshot, frame_outcome_from_backend,
+        renderer_error_from_backend, CameraView, FrameRenderOutcome,
     };
+
+    #[test]
+    fn cursor_grab_policy_is_edge_triggered_and_persists_across_pointer_leave() {
+        let mut requested = false;
+
+        let acquire = cursor_grab_transition(true, requested, true);
+        assert_eq!(acquire, Some(true));
+        requested = acquire.unwrap();
+
+        assert_eq!(cursor_grab_transition(true, requested, true), None);
+        assert_eq!(cursor_grab_transition(false, requested, false), None);
+        assert_eq!(cursor_grab_transition(false, requested, true), None);
+        assert_eq!(cursor_grab_transition(true, requested, true), None);
+    }
+
+    #[test]
+    fn cursor_grab_policy_defers_real_changes_until_pointer_is_present() {
+        assert_eq!(cursor_grab_transition(false, true, false), None);
+        assert_eq!(cursor_grab_transition(true, true, false), Some(false));
+        assert_eq!(cursor_grab_transition(false, false, true), None);
+        assert_eq!(cursor_grab_transition(true, false, true), Some(true));
+    }
 
     #[test]
     fn input_action_bridge_emits_after_snapshot_dispatch() {

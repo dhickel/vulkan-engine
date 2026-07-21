@@ -110,6 +110,9 @@ consume = false
   through `Renderer::events_mut()` on the no-dispatch render path.
 - Use action names for gameplay logic; avoid hardcoding key codes in systems.
 - Keep UI/input-capture layers at higher priority than gameplay layers.
+- Let the renderer own cursor confinement transitions. On Wayland, do not add app-level
+  `CursorLeft`/`CursorEntered` grab calls around `route_platform_input`; the renderer preserves one
+  persistent request across pointer leave/re-entry.
 - Prefer stable action IDs and load/save binding profiles for user rebinding.
 - Keep layer registration in explicit bands:
   - `900-1000`: engine capture/system overlays

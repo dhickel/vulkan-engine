@@ -17,6 +17,8 @@ App-owned input path:
   overlay visibility gating.
 - `F1` toggles the left console panel and `F2` toggles the right debug panel independently.
 - When either panel is visible, cursor grab is released and FPS camera-look updates are paused.
+- Cursor confinement is an edge-triggered persistent request. Cursor leave/enter updates presence but
+  does not tear down and recreate the Wayland constraint.
 - Layer dispatch model uses priority groups with same-priority peer execution.
 - Snapshot state is read-only to consumers after dispatch.
 - Renderer event emission for input actions reads the refreshed snapshot after `dispatch_frame()`.
@@ -95,6 +97,8 @@ Priority band guidance:
 
 ## 5. Best Practices
 - Keep renderer platform side effects in `Renderer::route_platform_input`.
+- Track the last successful cursor-grab request separately from pointer presence. Apply only policy
+  transitions, and defer transitions while the pointer is outside the window.
 - Prefer `route_platform_input_to_app` for app-owned input paths; use `queue_routed_input_event` directly only when code already has a routing result.
 - Preserve one dispatch boundary per frame.
 - On the app-owned path, do not also call renderer frame APIs that dispatch renderer-owned input in
@@ -108,14 +112,23 @@ Priority band guidance:
 - Dispatching less than once per frame causes stale input and lag.
 - Consuming in high-priority layers can mask lower gameplay layers unexpectedly.
 - Profile reload failures should be surfaced to logs/UX; never silently drop invalid bindings.
+- On winit 0.29 Wayland, `CursorLeft` is delivered after winit removes the pointer from the window's
+  pointer list. Releasing confinement in that handler may not destroy the protocol object even
+  though winit records `None`; requesting `Confined` on re-entry can then create a duplicate and
+  trigger a fatal `zwp_pointer_constraints_v1` protocol error.
+- `WindowEvent::Focused` is not part of the renderer cursor policy. Wayland activates/deactivates the
+  persistent constraint with pointer focus; the renderer should not recreate it for focus events.
 
 ## 7. Debugging Playbook
 - Step 1: on renderer-owned compatibility paths, verify `update_input` is called before event-specific branching; on app-owned paths, verify `route_platform_input_to_app` (or `route_platform_input` + `queue_routed_input_event`) runs before app-frame dispatch.
 - Step 2: inspect `input_system.debug_snapshot()` each frame.
 - Step 3: log layer priorities and enabled states.
-- Step 4: validate ImGui capture flags against observed behavior.
-- Step 5: validate action map bindings when gameplay input appears dead.
-- Step 6: subscribe through `Renderer::events_mut()` on legacy renderer-owned paths, or through the
+- Step 4: validate ImGui capture flags against observed behavior and confirm cursor policy changes
+  produce only one `set_cursor_grab` transition.
+- Step 5: on Wayland, distinguish the compositor's current constraint activation from the renderer's
+  persistent requested mode; do not infer protocol-object destruction from `CursorLeft`.
+- Step 6: validate action map bindings when gameplay input appears dead.
+- Step 7: subscribe through `Renderer::events_mut()` on legacy renderer-owned paths, or through the
   app-owned `EventBus` when validating `InputActionEventEmitter`.
 
 ## 8. Cross-Module Links

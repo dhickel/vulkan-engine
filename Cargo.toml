@@ -1,4 +1,4 @@
-workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "src/launch_shared", "apps/dungeon_dogfood", "tools/engine_pack"] }
+workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "src/launch_shared", "apps/dungeon_dogfood", "tools/engine_pack"], exclude = [".internal-dev/spikes/voxel-cave"] }
 
 [package]
 name = "engine"
