@@ -13,11 +13,14 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use crate::cave_gen::generators::{
     carve_ellipsoid, carve_ellipsoid_interior, carve_sphere, carve_sphere_interior, enforce_shell,
-    enforce_shell_multi, verify_shell_multi, AttemptContext, GenError, Generator, GeneratorResult,
-    InteriorRegion,
+    enforce_shell_multi, verify_shell_multi, AnchorKind, AttemptContext, CoreSiteKind, GenError,
+    Generator, GeneratorResult, InteriorRegion, RouteKind, SerializableAnchor, SerializableEdge,
+    SerializableSite, SerializableSiteRole, V2GeneratorResult,
 };
 use crate::cave_gen::lattice::{Density, VoxelWorld, DEFAULT_MATERIAL};
-use crate::cave_gen::metrics::{flood_fill_air, path_clearance, RouteEdge, Site};
+use crate::cave_gen::metrics::{
+    flood_fill_air, path_clearance, RouteEdge, Site, CLEARANCE_MAX_REPORT, CLEARANCE_RADIUS,
+};
 use crate::cave_gen::noise::PerlinNoise;
 use crate::cave_gen::rng::{v2_stream, Pcg32V1, PhaseTaggedRng};
 use crate::config::GeneratorSection;
@@ -51,6 +54,12 @@ const AIR_DENSITY: Density = 127;
 
 /// Maze endpoint attachment zone radius (cells from site center).
 const MAZE_ATTACH_ZONE: u32 = 3;
+
+/// Maximum ellipsoid surface warp beyond the configured cavern radius.
+const CAVERN_SHAPE_DISPLACEMENT: f32 = 1.0;
+
+/// Safety cell retained between operation footprints and extraction bounds.
+const EXTRACTION_SAFETY_MARGIN: u32 = 1;
 
 // ─── v1 Generator (preserved unchanged) ────────────────────────────────────
 
@@ -484,7 +493,7 @@ pub fn generate_v2(
     config: &GeneratorSection,
     world: &mut VoxelWorld,
     rng_seed: u64,
-) -> Result<GeneratorResult, GenError> {
+) -> Result<V2GeneratorResult, GenError> {
     // Generation is transactional: no typed failure may expose a partially
     // carved candidate through the caller-owned world.
     let mut candidate = world.clone();
@@ -497,7 +506,7 @@ fn generate_v2_candidate(
     config: &GeneratorSection,
     world: &mut VoxelWorld,
     rng_seed: u64,
-) -> Result<GeneratorResult, GenError> {
+) -> Result<V2GeneratorResult, GenError> {
     // 0. Validate version and resolution match
     let (res, h, d) = world.dims();
     if (res, h, d) != (config.resolution, config.resolution, config.resolution) {
@@ -539,29 +548,17 @@ fn generate_v2_candidate(
         ));
     }
 
-    // 1. Derive interior region
-    let interior = InteriorRegion::from_resolution(config.resolution, config.shell_thickness)
-        .ok_or(GenError::InteriorEmpty {
-            interior: 0,
-            max_radius: config.cavern_radius_max,
-        })?;
-    let max_radius = config
-        .cavern_radius_max
-        .max(config.tunnel_radius_max)
-        .max(config.maze_radius);
-    if max_radius + config.roughness + 2.0
-        > interior
-            .span()
-            .0
-            .min(interior.span().1)
-            .min(interior.span().2) as f32
-            / 2.0
-    {
-        return Err(GenError::InteriorEmpty {
-            interior: interior.span().0,
-            max_radius,
-        });
-    }
+    // 1. Derive one operation-aware interior before placement or carving.
+    let roughness_displacement_radius = config.roughness * 6.0;
+    let interior = InteriorRegion::from_operation_requirements(
+        config.resolution,
+        config.shell_thickness,
+        config.cavern_radius_max + CAVERN_SHAPE_DISPLACEMENT,
+        config.tunnel_radius_max,
+        config.maze_radius,
+        roughness_displacement_radius,
+        EXTRACTION_SAFETY_MARGIN,
+    )?;
 
     let mut ctx = AttemptContext::new();
 
@@ -583,6 +580,7 @@ fn generate_v2_candidate(
             Site::new(pos[0], pos[1], pos[2], label)
         })
         .collect();
+    let serializable_sites = build_serializable_sites(&sites)?;
 
     // 3. Build spline edges
     let spline_edges = build_spline_edges(rng_seed, &positions, config.tunnel_count)?;
@@ -594,7 +592,7 @@ fn generate_v2_candidate(
     );
 
     // 5. Carve tunnels along spline edges
-    carve_tunnels_v2(
+    let spline_route_cells = carve_tunnels_v2(
         world,
         &positions,
         &spline_edges,
@@ -618,38 +616,74 @@ fn generate_v2_candidate(
     // 7. Apply roughness
     apply_roughness_v2(world, config, &noise, rng_seed, &interior, &mut ctx);
 
-    // 8. Enforce shell (write solid, then verify)
+    // 8. Enforce shell defensively, then verify through the typed invariant.
     enforce_shell_multi(world, config.shell_thickness);
-    if !verify_shell_multi(world, config.shell_thickness) {
-        return Err(GenError::ShellBreach);
+    validate_shell_invariant(world, config.shell_thickness)?;
+
+    // 9. Verify reachability once and retain the set for anchor validation.
+    let reachable = verify_reachability(world, &sites)?;
+
+    // 10. Build stable viewpoints and nine light anchors from core roles/routes.
+    let viewpoints = build_viewpoints(&serializable_sites);
+    let light_anchors = build_light_anchors(&serializable_sites, &spline_route_cells)?;
+    validate_anchors(world, &interior, &reachable, &viewpoints)?;
+    validate_anchors(world, &interior, &reachable, &light_anchors)?;
+
+    // 11. Build legacy metric edges and canonical serializable route records
+    // from the actual carved route center cells.
+    let backbone_edges = backbone_edge_set(&positions);
+    let mut serializable_edges = Vec::with_capacity(spline_edges.len() + maze_edges.len());
+    for &(from, to) in &spline_edges {
+        let cells = spline_route_cells.get(&(from, to)).ok_or_else(|| {
+            GenError::InvalidConfig(format!("missing spline route cells for {from}-{to}"))
+        })?;
+        let clearance = route_cells_clearance(world, cells);
+        validate_route_clearance(from, to, clearance)?;
+        serializable_edges.push(SerializableEdge {
+            kind: if backbone_edges.contains(&(from, to)) {
+                RouteKind::SplineBackbone
+            } else {
+                RouteKind::SplineExtra
+            },
+            from_site_id: from as u8,
+            to_site_id: to as u8,
+            clearance,
+        });
     }
-
-    // 9. Verify reachability
-    verify_reachability(world, &sites)?;
-
-    // 10. Build result edges
-    let all_edges: Vec<(usize, usize)> = spline_edges
+    for (pair, cells) in &maze_edges {
+        let clearance = route_cells_clearance(world, cells);
+        validate_route_clearance(pair.0, pair.1, clearance)?;
+        serializable_edges.push(SerializableEdge {
+            kind: RouteKind::Maze,
+            from_site_id: pair.0 as u8,
+            to_site_id: pair.1 as u8,
+            clearance,
+        });
+    }
+    serializable_edges.sort_by_key(|edge| {
+        (
+            edge.from_site_id,
+            edge.to_site_id,
+            route_kind_order(edge.kind),
+        )
+    });
+    let edges = serializable_edges
         .iter()
-        .copied()
-        .chain(maze_edges.iter().copied())
-        .collect();
-
-    let edges: Vec<RouteEdge> = all_edges
-        .iter()
-        .map(|&(from, to)| {
-            let clearance = path_clearance(world.density(), &sites[from], &sites[to]);
-            RouteEdge {
-                from,
-                to,
-                clearance,
-            }
+        .map(|edge| RouteEdge {
+            from: edge.from_site_id as usize,
+            to: edge.to_site_id as usize,
+            clearance: edge.clearance,
         })
         .collect();
 
-    Ok(GeneratorResult {
+    Ok(V2GeneratorResult {
         sites,
         edges,
         spawn_index: 0,
+        serializable_sites,
+        serializable_edges,
+        viewpoints,
+        light_anchors,
     })
 }
 
@@ -658,22 +692,12 @@ fn generate_v2_candidate(
 fn place_sites_v2(
     seed: u64,
     n_sites: usize,
-    config: &GeneratorSection,
+    _config: &GeneratorSection,
     interior: &InteriorRegion,
 ) -> Result<Vec<[u32; 3]>, GenError> {
-    let max_radius = config
-        .cavern_radius_max
-        .max(config.tunnel_radius_max)
-        .max(config.maze_radius);
-    let clearance = (max_radius + config.roughness + 1.0).ceil() as u32;
-
-    // Inner bounds where site centers can go (clearance from interior edge)
-    let ix_min = interior.x_min + clearance;
-    let ix_max = interior.x_max.saturating_sub(clearance);
-    let iy_min = interior.y_min + clearance;
-    let iy_max = interior.y_max.saturating_sub(clearance);
-    let iz_min = interior.z_min + clearance;
-    let iz_max = interior.z_max.saturating_sub(clearance);
+    // Site centers use the operation-aware bounds. The inset includes maximum
+    // cavern/maze/tunnel reach, roughness displacement, and extraction safety.
+    let (ix_min, ix_max, iy_min, iy_max, iz_min, iz_max) = interior.operation_center_bounds();
 
     if ix_min > ix_max || iy_min > iy_max || iz_min > iz_max {
         return Err(GenError::SitePlacement {
@@ -871,6 +895,55 @@ fn checked_pair_count(n: u32) -> u32 {
     ((n64 * (n64 - 1)) / 2) as u32
 }
 
+fn build_serializable_sites(sites: &[Site]) -> Result<Vec<SerializableSite>, GenError> {
+    const CORE_KINDS: [CoreSiteKind; 5] = [
+        CoreSiteKind::Spawn,
+        CoreSiteKind::Junction,
+        CoreSiteKind::GrandCavern,
+        CoreSiteKind::Shaft,
+        CoreSiteKind::Destination,
+    ];
+
+    sites
+        .iter()
+        .enumerate()
+        .map(|(id, site)| {
+            let id = u8::try_from(id)
+                .map_err(|_| GenError::InvalidConfig("site ID exceeds u8".into()))?;
+            let role = if (id as usize) < CORE_KINDS.len() {
+                SerializableSiteRole::Core {
+                    kind: CORE_KINDS[id as usize],
+                }
+            } else {
+                SerializableSiteRole::Auxiliary { aux_id: id }
+            };
+            Ok(SerializableSite {
+                id,
+                role,
+                label: site.label.to_owned(),
+                x: site.x,
+                y: site.y,
+                z: site.z,
+            })
+        })
+        .collect()
+}
+
+fn backbone_edge_set(positions: &[[u32; 3]]) -> HashSet<(usize, usize)> {
+    let mut backbone = HashSet::new();
+    for pair in [(0, 1), (1, 2), (1, 3), (2, 4)] {
+        if pair.1 < positions.len() {
+            backbone.insert(pair);
+        }
+    }
+    for id in 5..positions.len() {
+        let candidates = (0..id).collect::<Vec<_>>();
+        let (_, parent) = nearest_among(id, positions, &candidates);
+        backbone.insert(canonical_pair(parent, id));
+    }
+    backbone
+}
+
 // ─── v2: Cavern carving ────────────────────────────────────────────────────
 
 fn carve_caverns_v2(
@@ -886,10 +959,12 @@ fn carve_caverns_v2(
     for (i, pos) in positions.iter().enumerate() {
         let mut rng = v2_stream(seed, &format!("cavern/site-{i:02}"));
         let radius_range = config.cavern_radius_max - config.cavern_radius_min;
-        let base_r = config.cavern_radius_min + rng.next_bounded(100) as f32 * 0.01 * radius_range;
-        let rx = base_r + rng.next_bounded(40) as f32 * 0.1;
-        let ry = base_r + rng.next_bounded(40) as f32 * 0.1;
-        let rz = base_r + rng.next_bounded(40) as f32 * 0.1;
+        let sample_radius = |rng: &mut Pcg32V1| {
+            config.cavern_radius_min + rng.next_bounded(10_001) as f32 * 0.0001 * radius_range
+        };
+        let rx = sample_radius(&mut rng);
+        let ry = sample_radius(&mut rng);
+        let rz = sample_radius(&mut rng);
 
         let cx = pos[0] as f32;
         let cy = pos[1] as f32;
@@ -905,7 +980,7 @@ fn carve_caverns_v2(
             rx,
             ry,
             rz,
-            1.0,
+            CAVERN_SHAPE_DISPLACEMENT,
             &|x, y, z| noise.noise_3d(x + noise_offset, y + noise_offset, z + noise_offset),
             AIR_DENSITY,
             DEFAULT_MATERIAL,
@@ -928,8 +1003,11 @@ fn carve_tunnels_v2(
     seed: u64,
     interior: &InteriorRegion,
     ctx: &mut AttemptContext,
-) {
+) -> HashMap<(usize, usize), Vec<(u32, u32, u32)>> {
+    let mut route_cells = HashMap::new();
+    let (cx_min, cx_max, cy_min, cy_max, cz_min, cz_max) = interior.operation_center_bounds();
     for &(from, to) in edges {
+        let mut cells = Vec::new();
         let mut rng = v2_stream(seed, &format!("tunnel/link-{from:02}-{to:02}"));
         let radius_range = config.tunnel_radius_max - config.tunnel_radius_min;
         let base_radius =
@@ -973,9 +1051,9 @@ fn carve_tunnels_v2(
                 base_z as f64 * 0.1,
             ) as f32;
 
-            let wx = (base_x + nx * warp_scale).clamp(interior.x_min as f32, interior.x_max as f32);
-            let wy = (base_y + ny * warp_scale).clamp(interior.y_min as f32, interior.y_max as f32);
-            let wz = (base_z + nz * warp_scale).clamp(interior.z_min as f32, interior.z_max as f32);
+            let wx = (base_x + nx * warp_scale).clamp(cx_min as f32, cx_max as f32);
+            let wy = (base_y + ny * warp_scale).clamp(cy_min as f32, cy_max as f32);
+            let wz = (base_z + nz * warp_scale).clamp(cz_min as f32, cz_max as f32);
             control.push([wx, wy, wz]);
         }
         control.push(to_pos);
@@ -983,7 +1061,10 @@ fn carve_tunnels_v2(
         let mut prev_point: Option<[f32; 3]> = None;
         for i in 0..=SPLINE_SAMPLES {
             let t = i as f32 / SPLINE_SAMPLES as f32;
-            let pt = catmull_rom_sample(&control, t);
+            let mut pt = catmull_rom_sample(&control, t);
+            pt[0] = pt[0].clamp(cx_min as f32, cx_max as f32);
+            pt[1] = pt[1].clamp(cy_min as f32, cy_max as f32);
+            pt[2] = pt[2].clamp(cz_min as f32, cz_max as f32);
 
             let radius_factor = 1.0 - 0.4 * (2.0 * t - 1.0).abs();
             let r = (base_radius * radius_factor).max(1.0);
@@ -1001,6 +1082,7 @@ fn carve_tunnels_v2(
                 interior,
                 ctx,
             );
+            push_route_cell(&mut cells, pt, interior);
 
             if let Some(prev) = prev_point {
                 let dist = ((pt[0] - prev[0]).powi(2)
@@ -1025,12 +1107,27 @@ fn carve_tunnels_v2(
                             interior,
                             ctx,
                         );
+                        push_route_cell(&mut cells, [gx, gy, gz], interior);
                     }
                 }
             }
             prev_point = Some(pt);
         }
         ctx.connection_forged();
+        route_cells.insert((from, to), cells);
+    }
+    route_cells
+}
+
+fn push_route_cell(cells: &mut Vec<(u32, u32, u32)>, point: [f32; 3], interior: &InteriorRegion) {
+    let cell = (
+        point[0].round() as u32,
+        point[1].round() as u32,
+        point[2].round() as u32,
+    );
+    debug_assert!(interior.contains_operation_center(cell.0, cell.1, cell.2));
+    if cells.last().copied() != Some(cell) {
+        cells.push(cell);
     }
 }
 
@@ -1045,7 +1142,7 @@ fn plan_and_carve_maze(
     config: &GeneratorSection,
     seed: u64,
     interior: &InteriorRegion,
-) -> Result<Vec<(usize, usize)>, GenError> {
+) -> Result<Vec<((usize, usize), Vec<(u32, u32, u32)>)>, GenError> {
     let n = positions.len();
 
     // 1. Eligible pairs
@@ -1062,10 +1159,7 @@ fn plan_and_carve_maze(
     eligible.sort_by_key(|&(a, b)| (a, b));
     let eligible_count = eligible.len() as u32;
 
-    let target = {
-        let d = config.maze_density as f64;
-        (d * eligible_count as f64 + 0.5).floor() as u32
-    };
+    let target = maze_target_count(config.maze_density, eligible_count)?;
     if target == 0 {
         return Ok(Vec::new());
     }
@@ -1117,8 +1211,12 @@ fn plan_and_carve_maze(
                 (config.cavern_radius_max + config.roughness + 5.0).ceil() as u32,
                 (max_search.saturating_sub(total_search)) as u32,
             );
-            total_search += result.search_nodes;
-            total_retries += 1;
+            total_search = total_search
+                .checked_add(result.search_nodes)
+                .ok_or_else(|| GenError::InvalidConfig("maze search accounting overflow".into()))?;
+            total_retries = total_retries
+                .checked_add(1)
+                .ok_or_else(|| GenError::InvalidConfig("maze retry accounting overflow".into()))?;
 
             if let Some(path) = result.path {
                 let footprint = maze_path_footprint(&path, config.maze_radius, interior);
@@ -1140,8 +1238,7 @@ fn plan_and_carve_maze(
         }
 
         if !found {
-            total_retries += 1;
-            // substitution: continue to next candidate
+            // Deterministic substitution: continue to the next shuffled candidate.
         }
     }
 
@@ -1154,14 +1251,21 @@ fn plan_and_carve_maze(
         });
     }
 
-    // 4. Carve in canonical pair order
-    let mut carved_pairs: Vec<(usize, usize)> = Vec::new();
-    for (pair, path) in &accepted {
+    // 4. Carve in canonical pair order.
+    accepted.sort_by_key(|(pair, _)| *pair);
+    for (_, path) in &accepted {
         carve_maze_path(world, path, config.maze_radius, interior);
-        carved_pairs.push(*pair);
     }
-    carved_pairs.sort_by_key(|&(a, b)| (a, b));
-    Ok(carved_pairs)
+    Ok(accepted)
+}
+
+fn maze_target_count(density: f32, eligible_count: u32) -> Result<u32, GenError> {
+    if !density.is_finite() || !(0.0..=1.0).contains(&density) {
+        return Err(GenError::InvalidConfig(
+            "maze density must be finite and within 0..=1".into(),
+        ));
+    }
+    Ok(((density as f64 * eligible_count as f64) + 0.5).floor() as u32)
 }
 
 struct MazePlanResult {
@@ -1222,7 +1326,7 @@ fn plan_maze_route(
                     continue;
                 }
                 let cell = (nx as u32, ny as u32, nz as u32);
-                if interior.contains(cell.0, cell.1, cell.2)
+                if interior.contains_operation_center(cell.0, cell.1, cell.2)
                     && *world.density().read(cell.0, cell.1, cell.2) >= 0
                 {
                     start_air_cells.insert(cell);
@@ -1243,7 +1347,9 @@ fn plan_maze_route(
                 if nx >= w || ny >= h || nz >= d {
                     continue;
                 }
-                if *world.density().read(nx, ny, nz) >= 0 {
+                if interior.contains_operation_center(nx, ny, nz)
+                    && *world.density().read(nx, ny, nz) >= 0
+                {
                     goal_air_cells.insert((nx, ny, nz));
                 }
             }
@@ -1336,7 +1442,7 @@ fn plan_maze_route(
             if nx >= w || ny >= h || nz >= d {
                 continue;
             }
-            if !interior.contains(nx, ny, nz) {
+            if !interior.contains_operation_center(nx, ny, nz) {
                 continue;
             }
 
@@ -1401,9 +1507,18 @@ fn plan_maze_route(
                 }
             }
             path.reverse();
-            MazePlanResult {
-                path: Some(path),
-                search_nodes,
+            let reconstruction_work = path.len() as u64;
+            let total_work = search_nodes.saturating_add(reconstruction_work);
+            if total_work > search_budget as u64 {
+                MazePlanResult {
+                    path: None,
+                    search_nodes: search_budget as u64,
+                }
+            } else {
+                MazePlanResult {
+                    path: Some(path),
+                    search_nodes: total_work,
+                }
             }
         }
         None => MazePlanResult {
@@ -1608,11 +1723,168 @@ fn apply_roughness_v2(
     }
 }
 
+// ─── v2: Final invariants and persisted records ────────────────────────────
+
+fn validate_shell_invariant(world: &VoxelWorld, thickness: u32) -> Result<(), GenError> {
+    if verify_shell_multi(world, thickness) {
+        Ok(())
+    } else {
+        Err(GenError::ShellBreach)
+    }
+}
+
+fn build_viewpoints(sites: &[SerializableSite]) -> Vec<SerializableAnchor> {
+    sites
+        .iter()
+        .filter(|site| matches!(site.role, SerializableSiteRole::Core { .. }))
+        .map(|site| SerializableAnchor {
+            id: site.id,
+            kind: AnchorKind::CoreViewpoint { site_id: site.id },
+            x: site.x,
+            y: site.y,
+            z: site.z,
+        })
+        .collect()
+}
+
+fn build_light_anchors(
+    sites: &[SerializableSite],
+    spline_route_cells: &HashMap<(usize, usize), Vec<(u32, u32, u32)>>,
+) -> Result<Vec<SerializableAnchor>, GenError> {
+    let mut anchors = sites
+        .iter()
+        .filter(|site| matches!(site.role, SerializableSiteRole::Core { .. }))
+        .map(|site| SerializableAnchor {
+            id: site.id,
+            kind: AnchorKind::CoreLight { site_id: site.id },
+            x: site.x,
+            y: site.y,
+            z: site.z,
+        })
+        .collect::<Vec<_>>();
+
+    for (offset, pair) in [(0usize, 1usize), (1, 2), (2, 4), (1, 3)]
+        .into_iter()
+        .enumerate()
+    {
+        let cells = spline_route_cells.get(&pair).ok_or_else(|| {
+            GenError::InvalidConfig(format!("missing core backbone route {}-{}", pair.0, pair.1))
+        })?;
+        let &(x, y, z) = cells.get(cells.len() / 2).ok_or_else(|| {
+            GenError::InvalidConfig(format!("empty core backbone route {}-{}", pair.0, pair.1))
+        })?;
+        anchors.push(SerializableAnchor {
+            id: (5 + offset) as u8,
+            kind: AnchorKind::BackboneLight {
+                from_site_id: pair.0 as u8,
+                to_site_id: pair.1 as u8,
+            },
+            x,
+            y,
+            z,
+        });
+    }
+    Ok(anchors)
+}
+
+fn validate_anchors(
+    world: &VoxelWorld,
+    interior: &InteriorRegion,
+    reachable: &HashSet<usize>,
+    anchors: &[SerializableAnchor],
+) -> Result<(), GenError> {
+    let (w, h, _) = world.dims();
+    for anchor in anchors {
+        let kind = format!("{:?}", anchor.kind);
+        if !interior.contains(anchor.x, anchor.y, anchor.z) {
+            return Err(GenError::InvalidAnchor {
+                anchor_kind: kind,
+                anchor_id: anchor.id,
+                reason: "outside writable interior".into(),
+            });
+        }
+        if *world.density().read(anchor.x, anchor.y, anchor.z) < 0 {
+            return Err(GenError::InvalidAnchor {
+                anchor_kind: kind,
+                anchor_id: anchor.id,
+                reason: "inside solid".into(),
+            });
+        }
+        let idx = anchor.x as usize
+            + anchor.y as usize * w as usize
+            + anchor.z as usize * w as usize * h as usize;
+        if !reachable.contains(&idx) {
+            return Err(GenError::InvalidAnchor {
+                anchor_kind: kind,
+                anchor_id: anchor.id,
+                reason: "unreachable from spawn".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn route_cells_clearance(world: &VoxelWorld, cells: &[(u32, u32, u32)]) -> f32 {
+    if cells.is_empty() {
+        return 0.0;
+    }
+    let (w, h, d) = world.dims();
+    let mut minimum = CLEARANCE_MAX_REPORT;
+    for &(x, y, z) in cells {
+        if *world.density().read(x, y, z) < 0 {
+            return 0.0;
+        }
+        for dz in -CLEARANCE_RADIUS..=CLEARANCE_RADIUS {
+            for dy in -CLEARANCE_RADIUS..=CLEARANCE_RADIUS {
+                for dx in -CLEARANCE_RADIUS..=CLEARANCE_RADIUS {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    let nz = z as i32 + dz;
+                    if nx < 0
+                        || ny < 0
+                        || nz < 0
+                        || nx >= w as i32
+                        || ny >= h as i32
+                        || nz >= d as i32
+                    {
+                        continue;
+                    }
+                    if *world.density().read(nx as u32, ny as u32, nz as u32) < 0 {
+                        let distance = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
+                        minimum = minimum.min(distance);
+                    }
+                }
+            }
+        }
+    }
+    minimum
+}
+
+fn validate_route_clearance(from: usize, to: usize, clearance: f32) -> Result<(), GenError> {
+    if clearance.is_finite() && clearance > 0.0 {
+        Ok(())
+    } else {
+        Err(GenError::InvalidRouteClearance {
+            from_site_id: from as u8,
+            to_site_id: to as u8,
+            clearance,
+        })
+    }
+}
+
+fn route_kind_order(kind: RouteKind) -> u8 {
+    match kind {
+        RouteKind::SplineBackbone => 0,
+        RouteKind::SplineExtra => 1,
+        RouteKind::Maze => 2,
+    }
+}
+
 // ─── v2: Reachability verification ─────────────────────────────────────────
 
-fn verify_reachability(world: &VoxelWorld, sites: &[Site]) -> Result<(), GenError> {
+fn verify_reachability(world: &VoxelWorld, sites: &[Site]) -> Result<HashSet<usize>, GenError> {
     if sites.is_empty() {
-        return Ok(());
+        return Ok(HashSet::new());
     }
 
     let spawn = &sites[0];
@@ -1627,7 +1899,7 @@ fn verify_reachability(world: &VoxelWorld, sites: &[Site]) -> Result<(), GenErro
             return Err(GenError::UnreachableSite { site_id: i as u8 });
         }
     }
-    Ok(())
+    Ok(spawn_set)
 }
 
 fn is_site_reachable(world: &VoxelWorld, site: &Site, spawn_set: &HashSet<usize>) -> bool {
@@ -1648,6 +1920,11 @@ mod tests {
     use crate::cave_gen::lattice::VoxelWorld;
     use crate::cave_gen::metrics::flood_fill_air;
     use crate::cave_gen::rng::PhaseTaggedRng;
+    use crate::config::{
+        compute_geometry_identity, compute_scene_config_identity, AssetRef, PresetDocument,
+        ResolvedAssetRef,
+    };
+    use sha2::{Digest, Sha256};
 
     // ── v1 tests (preserved) ────────────────────────────────────────────
 
@@ -1920,9 +2197,11 @@ mod tests {
         world.fill_solid();
 
         let result = generate_v2(&config, &mut world, config.seed).unwrap();
-        // Verify no maze-specific failures and valid shell
         assert!(verify_shell_multi(&world, config.shell_thickness));
-        let _ = result;
+        assert!(result
+            .serializable_edges
+            .iter()
+            .all(|edge| edge.kind != RouteKind::Maze));
     }
 
     #[test]
@@ -1975,7 +2254,11 @@ mod tests {
         let before_material = world.material().iter().copied().collect::<Vec<_>>();
         assert!(matches!(
             generate_v2(&config, &mut world, config.seed),
-            Err(GenError::MazeExhausted { .. })
+            Err(GenError::MazeExhausted {
+                search: 1,
+                retries: 1,
+                ..
+            })
         ));
         assert_eq!(
             before_density,
@@ -2010,5 +2293,312 @@ mod tests {
         assert_eq!(canonical_pair(3, 1), (1, 3));
         assert_eq!(canonical_pair(0, 5), (0, 5));
         assert_eq!(canonical_pair(4, 4), (4, 4));
+    }
+
+    #[test]
+    fn v2_serializable_records_have_stable_ids_roles_and_kinds() {
+        let config = v2_default_config();
+        let mut world = test_world();
+        let result = generate_v2(&config, &mut world, config.seed).unwrap();
+
+        assert_eq!(
+            result
+                .serializable_sites
+                .iter()
+                .map(|site| site.id)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        assert!(matches!(
+            result.serializable_sites[0].role,
+            SerializableSiteRole::Core {
+                kind: CoreSiteKind::Spawn
+            }
+        ));
+        assert_eq!(
+            result
+                .serializable_edges
+                .iter()
+                .filter(|edge| edge.kind == RouteKind::SplineBackbone)
+                .count(),
+            4
+        );
+        assert_eq!(
+            result
+                .serializable_edges
+                .iter()
+                .filter(|edge| edge.kind == RouteKind::SplineExtra)
+                .count(),
+            1
+        );
+        assert!(result.serializable_edges.iter().all(|edge| {
+            edge.from_site_id < edge.to_site_id
+                && edge.clearance.is_finite()
+                && edge.clearance > 0.0
+        }));
+
+        let encoded = serde_json::to_vec(&result.serializable_sites).unwrap();
+        let decoded: Vec<SerializableSite> = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, result.serializable_sites);
+
+        let mut auxiliary_config = config.clone();
+        auxiliary_config.cavern_count = 6;
+        auxiliary_config.tunnel_count = 5;
+        let mut auxiliary_world = test_world();
+        let auxiliary = generate_v2(
+            &auxiliary_config,
+            &mut auxiliary_world,
+            auxiliary_config.seed,
+        )
+        .unwrap();
+        assert!(matches!(
+            auxiliary.serializable_sites[5].role,
+            SerializableSiteRole::Auxiliary { aux_id: 5 }
+        ));
+        assert_eq!(auxiliary.serializable_sites[5].id, 5);
+    }
+
+    #[test]
+    fn v2_core_viewpoints_and_nine_lights_are_valid() {
+        let config = v2_default_config();
+        let mut world = test_world();
+        let result = generate_v2(&config, &mut world, config.seed).unwrap();
+        let interior = InteriorRegion::from_operation_requirements(
+            64,
+            config.shell_thickness,
+            config.cavern_radius_max + CAVERN_SHAPE_DISPLACEMENT,
+            config.tunnel_radius_max,
+            config.maze_radius,
+            config.roughness * 6.0,
+            EXTRACTION_SAFETY_MARGIN,
+        )
+        .unwrap();
+        assert_eq!(result.viewpoints.len(), 5);
+        assert_eq!(result.light_anchors.len(), 9);
+        for anchor in result.viewpoints.iter().chain(&result.light_anchors) {
+            assert!(interior.contains(anchor.x, anchor.y, anchor.z));
+            assert!(*world.density().read(anchor.x, anchor.y, anchor.z) >= 0);
+        }
+    }
+
+    #[test]
+    fn maze_retry_budget_exhaustion_is_typed_and_accounted() {
+        let mut config = v2_default_config();
+        config.maze_density = 1.0;
+        config.maze_retries = 2;
+        config.maze_search_budget = 100_000;
+        let mut world = VoxelWorld::new(64, 64, 64);
+        world.fill_air();
+        let positions = [[8, 8, 8], [55, 55, 55]];
+        let interior = InteriorRegion::from_resolution(64, 2).unwrap();
+        let error =
+            plan_and_carve_maze(&mut world, &positions, &[], &config, config.seed, &interior)
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            GenError::MazeExhausted {
+                requested: 1,
+                planned: 0,
+                retries: 2,
+                search,
+            } if search > 0
+        ));
+    }
+
+    #[test]
+    fn shell_breach_returns_typed_error() {
+        let mut world = VoxelWorld::new(16, 16, 16);
+        world.fill_solid();
+        world.set_voxel(1, 8, 8, AIR_DENSITY, DEFAULT_MATERIAL);
+        assert_eq!(
+            validate_shell_invariant(&world, 2),
+            Err(GenError::ShellBreach)
+        );
+    }
+
+    #[test]
+    fn unreachable_site_returns_typed_error() {
+        let mut world = VoxelWorld::new(16, 16, 16);
+        world.fill_solid();
+        world.set_voxel(4, 4, 4, AIR_DENSITY, DEFAULT_MATERIAL);
+        world.set_voxel(12, 12, 12, AIR_DENSITY, DEFAULT_MATERIAL);
+        let sites = [
+            Site::new(4, 4, 4, "spawn"),
+            Site::new(12, 12, 12, "destination"),
+        ];
+        assert!(matches!(
+            verify_reachability(&world, &sites),
+            Err(GenError::UnreachableSite { site_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn invalid_anchor_and_clearance_return_typed_errors() {
+        let mut world = VoxelWorld::new(16, 16, 16);
+        world.fill_solid();
+        let interior = InteriorRegion::from_resolution(16, 2).unwrap();
+        let anchor = SerializableAnchor {
+            id: 0,
+            kind: AnchorKind::CoreViewpoint { site_id: 0 },
+            x: 8,
+            y: 8,
+            z: 8,
+        };
+        assert!(matches!(
+            validate_anchors(&world, &interior, &HashSet::new(), &[anchor]),
+            Err(GenError::InvalidAnchor { anchor_id: 0, .. })
+        ));
+        assert!(matches!(
+            validate_route_clearance(0, 1, 0.0),
+            Err(GenError::InvalidRouteClearance {
+                from_site_id: 0,
+                to_site_id: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn maze_density_endpoints_select_none_or_all_eligible() {
+        assert_eq!(maze_target_count(0.0, 6).unwrap(), 0);
+        assert_eq!(maze_target_count(1.0, 6).unwrap(), 6);
+        assert_eq!(maze_target_count(0.5, 5).unwrap(), 3);
+    }
+
+    #[test]
+    fn five_sites_support_minimum_tree_and_all_pairs() {
+        let positions = [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]];
+        let tree = build_spline_edges(42, &positions, 4).unwrap();
+        assert_eq!(tree, [(0, 1), (1, 2), (1, 3), (2, 4)]);
+
+        let all_pairs = build_spline_edges(42, &positions, 10).unwrap();
+        assert_eq!(all_pairs.len(), 10);
+        assert_eq!(all_pairs.first(), Some(&(0, 1)));
+        assert_eq!(all_pairs.last(), Some(&(3, 4)));
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn identity_hex(bytes: &[u8; 32]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn resolved_catalog(asset: &AssetRef) -> ResolvedAssetRef {
+        match asset {
+            AssetRef::Catalog { id } => ResolvedAssetRef::Catalog(id.clone()),
+            AssetRef::Filesystem { .. } => panic!("fixture presets must use catalog assets"),
+        }
+    }
+
+    fn preset_source(name: &str) -> &'static str {
+        match name {
+            "default" => include_str!("../../../presets/default.toml"),
+            "cavernous" => include_str!("../../../presets/cavernous.toml"),
+            "mazy" => include_str!("../../../presets/mazy.toml"),
+            "tight" => include_str!("../../../presets/tight.toml"),
+            _ => panic!("unknown fixture preset {name}"),
+        }
+    }
+
+    fn compute_fixture(preset: &str, seed: u64) -> serde_json::Value {
+        let mut document: PresetDocument = toml::from_str(preset_source(preset)).unwrap();
+        document.generator.seed = seed;
+        document.generator.resolution = 64;
+        let config = &document.generator;
+        let mut world = VoxelWorld::new(64, 64, 64);
+        world.fill_solid();
+        let result = generate_v2(config, &mut world, seed).unwrap();
+
+        let density = world
+            .density()
+            .iter()
+            .map(|value| *value as u8)
+            .collect::<Vec<_>>();
+        let material = world.material().iter().copied().collect::<Vec<_>>();
+        let geometry = compute_geometry_identity(
+            document.generator_version,
+            document.rng_version,
+            &document.generator,
+        );
+        let wall = &document.materials.wall;
+        let floor = &document.materials.floor;
+        let scene = compute_scene_config_identity(
+            &geometry,
+            &document.generator,
+            wall,
+            floor,
+            &resolved_catalog(&wall.albedo),
+            &resolved_catalog(&wall.normal),
+            &resolved_catalog(&wall.roughness),
+            &resolved_catalog(&wall.ao),
+            &resolved_catalog(&floor.albedo),
+            &resolved_catalog(&floor.normal),
+            &resolved_catalog(&floor.roughness),
+            &resolved_catalog(&floor.ao),
+        );
+
+        serde_json::json!({
+            "preset": preset,
+            "seed": seed,
+            "resolution": 64,
+            "expected_sites": result.serializable_sites.len(),
+            "expected_spline_edges": result.serializable_edges.iter()
+                .filter(|edge| edge.kind != RouteKind::Maze).count(),
+            "expected_maze_links": result.serializable_edges.iter()
+                .filter(|edge| edge.kind == RouteKind::Maze).count(),
+            "sha256_density": sha256_hex(&density),
+            "sha256_material": sha256_hex(&material),
+            "sha256_sites": sha256_hex(&serde_json::to_vec(&result.serializable_sites).unwrap()),
+            "sha256_edges": sha256_hex(&serde_json::to_vec(&result.serializable_edges).unwrap()),
+            "sha256_viewpoints": sha256_hex(&serde_json::to_vec(&result.viewpoints).unwrap()),
+            "sha256_light_anchors": sha256_hex(&serde_json::to_vec(&result.light_anchors).unwrap()),
+            "geometry_identity": identity_hex(&geometry.0),
+            "scene_config_identity": identity_hex(&scene.0),
+        })
+    }
+
+    #[test]
+    fn v2_fixture_manifest_matches_blessed_outputs() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../test_data/v2/generator-fixtures.json"
+        ))
+        .unwrap();
+        let expected = manifest["fixtures"].as_array().unwrap();
+        let actual = ["default", "cavernous", "mazy", "tight"]
+            .into_iter()
+            .map(|preset| compute_fixture(preset, 0))
+            .collect::<Vec<_>>();
+
+        if std::env::var_os("VOXEL_PRINT_V2_FIXTURES").is_some() {
+            println!("{}", serde_json::to_string_pretty(&actual).unwrap());
+        }
+        assert_eq!(&actual, expected);
+        for field in ["rust_version", "platform", "target_triple", "blessed_on"] {
+            assert!(manifest["environment"][field]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+        }
+    }
+
+    #[test]
+    fn maximum_maze_density_plans_every_eligible_link() {
+        let mut config = v2_default_config();
+        config.tunnel_count = 4;
+        config.maze_density = 1.0;
+        config.maze_retries = 100;
+        config.maze_search_budget = 200_000;
+        let mut world = test_world();
+        let result = generate_v2(&config, &mut world, config.seed).unwrap();
+        assert_eq!(
+            result
+                .serializable_edges
+                .iter()
+                .filter(|edge| edge.kind == RouteKind::Maze)
+                .count(),
+            6
+        );
+        assert_eq!(result.serializable_edges.len(), 10);
     }
 }

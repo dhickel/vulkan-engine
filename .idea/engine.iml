@@ -19,6 +19,8 @@
       <sourceFolder url="file://$MODULE_DIR$/src/events/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/launch_shared/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/voxel_demo/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/voxel_demo/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

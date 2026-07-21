@@ -1,0 +1,16 @@
+{
+  "capture_target": "draw",
+  "captured_at_unix_ms": 1784657240120,
+  "color_conversion": "rgba16f-linear-clamped-to-rgba8",
+  "extent": {
+    "height": 720,
+    "width": 1280
+  },
+  "format": "R16G16B16A16_SFLOAT",
+  "frame_number": 42125,
+  "png_path": "captures/voxel-demo-1784657188905-pid398900/voxel-demo-frame-42125-draw-manual-0000.png",
+  "row_layout": "vkCmdCopyImageToBuffer tightly packed (buffer_row_length=0)",
+  "sequence_index": null,
+  "source": "Manual",
+  "status": "succeeded"
+}

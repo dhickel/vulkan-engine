@@ -16,6 +16,7 @@ pub mod topology_first;
 use crate::cave_gen::lattice::{Density, MaterialTag, VoxelWorld, DEFAULT_MATERIAL};
 use crate::cave_gen::metrics::{RouteEdge, Site};
 use crate::cave_gen::rng::PhaseTaggedRng;
+use serde::{Deserialize, Serialize};
 
 // ─── AttemptContext (minimal, always Off) ──────────────────────────────────
 
@@ -56,6 +57,87 @@ pub struct GeneratorResult {
     pub spawn_index: usize,
 }
 
+/// Stable semantic kind for the five v2 core sites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreSiteKind {
+    Spawn,
+    Junction,
+    GrandCavern,
+    Shaft,
+    Destination,
+}
+
+/// Stable role attached to a serialized v2 site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SerializableSiteRole {
+    Core { kind: CoreSiteKind },
+    Auxiliary { aux_id: u8 },
+}
+
+/// Canonical, owned v2 site record. IDs are contiguous and coordinates are
+/// lattice coordinates, so this type is stable across process boundaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializableSite {
+    pub id: u8,
+    pub role: SerializableSiteRole,
+    pub label: String,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+/// How a v2 route was selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteKind {
+    SplineBackbone,
+    SplineExtra,
+    Maze,
+}
+
+/// Canonical v2 route record. Endpoint IDs are always ordered low-to-high.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SerializableEdge {
+    pub kind: RouteKind,
+    pub from_site_id: u8,
+    pub to_site_id: u8,
+    /// Minimum distance from a carved route center cell to a solid cell.
+    pub clearance: f32,
+}
+
+/// Stable generator-owned anchor position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AnchorKind {
+    CoreViewpoint { site_id: u8 },
+    CoreLight { site_id: u8 },
+    BackboneLight { from_site_id: u8, to_site_id: u8 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializableAnchor {
+    pub id: u8,
+    pub kind: AnchorKind,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+}
+
+/// V2 result with the legacy metric view plus stable persisted records.
+/// `GeneratorResult` remains unchanged so the v1 path and goldens are isolated.
+#[derive(Debug, Clone)]
+pub struct V2GeneratorResult {
+    pub sites: Vec<Site>,
+    pub edges: Vec<RouteEdge>,
+    pub spawn_index: usize,
+    pub serializable_sites: Vec<SerializableSite>,
+    pub serializable_edges: Vec<SerializableEdge>,
+    pub viewpoints: Vec<SerializableAnchor>,
+    pub light_anchors: Vec<SerializableAnchor>,
+}
+
 /// Trait for cave generators that write into a VoxelWorld.
 pub trait Generator {
     /// Generate a cave into the given world, which is already initialized
@@ -84,6 +166,14 @@ pub struct InteriorRegion {
     pub y_max: u32,
     pub z_min: u32,
     pub z_max: u32,
+    /// Maximum configured cavern/tunnel/maze operation radius, rounded up.
+    pub max_operation_radius: u32,
+    /// Maximum roughness displacement reach, rounded up.
+    pub roughness_displacement_radius: u32,
+    /// Clearance retained between every operation footprint and extraction edge.
+    pub extraction_margin: u32,
+    /// Total inset required for an operation center.
+    pub operation_reach: u32,
 }
 
 impl InteriorRegion {
@@ -111,10 +201,76 @@ impl InteriorRegion {
             y_max,
             z_min,
             z_max,
+            max_operation_radius: 0,
+            roughness_displacement_radius: 0,
+            extraction_margin: 0,
+            operation_reach: 0,
         })
     }
 
-    /// Check that a coordinate is strictly inside the interior.
+    /// Derive and validate a writable interior together with the complete
+    /// center-to-boundary reach of every carving/extraction operation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_operation_requirements(
+        resolution: u32,
+        shell_thickness: u32,
+        max_cavern_radius: f32,
+        max_tunnel_radius: f32,
+        maze_radius: f32,
+        roughness_displacement_radius: f32,
+        extraction_margin: u32,
+    ) -> Result<Self, GenError> {
+        let interior =
+            Self::from_resolution(resolution, shell_thickness).ok_or(GenError::InteriorEmpty {
+                interior: 0,
+                max_radius: max_cavern_radius.max(max_tunnel_radius).max(maze_radius),
+            })?;
+        let values = [
+            max_cavern_radius,
+            max_tunnel_radius,
+            maze_radius,
+            roughness_displacement_radius,
+        ];
+        if values
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(GenError::InvalidConfig(
+                "interior operation reaches must be finite and non-negative".into(),
+            ));
+        }
+
+        let max_operation_radius = max_cavern_radius
+            .max(max_tunnel_radius)
+            .max(maze_radius)
+            .ceil() as u32;
+        let roughness_displacement_radius = roughness_displacement_radius.ceil() as u32;
+        let operation_reach = max_operation_radius
+            .checked_add(roughness_displacement_radius)
+            .and_then(|reach| reach.checked_add(extraction_margin))
+            .ok_or_else(|| GenError::InvalidConfig("interior operation reach overflow".into()))?;
+        let required_span = operation_reach
+            .checked_mul(2)
+            .and_then(|diameter| diameter.checked_add(1))
+            .ok_or_else(|| GenError::InvalidConfig("interior required span overflow".into()))?;
+        let (sx, sy, sz) = interior.span();
+        if sx < required_span || sy < required_span || sz < required_span {
+            return Err(GenError::InteriorEmpty {
+                interior: sx.min(sy).min(sz),
+                max_radius: operation_reach as f32,
+            });
+        }
+
+        Ok(Self {
+            max_operation_radius,
+            roughness_displacement_radius,
+            extraction_margin,
+            operation_reach,
+            ..interior
+        })
+    }
+
+    /// Check that a coordinate is inside the shell-derived writable interior.
     #[inline]
     pub fn contains(&self, x: u32, y: u32, z: u32) -> bool {
         x >= self.x_min
@@ -123,6 +279,31 @@ impl InteriorRegion {
             && y <= self.y_max
             && z >= self.z_min
             && z <= self.z_max
+    }
+
+    /// Check that a coordinate can be used as an operation center without
+    /// any configured operation reaching the extraction boundary.
+    pub fn contains_operation_center(&self, x: u32, y: u32, z: u32) -> bool {
+        let r = self.operation_reach;
+        x >= self.x_min + r
+            && x <= self.x_max - r
+            && y >= self.y_min + r
+            && y <= self.y_max - r
+            && z >= self.z_min + r
+            && z <= self.z_max - r
+    }
+
+    /// Inclusive bounds for operation centers.
+    pub fn operation_center_bounds(&self) -> (u32, u32, u32, u32, u32, u32) {
+        let r = self.operation_reach;
+        (
+            self.x_min + r,
+            self.x_max - r,
+            self.y_min + r,
+            self.y_max - r,
+            self.z_min + r,
+            self.z_max - r,
+        )
     }
 
     /// Span of the interior along each axis.
@@ -159,6 +340,18 @@ pub enum GenError {
     ShellBreach,
     /// A site is unreachable from spawn.
     UnreachableSite { site_id: u8 },
+    /// A generated viewpoint or light anchor violates an air/interior invariant.
+    InvalidAnchor {
+        anchor_kind: String,
+        anchor_id: u8,
+        reason: String,
+    },
+    /// A route has no finite positive clearance from its center cells to walls.
+    InvalidRouteClearance {
+        from_site_id: u8,
+        to_site_id: u8,
+        clearance: f32,
+    },
     /// Configuration is invalid for generation (passed-through from validation).
     InvalidConfig(String),
 }
@@ -202,6 +395,23 @@ impl std::fmt::Display for GenError {
             }
             Self::UnreachableSite { site_id } => {
                 write!(f, "site {site_id} is unreachable from spawn")
+            }
+            Self::InvalidAnchor {
+                anchor_kind,
+                anchor_id,
+                reason,
+            } => {
+                write!(f, "{anchor_kind} anchor {anchor_id} is invalid: {reason}")
+            }
+            Self::InvalidRouteClearance {
+                from_site_id,
+                to_site_id,
+                clearance,
+            } => {
+                write!(
+                    f,
+                    "route {from_site_id}-{to_site_id} has invalid clearance {clearance}"
+                )
             }
             Self::InvalidConfig(msg) => {
                 write!(f, "invalid config: {msg}")
@@ -571,6 +781,25 @@ mod tests {
         assert!(ir.contains(61, 61, 61));
         assert!(!ir.contains(1, 2, 2));
         assert!(!ir.contains(62, 2, 2));
+    }
+
+    #[test]
+    fn operation_interior_accounts_for_all_reaches() {
+        let ir = InteriorRegion::from_operation_requirements(64, 2, 8.0, 3.0, 1.5, 2.0, 1).unwrap();
+        assert_eq!(ir.max_operation_radius, 8);
+        assert_eq!(ir.roughness_displacement_radius, 2);
+        assert_eq!(ir.extraction_margin, 1);
+        assert_eq!(ir.operation_reach, 11);
+        assert!(ir.contains_operation_center(13, 13, 13));
+        assert!(!ir.contains_operation_center(12, 13, 13));
+    }
+
+    #[test]
+    fn operation_interior_rejects_insufficient_margin() {
+        assert!(matches!(
+            InteriorRegion::from_operation_requirements(32, 2, 14.0, 2.0, 1.0, 1.0, 1,),
+            Err(GenError::InteriorEmpty { .. })
+        ));
     }
 
     #[test]

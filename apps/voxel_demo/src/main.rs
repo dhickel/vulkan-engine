@@ -9,7 +9,9 @@
 mod cave_gen;
 mod cli;
 mod config;
+mod materials;
 mod meshers;
+mod scene_package;
 mod validate;
 
 use std::collections::HashSet;
@@ -19,8 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use glam::{Vec3, Vec4};
 use renderer::prelude::{
     AssetManifestMode, AssetPolicyConfig, CaptureTarget, EnvironmentSource, FrameCaptureRequest,
-    FrameCaptureSource, FrameCaptureStatus, PbrMaterialDesc, PointLight, ProceduralMeshData,
-    ProceduralVertex, Renderer, RendererConfig, Scene, VisualTuning,
+    FrameCaptureSource, FrameCaptureStatus, FrameRenderOutcome, PbrMaterialDesc, PointLight,
+    ProceduralMeshData, ProceduralVertex, Renderer, RendererConfig, Scene, VisualTuning,
 };
 use renderer::{Camera, FPSController};
 use winit::event::{Event, WindowEvent};
@@ -32,7 +34,7 @@ use cave_gen::generators::topology_first::TopologyFirst;
 use cave_gen::generators::{AttemptContext, Generator};
 use cave_gen::lattice::VoxelWorld;
 use cave_gen::rng::PhaseTaggedRng;
-use config::{NormalizedConfig, PresentationConfig};
+use config::{NormalizedConfig, PresentationConfig, ResolvedAssetRef};
 use meshers::mc33::Mc33;
 use meshers::FieldMesher;
 use validate::validate_normalized;
@@ -358,59 +360,31 @@ fn run_v2(args: &cli::CliArgs) -> Result<(), AppError> {
     log::info!("Maze density: {}", resolved.document.generator.maze_density);
     log::info!("Light budget: {light_budget} (runtime-only)");
 
-    // ── v2 generation ────────────────────────────────────────────────
-    let gen_config = &resolved.document.generator;
-    let res = gen_config.resolution;
-    let mut world = VoxelWorld::new(res, res, res);
-    world.fill_solid();
-
-    let t_gen = std::time::Instant::now();
-    let gen_result =
-        cave_gen::generators::topology_first::generate_v2(gen_config, &mut world, gen_config.seed)
-            .map_err(|e| AppError::Validation(format!("v2 generation failed: {e}")))?;
-    let gen_time = t_gen.elapsed();
+    // ── v2 generation + scene package ───────────────────────────────
+    log::info!("Building CPU scene package...");
+    let package = scene_package::build_scene_package(&resolved)
+        .map_err(|e| AppError::Validation(format!("scene package build failed: {e}")))?;
 
     log::info!(
-        "v2 Generator: {} sites, {} edges, {}ms",
-        gen_result.sites.len(),
-        gen_result.edges.len(),
-        gen_time.as_millis()
+        "CPU package built: wall_tris={} floor_tris={} lights={} viewpoints={} total_voxels={}",
+        package.wall_triangles,
+        package.floor_triangles,
+        package.lights.len(),
+        package.viewpoints.len(),
+        package.total_voxels
     );
-    for site in &gen_result.sites {
-        log::info!(
-            "  Site '{}': ({}, {}, {})",
-            site.label,
-            site.x,
-            site.y,
-            site.z
-        );
-    }
-    for edge in &gen_result.edges {
-        log::info!(
-            "  Edge {}->{} (clearance: {:.1})",
-            edge.from,
-            edge.to,
-            edge.clearance
-        );
-    }
-
-    // Shell verification
-    if !cave_gen::generators::verify_shell_multi(&world, gen_config.shell_thickness) {
-        return Err(AppError::Validation(
-            "v2 shell breach detected after generation".into(),
-        ));
-    }
     log::info!(
-        "Shell integrity verified (thickness={})",
-        gen_config.shell_thickness
+        "Timings: gen={}ms mesh={}ms partition={}ms",
+        package.generation_time_ms,
+        package.mesh_time_ms,
+        package.partition_time_ms
     );
 
-    // Reachability
-    let spawn = &gen_result.sites[gen_result.spawn_index];
-    let reachable = cave_gen::metrics::flood_fill_air(world.density(), spawn.x, spawn.y, spawn.z);
-    log::info!("Reachable air cells from spawn: {}", reachable.len());
-
-    log::info!("v2 generation complete.");
+    if resolved.runtime.headless {
+        run_headless_v2(&resolved, package)?;
+    } else {
+        run_windowed_v2(&resolved, package)?;
+    }
 
     Ok(())
 }
@@ -1268,6 +1242,676 @@ fn write_enriched_sidecar(
                 z: s.z,
             })
             .collect(),
+    };
+
+    let json = serde_json::to_string_pretty(&sidecar)
+        .map_err(|e| AppError::CaptureConfig(format!("JSON serialize: {e}")))?;
+    std::fs::write(path, json)
+        .map_err(|e| AppError::CaptureConfig(format!("write sidecar: {e}")))?;
+
+    Ok(())
+}
+
+// ─── v2 Windowed mode ─────────────────────────────────────────────────────
+
+fn run_windowed_v2(
+    resolved: &crate::config::ResolvedAppConfig,
+    package: scene_package::CpuScenePackage,
+) -> Result<(), AppError> {
+    let gen_config = &resolved.document.generator;
+
+    let event_loop = EventLoop::new()?;
+    let window = WindowBuilder::new()
+        .with_title(format!(
+            "{} v2 — preset={} seed={} res={}³",
+            APP_TITLE,
+            match &resolved.source {
+                crate::config::DocumentSource::Embedded { name } => name.clone(),
+                crate::config::DocumentSource::Preset { name } => name.clone(),
+                crate::config::DocumentSource::ConfigFile { path } => {
+                    path.display().to_string()
+                }
+            },
+            gen_config.seed,
+            gen_config.resolution
+        ))
+        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+        .build(&event_loop)?;
+
+    let config = RendererConfig {
+        app_name: "voxel_demo".to_string(),
+        window_width: 1280,
+        window_height: 720,
+        validation_layer: false,
+        compile_shaders: false,
+        shader_debug_mode: renderer::DebugRuntimeMode::Default,
+        preload_startup_scene: false,
+        visual_tuning: VisualTuning {
+            exposure: 4.0,
+            gamma: 2.2,
+            ibl_ambient_scale: 0.35,
+        },
+        headless: false,
+        asset_policy: AssetPolicyConfig {
+            manifest_mode: AssetManifestMode::BestEffort,
+            allow_filename_heuristics: true,
+            compression: renderer::api::config::CompressionConfig::default(),
+        },
+    };
+
+    let mut renderer = Renderer::new(config, &window)?;
+    let mut scene = Scene::new();
+
+    // Load materials
+    let (wall_mat, floor_mat) = materials::create_wall_floor_materials(
+        &mut renderer,
+        &resolved.resolved_wall_albedo,
+        &resolved.resolved_floor_albedo,
+        resolved.document.materials.wall.roughness_factor,
+        resolved.document.materials.wall.metallic_factor,
+        resolved.document.materials.floor.roughness_factor,
+        resolved.document.materials.floor.metallic_factor,
+    )
+    .map_err(|e| {
+        AppError::Asset(renderer::AssetError::Internal(format!(
+            "material creation failed: {e}"
+        )))
+    })?;
+
+    log::info!(
+        "Materials loaded: wall={:?} floor={:?}",
+        wall_mat.material,
+        floor_mat.material
+    );
+
+    // Upload meshes
+    let mut assets = renderer.assets();
+    let root = scene.create_node(None, glam::Mat4::IDENTITY)?;
+    let cave_node = scene.create_node(Some(root), glam::Mat4::IDENTITY)?;
+
+    if let Some(ref cpu_mesh) = package.wall_mesh {
+        let proc_verts: Vec<ProceduralVertex> = cpu_mesh
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let n = cpu_mesh.normals[i];
+                let t = cpu_mesh.tangents[i];
+                let uv = cpu_mesh.uvs[i];
+                let c = cpu_mesh.colors[i];
+                ProceduralVertex {
+                    position: Vec3::new(p[0], p[1], p[2]),
+                    normal: Vec3::new(n[0], n[1], n[2]),
+                    tangent: Vec4::new(t[0], t[1], t[2], t[3]),
+                    uv0: glam::Vec2::new(uv[0], uv[1]),
+                    uv1: glam::Vec2::ZERO,
+                    color: Vec4::new(c[0], c[1], c[2], c[3]),
+                }
+            })
+            .collect();
+        let mesh_data = ProceduralMeshData {
+            name: format!("cave_wall_s{}", gen_config.seed),
+            vertices: proc_verts,
+            indices: cpu_mesh.indices.clone(),
+            material: Some(wall_mat.material),
+        };
+        let handle = assets.upload_procedural_mesh(mesh_data)?;
+        let wall_node = scene.create_node(Some(cave_node), glam::Mat4::IDENTITY)?;
+        scene.add_mesh(wall_node, handle)?;
+        log::info!("Wall mesh uploaded: {} triangles", package.wall_triangles);
+    }
+
+    if let Some(ref cpu_mesh) = package.floor_mesh {
+        let proc_verts: Vec<ProceduralVertex> = cpu_mesh
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let n = cpu_mesh.normals[i];
+                let t = cpu_mesh.tangents[i];
+                let uv = cpu_mesh.uvs[i];
+                let c = cpu_mesh.colors[i];
+                ProceduralVertex {
+                    position: Vec3::new(p[0], p[1], p[2]),
+                    normal: Vec3::new(n[0], n[1], n[2]),
+                    tangent: Vec4::new(t[0], t[1], t[2], t[3]),
+                    uv0: glam::Vec2::new(uv[0], uv[1]),
+                    uv1: glam::Vec2::ZERO,
+                    color: Vec4::new(c[0], c[1], c[2], c[3]),
+                }
+            })
+            .collect();
+        let mesh_data = ProceduralMeshData {
+            name: format!("cave_floor_s{}", gen_config.seed),
+            vertices: proc_verts,
+            indices: cpu_mesh.indices.clone(),
+            material: Some(floor_mat.material),
+        };
+        let handle = assets.upload_procedural_mesh(mesh_data)?;
+        let floor_node = scene.create_node(Some(cave_node), glam::Mat4::IDENTITY)?;
+        scene.add_mesh(floor_node, handle)?;
+        log::info!("Floor mesh uploaded: {} triangles", package.floor_triangles);
+    }
+
+    // Place point lights
+    for light in &package.lights {
+        scene.create_point_light(PointLight {
+            position: Vec3::new(light.position[0], light.position[1], light.position[2]),
+            color: Vec3::new(light.color[0], light.color[1], light.color[2]),
+            intensity: light.intensity,
+            range: light.range,
+        })?;
+    }
+    log::info!("{} point lights placed", package.lights.len());
+
+    // Environment
+    let env_path = resolved
+        .runtime
+        .env_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr"));
+    if env_path.exists() {
+        match assets.load_environment(EnvironmentSource::Auto(env_path.clone())) {
+            Ok(env_handle) => {
+                scene.set_skybox(env_handle);
+                log::info!("IBL environment loaded: {}", env_path.display());
+            }
+            Err(e) => {
+                log::warn!("Failed to load environment {}: {e}", env_path.display());
+                scene.set_skybox(assets.default_environment());
+            }
+        }
+    } else {
+        log::warn!("Environment file not found: {}", env_path.display());
+        scene.set_skybox(assets.default_environment());
+    }
+
+    // Set up manual capture directory
+    let manual_capture_dir = manual_capture_run_dir();
+    std::fs::create_dir_all(&manual_capture_dir)
+        .map_err(|e| AppError::CaptureConfig(format!("create capture dir: {e}")))?;
+    renderer.configure_manual_frame_capture_dir(Some(manual_capture_dir.clone()))?;
+
+    // Initial camera at spawn viewpoint
+    let initial_eye = if let Some(spawn_vp) = package.viewpoints.first() {
+        Vec3::new(
+            spawn_vp.position[0],
+            spawn_vp.position[1],
+            spawn_vp.position[2],
+        )
+    } else {
+        let center = Vec3::new(
+            gen_config.resolution as f32 / 2.0,
+            gen_config.resolution as f32 / 2.0,
+            gen_config.resolution as f32 / 2.0,
+        );
+        center + Vec3::new(10.0, 5.0, 10.0)
+    };
+
+    let mut camera = Camera::new(initial_eye);
+    let mut fps_controller = FPSController::new(0.002, 1.0);
+    let mut app_input = engine::input::InputSystem::new();
+    install_app_fps_input(&mut app_input);
+    let mut noclip = true;
+    let mut reported_manual_captures: HashSet<PathBuf> = HashSet::new();
+
+    log::info!("Voxel demo v2 initialized, starting event loop");
+    window.request_redraw();
+
+    event_loop.run(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
+
+        let _routing = match engine::input::route_platform_input_to_app(
+            &mut renderer,
+            &window,
+            &mut app_input,
+            &event,
+        ) {
+            Ok(routing) => routing,
+            Err(e) => {
+                log::error!("Platform input routing failed: {e}");
+                elwt.exit();
+                return;
+            }
+        };
+
+        match event {
+            Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
+                WindowEvent::CloseRequested => {
+                    log::info!("Close requested, exiting");
+                    elwt.exit();
+                }
+                WindowEvent::Resized(new_size) => {
+                    if let Err(e) = renderer.resize(new_size.width, new_size.height) {
+                        log::error!("Resize failed: {e}");
+                        elwt.exit();
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    let snapshot = app_input.snapshot();
+
+                    let noclip_toggle = snapshot
+                        .action_just_pressed(&engine::input::ActionId::from(NOCLIP_TOGGLE_ACTION));
+                    let capture_screenshot = snapshot.action_just_pressed(
+                        &engine::input::ActionId::from(CAPTURE_SCREENSHOT_ACTION),
+                    );
+
+                    if noclip_toggle {
+                        noclip = !noclip;
+                        log::info!("Noclip {}", if noclip { "enabled" } else { "disabled" });
+                    }
+
+                    if capture_screenshot {
+                        if let Err(e) = renderer.queue_manual_frame_capture(CaptureTarget::Draw) {
+                            log::error!("Manual capture failed: {e}");
+                        } else {
+                            log::info!("Manual draw capture triggered");
+                        }
+                    }
+
+                    fps_controller.update_from_snapshot(snapshot, 1.0 / 60.0, &mut camera);
+
+                    renderer.pump_asset_tasks(32).unwrap_or_default();
+
+                    let current_size = window.inner_size();
+                    let view = engine::render::camera_view_for_size(
+                        &camera,
+                        current_size.width,
+                        current_size.height,
+                    );
+
+                    match renderer.render_scene_with_view(&mut scene, view) {
+                        Ok(FrameRenderOutcome::Rendered)
+                        | Ok(FrameRenderOutcome::SkippedAcquireUnavailable)
+                        | Ok(FrameRenderOutcome::SubmittedNotPresented)
+                        | Ok(FrameRenderOutcome::PresentedSuboptimal) => {}
+                        Ok(FrameRenderOutcome::SkippedResizePending) => {}
+                        Err(e) => {
+                            log::error!("Render failed: {e}");
+                            elwt.exit();
+                            return;
+                        }
+                    }
+
+                    log_manual_capture_status(&renderer, &mut reported_manual_captures);
+                    window.request_redraw();
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    })?;
+
+    Ok(())
+}
+
+// ─── v2 Headless mode ──────────────────────────────────────────────────────
+
+fn run_headless_v2(
+    resolved: &crate::config::ResolvedAppConfig,
+    package: scene_package::CpuScenePackage,
+) -> Result<(), AppError> {
+    log::info!("Starting voxel demo v2 headless capture run");
+
+    let config = RendererConfig {
+        app_name: "voxel_demo".to_string(),
+        window_width: 1920,
+        window_height: 1080,
+        validation_layer: false,
+        compile_shaders: false,
+        shader_debug_mode: renderer::DebugRuntimeMode::Default,
+        preload_startup_scene: false,
+        visual_tuning: VisualTuning {
+            exposure: 4.0,
+            gamma: 2.2,
+            ibl_ambient_scale: 0.35,
+        },
+        headless: true,
+        asset_policy: AssetPolicyConfig {
+            manifest_mode: AssetManifestMode::BestEffort,
+            allow_filename_heuristics: true,
+            compression: renderer::api::config::CompressionConfig::default(),
+        },
+    };
+
+    let mut renderer = Renderer::new_headless(config)?;
+    let mut scene = Scene::new();
+
+    // Load materials
+    let (wall_mat, floor_mat) = materials::create_wall_floor_materials(
+        &mut renderer,
+        &resolved.resolved_wall_albedo,
+        &resolved.resolved_floor_albedo,
+        resolved.document.materials.wall.roughness_factor,
+        resolved.document.materials.wall.metallic_factor,
+        resolved.document.materials.floor.roughness_factor,
+        resolved.document.materials.floor.metallic_factor,
+    )
+    .map_err(|e| {
+        AppError::Asset(renderer::AssetError::Internal(format!(
+            "material creation failed: {e}"
+        )))
+    })?;
+
+    // Upload meshes
+    let mut assets = renderer.assets();
+    let root = scene.create_node(None, glam::Mat4::IDENTITY)?;
+    let cave_node = scene.create_node(Some(root), glam::Mat4::IDENTITY)?;
+
+    if let Some(ref cpu_mesh) = package.wall_mesh {
+        let proc_verts: Vec<ProceduralVertex> = cpu_mesh
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let n = cpu_mesh.normals[i];
+                let t = cpu_mesh.tangents[i];
+                let uv = cpu_mesh.uvs[i];
+                let c = cpu_mesh.colors[i];
+                ProceduralVertex {
+                    position: Vec3::new(p[0], p[1], p[2]),
+                    normal: Vec3::new(n[0], n[1], n[2]),
+                    tangent: Vec4::new(t[0], t[1], t[2], t[3]),
+                    uv0: glam::Vec2::new(uv[0], uv[1]),
+                    uv1: glam::Vec2::ZERO,
+                    color: Vec4::new(c[0], c[1], c[2], c[3]),
+                }
+            })
+            .collect();
+        let mesh_data = ProceduralMeshData {
+            name: "cave_wall_v2".to_string(),
+            vertices: proc_verts,
+            indices: cpu_mesh.indices.clone(),
+            material: Some(wall_mat.material),
+        };
+        let handle = assets.upload_procedural_mesh(mesh_data)?;
+        let wall_node = scene.create_node(Some(cave_node), glam::Mat4::IDENTITY)?;
+        scene.add_mesh(wall_node, handle)?;
+    }
+
+    if let Some(ref cpu_mesh) = package.floor_mesh {
+        let proc_verts: Vec<ProceduralVertex> = cpu_mesh
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let n = cpu_mesh.normals[i];
+                let t = cpu_mesh.tangents[i];
+                let uv = cpu_mesh.uvs[i];
+                let c = cpu_mesh.colors[i];
+                ProceduralVertex {
+                    position: Vec3::new(p[0], p[1], p[2]),
+                    normal: Vec3::new(n[0], n[1], n[2]),
+                    tangent: Vec4::new(t[0], t[1], t[2], t[3]),
+                    uv0: glam::Vec2::new(uv[0], uv[1]),
+                    uv1: glam::Vec2::ZERO,
+                    color: Vec4::new(c[0], c[1], c[2], c[3]),
+                }
+            })
+            .collect();
+        let mesh_data = ProceduralMeshData {
+            name: "cave_floor_v2".to_string(),
+            vertices: proc_verts,
+            indices: cpu_mesh.indices.clone(),
+            material: Some(floor_mat.material),
+        };
+        let handle = assets.upload_procedural_mesh(mesh_data)?;
+        let floor_node = scene.create_node(Some(cave_node), glam::Mat4::IDENTITY)?;
+        scene.add_mesh(floor_node, handle)?;
+    }
+
+    // Place point lights
+    for light in &package.lights {
+        scene.create_point_light(PointLight {
+            position: Vec3::new(light.position[0], light.position[1], light.position[2]),
+            color: Vec3::new(light.color[0], light.color[1], light.color[2]),
+            intensity: light.intensity,
+            range: light.range,
+        })?;
+    }
+
+    // Environment
+    let env_path = resolved
+        .runtime
+        .env_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr"));
+    if env_path.exists() {
+        match assets.load_environment(EnvironmentSource::Auto(env_path.clone())) {
+            Ok(env_handle) => {
+                scene.set_skybox(env_handle);
+                log::info!("IBL environment loaded: {}", env_path.display());
+            }
+            Err(e) => {
+                log::warn!("Failed to load environment {}: {e}", env_path.display());
+                scene.set_skybox(assets.default_environment());
+            }
+        }
+    } else {
+        log::warn!("Environment file not found: {}", env_path.display());
+        scene.set_skybox(assets.default_environment());
+    }
+
+    // Determine capture directory
+    let gen_config = &resolved.document.generator;
+    let capture_root = resolved.runtime.capture_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(format!(
+            ".internal-dev/captures/voxel-demo-v2/s{}_r{}_pid{}",
+            gen_config.seed,
+            gen_config.resolution,
+            std::process::id()
+        ))
+    });
+    std::fs::create_dir_all(&capture_root)
+        .map_err(|e| AppError::CaptureConfig(format!("create capture dir: {e}")))?;
+    log::info!("Capture directory: {}", capture_root.display());
+
+    // Warmup frames
+    for _ in 0..10 {
+        renderer
+            .render_scene_headless(&mut scene)
+            .map_err(|e| AppError::RendererInit(e))?;
+    }
+    log::info!("Warmup frames complete");
+
+    // Capture at each viewpoint
+    for vp in &package.viewpoints {
+        let eye = Vec3::new(vp.position[0], vp.position[1], vp.position[2]);
+        let target = Vec3::new(vp.target[0], vp.target[1], vp.target[2]);
+
+        log::info!(
+            "Capturing viewpoint '{}': eye=({:.1},{:.1},{:.1}) target=({:.1},{:.1},{:.1})",
+            vp.role,
+            eye.x,
+            eye.y,
+            eye.z,
+            target.x,
+            target.y,
+            target.z
+        );
+
+        renderer
+            .set_camera_look_at(eye, target, Vec3::Y)
+            .map_err(|e| AppError::RendererInit(e))?;
+
+        let png_path = capture_root.join(format!(
+            "cave_s{}_r{}_{}.png",
+            gen_config.seed, gen_config.resolution, vp.role
+        ));
+        let renderer_sidecar = capture_root.join(format!(
+            "cave_s{}_r{}_{}_sidecar.json",
+            gen_config.seed, gen_config.resolution, vp.role
+        ));
+
+        let req = FrameCaptureRequest {
+            target: CaptureTarget::Draw,
+            output_path: png_path.clone(),
+            sidecar_path: Some(renderer_sidecar),
+        };
+        renderer
+            .request_frame_capture(req)
+            .map_err(|e| AppError::CaptureConfig(e.to_string()))?;
+
+        let mut captured = false;
+        for _attempt in 0..20 {
+            renderer
+                .render_scene_headless(&mut scene)
+                .map_err(|e| AppError::RendererInit(e))?;
+
+            match renderer.last_frame_capture_status() {
+                Some(FrameCaptureStatus::Succeeded {
+                    ref output_path,
+                    width,
+                    height,
+                    ..
+                }) if output_path == &png_path => {
+                    let w = *width;
+                    let h = *height;
+                    log::info!(
+                        "  ✓ Captured '{}': {} ({}×{})",
+                        vp.role,
+                        output_path.display(),
+                        w,
+                        h
+                    );
+
+                    // Write enriched metadata sidecar
+                    let enriched_path = capture_root.join(format!(
+                        "cave_s{}_r{}_{}_enriched.json",
+                        gen_config.seed, gen_config.resolution, vp.role
+                    ));
+                    if let Err(e) = write_enriched_sidecar_v2(
+                        &enriched_path,
+                        resolved,
+                        &vp.role,
+                        &package,
+                        w,
+                        h,
+                    ) {
+                        log::warn!("Failed to write enriched sidecar: {e}");
+                    }
+
+                    captured = true;
+                    break;
+                }
+                Some(FrameCaptureStatus::Failed {
+                    ref output_path,
+                    ref message,
+                    ..
+                }) if output_path == &png_path => {
+                    log::error!("  ✗ Capture failed for '{}': {message}", vp.role);
+                    return Err(AppError::CaptureConfig(format!(
+                        "capture failed for {}: {message}",
+                        vp.role
+                    )));
+                }
+                _ => {}
+            }
+        }
+        if !captured {
+            return Err(AppError::CaptureConfig(format!(
+                "capture for '{}' did not complete within frame budget",
+                vp.role
+            )));
+        }
+    }
+
+    log::info!(
+        "All headless captures complete → {}",
+        capture_root.display()
+    );
+    Ok(())
+}
+
+/// Write a JSON sidecar for v2 captures with config, identities, digests, topology, timings.
+fn write_enriched_sidecar_v2(
+    path: &PathBuf,
+    resolved: &crate::config::ResolvedAppConfig,
+    viewpoint_label: &str,
+    package: &scene_package::CpuScenePackage,
+    width: u32,
+    height: u32,
+) -> Result<(), AppError> {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct EnrichedSidecarV2<'a> {
+        schema_version: u32,
+        generator_version: u32,
+        rng_version: u32,
+        seed: u64,
+        resolution: u32,
+        viewpoint: &'a str,
+        eye: [f32; 3],
+        look_at: [f32; 3],
+        image_width: u32,
+        image_height: u32,
+        geometry_identity: String,
+        scene_config_identity: String,
+        wall_triangles: usize,
+        floor_triangles: usize,
+        total_voxels: u64,
+        light_count: usize,
+        generation_time_ms: u64,
+        mesh_time_ms: u64,
+        partition_time_ms: u64,
+        cavern_count: u32,
+        tunnel_count: u32,
+        wall_albedo: String,
+        floor_albedo: String,
+    }
+
+    fn bytes_to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    fn resolved_ref_to_string(r: &ResolvedAssetRef) -> String {
+        match r {
+            ResolvedAssetRef::Catalog(id) => format!("catalog:{id}"),
+            ResolvedAssetRef::Filesystem(p) => format!("filesystem:{}", p.display()),
+        }
+    }
+
+    // Find the eye/target for this viewpoint from the package
+    let vp = package
+        .viewpoints
+        .iter()
+        .find(|v| v.role == viewpoint_label)
+        .or_else(|| package.viewpoints.first());
+
+    let (eye, look_at) = if let Some(v) = vp {
+        (v.position, v.target)
+    } else {
+        ([0.0; 3], [0.0; 3])
+    };
+
+    let doc = &resolved.document;
+
+    let sidecar = EnrichedSidecarV2 {
+        schema_version: doc.schema_version,
+        generator_version: doc.generator_version,
+        rng_version: doc.rng_version,
+        seed: doc.generator.seed,
+        resolution: doc.generator.resolution,
+        viewpoint: viewpoint_label,
+        eye,
+        look_at,
+        image_width: width,
+        image_height: height,
+        geometry_identity: bytes_to_hex(&package.geometry_identity.0),
+        scene_config_identity: bytes_to_hex(&package.scene_config_identity.0),
+        wall_triangles: package.wall_triangles,
+        floor_triangles: package.floor_triangles,
+        total_voxels: package.total_voxels,
+        light_count: package.lights.len(),
+        generation_time_ms: package.generation_time_ms,
+        mesh_time_ms: package.mesh_time_ms,
+        partition_time_ms: package.partition_time_ms,
+        cavern_count: doc.generator.cavern_count,
+        tunnel_count: doc.generator.tunnel_count,
+        wall_albedo: resolved_ref_to_string(&resolved.resolved_wall_albedo),
+        floor_albedo: resolved_ref_to_string(&resolved.resolved_floor_albedo),
     };
 
     let json = serde_json::to_string_pretty(&sidecar)
