@@ -9,6 +9,7 @@
 mod cave_gen;
 mod cli;
 mod config;
+mod editor;
 mod materials;
 mod meshers;
 mod regeneration;
@@ -26,9 +27,9 @@ use renderer::prelude::{
     ProceduralMeshData, ProceduralVertex, Renderer, RendererConfig, Scene, VisualTuning,
 };
 use renderer::{Camera, FPSController};
-use winit::event::{Event, WindowEvent};
+use winit::event::{ElementState, Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::keyboard::KeyCode;
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::WindowBuilder;
 
 use cave_gen::generators::topology_first::TopologyFirst;
@@ -879,7 +880,8 @@ fn run_windowed(
                         }
                     }
                     WindowEvent::RedrawRequested => {
-                        // Read input
+                        // App-owned input has exactly one dispatch boundary per frame.
+                        app_input.dispatch_frame();
                         let snapshot = app_input.snapshot();
 
                         let noclip_toggle = snapshot.action_just_pressed(
@@ -1256,6 +1258,76 @@ fn write_enriched_sidecar(
 
 // ─── v2 Windowed mode ─────────────────────────────────────────────────────
 
+fn is_editor_toggle_event(event: &Event<()>, expected_window: winit::window::WindowId) -> bool {
+    matches!(
+        event,
+        Event::WindowEvent {
+            window_id,
+            event: WindowEvent::KeyboardInput { event, .. },
+        } if *window_id == expected_window
+            && !event.repeat
+            && event.state == ElementState::Pressed
+            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::F1 | KeyCode::F2))
+    )
+}
+
+fn queue_editor_capture_releases(input: &mut engine::input::InputSystem) {
+    for code in [
+        KeyCode::KeyW,
+        KeyCode::KeyS,
+        KeyCode::KeyA,
+        KeyCode::KeyD,
+        KeyCode::Space,
+        KeyCode::ShiftLeft,
+        KeyCode::KeyF,
+        KeyCode::KeyC,
+    ] {
+        input.queue_event(engine::input::InputEvent::Key {
+            code,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+    }
+}
+
+fn set_editor_visible(
+    renderer: &mut Renderer,
+    model: &std::rc::Rc<std::cell::RefCell<editor::EditorModel>>,
+    visible: bool,
+) {
+    if visible {
+        if renderer.has_app_ui() {
+            model.borrow_mut().visible = true;
+            return;
+        }
+        let callback_model = model.clone();
+        let callback: renderer::api::AppUiCallback = Box::new(move |ui, context| {
+            editor::render_editor_ui(ui, context, &callback_model);
+        });
+        match renderer.register_app_ui(editor::EDITOR_VIEW_ID, callback) {
+            Ok(_) => {
+                let mut model = model.borrow_mut();
+                model.visible = true;
+                model.status_message = Some("Editor shown; camera input is suppressed".into());
+                log::info!("Editor shown");
+            }
+            Err(error) => {
+                let mut model = model.borrow_mut();
+                model.visible = false;
+                model.status_message = Some(format!("Failed to show editor: {error}"));
+                log::error!("Failed to register editor UI: {error}");
+            }
+        }
+    } else {
+        renderer.unregister_app_ui(&renderer::api::DebugViewId::new(editor::EDITOR_VIEW_ID));
+        let mut model = model.borrow_mut();
+        model.visible = false;
+        model.status_message = Some("Editor hidden; camera input restored".into());
+        log::info!("Editor hidden");
+    }
+}
+
 fn run_windowed_v2(
     resolved: &crate::config::ResolvedAppConfig,
     package: scene_package::CpuScenePackage,
@@ -1342,6 +1414,30 @@ fn run_windowed_v2(
     let mut regen_state = regeneration::RegenerationState::new();
     regen_state.active = Some(presented);
 
+    // ── Editor model ────────────────────────────────────────────────
+    let editor_source_dir: std::path::PathBuf = match &resolved.source {
+        crate::config::DocumentSource::Embedded { .. }
+        | crate::config::DocumentSource::Preset { .. } => {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        }
+        crate::config::DocumentSource::ConfigFile { path } => path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from(".")),
+    };
+    let editor_model = std::rc::Rc::new(std::cell::RefCell::new(editor::EditorModel::new(
+        resolved.document.clone(),
+        &resolved.source,
+        editor_source_dir,
+        resolved.runtime.clone(),
+        package.scene_config_identity.clone(),
+        editor::ActiveStats::from_package(&package),
+    )));
+
+    // Register imgui only on this windowed branch. The headless branch never
+    // constructs an editor model, callback, regeneration controller, or RNG action.
+    set_editor_visible(&mut renderer, &editor_model, true);
+
     // Set up manual capture directory
     let manual_capture_dir = manual_capture_run_dir();
     std::fs::create_dir_all(&manual_capture_dir)
@@ -1384,19 +1480,25 @@ fn run_windowed_v2(
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Poll);
 
-        let _routing = match engine::input::route_platform_input_to_app(
+        // A registered app UI suppresses app keyboard routing, so process the
+        // editor's global visibility shortcuts before renderer routing. These
+        // two presses are consumed here and do not toggle built-in debug panels.
+        if is_editor_toggle_event(&event, window.id()) {
+            let show = !editor_model.borrow().visible;
+            if show {
+                queue_editor_capture_releases(&mut app_input);
+            }
+            set_editor_visible(&mut renderer, &editor_model, show);
+        } else if let Err(e) = engine::input::route_platform_input_to_app(
             &mut renderer,
             &window,
             &mut app_input,
             &event,
         ) {
-            Ok(routing) => routing,
-            Err(e) => {
-                log::error!("Platform input routing failed: {e}");
-                elwt.exit();
-                return;
-            }
-        };
+            log::error!("Platform input routing failed: {e}");
+            elwt.exit();
+            return;
+        }
 
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
@@ -1411,6 +1513,9 @@ fn run_windowed_v2(
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    // App-owned input has exactly one dispatch boundary per frame.
+                    app_input.dispatch_frame();
+
                     // ── Regeneration lifecycle ──────────────────────────
                     regen_state.advance_frame();
 
@@ -1430,12 +1535,21 @@ fn run_windowed_v2(
 
                     // Poll worker completion
                     if let Some(result) = regen_state.poll_worker() {
-                        if result.error.is_some() {
-                            log::error!(
-                                "Regeneration failed (request_id={}): {}",
-                                result.request_id,
-                                result.error.as_ref().unwrap()
-                            );
+                        let result_id = result.request_id;
+                        let result_err = result.error.clone();
+                        // Capture accepted presentation data before commit consumes the result.
+                        let editor_success = result.package.as_ref().map(|package| {
+                            (
+                                package.scene_config_identity.clone(),
+                                editor::ActiveStats::from_package(package),
+                            )
+                        });
+
+                        if let Some(ref err_msg) = result_err {
+                            log::error!("Regeneration failed (request_id={result_id}): {err_msg}");
+                            if let Ok(mut editor) = editor_model.try_borrow_mut() {
+                                editor.record_failure(result_id, err_msg.clone());
+                            }
                         } else {
                             let frame = regen_state.frame_index;
                             let expected_request_id = regen_state.latest_request_id;
@@ -1449,9 +1563,17 @@ fn run_windowed_v2(
                             ) {
                                 Ok(()) => {
                                     log::info!("Regeneration committed at frame {frame}");
+                                    if let (Ok(mut editor), Some((identity, stats))) =
+                                        (editor_model.try_borrow_mut(), editor_success)
+                                    {
+                                        editor.record_success(result_id, identity, stats);
+                                    }
                                 }
                                 Err(e) => {
                                     log::error!("Regeneration commit failed: {e}");
+                                    if let Ok(mut editor) = editor_model.try_borrow_mut() {
+                                        editor.record_failure(result_id, e.to_string());
+                                    }
                                 }
                             }
                         }
@@ -1469,22 +1591,42 @@ fn run_windowed_v2(
                         &engine::input::ActionId::from(CAPTURE_SCREENSHOT_ACTION),
                     );
 
-                    if noclip_toggle {
-                        noclip = !noclip;
-                        log::info!("Noclip {}", if noclip { "enabled" } else { "disabled" });
-                    }
-
-                    if capture_screenshot {
-                        if let Err(e) = renderer.queue_manual_frame_capture(CaptureTarget::Draw) {
-                            log::error!("Manual capture failed: {e}");
-                        } else {
-                            log::info!("Manual draw capture triggered");
+                    // Registered app UI owns keyboard/mouse capture. Gameplay
+                    // shortcuts and camera updates resume only after unregistration.
+                    if !editor_model.borrow().visible {
+                        if noclip_toggle {
+                            noclip = !noclip;
+                            log::info!("Noclip {}", if noclip { "enabled" } else { "disabled" });
                         }
-                    }
 
-                    fps_controller.update_from_snapshot(snapshot, 1.0 / 60.0, &mut camera);
+                        if capture_screenshot {
+                            if let Err(e) = renderer.queue_manual_frame_capture(CaptureTarget::Draw)
+                            {
+                                log::error!("Manual capture failed: {e}");
+                            } else {
+                                log::info!("Manual draw capture triggered");
+                            }
+                        }
+
+                        fps_controller.update_from_snapshot(snapshot, 1.0 / 60.0, &mut camera);
+                    }
 
                     renderer.pump_asset_tasks(32).unwrap_or_default();
+
+                    // Drain editor commands
+                    {
+                        let commands = if let Ok(mut model) = editor_model.try_borrow_mut() {
+                            model.sync_from_regen_state(&regen_state);
+                            model.drain_commands()
+                        } else {
+                            Vec::new()
+                        };
+                        for command in commands {
+                            if editor::handle_command(command, &editor_model, &mut regen_state) {
+                                set_editor_visible(&mut renderer, &editor_model, false);
+                            }
+                        }
+                    }
 
                     let current_size = window.inner_size();
                     let view = engine::render::camera_view_for_size(
