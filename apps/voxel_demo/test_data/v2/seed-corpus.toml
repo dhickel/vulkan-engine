@@ -1,0 +1,37 @@
+# Canonical seed corpus for v2 generation validation.
+# Declares the seeds and resolutions to be tested across all presets.
+# No generated output fixtures are included — those belong to Phase 02.
+
+[schema]
+version = 1
+description = "Canonical seeds and resolutions for v2 generator validation"
+
+[[corpus]]
+label = "seed_zero"
+seed = 0
+resolutions = [64, 96, 128]
+description = "Baseline deterministic seed"
+
+[[corpus]]
+label = "seed_one"
+seed = 1
+resolutions = [64, 96, 128]
+description = "Deterministic non-zero seed"
+
+[[corpus]]
+label = "seed_42"
+seed = 42
+resolutions = [64, 96, 128]
+description = "Well-known seed value"
+
+[[corpus]]
+label = "seed_max_u32"
+seed = 4294967295
+resolutions = [64, 96, 128]
+description = "Maximum u32 seed"
+
+[[corpus]]
+label = "seed_max_u64"
+seed = "18446744073709551615"
+resolutions = [64, 96, 128]
+description = "Maximum u64 seed"

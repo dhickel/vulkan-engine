@@ -9,14 +9,15 @@
 use crate::cave_gen::lattice::DenseLattice;
 
 pub mod mc33;
+pub mod partition;
 
 // ─── MeshResult ────────────────────────────────────────────────────────────
 
 /// An indexed triangle mesh produced by a field mesher.
 ///
-/// `normals`, `tangents`, and `uvs` are per-vertex and parallel to `vertices`.
-/// `indices` holds triangle triplets (3 per triangle). All indices must be
-/// valid for the vertex arrays.
+/// `normals`, `tangents`, `uvs`, and `colors` are per-vertex and parallel to
+/// `vertices`. `indices` holds triangle triplets (3 per triangle). All indices
+/// must be valid for the vertex arrays.
 #[derive(Debug, Clone)]
 pub struct MeshResult {
     /// Vertex positions in object space.
@@ -27,6 +28,8 @@ pub struct MeshResult {
     pub tangents: Vec<[f32; 4]>,
     /// Per-vertex UV coordinates.
     pub uvs: Vec<[f32; 2]>,
+    /// Per-vertex RGBA colors.
+    pub colors: Vec<[f32; 4]>,
     /// Triangle indices (length must be a multiple of 3).
     pub indices: Vec<u32>,
 }
@@ -177,21 +180,28 @@ pub(crate) fn dominant_axis_uv(normal: [f32; 3], position: [f32; 3]) -> ([f32; 2
 
 // ─── Mesh validation gates ─────────────────────────────────────────────────
 
+/// Controls whether open boundary edges are accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshValidationPolicy {
+    /// Require a closed manifold (no open edges).
+    Closed,
+    /// Allow open boundary edges (for partition outputs at wall/floor seams).
+    AllowOpenEdges,
+}
+
 /// Validate a mesh against structural correctness gates.
 ///
 /// Returns `Ok(())` if all checks pass, or `Err(errors)` with descriptions
 /// of every failure found.
-pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
+pub fn validate_mesh(mesh: &MeshResult, policy: MeshValidationPolicy) -> Result<(), Vec<String>> {
     let mut errors: Vec<String> = Vec::new();
 
     let n_vertices = mesh.vertices.len();
     let n_indices = mesh.indices.len();
 
     // 1. Index count must be multiple of 3
-    if n_indices % 3 != 0 {
-        errors.push(format!(
-            "index count ({n_indices}) is not a multiple of 3"
-        ));
+    if !n_indices.is_multiple_of(3) {
+        errors.push(format!("index count ({n_indices}) is not a multiple of 3"));
     }
 
     // 2. All indices in bounds
@@ -222,17 +232,24 @@ pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
             mesh.uvs.len()
         ));
     }
+    if mesh.colors.len() != n_vertices {
+        errors.push(format!(
+            "colors len {} != vertices len {n_vertices}",
+            mesh.colors.len()
+        ));
+    }
 
     // 4. All normals must be finite and normalized
     for (i, &n) in mesh.normals.iter().enumerate() {
         if !n[0].is_finite() || !n[1].is_finite() || !n[2].is_finite() {
-            errors.push(format!("normal[{i}] = [{}, {}, {}] is not finite", n[0], n[1], n[2]));
+            errors.push(format!(
+                "normal[{i}] = [{}, {}, {}] is not finite",
+                n[0], n[1], n[2]
+            ));
         } else {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             if (len - 1.0).abs() > 1e-5 {
-                errors.push(format!(
-                    "normal[{i}] length is {len:.6}, not 1.0"
-                ));
+                errors.push(format!("normal[{i}] length is {len:.6}, not 1.0"));
             }
         }
     }
@@ -245,21 +262,26 @@ pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
                 t[0], t[1], t[2], t[3]
             ));
         } else if t[3] != 1.0 && t[3] != -1.0 {
-            errors.push(format!(
-                "tangent[{i}] handedness {} not ±1.0",
-                t[3]
-            ));
+            errors.push(format!("tangent[{i}] handedness {} not ±1.0", t[3]));
         } else {
             let tlen = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
             if (tlen - 1.0).abs() > 1e-5 {
-                errors.push(format!(
-                    "tangent[{i}] 3D length is {tlen:.6}, not 1.0"
-                ));
+                errors.push(format!("tangent[{i}] 3D length is {tlen:.6}, not 1.0"));
             }
         }
     }
 
-    // 6. No degenerate triangles (zero area)
+    // 6. All positions must be finite.
+    for (i, &v) in mesh.vertices.iter().enumerate() {
+        if !v[0].is_finite() || !v[1].is_finite() || !v[2].is_finite() {
+            errors.push(format!(
+                "vertex[{i}] = [{}, {}, {}] is not finite",
+                v[0], v[1], v[2]
+            ));
+        }
+    }
+
+    // 7. Triangles must use distinct indices and have finite, nonzero area.
     for ti in 0..n_indices / 3 {
         let i0 = mesh.indices[ti * 3] as usize;
         let i1 = mesh.indices[ti * 3 + 1] as usize;
@@ -268,10 +290,21 @@ pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
         if i0 >= n_vertices || i1 >= n_vertices || i2 >= n_vertices {
             continue;
         }
+        if i0 == i1 || i1 == i2 || i0 == i2 {
+            errors.push(format!("triangle {ti} has repeated vertex indices"));
+        }
 
         let v0 = mesh.vertices[i0];
         let v1 = mesh.vertices[i1];
         let v2 = mesh.vertices[i2];
+        if !v0
+            .iter()
+            .chain(&v1)
+            .chain(&v2)
+            .all(|value| value.is_finite())
+        {
+            continue;
+        }
 
         let e1 = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
         let e2 = [v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]];
@@ -280,55 +313,92 @@ pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
             e1[2] * e2[0] - e1[0] * e2[2],
             e1[0] * e2[1] - e1[1] * e2[0],
         ];
-        let area = 0.5
-            * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+        let area = 0.5 * (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
 
-        if area < 1e-10 {
+        if !area.is_finite() {
+            errors.push(format!("triangle {ti} has non-finite geometric area"));
+        } else if area < 1e-10 {
             errors.push(format!("triangle {ti} is degenerate (area ≈ 0)"));
-        }
-
-        if i0 == i1 || i1 == i2 || i0 == i2 {
-            errors.push(format!("triangle {ti} has repeated vertex indices"));
         }
     }
 
-    // 7. Open boundary edge check (manifoldness)
+    // 8. All UVs must be finite
+    for (i, &uv) in mesh.uvs.iter().enumerate() {
+        if !uv[0].is_finite() || !uv[1].is_finite() {
+            errors.push(format!("uv[{i}] = [{}, {}] is not finite", uv[0], uv[1]));
+        }
+    }
+
+    // 9. All colors must be finite
+    for (i, &c) in mesh.colors.iter().enumerate() {
+        if !c[0].is_finite() || !c[1].is_finite() || !c[2].is_finite() || !c[3].is_finite() {
+            errors.push(format!(
+                "color[{i}] = [{}, {}, {}, {}] is not finite",
+                c[0], c[1], c[2], c[3]
+            ));
+        }
+    }
+
+    // 10. Tangent must be orthogonal to normal
+    for i in 0..n_vertices.min(mesh.tangents.len()).min(mesh.normals.len()) {
+        let t = mesh.tangents[i];
+        let n = mesh.normals[i];
+        let dot = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+        if dot.abs() > 1e-4 {
+            errors.push(format!(
+                "tangent[{i}] not orthogonal to normal (dot = {dot:.6})"
+            ));
+        }
+    }
+
+    // 11. Open boundary edge check (manifoldness)
     let mut edge_count: std::collections::HashMap<(u32, u32), u32> =
         std::collections::HashMap::with_capacity(n_indices);
     for ti in 0..n_indices / 3 {
         let i0 = mesh.indices[ti * 3];
         let i1 = mesh.indices[ti * 3 + 1];
         let i2 = mesh.indices[ti * 3 + 2];
-        let edges = [(i0.min(i1), i0.max(i1)), (i1.min(i2), i1.max(i2)), (i2.min(i0), i2.max(i0))];
+        let edges = [
+            (i0.min(i1), i0.max(i1)),
+            (i1.min(i2), i1.max(i2)),
+            (i2.min(i0), i2.max(i0)),
+        ];
         for e in edges {
             *edge_count.entry(e).or_insert(0) += 1;
         }
     }
 
-    let open_edges: Vec<_> = edge_count
-        .iter()
-        .filter(|&(_, &count)| count == 1)
-        .collect();
-    if !open_edges.is_empty() {
-        let sample: Vec<_> = open_edges.iter().take(10).map(|(&e, &c)| format!("{e:?}:{c}")).collect();
-        errors.push(format!(
-            "{} open boundary edges found{}",
-            open_edges.len(),
-            if open_edges.len() > 10 {
-                format!(" (showing first 10: {})", sample.join(", "))
-            } else {
-                format!(": {}", sample.join(", "))
-            }
-        ));
+    if policy == MeshValidationPolicy::Closed {
+        let open_edges: Vec<_> = edge_count
+            .iter()
+            .filter(|&(_, &count)| count == 1)
+            .collect();
+        if !open_edges.is_empty() {
+            let sample: Vec<_> = open_edges
+                .iter()
+                .take(10)
+                .map(|(&e, &c)| format!("{e:?}:{c}"))
+                .collect();
+            errors.push(format!(
+                "{} open boundary edges found{}",
+                open_edges.len(),
+                if open_edges.len() > 10 {
+                    format!(" (showing first 10: {})", sample.join(", "))
+                } else {
+                    format!(": {}", sample.join(", "))
+                }
+            ));
+        }
     }
 
-    // 8. Non-manifold edges (appearing > 2 times)
-    let non_manifold: Vec<_> = edge_count
-        .iter()
-        .filter(|&(_, &count)| count > 2)
-        .collect();
+    // 12. Non-manifold edges (appearing > 2 times)
+    let non_manifold: Vec<_> = edge_count.iter().filter(|&(_, &count)| count > 2).collect();
     if !non_manifold.is_empty() {
-        let sample: Vec<_> = non_manifold.iter().take(5).map(|(&e, &c)| format!("{e:?}:{c}")).collect();
+        let sample: Vec<_> = non_manifold
+            .iter()
+            .take(5)
+            .map(|(&e, &c)| format!("{e:?}:{c}"))
+            .collect();
         errors.push(format!(
             "{} non-manifold edges found{}",
             non_manifold.len(),
@@ -338,16 +408,6 @@ pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
                 format!(": {}", sample.join(", "))
             }
         ));
-    }
-
-    // 9. All vertices finite
-    for (i, &v) in mesh.vertices.iter().enumerate() {
-        if !v[0].is_finite() || !v[1].is_finite() || !v[2].is_finite() {
-            errors.push(format!(
-                "vertex[{i}] = [{}, {}, {}] is not finite",
-                v[0], v[1], v[2]
-            ));
-        }
     }
 
     if errors.is_empty() {
@@ -361,7 +421,6 @@ pub fn validate_mesh(mesh: &MeshResult) -> Result<(), Vec<String>> {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use super::*;
     use crate::cave_gen::lattice::VoxelWorld;
 
     /// Build a simple sphere field for testing meshers.
@@ -457,9 +516,10 @@ mod tests {
             normals: vec![],
             tangents: vec![],
             uvs: vec![],
+            colors: vec![],
             indices: vec![],
         };
-        assert!(validate_mesh(&mesh).is_ok());
+        assert!(validate_mesh(&mesh, MeshValidationPolicy::Closed).is_ok());
     }
 
     #[test]
@@ -469,9 +529,10 @@ mod tests {
             normals: vec![[0.0, 1.0, 0.0]; 2],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 2],
             uvs: vec![[0.0; 2]; 2],
+            colors: vec![[1.0; 4]; 2],
             indices: vec![0, 1, 5],
         };
-        let errs = validate_mesh(&mesh).unwrap_err();
+        let errs = validate_mesh(&mesh, MeshValidationPolicy::Closed).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("out of bounds")));
     }
 
@@ -482,9 +543,10 @@ mod tests {
             normals: vec![[2.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
             uvs: vec![[0.0; 2]; 3],
+            colors: vec![[1.0; 4]; 3],
             indices: vec![0, 1, 2],
         };
-        let errs = validate_mesh(&mesh).unwrap_err();
+        let errs = validate_mesh(&mesh, MeshValidationPolicy::Closed).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("length")));
     }
 
@@ -495,10 +557,13 @@ mod tests {
             normals: vec![[0.0, 1.0, 0.0]; 3],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
             uvs: vec![[0.0; 2]; 3],
+            colors: vec![[1.0; 4]; 3],
             indices: vec![0, 1, 2],
         };
-        let errs = validate_mesh(&mesh).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("degenerate") || e.contains("repeated")));
+        let errs = validate_mesh(&mesh, MeshValidationPolicy::Closed).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|e| e.contains("degenerate") || e.contains("repeated")));
     }
 
     #[test]
@@ -508,10 +573,14 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
             uvs: vec![[0.0; 2]; 3],
+            colors: vec![[1.0; 4]; 3],
             indices: vec![0, 1, 2],
         };
-        let errs = validate_mesh(&mesh).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("open boundary")), "expected open boundary edge detection");
+        let errs = validate_mesh(&mesh, MeshValidationPolicy::Closed).unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("open boundary")),
+            "expected open boundary edge detection"
+        );
     }
 
     #[test]
@@ -526,14 +595,10 @@ mod tests {
             normals: vec![[0.0, 1.0, 0.0]; 4],
             tangents: vec![[1.0, 0.0, 0.0, 1.0]; 4],
             uvs: vec![[0.0; 2]; 4],
-            indices: vec![
-                0, 2, 1,
-                0, 1, 3,
-                1, 2, 3,
-                2, 0, 3,
-            ],
+            colors: vec![[1.0; 4]; 4],
+            indices: vec![0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
         };
-        let result = validate_mesh(&mesh);
+        let result = validate_mesh(&mesh, MeshValidationPolicy::Closed);
         if let Err(ref errs) = result {
             assert!(!errs.iter().any(|e| e.contains("open boundary")));
         }

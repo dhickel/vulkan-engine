@@ -88,9 +88,37 @@ impl Pcg32V1 {
     }
 }
 
+// ─── v2 Named RNG Stream ──────────────────────────────────────────────────
+
+/// Derive a v2 named RNG stream directly from `(seed, rng_version, stage_tag)`.
+///
+/// Uses SHA-256 of a version-framed tag to produce a 128-bit (state, sequence)
+/// seed for a fresh `Pcg32V1`. No master stream consumption or nonce.
+/// Streams for different stage tags are independent; inserting or reordering
+/// unrelated stages does not perturb existing stage outputs.
+pub fn named_stream(seed: u64, rng_version: u32, stage_tag: &str) -> Pcg32V1 {
+    let mut hasher = Sha256::new();
+    let domain = b"voxel-demo/named-rng";
+    hasher.update((domain.len() as u32).to_le_bytes());
+    hasher.update(domain);
+    hasher.update(seed.to_le_bytes());
+    hasher.update(rng_version.to_le_bytes());
+    hasher.update((stage_tag.len() as u32).to_le_bytes());
+    hasher.update(stage_tag.as_bytes());
+    let digest: [u8; 32] = hasher.finalize().into();
+    let state = u64::from_le_bytes(digest[0..8].try_into().unwrap());
+    let sequence = u64::from_le_bytes(digest[8..16].try_into().unwrap());
+    Pcg32V1::new(state, sequence)
+}
+
+pub fn v2_stream(seed: u64, stage_tag: &str) -> Pcg32V1 {
+    named_stream(seed, 2, stage_tag)
+}
+
 // ─── PhaseTaggedRng ────────────────────────────────────────────────────────
 
 /// A phase-tagged RNG that can spawn child streams for generator stages.
+/// This is the v1 stream model preserved unchanged.
 #[derive(Debug, Clone)]
 pub struct PhaseTaggedRng {
     seed: u64,
@@ -115,6 +143,7 @@ impl PhaseTaggedRng {
 
     /// Create a child stream for a named generator stage.
     /// The child is deterministically derived from the seed + tag.
+    /// v1 only: this consumes the master stream via a nonce.
     pub fn phase_stream(&mut self, tag: &str) -> Pcg32V1 {
         let nonce = self.master.next_u32();
         let full_tag = format!("{tag}/{nonce}");
@@ -213,5 +242,59 @@ mod tests {
         let mut one = [42u8];
         rng.shuffle(&mut one);
         assert_eq!(one, [42]);
+    }
+
+    // ── v2_stream tests ────────────────────────────────────────────────
+
+    #[test]
+    fn v2_stream_deterministic() {
+        let mut a = v2_stream(42, "placement/site-0");
+        let mut b = v2_stream(42, "placement/site-0");
+        assert_eq!(a.next_u32(), b.next_u32());
+        assert_eq!(a.next_u32(), b.next_u32());
+    }
+
+    #[test]
+    fn v2_stream_version_isolation() {
+        let mut a = named_stream(42, 2, "placement/site-0");
+        let mut b = named_stream(42, 3, "placement/site-0");
+        assert_ne!(a.next_u32(), b.next_u32());
+    }
+
+    #[test]
+    fn v2_stream_tag_isolation() {
+        let mut a = v2_stream(42, "placement/site-0");
+        let mut b = v2_stream(42, "placement/site-1");
+        assert_ne!(a.next_u32(), b.next_u32());
+    }
+
+    #[test]
+    fn v2_stream_seed_isolation() {
+        let mut a = v2_stream(1, "test");
+        let mut b = v2_stream(2, "test");
+        assert_ne!(a.next_u32(), b.next_u32());
+    }
+
+    #[test]
+    fn v2_stream_order_independent() {
+        // Inserting an unrelated stage does not perturb existing outputs
+        let val_a = v2_stream(77, "cavern/site-0").next_u32();
+        // Call an unrelated stage
+        let _unrelated = v2_stream(77, "roughness").next_u32();
+        let val_b = v2_stream(77, "cavern/site-0").next_u32();
+        assert_eq!(val_a, val_b);
+
+        // Same test with the "unrelated" stage called first
+        let _unrelated_first = v2_stream(77, "roughness").next_u32();
+        let val_c = v2_stream(77, "cavern/site-0").next_u32();
+        assert_eq!(val_a, val_c);
+    }
+
+    #[test]
+    fn v2_stream_length_framing_prevents_tag_ambiguity() {
+        // "ab" + "c" vs "a" + "bc" should differ
+        let mut a = v2_stream(1, "ab_c");
+        let mut b = v2_stream(1, "a_bc");
+        assert_ne!(a.next_u32(), b.next_u32());
     }
 }

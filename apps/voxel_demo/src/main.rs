@@ -7,6 +7,7 @@
 //! viewpoints, writes PNG captures with enriched JSON sidecars.
 
 mod cave_gen;
+mod cli;
 mod config;
 mod meshers;
 mod validate;
@@ -17,10 +18,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use glam::{Vec3, Vec4};
 use renderer::prelude::{
-    AssetManifestMode, AssetPolicyConfig, CaptureTarget, EnvironmentSource,
-    FrameCaptureRequest, FrameCaptureSource, FrameCaptureStatus,
-    PbrMaterialDesc, PointLight, ProceduralMeshData, ProceduralVertex,
-    Renderer, RendererConfig, Scene, VisualTuning,
+    AssetManifestMode, AssetPolicyConfig, CaptureTarget, EnvironmentSource, FrameCaptureRequest,
+    FrameCaptureSource, FrameCaptureStatus, PbrMaterialDesc, PointLight, ProceduralMeshData,
+    ProceduralVertex, Renderer, RendererConfig, Scene, VisualTuning,
 };
 use renderer::{Camera, FPSController};
 use winit::event::{Event, WindowEvent};
@@ -28,11 +28,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::KeyCode;
 use winit::window::WindowBuilder;
 
-use config::{NormalizedConfig, PresentationConfig};
 use cave_gen::generators::topology_first::TopologyFirst;
 use cave_gen::generators::{AttemptContext, Generator};
 use cave_gen::lattice::VoxelWorld;
 use cave_gen::rng::PhaseTaggedRng;
+use config::{NormalizedConfig, PresentationConfig};
 use meshers::mc33::Mc33;
 use meshers::FieldMesher;
 use validate::validate_normalized;
@@ -42,144 +42,7 @@ const NOCLIP_TOGGLE_ACTION: &str = "noclip.toggle";
 const CAPTURE_SCREENSHOT_ACTION: &str = "capture.screenshot";
 const MAX_POINT_LIGHTS: usize = 16;
 
-// ─── CLI ───────────────────────────────────────────────────────────────────
-
-#[derive(Debug)]
-struct CliArgs {
-    seed: u64,
-    resolution: u32,
-    shell_thickness: u32,
-    light_budget: u32,
-    headless: bool,
-    capture_dir: Option<PathBuf>,
-    env_path: Option<PathBuf>,
-}
-
-impl CliArgs {
-    fn parse() -> Self {
-        let args: Vec<String> = std::env::args().collect();
-        let mut seed = 0u64;
-        let mut resolution = 96u32;
-        let mut shell_thickness = 2u32;
-        let mut light_budget = 9u32;
-        let mut headless = false;
-        let mut capture_dir = None;
-        let mut env_path = None;
-
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--seed" => {
-                    seed = parse_next_u64(&args, &mut i, "--seed");
-                }
-                "--resolution" => {
-                    resolution = parse_next_u32(&args, &mut i, "--resolution");
-                }
-                "--shell-thickness" => {
-                    shell_thickness = parse_next_u32(&args, &mut i, "--shell-thickness");
-                }
-                "--light-budget" => {
-                    light_budget = parse_next_u32(&args, &mut i, "--light-budget");
-                }
-                "--headless" => {
-                    headless = true;
-                    i += 1;
-                }
-                "--capture_dir" | "--capture-dir" => {
-                    capture_dir =
-                        Some(PathBuf::from(require_value(&args, &mut i, "--capture-dir")));
-                }
-                "--env" => {
-                    env_path = Some(PathBuf::from(require_value(&args, &mut i, "--env")));
-                }
-                "--help" => {
-                    print_help();
-                    std::process::exit(0);
-                }
-                other => {
-                    eprintln!("unknown argument: {other}");
-                    eprintln!("use --help for usage");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Self {
-            seed,
-            resolution,
-            shell_thickness,
-            light_budget,
-            headless,
-            capture_dir,
-            env_path,
-        }
-    }
-
-    fn to_normalized(&self) -> NormalizedConfig {
-        NormalizedConfig {
-            seed: self.seed,
-            resolution: self.resolution,
-            shell_thickness: self.shell_thickness,
-            light_budget: self.light_budget,
-        }
-    }
-
-    fn to_presentation(&self) -> PresentationConfig {
-        PresentationConfig {
-            headless: self.headless,
-            capture_dir: self.capture_dir.clone(),
-            env_path: self.env_path.clone(),
-        }
-    }
-}
-
-fn parse_next_u64(args: &[String], i: &mut usize, flag: &str) -> u64 {
-    let val = require_value(args, i, flag);
-    val.parse().unwrap_or_else(|_| {
-        eprintln!("{flag} expects a non-negative integer, got '{val}'");
-        std::process::exit(1);
-    })
-}
-
-fn parse_next_u32(args: &[String], i: &mut usize, flag: &str) -> u32 {
-    let val = require_value(args, i, flag);
-    val.parse().unwrap_or_else(|_| {
-        eprintln!("{flag} expects a non-negative integer, got '{val}'");
-        std::process::exit(1);
-    })
-}
-
-fn require_value(args: &[String], i: &mut usize, flag: &str) -> String {
-    *i += 1;
-    if let Some(val) = args.get(*i) {
-        if val.starts_with("--") {
-            eprintln!("{flag} requires a value, got flag '{val}'");
-            std::process::exit(1);
-        }
-        *i += 1;
-        val.clone()
-    } else {
-        eprintln!("{flag} requires a value");
-        std::process::exit(1);
-    }
-}
-
-fn print_help() {
-    println!("voxel_demo — Voxel cave generation and rendering demo");
-    println!();
-    println!("USAGE:");
-    println!("  cargo run -p voxel_demo -- [OPTIONS]");
-    println!();
-    println!("OPTIONS:");
-    println!("  --seed <N>                 RNG seed (default: 0)");
-    println!("  --resolution <64|96|128>   Cubic lattice resolution (default: 96)");
-    println!("  --shell-thickness <N>      Solid shell thickness in voxels (default: 2)");
-    println!("  --light-budget <N>         Point-light budget — always uses 9 fixed lights (default: 9, max: 16)");
-    println!("  --headless                 Run without a window, capture at 5 viewpoints");
-    println!("  --capture_dir <PATH>       Output directory for frame captures");
-    println!("  --env <PATH>               Environment map path for IBL");
-    println!("  --help                     Show this help");
-}
+// ─── Main entrypoint ──────────────────────────────────────────────────────
 
 // ─── Main ──────────────────────────────────────────────────────────────────
 
@@ -188,22 +51,368 @@ fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let args = CliArgs::parse();
-    let normalized = args.to_normalized();
-    let presentation = args.to_presentation();
+    let args = cli::CliArgs::parse();
 
-    if let Err(e) = validate_normalized(&normalized) {
-        log::error!("Configuration validation failed: {e}");
-        std::process::exit(1);
+    if args.is_v2 {
+        // v2 route: validate config and print identities (generation stub)
+        if let Err(e) = run_v2(&args) {
+            log::error!("{e}");
+            std::process::exit(1);
+        }
+    } else {
+        // v1 legacy route: unchanged one-shot path
+        let normalized = args.to_v1_normalized();
+        let presentation = args.to_v1_presentation();
+
+        if let Err(e) = validate_normalized(&normalized) {
+            log::error!("Configuration validation failed: {e}");
+            std::process::exit(1);
+        }
+
+        log::info!(
+            "NormalizedConfig: seed={} resolution={}³ shell={} light_budget={}",
+            normalized.seed,
+            normalized.resolution,
+            normalized.shell_thickness,
+            normalized.light_budget
+        );
+
+        if let Err(e) = run(normalized, presentation) {
+            log::error!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// ─── v2 Entrypoint ─────────────────────────────────────────────────────────
+
+fn run_v2(args: &cli::CliArgs) -> Result<(), AppError> {
+    use config::{
+        compute_geometry_identity, compute_scene_config_identity, get_embedded_preset,
+        known_catalog_ids, load_preset, normalize_document, resolve_asset_ref, DocumentSource,
+        LoadedDocument, ResolvedAppConfig, RuntimeOptions,
+    };
+    use validate::{validate_preset_document, validate_runtime_light_budget};
+
+    // 1. Select exactly one complete base and attach source context.
+    let (source_name, loaded) = if let Some(ref preset_name) = args.preset {
+        let (name, document) = get_embedded_preset(preset_name)
+            .ok_or_else(|| AppError::Validation(format!("unknown preset: '{preset_name}'")))?;
+        (
+            name.to_string(),
+            LoadedDocument {
+                document,
+                source: DocumentSource::Preset {
+                    name: name.to_string(),
+                },
+                source_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            },
+        )
+    } else if let Some(ref config_path) = args.config {
+        let absolute_path = if config_path.is_absolute() {
+            config_path.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(|error| AppError::Validation(error.to_string()))?
+                .join(config_path)
+        };
+        let document = load_preset(&absolute_path)
+            .map_err(|e| AppError::Validation(format!("failed to load config: {e}")))?;
+        let source_dir = absolute_path
+            .parent()
+            .ok_or_else(|| AppError::Validation("config path has no parent directory".into()))?
+            .to_path_buf();
+        (
+            absolute_path.display().to_string(),
+            LoadedDocument {
+                document,
+                source: DocumentSource::ConfigFile {
+                    path: absolute_path,
+                },
+                source_dir,
+            },
+        )
+    } else {
+        let (name, document) = get_embedded_preset("default")
+            .ok_or_else(|| AppError::Validation("embedded default preset not found".to_string()))?;
+        (
+            name.to_string(),
+            LoadedDocument {
+                document,
+                source: DocumentSource::Embedded {
+                    name: name.to_string(),
+                },
+                source_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            },
+        )
+    };
+    let LoadedDocument {
+        document: mut source_doc,
+        source,
+        source_dir,
+    } = loaded;
+
+    // 2. Normalize and resolve the selected base before merging overrides.
+    normalize_document(&mut source_doc)
+        .map_err(|e| AppError::Validation(format!("base normalization failed: {e}")))?;
+    for reference in [
+        &source_doc.materials.wall.albedo,
+        &source_doc.materials.wall.normal,
+        &source_doc.materials.wall.roughness,
+        &source_doc.materials.wall.ao,
+        &source_doc.materials.floor.albedo,
+        &source_doc.materials.floor.normal,
+        &source_doc.materials.floor.roughness,
+        &source_doc.materials.floor.ao,
+    ] {
+        resolve_asset_ref(reference, &source_dir, known_catalog_ids())
+            .map_err(|e| AppError::Validation(format!("base asset reference: {e}")))?;
     }
 
-    log::info!("NormalizedConfig: seed={} resolution={}³ shell={} light_budget={}",
-        normalized.seed, normalized.resolution, normalized.shell_thickness, normalized.light_budget);
-
-    if let Err(e) = run(normalized, presentation) {
-        log::error!("{e}");
-        std::process::exit(1);
+    // 3. Apply only explicitly present CLI overrides.
+    if let Some(seed) = args.seed {
+        source_doc.generator.seed = seed;
     }
+    if let Some(resolution) = args.resolution {
+        source_doc.generator.resolution = resolution;
+    }
+    if let Some(shell_thickness) = args.shell_thickness {
+        source_doc.generator.shell_thickness = shell_thickness;
+    }
+    if let Some(cavern_count) = args.cavern_count {
+        source_doc.generator.cavern_count = cavern_count;
+    }
+    if let Some(tunnel_count) = args.tunnel_count {
+        source_doc.generator.tunnel_count = tunnel_count;
+    }
+    if let Some(tunnel_radius_min) = args.tunnel_radius_min {
+        source_doc.generator.tunnel_radius_min = tunnel_radius_min;
+    }
+    if let Some(tunnel_radius_max) = args.tunnel_radius_max {
+        source_doc.generator.tunnel_radius_max = tunnel_radius_max;
+    }
+    if let Some(cavern_radius_min) = args.cavern_radius_min {
+        source_doc.generator.cavern_radius_min = cavern_radius_min;
+    }
+    if let Some(cavern_radius_max) = args.cavern_radius_max {
+        source_doc.generator.cavern_radius_max = cavern_radius_max;
+    }
+    if let Some(spline_tension) = args.spline_tension {
+        source_doc.generator.spline_tension = spline_tension;
+    }
+    if let Some(roughness) = args.roughness {
+        source_doc.generator.roughness = roughness;
+    }
+    if let Some(maze_density) = args.maze_density {
+        source_doc.generator.maze_density = maze_density;
+    }
+    if let Some(maze_twistiness) = args.maze_twistiness {
+        source_doc.generator.maze_twistiness = maze_twistiness;
+    }
+    if let Some(maze_radius) = args.maze_radius {
+        source_doc.generator.maze_radius = maze_radius;
+    }
+    if let Some(maze_retries) = args.maze_retries {
+        source_doc.generator.maze_retries = maze_retries;
+    }
+    if let Some(maze_search_budget) = args.maze_search_budget {
+        source_doc.generator.maze_search_budget = maze_search_budget;
+    }
+    if let Some(floor_threshold) = args.floor_threshold {
+        source_doc.generator.floor_threshold = floor_threshold;
+    }
+    if let Some(wall_uv_scale) = args.wall_uv_scale {
+        source_doc.generator.wall_uv_scale = wall_uv_scale;
+    }
+    if let Some(floor_uv_scale) = args.floor_uv_scale {
+        source_doc.generator.floor_uv_scale = floor_uv_scale;
+    }
+
+    // 4. Normalize the merged document again before validation or identity.
+    normalize_document(&mut source_doc)
+        .map_err(|e| AppError::Validation(format!("float normalization failed: {e}")))?;
+
+    // 5. Resolve the canonical merged asset references.
+
+    let catalog_ids = known_catalog_ids();
+    let resolve = |asset_ref: &config::AssetRef| -> Result<config::ResolvedAssetRef, AppError> {
+        resolve_asset_ref(asset_ref, &source_dir, catalog_ids)
+            .map_err(|e| AppError::Validation(format!("asset reference: {e}")))
+    };
+
+    let resolved_wall_albedo = resolve(&source_doc.materials.wall.albedo)?;
+    let resolved_wall_normal = resolve(&source_doc.materials.wall.normal)?;
+    let resolved_wall_roughness = resolve(&source_doc.materials.wall.roughness)?;
+    let resolved_wall_ao = resolve(&source_doc.materials.wall.ao)?;
+    let resolved_floor_albedo = resolve(&source_doc.materials.floor.albedo)?;
+    let resolved_floor_normal = resolve(&source_doc.materials.floor.normal)?;
+    let resolved_floor_roughness = resolve(&source_doc.materials.floor.roughness)?;
+    let resolved_floor_ao = resolve(&source_doc.materials.floor.ao)?;
+
+    // 6. Validate canonical document and runtime values.
+    let errors = validate_preset_document(&source_doc);
+    if !errors.is_empty() {
+        for error in &errors {
+            log::error!("Validation error: {error}");
+        }
+        return Err(AppError::Validation(format!(
+            "{} validation error(s)",
+            errors.len()
+        )));
+    }
+    let light_budget = args.light_budget.unwrap_or(9);
+    validate_runtime_light_budget(light_budget)
+        .map_err(|e| AppError::Validation(format!("runtime validation: {e}")))?;
+
+    // 7. Construct identities only from validated canonical typed values.
+    let geometry_identity = compute_geometry_identity(
+        source_doc.generator_version,
+        source_doc.rng_version,
+        &source_doc.generator,
+    );
+    let scene_config_identity = compute_scene_config_identity(
+        &geometry_identity,
+        &source_doc.generator,
+        &source_doc.materials.wall,
+        &source_doc.materials.floor,
+        &resolved_wall_albedo,
+        &resolved_wall_normal,
+        &resolved_wall_roughness,
+        &resolved_wall_ao,
+        &resolved_floor_albedo,
+        &resolved_floor_normal,
+        &resolved_floor_roughness,
+        &resolved_floor_ao,
+    );
+
+    let runtime = RuntimeOptions {
+        light_budget,
+        headless: args.headless,
+        capture_dir: args.capture_dir.clone(),
+        env_path: args.env_path.clone(),
+    };
+
+    // 8. Assemble resolved config and dispatch by validated versions.
+    let resolved = ResolvedAppConfig {
+        document: source_doc.clone(),
+        runtime,
+        source,
+        resolved_wall_albedo,
+        resolved_wall_normal,
+        resolved_wall_roughness,
+        resolved_wall_ao,
+        resolved_floor_albedo,
+        resolved_floor_normal,
+        resolved_floor_roughness,
+        resolved_floor_ao,
+        geometry_identity: geometry_identity.clone(),
+        scene_config_identity: scene_config_identity.clone(),
+        asset_digests: Vec::new(),
+    };
+
+    if resolved.document.generator_version == config::V1_GENERATOR_VERSION
+        && resolved.document.rng_version == config::V1_RNG_VERSION
+    {
+        let normalized = NormalizedConfig {
+            seed: resolved.document.generator.seed,
+            resolution: resolved.document.generator.resolution,
+            shell_thickness: resolved.document.generator.shell_thickness,
+            light_budget: resolved.runtime.light_budget,
+        };
+        validate_normalized(&normalized).map_err(|error| {
+            AppError::Validation(format!("legacy document validation failed: {error}"))
+        })?;
+        let presentation = PresentationConfig {
+            headless: resolved.runtime.headless,
+            capture_dir: resolved.runtime.capture_dir.clone(),
+            env_path: resolved.runtime.env_path.clone(),
+        };
+        return run(normalized, presentation);
+    }
+
+    // v2 generation
+    log::info!("=== v2 Configuration Validated ===");
+    log::info!("Source: {source_name}");
+    log::info!("Schema version: {}", resolved.document.schema_version);
+    log::info!("Generator version: {}", resolved.document.generator_version);
+    log::info!("RNG version: {}", resolved.document.rng_version);
+    log::info!(
+        "GeometryIdentity: {}",
+        bytes_to_hex(&resolved.geometry_identity.0)
+    );
+    log::info!(
+        "SceneConfigIdentity: {}",
+        bytes_to_hex(&resolved.scene_config_identity.0)
+    );
+    log::info!("Seed: {}", resolved.document.generator.seed);
+    log::info!(
+        "Resolution: {}cubed",
+        resolved.document.generator.resolution
+    );
+    log::info!("Cavern count: {}", resolved.document.generator.cavern_count);
+    log::info!("Tunnel count: {}", resolved.document.generator.tunnel_count);
+    log::info!("Maze density: {}", resolved.document.generator.maze_density);
+    log::info!("Light budget: {light_budget} (runtime-only)");
+
+    // ── v2 generation ────────────────────────────────────────────────
+    let gen_config = &resolved.document.generator;
+    let res = gen_config.resolution;
+    let mut world = VoxelWorld::new(res, res, res);
+    world.fill_solid();
+
+    let t_gen = std::time::Instant::now();
+    let gen_result =
+        cave_gen::generators::topology_first::generate_v2(gen_config, &mut world, gen_config.seed)
+            .map_err(|e| AppError::Validation(format!("v2 generation failed: {e}")))?;
+    let gen_time = t_gen.elapsed();
+
+    log::info!(
+        "v2 Generator: {} sites, {} edges, {}ms",
+        gen_result.sites.len(),
+        gen_result.edges.len(),
+        gen_time.as_millis()
+    );
+    for site in &gen_result.sites {
+        log::info!(
+            "  Site '{}': ({}, {}, {})",
+            site.label,
+            site.x,
+            site.y,
+            site.z
+        );
+    }
+    for edge in &gen_result.edges {
+        log::info!(
+            "  Edge {}->{} (clearance: {:.1})",
+            edge.from,
+            edge.to,
+            edge.clearance
+        );
+    }
+
+    // Shell verification
+    if !cave_gen::generators::verify_shell_multi(&world, gen_config.shell_thickness) {
+        return Err(AppError::Validation(
+            "v2 shell breach detected after generation".into(),
+        ));
+    }
+    log::info!(
+        "Shell integrity verified (thickness={})",
+        gen_config.shell_thickness
+    );
+
+    // Reachability
+    let spawn = &gen_result.sites[gen_result.spawn_index];
+    let reachable = cave_gen::metrics::flood_fill_air(world.density(), spawn.x, spawn.y, spawn.z);
+    log::info!("Reachable air cells from spawn: {}", reachable.len());
+
+    log::info!("v2 generation complete.");
+
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -264,7 +473,13 @@ fn run(normalized: NormalizedConfig, presentation: PresentationConfig) -> Result
         gen_time.as_millis()
     );
     for site in &gen_result.sites {
-        log::info!("  Site '{}': ({}, {}, {})", site.label, site.x, site.y, site.z);
+        log::info!(
+            "  Site '{}': ({}, {}, {})",
+            site.label,
+            site.x,
+            site.y,
+            site.z
+        );
     }
 
     // ── 2. Mesh extraction ──────────────────────────────────────────────
@@ -287,7 +502,7 @@ fn run(normalized: NormalizedConfig, presentation: PresentationConfig) -> Result
     for &v in &mesh_result.vertices {
         if !v[0].is_finite() || !v[1].is_finite() || !v[2].is_finite() {
             return Err(AppError::Validation(
-                "mesh contains non-finite vertex positions".into()
+                "mesh contains non-finite vertex positions".into(),
             ));
         }
     }
@@ -354,11 +569,11 @@ fn compute_light_positions(
     let max_idx = sites.len().saturating_sub(1);
 
     let light_colors: [Vec3; 5] = [
-        Vec3::new(1.0, 0.85, 0.6),  // spawn: warm orange
-        Vec3::new(0.9, 0.7, 0.5),   // junction: amber
-        Vec3::new(0.6, 0.75, 1.0),  // grand_cavern: cool blue
-        Vec3::new(0.8, 0.9, 0.7),   // shaft: pale green
-        Vec3::new(1.0, 0.65, 0.4),  // destination: warm orange
+        Vec3::new(1.0, 0.85, 0.6), // spawn: warm orange
+        Vec3::new(0.9, 0.7, 0.5),  // junction: amber
+        Vec3::new(0.6, 0.75, 1.0), // grand_cavern: cool blue
+        Vec3::new(0.8, 0.9, 0.7),  // shaft: pale green
+        Vec3::new(1.0, 0.65, 0.4), // destination: warm orange
     ];
 
     let intensities: [f32; 5] = [25.0, 18.0, 40.0, 18.0, 25.0];
@@ -382,8 +597,8 @@ fn compute_light_positions(
 
     // 4 edge lights at midpoints
     let edge_pairs: [(usize, usize); 4] = [
-        (0, 1), // spawn→junction
-        (1, 2), // junction→grand_cavern
+        (0, 1),              // spawn→junction
+        (1, 2),              // junction→grand_cavern
         (2, 4.min(max_idx)), // grand_cavern→destination
         (1, 3.min(max_idx)), // junction→shaft
     ];
@@ -443,11 +658,7 @@ fn compute_viewpoints(
         .map(|site| {
             let target = Vec3::new(site.x as f32, site.y as f32, site.z as f32);
             // Move camera outward from the target for a good view
-            let eye = Vec3::new(
-                target.x + 8.0,
-                target.y + 3.0,
-                target.z + 8.0,
-            );
+            let eye = Vec3::new(target.x + 8.0, target.y + 3.0, target.z + 8.0);
             // If eye is in solid, pull back further
             let eye = if !is_in_air(&eye, world) {
                 Vec3::new(target.x + 12.0, target.y + 6.0, target.z + 12.0)
@@ -532,9 +743,7 @@ fn seed_scene(
     }
 
     // Load IBL environment
-    let fallback_env = PathBuf::from(
-        "apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr",
-    );
+    let fallback_env = PathBuf::from("apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr");
     let env_path_resolved = env_path.unwrap_or(&fallback_env);
     if env_path_resolved.exists() {
         match assets.load_environment(EnvironmentSource::Auto(env_path_resolved.clone())) {
@@ -543,12 +752,18 @@ fn seed_scene(
                 log::info!("IBL environment loaded: {}", env_path_resolved.display());
             }
             Err(e) => {
-                log::warn!("Failed to load environment {}: {e}", env_path_resolved.display());
+                log::warn!(
+                    "Failed to load environment {}: {e}",
+                    env_path_resolved.display()
+                );
                 scene.set_skybox(assets.default_environment());
             }
         }
     } else {
-        log::warn!("Environment file not found: {}", env_path_resolved.display());
+        log::warn!(
+            "Environment file not found: {}",
+            env_path_resolved.display()
+        );
         scene.set_skybox(assets.default_environment());
     }
 
@@ -562,7 +777,7 @@ fn seed_scene(
         mesh_handle,
         material: stone_mat,
         light_ids,
-        sites: Vec::new(), // populated by caller
+        sites: Vec::new(),               // populated by caller
         world: VoxelWorld::new(1, 1, 1), // placeholder, caller sets
     })
 }
@@ -657,116 +872,113 @@ fn run_windowed(
 
     window.request_redraw();
 
-    event_loop
-        .run(move |event, elwt| {
-            elwt.set_control_flow(ControlFlow::Poll);
+    event_loop.run(move |event, elwt| {
+        elwt.set_control_flow(ControlFlow::Poll);
 
-            let _routing = match engine::input::route_platform_input_to_app(
-                &mut renderer,
-                &window,
-                &mut app_input,
-                &event,
-            ) {
-                Ok(routing) => routing,
-                Err(e) => {
-                    log::error!("Platform input routing failed: {e}");
-                    elwt.exit();
-                    return;
-                }
-            };
+        let _routing = match engine::input::route_platform_input_to_app(
+            &mut renderer,
+            &window,
+            &mut app_input,
+            &event,
+        ) {
+            Ok(routing) => routing,
+            Err(e) => {
+                log::error!("Platform input routing failed: {e}");
+                elwt.exit();
+                return;
+            }
+        };
 
-            match event {
-                Event::WindowEvent { event, window_id } if window_id == window.id() => {
-                    match event {
-                        WindowEvent::CloseRequested => {
-                            log::info!("Close requested, exiting");
+        match event {
+            Event::WindowEvent { event, window_id } if window_id == window.id() => {
+                match event {
+                    WindowEvent::CloseRequested => {
+                        log::info!("Close requested, exiting");
+                        elwt.exit();
+                    }
+                    WindowEvent::Resized(new_size) => {
+                        if let Err(e) = renderer.resize(new_size.width, new_size.height) {
+                            log::error!("Resize failed: {e}");
                             elwt.exit();
                         }
-                        WindowEvent::Resized(new_size) => {
-                            if let Err(e) = renderer.resize(new_size.width, new_size.height) {
-                                log::error!("Resize failed: {e}");
-                                elwt.exit();
-                            }
-                        }
-                        WindowEvent::RedrawRequested => {
-                            // Read input
-                            let snapshot = app_input.snapshot();
-
-                            let noclip_toggle = snapshot.action_just_pressed(
-                                &engine::input::ActionId::from(NOCLIP_TOGGLE_ACTION),
-                            );
-                            let capture_screenshot = snapshot.action_just_pressed(
-                                &engine::input::ActionId::from(CAPTURE_SCREENSHOT_ACTION),
-                            );
-
-                            if noclip_toggle {
-                                noclip = !noclip;
-                                log::info!(
-                                    "Noclip {}",
-                                    if noclip { "enabled" } else { "disabled" }
-                                );
-                            }
-
-                            if capture_screenshot {
-                                if let Err(e) =
-                                    renderer.queue_manual_frame_capture(CaptureTarget::Draw)
-                                {
-                                    log::error!("Manual capture failed: {e}");
-                                } else {
-                                    log::info!("Manual draw capture triggered");
-                                }
-                            }
-
-                            // Update FPS controller
-                            fps_controller.update_from_snapshot(
-                                snapshot,
-                                1.0 / 60.0, // approximate dt
-                                &mut camera,
-                            );
-
-                            // Validate camera is in air
-                            let cam_pos = camera.get_position();
-                            if !is_in_air(&cam_pos, _world) {
-                                log::warn!(
-                                    "Camera at ({:.1}, {:.1}, {:.1}) is inside solid; noclip allows it",
-                                    cam_pos.x, cam_pos.y, cam_pos.z
-                                );
-                            }
-
-                            // Render
-                            let current_size = window.inner_size();
-                            renderer.pump_asset_tasks(32).unwrap_or_default();
-
-                            let view = engine::render::camera_view_for_size(
-                                &camera,
-                                current_size.width,
-                                current_size.height,
-                            );
-
-                            match renderer.render_scene_with_view(&mut scene, view) {
-                                Ok(renderer::FrameRenderOutcome::Rendered)
-                                | Ok(renderer::FrameRenderOutcome::SkippedAcquireUnavailable)
-                                | Ok(renderer::FrameRenderOutcome::SubmittedNotPresented)
-                                | Ok(renderer::FrameRenderOutcome::PresentedSuboptimal) => {}
-                                Ok(renderer::FrameRenderOutcome::SkippedResizePending) => {}
-                                Err(e) => {
-                                    log::error!("Render failed: {e}");
-                                    elwt.exit();
-                                    return;
-                                }
-                            }
-
-                            // Log capture status
-                            log_manual_capture_status(&renderer, &mut reported_manual_captures);
-
-                            window.request_redraw();
-                        }
-                        _ => {}
                     }
+                    WindowEvent::RedrawRequested => {
+                        // Read input
+                        let snapshot = app_input.snapshot();
+
+                        let noclip_toggle = snapshot.action_just_pressed(
+                            &engine::input::ActionId::from(NOCLIP_TOGGLE_ACTION),
+                        );
+                        let capture_screenshot = snapshot.action_just_pressed(
+                            &engine::input::ActionId::from(CAPTURE_SCREENSHOT_ACTION),
+                        );
+
+                        if noclip_toggle {
+                            noclip = !noclip;
+                            log::info!("Noclip {}", if noclip { "enabled" } else { "disabled" });
+                        }
+
+                        if capture_screenshot {
+                            if let Err(e) = renderer.queue_manual_frame_capture(CaptureTarget::Draw)
+                            {
+                                log::error!("Manual capture failed: {e}");
+                            } else {
+                                log::info!("Manual draw capture triggered");
+                            }
+                        }
+
+                        // Update FPS controller
+                        fps_controller.update_from_snapshot(
+                            snapshot,
+                            1.0 / 60.0, // approximate dt
+                            &mut camera,
+                        );
+
+                        // Validate camera is in air
+                        let cam_pos = camera.get_position();
+                        if !is_in_air(&cam_pos, _world) {
+                            log::warn!(
+                                "Camera at ({:.1}, {:.1}, {:.1}) is inside solid; noclip allows it",
+                                cam_pos.x,
+                                cam_pos.y,
+                                cam_pos.z
+                            );
+                        }
+
+                        // Render
+                        let current_size = window.inner_size();
+                        renderer.pump_asset_tasks(32).unwrap_or_default();
+
+                        let view = engine::render::camera_view_for_size(
+                            &camera,
+                            current_size.width,
+                            current_size.height,
+                        );
+
+                        match renderer.render_scene_with_view(&mut scene, view) {
+                            Ok(renderer::FrameRenderOutcome::Rendered)
+                            | Ok(renderer::FrameRenderOutcome::SkippedAcquireUnavailable)
+                            | Ok(renderer::FrameRenderOutcome::SubmittedNotPresented)
+                            | Ok(renderer::FrameRenderOutcome::PresentedSuboptimal) => {}
+                            Ok(renderer::FrameRenderOutcome::SkippedResizePending) => {}
+                            Err(e) => {
+                                log::error!("Render failed: {e}");
+                                elwt.exit();
+                                return;
+                            }
+                        }
+
+                        // Log capture status
+                        log_manual_capture_status(&renderer, &mut reported_manual_captures);
+
+                        window.request_redraw();
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
-        })?;
+            _ => {}
+        }
+    })?;
 
     Ok(())
 }
@@ -802,10 +1014,7 @@ fn manual_capture_run_dir() -> PathBuf {
     ))
 }
 
-fn log_manual_capture_status(
-    renderer: &Renderer,
-    reported_paths: &mut HashSet<PathBuf>,
-) {
+fn log_manual_capture_status(renderer: &Renderer, reported_paths: &mut HashSet<PathBuf>) {
     match renderer.last_frame_capture_status() {
         Some(FrameCaptureStatus::Succeeded {
             ref output_path,
@@ -902,8 +1111,16 @@ fn run_headless(
 
     // Capture at each viewpoint
     for (label, eye, target) in viewpoints {
-        log::info!("Capturing viewpoint '{}': eye=({:.1},{:.1},{:.1}) target=({:.1},{:.1},{:.1})",
-            label, eye.x, eye.y, eye.z, target.x, target.y, target.z);
+        log::info!(
+            "Capturing viewpoint '{}': eye=({:.1},{:.1},{:.1}) target=({:.1},{:.1},{:.1})",
+            label,
+            eye.x,
+            eye.y,
+            eye.z,
+            target.x,
+            target.y,
+            target.z
+        );
 
         renderer
             .set_camera_look_at(*eye, *target, Vec3::Y)
@@ -973,7 +1190,9 @@ fn run_headless(
                     break;
                 }
                 Some(FrameCaptureStatus::Failed {
-                    ref output_path, ref message, ..
+                    ref output_path,
+                    ref message,
+                    ..
                 }) if output_path == &png_path => {
                     log::error!("  ✗ Capture failed for '{}': {message}", label);
                     return Err(AppError::CaptureConfig(format!(
@@ -990,7 +1209,10 @@ fn run_headless(
         }
     }
 
-    log::info!("All headless captures complete → {}", capture_root.display());
+    log::info!(
+        "All headless captures complete → {}",
+        capture_root.display()
+    );
     Ok(())
 }
 
@@ -1007,6 +1229,7 @@ fn write_enriched_sidecar(
 ) -> Result<(), AppError> {
     use serde::Serialize;
     #[derive(Serialize)]
+    #[serde(deny_unknown_fields)]
     struct EnrichedSidecar<'a> {
         seed: u64,
         resolution: u32,
@@ -1019,6 +1242,7 @@ fn write_enriched_sidecar(
         sites: Vec<SiteSummary<'a>>,
     }
     #[derive(Serialize)]
+    #[serde(deny_unknown_fields)]
     struct SiteSummary<'a> {
         label: &'a str,
         x: u32,
@@ -1096,7 +1320,9 @@ mod generator_parity_tests {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/goldens")).to_path_buf()
     }
 
-    fn generate_port(seed: u64) -> (
+    fn generate_port(
+        seed: u64,
+    ) -> (
         Vec<u8>,
         Vec<u8>,
         Vec<crate::cave_gen::metrics::Site>,

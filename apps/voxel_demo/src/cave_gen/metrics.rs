@@ -68,7 +68,10 @@ pub fn camera_pose(sites: &[Site], spawn_index: usize) -> CameraPose {
     let spawn = if spawn_index < sites.len() {
         sites[spawn_index]
     } else {
-        sites.first().copied().unwrap_or(Site::new(32, 32, 32, "default"))
+        sites
+            .first()
+            .copied()
+            .unwrap_or(Site::new(32, 32, 32, "default"))
     };
 
     // Look toward the site farthest from spawn

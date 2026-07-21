@@ -1,0 +1,49 @@
+# Voxel Cave Demo — cavernous preset
+# Large, open caverns with few tunnels and minimal maze.
+
+schema_version = 2
+generator_version = 2
+rng_version = 2
+
+[generator]
+seed = 0
+resolution = 96
+shell_thickness = 2
+cavern_count = 5
+tunnel_count = 6
+tunnel_radius_min = 2.5
+tunnel_radius_max = 4.5
+cavern_radius_min = 6.0
+cavern_radius_max = 12.0
+spline_tension = 0.3
+roughness = 0.2
+maze_density = 0.05
+maze_twistiness = 0.3
+maze_radius = 1.5
+maze_retries = 30
+maze_search_budget = 2000
+floor_threshold = 0.25
+wall_uv_scale = 1.0
+floor_uv_scale = 2.0
+
+[materials.wall]
+albedo = { type = "catalog", id = "kb3d/rock_wall_01" }
+normal = { type = "catalog", id = "kb3d/rock_wall_01" }
+roughness = { type = "catalog", id = "kb3d/rock_wall_01" }
+ao = { type = "catalog", id = "kb3d/rock_wall_01" }
+base_color_r = 0.7
+base_color_g = 0.65
+base_color_b = 0.6
+roughness_factor = 0.8
+metallic_factor = 0.0
+
+[materials.floor]
+albedo = { type = "catalog", id = "kb3d/rock_floor_01" }
+normal = { type = "catalog", id = "kb3d/rock_floor_01" }
+roughness = { type = "catalog", id = "kb3d/rock_floor_01" }
+ao = { type = "catalog", id = "kb3d/rock_floor_01" }
+base_color_r = 0.55
+base_color_g = 0.5
+base_color_b = 0.45
+roughness_factor = 0.85
+metallic_factor = 0.0

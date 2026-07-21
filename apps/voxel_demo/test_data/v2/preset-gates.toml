@@ -1,0 +1,34 @@
+# Structural and resource gate parameters for preset validation.
+# Each preset must pass these gates at the declared resolutions.
+
+[schema]
+version = 1
+description = "Validation gates for v2 preset documents"
+
+[[gates]]
+preset = "default"
+resolutions = [64, 96, 128]
+min_interior = 10
+max_mc33_triangles = 500000
+max_byte_estimate = 2500000
+
+[[gates]]
+preset = "cavernous"
+resolutions = [64, 96, 128]
+min_interior = 10
+max_mc33_triangles = 500000
+max_byte_estimate = 2500000
+
+[[gates]]
+preset = "mazy"
+resolutions = [64, 96, 128]
+min_interior = 10
+max_mc33_triangles = 500000
+max_byte_estimate = 2500000
+
+[[gates]]
+preset = "tight"
+resolutions = [64, 96, 128]
+min_interior = 10
+max_mc33_triangles = 500000
+max_byte_estimate = 2500000

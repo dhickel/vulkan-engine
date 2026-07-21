@@ -52,35 +52,33 @@ impl PerlinNoise {
             + zi as usize
             + 1)
             & 255];
-        let abb = self.perm[(
-            self.perm[(self.perm[xi as usize] as usize + yi as usize + 1) & 255] as usize
-                + zi as usize
-                + 1
-        ) & 255];
-        let baa = self.perm[(
-            self.perm[(self.perm[xi as usize + 1] as usize + yi as usize) & 255] as usize
-                + zi as usize
-        ) & 255];
-        let bba = self.perm[(
-            self.perm[(self.perm[xi as usize + 1] as usize + yi as usize + 1) & 255] as usize
-                + zi as usize
-        ) & 255];
-        let bab = self.perm[(
-            self.perm[(self.perm[xi as usize + 1] as usize + yi as usize) & 255] as usize
-                + zi as usize
-                + 1
-        ) & 255];
-        let bbb = self.perm[(
-            self.perm[(self.perm[xi as usize + 1] as usize + yi as usize + 1) & 255] as usize
-                + zi as usize
-                + 1
-        ) & 255];
+        let abb = self.perm[(self.perm[(self.perm[xi as usize] as usize + yi as usize + 1) & 255]
+            as usize
+            + zi as usize
+            + 1)
+            & 255];
+        let baa = self.perm[(self.perm[(self.perm[xi as usize + 1] as usize + yi as usize) & 255]
+            as usize
+            + zi as usize)
+            & 255];
+        let bba = self.perm[(self.perm
+            [(self.perm[xi as usize + 1] as usize + yi as usize + 1) & 255]
+            as usize
+            + zi as usize)
+            & 255];
+        let bab = self.perm[(self.perm[(self.perm[xi as usize + 1] as usize + yi as usize) & 255]
+            as usize
+            + zi as usize
+            + 1)
+            & 255];
+        let bbb = self.perm[(self.perm
+            [(self.perm[xi as usize + 1] as usize + yi as usize + 1) & 255]
+            as usize
+            + zi as usize
+            + 1)
+            & 255];
 
-        let x1 = lerp(
-            grad(aaa, xf, yf, zf),
-            grad(baa, xf - 1.0, yf, zf),
-            u,
-        );
+        let x1 = lerp(grad(aaa, xf, yf, zf), grad(baa, xf - 1.0, yf, zf), u);
         let x2 = lerp(
             grad(aba, xf, yf - 1.0, zf),
             grad(bba, xf - 1.0, yf - 1.0, zf),
@@ -105,15 +103,7 @@ impl PerlinNoise {
 
     /// Fractal Brownian motion: sum of octaves of noise.
     /// Returns a value in approximately [-1, 1].
-    pub fn fbm_3d(
-        &self,
-        x: f64,
-        y: f64,
-        z: f64,
-        octaves: u32,
-        lacunarity: f64,
-        gain: f64,
-    ) -> f64 {
+    pub fn fbm_3d(&self, x: f64, y: f64, z: f64, octaves: u32, lacunarity: f64, gain: f64) -> f64 {
         let mut value = 0.0;
         let mut amplitude = 1.0;
         let mut frequency = 1.0;
@@ -202,7 +192,10 @@ mod tests {
                 break;
             }
         }
-        assert!(any_different, "different seeds should produce different noise at some point");
+        assert!(
+            any_different,
+            "different seeds should produce different noise at some point"
+        );
     }
 
     #[test]
@@ -214,7 +207,10 @@ mod tests {
             let y = i as f64 * 2.17;
             let z = i as f64 * 3.31;
             let v = noise.noise_3d(x, y, z);
-            assert!(v >= -1.5 && v <= 1.5, "noise {v} out of expected range at ({x}, {y}, {z})");
+            assert!(
+                v >= -1.5 && v <= 1.5,
+                "noise {v} out of expected range at ({x}, {y}, {z})"
+            );
         }
     }
 

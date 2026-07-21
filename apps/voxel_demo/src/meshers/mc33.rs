@@ -30,8 +30,8 @@
 //!   8: (0,4) along Z at x=0,y=0   10: (2,6) along Z at x=1,y=1
 //!   9: (1,5) along Z at x=1,y=0   11: (3,7) along Z at x=0,y=1
 
-use crate::cave_gen::lattice::DenseLattice;
 use super::{density_gradient, dominant_axis_uv, FieldMesher, MeshResult, MesherError};
+use crate::cave_gen::lattice::DenseLattice;
 
 // ─── MC33 Tables ───────────────────────────────────────────────────────────
 //
@@ -47,37 +47,25 @@ use super::{density_gradient, dominant_axis_uv, FieldMesher, MeshResult, MesherE
 ///
 /// Bit i (0..11) = edge i is crossed.
 static EDGE_TABLE: [u16; 256] = [
-    0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
-    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
-    0x190, 0x99, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
-    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
-    0x230, 0x339, 0x33, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
-    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
-    0x3a0, 0x2a9, 0x1a3, 0xaa, 0x7a6, 0x6af, 0x5a5, 0x4ac,
-    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
-    0x460, 0x569, 0x663, 0x76a, 0x66, 0x16f, 0x265, 0x36c,
-    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
-    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff, 0x3f5, 0x2fc,
-    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
-    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55, 0x15c,
-    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
-    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc,
-    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
-    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
-    0xcc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
-    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
-    0x15c, 0x55, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
-    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
-    0x2fc, 0x3f5, 0xff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
-    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
-    0x36c, 0x265, 0x16f, 0x66, 0x76a, 0x663, 0x569, 0x460,
-    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
-    0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa, 0x1a3, 0x2a9, 0x3a0,
-    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
-    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33, 0x339, 0x230,
-    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
-    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99, 0x190,
-    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+    0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03,
+    0xe09, 0xf00, 0x190, 0x99, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f,
+    0xa96, 0xd9a, 0xc93, 0xf99, 0xe90, 0x230, 0x339, 0x33, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30, 0x3a0, 0x2a9, 0x1a3, 0xaa, 0x7a6,
+    0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0, 0x460, 0x569,
+    0x663, 0x76a, 0x66, 0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69,
+    0xb60, 0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff, 0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff, 0xef6,
+    0x9fa, 0x8f3, 0xbf9, 0xaf0, 0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55, 0x15c, 0xe5c,
+    0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950, 0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf,
+    0x1c5, 0xcc, 0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0, 0x8c0, 0x9c9, 0xac3,
+    0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0xcc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x55, 0x35f, 0x256, 0x55a,
+    0x453, 0x759, 0x650, 0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc, 0x3f5,
+    0xff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0, 0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65,
+    0xc6c, 0x36c, 0x265, 0x16f, 0x66, 0x76a, 0x663, 0x569, 0x460, 0xca0, 0xda9, 0xea3, 0xfaa,
+    0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa, 0x1a3, 0x2a9, 0x3a0, 0xd30,
+    0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33,
+    0x339, 0x230, 0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f,
+    0x596, 0x29a, 0x393, 0x99, 0x190, 0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
     0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0,
 ];
 
@@ -88,7 +76,9 @@ static EDGE_TABLE: [u16; 256] = [
 /// Up to 5 triangles (15 indices) per case.
 static TRI_TABLE: [[i8; 16]; 256] = [
     // 0
-    [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ],
     // 1
     [0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     // 2
@@ -598,7 +588,9 @@ static TRI_TABLE: [[i8; 16]; 256] = [
     // 254
     [0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     // 255
-    [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ],
 ];
 
 // ─── Edge vertex positions (midpoint between corner pairs) ─────────────────
@@ -756,7 +748,11 @@ impl FieldMesher for Mc33 {
                         let vi = if let Some(&existing) = edge_to_vertex.get(&edge_key) {
                             existing
                         } else {
-                            let vi = vertices.len() as u32;
+                            let vi = u32::try_from(vertices.len()).map_err(|_| {
+                                MesherError::InternalError(
+                                    "MC33 vertex count exceeds u32 index capacity".into(),
+                                )
+                            })?;
                             vertices.push([px, py, pz]);
                             edge_to_vertex.insert(edge_key, vi);
                             vi
@@ -806,11 +802,14 @@ impl FieldMesher for Mc33 {
             uvs.push(uv);
         }
 
+        let colors: Vec<[f32; 4]> = vec![[1.0, 1.0, 1.0, 1.0]; n_vertices];
+
         Ok(MeshResult {
             vertices,
             normals,
             tangents,
             uvs,
+            colors,
             indices,
         })
     }
@@ -824,9 +823,10 @@ impl FieldMesher for Mc33 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_helpers;
     use super::super::validate_mesh;
+    use super::super::MeshValidationPolicy;
+    use super::*;
     use crate::cave_gen::lattice::VoxelWorld;
 
     #[test]
@@ -867,9 +867,9 @@ mod tests {
         assert_eq!(result.vertices.len(), result.tangents.len());
         assert_eq!(result.vertices.len(), result.uvs.len());
         assert!(
-            validate_mesh(&result).is_ok(),
+            validate_mesh(&result, MeshValidationPolicy::Closed).is_ok(),
             "MC33 sphere mesh validation failed: {:?}",
-            validate_mesh(&result).unwrap_err()
+            validate_mesh(&result, MeshValidationPolicy::Closed).unwrap_err()
         );
     }
 
@@ -881,7 +881,7 @@ mod tests {
         assert!(!result.vertices.is_empty());
         assert!(!result.indices.is_empty());
 
-        let validation = validate_mesh(&result);
+        let validation = validate_mesh(&result, MeshValidationPolicy::Closed);
         if let Err(ref errs) = validation {
             eprintln!("MC33 single voxel issues: {errs:?}");
         }
@@ -929,9 +929,18 @@ mod tests {
     #[test]
     fn mc33_all_six_fields_pass_validation() {
         let fields: Vec<(&str, Box<dyn Fn() -> VoxelWorld>)> = vec![
-            ("sphere_64", Box::new(|| test_helpers::sphere_field(64, 20.0))),
-            ("sphere_96", Box::new(|| test_helpers::sphere_field(96, 30.0))),
-            ("sphere_128", Box::new(|| test_helpers::sphere_field(128, 40.0))),
+            (
+                "sphere_64",
+                Box::new(|| test_helpers::sphere_field(64, 20.0)),
+            ),
+            (
+                "sphere_96",
+                Box::new(|| test_helpers::sphere_field(96, 30.0)),
+            ),
+            (
+                "sphere_128",
+                Box::new(|| test_helpers::sphere_field(128, 40.0)),
+            ),
             ("cave_64", Box::new(|| test_helpers::cave_field(64, 16.0))),
             ("cave_96", Box::new(|| test_helpers::cave_field(96, 24.0))),
             ("cave_128", Box::new(|| test_helpers::cave_field(128, 32.0))),
@@ -941,7 +950,7 @@ mod tests {
         for (name, make_field) in &fields {
             let world = make_field();
             let mesh = mc.mesh(world.density()).unwrap();
-            let result = validate_mesh(&mesh);
+            let result = validate_mesh(&mesh, MeshValidationPolicy::Closed);
             if let Err(errs) = result {
                 panic!("{}: validation failed: {:?}", name, errs);
             }
@@ -963,56 +972,95 @@ mod tests {
         assert!(!mesh.vertices.is_empty());
         assert!(mesh.indices.len() % 3 == 0);
     }
-/// Serialize MeshResult to bytes for golden comparison.
-/// Format (matching spike generate_goldens.rs):
-///   [vertex_count:u32 LE][index_count:u32 LE]
-///   [vertices: f32×3 LE per vertex]
-///   [normals: f32×3 LE per vertex]
-///   [tangents: f32×4 LE per vertex]
-///   [uvs: f32×2 LE per vertex]
-///   [indices: u32 LE]
+    /// Serialize MeshResult to bytes for golden comparison.
+    /// Format matches spike generate_goldens.rs:
+    ///   [vertex_count:u32 LE][index_count:u32 LE][vertices: f32×3][normals: f32×3][tangents: f32×4][uvs: f32×2][indices: u32 LE]
+    fn serialize_mesh(m: &MeshResult) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(m.vertices.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(m.indices.len() as u32).to_le_bytes());
+        for v in &m.vertices {
+            buf.extend_from_slice(&v[0].to_le_bytes());
+            buf.extend_from_slice(&v[1].to_le_bytes());
+            buf.extend_from_slice(&v[2].to_le_bytes());
+        }
+        for n in &m.normals {
+            buf.extend_from_slice(&n[0].to_le_bytes());
+            buf.extend_from_slice(&n[1].to_le_bytes());
+            buf.extend_from_slice(&n[2].to_le_bytes());
+        }
+        for t in &m.tangents {
+            buf.extend_from_slice(&t[0].to_le_bytes());
+            buf.extend_from_slice(&t[1].to_le_bytes());
+            buf.extend_from_slice(&t[2].to_le_bytes());
+            buf.extend_from_slice(&t[3].to_le_bytes());
+        }
+        for uv in &m.uvs {
+            buf.extend_from_slice(&uv[0].to_le_bytes());
+            buf.extend_from_slice(&uv[1].to_le_bytes());
+        }
+        for &i in &m.indices {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        buf
+    }
 
-/// Serialize MeshResult to bytes for golden comparison.
-/// Format matches spike generate_goldens.rs:
-///   [vertex_count:u32 LE][index_count:u32 LE][vertices: f32×3][normals: f32×3][tangents: f32×4][uvs: f32×2][indices: u32 LE]
-fn serialize_mesh(m: &MeshResult) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&(m.vertices.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(m.indices.len() as u32).to_le_bytes());
-    for v in &m.vertices { buf.extend_from_slice(&v[0].to_le_bytes()); buf.extend_from_slice(&v[1].to_le_bytes()); buf.extend_from_slice(&v[2].to_le_bytes()); }
-    for n in &m.normals { buf.extend_from_slice(&n[0].to_le_bytes()); buf.extend_from_slice(&n[1].to_le_bytes()); buf.extend_from_slice(&n[2].to_le_bytes()); }
-    for t in &m.tangents { buf.extend_from_slice(&t[0].to_le_bytes()); buf.extend_from_slice(&t[1].to_le_bytes()); buf.extend_from_slice(&t[2].to_le_bytes()); buf.extend_from_slice(&t[3].to_le_bytes()); }
-    for uv in &m.uvs { buf.extend_from_slice(&uv[0].to_le_bytes()); buf.extend_from_slice(&uv[1].to_le_bytes()); }
-    for &i in &m.indices { buf.extend_from_slice(&i.to_le_bytes()); }
-    buf
-}
-
-#[test]
-fn golden_mesher_parity() {
-    // Verify structural mesh correctness for all 6 test fields.
-    // Golden files track byte-identical output for regression detection.
-    let mc = Mc33::default();
-    let cases: [(&str, Box<dyn Fn() -> VoxelWorld>, &str); 6] = [
-        ("sphere_64", Box::new(|| test_helpers::sphere_field(64, 16.0)), "sphere_64.bin"),
-        ("sphere_96", Box::new(|| test_helpers::sphere_field(96, 24.0)), "sphere_96.bin"),
-        ("sphere_128", Box::new(|| test_helpers::sphere_field(128, 40.0)), "sphere_128.bin"),
-        ("cave_64", Box::new(|| test_helpers::cave_field(64, 16.0)), "cave_64.bin"),
-        ("cave_96", Box::new(|| test_helpers::cave_field(96, 24.0)), "cave_96.bin"),
-        ("cave_128", Box::new(|| test_helpers::cave_field(128, 32.0)), "cave_128.bin"),
-    ];
-    let goldens_dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/goldens"));
-    for (name, make_field, golden_name) in &cases {
-        let world = make_field();
-        let mesh = mc.mesh(world.density()).unwrap();
-        let got = serialize_mesh(&mesh);
-        let golden_path = goldens_dir.join(golden_name);
-        if golden_path.exists() {
-            let golden = std::fs::read(&golden_path).unwrap();
+    #[test]
+    fn golden_mesher_parity() {
+        // Verify structural mesh correctness for all 6 test fields.
+        // Golden files track byte-identical output for regression detection.
+        let mc = Mc33::default();
+        let cases: [(&str, Box<dyn Fn() -> VoxelWorld>, &str); 6] = [
+            (
+                "sphere_64",
+                Box::new(|| test_helpers::sphere_field(64, 16.0)),
+                "sphere_64.bin",
+            ),
+            (
+                "sphere_96",
+                Box::new(|| test_helpers::sphere_field(96, 24.0)),
+                "sphere_96.bin",
+            ),
+            (
+                "sphere_128",
+                Box::new(|| test_helpers::sphere_field(128, 40.0)),
+                "sphere_128.bin",
+            ),
+            (
+                "cave_64",
+                Box::new(|| test_helpers::cave_field(64, 16.0)),
+                "cave_64.bin",
+            ),
+            (
+                "cave_96",
+                Box::new(|| test_helpers::cave_field(96, 24.0)),
+                "cave_96.bin",
+            ),
+            (
+                "cave_128",
+                Box::new(|| test_helpers::cave_field(128, 32.0)),
+                "cave_128.bin",
+            ),
+        ];
+        let goldens_dir =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/goldens"));
+        for (name, make_field, golden_name) in &cases {
+            let world = make_field();
+            let mesh = mc.mesh(world.density()).unwrap();
+            let got = serialize_mesh(&mesh);
+            let golden_path = goldens_dir.join(golden_name);
+            let golden = std::fs::read(&golden_path).unwrap_or_else(|error| {
+                panic!(
+                    "{}: required legacy golden {} could not be read: {error}",
+                    name,
+                    golden_path.display()
+                )
+            });
             assert_eq!(got, golden, "{}: byte mismatch with golden", name);
-        } else {
-            std::fs::write(&golden_path, &got).unwrap();
-            eprintln!("  Created golden: {}", golden_name);
+            assert!(
+                mesh.colors.iter().all(|&color| color == [1.0; 4]),
+                "{name}: MC33 colors must be deterministic white"
+            );
         }
     }
-}
 }
