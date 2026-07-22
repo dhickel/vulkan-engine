@@ -21,6 +21,9 @@ pub enum RendererError {
     /// A Vulkan operation was attempted after a prior terminal error.
     /// The backend is poisoned; destroy and recreate the Renderer.
     BackendPoisoned(String),
+    /// A backend-mutating operation failed during hook execution.
+    /// The frame backend may require drain/poison before the next submit.
+    HookBackend(String),
 }
 
 impl Display for RendererError {
@@ -36,6 +39,7 @@ impl Display for RendererError {
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
             Self::DeviceLost => write!(f, "renderer error: Vulkan device lost"),
             Self::BackendPoisoned(msg) => write!(f, "renderer backend poisoned: {msg}"),
+            Self::HookBackend(msg) => write!(f, "hook-induced backend failure: {msg}"),
         }
     }
 }
@@ -53,6 +57,7 @@ impl Error for RendererError {
             Self::InvalidState(_) => None,
             Self::DeviceLost => None,
             Self::BackendPoisoned(_) => None,
+            Self::HookBackend(_) => None,
         }
     }
 }
@@ -174,6 +179,10 @@ pub enum SceneError {
     BadSerializedParent { node_id: String, parent_id: String },
     DuplicateSerializedNodeId(String),
     DisconnectedGraph(String),
+    AnimationError(AnimationError),
+    CommandError(CommandError),
+    SerializationError(String),
+    InvalidMutation(String),
 }
 
 impl Display for SceneError {
@@ -230,7 +239,23 @@ impl Display for SceneError {
                 write!(f, "duplicate serialized scene node id '{id}'")
             }
             Self::DisconnectedGraph(msg) => write!(f, "disconnected scene graph: {msg}"),
+            Self::AnimationError(err) => write!(f, "animation error: {err}"),
+            Self::CommandError(err) => write!(f, "command error: {err}"),
+            Self::SerializationError(msg) => write!(f, "serialization error: {msg}"),
+            Self::InvalidMutation(msg) => write!(f, "invalid mutation: {msg}"),
         }
+    }
+}
+
+impl From<AnimationError> for SceneError {
+    fn from(err: AnimationError) -> Self {
+        Self::AnimationError(err)
+    }
+}
+
+impl From<CommandError> for SceneError {
+    fn from(err: CommandError) -> Self {
+        Self::CommandError(err)
     }
 }
 
@@ -409,6 +434,17 @@ pub enum HookError {
     Unsupported(String),
     Registration(String),
     Invocation(String),
+    /// A pre-frame hook failure observed before rendering began.
+    /// Frame number is preserved for diagnostics.
+    PreFrameFailure {
+        frame: u64,
+        message: String,
+    },
+    /// A post-frame hook failure observed after rendering completed.
+    PostFrameFailure {
+        frame: u64,
+        message: String,
+    },
 }
 
 impl Display for HookError {
@@ -417,6 +453,12 @@ impl Display for HookError {
             Self::Unsupported(msg) => write!(f, "{msg}"),
             Self::Registration(msg) => write!(f, "{msg}"),
             Self::Invocation(msg) => write!(f, "{msg}"),
+            Self::PreFrameFailure { frame, message } => {
+                write!(f, "pre-frame hook failed at frame {frame}: {message}")
+            }
+            Self::PostFrameFailure { frame, message } => {
+                write!(f, "post-frame hook failed at frame {frame}: {message}")
+            }
         }
     }
 }
@@ -424,6 +466,70 @@ impl Display for HookError {
 impl Error for HookError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         None
+    }
+}
+
+/// Frame-scoped hook failure entry suitable for structured diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HookFailureEntry {
+    pub frame_index: u64,
+    pub stage: HookFailureStage,
+    pub message: String,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HookFailureStage {
+    PreRender,
+    PostRender,
+}
+
+/// Per-frame safe-facade hook diagnostics.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HookReport {
+    frame_index: u64,
+    failures: Vec<HookFailureEntry>,
+}
+
+impl HookReport {
+    pub fn new(frame_index: u64) -> Self {
+        Self {
+            frame_index,
+            failures: Vec::new(),
+        }
+    }
+
+    pub fn frame_index(&self) -> u64 {
+        self.frame_index
+    }
+
+    pub fn failures(&self) -> &[HookFailureEntry] {
+        &self.failures
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
+    pub(crate) fn push_failure(&mut self, failure: HookFailureEntry) {
+        self.failures.push(failure);
+    }
+}
+
+impl HookFailureEntry {
+    pub fn pre_render(frame_index: u64, message: impl Into<String>) -> Self {
+        Self {
+            frame_index,
+            stage: HookFailureStage::PreRender,
+            message: message.into(),
+        }
+    }
+
+    pub fn post_render(frame_index: u64, message: impl Into<String>) -> Self {
+        Self {
+            frame_index,
+            stage: HookFailureStage::PostRender,
+            message: message.into(),
+        }
     }
 }
 
@@ -437,4 +543,76 @@ pub(crate) fn map_frame_input_err(err: impl Into<String>) -> RendererError {
 
 pub(crate) fn map_frame_render_err(err: impl Into<String>) -> RendererError {
     RendererFrameError::Render(err.into()).into()
+}
+
+// ── Animation errors ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum AnimationError {
+    InvalidClip(String),
+    InvalidChannel(String),
+    InvalidSampler(String),
+    InvalidTarget(String),
+    InvalidKeyframe(String),
+    StaleTarget(crate::scene::SceneNodeId),
+    InvalidDuration(String),
+    InvalidTimestamp(String),
+    NonFiniteOutput(String),
+    CardinalityMismatch(String),
+}
+
+impl Display for AnimationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidClip(msg) => write!(f, "invalid animation clip: {msg}"),
+            Self::InvalidChannel(msg) => write!(f, "invalid animation channel: {msg}"),
+            Self::InvalidSampler(msg) => write!(f, "invalid animation sampler: {msg}"),
+            Self::InvalidTarget(msg) => write!(f, "invalid animation target: {msg}"),
+            Self::InvalidKeyframe(msg) => write!(f, "invalid keyframe: {msg}"),
+            Self::StaleTarget(id) => write!(
+                f,
+                "stale animation target (slot={}, generation={})",
+                id.slot, id.generation
+            ),
+            Self::InvalidDuration(msg) => write!(f, "invalid animation duration: {msg}"),
+            Self::InvalidTimestamp(msg) => write!(f, "invalid animation timestamp: {msg}"),
+            Self::NonFiniteOutput(msg) => write!(f, "non-finite animation output: {msg}"),
+            Self::CardinalityMismatch(msg) => write!(f, "animation cardinality mismatch: {msg}"),
+        }
+    }
+}
+
+impl Error for AnimationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
+
+// ── Command errors ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum CommandError {
+    NothingToUndo,
+    NothingToRedo,
+    CommandExecutionFailed(String),
+    UndoFailed(String),
+    RedoFailed(String),
+}
+
+impl Display for CommandError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NothingToUndo => write!(f, "nothing to undo"),
+            Self::NothingToRedo => write!(f, "nothing to redo"),
+            Self::CommandExecutionFailed(msg) => write!(f, "command execution failed: {msg}"),
+            Self::UndoFailed(msg) => write!(f, "undo failed: {msg}"),
+            Self::RedoFailed(msg) => write!(f, "redo failed: {msg}"),
+        }
+    }
+}
+
+impl Error for CommandError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
 }

@@ -26,7 +26,7 @@ Current flow:
   - Frustum culling is enabled by default in `SceneWorld::build_submission`; occlusion culling is not implemented.
   - Mesh-backed nodes carry authoritative `SceneBounds` (`Known`, `Proxy`, `ConservativeVisible`) with local AABBs from registered `MeshGeometryDto`.
   - World AABBs are computed by transforming all eight corners through `node.world_transform` (not min/max only); `Aabb::transformed` handles rotation, shear, and negative scale.
-  - `compute_node_world_bounds` unions all known/proxy mesh AABBs in node-local space, then transforms to world. Any conservative-visible mesh makes the entire node conservative-visible.
+  - `compute_node_world_bounds` uses explicit local proxy bounds when allowed, otherwise unions all known/proxy mesh AABBs in node-local space, then transforms to world. Any conservative-visible mesh makes the entire node conservative-visible.
   - `compute_subtree_bounds_post_order` aggregates node world bounds with all child subtree bounds. Known subtrees may prune the branch; conservative-visible subtrees always traverse children.
   - `collect_draw_items_culled` tests known/proxy node world bounds against the frustum; conservative-visible nodes submit unconditionally. Children are always traversed.
   - `CullingStats` records known/proxy tests, exact conservative-visible reasons, subtree tests/prunes, and submitted draws.
@@ -219,10 +219,12 @@ reason:
 - Sparse light slots:
   - Light extraction iterates active entries and clamps by count; assumptions based on dense slot indexing can cause confusing debugging expectations.
 - Proxy-bound limitations:
-  - As of Phase 06, the scene graph owns CPU mesh bounds via `SceneNode.mesh_bounds` and `node_world_bounds`/`subtree_world_bounds`. `SceneBounds::ConservativeVisible` marks skinned, deformed, missing, or stale geometry. `dungeon_dogfood` re-enables culling with authoritative chunk bounds.
+  - As of Phase 06, the scene graph owns CPU mesh bounds via `SceneNode.mesh_bounds` and `node_world_bounds`/`subtree_world_bounds`. `SceneBounds::ConservativeVisible` marks skinned, deformed, missing, or stale geometry. Explicit local proxy bounds are stored separately so transform/cache invalidation cannot erase the proxy input. `dungeon_dogfood` re-enables culling with authoritative chunk bounds.
   - A node proxy is not a subtree bound. Skipping recursive traversal when a parent proxy is outside can hide an in-frustum child.
 - Constant drift risk:
   - `MAX_POINT_LIGHTS_GPU` exists in both scene and GPU-data modules (`src/renderer/src/scene/scene_world.rs` and `src/renderer/src/data/gpu_data.rs`); mismatches would silently corrupt or truncate light upload behavior.
+- Derived invalidation (Phase 08):
+  - `SceneWorld::invalidate_derived_state` must be called after any authoritative change (local transform, parent, meshes, mesh_bounds, proxy bounds). This clears `node_world_bounds`, `subtree_world_bounds` and sets `dirty = true` without clearing local proxy input. Bounds are fully rebuilt during the next `build_submission` call and before picking queries regardless of dirty state.
 
 ## 7. Debugging Playbook
 - Step 1: verify root validity first (`root_id()` and `is_valid_node_id`) when submissions unexpectedly contain zero draw items.

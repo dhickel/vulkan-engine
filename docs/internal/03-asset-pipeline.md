@@ -1,6 +1,8 @@
 # Asset Pipeline — Disk to GPU
 
 > Source: [`src/renderer/src/api/assets.rs`](../../src/renderer/src/api/assets.rs), [`src/renderer/src/data/`](../../src/renderer/src/data/), [`src/renderer/src/vulkan/`](../../src/renderer/src/vulkan/) — no legacy docs consulted.
+>
+> **Safety baseline (Phase 05)**: All Assimp FFI boundaries are checked. Property stores and imported scenes are RAII-guarded (exactly-once release on every path). Every pointer dereference, indexed access, and byte-slice construction validates its preconditions before the `unsafe` block. See [Phase 05 evidence](../../.internal-dev/plans/engine-safety-refactor-stabilization/evidence/phase-05.md) for the full unsafe inventory.
 
 ## End-to-End Flow: Loading a glTF Model
 
@@ -10,9 +12,11 @@
 
 ### 2. Assimp Parsing
 
-`assimp_util::load_model()` at [`data/assimp_util.rs:157`](../../src/renderer/src/data/assimp_util.rs#L157) calls russimp_sys directly (no higher-level crate wrapper).
+`assimp_util::load_model()` at [`data/assimp_util.rs`](../../src/renderer/src/data/assimp_util.rs) calls russimp_sys directly (no higher-level crate wrapper).
 
 **Post-processing flags**: `GenSmoothNormals | JoinIdenticalVertices | Triangulate | FlipUVs | FixInfacingNormals | CalcTangentSpace`.
+
+**Safety (Phase 05)**: The property store (`aiCreatePropertyStore`) and imported scene (`aiImportFileExWithProperties`) are wrapped in RAII guards that release exactly once on every success and error path. No raw Assimp pointer escapes to callers. Pointer arrays, mandatory payload pointers, counts, indices, products, declared `aiString` byte lengths, and embedded texture byte ranges are validated before the `unsafe` block; `aiString` decoding uses the declared byte range with an explicit UTF-8 lossy policy.
 
 Returns `ModelMeta { scene_world, material_ids, mesh_ids }` where `scene_world` is an Assimp scene graph with node hierarchy.
 

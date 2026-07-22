@@ -40,25 +40,64 @@ Snippet Type: Pseudocode
 ```rust
 // Simplified from src/renderer/src/vulkan/vk_frame.rs
 fn acquire_frame_slot(&mut self) -> Result<Option<FrameAcquire>, String> {
-    let frame = self.presentation.get_next_frame();
+    let frame = self.presentation.get_next_frame()?; // fallible; rejects empty ring
     let frame_sync = frame.sync;
     let expected_frame_serial = self.presentation.frame_epoch();
 
     // Wait for the frame-slot fence and create a completion token.
     let mut token = unsafe { self.wait_for_frame_fence(frame_sync, frame.index)?; }
     // Descriptor cleanup consumes the token; rejects stale/duplicate tokens.
+    // get_curr_frame_mut() returns NoActiveReservation if rewind was called.
     unsafe { self.cleanup_curr_frame_resources(&mut token, expected_frame_serial)?; }
     debug_assert!(token.is_consumed());
 
     let acquired = /* acquire/bind swapchain image, or choose headless slot */;
     let Some(acquired) = acquired else {
-        self.presentation.rewind_frame();
+        let _ = self.presentation.rewind_frame(); // cannot underflow
         self.resize_requested = true;
         return Ok(None); // fence remains signaled
     };
 
     unsafe { self.reset_frame_fence(frame_sync)?; }
     Ok(Some(acquired))
+}
+```
+
+Snippet Type: Pseudocode
+```rust
+// VkPresent frame-ring access (fallible, checked)
+fn get_next_frame(&mut self) -> Result<&VkFrame, VkError> {
+    if self.max_frames_active == 0 || self.frame_data.is_empty() {
+        return Err(VkError::NoFrameSources);
+    }
+    let index = (self.curr_frame_count % self.max_frames_active) as usize;
+    self.curr_frame_count = self.curr_frame_count
+        .checked_add(1)
+        .ok_or_else(|| VkError::Present("frame reservation counter exhausted".into()))?;
+    self.frame_epoch = self.frame_epoch
+        .checked_add(1)
+        .ok_or_else(|| VkError::Present("frame epoch exhausted".into()))?;
+    self.frame_data.get(index).ok_or_else(|| VkError::Present("frame index out of range".into()))
+}
+
+fn get_curr_frame_mut(&mut self) -> Result<&mut VkFrame, VkError> {
+    if self.curr_frame_count == 0 { return Err(VkError::NoActiveReservation); }
+    if self.max_frames_active == 0 || self.frame_data.is_empty() { return Err(VkError::NoFrameSources); }
+    let index = ((self.curr_frame_count - 1) % self.max_frames_active) as usize;
+    self.frame_data.get_mut(index).ok_or_else(|| VkError::Present("frame index out of range".into()))
+}
+
+fn rewind_frame(&mut self) -> Result<(), VkError> {
+    if self.curr_frame_count == 0 { return Err(VkError::NoActiveReservation); }
+    self.curr_frame_count -= 1;
+    Ok(())
+}
+
+fn replace_present_images(&mut self, images: Vec<…>) -> Result<(), VkError> {
+    // … replace targets …
+    self.curr_frame_count = 0; // no active reservation after swapchain rebuild
+    // frame_epoch remains monotonic for descriptor-reset token validation.
+    Ok(())
 }
 ```
 
@@ -180,6 +219,7 @@ else:
 - Frame-ring and sync types: `src/renderer/src/vulkan/vk_types.rs`
 - Descriptor allocators: `src/renderer/src/vulkan/vk_descriptor.rs`
 - Barrier helpers and upload transitions: `src/renderer/src/vulkan/vk_util.rs`
+- Image state tracking: `ImageStateTracker` (`vk_types.rs`), `FrameTransitionOverlay` (`vk_util.rs`). Transitions committed only after successful submit; same-family omits ownership transfer; split-family emits matched release/acquire.
 - Rendergraph ordering: `src/renderer/src/rendergraph/mod.rs`
 - Shadow pass: `src/renderer/src/rendergraph/passes/shadow_pass.rs`, `src/renderer/src/vulkan/vk_shadow.rs`
 - Present/UI/capture boundaries: `src/renderer/src/rendergraph/passes/present_copy_pass.rs`, `imgui_pass.rs`, `debug_capture_pass.rs`, `terminal_present_pass.rs`

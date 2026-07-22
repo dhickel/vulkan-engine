@@ -69,7 +69,9 @@ use crate::data::gpu_data::{
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::mesh_geometry::{MeshGeometryDto, MeshGeometryStore};
-use crate::data::retirement::{GpuRetirementQueue, MeshRetiredPayload};
+use crate::data::retirement::{
+    GpuRetirementQueue, MaterialRetiredPayload, MeshRetiredPayload, TextureRetiredPayload,
+};
 use crate::data::{data_cache, data_util};
 use crate::debug_ui::{DebugTimingSnapshot, DebugUiManager};
 use crate::rendergraph::RenderGraph;
@@ -169,6 +171,10 @@ pub struct VkRenderCore {
     pub(crate) latest_completed_serial: u64,
     /// Retirement queue for mesh payloads awaiting GPU completion.
     pub(crate) mesh_retirement_queue: GpuRetirementQueue<MeshRetiredPayload>,
+    /// Retirement queue for material metadata payloads awaiting GPU completion.
+    pub(crate) material_retirement_queue: GpuRetirementQueue<MaterialRetiredPayload>,
+    /// Retirement queue for texture image payloads awaiting GPU completion.
+    pub(crate) texture_retirement_queue: GpuRetirementQueue<TextureRetiredPayload>,
     /// CPU bounds/geometry metadata retained to the same fence boundary.
     pub(crate) bounds_retirement_queue: GpuRetirementQueue<MeshGeometryDto>,
     pub(crate) gpu_timing: GpuTimingState,
@@ -176,6 +182,13 @@ pub struct VkRenderCore {
     pub(crate) due_frame_captures: Vec<DueFrameCapture>,
     pub(crate) pending_frame_captures: Vec<PendingFrameCapture>,
     pub(crate) frame_capture_statuses: Vec<FrameCaptureStatus>,
+    /// Authoritative image state tracker. State is committed only after a
+    /// successful queue submit. During recording, transitions are staged in a
+    /// per-frame [`FrameTransitionOverlay`]; on recording failure the overlay
+    /// is discarded without committing.
+    pub(crate) image_state_tracker: ImageStateTracker,
+    /// Queue family indices for ownership-transfer decisions.
+    pub(crate) queue_family_indices: QueueFamilyIndices,
 }
 
 pub struct VkRender {
@@ -507,58 +520,49 @@ impl Drop for VkRenderCore {
                 imgui.renderer.destroy();
             }
 
-            self.transfer.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            let allocator_guard = match self.allocator.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::error!(
+                        "Render drop: allocator lock poisoned; recovering inner allocator for best-effort teardown"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            let allocator = &*allocator_guard;
+
+            self.transfer.destroy(&self.device, allocator);
 
             for slot in self.gpu_timing.slots.iter() {
                 self.device.destroy_query_pool(slot.query_pool, None);
             }
 
-            self.presentation.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.presentation.destroy(&self.device, allocator);
 
-            self.scene_descriptors.values_mut().for_each(|descriptors| {
-                descriptors.destroy(
-                    &self.device,
-                    &self.allocator.lock().expect("allocator lock poisoned"),
-                )
-            });
+            self.scene_descriptors
+                .values_mut()
+                .for_each(|descriptors| descriptors.destroy(&self.device, allocator));
             self.scene_descriptors.clear();
 
             #[cfg(feature = "csm")]
             if let Some(ref mut csm) = self.csm_shadow_resources {
-                let alloc = self.allocator.lock().expect("allocator lock poisoned");
-                csm.destroy(&self.device, &alloc);
+                csm.destroy(&self.device, allocator);
             }
-            self.shadow_resources.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.shadow_resources.destroy(&self.device, allocator);
 
             for descriptor in self.sky_box.descriptors.values() {
                 descriptor.desc_alloc.destroy(&self.device);
             }
             self.sky_box.descriptors.clear();
 
-            self.data_cache.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.data_cache.destroy(&self.device, allocator);
             ManuallyDrop::drop(&mut self.data_cache);
 
-            self.vulkan_cache.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.vulkan_cache.destroy(&self.device, allocator);
 
-            self.brdf_lut.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.brdf_lut.destroy(&self.device, allocator);
+
+            drop(allocator_guard);
 
             self.swapchain_owner.destroy_present_views(&self.device);
             if let Some(swapchain) = self.swapchain_owner.swapchain.as_ref() {
@@ -1007,9 +1011,25 @@ impl VkRenderCore {
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
+        let descriptor_limits =
+            vk_init::get_buffer_and_descriptor_limits(instance, physical_device.p_device);
+        let descriptor_set_budget =
+            if descriptor_limits.max_update_after_bind_descriptors_in_all_pools == 0 {
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP
+            } else {
+                descriptor_limits
+                    .max_update_after_bind_descriptors_in_all_pools
+                    .min(VkDynamicDescriptorAllocator::MAX_SETS_CAP)
+                    .max(1000)
+            };
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..swapchain_image_count)
             .map(|i| -> Result<VkDynamicDescriptorAllocator, String> {
-                let mut alloc = VkDynamicDescriptorAllocator::new(device, 1000, &pool_ratios)?;
+                let mut alloc = VkDynamicDescriptorAllocator::new_with_total_set_budget(
+                    device,
+                    1000,
+                    &pool_ratios,
+                    descriptor_set_budget,
+                )?;
                 alloc.set_frame_slot_index(i);
                 Ok(alloc)
             })
@@ -1320,6 +1340,8 @@ impl VkRenderCore {
             swapchain_image_count as usize,
         );
 
+        let queue_family_indices = QueueFamilyIndices::from_queues(&device_queues);
+
         let (data_cache, vulkan_cache, default_env_id) = init_caches(
             &instance,
             physical_device.p_device,
@@ -1345,10 +1367,11 @@ impl VkRenderCore {
             &device,
             &allocator.lock().expect("allocator lock poisoned"),
             brdf_pipeline,
-            presentation.frame_data[0]
-                .cmd_pools
-                .get(VkQueueType::Graphics)
-                .buffers[0],
+            presentation
+                .bootstrap_command_pools()
+                .expect("bootstrap pools missing")
+                .bootstrap_graphics_primary()
+                .expect("bootstrap graphics primary missing"),
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         )?;
 
@@ -1395,6 +1418,8 @@ impl VkRenderCore {
             latest_submitted_serial: 0,
             latest_completed_serial: 0,
             mesh_retirement_queue: GpuRetirementQueue::new(),
+            material_retirement_queue: GpuRetirementQueue::new(),
+            texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
@@ -1406,6 +1431,8 @@ impl VkRenderCore {
             visual_tuning,
             data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
+            image_state_tracker: ImageStateTracker::new(),
+            queue_family_indices,
         };
 
         let scene_world = if preload_startup_scene {
@@ -1496,6 +1523,8 @@ impl VkRenderCore {
             frame_slot_count as usize,
         );
 
+        let queue_family_indices = QueueFamilyIndices::from_queues(&device_queues);
+
         let (data_cache, vulkan_cache, default_env_id) = init_caches(
             &instance,
             physical_device.p_device,
@@ -1525,10 +1554,11 @@ impl VkRenderCore {
             &device,
             &allocator.lock().expect("allocator lock poisoned"),
             brdf_pipeline,
-            presentation.frame_data[0]
-                .cmd_pools
-                .get(VkQueueType::Graphics)
-                .buffers[0],
+            presentation
+                .bootstrap_command_pools()
+                .expect("bootstrap pools missing")
+                .bootstrap_graphics_primary()
+                .expect("bootstrap graphics primary missing"),
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         )
         .map_err(|err| {
@@ -1585,6 +1615,8 @@ impl VkRenderCore {
             latest_submitted_serial: 0,
             latest_completed_serial: 0,
             mesh_retirement_queue: GpuRetirementQueue::new(),
+            material_retirement_queue: GpuRetirementQueue::new(),
+            texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
@@ -1596,6 +1628,8 @@ impl VkRenderCore {
             visual_tuning,
             data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
+            image_state_tracker: ImageStateTracker::new(),
+            queue_family_indices,
         };
 
         let scene_world = if preload_startup_scene {
@@ -2446,6 +2480,8 @@ impl VkRenderCore {
                 latest_completed_serial: &mut self.latest_completed_serial,
                 latest_submitted_serial: &mut self.latest_submitted_serial,
                 mesh_retirement_queue: &mut self.mesh_retirement_queue,
+                material_retirement_queue: &mut self.material_retirement_queue,
+                texture_retirement_queue: &mut self.texture_retirement_queue,
                 bounds_retirement_queue: &mut self.bounds_retirement_queue,
                 data_cache: &self.data_cache,
                 gpu_timing: &mut self.gpu_timing,
@@ -2508,8 +2544,8 @@ impl VkRenderCore {
         let graph_result =
             unsafe { vk_commands::execute_rendergraph_for_frame(self, submission, rendergraph) };
         let rendergraph_ms = elapsed_ms(rendergraph_start);
-        let graph_report = match graph_result {
-            Ok(report) => report,
+        let (graph_report, pending_transitions) = match graph_result {
+            Ok(record_result) => (record_result.report, record_result.pending_transitions),
             Err(err) => {
                 error!("RenderGraph execution failed: {err}");
                 let capture_failure = format!("frame capture skipped: rendergraph failed: {err}");
@@ -2652,6 +2688,9 @@ impl VkRenderCore {
             frame,
         )?;
         frame_transaction.mark_submitted();
+        // Commit image state transitions only after successful submit.
+        self.image_state_tracker
+            .commit_transitions(&pending_transitions);
         let submit_ms = elapsed_ms(submit_start);
 
         let present_start = Instant::now();
@@ -3505,8 +3544,13 @@ impl VkRenderCore {
             cube_dim, cube_format
         );
 
-        let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
-        let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
+        let cmd_pool = self
+            .presentation
+            .bootstrap_command_pools()
+            .map_err(|e| format!("equirect convert: {e}"))?;
+        let render_buffer = cmd_pool
+            .bootstrap_graphics_primary()
+            .map_err(|e| format!("equirect convert: {e}"))?;
         let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         // Allocate descriptor for the equirect source texture
@@ -3741,8 +3785,13 @@ impl VkRenderCore {
         skybox_sampler: vk::Sampler,
     ) -> Result<EnvMaps, String> {
         let start = SystemTime::now();
-        let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
-        let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
+        let cmd_pool = self
+            .presentation
+            .bootstrap_command_pools()
+            .map_err(|e| format!("generate environment: {e}"))?;
+        let render_buffer = cmd_pool
+            .bootstrap_graphics_primary()
+            .map_err(|e| format!("generate environment: {e}"))?;
         let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         let desc_pool = VkDescriptorAllocator::new(

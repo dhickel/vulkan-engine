@@ -97,7 +97,26 @@ scale = 1.0
 consume = false
 ```
 
-## 5. Best Practices
+## 5. Multi-binding action contribution
+
+When multiple keys or buttons map to the same action, each binding receives a private `BindingInstanceId` at `ActionMapLayer` construction time. The input system tracks each binding's contribution independently:
+
+- Pressing any binding activates the action at the binding's scale value.
+- Releasing one binding leaves the action active as long as another binding instance still contributes.
+- The aggregate action value is the maximum across all active binding instances.
+- Transient edges (`just_pressed` / `just_released`) fire correctly: `just_released` only fires when the last active binding releases.
+
+```rust
+let mut map = ActionMap::new();
+map.bind_key("move.forward", KeyCode::KeyW);
+map.bind_key("move.forward", KeyCode::ArrowUp);
+// Both keys contribute to "move.forward" independently.
+```
+
+Apps that use `InputContext::set_action_value` directly can also use `set_instance_value`
+with a caller-assigned `BindingInstanceId` when they need multi-source aggregation.
+
+## 6. Best Practices
 - Call `update_input(...)` for every event.
 - Apps that own their own `InputSystem` should call `route_platform_input(...)` for every event and
   queue only uncaptured events with `queue_routed_input_event(...)`.

@@ -108,6 +108,7 @@ for each frame slot:
 - Tie every barrier to a concrete hazard (write->read, write->write, ownership transfer).
 - Prefer named stage-mask helpers in `vk_util` over inline bitmasks so sync intent stays explicit.
 - Keep queue-family transfer logic explicit when transfer and graphics queues differ.
+- Use `ImageStateTracker` and `FrameTransitionOverlay` for image layout state tracking: transitions are committed only after a successful queue submit. In the same-family case, ownership transfer indices are omitted (`QUEUE_FAMILY_IGNORED`); in the split-family case, matching release/acquire barriers are emitted.
 - Treat validation-layer warnings as correctness bugs until proven otherwise.
 
 ## 6. Gotchas & Failure Modes

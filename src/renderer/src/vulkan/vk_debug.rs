@@ -120,6 +120,7 @@ pub fn record_frame_capture(
             depth: 1,
         });
 
+    // SAFETY: Frame-capture recording owns the command/readback objects for this scope; mapped pointers, extents, formats, and byte ranges are checked before raw access.
     unsafe {
         device.cmd_copy_image_to_buffer(
             cmd_buffer,
@@ -187,7 +188,27 @@ fn finalize_frame_capture_inner(
     }
 
     let format_info = CaptureFormatInfo::from_vk_format(pending.source_format)?;
-    let byte_len = format_info.buffer_size(pending.extent)? as usize;
+    let expected_byte_len = format_info.buffer_size(pending.extent)?;
+
+    // Verify the mapped allocation range covers the expected readback size.
+    // The buffer was allocated with exactly buffer_size bytes, so alloc_info.size
+    // must be >= byte_len. Also guard against zero-byte reads and usize truncation.
+    if expected_byte_len == 0 {
+        return Err(FrameCaptureError::new(
+            "readback byte length is zero (extent may be degenerate)",
+        ));
+    }
+    let byte_len = usize::try_from(expected_byte_len)
+        .map_err(|_| FrameCaptureError::new("readback byte length does not fit in usize"))?;
+    let alloc_size = usize::try_from(pending.readback.alloc_info.size)
+        .map_err(|_| FrameCaptureError::new("readback allocation size does not fit in usize"))?;
+    if alloc_size < byte_len {
+        return Err(FrameCaptureError::new(format!(
+            "readback buffer allocation size {alloc_size} is smaller than expected {byte_len} bytes"
+        )));
+    }
+
+    // SAFETY: mapped_data is non-null; alloc_size >= byte_len confirmed above.
     let raw = unsafe { std::slice::from_raw_parts(mapped_data as *const u8, byte_len) };
     let rgba = format_info.convert_to_rgba(raw, pending.extent)?;
 
@@ -328,8 +349,12 @@ impl CaptureFormatInfo {
 }
 
 fn expected_len(extent: vk::Extent2D, bytes_per_pixel: usize) -> Result<usize, FrameCaptureError> {
-    (extent.width as usize)
-        .checked_mul(extent.height as usize)
+    let width = usize::try_from(extent.width)
+        .map_err(|_| FrameCaptureError::new("capture width does not fit in usize"))?;
+    let height = usize::try_from(extent.height)
+        .map_err(|_| FrameCaptureError::new("capture height does not fit in usize"))?;
+    width
+        .checked_mul(height)
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
         .ok_or_else(|| FrameCaptureError::new("capture buffer size overflowed"))
 }

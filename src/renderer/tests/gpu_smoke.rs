@@ -165,8 +165,8 @@ fn renderer_headless_capture_worker() {
             .assets()
             .mesh_geometry(mesh)
             .expect("deferred fragment geometry DTO");
-        assert_eq!(dto.deformation, MeshDeformation::Unknown);
-        assert!(dto.local_aabb.is_none());
+        assert_eq!(dto.deformation, MeshDeformation::Rigid);
+        assert!(dto.local_aabb.is_some());
     }
 
     // Position the camera looking at origin.

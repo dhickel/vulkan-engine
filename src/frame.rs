@@ -84,10 +84,12 @@ impl FrameClock {
     }
 
     pub fn tick_at(&mut self, now: Instant) -> FrameInfo {
-        let delta = now
-            .checked_duration_since(self.last_tick)
-            .unwrap_or(Duration::ZERO);
-        self.last_tick = now;
+        let delta = if let Some(delta) = now.checked_duration_since(self.last_tick) {
+            self.last_tick = now;
+            delta
+        } else {
+            Duration::ZERO
+        };
 
         let info = FrameInfo {
             index: self.next_index,
@@ -146,10 +148,20 @@ impl FixedStepClock {
 
     pub fn update(&mut self, delta: Duration) -> FixedStepUpdate {
         let delta = delta.max(Duration::ZERO);
+
+        // Compute alpha from current state before consuming any time.
+        let compute_alpha = |accumulator: Duration, step: Duration| -> f32 {
+            if step.as_nanos() == 0 {
+                0.0
+            } else {
+                (accumulator.as_secs_f32() / step.as_secs_f32()).clamp(0.0, 1.0)
+            }
+        };
+
         if delta == Duration::ZERO {
             return FixedStepUpdate {
                 steps: 0,
-                alpha: 0.0,
+                alpha: compute_alpha(self.accumulator, self.config.step),
                 accumulated: self.accumulator,
                 dropped_time: Duration::ZERO,
             };
@@ -256,9 +268,12 @@ mod tests {
         let mut clock = FrameClock::from_instant(start);
 
         let info = clock.tick_at(start - Duration::from_millis(1));
+        let next = clock.tick_at(start + Duration::from_millis(10));
 
         assert_eq!(info.index, 0);
         assert_eq!(info.delta, Duration::ZERO);
+        assert_eq!(next.index, 1);
+        assert_eq!(next.delta, Duration::from_millis(10));
     }
 
     #[test]
@@ -307,6 +322,24 @@ mod tests {
         assert_eq!(update.accumulated, Duration::ZERO);
         assert_eq!(update.dropped_time, Duration::ZERO);
         assert_alpha(update.alpha, 0.0);
+    }
+
+    #[test]
+    fn fixed_step_clock_zero_delta_with_accumulated_time_reports_correct_alpha() {
+        let mut clock = fixed_clock(16, 4);
+
+        // Accumulate some time first.
+        let first = clock.update(Duration::from_millis(10));
+        assert_eq!(first.steps, 0);
+        assert_eq!(first.accumulated, Duration::from_millis(10));
+        assert_alpha(first.alpha, 10.0 / 16.0);
+
+        // Zero delta should report current accumulator alpha, not zero.
+        let second = clock.update(Duration::ZERO);
+        assert_eq!(second.steps, 0);
+        assert_eq!(second.accumulated, Duration::from_millis(10));
+        assert_alpha(second.alpha, 10.0 / 16.0);
+        assert_eq!(second.dropped_time, Duration::ZERO);
     }
 
     #[test]

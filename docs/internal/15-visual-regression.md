@@ -1,5 +1,7 @@
 # Visual Regression Harness — Phase 01
 
+> **Safety baseline (Phase 05)**: Readback slices constructed from mapped GPU memory are guarded by an allocation-range coverage check in `vk_debug::finalize_frame_capture_inner`. The mapped pointer is validated non-null; the expected byte length (from checked extent × format size and tight `vkCmdCopyImageToBuffer` row layout) is checked for `usize` representability and verified against `alloc_info.size` before `std::slice::from_raw_parts`. Zero-byte reads are rejected. See [Phase 05 evidence](../../.internal-dev/plans/engine-safety-refactor-stabilization/evidence/phase-05.md) §5.
+
 ## Contract
 
 `src/renderer/tests/visual_regression.rs` decodes baseline and retained capture PNGs with

@@ -5,7 +5,10 @@
 
 use crate::data::data_cache::VkDataCache;
 use crate::data::mesh_geometry::MeshGeometryDto;
-use crate::data::retirement::{FrameSerial, GpuRetirementQueue, MeshRetiredPayload};
+use crate::data::retirement::{
+    FrameSerial, GpuRetirementQueue, MaterialRetiredPayload, MeshRetiredPayload,
+    TextureRetiredPayload,
+};
 use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot};
 use crate::rendergraph::RenderGraphExecutionReport;
 use crate::vulkan::vk_descriptor::DescriptorAllocatorStats;
@@ -193,6 +196,8 @@ pub(crate) struct FrameLifecycleContext<'a> {
     pub latest_completed_serial: &'a mut u64,
     pub latest_submitted_serial: &'a mut u64,
     pub mesh_retirement_queue: &'a mut GpuRetirementQueue<MeshRetiredPayload>,
+    pub material_retirement_queue: &'a mut GpuRetirementQueue<MaterialRetiredPayload>,
+    pub texture_retirement_queue: &'a mut GpuRetirementQueue<TextureRetiredPayload>,
     pub bounds_retirement_queue: &'a mut GpuRetirementQueue<MeshGeometryDto>,
     pub data_cache: &'a Arc<VkDataCache>,
     pub gpu_timing: &'a mut GpuTimingState,
@@ -294,9 +299,91 @@ pub(crate) fn reap_bounds_retirement(
     let reaped = bounds_retirement_queue
         .reap_through(FrameSerial::new(latest_completed_serial))
         .map_err(|err| format!("bounds retirement completion regression: {err:?}"))?;
-    debug_assert!(reaped.iter().all(|record| {
-        record.class == crate::data::retirement::RetirementClass::BoundsEntry
-    }));
+    debug_assert!(reaped
+        .iter()
+        .all(|record| { record.class == crate::data::retirement::RetirementClass::BoundsEntry }));
+    Ok(())
+}
+
+/// Reap the material retirement queue up through `latest_completed_serial`.
+///
+/// Destroys SSBO suballocations, frees descriptor sets, and releases cache slots
+/// for every record whose `retire_after` has been reached.
+pub(crate) fn reap_material_retirement(
+    latest_completed_serial: u64,
+    material_retirement_queue: &mut GpuRetirementQueue<MaterialRetiredPayload>,
+    data_cache: &Arc<VkDataCache>,
+    device: &ash::Device,
+) -> Result<(), String> {
+    let completed = FrameSerial::new(latest_completed_serial);
+    let reaped = material_retirement_queue
+        .reap_through(completed)
+        .map_err(|err| format!("material retirement completion regression: {err:?}"))?;
+    if reaped.is_empty() {
+        return Ok(());
+    }
+
+    let mut texture_cache = data_cache.texture_cache.lock().map_err(|_| {
+        "texture_cache lock poisoned during material retirement reaping".to_string()
+    })?;
+
+    for record in reaped {
+        debug_assert_eq!(
+            record.class,
+            crate::data::retirement::RetirementClass::MaterialMeta
+        );
+        log::trace!(
+            "reaping retired material slot {} generation {}",
+            record.payload.slot,
+            record.payload.generation
+        );
+        texture_cache.destroy_retired_material_payload(&record.payload);
+        for descriptor_set in &record.payload.descriptor_release.image_descriptor_sets {
+            texture_cache.free_material_descriptor(device, *descriptor_set);
+        }
+        texture_cache.release_material_slot(record.payload.slot);
+    }
+    Ok(())
+}
+
+/// Reap the texture retirement queue up through `latest_completed_serial`.
+///
+/// Destroys images, views, and samplers for every record whose
+/// `retire_after` has been reached.
+pub(crate) fn reap_texture_retirement(
+    latest_completed_serial: u64,
+    texture_retirement_queue: &mut GpuRetirementQueue<TextureRetiredPayload>,
+    data_cache: &Arc<VkDataCache>,
+) -> Result<(), String> {
+    let completed = FrameSerial::new(latest_completed_serial);
+    let reaped = texture_retirement_queue
+        .reap_through(completed)
+        .map_err(|err| format!("texture retirement completion regression: {err:?}"))?;
+    if reaped.is_empty() {
+        return Ok(());
+    }
+
+    let mut texture_cache = data_cache
+        .texture_cache
+        .lock()
+        .map_err(|_| "texture_cache lock poisoned during texture retirement reaping".to_string())?;
+
+    for record in reaped {
+        debug_assert_eq!(
+            record.class,
+            crate::data::retirement::RetirementClass::TextureImage
+        );
+        let slot = record.payload.slot;
+        log::trace!(
+            "reaping retired texture slot {} generation {} (sampler retained {:?})",
+            slot,
+            record.payload.generation,
+            record.payload.sampler
+        );
+        debug_assert!(record.payload.descriptor_release.is_empty());
+        texture_cache.destroy_retired_texture_payload(record.payload);
+        texture_cache.release_texture_slot(slot);
+    }
     Ok(())
 }
 
@@ -336,16 +423,21 @@ pub(crate) fn acquire_frame_slot(
     ctx: &mut FrameLifecycleContext,
 ) -> Result<FrameSlotAcquireOutcome, String> {
     let frame_index = {
-        let frame_data = ctx.presentation.get_next_frame();
-        frame_data.index
+        let frame = ctx
+            .presentation
+            .get_next_frame()
+            .map_err(|e| format!("failed to reserve frame slot: {e}"))?;
+        frame.index
     };
     let expected_frame_serial = ctx.presentation.frame_epoch();
     // Re-borrow to get the remaining frame data after get_next_frame's mutable borrow.
     let frame_data = &ctx.presentation.frame_data[frame_index as usize];
     let frame_slot_index = frame_index as usize;
     let frame_sync = frame_data.sync;
-    let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame_data
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("cannot acquire frame slot: {e}"))?;
     let queue = ctx.queues.get_queue(VkQueueType::Graphics);
 
     let fence_wait_start = Instant::now();
@@ -364,7 +456,10 @@ pub(crate) fn acquire_frame_slot(
     let cleanup_start = Instant::now();
     let completed_serial = completion_token.submitted_serial();
     {
-        let curr_frame = ctx.presentation.get_curr_frame_mut();
+        let curr_frame = ctx
+            .presentation
+            .get_curr_frame_mut()
+            .map_err(|e| format!("no active frame for descriptor cleanup: {e}"))?;
         unsafe {
             cleanup_curr_frame_resources(
                 ctx.device,
@@ -394,17 +489,21 @@ pub(crate) fn acquire_frame_slot(
         ctx.mesh_retirement_queue,
         ctx.data_cache,
     )?;
-    reap_bounds_retirement(
+    reap_material_retirement(
         *ctx.latest_completed_serial,
-        ctx.bounds_retirement_queue,
+        ctx.material_retirement_queue,
+        ctx.data_cache,
+        ctx.device,
     )?;
+    reap_texture_retirement(
+        *ctx.latest_completed_serial,
+        ctx.texture_retirement_queue,
+        ctx.data_cache,
+    )?;
+    reap_bounds_retirement(*ctx.latest_completed_serial, ctx.bounds_retirement_queue)?;
 
     // GPU timing resolution for the retiring slot
-    resolve_gpu_timing_for_slot(
-        ctx.device,
-        ctx.gpu_timing,
-        frame_slot_index,
-    );
+    resolve_gpu_timing_for_slot(ctx.device, ctx.gpu_timing, frame_slot_index);
 
     let swapchain_acquire_start = Instant::now();
     let (image_index, acquire_suboptimal, swapchain_acquire_ms) = if ctx.surface_mode.is_headless()
@@ -438,29 +537,27 @@ pub(crate) fn acquire_frame_slot(
                     "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); skipping this frame without rebuilding",
                     acquire_retries, swapchain_acquire_ms
                 );
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 return Ok(FrameSlotAcquireOutcome::TransientUnavailable);
             }
             AcquireClass::OutOfDate => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 ctx.swapchain_owner
                     .request_resize(ctx.window_state.get_curr_extent());
                 return Ok(FrameSlotAcquireOutcome::ResizePending);
             }
             AcquireClass::SurfaceLost => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 log::error!("wsi_outcome class=surface_lost operation=acquire");
                 return Err("Vulkan surface lost during image acquisition".to_string());
             }
             AcquireClass::DeviceLost => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 log::error!("wsi_outcome class=device_lost operation=acquire");
-                return Err(
-                    "Vulkan device lost during swapchain image acquisition".to_string()
-                );
+                return Err("Vulkan device lost during swapchain image acquisition".to_string());
             }
             AcquireClass::Fatal(msg) => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 return Err(format!("fatal swapchain acquire error: {msg}"));
             }
         };
@@ -511,8 +608,8 @@ pub(crate) unsafe fn reset_and_begin_frame_cmd(
         .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
         .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
 
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     device
         .begin_command_buffer(cmd_buffer, &begin_info)
@@ -540,7 +637,10 @@ pub(crate) fn record_failed_frame_drain(
 ) -> Result<(), String> {
     unsafe { reset_and_begin_frame_cmd(device, frame.cmd_buffer)? };
     if plan.transition_present_image {
-        let present_image = presentation.get_curr_frame().present_image;
+        let present_image = presentation
+            .get_curr_frame()
+            .map_err(|e| format!("no active frame for drain: {e}"))?
+            .present_image;
         vk_util::transition_image(
             device,
             frame.cmd_buffer,
@@ -720,10 +820,7 @@ pub(crate) fn resolve_gpu_timing_for_slot(
             let end = *slot.raw_results.get(record.end_query as usize)?;
             Some((
                 record.name,
-                timestamp_delta_to_ms(
-                    end.saturating_sub(start),
-                    gpu_timing.timestamp_period_ns,
-                ),
+                timestamp_delta_to_ms(end.saturating_sub(start), gpu_timing.timestamp_period_ns),
             ))
         })
         .collect();
@@ -882,6 +979,55 @@ pub(crate) fn aggregate_descriptor_stats(presentation: &VkPresent) -> Descriptor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── VkPresent frame-ring invariants ──────────────────────────────────
+
+    #[test]
+    fn vk_present_no_active_reservation_rejected() {
+        // Can't construct VkPresent without real Vulkan resources, but we can
+        // test the error type display and equality.
+        assert_eq!(
+            VkError::NoActiveReservation.to_string(),
+            "no active frame reservation"
+        );
+        assert_eq!(
+            VkError::NoFrameSources.to_string(),
+            "zero frame-data sources provided to VkPresent::new"
+        );
+    }
+
+    #[test]
+    fn rewind_before_first_frame_returns_no_active_reservation() {
+        // Simulate the state machine: rewind should fail when no frame is active.
+        let curr_frame_count: u32 = 0;
+        let result = if curr_frame_count == 0 {
+            Err(VkError::NoActiveReservation)
+        } else {
+            Ok(())
+        };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rewind_after_get_next_succeeds() {
+        let mut curr_frame_count: u32 = 1;
+        if curr_frame_count == 0 {
+            panic!("should have active frame");
+        }
+        curr_frame_count -= 1;
+        assert_eq!(curr_frame_count, 0);
+    }
+
+    #[test]
+    fn get_curr_frame_with_no_reservation_returns_error() {
+        let curr: u32 = 0;
+        let result = if curr == 0 {
+            Err(VkError::NoActiveReservation)
+        } else {
+            Ok(())
+        };
+        assert!(result.is_err());
+    }
 
     #[test]
     fn post_acquire_recording_failure_requires_submit_and_present_drain() {

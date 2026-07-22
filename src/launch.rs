@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use renderer::prelude::CaptureTarget;
 
@@ -92,176 +92,53 @@ pub fn parse_command(
 impl LaunchOptions {
     pub fn parse(args: impl IntoIterator<Item = impl Into<String>>) -> Result<Self, LaunchError> {
         let args: Vec<String> = args.into_iter().map(Into::into).collect();
-        let mut options = PartialLaunchOptions::default();
-        let mut index = 0;
+        let parsed = launch_shared::parse_cli_args(launch_shared::root_launcher_schema(), &args)
+            .into_result()
+            .map_err(LaunchError::Usage)?;
 
-        while index < args.len() {
-            let arg = args[index].as_str();
-            match arg {
-                "--project" => {
-                    options.project_path =
-                        Some(PathBuf::from(next_value(&args, index, "--project")?));
-                    index += 2;
-                }
-                "--scene" => {
-                    options.scene_path = Some(PathBuf::from(next_value(&args, index, "--scene")?));
-                    index += 2;
-                }
-                "--record_debug" => {
-                    let value = next_value(&args, index, "--record_debug")?;
-                    options.record_debug_secs = Some(parse_positive_u64("--record_debug", value)?);
-                    index += 2;
-                }
-                "--record_debug_interval" => {
-                    let value = next_value(&args, index, "--record_debug_interval")?;
-                    options.record_debug_interval_ms =
-                        Some(parse_positive_u64("--record_debug_interval", value)?);
-                    index += 2;
-                }
-                "--record_debug_path" => {
-                    options.record_debug_path = Some(PathBuf::from(next_value(
-                        &args,
-                        index,
-                        "--record_debug_path",
-                    )?));
-                    index += 2;
-                }
-                "--capture_frame" => {
-                    let value = next_value(&args, index, "--capture_frame")?;
-                    options.capture_frame = Some(parse_positive_u32("--capture_frame", value)?);
-                    index += 2;
-                }
-                "--capture_frame_path" => {
-                    options.capture_frame_path = Some(PathBuf::from(next_value(
-                        &args,
-                        index,
-                        "--capture_frame_path",
-                    )?));
-                    index += 2;
-                }
-                "--capture_frames" => {
-                    let value = next_value(&args, index, "--capture_frames")?;
-                    options.capture_frames = Some(parse_positive_u32("--capture_frames", value)?);
-                    index += 2;
-                }
-                "--capture_frame_start" => {
-                    let value = next_value(&args, index, "--capture_frame_start")?;
-                    options.capture_frame_start =
-                        Some(parse_positive_u32("--capture_frame_start", value)?);
-                    index += 2;
-                }
-                "--capture_frame_interval" => {
-                    let value = next_value(&args, index, "--capture_frame_interval")?;
-                    options.capture_frame_interval =
-                        Some(parse_positive_u32("--capture_frame_interval", value)?);
-                    index += 2;
-                }
-                "--capture_dir" => {
-                    options.capture_dir =
-                        Some(PathBuf::from(next_value(&args, index, "--capture_dir")?));
-                    index += 2;
-                }
-                "--capture_target" => {
-                    let value = next_value(&args, index, "--capture_target")?;
-                    options.capture_target = parse_capture_target(value)?;
-                    index += 2;
-                }
-                "--headless" => {
-                    options.headless = true;
-                    index += 1;
-                }
-                "--manual_capture_dir" => {
-                    options.manual_capture_dir = Some(PathBuf::from(next_value(
-                        &args,
-                        index,
-                        "--manual_capture_dir",
-                    )?));
-                    index += 2;
-                }
-                _ if arg.starts_with("--project=") => {
-                    options.project_path = Some(PathBuf::from(inline_value(arg, "--project")?));
-                    index += 1;
-                }
-                _ if arg.starts_with("--scene=") => {
-                    options.scene_path = Some(PathBuf::from(inline_value(arg, "--scene")?));
-                    index += 1;
-                }
-                _ if arg.starts_with("--record_debug=") => {
-                    options.record_debug_secs = Some(parse_positive_u64(
-                        "--record_debug",
-                        inline_value(arg, "--record_debug")?,
-                    )?);
-                    index += 1;
-                }
-                _ if arg.starts_with("--record_debug_interval=") => {
-                    options.record_debug_interval_ms = Some(parse_positive_u64(
-                        "--record_debug_interval",
-                        inline_value(arg, "--record_debug_interval")?,
-                    )?);
-                    index += 1;
-                }
-                _ if arg.starts_with("--record_debug_path=") => {
-                    options.record_debug_path =
-                        Some(PathBuf::from(inline_value(arg, "--record_debug_path")?));
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_frame=") => {
-                    options.capture_frame = Some(parse_positive_u32(
-                        "--capture_frame",
-                        inline_value(arg, "--capture_frame")?,
-                    )?);
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_frame_path=") => {
-                    options.capture_frame_path =
-                        Some(PathBuf::from(inline_value(arg, "--capture_frame_path")?));
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_frames=") => {
-                    options.capture_frames = Some(parse_positive_u32(
-                        "--capture_frames",
-                        inline_value(arg, "--capture_frames")?,
-                    )?);
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_frame_start=") => {
-                    options.capture_frame_start = Some(parse_positive_u32(
-                        "--capture_frame_start",
-                        inline_value(arg, "--capture_frame_start")?,
-                    )?);
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_frame_interval=") => {
-                    options.capture_frame_interval = Some(parse_positive_u32(
-                        "--capture_frame_interval",
-                        inline_value(arg, "--capture_frame_interval")?,
-                    )?);
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_dir=") => {
-                    options.capture_dir = Some(PathBuf::from(inline_value(arg, "--capture_dir")?));
-                    index += 1;
-                }
-                _ if arg.starts_with("--capture_target=") => {
-                    options.capture_target =
-                        parse_capture_target(inline_value(arg, "--capture_target")?)?;
-                    index += 1;
-                }
-                _ if arg.starts_with("--manual_capture_dir=") => {
-                    options.manual_capture_dir =
-                        Some(PathBuf::from(inline_value(arg, "--manual_capture_dir")?));
-                    index += 1;
-                }
-                _ if arg.starts_with('-') => {
-                    return Err(LaunchError::Usage(format!("unknown flag '{arg}'")));
-                }
-                _ => {
-                    return Err(LaunchError::Usage(format!(
-                        "unexpected positional argument '{arg}'"
-                    )));
-                }
-            }
+        if let Some(positional) = parsed.positionals.first() {
+            return Err(LaunchError::Usage(format!(
+                "unexpected positional argument '{positional}'"
+            )));
         }
+
+        let mut options = PartialLaunchOptions::default();
+        options.project_path = path_option(&parsed, "--project");
+        options.scene_path = path_option(&parsed, "--scene");
+        options.record_debug_secs = parsed
+            .singleton_value("--record_debug")
+            .map(|value| parse_positive_u64("--record_debug", value))
+            .transpose()?;
+        options.record_debug_interval_ms = parsed
+            .singleton_value("--record_debug_interval")
+            .map(|value| parse_positive_u64("--record_debug_interval", value))
+            .transpose()?;
+        options.record_debug_path = path_option(&parsed, "--record_debug_path");
+        options.capture_frame = parsed
+            .singleton_value("--capture_frame")
+            .map(|value| parse_positive_u32("--capture_frame", value))
+            .transpose()?;
+        options.capture_frame_path = path_option(&parsed, "--capture_frame_path");
+        options.capture_frames = parsed
+            .singleton_value("--capture_frames")
+            .map(|value| parse_positive_u32("--capture_frames", value))
+            .transpose()?;
+        options.capture_frame_start = parsed
+            .singleton_value("--capture_frame_start")
+            .map(|value| parse_positive_u32("--capture_frame_start", value))
+            .transpose()?;
+        options.capture_frame_interval = parsed
+            .singleton_value("--capture_frame_interval")
+            .map(|value| parse_positive_u32("--capture_frame_interval", value))
+            .transpose()?;
+        options.capture_dir = path_option(&parsed, "--capture_dir");
+        options.capture_target = parsed
+            .singleton_value("--capture_target")
+            .map(parse_capture_target)
+            .transpose()?
+            .unwrap_or_default();
+        options.headless = parsed.flag_present("--headless");
+        options.manual_capture_dir = path_option(&parsed, "--manual_capture_dir");
 
         options.finish()
     }
@@ -293,25 +170,11 @@ impl PartialLaunchOptions {
     }
 }
 
-fn next_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a str, LaunchError> {
-    let value = args
-        .get(index + 1)
-        .ok_or_else(|| LaunchError::Usage(format!("{flag} requires a value")))?;
-    if value.is_empty() || value.starts_with('-') {
-        return Err(LaunchError::Usage(format!("{flag} requires a value")));
-    }
-    Ok(value)
-}
-
-fn inline_value<'a>(arg: &'a str, flag: &str) -> Result<&'a str, LaunchError> {
-    let prefix = format!("{flag}=");
-    let value = arg
-        .strip_prefix(&prefix)
-        .expect("caller checked inline flag prefix");
-    if value.is_empty() {
-        return Err(LaunchError::Usage(format!("{flag} requires a value")));
-    }
-    Ok(value)
+fn path_option(parsed: &launch_shared::CliParseResult, flag: &str) -> Option<PathBuf> {
+    parsed
+        .singleton_value(flag)
+        .map(Path::new)
+        .map(PathBuf::from)
 }
 
 fn parse_positive_u64(flag: &str, value: &str) -> Result<u64, LaunchError> {
@@ -338,42 +201,8 @@ fn validate_capture_options(options: &PartialLaunchOptions) -> Result<(), Launch
     .map_err(LaunchError::Usage)
 }
 
-pub fn usage() -> &'static str {
-    "Usage: engine --project <path> [options]\n\
-\n\
-Root runtime launcher options:\n\
-  -h, --help                         Print this help text.\n\
-      --project <path>               Project manifest to launch. Required.\n\
-      --project=<path>               Project manifest to launch. Required.\n\
-      --scene <path>                 Optional startup scene override.\n\
-      --scene=<path>                 Optional startup scene override.\n\
-      --headless                     Use the headless runtime path.\n\
-\n\
-Capture options:\n\
-      --capture_target <present|draw>\n\
-      --capture_target=<present|draw>\n\
-      --capture_frame <n>\n\
-      --capture_frame=<n>\n\
-      --capture_frame_path <path>\n\
-      --capture_frame_path=<path>\n\
-      --capture_frames <n>\n\
-      --capture_frames=<n>\n\
-      --capture_frame_start <n>\n\
-      --capture_frame_start=<n>\n\
-      --capture_frame_interval <n>\n\
-      --capture_frame_interval=<n>\n\
-      --capture_dir <dir>\n\
-      --capture_dir=<dir>\n\
-      --manual_capture_dir <dir>\n\
-      --manual_capture_dir=<dir>\n\
-\n\
-Debug timing options:\n\
-      --record_debug <seconds>\n\
-      --record_debug=<seconds>\n\
-      --record_debug_interval <ms>\n\
-      --record_debug_interval=<ms>\n\
-      --record_debug_path <path>\n\
-      --record_debug_path=<path>\n"
+pub fn usage() -> String {
+    launch_shared::render_root_launcher_help()
 }
 
 #[cfg(test)]
@@ -460,11 +289,19 @@ mod tests {
         assert!(parse(&["--project=engine.project.toml", "--bogus"])
             .unwrap_err()
             .to_string()
-            .contains("unknown flag"));
+            .contains("unknown option"));
         assert!(parse(&["engine.project.toml"])
             .unwrap_err()
             .to_string()
             .contains("unexpected positional"));
+    }
+
+    #[test]
+    fn rejects_duplicate_singleton_project() {
+        assert!(parse(&["--project", "a.toml", "--project=b.toml"])
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate option '--project'"));
     }
 
     #[test]

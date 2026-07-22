@@ -32,6 +32,13 @@
 //! Vertex v = VertexBuffer(vertex_buffer_addr).vertices[gl_VertexIndex];
 //! ```
 //! Why: Simpler pipeline creation, flexible vertex formats, better for GPU-driven rendering.
+//!
+//! ## PipelineSpec — centralised creation boundary
+//!
+//! Every pipeline constructor maps its parameters into a [`PipelineSpec`] value and calls
+//! [`create_pipeline_from_spec`]. The spec is validated before any Vulkan call; contradictory
+//! attachment/depth combos are rejected. Rollback destroys only successfully-created resources
+//! and shared layouts are deduplicated in the [`VkPipelineCache`] destructor.
 
 use crate::data::data_cache::{
     CoreShaderType, VkDescLayoutCache, VkDescType, VkPipelineCache, VkPipelineType, VkShaderCache,
@@ -299,6 +306,171 @@ impl<'a> PipelineBuilder<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PipelineSpec — centralised creation boundary
+// ---------------------------------------------------------------------------
+
+/// Immutable specification for a single graphics pipeline.
+///
+/// Every pipeline constructor maps its parameters into this value and calls
+/// [`create_pipeline_from_spec`]. The spec is validated before any Vulkan call;
+/// contradictory attachment/depth combos are rejected.
+#[derive(Clone)]
+pub(crate) struct PipelineSpec {
+    pub vert_module: vk::ShaderModule,
+    pub frag_module: vk::ShaderModule,
+    pub topology: vk::PrimitiveTopology,
+    pub polygon_mode: vk::PolygonMode,
+    pub cull_mode: vk::CullModeFlags,
+    pub front_face: vk::FrontFace,
+    pub color_attachment_format: Option<vk::Format>,
+    pub depth_format: Option<vk::Format>,
+    /// (write_enable, compare_op). `None` means depth test disabled.
+    pub depth_test: Option<(bool, vk::CompareOp)>,
+    pub blend: BlendingMode,
+    pub layout: vk::PipelineLayout,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlendingMode {
+    Disabled,
+    AlphaBlend,
+}
+
+impl PipelineSpec {
+    fn validate(&self) -> Result<(), String> {
+        if self.vert_module == vk::ShaderModule::null() {
+            return Err("pipeline vertex shader module is null".to_string());
+        }
+        if self.frag_module == vk::ShaderModule::null() {
+            return Err("pipeline fragment shader module is null".to_string());
+        }
+        if self.layout == vk::PipelineLayout::null() {
+            return Err("pipeline layout is null".to_string());
+        }
+        if self.color_attachment_format == Some(vk::Format::UNDEFINED) {
+            return Err("color attachment format must not be UNDEFINED".to_string());
+        }
+        if self.depth_format == Some(vk::Format::UNDEFINED) {
+            return Err("depth attachment format must not be UNDEFINED".to_string());
+        }
+        if self.depth_format.is_some() && self.depth_test.is_none() {
+            return Err(
+                "depth attachment format is set but depth test is disabled; \
+                 either remove the depth format or enable depth testing"
+                    .to_string(),
+            );
+        }
+        if self.depth_test.is_some() && self.depth_format.is_none() {
+            return Err(
+                "depth test is enabled but no depth attachment format was provided".to_string(),
+            );
+        }
+        if self.color_attachment_format.is_none() && self.depth_format.is_none() {
+            return Err(
+                "pipeline must have at least one color or depth attachment format".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Build a Vulkan pipeline from a validated [`PipelineSpec`].
+///
+/// The caller owns the pipeline layout and is responsible for destroying it on
+/// rollback. On success, the returned `vk::Pipeline` is fully created.
+pub(crate) fn create_pipeline_from_spec(
+    device: &ash::Device,
+    spec: &PipelineSpec,
+) -> Result<vk::Pipeline, String> {
+    spec.validate()?;
+
+    let entry = c"main";
+
+    let mut builder = PipelineBuilder::default()
+        .set_shaders(spec.vert_module, entry, spec.frag_module, entry)
+        .set_input_topology(spec.topology)
+        .set_polygon_mode(spec.polygon_mode)
+        .set_cull_mode(spec.cull_mode, spec.front_face)
+        .set_multisample_none()
+        .set_pipeline_layout(spec.layout);
+
+    match spec.color_attachment_format {
+        Some(fmt) => {
+            builder = builder.set_color_attachment_format(fmt);
+        }
+        None => {
+            builder = builder.disable_color_attachments();
+        }
+    }
+
+    match spec.depth_format {
+        Some(fmt) => {
+            builder = builder.set_depth_format(fmt);
+        }
+        None => {}
+    }
+
+    match spec.depth_test {
+        Some((write_enable, compare_op)) => {
+            builder = builder.enable_depth_test(write_enable, compare_op);
+        }
+        None => {
+            builder = builder.disable_depth_test();
+        }
+    }
+
+    match spec.blend {
+        BlendingMode::Disabled => {
+            builder = builder.disable_blending();
+        }
+        BlendingMode::AlphaBlend => {
+            builder = builder.enable_blending_alpha_blend();
+        }
+    }
+
+    builder.build_pipeline(device)
+}
+
+/// Create two pipelines that share one layout, with atomic rollback.
+///
+/// If the second pipeline fails, the first pipeline *and* the shared layout
+/// are destroyed before the error propagates.
+pub(crate) fn create_pipeline_pair(
+    device: &ash::Device,
+    spec_a: &PipelineSpec,
+    spec_b: &PipelineSpec,
+) -> Result<(VkPipeline, VkPipeline), String> {
+    if spec_a.layout != spec_b.layout {
+        unsafe {
+            device.destroy_pipeline_layout(spec_a.layout, None);
+            if spec_b.layout != spec_a.layout {
+                device.destroy_pipeline_layout(spec_b.layout, None);
+            }
+        }
+        return Err("pipeline pair specs must share the same layout".to_string());
+    }
+
+    let pipeline_a = create_pipeline_from_spec(device, spec_a).map_err(|err| {
+        // Layout was never consumed; destroy it.
+        unsafe { device.destroy_pipeline_layout(spec_a.layout, None) };
+        err
+    })?;
+
+    let pipeline_b = create_pipeline_from_spec(device, spec_b).map_err(|err| {
+        unsafe {
+            device.destroy_pipeline(pipeline_a, None);
+            device.destroy_pipeline_layout(spec_a.layout, None);
+        }
+        err
+    })?;
+
+    Ok((
+        VkPipeline::new(pipeline_a, spec_a.layout),
+        VkPipeline::new(pipeline_b, spec_b.layout),
+    ))
+}
+
 pub fn init_pipeline_cache(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
@@ -405,32 +577,27 @@ fn init_met_rough_pipelines(
     let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
         .map_err(|err| format!("failed to create PBR pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let opaque_spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(color_format),
+        depth_format: Some(depth_format),
+        depth_test: Some((true, vk::CompareOp::LESS_OR_EQUAL)),
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(color_format)
-        .set_depth_format(depth_format)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
+    let alpha_spec = PipelineSpec {
+        blend: BlendingMode::AlphaBlend,
+        depth_test: Some((false, vk::CompareOp::LESS_OR_EQUAL)),
+        ..opaque_spec.clone()
+    };
 
-    let opaque_pipeline = pipeline_builder.build_pipeline(device)?;
-
-    let mut pipeline_builder = pipeline_builder
-        .enable_blending_alpha_blend()
-        .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
-
-    let transparent_pipeline = pipeline_builder.build_pipeline(device)?;
-
-    Ok((
-        VkPipeline::new(opaque_pipeline, layout),
-        VkPipeline::new(transparent_pipeline, layout),
-    ))
+    create_pipeline_pair(device, &opaque_spec, &alpha_spec)
 }
 
 fn init_unlit_pipelines(
@@ -461,32 +628,27 @@ fn init_unlit_pipelines(
     let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
         .map_err(|err| format!("failed to create unlit pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let opaque_spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(color_format),
+        depth_format: Some(depth_format),
+        depth_test: Some((true, vk::CompareOp::LESS_OR_EQUAL)),
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(color_format)
-        .set_depth_format(depth_format)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
+    let alpha_spec = PipelineSpec {
+        blend: BlendingMode::AlphaBlend,
+        depth_test: Some((false, vk::CompareOp::LESS_OR_EQUAL)),
+        ..opaque_spec.clone()
+    };
 
-    let opaque_pipeline = pipeline_builder.build_pipeline(device)?;
-
-    let mut pipeline_builder = pipeline_builder
-        .enable_blending_alpha_blend()
-        .enable_depth_test(false, vk::CompareOp::LESS_OR_EQUAL);
-
-    let transparent_pipeline = pipeline_builder.build_pipeline(device)?;
-
-    Ok((
-        VkPipeline::new(opaque_pipeline, layout),
-        VkPipeline::new(transparent_pipeline, layout),
-    ))
+    create_pipeline_pair(device, &opaque_spec, &alpha_spec)
 }
 
 fn init_brd_flut_pipeline(
@@ -497,31 +659,31 @@ fn init_brd_flut_pipeline(
     _depth_format: vk::Format,
 ) -> Result<VkPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutVert);
-
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutFrag);
 
     let layouts = [desc_layout_cache.get(VkDescType::Empty)];
-
     let mesh_layout_info = vk_util::pipeline_layout_create_info().set_layouts(&layouts);
-
     let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
         .map_err(|err| format!("failed to create BRDF LUT pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(color_format),
+        depth_format: None,
+        depth_test: None,
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(color_format)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .disable_depth_test()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
-
-    let pipeline = pipeline_builder.build_pipeline(device)?;
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
 
     Ok(VkPipeline::new(pipeline, layout))
 }
@@ -537,8 +699,6 @@ fn init_skybox_pipeline(
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxFrag);
 
     let push_const_size = std::mem::size_of::<PushConstSkyBox>() as u32;
-    // Vulkan spec minimum is 128 bytes; desktop GPUs provide ≥256.
-    // See PushConstSkyBox docs in gpu_data.rs for details.
     debug_assert!(
         push_const_size <= 256,
         "PushConstSkyBox size {} exceeds 256 bytes",
@@ -551,28 +711,30 @@ fn init_skybox_pipeline(
         .size(push_const_size)];
 
     let layouts = [desc_layout_cache.get(VkDescType::Skybox)];
-
     let layout_info = vk_util::pipeline_layout_create_info()
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
-
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|err| format!("failed to create skybox pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(color_format),
+        depth_format: None,
+        depth_test: None,
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .set_color_attachment_format(color_format)
-        .disable_depth_test()
-        .set_pipeline_layout(layout);
-
-    let pipeline = pipeline_builder.build_pipeline(device)?;
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
 
     Ok(VkPipeline::new(pipeline, layout))
 }
@@ -591,28 +753,30 @@ fn init_irradiance_pipeline(
         .size(std::mem::size_of::<PushConstIrradiance>() as u32)];
 
     let layouts = [desc_layout_cache.get(VkDescType::EnvIrradiance)];
-
     let layout_info = vk_util::pipeline_layout_create_info()
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
-
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|err| format!("failed to create irradiance pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(vk::Format::R32G32B32A32_SFLOAT),
+        depth_format: None,
+        depth_test: None,
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .disable_depth_test()
-        .set_color_attachment_format(vk::Format::R32G32B32A32_SFLOAT) //Irradiance cubemap format
-        .set_pipeline_layout(layout);
-
-    let pipeline = pipeline_builder.build_pipeline(device)?;
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
 
     Ok(VkPipeline::new(pipeline, layout))
 }
@@ -631,28 +795,30 @@ fn init_pre_filter_pipeline(
         .size(std::mem::size_of::<PushConstPrefilterEnv>() as u32)];
 
     let layouts = [desc_layout_cache.get(VkDescType::EnvPreFilter)];
-
     let layout_info = vk_util::pipeline_layout_create_info()
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
-
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|err| format!("failed to create prefilter pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(vk::Format::R16G16B16A16_SFLOAT),
+        depth_format: None,
+        depth_test: None,
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .disable_depth_test()
-        .set_color_attachment_format(vk::Format::R16G16B16A16_SFLOAT) //Prefilter cubemap format
-        .set_pipeline_layout(layout);
-
-    let pipeline = pipeline_builder.build_pipeline(device)?;
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
 
     Ok(VkPipeline::new(pipeline, layout))
 }
@@ -671,28 +837,30 @@ fn init_equirect_to_cube_pipeline(
         .size(std::mem::size_of::<PushConstCubeCapture>() as u32)];
 
     let layouts = [desc_layout_cache.get(VkDescType::EnvEquirect)];
-
     let layout_info = vk_util::pipeline_layout_create_info()
         .set_layouts(&layouts)
         .push_constant_ranges(&push_constant_range);
-
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|err| format!("failed to create equirect pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(vk::Format::R32G32B32A32_SFLOAT),
+        depth_format: None,
+        depth_test: None,
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .disable_depth_test()
-        .set_color_attachment_format(vk::Format::R32G32B32A32_SFLOAT)
-        .set_pipeline_layout(layout);
-
-    let pipeline = pipeline_builder.build_pipeline(device)?;
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
+        unsafe { device.destroy_pipeline_layout(layout, None) };
+        err
+    })?;
 
     Ok(VkPipeline::new(pipeline, layout))
 }
@@ -714,7 +882,6 @@ fn init_shadow_depth_pipeline(
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthFrag);
 
     let push_const_size = std::mem::size_of::<PushConstShadowDepth>() as u32;
-
     let push_constant_range = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX)
         .offset(0)
@@ -723,25 +890,24 @@ fn init_shadow_depth_pipeline(
     let layout_info = vk_util::pipeline_layout_create_info()
         .set_layouts(&[])
         .push_constant_ranges(&push_constant_range);
-
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|err| format!("failed to create shadow pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
+    let spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: frag_shader,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: None,
+        depth_format: Some(vk::Format::D32_SFLOAT),
+        depth_test: Some((true, vk::CompareOp::LESS_OR_EQUAL)),
+        blend: BlendingMode::Disabled,
+        layout,
+    };
 
-    let mut pipeline_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, frag_shader, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .set_depth_format(vk::Format::D32_SFLOAT)
-        .disable_color_attachments()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
-
-    let pipeline = pipeline_builder.build_pipeline(device).map_err(|err| {
+    let pipeline = create_pipeline_from_spec(device, &spec).map_err(|err| {
         unsafe { device.destroy_pipeline_layout(layout, None) };
         err
     })?;
@@ -765,7 +931,6 @@ fn init_instanced_pipelines(
     let pbr_frag = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
     let unlit_frag = shader_cache.get_core_shader(CoreShaderType::MetRoughFragUnlit);
 
-    // Instanced push constants: 32 bytes (no model matrix).
     let push_const_size = 32u32;
     let push_constant_range = [vk::PushConstantRange::default()
         .offset(0)
@@ -785,55 +950,81 @@ fn init_instanced_pipelines(
     let layout = unsafe { device.create_pipeline_layout(&mesh_layout_info, None) }
         .map_err(|err| format!("failed to create instanced pipeline layout: {err:?}"))?;
 
-    let entry = c"main";
-
-    // PBR opaque instanced
-    let mut pbr_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, pbr_frag, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(color_format)
-        .set_depth_format(depth_format)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
-
-    let pbr_instanced = match pbr_builder.build_pipeline(device) {
-        Ok(pipeline) => pipeline,
-        Err(err) => {
-            unsafe { device.destroy_pipeline_layout(layout, None) };
-            return Err(err);
-        }
+    let pbr_spec = PipelineSpec {
+        vert_module: vert_shader,
+        frag_module: pbr_frag,
+        topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+        polygon_mode: vk::PolygonMode::FILL,
+        cull_mode: vk::CullModeFlags::NONE,
+        front_face: vk::FrontFace::CLOCKWISE,
+        color_attachment_format: Some(color_format),
+        depth_format: Some(depth_format),
+        depth_test: Some((true, vk::CompareOp::LESS_OR_EQUAL)),
+        blend: BlendingMode::Disabled,
+        layout,
     };
 
-    // Unlit opaque instanced
-    let mut unlit_builder = PipelineBuilder::default()
-        .set_shaders(vert_shader, entry, unlit_frag, entry)
-        .set_input_topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .set_color_attachment_format(color_format)
-        .set_depth_format(depth_format)
-        .set_polygon_mode(vk::PolygonMode::FILL)
-        .set_cull_mode(vk::CullModeFlags::NONE, vk::FrontFace::CLOCKWISE)
-        .set_multisample_none()
-        .disable_blending()
-        .enable_depth_test(true, vk::CompareOp::LESS_OR_EQUAL)
-        .set_pipeline_layout(layout);
-
-    let unlit_instanced = match unlit_builder.build_pipeline(device) {
-        Ok(pipeline) => pipeline,
-        Err(err) => {
-            unsafe {
-                device.destroy_pipeline(pbr_instanced, None);
-                device.destroy_pipeline_layout(layout, None);
-            }
-            return Err(err);
-        }
+    let unlit_spec = PipelineSpec {
+        frag_module: unlit_frag,
+        ..pbr_spec.clone()
     };
 
-    Ok((
-        VkPipeline::new(pbr_instanced, layout),
-        VkPipeline::new(unlit_instanced, layout),
-    ))
+    create_pipeline_pair(device, &pbr_spec, &unlit_spec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ash::vk::Handle;
+
+    fn valid_spec() -> PipelineSpec {
+        PipelineSpec {
+            vert_module: vk::ShaderModule::from_raw(0x101),
+            frag_module: vk::ShaderModule::from_raw(0x102),
+            topology: vk::PrimitiveTopology::TRIANGLE_LIST,
+            polygon_mode: vk::PolygonMode::FILL,
+            cull_mode: vk::CullModeFlags::NONE,
+            front_face: vk::FrontFace::CLOCKWISE,
+            color_attachment_format: Some(vk::Format::R8G8B8A8_UNORM),
+            depth_format: None,
+            depth_test: None,
+            blend: BlendingMode::Disabled,
+            layout: vk::PipelineLayout::from_raw(0x103),
+        }
+    }
+
+    #[test]
+    fn pipeline_spec_accepts_color_only_pipeline() {
+        assert!(valid_spec().validate().is_ok());
+    }
+
+    #[test]
+    fn pipeline_spec_rejects_depth_state_mismatches_before_vulkan() {
+        let mut depth_without_test = valid_spec();
+        depth_without_test.depth_format = Some(vk::Format::D32_SFLOAT);
+        assert!(depth_without_test.validate().is_err());
+
+        let mut test_without_depth = valid_spec();
+        test_without_depth.depth_test = Some((true, vk::CompareOp::LESS_OR_EQUAL));
+        assert!(test_without_depth.validate().is_err());
+    }
+
+    #[test]
+    fn pipeline_spec_rejects_missing_attachments_and_invalid_handles() {
+        let mut no_attachments = valid_spec();
+        no_attachments.color_attachment_format = None;
+        assert!(no_attachments.validate().is_err());
+
+        let mut undefined_color = valid_spec();
+        undefined_color.color_attachment_format = Some(vk::Format::UNDEFINED);
+        assert!(undefined_color.validate().is_err());
+
+        let mut null_vert = valid_spec();
+        null_vert.vert_module = vk::ShaderModule::null();
+        assert!(null_vert.validate().is_err());
+
+        let mut null_layout = valid_spec();
+        null_layout.layout = vk::PipelineLayout::null();
+        assert!(null_layout.validate().is_err());
+    }
 }

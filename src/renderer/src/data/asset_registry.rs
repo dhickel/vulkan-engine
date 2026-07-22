@@ -7,7 +7,7 @@
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
 use crate::data::validation::{ValidationArea, ValidationDiagnostic, ValidationError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::path::{Component, Path, PathBuf};
 
@@ -263,6 +263,19 @@ impl AssetRegistry {
 
     pub fn register_environment(&mut self, path: impl Into<PathBuf>, handle: EnvironmentHandle) {
         self.environments.insert(path.into(), handle);
+    }
+
+    /// Register a mesh with a normalized logical key (project-relative, `/`-separated).
+    ///
+    /// The logical key is canonical identity; the host-absolute path is not stored
+    /// as durable identity.
+    pub fn register_mesh_with_key(&mut self, key: &str, handle: MeshHandle) {
+        self.meshes.insert(PathBuf::from(key), handle);
+    }
+
+    /// Register a texture with a normalized logical key.
+    pub fn register_texture_with_key(&mut self, key: &str, handle: TextureHandle) {
+        self.textures.insert(PathBuf::from(key), handle);
     }
 
     pub fn find_mesh(&self, path: &Path) -> Option<MeshHandle> {
@@ -1507,20 +1520,66 @@ fn join_normalized(base: &Path, relative: &Path) -> PathBuf {
     }
 }
 
+/// Normalize a path to a canonical project-relative logical key.
+///
+/// This is a pure function: no filesystem access, no symlink resolution,
+/// no host-absolute canonicalization. It produces a deterministic
+/// `/`-separated key suitable for runtime handle maps and durable
+/// path indexes.
+///
+/// - Removes `.` components
+/// - Resolves lexical `..` only within root (rejects escape attempts)
+/// - Normalizes separators to `/`
+/// - Rejects empty, absolute, prefix, and root-escape paths
+pub fn normalize_logical_key(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return None;
+    }
+
+    let mut parts = VecDeque::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push_back(part),
+            Component::ParentDir => {
+                if parts.pop_back().is_none() {
+                    return None; // escapes root
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    let key: Vec<String> = parts
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    Some(key.join("/"))
+}
+
 fn default_package_version() -> String {
     "0.1.0".to_string()
 }
 
 /// Workspace-level project configuration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Version consolidation (Phase 10): both `version` and `project_version`
+/// are accepted during deserialization for legacy compatibility. When both
+/// are present and differ, validation rejects the conflict. Serialization
+/// emits only the canonical `project_version` field.
+#[derive(Clone, Debug, Serialize)]
 pub struct Project {
     #[serde(default = "default_project_format_version")]
     pub format_version: u32,
     #[serde(default = "default_project_id")]
     pub project_id: String,
     pub name: String,
-    #[serde(default = "default_project_version")]
-    pub version: String,
+    /// Canonical project version field. Deserialized from either `version`
+    /// or `project_version`; serialized as `project_version` only.
     #[serde(default = "default_project_version")]
     pub project_version: String,
     /// Root directory for assets (relative to project file).
@@ -1533,6 +1592,58 @@ pub struct Project {
     pub packages: Vec<ProjectPackage>,
     /// Graphics settings.
     pub settings: ProjectSettings,
+}
+
+/// Intermediate helper for deserializing Project with legacy `version` field support.
+#[derive(Deserialize)]
+struct ProjectDeHelper {
+    #[serde(default = "default_project_format_version")]
+    format_version: u32,
+    #[serde(default = "default_project_id")]
+    project_id: String,
+    name: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    project_version: Option<String>,
+    asset_root: PathBuf,
+    startup_scene: Option<PathBuf>,
+    default_environment: Option<PathBuf>,
+    #[serde(default)]
+    packages: Vec<ProjectPackage>,
+    settings: ProjectSettings,
+}
+
+impl<'de> Deserialize<'de> for Project {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let helper = ProjectDeHelper::deserialize(deserializer)?;
+        let project_version = match (helper.version.as_deref(), helper.project_version.as_deref()) {
+            (Some(legacy), Some(current)) if legacy != current => {
+                return Err(serde::de::Error::custom(format!(
+                    "conflicting version fields: 'version' = '{legacy}', 'project_version' = '{current}'"
+                )));
+            }
+            (Some(legacy), None) => legacy.to_string(),
+            (None, Some(current)) => current.to_string(),
+            (None, None) => default_project_version(),
+            (Some(v), Some(_)) => v.to_string(), // equal values, pick either
+        };
+
+        Ok(Project {
+            format_version: helper.format_version,
+            project_id: helper.project_id,
+            name: helper.name,
+            project_version,
+            asset_root: helper.asset_root,
+            startup_scene: helper.startup_scene,
+            default_environment: helper.default_environment,
+            packages: helper.packages,
+            settings: helper.settings,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1557,7 +1668,6 @@ impl Default for Project {
             format_version: PROJECT_FORMAT_VERSION,
             project_id: default_project_id(),
             name: "untitled".into(),
-            version: "0.1.0".into(),
             project_version: "0.1.0".into(),
             asset_root: PathBuf::from("assets"),
             startup_scene: None,
@@ -1617,8 +1727,9 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
-        AssetKind, PackageValidationOptions, ProjectValidationOptions,
+        normalize_logical_key, validate_package_manifest_file, validate_package_manifest_str,
+        validate_project_file, validate_project_str, AssetKind, PackageValidationOptions, Project,
+        ProjectValidationOptions,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -2127,6 +2238,75 @@ vsync = true
             .diagnostics()
             .iter()
             .any(|diagnostic| diagnostic.code == "project.invalid_window_size"));
+    }
+
+    #[test]
+    fn normalize_logical_key_is_pure_and_rejects_invalid_paths() {
+        assert_eq!(
+            normalize_logical_key(PathBuf::from("missing/../models/crate.glb").as_path()),
+            Some("models/crate.glb".to_string())
+        );
+        assert_eq!(normalize_logical_key(PathBuf::from("").as_path()), None);
+        assert_eq!(
+            normalize_logical_key(PathBuf::from("/absolute").as_path()),
+            None
+        );
+        assert_eq!(
+            normalize_logical_key(PathBuf::from("../escape").as_path()),
+            None
+        );
+        assert_eq!(
+            normalize_logical_key(PathBuf::from("a/../../escape").as_path()),
+            None
+        );
+    }
+
+    #[test]
+    fn project_version_consolidates_legacy_and_rejects_conflicts() {
+        let legacy = r#"
+format_version = 1
+project_id = "project.legacy"
+name = "Legacy"
+version = "2.0.0"
+asset_root = "assets"
+packages = []
+
+[settings]
+window_width = 1280
+window_height = 720
+fullscreen = false
+vsync = true
+"#;
+        let project = validate_project_str(legacy, ".", &ProjectValidationOptions::default())
+            .expect("legacy version should deserialize");
+        assert_eq!(project.project_version, "2.0.0");
+        let serialized = toml::to_string(&project).expect("project should serialize");
+        assert!(serialized.contains("project_version"));
+        assert!(!serialized.contains("\nversion"));
+
+        let matching = r#"
+format_version = 1
+project_id = "project.matching"
+name = "Matching"
+version = "2.0.0"
+project_version = "2.0.0"
+asset_root = "assets"
+packages = []
+
+[settings]
+window_width = 1280
+window_height = 720
+fullscreen = false
+vsync = true
+"#;
+        let project: Project = toml::from_str(matching).expect("matching fields should parse");
+        assert_eq!(project.project_version, "2.0.0");
+
+        let conflicting =
+            matching.replace("project_version = \"2.0.0\"", "project_version = \"3.0.0\"");
+        let err = validate_project_str(&conflicting, ".", &ProjectValidationOptions::default())
+            .expect_err("conflicting version fields must fail validation");
+        assert_has_code(&err, "project.parse");
     }
 
     #[test]

@@ -189,6 +189,8 @@ Stable asset ID rules:
 - The resolver must report duplicate IDs, missing package manifests, unknown package versions, unknown asset kinds, and missing asset paths before the editor presents assets as placeable.
 - Runtime handles are resolution outputs. `MeshHandle`, `MaterialHandle`, `TextureHandle`, `EnvironmentHandle`, `SceneNodeId`, `PointLightId`, and `LoadTicket` must never be written as durable project, package, or scene identity.
 - Collision metadata follows the same rule. Package manifests may define durable collision IDs and primitive shape descriptors for assets, but they must not serialize Rapier handles, renderer handles, or path-only IDs. This metadata is validated and carried with asset records; automatic scene-to-physics instantiation is a later runtime integration step.
+- Logical keys are normalized project-relative paths (e.g., `models/crate.glb`). They are canonical identity; host-absolute canonical paths are never durable identity. Use `normalize_logical_key()` to convert a path to its deterministic `/`-separated form.
+- The `engine.project.toml` `version` field is deprecated. Use the canonical `project_version` field. When both are present and differ, validation rejects the conflict. Serialized output always uses `project_version`.
 
 Current facade APIs:
 

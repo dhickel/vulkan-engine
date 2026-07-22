@@ -260,6 +260,23 @@ pub enum ScriptingEvent {
     },
 }
 
+impl ScriptingEvent {
+    /// Returns the event name for `ScriptEmitted`, or "error" for `ScriptError`.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::ScriptEmitted { name, .. } => name.as_str(),
+            Self::ScriptError { .. } => "error",
+        }
+    }
+
+    /// Returns the script identity associated with this event.
+    pub fn script_id(&self) -> &ScriptId {
+        match self {
+            Self::ScriptEmitted { script, .. } | Self::ScriptError { script, .. } => script,
+        }
+    }
+}
+
 /// Marker trait for event types that can be subscribed to directly via
 /// [`EventBus::subscribe_to`].
 ///

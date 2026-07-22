@@ -33,6 +33,7 @@ use crate::data::data_cache::VkDescType;
 use crate::vulkan::vk_types::*;
 use ash::vk::DescriptorSetLayoutCreateFlags;
 use ash::{vk, Device};
+use std::collections::HashMap;
 use std::fmt;
 use std::vec;
 use vk_mem::Allocator;
@@ -89,6 +90,8 @@ pub(crate) enum DescriptorAllocError {
     ResetRejected(String),
     /// A Vulkan pool reset operation failed.
     ResetFailed(String),
+    /// Total descriptor budget exhausted; the ceiling is encoded in the message.
+    BudgetExhausted { current: u32, ceiling: u32 },
 }
 
 impl fmt::Display for DescriptorAllocError {
@@ -100,6 +103,10 @@ impl fmt::Display for DescriptorAllocError {
             Self::PoolCreationFailed(msg) => write!(f, "descriptor pool creation failed: {msg}"),
             Self::ResetRejected(msg) => write!(f, "descriptor reset rejected: {msg}"),
             Self::ResetFailed(msg) => write!(f, "descriptor reset failed: {msg}"),
+            Self::BudgetExhausted { current, ceiling } => write!(
+                f,
+                "descriptor budget exhausted: {current}/{ceiling} total sets across all pools"
+            ),
         }
     }
 }
@@ -158,11 +165,7 @@ trait VkDescriptorAdapter {
         layouts: &[vk::DescriptorSetLayout],
     ) -> Result<Vec<vk::DescriptorSet>, vk::Result>;
 
-    fn reset_pool(
-        &self,
-        device: &ash::Device,
-        pool: vk::DescriptorPool,
-    ) -> Result<(), vk::Result>;
+    fn reset_pool(&self, device: &ash::Device, pool: vk::DescriptorPool) -> Result<(), vk::Result>;
 
     fn destroy_pool(&self, device: &ash::Device, pool: vk::DescriptorPool);
 }
@@ -186,7 +189,7 @@ impl VkDescriptorAdapter for DefaultVulkanAdapter {
             .collect();
 
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .flags(vk::DescriptorPoolCreateFlags::default())
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
             .max_sets(set_count)
             .pool_sizes(&pool_sizes);
 
@@ -209,14 +212,8 @@ impl VkDescriptorAdapter for DefaultVulkanAdapter {
         unsafe { device.allocate_descriptor_sets(&alloc_info) }
     }
 
-    fn reset_pool(
-        &self,
-        device: &ash::Device,
-        pool: vk::DescriptorPool,
-    ) -> Result<(), vk::Result> {
-        unsafe {
-            device.reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
-        }
+    fn reset_pool(&self, device: &ash::Device, pool: vk::DescriptorPool) -> Result<(), vk::Result> {
+        unsafe { device.reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty()) }
     }
 
     fn destroy_pool(&self, device: &ash::Device, pool: vk::DescriptorPool) {
@@ -529,6 +526,12 @@ pub struct VkDynamicDescriptorAllocator {
     stats: DescriptorAllocatorStats,
     /// Maximum sets per pool; growth is clamped to this cap.
     max_sets_cap: u32,
+    /// Hard device-compatible total budget across all pools. Pre-commit check
+    /// rejects allocation before pool creation when the sum of existing pool
+    /// capacities plus the new pool's planned capacity would exceed this ceiling.
+    total_set_budget: u32,
+    /// Descriptor-set owner pool used to free individual sets through their creating pool.
+    descriptor_set_owners: HashMap<vk::DescriptorSet, vk::DescriptorPool>,
     /// Private fault-injection adapter. Production uses `DefaultVulkanAdapter`.
     adapter: Box<dyn VkDescriptorAdapter>,
 }
@@ -544,6 +547,8 @@ impl std::fmt::Debug for VkDynamicDescriptorAllocator {
             .field("last_reset_epoch", &self.last_reset_epoch)
             .field("stats", &self.stats)
             .field("max_sets_cap", &self.max_sets_cap)
+            .field("total_set_budget", &self.total_set_budget)
+            .field("tracked_descriptor_sets", &self.descriptor_set_owners.len())
             .field("adapter", &"<opaque>")
             .finish()
     }
@@ -560,6 +565,8 @@ impl Default for VkDynamicDescriptorAllocator {
             last_reset_epoch: 0,
             stats: DescriptorAllocatorStats::default(),
             max_sets_cap: 4092,
+            total_set_budget: 4092,
+            descriptor_set_owners: HashMap::new(),
             adapter: Box::new(DefaultVulkanAdapter),
         }
     }
@@ -574,7 +581,22 @@ impl VkDynamicDescriptorAllocator {
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
     ) -> Result<VkDynamicDescriptorAllocator, String> {
-        Self::new_with_adapter(device, max_sets, pool_ratios, Box::new(DefaultVulkanAdapter))
+        Self::new_with_total_set_budget(device, max_sets, pool_ratios, Self::MAX_SETS_CAP)
+    }
+
+    pub fn new_with_total_set_budget(
+        device: &ash::Device,
+        max_sets: u32,
+        pool_ratios: &[PoolSizeRatio],
+        total_set_budget: u32,
+    ) -> Result<VkDynamicDescriptorAllocator, String> {
+        Self::new_with_adapter(
+            device,
+            max_sets,
+            pool_ratios,
+            Box::new(DefaultVulkanAdapter),
+            total_set_budget,
+        )
     }
 
     /// Internal constructor with injectable adapter for testing.
@@ -583,12 +605,24 @@ impl VkDynamicDescriptorAllocator {
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
         adapter: Box<dyn VkDescriptorAdapter>,
+        total_set_budget: u32,
     ) -> Result<VkDynamicDescriptorAllocator, String> {
         let mut pool = VkDynamicDescriptorAllocator::default();
         pool_ratios.iter().for_each(|r| pool.ratios.push(*r));
         pool.adapter = adapter;
         pool.max_sets_cap = Self::MAX_SETS_CAP;
         pool.sets_per_pool = max_sets.clamp(1, pool.max_sets_cap);
+        pool.total_set_budget =
+            total_set_budget.clamp(pool.sets_per_pool.max(1), Self::MAX_SETS_CAP);
+
+        // Pre-commit budget check for the initial pool.
+        let current_total = pool.total_allocated_sets();
+        if current_total.saturating_add(pool.sets_per_pool) > pool.total_set_budget {
+            return Err(format!(
+                "descriptor budget exhausted: {} + {} > {} total sets",
+                current_total, pool.sets_per_pool, pool.total_set_budget
+            ));
+        }
 
         let handle = pool
             .adapter
@@ -603,6 +637,15 @@ impl VkDynamicDescriptorAllocator {
     /// Set the frame slot identity this allocator belongs to.
     pub fn set_frame_slot_index(&mut self, index: u32) {
         self.frame_slot_index = index;
+    }
+
+    /// Override the total descriptor-set budget ceiling.
+    ///
+    /// Callers should derive this from `VkBufferAndDescriptorLimits`
+    /// (e.g., `max_bound_descriptor_sets` or a fraction thereof).
+    /// The default is `MAX_SETS_CAP` (4092).
+    pub fn set_total_set_budget(&mut self, budget: u32) {
+        self.total_set_budget = budget.clamp(1, Self::MAX_SETS_CAP);
     }
 
     /// Clear and consolidate all pools after an authorized frame-fence completion.
@@ -624,9 +667,7 @@ impl VkDynamicDescriptorAllocator {
         // ── Token validation (before any Vulkan call) ────────────────────
         let (slot_index, epoch) = token.take().ok_or_else(|| {
             self.stats.reset_rejections += 1;
-            DescriptorAllocError::ResetRejected(
-                "completion token already consumed".to_string(),
-            )
+            DescriptorAllocError::ResetRejected("completion token already consumed".to_string())
         })?;
 
         if slot_index != self.frame_slot_index {
@@ -653,9 +694,8 @@ impl VkDynamicDescriptorAllocator {
         }
 
         // ── Collect unique pool handles (defensive dedup) ──────────────
-        let mut reset_handles: Vec<vk::DescriptorPool> = Vec::with_capacity(
-            self.ready_pools.len() + self.full_pools.len(),
-        );
+        let mut reset_handles: Vec<vk::DescriptorPool> =
+            Vec::with_capacity(self.ready_pools.len() + self.full_pools.len());
         for record in self.ready_pools.iter().chain(self.full_pools.iter()) {
             if !reset_handles.contains(&record.handle) {
                 reset_handles.push(record.handle);
@@ -675,12 +715,14 @@ impl VkDynamicDescriptorAllocator {
                     record.state = DescriptorPoolState::Exhausted;
                 }
                 return Err(DescriptorAllocError::ResetFailed(format!(
-                    "vkResetDescriptorPool failed: {:?}", error
+                    "vkResetDescriptorPool failed: {:?}",
+                    error
                 )));
             }
         }
 
         // ── All Vulkan resets succeeded; update state ──────────────────
+        self.descriptor_set_owners.clear();
         for record in self.ready_pools.iter_mut() {
             record.allocated_sets = 0;
             record.state = DescriptorPoolState::Ready;
@@ -724,6 +766,16 @@ impl VkDynamicDescriptorAllocator {
             .sets_per_pool
             .saturating_add(self.sets_per_pool / 2)
             .clamp(1, self.max_sets_cap);
+
+        // Pre-commit budget check: reject before any Vulkan pool creation.
+        let current_total = self.total_allocated_sets();
+        if current_total.saturating_add(next_sets) > self.total_set_budget {
+            return Err(DescriptorAllocError::BudgetExhausted {
+                current: current_total,
+                ceiling: self.total_set_budget,
+            });
+        }
+
         self.sets_per_pool = next_sets;
 
         let handle = self
@@ -736,6 +788,15 @@ impl VkDynamicDescriptorAllocator {
         self.stats.pool_count = (self.ready_pools.len() + self.full_pools.len() + 1) as u32;
         self.stats.pool_growth_events += 1;
         Ok(record)
+    }
+
+    /// Sum the capacity of all currently tracked pools (ready + exhausted).
+    fn total_allocated_sets(&self) -> u32 {
+        self.ready_pools
+            .iter()
+            .chain(self.full_pools.iter())
+            .map(|r| r.capacity_sets)
+            .sum()
     }
 
     /// Allocate a descriptor set from a managed pool.
@@ -868,6 +929,9 @@ impl VkDynamicDescriptorAllocator {
             return Err(DescriptorAllocError::VulkanError(empty_message.to_string()));
         };
 
+        for set in &sets {
+            self.descriptor_set_owners.insert(*set, record.handle);
+        }
         record.allocated_sets += sets.len() as u32;
         self.update_peak_stats(&record);
         self.stats.successful_allocations += 1;
@@ -891,6 +955,59 @@ impl VkDynamicDescriptorAllocator {
         let ratio = record.utilization_ratio();
         if ratio > self.stats.peak_utilization_ratio {
             self.stats.peak_utilization_ratio = ratio;
+        }
+    }
+
+    /// Free a single descriptor set back to its creating pool.
+    ///
+    /// Pools are created with `FREE_DESCRIPTOR_SET_BIT` so individual descriptor
+    /// sets can be returned before the pool is reset. Vulkan requires freeing a
+    /// descriptor set against the exact pool that allocated it, so the allocator
+    /// tracks set→pool ownership at allocation time and never probes unrelated pools.
+    pub fn free_descriptor_set(&mut self, device: &ash::Device, set: vk::DescriptorSet) {
+        if set == vk::DescriptorSet::null() {
+            return;
+        }
+        let Some(owner_pool) = self.descriptor_set_owners.remove(&set) else {
+            log::warn!("descriptor set {:?} was not tracked by this allocator", set);
+            return;
+        };
+
+        let sets = [set];
+        let free_result = unsafe { device.free_descriptor_sets(owner_pool, &sets) };
+        if let Err(err) = free_result {
+            self.descriptor_set_owners.insert(set, owner_pool);
+            log::warn!(
+                "failed to free descriptor set {:?} from pool {:?}: {:?}",
+                set,
+                owner_pool,
+                err
+            );
+            return;
+        }
+
+        if let Some(record) = self
+            .ready_pools
+            .iter_mut()
+            .find(|record| record.handle == owner_pool)
+        {
+            record.allocated_sets = record.allocated_sets.saturating_sub(1);
+            return;
+        }
+
+        if let Some(index) = self
+            .full_pools
+            .iter()
+            .position(|record| record.handle == owner_pool)
+        {
+            let mut record = self.full_pools.remove(index);
+            record.allocated_sets = record.allocated_sets.saturating_sub(1);
+            if record.allocated_sets < record.capacity_sets {
+                record.state = DescriptorPoolState::Ready;
+                self.ready_pools.push(record);
+            } else {
+                self.full_pools.push(record);
+            }
         }
     }
 
@@ -924,6 +1041,7 @@ impl VkDynamicDescriptorAllocator {
         }
         self.ready_pools.clear();
         self.full_pools.clear();
+        self.descriptor_set_owners.clear();
         self.stats.pool_count = 0;
     }
 }
@@ -1145,10 +1263,7 @@ mod tests {
     }
 
     fn make_ratios() -> [PoolSizeRatio; 1] {
-        [PoolSizeRatio::new(
-            vk::DescriptorType::UNIFORM_BUFFER,
-            1.0,
-        )]
+        [PoolSizeRatio::new(vk::DescriptorType::UNIFORM_BUFFER, 1.0)]
     }
 
     fn make_token(slot: u32, epoch: u64) -> CompletedFrameSlot {
@@ -1175,6 +1290,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1212,6 +1328,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1228,6 +1345,40 @@ mod tests {
             assert_eq!(create_capacity_log.borrow().as_slice(), &[10, 15]);
             // The exhausted pool moved to full_pools.
             assert_eq!(alloc.pool_count(), 2);
+        }
+    }
+
+    #[test]
+    fn budget_exhausted_rejects_growth_before_pool_creation() {
+        unsafe {
+            let adapter = FaultInjectAdapter::new();
+            let create_capacity_log = adapter.create_capacity_log.clone();
+            let fake_dev = fake_device();
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
+            adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
+
+            let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
+                &fake_dev,
+                10,
+                &make_ratios(),
+                Box::new(adapter),
+                10,
+            )
+            .expect("allocator creation");
+            alloc.set_frame_slot_index(0);
+
+            let err = alloc
+                .allocate(&fake_dev, &[])
+                .expect_err("budget exhausted");
+            assert!(matches!(
+                err,
+                DescriptorAllocError::BudgetExhausted {
+                    current: 10,
+                    ceiling: 10
+                }
+            ));
+            assert_eq!(create_capacity_log.borrow().as_slice(), &[10]);
+            assert_eq!(alloc.pool_count(), 1);
         }
     }
 
@@ -1248,6 +1399,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1277,6 +1429,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1302,6 +1455,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             );
             assert!(result.is_err());
         }
@@ -1322,6 +1476,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             let result = alloc.allocate(&fake_dev, &[]);
@@ -1333,7 +1488,10 @@ mod tests {
             assert_eq!(alloc.pool_count(), 1);
 
             alloc.destroy_pools(&fake_dev);
-            assert_eq!(destroy_log.borrow().as_slice(), &[vk::DescriptorPool::from_raw(1)]);
+            assert_eq!(
+                destroy_log.borrow().as_slice(),
+                &[vk::DescriptorPool::from_raw(1)]
+            );
         }
     }
 
@@ -1352,6 +1510,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1361,7 +1520,10 @@ mod tests {
             token.take(); // consumed
 
             let result = alloc.clear_pools(&fake_dev, &mut token, 1);
-            assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+            assert!(matches!(
+                result,
+                Err(DescriptorAllocError::ResetRejected(_))
+            ));
             assert_eq!(alloc.stats_snapshot().reset_rejections, 1);
         }
     }
@@ -1380,6 +1542,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1393,7 +1556,10 @@ mod tests {
 
             // Second reset with same already-consumed token.
             let result = alloc.clear_pools(&fake_dev, &mut token1, 1);
-            assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+            assert!(matches!(
+                result,
+                Err(DescriptorAllocError::ResetRejected(_))
+            ));
             assert_eq!(alloc.stats_snapshot().reset_rejections, 1);
         }
     }
@@ -1412,13 +1578,17 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(2);
 
             let mut token = make_token(0, 1); // slot 0, but allocator is slot 2
             let result = alloc.clear_pools(&fake_dev, &mut token, 1);
-            assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+            assert!(matches!(
+                result,
+                Err(DescriptorAllocError::ResetRejected(_))
+            ));
         }
     }
 
@@ -1437,13 +1607,17 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
 
             let mut token = make_token(0, 4);
             let result = alloc.clear_pools(&fake_dev, &mut token, 5);
-            assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+            assert!(matches!(
+                result,
+                Err(DescriptorAllocError::ResetRejected(_))
+            ));
             assert!(reset_log.borrow().is_empty());
         }
     }
@@ -1462,6 +1636,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1475,7 +1650,10 @@ mod tests {
             // Try reset with epoch 3 (stale).
             let mut token2 = make_token(0, 3);
             let result = alloc.clear_pools(&fake_dev, &mut token2, 3);
-            assert!(matches!(result, Err(DescriptorAllocError::ResetRejected(_))));
+            assert!(matches!(
+                result,
+                Err(DescriptorAllocError::ResetRejected(_))
+            ));
         }
     }
 
@@ -1504,6 +1682,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1515,12 +1694,17 @@ mod tests {
             assert!(token.is_consumed());
             assert_eq!(alloc.stats_snapshot().reset_count, 0);
             assert_eq!(alloc.ready_pool_count(), 0);
-            assert_eq!(reset_log.borrow().as_slice(), &[
-                vk::DescriptorPool::from_raw(2),
-                vk::DescriptorPool::from_raw(1),
-            ]);
+            assert_eq!(
+                reset_log.borrow().as_slice(),
+                &[
+                    vk::DescriptorPool::from_raw(2),
+                    vk::DescriptorPool::from_raw(1),
+                ]
+            );
 
-            let _set = alloc.allocate(&fake_dev, &[]).expect("replacement allocation");
+            let _set = alloc
+                .allocate(&fake_dev, &[])
+                .expect("replacement allocation");
             assert_eq!(alloc.pool_count(), 3);
         }
     }
@@ -1545,6 +1729,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1554,17 +1739,18 @@ mod tests {
 
             // Reset with valid token.
             let mut token = make_token(0, 1);
-            alloc
-                .clear_pools(&fake_dev, &mut token, 1)
-                .expect("reset");
+            alloc.clear_pools(&fake_dev, &mut token, 1).expect("reset");
 
             assert_eq!(alloc.stats_snapshot().reset_count, 1);
             let mut reset_handles = reset_log.borrow().clone();
             reset_handles.sort_by_key(|pool| pool.as_raw());
-            assert_eq!(reset_handles, vec![
-                vk::DescriptorPool::from_raw(1),
-                vk::DescriptorPool::from_raw(2),
-            ]);
+            assert_eq!(
+                reset_handles,
+                vec![
+                    vk::DescriptorPool::from_raw(1),
+                    vk::DescriptorPool::from_raw(2),
+                ]
+            );
             // After reset, exhausted pools moved to ready.
             assert_eq!(alloc.ready_pool_count(), 2);
 
@@ -1575,7 +1761,11 @@ mod tests {
             let mut sorted = logged.clone();
             sorted.sort_by_key(|p| p.as_raw());
             sorted.dedup();
-            assert_eq!(logged.len(), sorted.len(), "each pool destroyed exactly once");
+            assert_eq!(
+                logged.len(),
+                sorted.len(),
+                "each pool destroyed exactly once"
+            );
         }
     }
 
@@ -1588,6 +1778,7 @@ mod tests {
             let create_capacity_log = adapter.create_capacity_log.clone();
             let fake_dev = fake_device();
             // Initial request exceeds the cap; both initial and growth pools are clamped.
+            // Use a small initial pool so the growth chain stays within the default budget.
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
             adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(2))); // growth pool: clamped to cap
@@ -1595,11 +1786,14 @@ mod tests {
 
             let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
                 &fake_dev,
-                5000,
+                10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
+            // Override budget to fit the expected test capacities: initial 10 + growth 15 = 25.
+            alloc.set_total_set_budget(4092);
             alloc.set_frame_slot_index(0);
 
             let set = alloc.allocate(&fake_dev, &[]).expect("allocate");
@@ -1609,7 +1803,9 @@ mod tests {
             let snap = alloc.stats_snapshot();
             assert_eq!(snap.pool_growth_events, 1);
             assert_eq!(snap.pools_created, 2);
-            assert_eq!(create_capacity_log.borrow().as_slice(), &[4092, 4092]);
+            // Initial pool clamped to cap (10 clamped to 4092 = 10).
+            // Growth from 10 -> 15.
+            assert_eq!(create_capacity_log.borrow().as_slice(), &[10, 15]);
         }
     }
 
@@ -1632,6 +1828,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1684,6 +1881,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
 
@@ -1712,6 +1910,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);

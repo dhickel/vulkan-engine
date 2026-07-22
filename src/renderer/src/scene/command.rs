@@ -3,7 +3,8 @@
 //! Each command stores enough state to reverse its effect. Commands are pushed
 //! onto a `CommandHistory` stack of bounded depth.
 
-use crate::api::{SceneAssetReference, SceneError, SceneFragment, SceneFragmentNodeId};
+use crate::api::{CommandError, SceneError};
+use crate::api::{SceneAssetReference, SceneFragment, SceneFragmentNodeId};
 use crate::data::handles::MeshHandle;
 use crate::scene::scene_world::{
     RestorableSceneSubtree, SceneNode, SceneNodeId, SceneNodeRefError, SceneWorld,
@@ -54,6 +55,10 @@ impl CommandHistory {
 
     /// Execute a command and push it onto the undo stack.
     /// Clears the redo stack (new action invalidates redo history).
+    ///
+    /// When `max_depth` is zero (zero-capacity history): executes the
+    /// command, clears redo, and stores nothing. `undo` will report
+    /// `NothingToUndo`.
     pub fn execute(
         &mut self,
         mut cmd: Box<dyn Command>,
@@ -66,7 +71,11 @@ impl CommandHistory {
             created_node: cmd.created_node(),
         };
         self.redo_stack.clear();
-        if self.undo_stack.len() >= self.max_depth {
+        if self.max_depth == 0 {
+            // Zero-capacity: discard the command after execution.
+            return Ok(result);
+        }
+        while self.undo_stack.len() >= self.max_depth {
             self.undo_stack.remove(0);
         }
         self.undo_stack.push(cmd);
@@ -74,11 +83,14 @@ impl CommandHistory {
     }
 
     /// Undo the most recent command.
+    ///
+    /// Returns `CommandError::NothingToUndo` when the undo stack is
+    /// empty (including zero-capacity histories).
     pub fn undo(&mut self, world: &mut SceneWorld) -> Result<CommandResult, SceneError> {
         let mut cmd = self
             .undo_stack
             .pop()
-            .ok_or_else(|| SceneError::MergeFailed("nothing to undo".into()))?;
+            .ok_or_else(|| SceneError::CommandError(CommandError::NothingToUndo))?;
         cmd.undo(world)?;
         let result = CommandResult {
             description: cmd.description().to_string(),
@@ -90,21 +102,26 @@ impl CommandHistory {
     }
 
     /// Redo the most recently undone command.
+    ///
+    /// Returns `CommandError::NothingToRedo` when the redo stack is
+    /// empty.
     pub fn redo(&mut self, world: &mut SceneWorld) -> Result<CommandResult, SceneError> {
         let mut cmd = self
             .redo_stack
             .pop()
-            .ok_or_else(|| SceneError::MergeFailed("nothing to redo".into()))?;
+            .ok_or_else(|| SceneError::CommandError(CommandError::NothingToRedo))?;
         cmd.execute(world)?;
         let result = CommandResult {
             description: cmd.description().to_string(),
             node_remap: cmd.node_remap(),
             created_node: cmd.created_node(),
         };
-        if self.undo_stack.len() >= self.max_depth {
-            self.undo_stack.remove(0);
+        if self.max_depth > 0 {
+            while self.undo_stack.len() >= self.max_depth {
+                self.undo_stack.remove(0);
+            }
+            self.undo_stack.push(cmd);
         }
-        self.undo_stack.push(cmd);
         Ok(result)
     }
 
@@ -140,21 +157,32 @@ impl SetTransformCommand {
 
 impl Command for SetTransformCommand {
     fn execute(&mut self, world: &mut SceneWorld) -> Result<(), SceneError> {
+        if !self.new_transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        world
+            .validate_node_ref(self.node)
+            .map_err(|err| map_node_ref_error(self.node, err))?;
         let node_ref = world
             .get_node_mut(self.node)
             .ok_or(SceneError::InvalidNode(self.node))?;
         self.old_transform = node_ref.local_transform;
         node_ref.local_transform = self.new_transform;
-        node_ref.dirty = true;
+        world.invalidate_derived_state(self.node);
         Ok(())
     }
 
     fn undo(&mut self, world: &mut SceneWorld) -> Result<(), SceneError> {
+        world
+            .validate_node_ref(self.node)
+            .map_err(|err| map_node_ref_error(self.node, err))?;
         let node_ref = world
             .get_node_mut(self.node)
             .ok_or(SceneError::InvalidNode(self.node))?;
         node_ref.local_transform = self.old_transform;
-        node_ref.dirty = true;
+        world.invalidate_derived_state(self.node);
         Ok(())
     }
 
@@ -184,6 +212,16 @@ impl AddNodeCommand {
 
 impl Command for AddNodeCommand {
     fn execute(&mut self, world: &mut SceneWorld) -> Result<(), SceneError> {
+        if !self.transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
+        if let Some(parent) = self.parent {
+            world
+                .validate_node_ref(parent)
+                .map_err(|err| map_parent_ref_error(parent, err))?;
+        }
         let id = world.add_node_with_parts(self.parent, self.transform, self.meshes.clone());
         self.created_node = Some(id);
         Ok(())
@@ -238,6 +276,11 @@ impl PlaceAssetCommand {
 
 impl Command for PlaceAssetCommand {
     fn execute(&mut self, world: &mut SceneWorld) -> Result<(), SceneError> {
+        if !self.transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
         if let Some(parent) = self.parent {
             world
                 .validate_node_ref(parent)
@@ -292,6 +335,11 @@ fn mount_fragment_for_asset(
     tags: &[String],
     stable_id_base: &str,
 ) -> Result<SceneNodeId, SceneError> {
+    if !placement_transform.is_finite() {
+        return Err(SceneError::InvalidMutation(
+            "transform must contain only finite values".to_string(),
+        ));
+    }
     let (nodes, root, skybox) = fragment.into_parts();
     if skybox.is_some() {
         return Err(SceneError::MergeFailed(
@@ -329,6 +377,7 @@ fn mount_fragment_for_asset(
             parent: scene_parent,
             local_transform: transform,
             meshes: source.meshes.clone(),
+            mesh_bounds: source.mesh_bounds.clone(),
             ..SceneNode::default()
         };
         node.stable_id = Some(if is_root {
@@ -471,6 +520,13 @@ fn map_parent_ref_error(parent: SceneNodeId, err: SceneNodeRefError) -> SceneErr
     }
 }
 
+fn map_node_ref_error(node: SceneNodeId, err: SceneNodeRefError) -> SceneError {
+    match err {
+        SceneNodeRefError::GenerationMismatch => SceneError::StaleNode(node),
+        SceneNodeRefError::OutOfBounds | SceneNodeRefError::Vacant => SceneError::InvalidNode(node),
+    }
+}
+
 impl RemoveNodeCommand {
     pub fn new(node: SceneNodeId) -> Self {
         Self {
@@ -524,8 +580,9 @@ impl Command for RemoveNodeCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandHistory, PlaceAssetCommand, RemoveNodeCommand, SetTransformCommand};
+    use super::{mount_fragment_for_asset, CommandHistory, PlaceAssetCommand, RemoveNodeCommand, SetTransformCommand};
     use crate::api::scene::{SceneAssetReference, SceneFragment};
+    use crate::api::{CommandError, SceneError};
     use crate::data::handles::MeshHandle;
     use crate::scene::scene_world::{SceneNode, SceneWorld};
     use glam::{Mat4, Vec3};
@@ -691,6 +748,136 @@ mod tests {
                 .map(|asset| asset.id.as_str()),
             Some("editor_sample.wall.stone_2m")
         );
+    }
+
+    #[test]
+    fn zero_capacity_execute_succeeds_and_undo_reports_empty() {
+        let mut world = SceneWorld::new();
+        let node = world.add_node(None, SceneNode::default());
+        let mut history = CommandHistory::new(0);
+
+        // Execute succeeds.
+        let result = history
+            .execute(
+                Box::new(SetTransformCommand::new(
+                    node,
+                    Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+                )),
+                &mut world,
+            )
+            .unwrap();
+        assert_eq!(result.description, "set_transform");
+        assert_eq!(
+            world.get_node(node).unwrap().local_transform,
+            Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0))
+        );
+
+        // Can't undo — stack is empty.
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+        let err = history.undo(&mut world).unwrap_err();
+        assert!(matches!(err, SceneError::CommandError(CommandError::NothingToUndo)));
+    }
+
+    #[test]
+    fn zero_capacity_redo_after_undo_reports_empty() {
+        let mut world = SceneWorld::new();
+        let mut history = CommandHistory::new(0);
+
+        // Redo on empty redo stack.
+        let err = history.redo(&mut world).unwrap_err();
+        assert!(matches!(err, SceneError::CommandError(CommandError::NothingToRedo)));
+    }
+
+    #[test]
+    fn configured_capacity_undo_redo_works() {
+        let mut world = SceneWorld::new();
+        let node = world.add_node(None, SceneNode::default());
+        let mut history = CommandHistory::new(4);
+
+        history
+            .execute(
+                Box::new(SetTransformCommand::new(
+                    node,
+                    Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                )),
+                &mut world,
+            )
+            .unwrap();
+        history
+            .execute(
+                Box::new(SetTransformCommand::new(
+                    node,
+                    Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+                )),
+                &mut world,
+            )
+            .unwrap();
+
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+
+        history.undo(&mut world).unwrap();
+        assert!(history.can_redo());
+        assert_eq!(
+            world.get_node(node).unwrap().local_transform,
+            Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0))
+        );
+
+        history.redo(&mut world).unwrap();
+        assert!(!history.can_redo());
+        assert_eq!(
+            world.get_node(node).unwrap().local_transform,
+            Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn fragment_placement_preserves_mesh_bounds_field() {
+        use crate::api::scene::{MeshBoundsEntry, SceneBounds, BoundsUnknownReason};
+
+        let mut world = SceneWorld::new();
+        let root = world.add_node(None, SceneNode::default());
+
+        let bounds = SceneBounds::Known(
+            crate::data::camera::Aabb::from_min_max(
+                Vec3::new(-2.0, -2.0, -2.0),
+                Vec3::new(2.0, 2.0, 2.0),
+            ),
+        );
+        let entry = MeshBoundsEntry {
+            mesh: MeshHandle::new(7, 0),
+            bounds,
+        };
+        let mut fragment = SceneFragment::new();
+        fragment
+            .add_node_with_bounds(
+                None,
+                Mat4::IDENTITY,
+                vec![MeshHandle::new(7, 0)],
+                vec![entry],
+            )
+            .expect("fragment node");
+
+        let placed = mount_fragment_for_asset(
+            &mut world,
+            Some(root),
+            Mat4::IDENTITY,
+            fragment,
+            SceneAssetReference::new("test.asset", None::<std::path::PathBuf>),
+            "Bounds Test",
+            &[],
+            "node.bounds_test",
+        )
+        .unwrap();
+
+        let placed_node = world.get_node(placed).unwrap();
+        assert_eq!(placed_node.mesh_bounds.len(), 1);
+        assert_eq!(placed_node.mesh_bounds[0].mesh, MeshHandle::new(7, 0));
+        assert!(matches!(
+            placed_node.mesh_bounds[0].bounds,
+            SceneBounds::Known(_)
+        ));
     }
 
     #[test]

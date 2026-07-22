@@ -24,6 +24,33 @@
 //! - Generation wrap must reject reuse before collision.
 
 use crate::data::gpu_data::VkMeshBuffers;
+use crate::vulkan::vk_types::{VkImageAlloc, VkSubAlloc};
+use ash::vk;
+
+/// Descriptor allocations that must be released with a retired payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DescriptorReleaseData {
+    /// Image/sampler descriptor sets to return to the descriptor allocator.
+    pub image_descriptor_sets: Vec<vk::DescriptorSet>,
+}
+
+impl DescriptorReleaseData {
+    /// Construct release data for one image descriptor set.
+    pub fn image_descriptor(set: vk::DescriptorSet) -> Self {
+        if set == vk::DescriptorSet::null() {
+            Self::default()
+        } else {
+            Self {
+                image_descriptor_sets: vec![set],
+            }
+        }
+    }
+
+    /// True when no descriptor allocator release is required.
+    pub fn is_empty(&self) -> bool {
+        self.image_descriptor_sets.is_empty()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FrameSerial
@@ -74,7 +101,10 @@ impl std::fmt::Display for FrameSerial {
 /// auditing can verify that each class is reaped before dependent phases proceed.
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "remaining classes are contracts for dependent sprint phases")
+    allow(
+        dead_code,
+        reason = "remaining classes are contracts for dependent sprint phases"
+    )
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetirementClass {
@@ -90,6 +120,10 @@ pub enum RetirementClass {
     InstanceRecord,
     /// Mesh geometry payload (VkMeshBuffers + suballocations).
     MeshGeometry,
+    /// Material metadata (SSBO suballocation + descriptor set).
+    MaterialMeta,
+    /// Texture image, view, and sampler.
+    TextureImage,
 }
 
 impl std::fmt::Display for RetirementClass {
@@ -101,6 +135,8 @@ impl std::fmt::Display for RetirementClass {
             Self::LodChainReference => write!(f, "LodChainReference"),
             Self::InstanceRecord => write!(f, "InstanceRecord"),
             Self::MeshGeometry => write!(f, "MeshGeometry"),
+            Self::MaterialMeta => write!(f, "MaterialMeta"),
+            Self::TextureImage => write!(f, "TextureImage"),
         }
     }
 }
@@ -198,7 +234,10 @@ impl<T> GpuRetirementQueue<T> {
     /// Number of pending records for a specific retirement class.
     #[cfg_attr(
         not(test),
-        allow(dead_code, reason = "lifecycle assertion API is consumed by dependent stores")
+        allow(
+            dead_code,
+            reason = "lifecycle assertion API is consumed by dependent stores"
+        )
     )]
     pub fn pending_by_class(&self, class: RetirementClass) -> usize {
         self.records.iter().filter(|r| r.class == class).count()
@@ -237,6 +276,43 @@ pub struct MeshRetiredPayload {
     pub slot: u32,
     /// Complete copied GPU draw metadata, including both suballocations.
     pub buffers: VkMeshBuffers,
+}
+
+/// Payload held in the retirement queue for a retired material.
+///
+/// Contains the SSBO suballocation and descriptor set that must be
+/// released after GPU completion, plus the cache slot to release for reuse.
+/// Texture ownership is NOT cascaded — shared/default textures survive
+/// unrelated material unload.
+#[derive(Debug, Clone)]
+pub struct MaterialRetiredPayload {
+    /// The cache slot to release after reaping.
+    pub slot: u32,
+    /// Generation invalidated at retirement time.
+    pub generation: u32,
+    /// Suballocation in the material metadata SSBO.
+    pub meta_alloc: VkSubAlloc,
+    /// Descriptor allocator release data owned by this material payload.
+    pub descriptor_release: DescriptorReleaseData,
+}
+
+/// Payload held in the retirement queue for a retired texture.
+///
+/// Contains the Vulkan image, image view, and sampler that must be
+/// destroyed after GPU completion, plus the cache slot to release for reuse.
+#[derive(Debug)]
+pub struct TextureRetiredPayload {
+    /// The cache slot to release after reaping.
+    pub slot: u32,
+    /// Generation invalidated at retirement time.
+    pub generation: u32,
+    /// Image allocation and view to destroy on reap.
+    pub alloc: VkImageAlloc,
+    /// Sampler to destroy on reap.
+    pub sampler: vk::Sampler,
+    /// Descriptor allocator release data owned by this texture payload.
+    /// Textures currently own no descriptor sets; material payloads own sampler descriptors.
+    pub descriptor_release: DescriptorReleaseData,
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +501,11 @@ mod tests {
         // Enqueue records that must not be reaped before their referencing serials.
         q.enqueue(RetirementClass::MeshGeometry, FrameSerial(1), "mesh-A1");
         q.enqueue(RetirementClass::BoundsEntry, FrameSerial(2), "bounds-B2");
-        q.enqueue(RetirementClass::ColliderRecipe, FrameSerial(3), "collider-C3");
+        q.enqueue(
+            RetirementClass::ColliderRecipe,
+            FrameSerial(3),
+            "collider-C3",
+        );
         q.enqueue(RetirementClass::BvhLeaf, FrameSerial(4), "bvh-A4");
         q.enqueue(RetirementClass::LodChainReference, FrameSerial(5), "lod-B5");
 
@@ -488,10 +568,17 @@ mod tests {
             },
         );
 
-        assert_ne!(old_generation, live_generation, "old handle must be stale immediately");
+        assert_ne!(
+            old_generation, live_generation,
+            "old handle must be stale immediately"
+        );
         assert!(free_slots.is_empty(), "slot reused before its fence");
         assert!(q.reap_through(FrameSerial(2)).unwrap().is_empty());
-        assert_eq!(drops.load(Ordering::SeqCst), 0, "payload freed before its fence");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "payload freed before its fence"
+        );
         assert!(free_slots.is_empty(), "slot reused before its fence");
 
         let retired = q.reap_through(FrameSerial(4)).unwrap();
@@ -502,14 +589,22 @@ mod tests {
         assert_eq!(free_slots, vec![3]);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(q.reap_through(FrameSerial(4)).unwrap().is_empty());
-        assert_eq!(drops.load(Ordering::SeqCst), 1, "duplicate completion double-dropped");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "duplicate completion double-dropped"
+        );
     }
 
     #[test]
     fn out_of_order_slot_observation_uses_monotonic_completion_high_water() {
         let mut q = GpuRetirementQueue::new();
         q.enqueue(RetirementClass::BoundsEntry, FrameSerial(1), "slot-0-old");
-        q.enqueue(RetirementClass::InstanceRecord, FrameSerial(2), "slot-1-new");
+        q.enqueue(
+            RetirementClass::InstanceRecord,
+            FrameSerial(2),
+            "slot-1-new",
+        );
         q.enqueue(RetirementClass::MeshGeometry, FrameSerial(3), "slot-0-next");
 
         // Slot 1 is observed first. Because submissions share one ordered graphics queue,
@@ -518,7 +613,10 @@ mod tests {
         completion_high_water = completion_high_water.max(FrameSerial(2));
         let reaped = q.reap_through(completion_high_water).unwrap();
         assert_eq!(
-            reaped.iter().map(|record| record.payload).collect::<Vec<_>>(),
+            reaped
+                .iter()
+                .map(|record| record.payload)
+                .collect::<Vec<_>>(),
             vec!["slot-0-old", "slot-1-new"]
         );
         assert_eq!(q.pending_count(), 1);
@@ -556,6 +654,8 @@ mod tests {
             RetirementClass::LodChainReference,
             RetirementClass::InstanceRecord,
             RetirementClass::MeshGeometry,
+            RetirementClass::MaterialMeta,
+            RetirementClass::TextureImage,
         ];
 
         let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
@@ -563,9 +663,9 @@ mod tests {
             q.enqueue(cls, FrameSerial(i as u64 + 1), i as u32);
         }
 
-        assert_eq!(q.pending_count(), 6);
-        let reaped = q.reap_through(FrameSerial(6)).unwrap();
-        assert_eq!(reaped.len(), 6);
+        assert_eq!(q.pending_count(), 8);
+        let reaped = q.reap_through(FrameSerial(8)).unwrap();
+        assert_eq!(reaped.len(), 8);
         for (i, rec) in reaped.iter().enumerate() {
             assert_eq!(rec.class, classes[i]);
             assert_eq!(rec.payload, i as u32);

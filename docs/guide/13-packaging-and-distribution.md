@@ -10,6 +10,20 @@ For the API reference, see [Packaging CLI](../api/10-packaging-cli.md). The tool
 
 `engine_pack` is a standalone CLI binary in the engine workspace. It uses the renderer crate's validators (project, package, scene) for schema enforcement but does not start a GPU runtime, open a window, or depend on Vulkan. All commands are pure CPU operations — filesystem reads/writes, JSON/TOML parsing, schema validation, and directory scanning.
 
+### Transaction Semantics (Phase 10)
+
+Mutating commands (`new-app`, `new-project`, `new-package`, `add-asset`, `pack`) use fail-closed transactional staging:
+
+- **Preflight**: All inputs are validated before any output is written.
+- **Staging**: Content is built in a temporary staging directory sibling to the target, then atomically renamed into place.
+- **Existing target refusal**: Operations fail if the target already exists (no silent overwrite).
+- **Rollback**: `add-asset` backs up the manifest before mutation and restores it on validation failure. If rollback fails, recovery paths are reported.
+- **Symlink safety**: `scan-assets` uses `symlink_metadata` to detect symlinks and silently skips them. Filesystem cycles are detected via visited-set tracking.
+
+### CLI Schema
+
+Options are parsed through a shared declarative schema in `launch_shared`. The root launcher and `engine_pack` both reject duplicate singleton options (e.g., `--project` twice). Repeatable options (`--tag`) are explicitly declared and accumulated.
+
 ```
 engine_pack
 ├── Scaffolding

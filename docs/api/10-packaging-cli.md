@@ -84,7 +84,24 @@ cargo run -p engine_pack -- pack apps/dungeon_dogfood/engine.project.toml --out 
 
 The pack command writes a folder tree plus `PACK_REPORT.json`. It does not create a binary archive, thumbnail cache, import database, or editor placement transaction. Runtime launch is handled by the root `engine` binary after project/package/scene validation.
 
-## 4. Durable Identity Rules
+## 4. Fail-Closed Transaction Semantics (Phase 10)
+
+All mutating `engine_pack` commands (`new-app`, `new-project`, `new-package`, `add-asset`, `pack`) now use transactional staging:
+
+- **Preflight**: All inputs are validated before any output is written.
+- **Staging**: Content is built in a sibling staging directory (`.<name>.staging.<pid>.<n>`).
+- **Publication**: The staging directory is atomically renamed to the target path. If the target already exists, the operation fails with an error (no silent overwrite).
+- **Rollback**: `add-asset` uses a backup/rename sequence for manifest mutation. On validation failure after write, the original manifest is restored from backup. If rollback itself fails, the error includes recovery paths.
+- **Cleanup**: On any failure before publication, the staging directory is removed.
+
+`pack` refuses to overwrite an existing output directory. `new-app` and `new-project` refuse existing target directories.
+
+`scan-assets` uses:
+- `symlink_metadata` to detect and silently skip symlinks (never follows them)
+- Per-entry canonicalization with root containment checks
+- Visited-set tracking to reject filesystem cycles
+
+## 5. Durable Identity Rules
 
 The CLI follows the same durable identity rules as the renderer facade and scene formats:
 
@@ -105,7 +122,7 @@ The CLI follows the same durable identity rules as the renderer facade and scene
 
 `scan-assets` infers basic audio asset records by extension. Audio metadata such as declared format, usage, and default gain may be authored manually under `[assets.metadata.audio]` and is validated by `validate-package`, `validate-project`, `validate-scene`, and `pack` through the renderer validators. Collision and material records are still manually authored; collision metadata is also validated through the same renderer-backed path. Package-level script asset records are deferred in this alpha and `script` is not currently accepted as an asset kind.
 
-## 5. Pack Output Shape
+## 6. Pack Output Shape
 
 Folder packs preserve project-relative paths. A successful pack of the dogfood project contains:
 
@@ -128,7 +145,7 @@ scenes/start.engine.scene.json
 
 The packer rejects absolute paths and parent-traversing paths before copying. Failed repacks remove stale `PACK_REPORT.json` before validation can abort, so an old success report does not survive a failed pack attempt.
 
-## 6. Validation Exit Behavior
+## 7. Validation Exit Behavior
 
 Successful commands print stable `valid[...]`, `created[...]`, `added[...]`, `scan[...]`, or `packed[...]` status lines.
 
@@ -136,7 +153,7 @@ Validation failures exit with code `1` and print stable `error[code]` diagnostic
 
 Usage failures exit with code `2`.
 
-## 7. Deferred Work
+## 8. Deferred Work
 
 The alpha CLI deliberately does not yet provide:
 

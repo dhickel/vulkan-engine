@@ -24,8 +24,7 @@ use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
 use crate::data::mesh_geometry::{
-    compute_local_aabb, validate_triangle_indices, MeshDeformation, MeshGeometryDto,
-    MeshLocalAabb,
+    compute_local_aabb, validate_triangle_indices, MeshDeformation, MeshGeometryDto, MeshLocalAabb,
 };
 use crate::data::thread_pool::BoundedThreadPool;
 use crate::scene::scene_world::{SceneNodeId, SceneWorld};
@@ -335,7 +334,7 @@ impl AssetLoadTracker {
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                panic!("texture_cache lock poisoned during asset pump")
+                return Err(format!("texture_cache lock poisoned during asset pump"));
             }
         }
 
@@ -944,9 +943,7 @@ impl<'a> AssetManager<'a> {
         let retired = mesh_cache
             .retire_mesh(
                 mesh,
-                crate::data::retirement::FrameSerial::new(
-                    self.core.latest_submitted_serial,
-                ),
+                crate::data::retirement::FrameSerial::new(self.core.latest_submitted_serial),
             )
             .map_err(|err| map_cache_err("mesh", mesh.slot, mesh.generation, err))?;
         let geometry = geo_store.take(mesh);
@@ -972,52 +969,108 @@ impl<'a> AssetManager<'a> {
     /// Thread: Main
     /// May Stall: No
     pub fn unload_material(&mut self, material: MaterialHandle) -> Result<(), AssetError> {
-        let mut texture_cache = self
-            .core
-            .data_cache
-            .texture_cache
-            .lock()
-            .map_err(|_| poisoned_lock_err("texture_cache"))?;
+        // Validate the handle exists and is not reserved before retiring.
+        {
+            let texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
 
-        texture_cache
-            .get_material(material)
-            .map_err(|err| map_cache_err("material", material.slot, material.generation, err))?;
+            texture_cache.get_material(material).map_err(|err| {
+                map_cache_err("material", material.slot, material.generation, err)
+            })?;
 
-        if (material.slot as usize) < TextureCache::DEFAULT_MAT_ITER_START {
-            return Err(AssetError::ReservedHandle {
-                resource: "material",
-                slot: material.slot,
-                generation: material.generation,
-            });
+            if (material.slot as usize) < TextureCache::DEFAULT_MAT_ITER_START {
+                return Err(AssetError::ReservedHandle {
+                    resource: "material",
+                    slot: material.slot,
+                    generation: material.generation,
+                });
+            }
         }
 
-        texture_cache.deallocate_materials(vec![material]);
+        // Retire the material: invalidate handle immediately, defer GPU
+        // payload destruction until all referencing frames complete.
+        let retired = {
+            let mut texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+            texture_cache
+                .retire_material(
+                    material,
+                    crate::data::retirement::FrameSerial::new(self.core.latest_submitted_serial),
+                )
+                .map_err(|err| map_cache_err("material", material.slot, material.generation, err))?
+        };
+
+        if let Some((payload, retire_after)) = retired {
+            self.core.material_retirement_queue.enqueue(
+                crate::data::retirement::RetirementClass::MaterialMeta,
+                retire_after,
+                payload,
+            );
+        }
+
         Ok(())
     }
 
     /// Thread: Main
     /// May Stall: No
     pub fn unload_texture(&mut self, texture: TextureHandle) -> Result<(), AssetError> {
-        let mut texture_cache = self
-            .core
-            .data_cache
-            .texture_cache
-            .lock()
-            .map_err(|_| poisoned_lock_err("texture_cache"))?;
+        // Validate the handle exists and is not reserved before retiring.
+        {
+            let texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
 
-        texture_cache
-            .get_texture(texture)
-            .map_err(|err| map_cache_err("texture", texture.slot, texture.generation, err))?;
+            texture_cache
+                .get_texture(texture)
+                .map_err(|err| map_cache_err("texture", texture.slot, texture.generation, err))?;
 
-        if (texture.slot as usize) < TextureCache::DEFAULT_TEX_ITER_START {
-            return Err(AssetError::ReservedHandle {
-                resource: "texture",
-                slot: texture.slot,
-                generation: texture.generation,
-            });
+            if (texture.slot as usize) < TextureCache::DEFAULT_TEX_ITER_START {
+                return Err(AssetError::ReservedHandle {
+                    resource: "texture",
+                    slot: texture.slot,
+                    generation: texture.generation,
+                });
+            }
         }
 
-        texture_cache.deallocate_texture(texture);
+        // Retire the texture: invalidate handle immediately, defer GPU
+        // payload destruction until all referencing frames complete.
+        let retired = {
+            let mut texture_cache = self
+                .core
+                .data_cache
+                .texture_cache
+                .lock()
+                .map_err(|_| poisoned_lock_err("texture_cache"))?;
+
+            texture_cache
+                .retire_texture(
+                    texture,
+                    crate::data::retirement::FrameSerial::new(self.core.latest_submitted_serial),
+                )
+                .map_err(|err| map_cache_err("texture", texture.slot, texture.generation, err))?
+        };
+
+        if let Some((payload, retire_after)) = retired {
+            self.core.texture_retirement_queue.enqueue(
+                crate::data::retirement::RetirementClass::TextureImage,
+                retire_after,
+                payload,
+            );
+        }
+
         Ok(())
     }
 
@@ -1057,10 +1110,7 @@ impl<'a> AssetManager<'a> {
     ///
     /// Thread: Any
     /// May Stall: No
-    pub fn mesh_local_aabb(
-        &self,
-        mesh: MeshHandle,
-    ) -> Result<Option<MeshLocalAabb>, AssetError> {
+    pub fn mesh_local_aabb(&self, mesh: MeshHandle) -> Result<Option<MeshLocalAabb>, AssetError> {
         let mesh_cache = self
             .core
             .data_cache
@@ -1523,7 +1573,11 @@ fn mesh_meta_to_dto(
     validate_triangle_indices(&meta.indices, meta.vertices.len())
         .map_err(|e| format!("invalid indices for {:?}: {e}", mesh_id))?;
 
-    let positions: Vec<[f32; 3]> = meta.vertices.iter().map(|v| v.position.to_array()).collect();
+    let positions: Vec<[f32; 3]> = meta
+        .vertices
+        .iter()
+        .map(|v| v.position.to_array())
+        .collect();
     let local_aabb = (deformation == MeshDeformation::Rigid)
         .then(|| compute_local_aabb(&positions))
         .flatten();
@@ -2065,12 +2119,11 @@ mod tests {
     #[test]
     fn imported_scene_fragment_preserves_exact_mesh_bounds() {
         let mesh = MeshHandle::new(7, 3);
-        let bounds = crate::api::scene::SceneBounds::Known(
-            crate::data::camera::Aabb::from_min_max(
+        let bounds =
+            crate::api::scene::SceneBounds::Known(crate::data::camera::Aabb::from_min_max(
                 glam::Vec3::new(-2.0, -1.0, -3.0),
                 glam::Vec3::new(4.0, 5.0, 6.0),
-            ),
-        );
+            ));
         let mut world = SceneWorld::new();
         let root = world.add_node_with_parts_and_bounds(
             None,

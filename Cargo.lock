@@ -953,6 +953,7 @@ dependencies = [
 name = "engine_pack"
 version = "0.1.0"
 dependencies = [
+ "launch_shared",
  "renderer",
  "serde",
  "serde_json",

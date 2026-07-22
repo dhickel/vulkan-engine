@@ -45,6 +45,7 @@ use ash::vk::{
     PipelineLayoutCreateInfo, Rect2D, RenderingInfo,
 };
 use log::{info, warn};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -55,7 +56,6 @@ use crate::data::data_cache::{LodBias, VkSamplerCache, VkSamplerInfo};
 use crate::vulkan::vk_util;
 // use shaderc::{CompileOptions, Compiler, ShaderKind};
 use std::fs;
-use std::ops::Add;
 use std::path::Path;
 
 pub fn command_buffer_begin_info<'a>(
@@ -98,6 +98,233 @@ pub fn async_texture_upload_wait_stage_mask() -> vk::PipelineStageFlags2 {
 /// Stage used when graphics queue waits before consuming uploaded vertex/index buffers.
 pub fn async_buffer_upload_wait_stage_mask() -> vk::PipelineStageFlags2 {
     vk::PipelineStageFlags2::VERTEX_INPUT
+}
+
+// ---------------------------------------------------------------------------
+// Frame transition overlay (Phase 06)
+// ---------------------------------------------------------------------------
+
+/// Per-frame or one-shot transaction overlay for image state transitions.
+///
+/// Accumulates staged [`PendingTransition`] deltas. Reads committed state
+/// from the authoritative [`ImageStateTracker`] (passed at query time,
+/// not stored). Deltas are committed only after a successful submit;
+/// on recording failure the overlay is discarded.
+#[derive(Debug, Default)]
+pub(crate) struct FrameTransitionOverlay {
+    staging: HashMap<(vk::Image, ImageSubresourceKey), TrackedSubresourceState>,
+    pending: Vec<PendingTransition>,
+}
+
+impl FrameTransitionOverlay {
+    pub(crate) fn new() -> Self {
+        Self {
+            staging: HashMap::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Read the effective state for an image subresource range: committed state
+    /// overlaid with any prior staged delta from this overlay.
+    pub(crate) fn effective_state(
+        &self,
+        tracker: &ImageStateTracker,
+        image: vk::Image,
+        key: &ImageSubresourceKey,
+        _default_aspect: vk::ImageAspectFlags,
+    ) -> Option<TrackedSubresourceState> {
+        let composite_key = (image, key.clone());
+        if let Some(staged) = self.staging.get(&composite_key) {
+            return Some(*staged);
+        }
+        tracker.committed_state(image, key)
+    }
+
+    /// Record a subresource transition from a known old state to a desired new state.
+    ///
+    /// Validates that the old state matches the effective state. Derives narrow
+    /// barriers (access/stage/queue-family). If the source and destination queue
+    /// families match, ownership transfer is omitted (indices set to IGNORED).
+    /// If they differ, a matched release/acquire pair is recorded.
+    pub(crate) fn record_transition(
+        &mut self,
+        tracker: &ImageStateTracker,
+        image: vk::Image,
+        key: ImageSubresourceKey,
+        aspect: vk::ImageAspectFlags,
+        desired: TrackedSubresourceState,
+    ) -> Result<(), String> {
+        let old = self.effective_state(tracker, image, &key, aspect).ok_or_else(|| {
+            format!(
+                "image transition requested for untracked or non-uniform subresource range: image={image:?}, range={key:?}"
+            )
+        })?;
+
+        // Skip no-op transitions.
+        if old.layout == desired.layout
+            && old.access == desired.access
+            && old.stage == desired.stage
+            && old.queue_family == desired.queue_family
+        {
+            return Ok(());
+        }
+
+        let pending = PendingTransition {
+            image,
+            key: key.clone(),
+            aspect,
+            old_state: old,
+            new_state: desired,
+        };
+
+        let composite_key = (image, key);
+        self.staging.insert(composite_key, desired);
+        self.pending.push(pending);
+        Ok(())
+    }
+
+    /// Build barrier structs for all pending transitions.
+    ///
+    /// Uses the narrowest stage/access masks derived from the old and new state.
+    /// For same-family operations, uses `QUEUE_FAMILY_IGNORED` for ownership indices.
+    /// For split-family operations, emits explicit family indices.
+    pub(crate) fn pending_barriers(&self) -> Vec<vk::ImageMemoryBarrier2<'static>> {
+        self.pending
+            .iter()
+            .map(|t| image_barrier_for_pending_transition(t))
+            .collect()
+    }
+
+    /// Emit the barrier commands for all pending transitions onto a command buffer.
+    pub(crate) fn emit_barriers(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
+        let barriers = self.pending_barriers();
+        if barriers.is_empty() {
+            return;
+        }
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+        unsafe { device.cmd_pipeline_barrier2(cmd, &dep_info) };
+    }
+
+    /// Record one tracked image transition and immediately emit its barrier.
+    pub(crate) fn record_and_emit_transition(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        tracker: &ImageStateTracker,
+        image: vk::Image,
+        key: ImageSubresourceKey,
+        aspect: vk::ImageAspectFlags,
+        desired: TrackedSubresourceState,
+    ) -> Result<(), String> {
+        let pending_start = self.pending.len();
+        self.record_transition(tracker, image, key, aspect, desired)?;
+        if let Some(transition) = self.pending.get(pending_start) {
+            let barrier = [image_barrier_for_pending_transition(transition)];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barrier);
+            unsafe { device.cmd_pipeline_barrier2(cmd, &dep_info) };
+        }
+        Ok(())
+    }
+
+    /// Consume the overlay and return the pending transitions for commit.
+    pub(crate) fn take_pending(self) -> Vec<PendingTransition> {
+        self.pending
+    }
+
+    /// Returns true if no transitions have been staged.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+pub(crate) fn queue_family_indices_for_barrier(src_family: u32, dst_family: u32) -> (u32, u32) {
+    if src_family == dst_family {
+        (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED)
+    } else {
+        (src_family, dst_family)
+    }
+}
+
+pub(crate) fn tracked_state_for_layout(
+    layout: vk::ImageLayout,
+    queue_family: u32,
+) -> TrackedSubresourceState {
+    match layout {
+        vk::ImageLayout::UNDEFINED => TrackedSubresourceState::undefined(queue_family),
+        vk::ImageLayout::GENERAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+            stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+            queue_family,
+        },
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            queue_family,
+        },
+        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
+        | vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            queue_family,
+        },
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::TRANSFER_READ,
+            stage: vk::PipelineStageFlags2::TRANSFER,
+            queue_family,
+        },
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::TRANSFER_WRITE,
+            stage: vk::PipelineStageFlags2::TRANSFER,
+            queue_family,
+        },
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::SHADER_READ,
+            stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            queue_family,
+        },
+        vk::ImageLayout::PRESENT_SRC_KHR => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::empty(),
+            stage: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+            queue_family,
+        },
+        _ => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+            stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+            queue_family,
+        },
+    }
+}
+
+pub(crate) fn image_barrier_for_pending_transition(
+    transition: &PendingTransition,
+) -> vk::ImageMemoryBarrier2<'static> {
+    let (src_family, dst_family) = queue_family_indices_for_barrier(
+        transition.old_state.queue_family,
+        transition.new_state.queue_family,
+    );
+
+    vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(transition.old_state.stage)
+        .src_access_mask(transition.old_state.access)
+        .dst_stage_mask(transition.new_state.stage)
+        .dst_access_mask(transition.new_state.access)
+        .old_layout(transition.old_state.layout)
+        .new_layout(transition.new_state.layout)
+        .src_queue_family_index(src_family)
+        .dst_queue_family_index(dst_family)
+        .image(transition.image)
+        .subresource_range(transition.key.to_vk(transition.aspect))
 }
 
 pub fn command_buffer_submit_info<'a>(cmd: vk::CommandBuffer) -> vk::CommandBufferSubmitInfo<'a> {
@@ -160,6 +387,7 @@ pub fn create_array_image(
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let (image, mut allocation) = unsafe {
         allocator
             .create_image(&image_info, &alloc_info)
@@ -176,6 +404,7 @@ pub fn create_array_image(
     view_info.subresource_range.level_count = mips_levels;
     view_info.subresource_range.layer_count = array_layers;
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let image_view = match unsafe { device.create_image_view(&view_info, None) } {
         Ok(view) => view,
         Err(err) => {
@@ -215,6 +444,7 @@ pub fn create_image(
     alloc_info.usage = vk_mem::MemoryUsage::AutoPreferDevice;
     alloc_info.required_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let (image, mut allocation) = unsafe {
         allocator
             .create_image(&image_info, &alloc_info)
@@ -230,6 +460,7 @@ pub fn create_image(
         image_view_create_info(format, vk::ImageViewType::TYPE_2D, image, aspect_flag);
     view_info.subresource_range.level_count = mips_levels;
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let image_view = match unsafe { device.create_image_view(&view_info, None) } {
         Ok(view) => view,
         Err(err) => {
@@ -396,6 +627,7 @@ pub fn blit_copy_image_to_image(
         .filter(vk::Filter::LINEAR)
         .regions(&blit_region);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe { device.cmd_blit_image2(cmd, &blit_info) }
 }
 
@@ -424,6 +656,7 @@ pub fn transition_image(
 
     let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barrier);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
 
@@ -460,40 +693,119 @@ pub fn transition_image_layered(
 
     let dep_info = vk::DependencyInfo::default().image_memory_barriers(&image_barrier);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe { device.cmd_pipeline_barrier2(cmd_buffer, &dep_info) }
 }
 
+// ── Structured Shader-Load Error ────────────────────────────────────────────
+
+/// Typed error for SPIR-V shader loading failures.
+#[derive(Debug)]
+pub enum ShaderLoadError {
+    /// File I/O or path not found.
+    Io { path: String, error: std::io::Error },
+    /// The SPIR-V byte length was zero or not divisible by 4.
+    InvalidSpirvLength { path: String, byte_len: u64 },
+    /// The SPIR-V byte length exceeded the representable u32-word count.
+    SpirvTooLarge { path: String, byte_len: u64 },
+    /// Vulkan shader module creation failed.
+    VulkanCreate { path: String, error: vk::Result },
+}
+
+impl std::fmt::Display for ShaderLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, error } => {
+                write!(f, "failed to read shader file '{path}': {error}")
+            }
+            Self::InvalidSpirvLength { path, byte_len } => {
+                write!(
+                    f,
+                    "shader file '{path}' has invalid SPIR-V byte length {byte_len} (must be non-zero and divisible by 4)"
+                )
+            }
+            Self::SpirvTooLarge { path, byte_len } => {
+                write!(
+                    f,
+                    "shader file '{path}' byte length {byte_len} exceeds representable u32-word count"
+                )
+            }
+            Self::VulkanCreate { path, error } => {
+                write!(f, "failed to create shader module from '{path}': {error:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ShaderLoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
+
+/// Load a SPIR-V shader module from a file path.
+///
+/// Validates:
+/// - File can be opened and read.
+/// - Byte length is non-zero and divisible by 4 (SPIR-V word alignment).
+/// - Byte length fits in a `usize` and yields a representable u32-word count.
+/// - The bytes are copied into an owned, aligned `Vec<u32>` before shader-module creation.
 pub fn load_shader_module(
     device: &ash::Device,
     file_path: &str,
-) -> Result<vk::ShaderModule, String> {
-    // Open the file with the cursor at the end to determine the file size
-    let mut file =
-        std::fs::File::open(file_path).map_err(|e| format!("Failed to open file: {}", e))?;
+) -> Result<vk::ShaderModule, ShaderLoadError> {
+    let mut file = std::fs::File::open(file_path).map_err(|e| ShaderLoadError::Io {
+        path: file_path.to_string(),
+        error: e,
+    })?;
     let file_size = file
         .seek(SeekFrom::End(0))
-        .map_err(|e| format!("Failed to seek file: {}", e))?;
+        .map_err(|e| ShaderLoadError::Io {
+            path: file_path.to_string(),
+            error: e,
+        })?;
 
-    // spirv expects the buffer to be on uint32, so make sure to reserve a Vec
-    // big enough for the entire file
-    let mut buffer = vec![0u32; (file_size / 4) as usize];
+    // Validate SPIR-V byte length.
+    if file_size == 0 || file_size % 4 != 0 {
+        return Err(ShaderLoadError::InvalidSpirvLength {
+            path: file_path.to_string(),
+            byte_len: file_size,
+        });
+    }
 
-    // Put file cursor at the beginning
+    let word_count =
+        usize::try_from(file_size / 4).map_err(|_| ShaderLoadError::SpirvTooLarge {
+            path: file_path.to_string(),
+            byte_len: file_size,
+        })?;
+
+    // Owned, aligned u32 buffer.
+    let mut buffer = vec![0u32; word_count];
+
     file.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("Failed to seek file: {}", e))?;
-
-    // Load the entire file into the buffer
+        .map_err(|e| ShaderLoadError::Io {
+            path: file_path.to_string(),
+            error: e,
+        })?;
     file.read_exact(bytemuck::cast_slice_mut(&mut buffer))
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+        .map_err(|e| ShaderLoadError::Io {
+            path: file_path.to_string(),
+            error: e,
+        })?;
 
-    // Create a new shader module, using the buffer we loaded
     let create_info = vk::ShaderModuleCreateInfo::default().code(&buffer);
 
-    // Check that the creation goes well
+    // SAFETY: buffer is aligned and valid; create_info is correctly populated.
     let shader_module = unsafe {
         device
             .create_shader_module(&create_info, None)
-            .map_err(|e| format!("Failed to create shader module: {:?}", e))?
+            .map_err(|e| ShaderLoadError::VulkanCreate {
+                path: file_path.to_string(),
+                error: e,
+            })?
     };
 
     Ok(shader_module)
@@ -514,6 +826,7 @@ pub fn allocate_buffer(
     alloc_create_info.flags = vk_mem::AllocationCreateFlags::MAPPED
         | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE;
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let (buffer, allocation) = unsafe {
         allocator
             .create_buffer(&buffer_info, &alloc_create_info)
@@ -543,6 +856,7 @@ pub fn allocate_host_buffer(allocator: &Allocator, size: u64) -> Result<VkBuffer
         ..Default::default()
     };
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let (buffer, allocation) = unsafe {
         allocator
             .create_buffer(&buffer_info, &alloc_create_info)
@@ -567,6 +881,7 @@ pub fn allocate_and_write_buffer(
     let buffer_size = data.len() as u64;
     let mut buffer = allocate_buffer(allocator, buffer_size, usage, vk_mem::MemoryUsage::Auto)?;
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         let data_ptr = allocator
             .map_memory(&mut buffer.allocation)
@@ -579,10 +894,12 @@ pub fn allocate_and_write_buffer(
 }
 
 pub fn destroy_buffer(allocator: &Allocator, mut buffer: VkBuffer) {
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe { allocator.destroy_buffer(buffer.buffer, &mut buffer.allocation) }
 }
 
 pub fn destroy_image(device: &ash::Device, allocator: &Allocator, mut image: VkImageAlloc) {
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         device.destroy_image_view(image.image_view, None);
         allocator.destroy_image(image.image, &mut image.allocation);
@@ -629,6 +946,7 @@ pub fn generate_brdf_lut(
         .max_anisotropy(1.0)
         .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let brd_sampler = unsafe { device.create_sampler(&brd_sampler, None) }
         .map_err(|err| format!("failed to create BRDF LUT sampler: {err:?}"))?;
 
@@ -667,6 +985,7 @@ pub fn generate_brdf_lut(
         extent: dim_extent,
     };
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -798,6 +1117,7 @@ pub fn upload_skybox(
         .array_layers(6)
         .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let image = unsafe { device.create_image(&image_create_info, None) }
         .map_err(|err| format!("failed to create skybox image: {err:?}"))?;
 
@@ -808,6 +1128,7 @@ pub fn upload_skybox(
         ..Default::default()
     };
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let (allocation, _device_memory, _alloc_offset) = unsafe {
         let alloc = allocator
             .allocate_memory_for_image(image, &alloc_info)
@@ -824,7 +1145,10 @@ pub fn upload_skybox(
         (alloc, device_memory, offset)
     };
 
-    let cmd_buffer = transfer_pool.buffers[0];
+    let cmd_buffer = transfer_pool
+        .primary("transfer_skybox_upload")
+        .expect("transfer pool must have 1 buffer");
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1010,7 +1334,10 @@ pub fn upload_texture_2d(
         1,
     )?;
 
-    let cmd_buffer = transfer_pool.buffers[0];
+    let cmd_buffer = transfer_pool
+        .primary("transfer_texture_2d_upload")
+        .expect("transfer pool must have 1 buffer");
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1187,6 +1514,7 @@ pub(crate) fn create_cubemap(
         ..Default::default()
     };
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let (image, allocation) = unsafe {
         allocator
             .create_image(&image_create_info, &alloc_info)
@@ -1206,6 +1534,7 @@ pub(crate) fn create_cubemap(
         })
         .image(image);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let image_view = unsafe {
         device
             .create_image_view(&view_create_info, None)
@@ -1226,6 +1555,7 @@ pub(crate) fn create_cubemap(
         .max_lod(num_mips as f32)
         .border_color(vk::BorderColor::FLOAT_OPAQUE_WHITE);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let sampler = unsafe {
         device
             .create_sampler(&sampler_create_info, None)
@@ -1248,6 +1578,58 @@ pub(crate) fn create_cubemap(
 // UPLOAD UTIL //
 /////////////////
 
+fn checked_padded_len(len: usize, alignment: usize) -> Result<usize, String> {
+    debug_assert!(alignment > 0);
+    let remainder = len % alignment;
+    if remainder == 0 {
+        Ok(len)
+    } else {
+        len.checked_add(alignment - remainder).ok_or_else(|| {
+            format!("padded byte length overflowed for len {len}, alignment {alignment}")
+        })
+    }
+}
+
+fn mapped_write_capacity(buffer: &VkBuffer, context: &str) -> Result<usize, String> {
+    if buffer.alloc_info.mapped_data.is_null() {
+        return Err(format!("{context} host buffer allocation is not mapped"));
+    }
+    let declared = usize::try_from(buffer.size)
+        .map_err(|_| format!("{context} buffer size does not fit in usize"))?;
+    let allocated = usize::try_from(buffer.alloc_info.size)
+        .map_err(|_| format!("{context} allocation size does not fit in usize"))?;
+    Ok(declared.min(allocated))
+}
+
+fn destroy_staged_image_allocs(
+    device: &ash::Device,
+    allocator: &Arc<Mutex<vk_mem::Allocator>>,
+    image_allocs: &mut Vec<VkImageAlloc>,
+) -> Result<(), String> {
+    if image_allocs.is_empty() {
+        return Ok(());
+    }
+    let allocator = allocator
+        .lock()
+        .map_err(|_| "allocator lock poisoned during texture upload rollback".to_string())?;
+    for image_alloc in image_allocs.drain(..) {
+        destroy_image(device, &allocator, image_alloc);
+    }
+    Ok(())
+}
+
+fn texture_upload_error<T>(
+    device: &ash::Device,
+    allocator: &Arc<Mutex<vk_mem::Allocator>>,
+    image_allocs: &mut Vec<VkImageAlloc>,
+    message: String,
+) -> Result<T, String> {
+    match destroy_staged_image_allocs(device, allocator, image_allocs) {
+        Ok(()) => Err(message),
+        Err(cleanup_err) => Err(format!("{message}; rollback failed: {cleanup_err}")),
+    }
+}
+
 pub fn record_host_to_storage_buffer(
     device: &ash::Device,
     host_info: &VkHostBuffer,
@@ -1256,32 +1638,70 @@ pub fn record_host_to_storage_buffer(
     bytes: &[&[u8]],
     alignment: u64,
 ) -> Result<(), String> {
-    let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
-    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
+    let transfer_cmd_buffer = host_info
+        .transfer_pool
+        .primary("host_transfer_storage_upload")
+        .expect("VkHostBuffer transfer pool must have 1 buffer");
+    let graphics_cmd_buffer = host_info
+        .graphics_pool
+        .primary("host_graphics_storage_upload")
+        .expect("VkHostBuffer graphics pool must have 1 buffer");
     let host_buffer = &host_info.buffer;
 
-    let alignment = if alignment < 4 { 4 } else { alignment };
+    let alignment = usize::try_from(alignment.max(4))
+        .map_err(|_| "storage upload alignment does not fit in usize".to_string())?;
+    let host_capacity = mapped_write_capacity(host_buffer, "storage upload")?;
 
-    let mut total_size = 0;
+    let mut total_size: usize = 0;
+    for chunk in bytes {
+        let size = checked_padded_len(chunk.len(), alignment)?;
+        total_size = total_size
+            .checked_add(size)
+            .ok_or_else(|| "storage upload total byte size overflowed".to_string())?;
+    }
+    if total_size > host_capacity {
+        return Err(format!(
+            "storage upload requires {total_size} bytes but mapped host buffer covers {host_capacity} bytes"
+        ));
+    }
+    let total_size_u64 = u64::try_from(total_size)
+        .map_err(|_| "storage upload total byte size does not fit in u64".to_string())?;
+    device_offset
+        .checked_add(total_size_u64)
+        .filter(|end| *end <= device_buffer.size)
+        .ok_or_else(|| {
+            format!(
+                "storage upload range [{}..{}) exceeds device buffer size {}",
+                device_offset,
+                device_offset.saturating_add(total_size_u64),
+                device_buffer.size
+            )
+        })?;
 
     let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
     for chunk in bytes {
-        let size = chunk.len().next_multiple_of(alignment as usize);
+        let size = checked_padded_len(chunk.len(), alignment)?;
+        // SAFETY: mapped_write_capacity confirmed a non-null mapped pointer and the precomputed
+        // total padded write size fits inside the mapped allocation range. host_ptr advances only
+        // within that range, and source/destination do not overlap.
         unsafe {
             std::ptr::copy_nonoverlapping(chunk.as_ptr(), host_ptr, chunk.len());
+            if size > chunk.len() {
+                std::ptr::write_bytes(host_ptr.add(chunk.len()), 0, size - chunk.len());
+            }
             host_ptr = host_ptr.add(size);
-            total_size += size;
         }
     }
 
     let copy_info = [vk::BufferCopy::default()
         .dst_offset(device_offset)
         .src_offset(0)
-        .size(total_size as vk::DeviceSize)];
+        .size(total_size_u64)];
 
     let begin_info =
         vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         // Record transfer command buffer
         device
@@ -1314,16 +1734,20 @@ pub fn record_host_to_storage_buffer(
             &copy_info,
         );
 
+        let (src_family, dst_family) = queue_family_indices_for_barrier(
+            host_info.transfer_queue_index,
+            host_info.graphics_queue_index,
+        );
         let release_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             // Queue-family release operations make writes available; the acquire operation
-            // defines the consumer access scope.
+            // defines the consumer access scope. Same-family queues use ignored indices.
             .dst_access_mask(vk::AccessFlags::empty())
-            .src_queue_family_index(host_info.transfer_queue_index)
-            .dst_queue_family_index(host_info.graphics_queue_index)
+            .src_queue_family_index(src_family)
+            .dst_queue_family_index(dst_family)
             .buffer(device_buffer.buffer)
             .offset(device_offset)
-            .size(total_size as vk::DeviceSize);
+            .size(total_size_u64);
 
         device.cmd_pipeline_barrier(
             transfer_cmd_buffer,
@@ -1349,11 +1773,11 @@ pub fn record_host_to_storage_buffer(
             // operation only needs to define visibility to vertex/index reads.
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
-            .src_queue_family_index(host_info.transfer_queue_index)
-            .dst_queue_family_index(host_info.graphics_queue_index)
+            .src_queue_family_index(src_family)
+            .dst_queue_family_index(dst_family)
             .buffer(device_buffer.buffer)
             .offset(device_offset)
-            .size(total_size as vk::DeviceSize);
+            .size(total_size_u64);
 
         device.cmd_pipeline_barrier(
             graphics_cmd_buffer,
@@ -1378,6 +1802,7 @@ pub fn format_supports_linear_mip_blit(
     physical_device: vk::PhysicalDevice,
     format: vk::Format,
 ) -> bool {
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     let props = unsafe { instance.get_physical_device_format_properties(physical_device, format) };
     let required = vk::FormatFeatureFlags::BLIT_SRC
         | vk::FormatFeatureFlags::BLIT_DST
@@ -1413,30 +1838,56 @@ pub fn record_host_to_image_buffer(
         return Err("Image upload metadata and linear blit support length mismatch".to_string());
     }
 
-    let alignment = if alignment < 4 { 4 } else { alignment };
+    let alignment = usize::try_from(alignment.max(4))
+        .map_err(|_| "image upload alignment does not fit in usize".to_string())?;
 
     let host_buffer = &host_info.buffer;
-    let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
-    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
+    let transfer_cmd_buffer = host_info
+        .transfer_pool
+        .primary("host_transfer_image_upload")
+        .expect("VkHostBuffer transfer pool must have 1 buffer");
+    let graphics_cmd_buffer = host_info
+        .graphics_pool
+        .primary("host_graphics_image_upload")
+        .expect("VkHostBuffer graphics pool must have 1 buffer");
+    let host_capacity = mapped_write_capacity(host_buffer, "image upload")?;
+
+    let mut offset: DeviceSize = 0;
+    let mut image_offsets = Vec::with_capacity(image_meta.len());
+    for meta in image_meta {
+        let bytes = meta.payload.bytes();
+        let size = checked_padded_len(bytes.len(), alignment)?;
+        let size_u64 = u64::try_from(size)
+            .map_err(|_| "image upload padded byte size does not fit in u64".to_string())?;
+        let curr_offset = offset;
+        offset = offset
+            .checked_add(size_u64)
+            .ok_or_else(|| "image upload total byte size overflowed".to_string())?;
+        image_offsets.push(curr_offset);
+    }
+    let total_size = usize::try_from(offset)
+        .map_err(|_| "image upload total byte size does not fit in usize".to_string())?;
+    if total_size > host_capacity {
+        return Err(format!(
+            "image upload requires {total_size} bytes but mapped host buffer covers {host_capacity} bytes"
+        ));
+    }
 
     let mut host_ptr = host_buffer.alloc_info.mapped_data as *mut u8;
-    let mut offset: DeviceSize = 0;
-    let image_offsets: Vec<DeviceSize> = image_meta
-        .iter()
-        .zip(ids.iter())
-        .map(|(meta, _id)| {
-            let bytes = meta.payload.bytes();
-            let size = bytes.len().next_multiple_of(alignment as usize);
-
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), host_ptr, bytes.len());
-                host_ptr = host_ptr.add(size);
-                let curr_offset = offset;
-                offset = offset.add(size as u64);
-                curr_offset as DeviceSize
+    for meta in image_meta {
+        let bytes = meta.payload.bytes();
+        let size = checked_padded_len(bytes.len(), alignment)?;
+        // SAFETY: mapped_write_capacity confirmed a non-null mapped pointer and the precomputed
+        // total padded write size fits inside the mapped allocation range. host_ptr advances only
+        // within that range, and source/destination do not overlap.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), host_ptr, bytes.len());
+            if size > bytes.len() {
+                std::ptr::write_bytes(host_ptr.add(bytes.len()), 0, size - bytes.len());
             }
-        })
-        .collect();
+            host_ptr = host_ptr.add(size);
+        }
+    }
 
     let mut image_allocs: Vec<VkImageAlloc> = Vec::with_capacity(image_meta.len());
     for ((meta, id), supports_linear_blit) in image_meta
@@ -1464,34 +1915,56 @@ pub fn record_host_to_image_buffer(
         }
 
         let image_alloc = {
-            let allocator = allocator.lock().expect("allocator lock poisoned");
-            create_image(
+            let allocator_guard = match allocator.lock() {
+                Ok(allocator) => allocator,
+                Err(_) => {
+                    return texture_upload_error(
+                        device,
+                        allocator,
+                        &mut image_allocs,
+                        "allocator lock poisoned during image upload allocation".to_string(),
+                    );
+                }
+            };
+            match create_image(
                 device,
-                &allocator,
+                &allocator_guard,
                 Extent3D::default().height(height).width(width).depth(1),
                 format,
                 vk::ImageUsageFlags::SAMPLED
                     | vk::ImageUsageFlags::TRANSFER_DST
                     | vk::ImageUsageFlags::TRANSFER_SRC,
                 effective_mips,
-            )?
+            ) {
+                Ok(image) => image,
+                Err(err) => {
+                    return texture_upload_error(device, allocator, &mut image_allocs, err);
+                }
+            }
         };
         image_allocs.push(image_alloc);
     }
 
     let begin_info =
         vk_util::command_buffer_begin_info(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
-        device
-            .begin_command_buffer(transfer_cmd_buffer, &begin_info)
-            .map_err(|err| {
-                format!("failed to begin transfer command buffer for texture upload: {err:?}")
-            })?;
-        device
-            .begin_command_buffer(graphics_cmd_buffer, &begin_info)
-            .map_err(|err| {
-                format!("failed to begin graphics command buffer for texture upload: {err:?}")
-            })?;
+        if let Err(err) = device.begin_command_buffer(transfer_cmd_buffer, &begin_info) {
+            return texture_upload_error(
+                device,
+                allocator,
+                &mut image_allocs,
+                format!("failed to begin transfer command buffer for texture upload: {err:?}"),
+            );
+        }
+        if let Err(err) = device.begin_command_buffer(graphics_cmd_buffer, &begin_info) {
+            return texture_upload_error(
+                device,
+                allocator,
+                &mut image_allocs,
+                format!("failed to begin graphics command buffer for texture upload: {err:?}"),
+            );
+        }
     }
 
     // Perform buffer to image copies
@@ -1532,6 +2005,7 @@ pub fn record_host_to_image_buffer(
                     })
                     .image_extent(image_alloc.image_extent)];
 
+                // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
                 unsafe {
                     device.cmd_copy_buffer_to_image(
                         transfer_cmd_buffer,
@@ -1549,14 +2023,18 @@ pub fn record_host_to_image_buffer(
                 ..
             } => {
                 // Copy all mips
-                let regions: Vec<vk::BufferImageCopy> = mip_offsets
+                let regions: Vec<vk::BufferImageCopy> = match mip_offsets
                     .iter()
                     .enumerate()
                     .map(|(i, &mip_offset)| {
                         let mip_width = (width >> i).max(1);
                         let mip_height = (height >> i).max(1);
-                        vk::BufferImageCopy::default()
-                            .buffer_offset(*offset + mip_offset as u64)
+                        let buffer_offset =
+                            offset.checked_add(mip_offset as u64).ok_or_else(|| {
+                                "compressed image mip buffer offset overflow".to_string()
+                            })?;
+                        Ok(vk::BufferImageCopy::default()
+                            .buffer_offset(buffer_offset)
                             .buffer_row_length(0) // Tightly packed blocks
                             .buffer_image_height(0)
                             .image_subresource(vk::ImageSubresourceLayers {
@@ -1569,10 +2047,17 @@ pub fn record_host_to_image_buffer(
                                 width: mip_width,
                                 height: mip_height,
                                 depth: 1,
-                            })
+                            }))
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()
+                {
+                    Ok(regions) => regions,
+                    Err(err) => {
+                        return texture_upload_error(device, allocator, &mut image_allocs, err);
+                    }
+                };
 
+                // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
                 unsafe {
                     device.cmd_copy_buffer_to_image(
                         transfer_cmd_buffer,
@@ -1679,13 +2164,9 @@ pub fn record_host_to_image_buffer(
         }
     }
 
-    let mut upload_images = Vec::<(VkImageAlloc, vk::Sampler)>::with_capacity(image_allocs.len());
+    let mut samplers = Vec::<vk::Sampler>::with_capacity(image_allocs.len());
 
-    for ((image_alloc, _id), meta) in image_allocs
-        .into_iter()
-        .zip(ids.iter())
-        .zip(image_meta.iter())
-    {
+    for (image_alloc, meta) in image_allocs.iter().zip(image_meta.iter()) {
         let mut sampler_info = if let Some(info) = &meta.sampler_info {
             info.clone()
         } else {
@@ -1712,25 +2193,35 @@ pub fn record_host_to_image_buffer(
             sampler_info.min_lod = sampler_info.max_lod;
         }
 
-        let sampler = sampler_cache.get_or_create_sampler(device, sampler_info)?;
-
-        upload_images.push((image_alloc, sampler));
+        match sampler_cache.get_or_create_sampler(device, sampler_info) {
+            Ok(sampler) => samplers.push(sampler),
+            Err(err) => {
+                return texture_upload_error(device, allocator, &mut image_allocs, err);
+            }
+        }
     }
 
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
-        device
-            .end_command_buffer(transfer_cmd_buffer)
-            .map_err(|err| {
-                format!("failed to end transfer command buffer for texture upload: {err:?}")
-            })?;
-        device
-            .end_command_buffer(graphics_cmd_buffer)
-            .map_err(|err| {
-                format!("failed to end graphics command buffer for texture upload: {err:?}")
-            })?;
+        if let Err(err) = device.end_command_buffer(transfer_cmd_buffer) {
+            return texture_upload_error(
+                device,
+                allocator,
+                &mut image_allocs,
+                format!("failed to end transfer command buffer for texture upload: {err:?}"),
+            );
+        }
+        if let Err(err) = device.end_command_buffer(graphics_cmd_buffer) {
+            return texture_upload_error(
+                device,
+                allocator,
+                &mut image_allocs,
+                format!("failed to end graphics command buffer for texture upload: {err:?}"),
+            );
+        }
     }
 
-    Ok(upload_images)
+    Ok(image_allocs.into_iter().zip(samplers).collect())
 }
 
 pub fn record_mip_maps_generation(
@@ -1795,6 +2286,7 @@ pub fn record_mip_maps_generation(
             None,
         );
 
+        // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
         unsafe {
             device.cmd_blit_image(
                 cmd_buffer,
@@ -1930,6 +2422,7 @@ pub fn record_image_barrier(
     }
 
     let barrier = [barrier];
+    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         device.cmd_pipeline_barrier(
             cmd_buffer,
@@ -1945,7 +2438,163 @@ pub fn record_image_barrier(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_upload_mip_levels;
+    use super::{
+        queue_family_indices_for_barrier, resolve_upload_mip_levels, FrameTransitionOverlay,
+    };
+    use crate::vulkan::vk_types::{
+        ImageStateTracker, ImageSubresourceKey, TrackedSubresourceState,
+    };
+    use ash::vk;
+    use ash::vk::Handle;
+
+    fn tracked_state(
+        layout: vk::ImageLayout,
+        access: vk::AccessFlags2,
+        stage: vk::PipelineStageFlags2,
+        queue_family: u32,
+    ) -> TrackedSubresourceState {
+        TrackedSubresourceState {
+            layout,
+            access,
+            stage,
+            queue_family,
+        }
+    }
+
+    #[test]
+    fn frame_transition_overlay_discards_without_tracker_commit() {
+        let image = vk::Image::from_raw(0x200);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        let key = ImageSubresourceKey::single_mip(0);
+        let desired = tracked_state(
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::AccessFlags2::TRANSFER_WRITE,
+            vk::PipelineStageFlags2::TRANSFER,
+            0,
+        );
+
+        {
+            let mut overlay = FrameTransitionOverlay::new();
+            overlay
+                .record_transition(
+                    &tracker,
+                    image,
+                    key.clone(),
+                    vk::ImageAspectFlags::COLOR,
+                    desired,
+                )
+                .expect("registered full range covers mip 0");
+            assert_eq!(overlay.pending_barriers().len(), 1);
+        }
+
+        assert_eq!(
+            tracker.committed_state(image, &key),
+            Some(TrackedSubresourceState::undefined(0))
+        );
+    }
+
+    #[test]
+    fn frame_transition_overlay_rejects_untracked_images() {
+        let tracker = ImageStateTracker::new();
+        let mut overlay = FrameTransitionOverlay::new();
+        let err = overlay
+            .record_transition(
+                &tracker,
+                vk::Image::from_raw(0x201),
+                ImageSubresourceKey::single_mip(0),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::TRANSFER,
+                    0,
+                ),
+            )
+            .expect_err("unregistered images cannot invent an UNDEFINED old layout");
+        assert!(err.contains("untracked"));
+    }
+
+    #[test]
+    fn frame_transition_overlay_uses_mip_and_layer_ranges_in_barriers() {
+        let image = vk::Image::from_raw(0x202);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 3);
+        let mut overlay = FrameTransitionOverlay::new();
+        overlay
+            .record_transition(
+                &tracker,
+                image,
+                ImageSubresourceKey::all_mips_all_layers(4, 6),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags2::SHADER_READ,
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    3,
+                ),
+            )
+            .expect("full registration covers explicit mip/layer range");
+
+        let barriers = overlay.pending_barriers();
+        assert_eq!(barriers.len(), 1);
+        let range = barriers[0].subresource_range;
+        assert_eq!(range.base_mip_level, 0);
+        assert_eq!(range.level_count, 4);
+        assert_eq!(range.base_array_layer, 0);
+        assert_eq!(range.layer_count, 6);
+    }
+
+    #[test]
+    fn queue_family_barrier_indices_ignore_same_family_and_keep_split_family() {
+        assert_eq!(
+            queue_family_indices_for_barrier(2, 2),
+            (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED)
+        );
+        assert_eq!(queue_family_indices_for_barrier(2, 5), (2, 5));
+    }
+
+    #[test]
+    fn frame_transition_overlay_barriers_encode_same_and_split_family_ownership() {
+        let image = vk::Image::from_raw(0x203);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 1);
+        let mut overlay = FrameTransitionOverlay::new();
+        overlay
+            .record_transition(
+                &tracker,
+                image,
+                ImageSubresourceKey::single_mip(0),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::TRANSFER,
+                    1,
+                ),
+            )
+            .expect("same-family transition records");
+        overlay
+            .record_transition(
+                &tracker,
+                image,
+                ImageSubresourceKey::single_mip(1),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags2::SHADER_READ,
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    4,
+                ),
+            )
+            .expect("split-family transition records");
+
+        let barriers = overlay.pending_barriers();
+        assert_eq!(barriers[0].src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        assert_eq!(barriers[0].dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        assert_eq!(barriers[1].src_queue_family_index, 1);
+        assert_eq!(barriers[1].dst_queue_family_index, 4);
+    }
 
     #[test]
     fn resolve_upload_mips_keeps_requested_when_blit_supported() {

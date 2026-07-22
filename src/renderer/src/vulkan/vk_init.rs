@@ -386,8 +386,12 @@ pub fn create_logical_device(
     let queue_priority = vec![1.0f32];
 
     log::info!("Logical Device: Crafting queue infos");
+    // Deduplicate by family index. Multiple queue roles can share one family;
+    // VkDeviceQueueCreateInfo must contain each family index only once.
+    let mut seen_families: HashSet<u32> = HashSet::new();
     let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = queue_indices
         .iter()
+        .filter(|qi| seen_families.insert(qi.index))
         .map(|qi| {
             vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(qi.index)
@@ -1638,4 +1642,134 @@ pub fn get_basic_device_ext_ptrs() -> Vec<*const c_char> {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         ash::khr::portability_subset::NAME.as_ptr(),
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that duplicate family indices are collapsed into a single
+    /// `VkDeviceQueueCreateInfo` per family, preserving the first index only.
+    #[test]
+    fn queue_create_infos_deduplicate_by_family_index() {
+        let indices = vec![
+            QueueIndex {
+                index: 0,
+                queue_types: vec![VkQueueType::Graphics, VkQueueType::Present],
+            },
+            QueueIndex {
+                index: 0, // same family as graphics/present
+                queue_types: vec![VkQueueType::Compute],
+            },
+            QueueIndex {
+                index: 1,
+                queue_types: vec![VkQueueType::Transfer],
+            },
+        ];
+
+        let mut seen: HashSet<u32> = HashSet::new();
+        let infos: Vec<_> = indices
+            .iter()
+            .filter(|qi| seen.insert(qi.index))
+            .map(|qi| qi.index)
+            .collect();
+
+        // Family 0 appears twice in input but should appear once in output.
+        assert_eq!(infos, vec![0, 1]);
+        assert_eq!(infos.len(), 2);
+    }
+
+    /// When all queue roles share one family, the result is a single create info.
+    #[test]
+    fn all_distinct_family_indices_preserved() {
+        let indices = vec![
+            QueueIndex {
+                index: 0,
+                queue_types: vec![VkQueueType::Graphics, VkQueueType::Present],
+            },
+            QueueIndex {
+                index: 1,
+                queue_types: vec![VkQueueType::Compute],
+            },
+            QueueIndex {
+                index: 2,
+                queue_types: vec![VkQueueType::Transfer],
+            },
+        ];
+
+        let mut seen: HashSet<u32> = HashSet::new();
+        let infos: Vec<_> = indices
+            .iter()
+            .filter(|qi| seen.insert(qi.index))
+            .map(|qi| qi.index)
+            .collect();
+
+        assert_eq!(infos, vec![0, 1, 2]);
+        assert_eq!(infos.len(), 3);
+    }
+
+    /// When all roles share the same family, only one create info is produced.
+    #[test]
+    fn same_family_all_roles_deduplicates_to_one() {
+        let indices = vec![
+            QueueIndex {
+                index: 0,
+                queue_types: vec![VkQueueType::Graphics, VkQueueType::Present],
+            },
+            QueueIndex {
+                index: 0,
+                queue_types: vec![VkQueueType::Compute],
+            },
+            QueueIndex {
+                index: 0,
+                queue_types: vec![VkQueueType::Transfer],
+            },
+        ];
+
+        let mut seen: HashSet<u32> = HashSet::new();
+        let infos: Vec<_> = indices
+            .iter()
+            .filter(|qi| seen.insert(qi.index))
+            .map(|qi| qi.index)
+            .collect();
+
+        assert_eq!(infos, vec![0]);
+        assert_eq!(infos.len(), 1);
+    }
+
+    #[test]
+    fn queue_family_indices_same_and_distinct() {
+        // Same-family
+        let same = QueueFamilyIndices {
+            graphics: 0,
+            transfer: 0,
+        };
+        assert!(same.same_family());
+
+        // Distinct families
+        let distinct = QueueFamilyIndices {
+            graphics: 0,
+            transfer: 1,
+        };
+        assert!(!distinct.same_family());
+    }
+
+    #[test]
+    fn queue_family_indices_from_queues_uses_actual_indices() {
+        let queues = VkDeviceQueues {
+            graphics_queue: (0, vk::Queue::null()),
+            present_queue: (0, vk::Queue::null()),
+            compute_queue: (2, vk::Queue::null()),
+            transfer_queue: (3, vk::Queue::null()),
+        };
+
+        let indices = QueueFamilyIndices::from_queues(&queues);
+        assert_eq!(indices.graphics, 0);
+        assert_eq!(indices.transfer, 3);
+        assert!(!indices.same_family());
+    }
 }

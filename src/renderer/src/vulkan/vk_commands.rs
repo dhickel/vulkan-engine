@@ -28,6 +28,7 @@ use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
 use crate::vulkan::vk_shadow::{
     compute_csm_cascades, derive_camera_near_far_from_corners, frustum_corners_from_vp,
 };
+use crate::vulkan::vk_types::PendingTransition;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
@@ -66,11 +67,18 @@ pub(crate) struct RecordingDispatcher<'a> {
     #[cfg(feature = "csm")]
     csm_shadow_resources: Option<&'a crate::vulkan::vk_shadow::VkCsmShadowResources>,
     gpu_timing: &'a mut crate::vulkan::vk_render::GpuTimingState,
+    image_state_tracker: &'a ImageStateTracker,
+    graphics_queue_family: u32,
+    /// Per-frame transition overlay. Staged deltas are committed after submit.
+    transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
 }
 
 pub(crate) struct PrepareTargetsRecording<'a> {
     device: &'a ash::Device,
     frame: &'a VkFrame,
+    image_state_tracker: &'a ImageStateTracker,
+    transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
 }
 pub(crate) struct ShadowRecording<'a> {
     device: &'a ash::Device,
@@ -83,6 +91,9 @@ pub(crate) struct ShadowRecording<'a> {
     next_submit_serial: u64,
     frame: &'a VkFrame,
     submission: &'a RenderSubmission,
+    image_state_tracker: &'a ImageStateTracker,
+    transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
 }
 pub(crate) struct SkyboxRecording<'a> {
     device: &'a ash::Device,
@@ -114,6 +125,9 @@ pub(crate) struct PresentCopyRecording<'a> {
     device: &'a ash::Device,
     window_state: &'a VkWindowState,
     frame: &'a mut VkFrame,
+    image_state_tracker: &'a ImageStateTracker,
+    transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
 }
 pub(crate) struct ImguiRecording<'a> {
     device: &'a ash::Device,
@@ -136,32 +150,52 @@ pub(crate) struct TerminalPresentRecording<'a> {
     device: &'a ash::Device,
     surface_mode: RenderSurfaceMode,
     frame: &'a mut VkFrame,
+    image_state_tracker: &'a ImageStateTracker,
+    transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
 }
 
 impl PrepareTargetsRecording<'_> {
-    pub(crate) fn prepare_draw_targets(&mut self) {
-        let cmd_buffer = self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0];
-        vk_util::transition_image(
+    pub(crate) fn prepare_draw_targets(&mut self) -> Result<(), String> {
+        let cmd_buffer = self
+            .frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .map_err(|e| format!("PrepareTargetsPass: {e}"))?;
+        let key = ImageSubresourceKey::all_mips_all_layers(1, 1);
+        self.transition_overlay.record_and_emit_transition(
             self.device,
             cmd_buffer,
+            self.image_state_tracker,
             self.frame.draw.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::GENERAL,
-        );
-        vk_util::transition_image(
+            key.clone(),
+            vk::ImageAspectFlags::COLOR,
+            vk_util::tracked_state_for_layout(vk::ImageLayout::GENERAL, self.graphics_queue_family),
+        )?;
+        self.transition_overlay.record_and_emit_transition(
             self.device,
             cmd_buffer,
+            self.image_state_tracker,
             self.frame.depth.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-        );
-        vk_util::transition_image(
+            key.clone(),
+            vk::ImageAspectFlags::DEPTH,
+            vk_util::tracked_state_for_layout(
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                self.graphics_queue_family,
+            ),
+        )?;
+        self.transition_overlay.record_and_emit_transition(
             self.device,
             cmd_buffer,
+            self.image_state_tracker,
             self.frame.draw.image,
-            vk::ImageLayout::GENERAL,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        );
+            key,
+            vk::ImageAspectFlags::COLOR,
+            vk_util::tracked_state_for_layout(
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                self.graphics_queue_family,
+            ),
+        )
     }
 }
 
@@ -196,7 +230,29 @@ impl ShadowRecording<'_> {
         self.submission
     }
     pub(crate) fn cmd_buffer(&self) -> vk::CommandBuffer {
-        self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0]
+        self.frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .expect("ShadowRecording: frame graphics primary missing")
+    }
+
+    pub(crate) fn transition_shadow_image(
+        &mut self,
+        image: vk::Image,
+        mip_count: u32,
+        layer_count: u32,
+        layout: vk::ImageLayout,
+    ) -> Result<(), String> {
+        let key = ImageSubresourceKey::all_mips_all_layers(mip_count, layer_count);
+        self.transition_overlay.record_and_emit_transition(
+            self.device,
+            self.cmd_buffer(),
+            self.image_state_tracker,
+            image,
+            key,
+            vk::ImageAspectFlags::DEPTH,
+            vk_util::tracked_state_for_layout(layout, self.graphics_queue_family),
+        )
     }
 }
 
@@ -235,11 +291,25 @@ impl GeometryRecording<'_> {
     }
 }
 impl PresentCopyRecording<'_> {
-    pub(crate) fn copy_draw_to_present(&mut self) {
-        copy_draw_to_present_impl(self.device, self.window_state, self.frame);
+    pub(crate) fn copy_draw_to_present(&mut self) -> Result<(), String> {
+        copy_draw_to_present_impl(
+            self.device,
+            self.window_state,
+            self.frame,
+            self.image_state_tracker,
+            self.transition_overlay,
+            self.graphics_queue_family,
+        )
     }
-    pub(crate) fn prepare_present_color_attachment(&mut self) {
-        prepare_present_color_attachment_impl(self.device, self.window_state, self.frame);
+    pub(crate) fn prepare_present_color_attachment(&mut self) -> Result<(), String> {
+        prepare_present_color_attachment_impl(
+            self.device,
+            self.window_state,
+            self.frame,
+            self.image_state_tracker,
+            self.transition_overlay,
+            self.graphics_queue_family,
+        )
     }
 }
 impl ImguiRecording<'_> {
@@ -271,21 +341,36 @@ impl TerminalPresentRecording<'_> {
     pub(crate) fn is_headless(&self) -> bool {
         self.surface_mode.is_headless()
     }
-    pub(crate) fn transition_present_for_present(&mut self) {
-        let cmd_buffer = self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0];
-        vk_util::transition_image(
+    pub(crate) fn transition_present_for_present(&mut self) -> Result<(), String> {
+        let cmd_buffer = self
+            .frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .map_err(|e| format!("TerminalPresent: {e}"))?;
+        self.transition_overlay.record_and_emit_transition(
             self.device,
             cmd_buffer,
+            self.image_state_tracker,
             self.frame.present_image,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::PRESENT_SRC_KHR,
-        );
+            ImageSubresourceKey::all_mips_all_layers(1, 1),
+            vk::ImageAspectFlags::COLOR,
+            vk_util::tracked_state_for_layout(
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                self.graphics_queue_family,
+            ),
+        )
     }
 }
 
 // ---------------------------------------------------------------------------
 // Confined frame-pointer boundary
 // ---------------------------------------------------------------------------
+
+/// Result of rendergraph execution with pending image state transitions.
+pub(crate) struct FrameRecordResult {
+    pub report: RenderGraphExecutionReport,
+    pub pending_transitions: Vec<PendingTransition>,
+}
 
 /// Execute rendergraph passes for the currently acquired frame.
 ///
@@ -300,8 +385,40 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
     core: &mut VkRenderCore,
     submission: &RenderSubmission,
     rendergraph: &RenderGraph,
-) -> Result<RenderGraphExecutionReport, String> {
-    let frame_ptr = core.presentation.get_curr_frame_mut() as *mut VkFrame;
+) -> Result<FrameRecordResult, String> {
+    let frame_ptr = core
+        .presentation
+        .get_curr_frame_mut()
+        .map_err(|e| format!("no active frame for rendergraph recording: {e}"))?
+        as *mut VkFrame;
+
+    let graphics_queue_family = core.queue_family_indices.graphics;
+    {
+        let frame = unsafe { &*frame_ptr };
+        core.image_state_tracker
+            .register_image_if_absent(frame.draw.image, graphics_queue_family);
+        core.image_state_tracker
+            .register_image_if_absent(frame.depth.image, graphics_queue_family);
+        if frame.present_image != vk::Image::null() {
+            core.image_state_tracker
+                .register_image_if_absent(frame.present_image, graphics_queue_family);
+        }
+        let shadow_frame = core.shadow_resources.get_frame(frame.index);
+        core.image_state_tracker
+            .register_image_if_absent(shadow_frame.shadow_map.image, graphics_queue_family);
+        #[cfg(feature = "csm")]
+        if let Some(csm_resources) = core.csm_shadow_resources.as_ref() {
+            let csm_frame = csm_resources.get_frame(frame.index);
+            core.image_state_tracker
+                .register_image_if_absent(csm_frame.csm_image.image, graphics_queue_family);
+        }
+    }
+
+    // Create the per-frame transition overlay. Staging is local to the overlay.
+    // On recording failure, the overlay is dropped without committing; on
+    // successful submit, `take_pending` transfers deltas for commit.
+    let mut transition_overlay = vk_util::FrameTransitionOverlay::new();
+
     let mut dispatcher = RecordingDispatcher {
         device: &core.device,
         window_state: &core.window_state,
@@ -326,11 +443,19 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         #[cfg(feature = "csm")]
         csm_shadow_resources: core.csm_shadow_resources.as_ref(),
         gpu_timing: &mut core.gpu_timing,
+        image_state_tracker: &core.image_state_tracker,
+        graphics_queue_family: core.queue_family_indices.graphics,
+        transition_overlay: &mut transition_overlay,
     };
     // SAFETY: `frame_ptr` is unique for this scope and dispatcher cannot reach presentation.
     let frame = unsafe { &mut *frame_ptr };
     let mut graph_ctx = RenderGraphContext::new(submission, frame, &mut dispatcher);
-    rendergraph.execute(&mut graph_ctx)
+    let report = rendergraph.execute(&mut graph_ctx)?;
+    let pending_transitions = transition_overlay.take_pending();
+    Ok(FrameRecordResult {
+        report,
+        pending_transitions,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +467,9 @@ impl RenderGraphContext<'_> {
         PrepareTargetsRecording {
             device: self.recording.device,
             frame: self.frame,
+            image_state_tracker: self.recording.image_state_tracker,
+            transition_overlay: self.recording.transition_overlay,
+            graphics_queue_family: self.recording.graphics_queue_family,
         }
     }
 
@@ -357,6 +485,9 @@ impl RenderGraphContext<'_> {
             next_submit_serial: self.recording.next_submit_serial,
             frame: self.frame,
             submission: self.submission,
+            image_state_tracker: self.recording.image_state_tracker,
+            transition_overlay: self.recording.transition_overlay,
+            graphics_queue_family: self.recording.graphics_queue_family,
         }
     }
 
@@ -397,6 +528,9 @@ impl RenderGraphContext<'_> {
             device: self.recording.device,
             window_state: self.recording.window_state,
             frame: self.frame,
+            image_state_tracker: self.recording.image_state_tracker,
+            transition_overlay: self.recording.transition_overlay,
+            graphics_queue_family: self.recording.graphics_queue_family,
         }
     }
 
@@ -428,6 +562,9 @@ impl RenderGraphContext<'_> {
             device: self.recording.device,
             surface_mode: self.recording.surface_mode,
             frame: self.frame,
+            image_state_tracker: self.recording.image_state_tracker,
+            transition_overlay: self.recording.transition_overlay,
+            graphics_queue_family: self.recording.graphics_queue_family,
         }
     }
 }
@@ -452,8 +589,10 @@ fn draw_geometry_from_submission_impl(
     submission: &RenderSubmission,
 ) {
     let frame_index = frame.index;
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .expect("geometry: frame graphics primary missing");
 
     let color_clear = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -586,6 +725,7 @@ fn draw_geometry_from_submission_impl(
         light_view_projection,
     );
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         record_geometry_draw_sequence_impl(
             device,
@@ -616,8 +756,10 @@ fn draw_skybox_from_submission_impl(
     frame: &mut VkFrame,
     submission: &RenderSubmission,
 ) {
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .expect("skybox: frame graphics primary missing");
 
     let clear_color = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -642,6 +784,7 @@ fn draw_skybox_from_submission_impl(
     );
     update_skybox_push_constants_impl(sky_box, visual_tuning, scene_data);
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_begin_rendering(cmd_buffer, &rendering_info);
         device.cmd_set_viewport(cmd_buffer, 0, window_state.get_viewport());
@@ -659,26 +802,42 @@ fn copy_draw_to_present_impl(
     device: &ash::Device,
     window_state: &VkWindowState,
     frame: &mut VkFrame,
-) {
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    image_state_tracker: &ImageStateTracker,
+    transition_overlay: &mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
+) -> Result<(), String> {
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("PresentCopy: {e}"))?;
     let extent = window_state.get_curr_extent();
 
-    vk_util::transition_image(
+    let key = ImageSubresourceKey::all_mips_all_layers(1, 1);
+    transition_overlay.record_and_emit_transition(
         device,
         cmd_buffer,
+        image_state_tracker,
         frame.draw.image,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-    );
+        key.clone(),
+        vk::ImageAspectFlags::COLOR,
+        vk_util::tracked_state_for_layout(
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            graphics_queue_family,
+        ),
+    )?;
 
-    vk_util::transition_image(
+    transition_overlay.record_and_emit_transition(
         device,
         cmd_buffer,
+        image_state_tracker,
         frame.present_image,
-        vk::ImageLayout::UNDEFINED,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-    );
+        key.clone(),
+        vk::ImageAspectFlags::COLOR,
+        vk_util::tracked_state_for_layout(
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            graphics_queue_family,
+        ),
+    )?;
 
     vk_util::blit_copy_image_to_image(
         device,
@@ -689,30 +848,45 @@ fn copy_draw_to_present_impl(
         extent,
     );
 
-    vk_util::transition_image(
+    transition_overlay.record_and_emit_transition(
         device,
         cmd_buffer,
+        image_state_tracker,
         frame.present_image,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-    );
+        key,
+        vk::ImageAspectFlags::COLOR,
+        vk_util::tracked_state_for_layout(
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            graphics_queue_family,
+        ),
+    )
 }
 
 fn prepare_present_color_attachment_impl(
     device: &ash::Device,
     window_state: &VkWindowState,
     frame: &mut VkFrame,
-) {
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    image_state_tracker: &ImageStateTracker,
+    transition_overlay: &mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
+) -> Result<(), String> {
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("PresentCopy: {e}"))?;
 
-    vk_util::transition_image(
+    transition_overlay.record_and_emit_transition(
         device,
         cmd_buffer,
+        image_state_tracker,
         frame.present_image,
-        vk::ImageLayout::UNDEFINED,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-    );
+        ImageSubresourceKey::all_mips_all_layers(1, 1),
+        vk::ImageAspectFlags::COLOR,
+        vk_util::tracked_state_for_layout(
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            graphics_queue_family,
+        ),
+    )?;
 
     let clear_color = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -727,10 +901,12 @@ fn prepare_present_color_attachment_impl(
     let render_info =
         vk_util::rendering_info(window_state.get_curr_extent(), &attachment_info, None);
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_begin_rendering(cmd_buffer, &render_info);
         device.cmd_end_rendering(cmd_buffer);
     }
+    Ok(())
 }
 
 fn draw_imgui_to_present_impl(
@@ -744,8 +920,10 @@ fn draw_imgui_to_present_impl(
         return Ok(());
     }
 
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("Imgui: {e}"))?;
     draw_imgui_impl(
         device,
         window_state,
@@ -771,8 +949,10 @@ fn record_due_frame_captures_impl(
         return;
     }
 
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .expect("DebugCapture: frame graphics primary missing");
     let extent = window_state.get_curr_extent();
     let due = std::mem::take(due_frame_captures);
 
@@ -893,6 +1073,8 @@ fn update_skybox_push_constants_impl(
     sky_box.skybox_consts.gamma = visual_tuning.gamma;
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn record_skybox_draw_impl(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -957,7 +1139,7 @@ fn resolve_submission_buckets_impl(
         .mesh_cache
         .lock()
         .expect("mesh_cache lock poisoned");
-    let tex_cache = data_cache
+    let mut tex_cache = data_cache
         .texture_cache
         .lock()
         .expect("texture_cache lock poisoned");
@@ -982,7 +1164,16 @@ fn resolve_submission_buckets_impl(
         }
 
         let copied_material = match tex_cache.get_loaded_material(mesh.material_id) {
-            Ok(material) => CopiedMaterialDrawRecord::from(material),
+            Ok(material) => {
+                // Track material and its texture references against the prospective
+                // submission serial so retirement does not recycle slots before this
+                // frame completes.
+                let _ = tex_cache.mark_material_referenced(mesh.material_id, next_submit_serial);
+                for tex_id in material.texture_ids.to_vec() {
+                    let _ = tex_cache.mark_texture_referenced(tex_id, next_submit_serial);
+                }
+                CopiedMaterialDrawRecord::from(material)
+            }
             Err(_) => continue,
         };
 
@@ -1150,6 +1341,8 @@ fn visit_geometry_phases(
     );
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn record_geometry_draw_sequence_impl(
     device: &ash::Device,
     window_state: &VkWindowState,
@@ -1296,6 +1489,7 @@ fn draw_imgui_impl(
     let render_info =
         vk_util::rendering_info(window_state.get_curr_extent(), &attachment_info, None);
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_begin_rendering(cmd_buffer, &render_info);
     }
@@ -1310,6 +1504,7 @@ fn draw_imgui_impl(
         .cmd_draw(cmd_buffer, draw_data)
         .map_err(|err| format!("imgui cmd_draw failed: {err}"));
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_end_rendering(cmd_buffer);
     }
@@ -1373,6 +1568,7 @@ fn begin_gpu_pass_timing(
     if let Some((name, start_query)) = slot.open_pass.take() {
         if slot.next_query < timing.max_queries {
             let end_query = slot.next_query;
+            // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
             unsafe {
                 device.cmd_write_timestamp2(
                     cmd_buffer,
@@ -1394,6 +1590,7 @@ fn begin_gpu_pass_timing(
         return;
     }
     let start_query = slot.next_query;
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_write_timestamp2(
             cmd_buffer,
@@ -1427,6 +1624,7 @@ fn end_gpu_pass_timing(
         return;
     }
     let end_query = slot.next_query;
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_write_timestamp2(
             cmd_buffer,
@@ -1466,12 +1664,15 @@ pub(crate) fn build_frame_environment_ubo(
     #[cfg(feature = "csm")] csm_data: Option<&CsmUboData>,
 ) -> EnvironmentUBO {
     use crate::data::gpu_data::{
-        CSM_CASCADE_COUNT, CSM_CASCADE_DIM, GpuDirectionalLight, GpuPointLight, GpuSpotLight,
+        GpuDirectionalLight, GpuPointLight, GpuSpotLight, CSM_CASCADE_COUNT, CSM_CASCADE_DIM,
         MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
     };
 
     let mut env = *base;
-    debug_assert_eq!(env.cascade_view_proj.len(), (CSM_CASCADE_COUNT as usize) * 4);
+    debug_assert_eq!(
+        env.cascade_view_proj.len(),
+        (CSM_CASCADE_COUNT as usize) * 4
+    );
     debug_assert!(CSM_CASCADE_DIM > 0);
     env.exposure = visual_tuning.exposure;
     env.gamma = visual_tuning.gamma;

@@ -83,7 +83,7 @@ Current limit: the runtime still has a single submitted root. Phase 03 load vali
 
 Phase 05 editor mutations use `CommandHistory` around scene commands. `SetTransformCommand` stores the old local transform and treats each inspector edit as a completed undo transaction. `RemoveNodeCommand` snapshots the removed subtree, then removes it through normal slot/generation invalidation. Undo restores equivalent nodes with fresh `SceneNodeId` values and returns a remap, so old handles remain stale and editor selection can move to the restored runtime ID without weakening handle safety.
 
-Picking uses the scene's last renderer-updated camera matrices and current scene transforms. Known meshes use exact eight-corner-transformed world AABBs, explicitly declared proxies remain tagged, and empty/group nodes use a small editor-origin helper. Conservative-visible mesh-bearing nodes are skipped rather than reporting a false proxy hit.
+Picking uses the scene's last renderer-updated camera matrices and refreshes derived transforms/bounds before testing. Known meshes use exact eight-corner-transformed world AABBs, explicitly declared local proxies remain tagged when transformed to world bounds, and empty/group nodes use a small editor-origin helper. Conservative-visible mesh-bearing nodes are skipped rather than reporting a false proxy hit.
 
 Persistence negative examples:
 
@@ -181,8 +181,40 @@ Point lights are stored in a parallel flat array with slot+generation handles (`
 
 The directional-light store uses the same slot+generation lifecycle, while the public facade rejects a second live light. `direction` is surface-to-light. Submission carries one optional `FrameDirectionalLight`; the renderer writes its direction, color/intensity, and fitted light view-projection matrix into `EnvironmentUBO` before PBR draws.
 
+## Phase 08: Canonical Persistence, Mutations, Commands, Animation
+
+### Directional and Spot Light Persistence
+
+`SceneWorld` now exposes serializable iterators for all three light kinds:
+- `serializable_lights()` → point lights with `PointLightId`
+- `serializable_directional_lights()` → directional lights with `DirectionalLightId`
+- `serializable_spot_lights()` → spot lights with `SpotLightId`
+
+### Atomic Save
+
+`Scene::save` stages a temporary file next to the target, flushes to disk, then renames over the target. I/O errors during staging clean up the temp file and propagate a `SceneError::SerializationError`.
+
+### Derived Invalidation
+
+`SceneWorld::invalidate_derived_state(id)` centralizes clearing `node_world_bounds` and `subtree_world_bounds` while setting `dirty = true`. Explicit proxy input is stored separately as local proxy bounds so transform invalidation does not erase it. All authoritative mutations (transform, parent, meshes, mesh_bounds, proxy bounds) route through this path so bounds are rebuilt before the next submission or query.
+
+### Canonical DTO Fields
+
+**Serialized (accepted):** `format_version`, `scene_id`, `display_name`, `root_nodes`, `nodes[].id/parent/name/transform/asset/material_overrides/visibility/tags/prefab/collision`, `lights[]`, `directional_lights[]`, `spot_lights[]`, `environment`, `materials`, `audio`, `editor`.
+
+**Excluded (reconstructed/derived):** runtime `SceneNodeId`/`MeshHandle`/`EnvironmentHandle` handles, `world_transform`, `dirty`, `children` indexes, `node_world_bounds`, `subtree_world_bounds`, `mesh_bounds` cache data, local proxy caches, GPU descriptors.
+
+### Command History Zero-Capacity
+
+`CommandHistory::new(0)` creates a history that executes commands without storing them. `can_undo()` and `can_redo()` are always false. This is useful for headless/batch environments where undo is unnecessary and memory overhead must be zero.
+
+### Animation Architecture
+
+Animation channels use `SceneNodeId` targets (not node indices). `AnimationPlayer::update` accepts a `valid_targets` set to detect stale handles before evaluation. Clips validate duration, sampler indices, monotonic timestamps, and interpolation cardinality at acceptance time.
+
 ## See Also
 
 - [../api/03-scene.md](../api/03-scene.md) — public scene API
 - [04-api-to-backend-handoff.md](04-api-to-backend-handoff.md) — how submission feeds the rendergraph
 - [src/renderer/src/scene/scene_world.rs](../../src/renderer/src/scene/scene_world.rs) — implementation
+- [src/renderer/src/animation/mod.rs](../../src/renderer/src/animation/mod.rs) — animation system

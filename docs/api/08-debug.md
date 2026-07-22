@@ -104,9 +104,9 @@ cargo run -p renderer --example api_test -- \
 
 ### Timing Data Format
 
-Each JSONL line is a `DebugTimingSnapshot`:
+Each JSONL line is a valid JSON object produced via `serde_json`. Non-finite floats (NaN, ±Inf) are serialized as JSON `null`. The recording subsystem validates the output path and writes an initial "start" record before activating, so a missing or unwritable path fails before any timing data is collected.
 
-```rust
+```json
 pub struct DebugTimingSnapshot {
     // frame index, timestamp, per-pass durations, GPU timestamps
 }

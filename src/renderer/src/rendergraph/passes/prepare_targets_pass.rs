@@ -12,7 +12,7 @@ impl RenderPassNode for PrepareTargetsPass {
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
         if ctx.submission.has_draw_targets() {
             let mut recording = ctx.prepare_targets_ctx();
-            recording.prepare_draw_targets();
+            recording.prepare_draw_targets()?;
         }
 
         Ok(())
