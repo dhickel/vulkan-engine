@@ -106,6 +106,10 @@ name = "capture_csm"
 path = "examples/capture_tests/capture_csm.rs"
 
 [[example]]
+name = "capture_shadow_persistence"
+path = "examples/capture_tests/capture_shadow_persistence.rs"
+
+[[example]]
 name = "capture_lod_instancing"
 path = "examples/capture_tests/capture_lod_instancing.rs"
 

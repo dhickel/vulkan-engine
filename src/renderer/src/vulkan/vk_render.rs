@@ -2244,15 +2244,35 @@ impl VkRenderCore {
     }
 
     fn discard_pending_frame_captures(&mut self, message: &str) {
+        if self.pending_frame_captures.is_empty() {
+            return;
+        }
+
+        let allocator = match self.allocator.lock() {
+            Ok(allocator) => allocator,
+            Err(err) => {
+                let failure =
+                    format!("{message}; allocator lock poisoned during capture discard: {err}");
+                for capture in std::mem::take(&mut self.pending_frame_captures) {
+                    self.frame_capture_statuses
+                        .push(FrameCaptureStatus::Failed {
+                            frame_number: capture.frame_number,
+                            target: capture.target,
+                            output_path: capture.output_path,
+                            source: capture.source,
+                            message: failure.clone(),
+                        });
+                }
+                return;
+            }
+        };
+
         for capture in std::mem::take(&mut self.pending_frame_captures) {
             let frame_number = capture.frame_number;
             let target = capture.target;
             let output_path = capture.output_path.clone();
             let source = capture.source;
-            {
-                let allocator = self.allocator.lock().expect("allocator lock poisoned");
-                discard_frame_capture(&self.device, &allocator, capture);
-            }
+            discard_frame_capture(&self.device, &allocator, capture);
             self.frame_capture_statuses
                 .push(FrameCaptureStatus::Failed {
                     frame_number,
@@ -2280,17 +2300,17 @@ impl VkRenderCore {
             self.wait_for_frame_fence(frame_sync, frame_slot_index, descriptor_reset_serial)?
         };
 
+        let allocator = self
+            .allocator
+            .lock()
+            .map_err(|err| format!("allocator lock poisoned during capture finalize: {err}"))?;
         let pending = std::mem::take(&mut self.pending_frame_captures);
         for capture in pending {
             let frame_number = capture.frame_number;
             let target = capture.target;
             let output_path = capture.output_path.clone();
             let source = capture.source;
-            match finalize_frame_capture(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-                capture,
-            ) {
+            match finalize_frame_capture(&self.device, &allocator, capture) {
                 Ok(report) => {
                     info!(
                         "Frame capture saved for frame {} target {} -> {}",
@@ -2613,8 +2633,9 @@ impl VkRenderCore {
         let pre_hook_ms = elapsed_ms(pre_hook_start);
 
         let rendergraph_start = Instant::now();
-        let graph_result =
-            unsafe { vk_commands::execute_rendergraph_for_frame(self, submission, rendergraph) };
+        let graph_result = unsafe {
+            vk_commands::execute_rendergraph_for_frame(self, submission, rendergraph, frame_number)
+        };
         let rendergraph_ms = elapsed_ms(rendergraph_start);
         let (graph_report, pending_transitions) = match graph_result {
             Ok(record_result) => (record_result.report, record_result.pending_transitions),

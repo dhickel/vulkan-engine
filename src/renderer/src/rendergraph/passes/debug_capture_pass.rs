@@ -11,7 +11,7 @@ impl RenderPassNode for DebugCapturePass {
 
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
         let mut recording = ctx.debug_capture_ctx();
-        recording.record_due_frame_captures();
+        recording.record_due_frame_captures()?;
         Ok(())
     }
 }
