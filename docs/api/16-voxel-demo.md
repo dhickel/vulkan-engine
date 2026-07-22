@@ -50,10 +50,10 @@ The parser tracks whether each override was present. Omitted values stay inherit
 | Flag | Behavior |
 | --- | --- |
 | `--preset <NAME>` | Load one embedded v2 preset: `default`, `cavernous`, `mazy`, or `tight`. |
-| `--config <PATH>` | Load one complete strict TOML document. Relative paths resolve from the process working directory; relative asset paths inside the document resolve from the document's directory. |
+| `--config <PATH>` | Load one complete strict TOML document. Relative paths try the process working directory first, then `apps/voxel_demo/`, then the workspace root; relative asset paths inside the document resolve from the selected document's directory. |
 | `--help` | Print the command summary and exit successfully. |
 
-`--preset` and `--config` are mutually exclusive. Every option may appear at most once; `--capture-dir` and `--capture_dir` count as the same option.
+`--preset` and `--config` are mutually exclusive. Every option may appear at most once; `--capture-dir` and `--capture_dir` count as the same option. This makes both `--config presets/default.toml` and `--config apps/voxel_demo/presets/default.toml` valid from the workspace root while preserving working-directory precedence for user configs.
 
 ### Generator, classifier, and UV overrides
 

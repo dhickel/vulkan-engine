@@ -1471,10 +1471,15 @@ impl Scene {
     /// Cast a ray into the scene and return the closest intersected node.
     /// Uses the camera's view/projection and screen coordinates.
     ///
+    /// This is a pure read-only query: it computes world transforms and
+    /// bounds on the fly without mutating cached scene state. The
+    /// rendering path (`build_submission`) continues to use the mutable
+    /// `refresh_derived_state` path for performance.
+    ///
     /// Thread: Any
     /// May Stall: No
     pub fn pick(
-        &mut self,
+        &self,
         screen_x: f32,
         screen_y: f32,
         viewport_width: u32,
@@ -1490,8 +1495,7 @@ impl Scene {
             inv_vp,
             camera_position,
         );
-        self.world.refresh_derived_state();
-        self.world.pick_ray(&ray)
+        self.world.pick_ray_readonly(&ray)
     }
 
     /// Cast a ray using the scene's last renderer-supplied camera matrices.
@@ -1512,7 +1516,7 @@ impl Scene {
     /// Thread: Any
     /// May Stall: No
     pub fn pick_last_camera(
-        &mut self,
+        &self,
         screen_x: f32,
         screen_y: f32,
         viewport_width: u32,

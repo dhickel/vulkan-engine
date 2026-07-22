@@ -117,14 +117,9 @@ impl EvaluationGuard {
         Self { active: true }
     }
 
-    fn finish(mut self) -> EvaluationContext {
+    fn finish(mut self) -> Option<EvaluationContext> {
         self.active = false;
-        EVAL_STACK.with(|stack| {
-            stack
-                .borrow_mut()
-                .pop()
-                .expect("evaluation context missing after eval")
-        })
+        EVAL_STACK.with(|stack| stack.borrow_mut().pop())
     }
 }
 
@@ -138,16 +133,21 @@ impl Drop for EvaluationGuard {
     }
 }
 
-fn with_top_context<F, R>(f: F) -> R
+const CONTEXT_ERROR_MSG: &str = "builtin requires ScriptEngine managed evaluation context";
+
+fn with_top_context<F, R>(f: F) -> Result<R, Box<rhai::EvalAltResult>>
 where
     F: FnOnce(&mut EvaluationContext) -> R,
 {
     EVAL_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
-        let ctx = stack
-            .last_mut()
-            .expect("script builtin called outside an active EvaluationContext");
-        f(ctx)
+        let ctx = stack.last_mut().ok_or_else(|| {
+            Box::new(rhai::EvalAltResult::ErrorRuntime(
+                CONTEXT_ERROR_MSG.into(),
+                rhai::Position::NONE,
+            ))
+        })?;
+        Ok(f(ctx))
     })
 }
 
@@ -160,22 +160,25 @@ impl ScriptEngine {
     pub fn new() -> Self {
         let mut engine = Engine::new();
 
-        engine.register_fn("log_info", |msg: &str| {
-            with_top_context(|ctx| ctx.log(log::Level::Info, msg));
+        engine.register_fn("log_info", |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+            with_top_context(|ctx| ctx.log(log::Level::Info, msg))
         });
-        engine.register_fn("log_warn", |msg: &str| {
-            with_top_context(|ctx| ctx.log(log::Level::Warn, msg));
+        engine.register_fn("log_warn", |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+            with_top_context(|ctx| ctx.log(log::Level::Warn, msg))
         });
-        engine.register_fn("log_error", |msg: &str| {
-            with_top_context(|ctx| ctx.log(log::Level::Error, msg));
+        engine.register_fn("log_error", |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+            with_top_context(|ctx| ctx.log(log::Level::Error, msg))
         });
 
-        engine.register_fn("emit_event", |name: &str| {
-            with_top_context(|ctx| ctx.emit_event(name, None));
+        engine.register_fn("emit_event", |name: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+            with_top_context(|ctx| ctx.emit_event(name, None))
         });
-        engine.register_fn("emit_event", |name: &str, payload: rhai::Dynamic| {
-            with_top_context(|ctx| ctx.emit_event(name, Some(payload)));
-        });
+        engine.register_fn(
+            "emit_event",
+            |name: &str, payload: rhai::Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
+                with_top_context(|ctx| ctx.emit_event(name, Some(payload)))
+            },
+        );
 
         Self { engine }
     }
@@ -263,7 +266,12 @@ impl ScriptEngine {
     {
         let guard = EvaluationGuard::push(script.clone());
         let result = evaluate(&self.engine);
-        let ctx = guard.finish();
+        let ctx = guard.finish().ok_or_else(|| {
+            ScriptError::new(
+                script.clone(),
+                "evaluation context stack corrupt",
+            )
+        })?;
 
         match result {
             Ok(value) => Ok(ScriptEvalReport {
@@ -597,5 +605,89 @@ mod tests {
         // Outer context was not polluted.
         assert_eq!(outer.events.len(), 1);
         assert_eq!(outer.events[0].name(), "outer.start");
+    }
+
+    // ── H-A8 unmanaged context tests ─────────────────────────────────
+
+    /// Direct `engine_mut().eval` to log_info without a managed context
+    /// must not panic and must return an error.
+    #[test]
+    fn direct_engine_eval_log_info_returns_error_not_panic() {
+        let mut engine = ScriptEngine::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.engine_mut().eval::<()>(r#"log_info("test")"#)
+        }));
+        assert!(result.is_ok(), "must not panic");
+        let eval_result = result.unwrap();
+        assert!(eval_result.is_err(), "must return error");
+        assert!(
+            eval_result
+                .unwrap_err()
+                .to_string()
+                .contains(CONTEXT_ERROR_MSG),
+            "error message must reference managed context"
+        );
+    }
+
+    /// Direct `engine_mut().eval` to log_warn without a managed context
+    /// must not panic.
+    #[test]
+    fn direct_engine_eval_log_warn_returns_error_not_panic() {
+        let mut engine = ScriptEngine::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.engine_mut().eval::<()>(r#"log_warn("test")"#)
+        }));
+        assert!(result.is_ok(), "must not panic");
+        assert!(result.unwrap().is_err(), "must return error");
+    }
+
+    /// Direct `engine_mut().eval` to log_error without a managed context
+    /// must not panic.
+    #[test]
+    fn direct_engine_eval_log_error_returns_error_not_panic() {
+        let mut engine = ScriptEngine::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.engine_mut().eval::<()>(r#"log_error("test")"#)
+        }));
+        assert!(result.is_ok(), "must not panic");
+        assert!(result.unwrap().is_err(), "must return error");
+    }
+
+    /// Direct `engine_mut().eval` to emit_event without a managed context
+    /// must not panic.
+    #[test]
+    fn direct_engine_eval_emit_event_returns_error_not_panic() {
+        let mut engine = ScriptEngine::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.engine_mut().eval::<()>(r#"emit_event("test")"#)
+        }));
+        assert!(result.is_ok(), "must not panic");
+        assert!(result.unwrap().is_err(), "must return error");
+    }
+
+    /// Direct `engine_mut().eval` to emit_event with payload without a
+    /// managed context must not panic.
+    #[test]
+    fn direct_engine_eval_emit_event_with_payload_returns_error_not_panic() {
+        let mut engine = ScriptEngine::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine
+                .engine_mut()
+                .eval::<()>(r#"emit_event("test", "payload")"#)
+        }));
+        assert!(result.is_ok(), "must not panic");
+        assert!(result.unwrap().is_err(), "must return error");
+    }
+
+    /// Custom functions registered through `engine_mut()` still work after
+    /// the context safety changes.
+    #[test]
+    fn custom_function_still_works_after_safety_changes() {
+        let mut engine = ScriptEngine::new();
+        engine
+            .engine_mut()
+            .register_fn("double", |x: i64| -> i64 { x * 2 });
+        let result = engine.eval("double(21)").unwrap();
+        assert_eq!(result.as_int().unwrap(), 42);
     }
 }

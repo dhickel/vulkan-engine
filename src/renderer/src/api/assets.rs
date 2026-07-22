@@ -1011,7 +1011,7 @@ impl<'a> AssetManager<'a> {
 
         if let Some((payload, retire_after)) = retired {
             self.core.material_retirement_queue.enqueue(
-                crate::data::retirement::RetirementClass::MaterialMeta,
+                crate::data::retirement::RetirementClass::MaterialPayload,
                 retire_after,
                 payload,
             );
@@ -1065,7 +1065,7 @@ impl<'a> AssetManager<'a> {
 
         if let Some((payload, retire_after)) = retired {
             self.core.texture_retirement_queue.enqueue(
-                crate::data::retirement::RetirementClass::TextureImage,
+                crate::data::retirement::RetirementClass::TextureGeometry,
                 retire_after,
                 payload,
             );

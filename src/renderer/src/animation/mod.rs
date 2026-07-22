@@ -5,9 +5,16 @@
 //! skinning buffer each frame.
 //!
 //! ## Durable animation targets
-//! Channels reference scene nodes by durable [`SceneNodeId`] rather than
-//! by temporary index. Stale targets are detected before evaluation and
-//! return distinct errors.
+//! Channels reference scene nodes by a legacy public `node_index: usize`
+//! for historical caller compatibility.  Internally a private resolved
+//! representation maps each index to a durable [`SceneNodeId`] through a
+//! user-supplied target map.  Stale targets are detected before
+//! evaluation and handled differently depending on the API surface:
+//!
+//! * **Legacy methods** (`set_clip`, `update`, `set_speed`): silently
+//!   skip or reject invalid input without mutating player state.
+//! * **Fallible methods** (`try_set_clip`, `try_set_speed`,
+//!   `try_update`): return typed [`AnimationError`] variants.
 //!
 //! ## Interpolation modes
 //! - **Step**: previous key value.
@@ -30,12 +37,14 @@ pub enum KeyframeValue {
     Scale(Vec3),
 }
 
-/// A channel targets a specific scene node and property by durable
+/// A channel targets a specific node and property by durable
 /// [`SceneNodeId`] instead of a volatile index.
 #[derive(Clone, Debug)]
 pub struct AnimationChannel {
-    /// Durable scene node target.
-    pub target: SceneNodeId,
+    /// Legacy node index resolved through the player's target map before
+    /// evaluation.  Kept as the public field for historical caller
+    /// compatibility (H-A2).
+    pub node_index: usize,
     pub target_path: AnimationTarget,
     pub sampler_index: usize,
 }
@@ -66,12 +75,37 @@ pub enum Interpolation {
 }
 
 /// A named animation clip with channels and samplers.
+///
+/// Channels reference scene nodes by legacy `node_index` for public
+/// compatibility.  Resolution to [`SceneNodeId`] happens inside the
+/// player via a target map.
 #[derive(Clone, Debug)]
 pub struct AnimationClip {
     pub name: String,
     pub duration: f32,
     pub channels: Vec<AnimationChannel>,
     pub samplers: Vec<AnimationSampler>,
+}
+
+// ── Private resolved representations ──────────────────────────────────
+
+/// Resolved channel that maps a legacy `node_index` to a durable
+/// [`SceneNodeId`].  Built from [`AnimationChannel`] plus a target map
+/// during pre-evaluation resolution.
+#[derive(Clone, Debug)]
+struct ResolvedChannel {
+    target: SceneNodeId,
+    target_path: AnimationTarget,
+    sampler_index: usize,
+}
+
+/// Fully-resolved clip ready for evaluation.
+#[derive(Clone, Debug)]
+struct ResolvedClip {
+    name: String,
+    duration: f32,
+    channels: Vec<ResolvedChannel>,
+    samplers: Vec<AnimationSampler>,
 }
 
 impl AnimationClip {
@@ -212,11 +246,50 @@ impl AnimationClip {
 
         Ok(())
     }
+
+    /// Resolve legacy `node_index` fields into [`SceneNodeId`] targets
+    /// using a user-supplied map.  Returns an error if any channel
+    /// references a `node_index` not present in the map.
+    fn resolve(&self, target_map: &HashMap<usize, SceneNodeId>) -> Result<ResolvedClip, AnimationError> {
+        let mut channels = Vec::with_capacity(self.channels.len());
+        for channel in &self.channels {
+            let target = target_map.get(&channel.node_index).copied().ok_or_else(|| {
+                AnimationError::InvalidChannel(format!(
+                    "channel node_index {} is not in the target map",
+                    channel.node_index
+                ))
+            })?;
+            channels.push(ResolvedChannel {
+                target,
+                target_path: channel.target_path,
+                sampler_index: channel.sampler_index,
+            });
+        }
+        Ok(ResolvedClip {
+            name: self.name.clone(),
+            duration: self.duration,
+            channels,
+            samplers: self.samplers.clone(),
+        })
+    }
 }
 
 /// Plays back an AnimationClip at a given time, computing per-node transforms.
+///
+/// ## API surfaces
+///
+/// | Method | Receiver | Returns | Failure behaviour |
+/// |--------|----------|---------|-------------------|
+/// | `set_clip` | `&mut self` | – | non-mutating |
+/// | `set_speed` | `&mut self` | – | non-mutating on NaN/∞ |
+/// | `update` | `&mut self` | `HashMap<usize, Mat4>` | empty map on error |
+/// | `try_set_clip` | `&mut self` | `Result<(), AnimationError>` | typed error |
+/// | `try_set_speed` | `&mut self` | `Result<(), AnimationError>` | typed error |
+/// | `try_update` | `&mut self` | `Result<HashMap<SceneNodeId, Mat4>, AnimationError>` | typed error |
 pub struct AnimationPlayer {
     clip: Option<AnimationClip>,
+    resolved: Option<ResolvedClip>,
+    target_map: HashMap<usize, SceneNodeId>,
     current_time: f32,
     playing: bool,
     loop_enabled: bool,
@@ -227,6 +300,8 @@ impl AnimationPlayer {
     pub fn new() -> Self {
         Self {
             clip: None,
+            resolved: None,
+            target_map: HashMap::new(),
             current_time: 0.0,
             playing: false,
             loop_enabled: false,
@@ -234,13 +309,35 @@ impl AnimationPlayer {
         }
     }
 
+    // ── Target map ────────────────────────────────────────────────────
+
+    /// Set the mapping from legacy `node_index` values to durable
+    /// [`SceneNodeId`] targets.  Required before `update` or
+    /// `try_update` can produce meaningful output.
+    pub fn set_target_map(&mut self, map: HashMap<usize, SceneNodeId>) {
+        self.target_map = map;
+        // Invalidate any previously-resolved clip.
+        self.resolved = None;
+    }
+
+    /// Return a reference to the current target map.
+    pub fn target_map(&self) -> &HashMap<usize, SceneNodeId> {
+        &self.target_map
+    }
+
+    // ── Historical compatibility methods ──────────────────────────────
+
     /// Set the clip to play and reset time.
-    /// Returns an error if the clip fails validation.
-    pub fn set_clip(&mut self, clip: AnimationClip) -> Result<(), AnimationError> {
-        clip.validate()?;
-        self.clip = Some(clip);
-        self.current_time = 0.0;
-        Ok(())
+    ///
+    /// If the clip fails structural validation the player state is
+    /// unchanged (non-mutating).  This preserves the historical
+    /// infallible signature.
+    pub fn set_clip(&mut self, clip: AnimationClip) {
+        if clip.validate().is_ok() {
+            self.clip = Some(clip);
+            self.resolved = None; // will be resolved on next update
+            self.current_time = 0.0;
+        }
     }
 
     /// Returns a reference to the current clip, if any.
@@ -260,8 +357,17 @@ impl AnimationPlayer {
         self.loop_enabled = looping;
     }
 
+    /// Set playback speed.  NaN and ±∞ are silently rejected without
+    /// mutating state.
     pub fn set_speed(&mut self, speed: f32) {
-        self.speed = speed;
+        if speed.is_finite() {
+            self.speed = speed;
+        }
+    }
+
+    /// Returns the current playback speed.
+    pub fn speed(&self) -> f32 {
+        self.speed
     }
 
     /// Returns the current playback time in seconds.
@@ -276,141 +382,160 @@ impl AnimationPlayer {
 
     /// Advance time by `dt` seconds and compute per-node transforms.
     ///
-    /// Returns a map of [`SceneNodeId`] → local transform matrix, or an
-    /// empty map if no clip is set. Values are finite-checked and
-    /// normalized before return.
-    pub fn update(
+    /// Returns a map of `node_index` → local transform matrix, or an
+    /// empty map if no clip is set or an error occurs.  Invalid `dt`
+    /// (NaN, ∞, negative) does not mutate player state.
+    pub fn update(&mut self, dt: f32) -> HashMap<usize, Mat4> {
+        // Resolve targets lazily if needed.
+        if self.resolved.is_none() {
+            if let Some(ref clip) = self.clip {
+                match clip.resolve(&self.target_map) {
+                    Ok(r) => self.resolved = Some(r),
+                    Err(_) => return HashMap::new(),
+                }
+            } else {
+                return HashMap::new();
+            }
+        }
+
+        match self.try_compute_update(dt) {
+            Ok((transforms_scene_id, new_time, new_playing)) => {
+                // Commit.
+                self.current_time = new_time;
+                self.playing = new_playing;
+                // Convert SceneNodeId-keyed map to usize-keyed map for
+                // legacy return type.  Build a reverse lookup.
+                let reverse: HashMap<SceneNodeId, usize> = self
+                    .target_map
+                    .iter()
+                    .map(|(k, v)| (*v, *k))
+                    .collect();
+                let mut result = HashMap::with_capacity(transforms_scene_id.len());
+                for (scene_id, mat) in transforms_scene_id {
+                    if let Some(idx) = reverse.get(&scene_id) {
+                        result.insert(*idx, mat);
+                    }
+                }
+                result
+            }
+            Err(_) => {
+                // Non-mutating: leave state unchanged, return empty.
+                HashMap::new()
+            }
+        }
+    }
+
+    // ── Fallible (typed) methods ─────────────────────────────────────
+
+    /// Set the clip to play and reset time.  Returns a typed error if the
+    /// clip fails structural validation.
+    pub fn try_set_clip(&mut self, clip: AnimationClip) -> Result<(), AnimationError> {
+        clip.validate()?;
+        self.clip = Some(clip);
+        self.resolved = None;
+        self.current_time = 0.0;
+        Ok(())
+    }
+
+    /// Set playback speed.  Returns a typed error for NaN or ±∞.
+    pub fn try_set_speed(&mut self, speed: f32) -> Result<(), AnimationError> {
+        if !speed.is_finite() {
+            return Err(AnimationError::InvalidTimestamp(format!(
+                "speed must be finite, got {speed}"
+            )));
+        }
+        self.speed = speed;
+        Ok(())
+    }
+
+    /// Advance time by `dt` seconds and compute per-node transforms.
+    ///
+    /// Returns a map of [`SceneNodeId`] → local transform matrix.
+    /// Detects stale targets, non-finite `dt`, overflowed time, and
+    /// non-finite interpolation output.
+    ///
+    /// On failure the player state is unchanged.
+    pub fn try_update(
         &mut self,
         dt: f32,
-        valid_targets: &HashMap<SceneNodeId, ()>,
     ) -> Result<HashMap<SceneNodeId, Mat4>, AnimationError> {
-        let clip = match &self.clip {
-            Some(c) => c,
-            None => return Ok(HashMap::new()),
-        };
+        // Resolve targets lazily if needed.
+        if self.resolved.is_none() {
+            if let Some(ref clip) = self.clip {
+                self.resolved = Some(clip.resolve(&self.target_map)?);
+            } else {
+                return Ok(HashMap::new());
+            }
+        }
 
+        let (transforms, new_time, new_playing) = self.try_compute_update(dt)?;
+        // Commit only after success.
+        self.current_time = new_time;
+        self.playing = new_playing;
+        Ok(transforms)
+    }
+
+    // ── Internal candidate computation ────────────────────────────────
+
+    /// Compute candidate time, play state, and output transforms without
+    /// mutating `self`.  On success the caller commits the live fields;
+    /// on error the player is untouched.
+    fn try_compute_update(
+        &self,
+        dt: f32,
+    ) -> Result<
+        (
+            HashMap<SceneNodeId, Mat4>,
+            f32,  // new current_time
+            bool, // new playing
+        ),
+        AnimationError,
+    > {
         if !dt.is_finite() || dt < 0.0 {
             return Err(AnimationError::InvalidTimestamp(format!(
                 "delta time must be finite and non-negative, got {dt}"
             )));
         }
 
-        if !self.playing {
-            return self.evaluate_at(self.current_time, valid_targets);
-        }
-
-        self.current_time += dt * self.speed;
-
-        if !self.current_time.is_finite() {
-            return Err(AnimationError::InvalidTimestamp(format!(
-                "current time became non-finite after advance: dt={dt}, speed={}",
-                self.speed
-            )));
-        }
-
-        if self.loop_enabled && clip.duration > 0.0 {
-            if self.current_time > clip.duration {
-                self.current_time %= clip.duration;
-            } else if self.current_time < 0.0 {
-                self.current_time = clip.duration + (self.current_time % clip.duration);
-            }
-        } else if self.current_time > clip.duration {
-            self.current_time = clip.duration;
-            self.playing = false;
-        } else if self.current_time < 0.0 {
-            self.current_time = 0.0;
-        }
-
-        self.evaluate_at(self.current_time, valid_targets)
-    }
-
-    /// Evaluate the animation at a specific time, returning per-node transforms.
-    fn evaluate_at(
-        &self,
-        time: f32,
-        valid_targets: &HashMap<SceneNodeId, ()>,
-    ) -> Result<HashMap<SceneNodeId, Mat4>, AnimationError> {
-        let clip = match &self.clip {
-            Some(c) => c,
-            None => return Ok(HashMap::new()),
+        let resolved = match &self.resolved {
+            Some(r) => r,
+            None => return Ok((HashMap::new(), self.current_time, self.playing)),
         };
 
-        let mut transforms: HashMap<SceneNodeId, (Option<Vec3>, Option<Quat>, Option<Vec3>)> =
-            HashMap::new();
-
-        for channel in &clip.channels {
-            // Check that the target node is still valid.
-            if !valid_targets.contains_key(&channel.target) {
-                return Err(AnimationError::StaleTarget(channel.target));
-            }
-
-            let sampler = match clip.samplers.get(channel.sampler_index) {
-                Some(s) => s,
-                None => {
-                    return Err(AnimationError::InvalidChannel(format!(
-                        "sampler index {} out of bounds",
-                        channel.sampler_index
-                    )))
-                }
-            };
-
-            let value = interpolate_sampler(sampler, time)?;
-
-            let entry = transforms.entry(channel.target).or_default();
-            match channel.target_path {
-                AnimationTarget::Translation => {
-                    if let KeyframeValue::Translation(v) = value {
-                        if !v.is_finite() {
-                            return Err(AnimationError::NonFiniteOutput(
-                                "translation interpolation produced a non-finite value".to_string(),
-                            ));
-                        }
-                        entry.0 = Some(v);
-                    }
-                }
-                AnimationTarget::Rotation => {
-                    if let KeyframeValue::Rotation(q) = value {
-                        if !q.is_finite() || !q.is_normalized() {
-                            return Err(AnimationError::NonFiniteOutput(
-                                "rotation interpolation produced an invalid quaternion".to_string(),
-                            ));
-                        }
-                        entry.1 = Some(q);
-                    }
-                }
-                AnimationTarget::Scale => {
-                    if let KeyframeValue::Scale(v) = value {
-                        if !v.is_finite() {
-                            return Err(AnimationError::NonFiniteOutput(
-                                "scale interpolation produced a non-finite value".to_string(),
-                            ));
-                        }
-                        entry.2 = Some(v);
-                    }
-                }
-            }
-        }
-
-        let mut result = HashMap::with_capacity(transforms.len());
-        for (id, (t, r, s)) in transforms {
-            let translation = t.unwrap_or(Vec3::ZERO);
-            let rotation = r.unwrap_or(Quat::IDENTITY);
-            let scale = s.unwrap_or(Vec3::ONE);
-
-            if !translation.is_finite() || !scale.is_finite() || !rotation.is_finite() {
-                return Err(AnimationError::NonFiniteOutput(format!(
-                    "non-finite transform for node (slot={}, gen={})",
-                    id.slot, id.generation
+        let candidate_time = if !self.playing {
+            self.current_time
+        } else {
+            let advanced = self.current_time + dt * self.speed;
+            if !advanced.is_finite() {
+                return Err(AnimationError::InvalidTimestamp(format!(
+                    "current time became non-finite after advance: dt={dt}, speed={}",
+                    self.speed
                 )));
             }
+            advanced
+        };
 
-            result.insert(
-                id,
-                Mat4::from_scale_rotation_translation(scale, rotation, translation),
-            );
-        }
+        let (clamped_time, new_playing) = if self.loop_enabled && resolved.duration > 0.0 {
+            let t = if candidate_time > resolved.duration {
+                candidate_time % resolved.duration
+            } else if candidate_time < 0.0 {
+                resolved.duration + (candidate_time % resolved.duration)
+            } else {
+                candidate_time
+            };
+            (t, self.playing)
+        } else {
+            if candidate_time > resolved.duration {
+                (resolved.duration, false)
+            } else if candidate_time < 0.0 {
+                (0.0, self.playing)
+            } else {
+                (candidate_time, self.playing)
+            }
+        };
 
-        Ok(result)
+        let transforms = evaluate_resolved(resolved, clamped_time)?;
+        Ok((transforms, clamped_time, new_playing))
     }
 }
 
@@ -419,6 +544,89 @@ impl Default for AnimationPlayer {
         Self::new()
     }
 }
+
+// ── Resolved-clip evaluation ───────────────────────────────────────────
+
+/// Evaluate a resolved clip at `time`, returning per-`SceneNodeId` local
+/// transform matrices.  All outputs are finite-checked.
+fn evaluate_resolved(
+    clip: &ResolvedClip,
+    time: f32,
+) -> Result<HashMap<SceneNodeId, Mat4>, AnimationError> {
+    let mut transforms: HashMap<SceneNodeId, (Option<Vec3>, Option<Quat>, Option<Vec3>)> =
+        HashMap::new();
+
+    for channel in &clip.channels {
+        let sampler = match clip.samplers.get(channel.sampler_index) {
+            Some(s) => s,
+            None => {
+                return Err(AnimationError::InvalidChannel(format!(
+                    "sampler index {} out of bounds",
+                    channel.sampler_index
+                )))
+            }
+        };
+
+        let value = interpolate_sampler(sampler, time)?;
+
+        let entry = transforms.entry(channel.target).or_default();
+        match channel.target_path {
+            AnimationTarget::Translation => {
+                if let KeyframeValue::Translation(v) = value {
+                    if !v.is_finite() {
+                        return Err(AnimationError::NonFiniteOutput(
+                            "translation interpolation produced a non-finite value".to_string(),
+                        ));
+                    }
+                    entry.0 = Some(v);
+                }
+            }
+            AnimationTarget::Rotation => {
+                if let KeyframeValue::Rotation(q) = value {
+                    if !q.is_finite() || !q.is_normalized() {
+                        return Err(AnimationError::NonFiniteOutput(
+                            "rotation interpolation produced an invalid quaternion".to_string(),
+                        ));
+                    }
+                    entry.1 = Some(q);
+                }
+            }
+            AnimationTarget::Scale => {
+                if let KeyframeValue::Scale(v) = value {
+                    if !v.is_finite() {
+                        return Err(AnimationError::NonFiniteOutput(
+                            "scale interpolation produced a non-finite value".to_string(),
+                        ));
+                    }
+                    entry.2 = Some(v);
+                }
+            }
+        }
+    }
+
+    let mut result = HashMap::with_capacity(transforms.len());
+    for (id, (t, r, s)) in transforms {
+        let translation = t.unwrap_or(Vec3::ZERO);
+        let rotation = r.unwrap_or(Quat::IDENTITY);
+        let scale = s.unwrap_or(Vec3::ONE);
+
+        if !translation.is_finite() || !scale.is_finite() || !rotation.is_finite() {
+            return Err(AnimationError::NonFiniteOutput(format!(
+                "non-finite transform for node (slot={}, gen={})",
+                id.slot, id.generation
+            )));
+        }
+
+        result.insert(
+            id,
+            Mat4::from_scale_rotation_translation(scale, rotation, translation),
+        );
+    }
+
+    Ok(result)
+}
+
+// ── Sampler interpolation ─────────────────────────────────────────────
 
 /// Interpolate a sampler's value at a given time.
 fn interpolate_sampler(
@@ -707,9 +915,9 @@ mod tests {
         SceneNodeId::new(1, 0)
     }
 
-    fn make_valid_targets() -> HashMap<SceneNodeId, ()> {
+    fn make_target_map() -> HashMap<usize, SceneNodeId> {
         let mut map = HashMap::new();
-        map.insert(make_test_clip_node_id(), ());
+        map.insert(0, make_test_clip_node_id());
         map
     }
 
@@ -774,7 +982,7 @@ mod tests {
     fn clip_validation_rejects_out_of_bounds_sampler_index() {
         let mut clip = AnimationClip::new("test", 1.0);
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 5,
         });
@@ -797,7 +1005,7 @@ mod tests {
             interpolation: Interpolation::Linear,
         });
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
@@ -820,7 +1028,7 @@ mod tests {
             interpolation: Interpolation::CubicSpline,
         });
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
@@ -842,7 +1050,7 @@ mod tests {
             interpolation: Interpolation::Linear,
         });
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
@@ -860,7 +1068,7 @@ mod tests {
             vec![Vec3::ZERO, Vec3::ONE, Vec3::new(2.0, 0.0, 0.0)],
         ));
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
@@ -1018,7 +1226,7 @@ mod tests {
         }
     }
 
-    // ── Player tests ─────────────────────────────────────────────────
+    // ── Legacy player tests ─────────────────────────────────────────
 
     #[test]
     fn player_advances_time_correctly() {
@@ -1028,20 +1236,20 @@ mod tests {
             vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
         ));
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
 
         let mut player = AnimationPlayer::new();
-        player.set_clip(clip).unwrap();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
         player.play();
 
-        let targets = make_valid_targets();
-        let result = player.update(1.0, &targets).unwrap();
+        let result = player.update(1.0);
         assert_eq!(player.current_time(), 1.0);
         // At t=1.0, should be midpoint.
-        let m = result[&make_test_clip_node_id()];
+        let m = result[&0usize];
         let (_, _, t) = m.to_scale_rotation_translation();
         assert!((t.x - 5.0).abs() < 0.01);
     }
@@ -1054,17 +1262,17 @@ mod tests {
             vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
         ));
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
 
         let mut player = AnimationPlayer::new();
-        player.set_clip(clip).unwrap();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
         player.play();
 
-        let targets = make_valid_targets();
-        let _ = player.update(3.0, &targets).unwrap();
+        let _ = player.update(3.0);
         assert!(!player.is_playing());
         assert_eq!(player.current_time(), 2.0);
     }
@@ -1077,65 +1285,290 @@ mod tests {
             vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
         ));
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
 
         let mut player = AnimationPlayer::new();
-        player.set_clip(clip).unwrap();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
         player.set_looping(true);
         player.play();
 
-        let targets = make_valid_targets();
-        let _ = player.update(3.0, &targets).unwrap();
+        let _ = player.update(3.0);
         assert!(player.is_playing());
         assert_eq!(player.current_time(), 1.0);
     }
 
     #[test]
-    fn player_rejects_stale_target() {
-        let mut clip = AnimationClip::new("stale", 1.0);
+    fn player_missing_target_map_returns_empty() {
+        let mut clip = AnimationClip::new("no_map", 1.0);
         clip.samplers.push(make_translation_sampler_linear(
             vec![0.0, 1.0],
             vec![Vec3::ZERO, Vec3::ONE],
         ));
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
 
         let mut player = AnimationPlayer::new();
-        player.set_clip(clip).unwrap();
+        // Deliberately do NOT set target map.
+        player.set_clip(clip);
         player.play();
 
-        // Empty targets — the node ID is not valid.
-        let empty_targets = HashMap::new();
-        let result = player.update(0.1, &empty_targets);
-        assert!(matches!(result, Err(AnimationError::StaleTarget(_))));
+        let result = player.update(0.1);
+        assert!(result.is_empty());
+        // State must be unchanged.
+        assert_eq!(player.current_time(), 0.0);
+        assert!(player.is_playing());
     }
 
     #[test]
-    fn player_rejects_negative_dt() {
+    fn player_rejects_negative_dt_non_mutating() {
         let mut clip = AnimationClip::new("neg_dt", 1.0);
         clip.samplers.push(make_translation_sampler_linear(
             vec![0.0, 1.0],
             vec![Vec3::ZERO, Vec3::ONE],
         ));
         clip.channels.push(AnimationChannel {
-            target: make_test_clip_node_id(),
+            node_index: 0,
             target_path: AnimationTarget::Translation,
             sampler_index: 0,
         });
 
         let mut player = AnimationPlayer::new();
-        player.set_clip(clip).unwrap();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
         player.play();
 
-        let targets = make_valid_targets();
-        let result = player.update(-0.1, &targets);
+        let result = player.update(-0.1);
+        assert!(result.is_empty());
+        // State unchanged.
+        assert_eq!(player.current_time(), 0.0);
+        assert!(player.is_playing());
+    }
+
+    #[test]
+    fn player_invalid_clip_not_set_non_mutating() {
+        let mut player = AnimationPlayer::new();
+        let clip = AnimationClip::new("", 1.0); // empty name
+        player.set_clip(clip);
+        assert!(player.clip().is_none());
+        assert_eq!(player.current_time(), 0.0);
+    }
+
+    // ── Speed NaN/∞ rejection (legacy) ───────────────────────────────
+
+    #[test]
+    fn set_speed_rejects_nan() {
+        let mut player = AnimationPlayer::new();
+        player.set_speed(2.0);
+        player.set_speed(f32::NAN);
+        assert!((player.speed() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn set_speed_rejects_infinity() {
+        let mut player = AnimationPlayer::new();
+        player.set_speed(2.0);
+        player.set_speed(f32::INFINITY);
+        assert!((player.speed() - 2.0).abs() < 0.01);
+        player.set_speed(f32::NEG_INFINITY);
+        assert!((player.speed() - 2.0).abs() < 0.01);
+    }
+
+    // ── try_* player tests ───────────────────────────────────────────
+
+    #[test]
+    fn try_set_clip_rejects_invalid() {
+        let mut player = AnimationPlayer::new();
+        let clip = AnimationClip::new("", 1.0);
+        let result = player.try_set_clip(clip);
+        assert!(result.is_err());
+        assert!(player.clip().is_none());
+    }
+
+    #[test]
+    fn try_set_speed_rejects_nan() {
+        let mut player = AnimationPlayer::new();
+        assert!(player.try_set_speed(2.0).is_ok());
+        let result = player.try_set_speed(f32::NAN);
+        assert!(result.is_err());
+        assert!((player.speed() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_set_speed_rejects_inf() {
+        let mut player = AnimationPlayer::new();
+        assert!(player.try_set_speed(2.0).is_ok());
+        assert!(player.try_set_speed(f32::INFINITY).is_err());
+        assert!((player.speed() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_update_returns_error_on_negative_dt() {
+        let mut clip = AnimationClip::new("test", 1.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 1.0],
+            vec![Vec3::ZERO, Vec3::ONE],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.play();
+
+        let result = player.try_update(-0.1);
         assert!(matches!(result, Err(AnimationError::InvalidTimestamp(_))));
+        assert_eq!(player.current_time(), 0.0);
+        assert!(player.is_playing());
+    }
+
+    #[test]
+    fn try_update_returns_error_on_nan_dt() {
+        let mut clip = AnimationClip::new("test", 1.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 1.0],
+            vec![Vec3::ZERO, Vec3::ONE],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.play();
+
+        let result = player.try_update(f32::NAN);
+        assert!(matches!(result, Err(AnimationError::InvalidTimestamp(_))));
+        assert_eq!(player.current_time(), 0.0);
+    }
+
+    #[test]
+    fn try_update_paused_returns_current_state() {
+        let mut clip = AnimationClip::new("test", 2.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 2.0],
+            vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        // Paused — not playing.
+        let result = player.try_update(1.0).unwrap();
+        // Should evaluate at t=0 (current_time).
+        let mat = result[&make_test_clip_node_id()];
+        let (_, _, t) = mat.to_scale_rotation_translation();
+        assert!((t.x - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_update_no_clip_returns_empty() {
+        let mut player = AnimationPlayer::new();
+        let result = player.try_update(0.016).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn try_update_with_speed() {
+        let mut clip = AnimationClip::new("test", 10.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 10.0],
+            vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.set_speed(2.0);
+        player.play();
+
+        let result = player.try_update(1.0).unwrap();
+        // dt=1.0, speed=2.0 => advance 2.0 seconds => t=2.0
+        let mat = result[&make_test_clip_node_id()];
+        let (_, _, t) = mat.to_scale_rotation_translation();
+        assert!((t.x - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_update_looping() {
+        let mut clip = AnimationClip::new("loop", 2.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 2.0],
+            vec![Vec3::ZERO, Vec3::new(10.0, 0.0, 0.0)],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.set_looping(true);
+        player.play();
+
+        let _ = player.try_update(3.0).unwrap();
+        assert!(player.is_playing());
+        assert_eq!(player.current_time(), 1.0);
+    }
+
+    /// State snapshot: try_update failure must leave all player state
+    /// identical to pre-call snapshot.
+    #[test]
+    fn try_update_state_snapshot_unchanged_on_failure() {
+        let mut clip = AnimationClip::new("snapshot", 2.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 1.0, 2.0],
+            vec![Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.set_speed(1.5);
+        player.play();
+
+        // Advance a bit first.
+        let _ = player.try_update(0.5).unwrap();
+        let snap_time = player.current_time();
+        let snap_playing = player.is_playing();
+        let snap_speed = player.speed();
+
+        // Now trigger a failure with NaN dt.
+        let result = player.try_update(f32::NAN);
+        assert!(result.is_err());
+        assert_eq!(player.current_time(), snap_time);
+        assert_eq!(player.is_playing(), snap_playing);
+        assert!((player.speed() - snap_speed).abs() < 0.01);
     }
 
     // ── Shortest-path slerp ──────────────────────────────────────────

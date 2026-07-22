@@ -99,8 +99,9 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 fn run_v2(args: &cli::CliArgs) -> Result<(), AppError> {
     use config::{
         compute_geometry_identity, compute_scene_config_identity, get_embedded_preset,
-        known_catalog_ids, load_preset, normalize_document, resolve_asset_ref, DocumentSource,
-        LoadedDocument, ResolvedAppConfig, RuntimeOptions,
+        known_catalog_ids, load_preset, normalize_document, resolve_asset_ref,
+        resolve_config_document_path, DocumentSource, LoadedDocument, ResolvedAppConfig,
+        RuntimeOptions,
     };
     use validate::{validate_preset_document, validate_runtime_light_budget};
 
@@ -119,13 +120,8 @@ fn run_v2(args: &cli::CliArgs) -> Result<(), AppError> {
             },
         )
     } else if let Some(ref config_path) = args.config {
-        let absolute_path = if config_path.is_absolute() {
-            config_path.clone()
-        } else {
-            std::env::current_dir()
-                .map_err(|error| AppError::Validation(error.to_string()))?
-                .join(config_path)
-        };
+        let absolute_path = resolve_config_document_path(config_path)
+            .map_err(|e| AppError::Validation(format!("failed to resolve config: {e}")))?;
         let document = load_preset(&absolute_path)
             .map_err(|e| AppError::Validation(format!("failed to load config: {e}")))?;
         let source_dir = absolute_path

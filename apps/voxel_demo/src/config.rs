@@ -814,6 +814,57 @@ fn normalize_path(path: &Path) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+// ─── Config Document Path Resolution ──────────────────────────────────────
+
+/// Resolve a CLI/editor config document path without requiring one specific
+/// workspace working directory.
+///
+/// Relative paths prefer the process working directory, then the voxel-demo
+/// package directory, then the workspace root. Only an existing regular file
+/// is accepted, and failures report every candidate that was tried.
+pub(crate) fn resolve_config_document_path(path: &Path) -> Result<PathBuf, String> {
+    let current_dir = std::env::current_dir()
+        .map_err(|error| format!("cannot resolve current directory: {error}"))?;
+    resolve_config_document_path_from(path, &current_dir, Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+fn resolve_config_document_path_from(
+    path: &Path,
+    current_dir: &Path,
+    manifest_dir: &Path,
+) -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    let mut push_candidate = |candidate: PathBuf| {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    if path.is_absolute() {
+        push_candidate(path.to_path_buf());
+    } else {
+        push_candidate(current_dir.join(path));
+        push_candidate(manifest_dir.join(path));
+        if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+            push_candidate(workspace_root.join(path));
+        }
+    }
+
+    if let Some(candidate) = candidates.iter().find(|candidate| candidate.is_file()) {
+        return Ok(candidate.clone());
+    }
+
+    let attempted = candidates
+        .iter()
+        .map(|candidate| format!("'{}'", candidate.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "config file '{}' was not found; tried {attempted}",
+        path.display()
+    ))
+}
+
 // ─── Save & Load ───────────────────────────────────────────────────────────
 
 /// Save a canonical complete `PresetDocument` to a TOML file.
@@ -1460,6 +1511,71 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn config_document_path_resolves_bundled_preset_from_workspace_root() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
+        let resolved = resolve_config_document_path_from(
+            Path::new("presets/default.toml"),
+            workspace_root,
+            manifest_dir,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, manifest_dir.join("presets/default.toml"));
+    }
+
+    #[test]
+    fn config_document_path_resolves_workspace_qualified_preset_from_package_dir() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let resolved = resolve_config_document_path_from(
+            Path::new("apps/voxel_demo/presets/default.toml"),
+            manifest_dir,
+            manifest_dir,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, manifest_dir.join("presets/default.toml"));
+    }
+
+    #[test]
+    fn config_document_path_prefers_existing_current_directory_file() {
+        let root = std::env::temp_dir().join(format!(
+            "voxel-demo-config-path-tests-{}",
+            std::process::id()
+        ));
+        let current_dir = root.join("current");
+        let manifest_dir = root.join("workspace/apps/voxel_demo");
+        let relative = Path::new("configs/cave.toml");
+        let current_file = current_dir.join(relative);
+        let package_file = manifest_dir.join(relative);
+        std::fs::create_dir_all(current_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(package_file.parent().unwrap()).unwrap();
+        std::fs::write(&current_file, b"current").unwrap();
+        std::fs::write(&package_file, b"package").unwrap();
+
+        let resolved =
+            resolve_config_document_path_from(relative, &current_dir, &manifest_dir).unwrap();
+        assert_eq!(resolved, current_file);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_document_path_missing_error_lists_candidates() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let error = resolve_config_document_path_from(
+            Path::new("missing/never-a-config.toml"),
+            Path::new("/tmp/voxel-demo-missing-config"),
+            manifest_dir,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("was not found; tried"));
+        assert!(error.contains("missing/never-a-config.toml"));
+        assert!(error.contains(env!("CARGO_MANIFEST_DIR")));
     }
 
     // ── Save/load round-trip ───────────────────────────────────────────

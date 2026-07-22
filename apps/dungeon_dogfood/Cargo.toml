@@ -2,6 +2,7 @@
 name = "dungeon_dogfood"
 version = "0.1.0"
 edition = "2021"
+default-run = "dungeon_dogfood"
 
 [features]
 default = ["runtime"]
