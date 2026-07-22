@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "scene_id": "scene.dogfood_dungeon.start",
+  "root_nodes": ["node.dogfood_dungeon.root"],
+  "nodes": [
+    {
+      "id": "node.dogfood_dungeon.root",
+      "parent": null,
+      "name": "Dungeon Dogfood Root",
+      "transform": {
+        "translation": [0.0, 0.0, 0.0],
+        "rotation": [0.0, 0.0, 0.0, 1.0],
+        "scale": [1.0, 1.0, 1.0]
+      },
+      "asset": null
+    }
+  ],
+  "lights": [],
+  "environment": null,
+  "editor": {}
+}

@@ -10,6 +10,8 @@ Rust developers building applications on this Vulkan rendering engine. Familiari
 
 The root workspace currently contains the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `apps/dungeon_dogfood`, `apps/voxel_demo`, and `tools/engine_pack`. `apps/voxel_demo` is the configurable procedural-cave application. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
 
+> **New here?** Start with the [Engine Guide](../guide/00-index.md) — a cumulative learning path for building applications with this engine. This API reference is the companion contract-level documentation.
+
 ## Quick Navigation
 
 | Topic | Document | What You'll Learn |

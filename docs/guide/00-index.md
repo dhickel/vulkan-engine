@@ -47,17 +47,21 @@ Use these chapters when you need a specific capability. They do not depend on re
 
 ### Part III — Real-World Reference
 
+Case studies of two complete workspace applications. Read these to see how the concepts from Parts I and II compose into real apps.
+
 | # | Chapter | What It Covers |
 |---|---------|----------------|
-| 14 | Case Study: Dungeon Dogfood *(planned)* | Full walkthrough of the dogfood app — architecture, collision, audio bridge, headless capture |
-| 15 | Case Study: Voxel Demo *(planned)* | Procedural cave generation, MC33 meshing, configurable presets, regeneration |
+| [14](14-dungeon-dogfood-walkthrough.md) | Case Study: Dungeon Dogfood | App-owned loop, procedural dungeon, AABB collision, mesh-collider bridge, audio telemetry, headless capture |
+| [15](15-voxel-demo-walkthrough.md) | Case Study: Voxel Demo | v2 presets/config, deterministic generation, MC33 partition, PBR materials, imgui editor, latest-wins regeneration |
 
 ### Part IV — Compatibility & Troubleshooting
 
+Reference chapters for distinguishing supported API paths and diagnosing common issues.
+
 | # | Chapter | What It Covers |
 |---|---------|----------------|
-| 16 | Renderer Compatibility Paths *(planned)* | Distinguishing renderer-owned `update_input`/`render_scene` examples from app-owned loops; when to use each |
-| 17 | Troubleshooting *(planned)* | Common errors, Vulkan setup issues, resize problems, asset loading failures |
+| [16](16-api-compatibility-guide.md) | API Compatibility Guide | Side-by-side ownership tables: app-owned vs renderer compatibility paths, migration labels, prelude comparison |
+| [17](17-troubleshooting.md) | Troubleshooting | Compile errors, init failures, runtime outcomes, terminal errors, subsystem failures, headless vs WSI evidence |
 
 ## Conventions
 

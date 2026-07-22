@@ -63,6 +63,7 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 
 ## Documentation Map
 
+- App developer guide: `docs/guide/00-index.md`
 - API usage docs: `docs/api/00-index.md`
 - Internal implementation docs: `docs/internal/00-index.md`
 - Renderer package guide: `src/renderer/AGENTS.md`
