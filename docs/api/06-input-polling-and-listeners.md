@@ -122,7 +122,9 @@ consume = false
 - The renderer's `register_app_ui(...)` path treats native app chrome as active imgui capture:
   keyboard, mouse, cursor grab, and built-in FPS camera updates are suppressed while the app UI is
   registered. This is the editor shell's default so panel/menu interaction does not leak into game
-  controls.
+  controls. If the app intercepts a show/hide hotkey before renderer routing, it calls
+  `refresh_cursor_capture(window)` after callback registration changes so hidden UI restores cursor
+  confinement and mouse-look immediately.
 - Direct `InputSystem` users can install `editor_ui_capture_layer()` when they need the same
   high-priority editor-consumes-before-gameplay behavior outside the renderer facade.
 

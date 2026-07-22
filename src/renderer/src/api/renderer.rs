@@ -369,18 +369,10 @@ impl Renderer {
             imgui.handle_event(window, event);
         }
 
-        let io = self
-            .runtime
-            .core
-            .imgui
-            .as_ref()
-            .map(|imgui| imgui.context.io());
         let ui_visible = self.runtime.core.debug_ui.is_any_visible();
         let app_ui_active = self.runtime.core.debug_ui.has_app_ui();
-        let consume_keyboard =
-            app_ui_active || ui_visible || io.is_some_and(|io| io.want_capture_keyboard);
-        let consume_mouse =
-            app_ui_active || ui_visible || io.is_some_and(|io| io.want_capture_mouse);
+        let (consume_keyboard, consume_mouse) =
+            ui_capture_policy(app_ui_active, ui_visible);
 
         match event {
             Event::DeviceEvent {
@@ -896,6 +888,15 @@ impl Renderer {
         self.runtime.core.debug_ui.has_app_ui()
     }
 
+    /// Immediately reapplies cursor visibility/confinement after app UI registration changes.
+    ///
+    /// App-owned loops that intercept their UI hotkey before [`Self::route_platform_input`] should
+    /// call this after registering or unregistering app UI. This keeps cursor policy renderer-owned
+    /// while restoring mouse-look without waiting for another pointer enter/leave event.
+    pub fn refresh_cursor_capture(&mut self, window: &Window) -> Result<(), RendererError> {
+        self.apply_cursor_policy(window)
+    }
+
     /// Returns true when imgui wants keyboard input for an active widget.
     ///
     /// App shells should use this to suppress their own raw keyboard shortcuts while
@@ -1270,12 +1271,10 @@ impl Renderer {
     }
 
     fn imgui_capture_active(&self) -> bool {
-        self.runtime.core.debug_ui.has_app_ui()
-            || self.runtime.core.debug_ui.is_any_visible()
-            || self.runtime.core.imgui.as_ref().is_some_and(|imgui| {
-                let io = imgui.context.io();
-                io.want_capture_keyboard || io.want_capture_mouse
-            })
+        let app_ui_active = self.runtime.core.debug_ui.has_app_ui();
+        let ui_visible = self.runtime.core.debug_ui.is_any_visible();
+        let (keyboard, mouse) = ui_capture_policy(app_ui_active, ui_visible);
+        keyboard || mouse
     }
 
     fn handle_cursor_focus(
@@ -1382,6 +1381,11 @@ fn cursor_grab_transition(
     should_grab: bool,
 ) -> Option<bool> {
     (cursor_in_window && grab_requested != should_grab).then_some(should_grab)
+}
+
+fn ui_capture_policy(app_ui_active: bool, debug_ui_visible: bool) -> (bool, bool) {
+    let ui_surface_active = app_ui_active || debug_ui_visible;
+    (ui_surface_active, ui_surface_active)
 }
 
 fn scroll_delta_to_lines(delta: &MouseScrollDelta) -> f32 {
@@ -1497,6 +1501,9 @@ fn renderer_error_from_backend(err: vk_render::VkRenderError) -> RendererError {
             RendererError::DeviceLost
         }
         vk_render::VkRenderError::Backend(message) => map_frame_render_err(message),
+        vk_render::VkRenderError::RetryableResize(message) => {
+            super::errors::RendererFrameError::Resize(message).into()
+        }
         vk_render::VkRenderError::BackendPoisoned(reason) => RendererError::BackendPoisoned(reason),
     }
 }
@@ -1534,7 +1541,7 @@ mod tests {
     use super::{
         build_submission_with_camera_view, cursor_grab_transition,
         emit_input_action_events_from_snapshot, frame_outcome_from_backend,
-        renderer_error_from_backend, CameraView, FrameRenderOutcome,
+        renderer_error_from_backend, ui_capture_policy, CameraView, FrameRenderOutcome,
     };
 
     #[test]
@@ -1557,6 +1564,13 @@ mod tests {
         assert_eq!(cursor_grab_transition(true, true, false), Some(false));
         assert_eq!(cursor_grab_transition(false, false, true), None);
         assert_eq!(cursor_grab_transition(true, false, true), Some(true));
+    }
+
+    #[test]
+    fn stale_imgui_capture_does_not_block_input_after_all_ui_is_hidden() {
+        assert_eq!(ui_capture_policy(false, false), (false, false));
+        assert_eq!(ui_capture_policy(true, false), (true, true));
+        assert_eq!(ui_capture_policy(false, true), (true, true));
     }
 
     #[test]
@@ -1700,6 +1714,18 @@ mod tests {
                 "Vulkan device lost during fence wait".to_string(),
             ));
         assert!(matches!(device_lost, crate::api::RendererError::DeviceLost));
+
+        let retryable_resize = renderer_error_from_backend(
+            crate::vulkan::vk_render::VkRenderError::RetryableResize(
+                "surface capabilities temporarily unavailable".to_string(),
+            ),
+        );
+        assert!(matches!(
+            retryable_resize,
+            crate::api::RendererError::Frame(
+                crate::api::RendererFrameError::Resize(message)
+            ) if message == "surface capabilities temporarily unavailable"
+        ));
 
         let poisoned =
             renderer_error_from_backend(crate::vulkan::vk_render::VkRenderError::BackendPoisoned(

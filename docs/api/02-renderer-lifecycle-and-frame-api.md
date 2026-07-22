@@ -36,7 +36,9 @@ This chapter is for students, hobbyists, and indie developers using the facade r
   - `toggle_debug_ui()`, `set_debug_ui_visible(...)`, `is_debug_ui_visible()`
   - `register_debug_view(...)`, `unregister_debug_view(...)`, `set_debug_view_enabled(...)`
 - App-owned imgui chrome can be registered with `register_app_ui(...)` for native tools that
-  need always-visible panels instead of optional debug windows.
+  need always-visible panels instead of optional debug windows. If an app intercepts its UI hotkey
+  before renderer input routing, call `refresh_cursor_capture(window)` after callback registration
+  changes so cursor confinement/visibility updates immediately.
 - `update_input(...)` remains the compatibility path that handles renderer platform side effects and
   queues into renderer-owned input. Apps that own input dispatch can call `route_platform_input(...)`
   and then `engine::input::queue_routed_input_event(...)` for uncaptured gameplay/app input.
@@ -140,6 +142,10 @@ Every loop tick:
 - Calling `render_scene_in_frame(...)` twice for one `FrameContext` is invalid.
 - `SkippedAcquireUnavailable` is transient and does not request a resize or rebuild; keep the loop alive and retry a later frame.
 - Resize flow can produce repeated `SkippedResizePending` outcomes until resize is serviced.
+  Zero requested or capability-selected extents remain pending without Vulkan swapchain creation.
+  `RendererFrameError::Resize` means a transient zero/empty capability state was detected before
+  retirement and the existing generation is safe to retry; device loss, backend poisoning,
+  compatibility violations, and other render errors remain terminal.
 - `SubmittedNotPresented` means queue submission succeeded but presentation did not reach the
   presentation engine because the swapchain was out of date.
 - `PresentedSuboptimal` means the frame reached presentation, but image acquisition or presentation

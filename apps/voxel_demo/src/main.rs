@@ -876,12 +876,39 @@ fn run_windowed(
                         elwt.exit();
                     }
                     WindowEvent::Resized(new_size) => {
-                        if let Err(e) = renderer.resize(new_size.width, new_size.height) {
-                            log::error!("Resize failed: {e}");
+                        if service_window_resize(
+                            &mut renderer,
+                            new_size.width,
+                            new_size.height,
+                            "window resize event",
+                        ) == WindowResizeOutcome::Terminal
+                        {
                             elwt.exit();
+                        } else {
+                            window.request_redraw();
                         }
                     }
                     WindowEvent::RedrawRequested => {
+                        let current_size = window.inner_size();
+                        match service_window_resize(
+                            &mut renderer,
+                            current_size.width,
+                            current_size.height,
+                            "redraw resize retry",
+                        ) {
+                            WindowResizeOutcome::Ready => {}
+                            WindowResizeOutcome::Deferred => {
+                                if current_size.width > 0 && current_size.height > 0 {
+                                    window.request_redraw();
+                                }
+                                return;
+                            }
+                            WindowResizeOutcome::Terminal => {
+                                elwt.exit();
+                                return;
+                            }
+                        }
+
                         // App-owned input has exactly one dispatch boundary per frame.
                         app_input.dispatch_frame();
                         let snapshot = app_input.snapshot();
@@ -926,7 +953,6 @@ fn run_windowed(
                         }
 
                         // Render
-                        let current_size = window.inner_size();
                         renderer.pump_asset_tasks(32).unwrap_or_default();
 
                         let view = engine::render::camera_view_for_size(
@@ -961,6 +987,37 @@ fn run_windowed(
     })?;
 
     Ok(())
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum WindowResizeOutcome {
+    Ready,
+    Deferred,
+    Terminal,
+}
+
+fn service_window_resize(
+    renderer: &mut Renderer,
+    width: u32,
+    height: u32,
+    context: &str,
+) -> WindowResizeOutcome {
+    match renderer.resize(width, height) {
+        Ok(()) if width == 0 || height == 0 => WindowResizeOutcome::Deferred,
+        Ok(()) => WindowResizeOutcome::Ready,
+        Err(renderer::RendererError::Frame(
+            renderer::api::RendererFrameError::Resize(message),
+        )) => {
+            log::warn!(
+                "{context} deferred for {width}x{height}; swapchain preflight will retry: {message}"
+            );
+            WindowResizeOutcome::Deferred
+        }
+        Err(error) => {
+            log::error!("{context} failed for {width}x{height}: {error}");
+            WindowResizeOutcome::Terminal
+        }
+    }
 }
 
 fn install_app_fps_input(input: &mut engine::input::InputSystem) {
@@ -1260,6 +1317,16 @@ fn write_enriched_sidecar(
 
 // ─── v2 Windowed mode ─────────────────────────────────────────────────────
 
+fn is_editor_toggle_key(
+    physical_key: PhysicalKey,
+    state: ElementState,
+    repeat: bool,
+) -> bool {
+    !repeat
+        && state == ElementState::Pressed
+        && matches!(physical_key, PhysicalKey::Code(KeyCode::F1 | KeyCode::F2))
+}
+
 fn is_editor_toggle_event(event: &Event<()>, expected_window: winit::window::WindowId) -> bool {
     matches!(
         event,
@@ -1267,10 +1334,39 @@ fn is_editor_toggle_event(event: &Event<()>, expected_window: winit::window::Win
             window_id,
             event: WindowEvent::KeyboardInput { event, .. },
         } if *window_id == expected_window
-            && !event.repeat
-            && event.state == ElementState::Pressed
-            && matches!(event.physical_key, PhysicalKey::Code(KeyCode::F1 | KeyCode::F2))
+            && is_editor_toggle_key(event.physical_key, event.state, event.repeat)
     )
+}
+
+#[cfg(test)]
+mod editor_hotkey_tests {
+    use super::*;
+
+    #[test]
+    fn f1_and_f2_toggle_only_on_initial_press() {
+        for key in [KeyCode::F1, KeyCode::F2] {
+            assert!(is_editor_toggle_key(
+                PhysicalKey::Code(key),
+                ElementState::Pressed,
+                false,
+            ));
+            assert!(!is_editor_toggle_key(
+                PhysicalKey::Code(key),
+                ElementState::Pressed,
+                true,
+            ));
+            assert!(!is_editor_toggle_key(
+                PhysicalKey::Code(key),
+                ElementState::Released,
+                false,
+            ));
+        }
+        assert!(!is_editor_toggle_key(
+            PhysicalKey::Code(KeyCode::F3),
+            ElementState::Pressed,
+            false,
+        ));
+    }
 }
 
 fn queue_editor_capture_releases(input: &mut engine::input::InputSystem) {
@@ -1295,12 +1391,16 @@ fn queue_editor_capture_releases(input: &mut engine::input::InputSystem) {
 
 fn set_editor_visible(
     renderer: &mut Renderer,
+    window: &winit::window::Window,
     model: &std::rc::Rc<std::cell::RefCell<editor::EditorModel>>,
     visible: bool,
 ) {
     if visible {
         if renderer.has_app_ui() {
             model.borrow_mut().visible = true;
+            if let Err(error) = renderer.refresh_cursor_capture(window) {
+                log::error!("Failed to refresh editor cursor capture: {error}");
+            }
             return;
         }
         let callback_model = model.clone();
@@ -1327,6 +1427,10 @@ fn set_editor_visible(
         model.visible = false;
         model.status_message = Some("Editor hidden; camera input restored".into());
         log::info!("Editor hidden");
+    }
+
+    if let Err(error) = renderer.refresh_cursor_capture(window) {
+        log::error!("Failed to refresh editor cursor capture: {error}");
     }
 }
 
@@ -1438,7 +1542,7 @@ fn run_windowed_v2(
 
     // Register imgui only on this windowed branch. The headless branch never
     // constructs an editor model, callback, regeneration controller, or RNG action.
-    set_editor_visible(&mut renderer, &editor_model, true);
+    set_editor_visible(&mut renderer, &window, &editor_model, true);
 
     // Set up manual capture directory
     let manual_capture_dir = manual_capture_run_dir();
@@ -1490,7 +1594,7 @@ fn run_windowed_v2(
             if show {
                 queue_editor_capture_releases(&mut app_input);
             }
-            set_editor_visible(&mut renderer, &editor_model, show);
+            set_editor_visible(&mut renderer, &window, &editor_model, show);
         } else if let Err(e) = engine::input::route_platform_input_to_app(
             &mut renderer,
             &window,
@@ -1509,12 +1613,39 @@ fn run_windowed_v2(
                     elwt.exit();
                 }
                 WindowEvent::Resized(new_size) => {
-                    if let Err(e) = renderer.resize(new_size.width, new_size.height) {
-                        log::error!("Resize failed: {e}");
+                    if service_window_resize(
+                        &mut renderer,
+                        new_size.width,
+                        new_size.height,
+                        "window resize event",
+                    ) == WindowResizeOutcome::Terminal
+                    {
                         elwt.exit();
+                    } else {
+                        window.request_redraw();
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    let current_size = window.inner_size();
+                    match service_window_resize(
+                        &mut renderer,
+                        current_size.width,
+                        current_size.height,
+                        "redraw resize retry",
+                    ) {
+                        WindowResizeOutcome::Ready => {}
+                        WindowResizeOutcome::Deferred => {
+                            if current_size.width > 0 && current_size.height > 0 {
+                                window.request_redraw();
+                            }
+                            return;
+                        }
+                        WindowResizeOutcome::Terminal => {
+                            elwt.exit();
+                            return;
+                        }
+                    }
+
                     // App-owned input has exactly one dispatch boundary per frame.
                     app_input.dispatch_frame();
 
@@ -1625,12 +1756,11 @@ fn run_windowed_v2(
                         };
                         for command in commands {
                             if editor::handle_command(command, &editor_model, &mut regen_state) {
-                                set_editor_visible(&mut renderer, &editor_model, false);
+                                set_editor_visible(&mut renderer, &window, &editor_model, false);
                             }
                         }
                     }
 
-                    let current_size = window.inner_size();
                     let view = engine::render::camera_view_for_size(
                         &camera,
                         current_size.width,

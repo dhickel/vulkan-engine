@@ -195,6 +195,7 @@ pub(crate) enum VkFrameRenderOutcome {
 pub(crate) enum VkRenderError {
     DeviceLost(String),
     Backend(String),
+    RetryableResize(String),
     BackendPoisoned(String),
 }
 
@@ -212,7 +213,9 @@ impl VkRenderError {
 impl Display for VkRenderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DeviceLost(message) | Self::Backend(message) => f.write_str(message),
+            Self::DeviceLost(message) | Self::Backend(message) | Self::RetryableResize(message) => {
+                f.write_str(message)
+            }
             Self::BackendPoisoned(reason) => write!(f, "renderer backend poisoned: {reason}"),
         }
     }
@@ -244,6 +247,28 @@ impl BackendHealth {
                 .clone()
                 .unwrap_or_else(|| "a previous renderer operation panicked".to_string()),
         )
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SwapchainRebuildFailure {
+    message: String,
+    retryable: bool,
+}
+
+impl SwapchainRebuildFailure {
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    fn terminal(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
     }
 }
 
@@ -1544,7 +1569,10 @@ impl VkRenderCore {
         Ok((render, scene_world))
     }
 
-    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), String> {
+    pub fn rebuild_swapchain(
+        &mut self,
+        new_size: Extent2D,
+    ) -> Result<(), SwapchainRebuildFailure> {
         if self.surface_mode.is_headless() {
             self.window_state.update_curr_size(new_size);
             return Ok(());
@@ -1561,10 +1589,9 @@ impl VkRenderCore {
         match self.swapchain_owner.state() {
             crate::vulkan::vk_swapchain::SwapchainState::Retired { .. }
             | crate::vulkan::vk_swapchain::SwapchainState::Absent => {
-                return Err(
-                    "swapchain rebuild was attempted after terminal retirement; renderer must be recreated"
-                        .to_string(),
-                );
+                return Err(SwapchainRebuildFailure::terminal(
+                    "swapchain rebuild was attempted after terminal retirement; renderer must be recreated",
+                ));
             }
             _ => {}
         }
@@ -1572,11 +1599,16 @@ impl VkRenderCore {
         self.window_state.update_curr_size(new_size);
 
         // --- Phase 1: Re-query surface capabilities (pure, no side effects) ---
-        let surface = self
-            .surface
-            .as_ref()
-            .ok_or_else(|| "windowed renderer is missing its Vulkan surface".to_string())?;
-        let support = vk_init::get_swapchain_support(&self.physical_device.p_device, surface)?;
+        let surface = self.surface.as_ref().ok_or_else(|| {
+            SwapchainRebuildFailure::terminal("windowed renderer is missing its Vulkan surface")
+        })?;
+        let support = vk_init::get_swapchain_support(&self.physical_device.p_device, surface)
+            .map_err(SwapchainRebuildFailure::terminal)?;
+        if support.formats.is_empty() || support.present_modes.is_empty() {
+            return Err(SwapchainRebuildFailure::retryable(
+                "surface temporarily reported no swapchain formats or presentation modes",
+            ));
+        }
 
         let plan = vk_init::build_swapchain_create_plan(
             &support,
@@ -1585,22 +1617,33 @@ impl VkRenderCore {
             None,
             Some(vk::PresentModeKHR::MAILBOX),
             true,
-        )?;
+        )
+        .map_err(SwapchainRebuildFailure::terminal)?;
+        if plan.extent.width == 0 || plan.extent.height == 0 {
+            return Err(SwapchainRebuildFailure::retryable(format!(
+                "surface temporarily reported zero drawable extent {:?}",
+                plan.extent
+            )));
+        }
         let installed_request = self.swapchain_owner.pending_resize().copied();
         let current_format = self
             .swapchain_owner
             .swapchain
             .as_ref()
-            .ok_or_else(|| "windowed renderer is missing its Vulkan swapchain".to_string())?
+            .ok_or_else(|| {
+                SwapchainRebuildFailure::terminal(
+                    "windowed renderer is missing its Vulkan swapchain",
+                )
+            })?
             .surface_format;
         if plan.surface_format != current_format {
-            return Err(format!(
+            return Err(SwapchainRebuildFailure::terminal(format!(
                 "swapchain format changed from {:?}/{:?} to {:?}/{:?}; format-dependent resources require renderer recreation",
                 current_format.format,
                 current_format.color_space,
                 plan.surface_format.format,
                 plan.surface_format.color_space
-            ));
+            )));
         }
 
         // --- Phase 2: Retire current (IRREVERSIBLE) ---
@@ -1609,14 +1652,19 @@ impl VkRenderCore {
         // where required by current rebuild teardown.
         unsafe {
             self.device.device_wait_idle().map_err(|err| {
-                format!("device_wait_idle failed during swapchain rebuild: {err:?}")
+                SwapchainRebuildFailure::terminal(format!(
+                    "device_wait_idle failed during swapchain rebuild: {err:?}"
+                ))
             })?;
         }
 
         // Destroy present views BEFORE retiring to maintain view-before-swapchain order.
         self.swapchain_owner.destroy_present_views(&self.device);
 
-        let old_handle = self.swapchain_owner.retire_current()?;
+        let old_handle = self
+            .swapchain_owner
+            .retire_current()
+            .map_err(SwapchainRebuildFailure::terminal)?;
 
         // --- Phase 3: Create new (old is already retired) ---
         let new_swapchain = match vk_init::create_swapchain_with_plan(
@@ -1635,9 +1683,9 @@ impl VkRenderCore {
                     self.swapchain_owner
                         .destroy_retired(&self.device, old_sc);
                 }
-                return Err(format!(
+                return Err(SwapchainRebuildFailure::terminal(format!(
                     "swapchain creation failed after old generation was retired: {err}"
-                ));
+                )));
             }
         };
 
@@ -1651,10 +1699,10 @@ impl VkRenderCore {
             if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
                 self.swapchain_owner.destroy_retired(&self.device, old_sc);
             }
-            return Err(format!(
+            return Err(SwapchainRebuildFailure::terminal(format!(
                 "swapchain image count changed from {} to {} after old generation was retired; renderer recreation is required",
                 self.frame_slot_count, actual_count
-            ));
+            )));
         }
 
         // --- Phase 4: Transactional view creation ---
@@ -1673,9 +1721,9 @@ impl VkRenderCore {
                         self.swapchain_owner
                             .destroy_retired(&self.device, old_sc);
                     }
-                    return Err(format!(
+                    return Err(SwapchainRebuildFailure::terminal(format!(
                         "create_basic_present_views failed during swapchain rebuild: {err}"
-                    ));
+                    )));
                 }
             };
 
@@ -1692,15 +1740,24 @@ impl VkRenderCore {
             .swapchain_owner
             .swapchain
             .take()
-            .ok_or_else(|| "retired generation lost its swapchain handle".to_string())?;
+            .ok_or_else(|| {
+                SwapchainRebuildFailure::terminal(
+                    "retired generation lost its swapchain handle",
+                )
+            })?;
 
         // Validate all dependent publication before committing the new owner state.
         // The count was checked above, so publication cannot partially fail.
         self.presentation
             .replace_present_images(present_images.clone())
-            .map_err(|err| format!("failed to publish replacement present images: {err:?}"))?;
+            .map_err(|err| {
+                SwapchainRebuildFailure::terminal(format!(
+                    "failed to publish replacement present images: {err:?}"
+                ))
+            })?;
         self.swapchain_owner
-            .install_new(new_swapchain, present_images)?;
+            .install_new(new_swapchain, present_images)
+            .map_err(SwapchainRebuildFailure::terminal)?;
         self.swapchain_owner
             .destroy_retired(&self.device, retired_swapchain);
 
@@ -1802,8 +1859,22 @@ impl VkRender {
 
     pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), VkRenderError> {
         let _panic_guard = self.backend_operation_guard()?;
-        let result = self.core.rebuild_swapchain(new_size);
-        self.complete_backend_operation(result)
+        match self.core.rebuild_swapchain(new_size) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                let error = VkRenderError::from_backend_message(failure.message);
+                if failure.retryable && matches!(error, VkRenderError::Backend(_)) {
+                    return match error {
+                        VkRenderError::Backend(message) => {
+                            Err(VkRenderError::RetryableResize(message))
+                        }
+                        _ => unreachable!("retryable resize was already classified as backend"),
+                    };
+                }
+                self.backend_health.poison(error.to_string());
+                Err(error)
+            }
+        }
     }
 
     pub fn render_with_hooks<PreRenderHook, PostRenderHook>(

@@ -25,6 +25,10 @@ use crate::validate::validate_preset_document;
 pub const EDITOR_VIEW_ID: &str = "voxel_editor";
 const MAX_EDITOR_COMMANDS: usize = 32;
 const ASSET_FIELD_COUNT: usize = 8;
+const EDITOR_DEFAULT_WIDTH: f32 = 400.0;
+const EDITOR_DEFAULT_HEIGHT: f32 = 600.0;
+const EDITOR_MIN_WIDTH: f32 = 280.0;
+const EDITOR_MIN_HEIGHT: f32 = 180.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftSource {
@@ -497,20 +501,37 @@ pub fn render_editor_ui(ui: &Ui, _ctx: &DebugUiFrameContext, model: &Rc<RefCell<
     let Ok(mut model) = model.try_borrow_mut() else {
         return;
     };
+
+    let display_size = ui.io().display_size;
+    let max_width = display_size[0].max(1.0);
+    let max_height = display_size[1].max(1.0);
+    let min_width = EDITOR_MIN_WIDTH.min(max_width);
+    let min_height = EDITOR_MIN_HEIGHT.min(max_height);
+    let initial_width = EDITOR_DEFAULT_WIDTH.min(max_width);
+    let initial_height = EDITOR_DEFAULT_HEIGHT.min(max_height);
+
     ui.window("Voxel Editor###voxel_editor")
-        .size([460.0, 820.0], Condition::FirstUseEver)
+        .position([0.0, 0.0], Condition::Always)
+        .size([initial_width, initial_height], Condition::FirstUseEver)
+        .size_constraints([min_width, min_height], [max_width, max_height])
         .resizable(true)
-        .movable(true)
+        .movable(false)
         .build(|| {
-            render_file_section(ui, &mut model);
-            ui.separator();
-            render_generator_section(ui, &mut model);
-            ui.separator();
-            render_materials_section(ui, &mut model);
-            ui.separator();
-            render_status_section(ui, &model);
-            ui.separator();
-            render_actions(ui, &mut model);
+            ui.child_window("voxel_editor_scroll_content")
+                .size([0.0, 0.0])
+                .scroll_bar(true)
+                .scrollable(true)
+                .build(|| {
+                    render_file_section(ui, &mut model);
+                    ui.separator();
+                    render_generator_section(ui, &mut model);
+                    ui.separator();
+                    render_materials_section(ui, &mut model);
+                    ui.separator();
+                    render_status_section(ui, &model);
+                    ui.separator();
+                    render_actions(ui, &mut model);
+                });
         });
 }
 

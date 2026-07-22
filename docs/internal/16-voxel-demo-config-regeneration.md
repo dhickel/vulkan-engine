@@ -257,8 +257,9 @@ Windowed v2 creates `Rc<RefCell<EditorModel>>` and registers one app UI callback
 
 - Editor visible: callback registered; current renderer UI policy suppresses app camera/gameplay input.
 - F1/F2: intercepted before renderer routing and toggles visibility.
-- Hide: `unregister_app_ui` removes the callback and restores camera routing.
-- Show: movement/action release events are queued before registration to avoid latched controls.
+- Hide: `unregister_app_ui` removes the callback, refreshes renderer-owned cursor capture, and restores camera routing immediately.
+- Show: movement/action release events are queued before registration to avoid latched controls, then cursor capture is refreshed for editor interaction.
+- Layout: the editor is pinned to the viewport upper-left, starts at 400×600, is constrained to the current viewport, and places overflowing controls in a scrollable child region.
 
 Registered UI does not promise viewport click-through.
 
