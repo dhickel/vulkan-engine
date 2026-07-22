@@ -966,7 +966,7 @@ fn resolve_submission_buckets_impl(
         .mesh_cache
         .lock()
         .expect("mesh_cache lock poisoned");
-    let tex_cache = data_cache
+    let mut tex_cache = data_cache
         .texture_cache
         .lock()
         .expect("texture_cache lock poisoned");
@@ -991,7 +991,16 @@ fn resolve_submission_buckets_impl(
         }
 
         let copied_material = match tex_cache.get_loaded_material(mesh.material_id) {
-            Ok(material) => CopiedMaterialDrawRecord::from(material),
+            Ok(material) => {
+                // Track material and its texture references against the prospective
+                // submission serial so retirement does not recycle slots before this
+                // frame completes.
+                let _ = tex_cache.mark_material_referenced(mesh.material_id, next_submit_serial);
+                for tex_id in material.texture_ids.to_vec() {
+                    let _ = tex_cache.mark_texture_referenced(tex_id, next_submit_serial);
+                }
+                CopiedMaterialDrawRecord::from(material)
+            }
             Err(_) => continue,
         };
 

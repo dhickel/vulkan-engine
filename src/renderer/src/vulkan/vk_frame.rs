@@ -5,7 +5,10 @@
 
 use crate::data::data_cache::VkDataCache;
 use crate::data::mesh_geometry::MeshGeometryDto;
-use crate::data::retirement::{FrameSerial, GpuRetirementQueue, MeshRetiredPayload};
+use crate::data::retirement::{
+    FrameSerial, GpuRetirementQueue, MaterialRetiredPayload, MeshRetiredPayload,
+    TextureRetiredPayload,
+};
 use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot};
 use crate::rendergraph::RenderGraphExecutionReport;
 use crate::vulkan::vk_descriptor::DescriptorAllocatorStats;
@@ -193,6 +196,8 @@ pub(crate) struct FrameLifecycleContext<'a> {
     pub latest_completed_serial: &'a mut u64,
     pub latest_submitted_serial: &'a mut u64,
     pub mesh_retirement_queue: &'a mut GpuRetirementQueue<MeshRetiredPayload>,
+    pub material_retirement_queue: &'a mut GpuRetirementQueue<MaterialRetiredPayload>,
+    pub texture_retirement_queue: &'a mut GpuRetirementQueue<TextureRetiredPayload>,
     pub bounds_retirement_queue: &'a mut GpuRetirementQueue<MeshGeometryDto>,
     pub data_cache: &'a Arc<VkDataCache>,
     pub gpu_timing: &'a mut GpuTimingState,
@@ -300,6 +305,88 @@ pub(crate) fn reap_bounds_retirement(
     Ok(())
 }
 
+/// Reap the material retirement queue up through `latest_completed_serial`.
+///
+/// Destroys SSBO suballocations, frees descriptor sets, and releases cache slots
+/// for every record whose `retire_after` has been reached.
+pub(crate) fn reap_material_retirement(
+    latest_completed_serial: u64,
+    material_retirement_queue: &mut GpuRetirementQueue<MaterialRetiredPayload>,
+    data_cache: &Arc<VkDataCache>,
+    device: &ash::Device,
+) -> Result<(), String> {
+    let completed = FrameSerial::new(latest_completed_serial);
+    let reaped = material_retirement_queue
+        .reap_through(completed)
+        .map_err(|err| format!("material retirement completion regression: {err:?}"))?;
+    if reaped.is_empty() {
+        return Ok(());
+    }
+
+    let mut texture_cache = data_cache.texture_cache.lock().map_err(|_| {
+        "texture_cache lock poisoned during material retirement reaping".to_string()
+    })?;
+
+    for record in reaped {
+        debug_assert_eq!(
+            record.class,
+            crate::data::retirement::RetirementClass::MaterialMeta
+        );
+        log::trace!(
+            "reaping retired material slot {} generation {}",
+            record.payload.slot,
+            record.payload.generation
+        );
+        texture_cache.destroy_retired_material_payload(&record.payload);
+        for descriptor_set in &record.payload.descriptor_release.image_descriptor_sets {
+            texture_cache.free_material_descriptor(device, *descriptor_set);
+        }
+        texture_cache.release_material_slot(record.payload.slot);
+    }
+    Ok(())
+}
+
+/// Reap the texture retirement queue up through `latest_completed_serial`.
+///
+/// Destroys images, views, and samplers for every record whose
+/// `retire_after` has been reached.
+pub(crate) fn reap_texture_retirement(
+    latest_completed_serial: u64,
+    texture_retirement_queue: &mut GpuRetirementQueue<TextureRetiredPayload>,
+    data_cache: &Arc<VkDataCache>,
+) -> Result<(), String> {
+    let completed = FrameSerial::new(latest_completed_serial);
+    let reaped = texture_retirement_queue
+        .reap_through(completed)
+        .map_err(|err| format!("texture retirement completion regression: {err:?}"))?;
+    if reaped.is_empty() {
+        return Ok(());
+    }
+
+    let mut texture_cache = data_cache
+        .texture_cache
+        .lock()
+        .map_err(|_| "texture_cache lock poisoned during texture retirement reaping".to_string())?;
+
+    for record in reaped {
+        debug_assert_eq!(
+            record.class,
+            crate::data::retirement::RetirementClass::TextureImage
+        );
+        let slot = record.payload.slot;
+        log::trace!(
+            "reaping retired texture slot {} generation {} (sampler retained {:?})",
+            slot,
+            record.payload.generation,
+            record.payload.sampler
+        );
+        debug_assert!(record.payload.descriptor_release.is_empty());
+        texture_cache.destroy_retired_texture_payload(record.payload);
+        texture_cache.release_texture_slot(slot);
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Swapchain image acquisition
 // ---------------------------------------------------------------------------
@@ -398,6 +485,17 @@ pub(crate) fn acquire_frame_slot(
     reap_mesh_retirement(
         *ctx.latest_completed_serial,
         ctx.mesh_retirement_queue,
+        ctx.data_cache,
+    )?;
+    reap_material_retirement(
+        *ctx.latest_completed_serial,
+        ctx.material_retirement_queue,
+        ctx.data_cache,
+        ctx.device,
+    )?;
+    reap_texture_retirement(
+        *ctx.latest_completed_serial,
+        ctx.texture_retirement_queue,
         ctx.data_cache,
     )?;
     reap_bounds_retirement(*ctx.latest_completed_serial, ctx.bounds_retirement_queue)?;

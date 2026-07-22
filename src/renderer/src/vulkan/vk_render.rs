@@ -69,7 +69,9 @@ use crate::data::gpu_data::{
 };
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::data::mesh_geometry::{MeshGeometryDto, MeshGeometryStore};
-use crate::data::retirement::{GpuRetirementQueue, MeshRetiredPayload};
+use crate::data::retirement::{
+    GpuRetirementQueue, MaterialRetiredPayload, MeshRetiredPayload, TextureRetiredPayload,
+};
 use crate::data::{data_cache, data_util};
 use crate::debug_ui::{DebugTimingSnapshot, DebugUiManager};
 use crate::rendergraph::RenderGraph;
@@ -169,6 +171,10 @@ pub struct VkRenderCore {
     pub(crate) latest_completed_serial: u64,
     /// Retirement queue for mesh payloads awaiting GPU completion.
     pub(crate) mesh_retirement_queue: GpuRetirementQueue<MeshRetiredPayload>,
+    /// Retirement queue for material metadata payloads awaiting GPU completion.
+    pub(crate) material_retirement_queue: GpuRetirementQueue<MaterialRetiredPayload>,
+    /// Retirement queue for texture image payloads awaiting GPU completion.
+    pub(crate) texture_retirement_queue: GpuRetirementQueue<TextureRetiredPayload>,
     /// CPU bounds/geometry metadata retained to the same fence boundary.
     pub(crate) bounds_retirement_queue: GpuRetirementQueue<MeshGeometryDto>,
     pub(crate) gpu_timing: GpuTimingState,
@@ -1009,14 +1015,15 @@ impl VkRenderCore {
 
         let descriptor_limits =
             vk_init::get_buffer_and_descriptor_limits(instance, physical_device.p_device);
-        let descriptor_set_budget = if descriptor_limits.max_update_after_bind_descriptors_in_all_pools == 0 {
-            VkDynamicDescriptorAllocator::MAX_SETS_CAP
-        } else {
-            descriptor_limits
-                .max_update_after_bind_descriptors_in_all_pools
-                .min(VkDynamicDescriptorAllocator::MAX_SETS_CAP)
-                .max(1000)
-        };
+        let descriptor_set_budget =
+            if descriptor_limits.max_update_after_bind_descriptors_in_all_pools == 0 {
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP
+            } else {
+                descriptor_limits
+                    .max_update_after_bind_descriptors_in_all_pools
+                    .min(VkDynamicDescriptorAllocator::MAX_SETS_CAP)
+                    .max(1000)
+            };
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..swapchain_image_count)
             .map(|i| -> Result<VkDynamicDescriptorAllocator, String> {
                 let mut alloc = VkDynamicDescriptorAllocator::new_with_total_set_budget(
@@ -1410,6 +1417,8 @@ impl VkRenderCore {
             latest_submitted_serial: 0,
             latest_completed_serial: 0,
             mesh_retirement_queue: GpuRetirementQueue::new(),
+            material_retirement_queue: GpuRetirementQueue::new(),
+            texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
@@ -1600,6 +1609,8 @@ impl VkRenderCore {
             latest_submitted_serial: 0,
             latest_completed_serial: 0,
             mesh_retirement_queue: GpuRetirementQueue::new(),
+            material_retirement_queue: GpuRetirementQueue::new(),
+            texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
@@ -2461,6 +2472,8 @@ impl VkRenderCore {
                 latest_completed_serial: &mut self.latest_completed_serial,
                 latest_submitted_serial: &mut self.latest_submitted_serial,
                 mesh_retirement_queue: &mut self.mesh_retirement_queue,
+                material_retirement_queue: &mut self.material_retirement_queue,
+                texture_retirement_queue: &mut self.texture_retirement_queue,
                 bounds_retirement_queue: &mut self.bounds_retirement_queue,
                 data_cache: &self.data_cache,
                 gpu_timing: &mut self.gpu_timing,

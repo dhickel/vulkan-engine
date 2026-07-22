@@ -67,6 +67,9 @@ use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
 use crate::data::mesh_geometry::MeshGeometryStore;
+use crate::data::retirement::{
+    DescriptorReleaseData, FrameSerial, MaterialRetiredPayload, TextureRetiredPayload,
+};
 use crate::data::{data_util, gpu_data};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorWriter, VkDynamicDescriptorAllocator,
@@ -176,6 +179,14 @@ impl DescriptorManager {
                 format!("descriptor pool exhausted during image descriptor allocation: {e}")
             })
     }
+
+    /// Free a previously allocated image descriptor set.
+    ///
+    /// Returns the set to its owning pool so it can be reused. Pools are
+    /// created with `FREE_DESCRIPTOR_SET_BIT` to enable individual freeing.
+    pub fn free_image_desc(&mut self, device: &ash::Device, set: vk::DescriptorSet) {
+        self.image_desc_allocator.free_descriptor_set(device, set);
+    }
 }
 
 // SAFETY: MeshCache is safe to send across threads because:
@@ -252,6 +263,8 @@ pub struct TextureCache {
     cached_materials: Vec<CachedMaterial>,
     texture_generations: Vec<u32>,
     material_generations: Vec<u32>,
+    texture_last_referenced_serials: Vec<u64>,
+    material_last_referenced_serials: Vec<u64>,
     free_texture_slots: Vec<u32>,
     free_material_slots: Vec<u32>,
     desc_manager: DescriptorManager,
@@ -394,10 +407,7 @@ impl TextureCache {
         let def_error = CachedTexture::Unloaded(TextureMeta {
             payload: gpu_data::TexturePayload::Raw {
                 bytes: vec![
-                    255, 20, 147, 255,
-                    255, 20, 147, 255,
-                    255, 20, 147, 255,
-                    255, 20, 147, 255,
+                    255, 20, 147, 255, 255, 20, 147, 255, 255, 20, 147, 255, 255, 20, 147, 255,
                 ],
                 width: 2,
                 height: 2,
@@ -463,6 +473,8 @@ impl TextureCache {
             allocator,
             texture_generations: vec![0; cached_textures.len()],
             material_generations: vec![0; cached_materials.len()],
+            texture_last_referenced_serials: vec![0; cached_textures.len()],
+            material_last_referenced_serials: vec![0; cached_materials.len()],
             free_texture_slots: Vec::new(),
             free_material_slots: Vec::new(),
             cached_textures,
@@ -533,11 +545,13 @@ impl TextureCache {
     fn alloc_texture_slot(&mut self, data: CachedTexture) -> TextureHandle {
         if let Some(slot) = self.free_texture_slots.pop() {
             self.cached_textures[slot as usize] = data;
+            self.texture_last_referenced_serials[slot as usize] = 0;
             self.texture_handle_for_slot(slot)
         } else {
             let slot = self.cached_textures.len() as u32;
             self.cached_textures.push(data);
             self.texture_generations.push(0);
+            self.texture_last_referenced_serials.push(0);
             TextureHandle::new(slot, 0)
         }
     }
@@ -545,11 +559,13 @@ impl TextureCache {
     fn alloc_material_slot(&mut self, data: CachedMaterial) -> MaterialHandle {
         if let Some(slot) = self.free_material_slots.pop() {
             self.cached_materials[slot as usize] = data;
+            self.material_last_referenced_serials[slot as usize] = 0;
             self.material_handle_for_slot(slot)
         } else {
             let slot = self.cached_materials.len() as u32;
             self.cached_materials.push(data);
             self.material_generations.push(0);
+            self.material_last_referenced_serials.push(0);
             MaterialHandle::new(slot, 0)
         }
     }
@@ -844,9 +860,7 @@ impl TextureCache {
                     let alignment = self.host_alignment.max(1) as usize;
                     let aligned_size = payload_len
                         .checked_next_multiple_of(alignment)
-                        .ok_or_else(|| {
-                            format!("texture {:?} aligned upload size overflow", id)
-                        })?;
+                        .ok_or_else(|| format!("texture {:?} aligned upload size overflow", id))?;
 
                     if aligned_size > max_upload_bytes as usize {
                         return Err(format!(
@@ -1151,8 +1165,7 @@ impl TextureCache {
             .map(|((slot, meta), alloc)| (slot, meta, alloc))
             .collect();
 
-        let mut staged: Vec<(usize, VkLoadedMaterial)> =
-            Vec::with_capacity(entries.len());
+        let mut staged: Vec<(usize, VkLoadedMaterial)> = Vec::with_capacity(entries.len());
 
         let entry_count = entries.len();
         for (entry_index, (slot, meta, alloc)) in entries.iter().enumerate() {
@@ -1493,6 +1506,204 @@ impl TextureCache {
     pub fn deallocate_materials(&mut self, material_ids: Vec<MaterialHandle>) {
         self.deallocate_materials_with_policy(material_ids, true);
     }
+
+    // ── Fence-aware reference tracking ────────────────────────────────
+
+    /// Mark a loaded texture as referenced by GPU commands owned by `submitted_serial`.
+    pub fn mark_texture_referenced(
+        &mut self,
+        id: TextureHandle,
+        submitted_serial: u64,
+    ) -> Result<(), CacheError> {
+        let slot = self.validate_texture_slot(id)?;
+        if !matches!(
+            self.cached_textures.get(slot),
+            Some(CachedTexture::Loaded(_))
+        ) {
+            return Err(CacheError::NotLoaded);
+        }
+        if let Some(serial) = self.texture_last_referenced_serials.get_mut(slot) {
+            *serial = (*serial).max(submitted_serial);
+        }
+        Ok(())
+    }
+
+    /// Mark a loaded material as referenced by GPU commands owned by `submitted_serial`.
+    pub fn mark_material_referenced(
+        &mut self,
+        id: MaterialHandle,
+        submitted_serial: u64,
+    ) -> Result<(), CacheError> {
+        let slot = self.validate_material_slot(id)?;
+        if !matches!(
+            self.cached_materials.get(slot),
+            Some(CachedMaterial::Loaded(_))
+        ) {
+            return Err(CacheError::NotLoaded);
+        }
+        if let Some(serial) = self.material_last_referenced_serials.get_mut(slot) {
+            *serial = (*serial).max(submitted_serial);
+        }
+        Ok(())
+    }
+
+    // ── Fence-aware retirement (two-step unload) ────────────────────────
+
+    /// Retire a texture handle for deferred GPU-safe destruction.
+    ///
+    /// Invalidates the handle immediately (generation bump, NULL tombstone)
+    /// but returns the GPU payload as a [`TextureRetiredPayload`] for the caller
+    /// to enqueue in a retirement queue. The slot is NOT returned to the free
+    /// list until [`release_texture_slot`] is called.
+    ///
+    /// Returns `Ok(None)` for reserved/default slots.
+    /// Returns `Err(CacheError::…)` for stale, invalid, or unloaded handles.
+    pub fn retire_texture(
+        &mut self,
+        texture_id: TextureHandle,
+        latest_submitted_serial: FrameSerial,
+    ) -> Result<Option<(TextureRetiredPayload, FrameSerial)>, CacheError> {
+        if is_reserved_texture_slot(texture_id.slot) {
+            return Ok(None);
+        }
+
+        let slot_idx = self.validate_texture_slot(texture_id)?;
+        let next_gen = checked_retired_generation(self.texture_generations[slot_idx])?;
+        let last_referenced = FrameSerial::new(self.texture_last_referenced_serials[slot_idx]);
+        let retire_after = last_referenced.max(latest_submitted_serial);
+
+        let slot = self
+            .cached_textures
+            .get_mut(slot_idx)
+            .ok_or(CacheError::OutOfBounds)?;
+        let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
+        self.texture_generations[slot_idx] = next_gen;
+        self.texture_last_referenced_serials[slot_idx] = 0;
+
+        match old_tex {
+            CachedTexture::Loaded(tex) => Ok(Some((
+                TextureRetiredPayload {
+                    slot: slot_idx as u32,
+                    generation: texture_id.generation,
+                    alloc: tex.alloc,
+                    sampler: tex.sampler,
+                    descriptor_release: DescriptorReleaseData::default(),
+                },
+                retire_after,
+            ))),
+            CachedTexture::Unloaded(_) => {
+                self.free_texture_slots.push(slot_idx as u32);
+                Ok(None)
+            }
+            CachedTexture::_NULL => unreachable!("validated live texture slot became null"),
+        }
+    }
+
+    /// Retire a material handle for deferred GPU-safe destruction.
+    ///
+    /// Invalidates the handle immediately (generation bump, NULL tombstone)
+    /// but returns the material GPU payload as a [`MaterialRetiredPayload`].
+    /// Textures referenced by the material are NOT retired — texture ownership
+    /// is independent and must be retired explicitly.
+    ///
+    /// Returns `Ok(None)` for reserved/default slots.
+    pub fn retire_material(
+        &mut self,
+        material_id: MaterialHandle,
+        latest_submitted_serial: FrameSerial,
+    ) -> Result<Option<(MaterialRetiredPayload, FrameSerial)>, CacheError> {
+        if is_reserved_material_slot(material_id.slot) {
+            return Ok(None);
+        }
+
+        let slot_idx = self.validate_material_slot(material_id)?;
+        let next_gen = checked_retired_generation(self.material_generations[slot_idx])?;
+        let last_referenced = FrameSerial::new(self.material_last_referenced_serials[slot_idx]);
+        let retire_after = last_referenced.max(latest_submitted_serial);
+
+        let slot = self
+            .cached_materials
+            .get_mut(slot_idx)
+            .ok_or(CacheError::OutOfBounds)?;
+        let old_mat = std::mem::replace(slot, CachedMaterial::_NULL);
+        self.material_generations[slot_idx] = next_gen;
+        self.material_last_referenced_serials[slot_idx] = 0;
+
+        match old_mat {
+            CachedMaterial::Loaded(mat) => Ok(Some((
+                MaterialRetiredPayload {
+                    slot: slot_idx as u32,
+                    generation: material_id.generation,
+                    meta_alloc: mat.meta_alloc,
+                    descriptor_release: DescriptorReleaseData::image_descriptor(
+                        mat.image_descriptor,
+                    ),
+                },
+                retire_after,
+            ))),
+            CachedMaterial::Unloaded(_) => {
+                self.free_material_slots.push(slot_idx as u32);
+                Ok(None)
+            }
+            CachedMaterial::_NULL => unreachable!("validated live material slot became null"),
+        }
+    }
+
+    /// Destroy the GPU resources held by a retired texture payload.
+    ///
+    /// Called after the retirement queue has determined it is safe to free
+    /// these resources. Does not release the cache slot — call
+    /// [`release_texture_slot`] separately. Sampler handles are retained in
+    /// `VkSamplerCache` and are destroyed once by that cache, not by texture retirement.
+    pub fn destroy_retired_texture_payload(&self, payload: TextureRetiredPayload) {
+        if let Ok(allocator) = self.allocator.lock() {
+            vk_util::destroy_image(&self.device, &allocator, payload.alloc);
+        } else {
+            error!("allocator lock poisoned while destroying retired texture payload");
+        }
+    }
+
+    /// Destroy the GPU resources held by a retired material payload.
+    ///
+    /// Called after the retirement queue has determined it is safe to free
+    /// these resources. Does not release the cache slot — call
+    /// [`release_material_slot`] separately.
+    pub fn destroy_retired_material_payload(&mut self, payload: &MaterialRetiredPayload) {
+        self.material_meta_storage.deallocate(payload.meta_alloc);
+        // Descriptor set is returned via VkDynamicDescriptorAllocator::free_descriptor_set
+        // by the reap path in vk_frame.rs, since the pool tracking lives there.
+    }
+
+    /// Release a texture cache slot back to the free list after its retired
+    /// payload has been destroyed.
+    pub fn release_texture_slot(&mut self, slot: u32) {
+        debug_assert!((slot as usize) >= Self::DEFAULT_TEX_ITER_START);
+        debug_assert!(!self.free_texture_slots.contains(&slot));
+        self.free_texture_slots.push(slot);
+    }
+
+    /// Release a material cache slot back to the free list after its retired
+    /// payload has been destroyed.
+    pub fn release_material_slot(&mut self, slot: u32) {
+        debug_assert!((slot as usize) >= Self::DEFAULT_MAT_ITER_START);
+        debug_assert!(!self.free_material_slots.contains(&slot));
+        self.free_material_slots.push(slot);
+    }
+
+    /// Free a material's image descriptor set back to the descriptor pool.
+    ///
+    /// Delegates to [`DescriptorManager::free_image_desc`].
+    pub fn free_material_descriptor(&mut self, device: &ash::Device, set: vk::DescriptorSet) {
+        self.desc_manager.free_image_desc(device, set);
+    }
+}
+
+fn is_reserved_texture_slot(slot: u32) -> bool {
+    (slot as usize) < TextureCache::DEFAULT_TEX_ITER_START
+}
+
+fn is_reserved_material_slot(slot: u32) -> bool {
+    (slot as usize) < TextureCache::DEFAULT_MAT_ITER_START
 }
 
 impl VkDestroyable for TextureCache {
@@ -1511,6 +1722,8 @@ impl VkDestroyable for TextureCache {
                 vk_util::destroy_image(device, allocator, tex.alloc);
             }
         }
+        self.texture_generations.clear();
+        self.texture_last_referenced_serials.clear();
 
         for slot in self.cached_materials.iter_mut() {
             let old_mat = std::mem::replace(slot, CachedMaterial::_NULL);
@@ -1518,6 +1731,8 @@ impl VkDestroyable for TextureCache {
                 self.material_meta_storage.deallocate(mat.meta_alloc);
             }
         }
+        self.material_generations.clear();
+        self.material_last_referenced_serials.clear();
 
         self.material_meta_storage.destroy(device, allocator);
         self.desc_manager
@@ -1739,7 +1954,11 @@ impl MeshCache {
                 for alloc in successful_allocs {
                     self.index_storage.deallocate(alloc);
                 }
-                error!("Failed to allocate indices (rolled back {} vertex allocs): {:?}", vertex_data.len(), error_msg);
+                error!(
+                    "Failed to allocate indices (rolled back {} vertex allocs): {:?}",
+                    vertex_data.len(),
+                    error_msg
+                );
                 return LoadResult::Failed(None);
             }
         };
