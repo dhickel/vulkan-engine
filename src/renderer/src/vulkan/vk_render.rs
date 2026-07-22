@@ -2020,8 +2020,8 @@ impl EnvTarget {
     fn dimension(self) -> u32 {
         match self {
             Self::Irradiance => 64,
-            // 256 keeps the one-off convolution below common Linux GPU watchdog budgets while
-            // retaining nine roughness mip levels for IBL.
+            // 256 bounds the heaviest isolated mip batch below common Linux GPU watchdog
+            // budgets while retaining nine roughness mip levels for IBL.
             Self::PreFiltered => 256,
         }
     }
@@ -2030,6 +2030,16 @@ impl EnvTarget {
         match self {
             Self::Irradiance => VkPipelineType::EnvIrradiance,
             Self::PreFiltered => VkPipelineType::EnvPreFilter,
+        }
+    }
+
+    /// Keep prefilter convolution in independently fenced queue jobs so one launch-time submit
+    /// cannot exceed the GPU watchdog budget. Irradiance retains its existing single batch.
+    fn submission_mip_ranges(self, mips_count: u32) -> Vec<std::ops::Range<u32>> {
+        debug_assert!(mips_count > 0);
+        match self {
+            Self::Irradiance => vec![0..mips_count],
+            Self::PreFiltered => (0..mips_count).map(|mip| mip..mip + 1).collect(),
         }
     }
 }
@@ -3280,163 +3290,179 @@ impl VkRenderCore {
             let matrices = Self::cubemap_capture_matrices();
 
             unsafe {
-                self.device
-                    .reset_command_buffer(render_buffer, vk::CommandBufferResetFlags::empty())
-                    .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
-
-                let begin_info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-                self.device
-                    .begin_command_buffer(render_buffer, &begin_info)
-                    .map_err(|e| format!("begin_command_buffer failed: {:?}", e))?;
-
-                vk_util::transition_image_layered(
-                    &self.device,
-                    render_buffer,
-                    cubemap_image.image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    6,
-                    mips_count,
-                );
-
                 let mut offscreen_layout = vk::ImageLayout::UNDEFINED;
-                for mip in 0..mips_count {
-                    for face in 0..6 {
-                        info!(
-                            "Generating face: {}, mip: {}, for {:?} Map",
-                            face, mip, target
-                        );
+                for mip_range in target.submission_mip_ranges(mips_count) {
+                    let first_mip = mip_range.start;
+                    let last_mip_exclusive = mip_range.end;
 
-                        let mip_dim = std::cmp::max(dim >> mip, 1);
-                        viewport[0].width = mip_dim as f32;
-                        viewport[0].height = mip_dim as f32;
+                    self.device
+                        .reset_command_buffer(render_buffer, vk::CommandBufferResetFlags::empty())
+                        .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
 
-                        vk_util::transition_image(
+                    let begin_info = vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+                    self.device
+                        .begin_command_buffer(render_buffer, &begin_info)
+                        .map_err(|e| format!("begin_command_buffer failed: {:?}", e))?;
+
+                    if first_mip == 0 {
+                        vk_util::transition_image_layered(
                             &self.device,
                             render_buffer,
-                            offscreen_image.image,
-                            offscreen_layout,
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                        );
-
-                        let color_attachment_info = [vk::RenderingAttachmentInfo::default()
-                            .image_view(offscreen_image.image_view)
-                            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                            .load_op(vk::AttachmentLoadOp::CLEAR)
-                            .store_op(vk::AttachmentStoreOp::STORE)
-                            .clear_value(vk::ClearValue {
-                                color: vk::ClearColorValue {
-                                    float32: [0.0, 0.0, 0.0, 1.0],
-                                },
-                            })];
-
-                        let rendering_info = vk::RenderingInfo::default()
-                            .render_area(scissor[0])
-                            .layer_count(1)
-                            .color_attachments(&color_attachment_info);
-
-                        self.device
-                            .cmd_begin_rendering(render_buffer, &rendering_info);
-                        self.device.cmd_set_viewport(render_buffer, 0, &viewport);
-                        self.device.cmd_set_scissor(render_buffer, 0, &scissor);
-                        self.device.cmd_bind_pipeline(
-                            render_buffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            pipeline.pipeline,
-                        );
-                        self.device.cmd_bind_descriptor_sets(
-                            render_buffer,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            pipeline.layout,
-                            0,
-                            &[source_desc],
-                            &[],
-                        );
-
-                        let perspective = glam::Mat4::perspective_rh(FRAC_PI_2, 1.0, 0.1, 512.0);
-                        let mvp = perspective * matrices[face];
-                        self.push_env_capture_constants(
-                            target,
-                            render_buffer,
-                            pipeline.layout,
-                            mvp,
-                            mip,
-                            mips_count,
-                            skybox_mesh,
-                        );
-
-                        self.device.cmd_bind_index_buffer(
-                            render_buffer,
-                            skybox_mesh.index_buffer,
-                            0,
-                            vk::IndexType::UINT32,
-                        );
-                        self.device.cmd_draw_indexed(
-                            render_buffer,
-                            skybox_mesh.index_count,
-                            1,
-                            0,
-                            0,
-                            0,
-                        );
-                        self.device.cmd_end_rendering(render_buffer);
-
-                        vk_util::transition_image(
-                            &self.device,
-                            render_buffer,
-                            offscreen_image.image,
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        );
-                        offscreen_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
-
-                        let copy_region = vk::ImageCopy::default()
-                            .src_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: 0,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            })
-                            .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                            .dst_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: mip,
-                                base_array_layer: face as u32,
-                                layer_count: 1,
-                            })
-                            .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                            .extent(vk::Extent3D {
-                                width: mip_dim,
-                                height: mip_dim,
-                                depth: 1,
-                            });
-
-                        self.device.cmd_copy_image(
-                            render_buffer,
-                            offscreen_image.image,
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             cubemap_image.image,
+                            vk::ImageLayout::UNDEFINED,
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            &[copy_region],
+                            6,
+                            mips_count,
                         );
                     }
+
+                    for mip in mip_range {
+                        for face in 0..6 {
+                            info!(
+                                "Generating face: {}, mip: {}, for {:?} Map",
+                                face, mip, target
+                            );
+
+                            let mip_dim = std::cmp::max(dim >> mip, 1);
+                            viewport[0].width = mip_dim as f32;
+                            viewport[0].height = mip_dim as f32;
+
+                            vk_util::transition_image(
+                                &self.device,
+                                render_buffer,
+                                offscreen_image.image,
+                                offscreen_layout,
+                                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            );
+
+                            let color_attachment_info = [vk::RenderingAttachmentInfo::default()
+                                .image_view(offscreen_image.image_view)
+                                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                                .load_op(vk::AttachmentLoadOp::CLEAR)
+                                .store_op(vk::AttachmentStoreOp::STORE)
+                                .clear_value(vk::ClearValue {
+                                    color: vk::ClearColorValue {
+                                        float32: [0.0, 0.0, 0.0, 1.0],
+                                    },
+                                })];
+
+                            let rendering_info = vk::RenderingInfo::default()
+                                .render_area(scissor[0])
+                                .layer_count(1)
+                                .color_attachments(&color_attachment_info);
+
+                            self.device
+                                .cmd_begin_rendering(render_buffer, &rendering_info);
+                            self.device.cmd_set_viewport(render_buffer, 0, &viewport);
+                            self.device.cmd_set_scissor(render_buffer, 0, &scissor);
+                            self.device.cmd_bind_pipeline(
+                                render_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline.pipeline,
+                            );
+                            self.device.cmd_bind_descriptor_sets(
+                                render_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline.layout,
+                                0,
+                                &[source_desc],
+                                &[],
+                            );
+
+                            let perspective =
+                                glam::Mat4::perspective_rh(FRAC_PI_2, 1.0, 0.1, 512.0);
+                            let mvp = perspective * matrices[face];
+                            self.push_env_capture_constants(
+                                target,
+                                render_buffer,
+                                pipeline.layout,
+                                mvp,
+                                mip,
+                                mips_count,
+                                skybox_mesh,
+                            );
+
+                            self.device.cmd_bind_index_buffer(
+                                render_buffer,
+                                skybox_mesh.index_buffer,
+                                0,
+                                vk::IndexType::UINT32,
+                            );
+                            self.device.cmd_draw_indexed(
+                                render_buffer,
+                                skybox_mesh.index_count,
+                                1,
+                                0,
+                                0,
+                                0,
+                            );
+                            self.device.cmd_end_rendering(render_buffer);
+
+                            vk_util::transition_image(
+                                &self.device,
+                                render_buffer,
+                                offscreen_image.image,
+                                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            );
+                            offscreen_layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
+
+                            let copy_region = vk::ImageCopy::default()
+                                .src_subresource(vk::ImageSubresourceLayers {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    mip_level: 0,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                })
+                                .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                                .dst_subresource(vk::ImageSubresourceLayers {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    mip_level: mip,
+                                    base_array_layer: face as u32,
+                                    layer_count: 1,
+                                })
+                                .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                                .extent(vk::Extent3D {
+                                    width: mip_dim,
+                                    height: mip_dim,
+                                    depth: 1,
+                                });
+
+                            self.device.cmd_copy_image(
+                                render_buffer,
+                                offscreen_image.image,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                cubemap_image.image,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                &[copy_region],
+                            );
+                        }
+                    }
+
+                    if last_mip_exclusive == mips_count {
+                        vk_util::transition_image_layered(
+                            &self.device,
+                            render_buffer,
+                            cubemap_image.image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            6,
+                            mips_count,
+                        );
+                    }
+
+                    self.device
+                        .end_command_buffer(render_buffer)
+                        .map_err(|e| format!("end_command_buffer failed: {:?}", e))?;
+                    if target == EnvTarget::PreFiltered {
+                        info!("Submitting PreFiltered mip {first_mip} as an isolated GPU batch");
+                    }
+                    self.submit_and_wait_graphics(render_buffer, render_queue)?;
+                    if target == EnvTarget::PreFiltered {
+                        info!("Finished PreFiltered mip {first_mip} GPU batch");
+                    }
                 }
-
-                vk_util::transition_image_layered(
-                    &self.device,
-                    render_buffer,
-                    cubemap_image.image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    6,
-                    mips_count,
-                );
-
-                self.device
-                    .end_command_buffer(render_buffer)
-                    .map_err(|e| format!("end_command_buffer failed: {:?}", e))?;
-                self.submit_and_wait_graphics(render_buffer, render_queue)?;
             }
 
             let final_cubemap = VkCubeMap {
@@ -3818,9 +3844,15 @@ mod backend_tests {
     }
 
     #[test]
-    fn prefilter_target_uses_watchdog_safe_resolution() {
+    fn prefilter_target_uses_watchdog_safe_resolution_and_isolated_mip_submissions() {
+        let mips_count = data_util::calc_mips_count(256, 256);
         assert_eq!(EnvTarget::PreFiltered.dimension(), 256);
-        assert_eq!(data_util::calc_mips_count(256, 256), 9);
+        assert_eq!(mips_count, 9);
+        assert_eq!(
+            EnvTarget::PreFiltered.submission_mip_ranges(mips_count),
+            (0..mips_count).map(|mip| mip..mip + 1).collect::<Vec<_>>()
+        );
+        assert_eq!(EnvTarget::Irradiance.submission_mip_ranges(7), vec![0..7]);
     }
 
     #[test]
