@@ -9,6 +9,38 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
+// ─── Environment ───────────────────────────────────────────────────────────
+
+/// Build environment metadata.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuildEnv {
+    /// Rust toolchain triple, e.g. "x86_64-unknown-linux-gnu".
+    pub target_triple: String,
+    /// Build profile ("debug" or "release").
+    pub profile: String,
+    /// Operating system name.
+    pub os: String,
+}
+
+impl Default for BuildEnv {
+    fn default() -> Self {
+        Self {
+            target_triple: std::env::consts::ARCH.to_string()
+                + "-"
+                + std::env::consts::FAMILY
+                + "-"
+                + std::env::consts::OS,
+            profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+            .to_string(),
+            os: std::env::consts::OS.to_string(),
+        }
+    }
+}
+
 // ─── PhaseTiming ───────────────────────────────────────────────────────────
 
 /// Timing and metadata for one generation-mesh-partition pipeline run.
@@ -52,6 +84,48 @@ pub struct PhaseTiming {
     pub light_count: usize,
     /// Number of viewpoints derived.
     pub viewpoint_count: usize,
+
+    // ── Environment ────────────────────────────────────────────────────
+    /// Build environment metadata.
+    pub build_env: BuildEnv,
+
+    // ── Lifecycle ──────────────────────────────────────────────────────
+    /// Request identity for this generation.
+    pub request_id: String,
+
+    // ── Upload timing ──────────────────────────────────────────────────
+    /// Mesh upload wall-clock to GPU (milliseconds).
+    pub upload_ms: f64,
+    /// Material creation wall-clock (milliseconds).
+    pub material_create_ms: f64,
+}
+
+impl PhaseTiming {
+    /// Create a new PhaseTiming with the given preset/seed/resolution and default env/request.
+    pub fn new(preset: &str, seed: u64, resolution: u32) -> Self {
+        Self {
+            preset: preset.to_string(),
+            seed,
+            resolution,
+            generation_ms: 0.0,
+            mc33_ms: 0.0,
+            partition_ms: 0.0,
+            conversion_ms: 0.0,
+            total_cpu_ms: 0.0,
+            wall_triangles: 0,
+            floor_triangles: 0,
+            total_voxels: 0,
+            site_count: 0,
+            spline_edges: 0,
+            maze_links: 0,
+            light_count: 0,
+            viewpoint_count: 0,
+            build_env: BuildEnv::default(),
+            request_id: String::new(),
+            upload_ms: 0.0,
+            material_create_ms: 0.0,
+        }
+    }
 }
 
 /// A record written to the JSONL file for a single campaign run.
@@ -71,6 +145,8 @@ pub struct CampaignRecord {
     /// Timing data (present on success).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<PhaseTiming>,
+    /// Build environment metadata.
+    pub build_env: BuildEnv,
 }
 
 // ─── TelemetryRecorder ─────────────────────────────────────────────────────

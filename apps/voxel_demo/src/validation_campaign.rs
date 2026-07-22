@@ -82,17 +82,17 @@ struct SeedCorpus {
     corpus: Vec<CorpusEntry>,
 }
 
-/// A preset gate entry.
+/// A preset gate entry with actionable limits.
 #[derive(Debug, Clone, Deserialize)]
 struct GateEntry {
     preset: String,
     resolutions: Vec<u32>,
-    #[allow(dead_code)]
     min_interior: u32,
-    #[allow(dead_code)]
     max_mc33_triangles: u64,
-    #[allow(dead_code)]
     max_byte_estimate: u64,
+    expected_sites: Option<usize>,
+    expected_spline: Option<usize>,
+    expected_maze: Option<usize>,
 }
 
 /// The preset-gates.toml file.
@@ -174,6 +174,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                 passed: false,
                 error: Some(format!("unknown preset: '{}'", case.preset_name)),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     };
@@ -191,6 +192,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some(format!("normalize: {e}")),
             timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -204,6 +206,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some(format!("validation: {}", msgs.join("; "))),
             timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -223,6 +226,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                 passed: false,
                 error: Some(format!("asset resolve: {e}")),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     };
@@ -287,6 +291,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                 passed: false,
                 error: Some(format!("scene package: {e}")),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     };
@@ -310,6 +315,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                 passed: false,
                 error: Some(format!("generation (check): {e}")),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     };
@@ -323,6 +329,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("shell breach detected".to_string()),
             timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -339,6 +346,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("no sites placed".to_string()),
             timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
         };
     };
     let reachable = flood_fill_air(
@@ -355,6 +363,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("spawn site is not in air".to_string()),
             timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -370,6 +379,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                 passed: false,
                 error: Some(format!("site '{}' unreachable from spawn", site.label)),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     }
@@ -387,6 +397,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                     vp.id, vp.x, vp.y, vp.z
                 )),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     }
@@ -404,6 +415,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
                     la.id, la.x, la.y, la.z
                 )),
                 timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
             };
         }
     }
@@ -417,6 +429,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
             passed: false,
             error: Some("zero triangles in both wall and floor partitions".to_string()),
             timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
         };
     }
 
@@ -438,7 +451,65 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
         .filter(|e| matches!(e.kind, crate::cave_gen::generators::RouteKind::Maze))
         .count();
 
-    // 4. Build timing record
+    // 4. Gate limit checks
+    let gates_path = test_data_path("v2/preset-gates.toml");
+    if let Ok(gates_toml) = std::fs::read_to_string(&gates_path) {
+        if let Ok(gates) = toml::from_str::<PresetGates>(&gates_toml) {
+            for gate in &gates.gates {
+                if gate.preset == case.preset_name && gate.resolutions.contains(&case.resolution) {
+                    // Check gate limits
+                    if let Some(expected_sites) = gate.expected_sites {
+                        if gen_result.sites.len() != expected_sites {
+                            return CampaignRecord {
+                                preset: case.preset_name.clone(),
+                                seed: case.seed,
+                                resolution: case.resolution,
+                                passed: false,
+                                error: Some(format!(
+                                    "gate: expected {expected_sites} sites, got {}",
+                                    gen_result.sites.len()
+                                )),
+                                timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
+                            };
+                        }
+                    }
+                    if let Some(expected_spline) = gate.expected_spline {
+                        if spline_count != expected_spline {
+                            return CampaignRecord {
+                                preset: case.preset_name.clone(),
+                                seed: case.seed,
+                                resolution: case.resolution,
+                                passed: false,
+                                error: Some(format!(
+                                    "gate: expected {expected_spline} spline edges, got {spline_count}"
+                                )),
+                                timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
+                            };
+                        }
+                    }
+                    if let Some(expected_maze) = gate.expected_maze {
+                        if maze_count != expected_maze {
+                            return CampaignRecord {
+                                preset: case.preset_name.clone(),
+                                seed: case.seed,
+                                resolution: case.resolution,
+                                passed: false,
+                                error: Some(format!(
+                                    "gate: expected {expected_maze} maze links, got {maze_count}"
+                                )),
+                                timing: None,
+                build_env: crate::telemetry::BuildEnv::default(),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Build timing record
     let timing = PhaseTiming {
         preset: case.preset_name.clone(),
         seed: case.seed,
@@ -446,7 +517,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
         generation_ms: package.generation_time_ms as f64,
         mc33_ms: package.mesh_time_ms as f64,
         partition_ms: package.partition_time_ms as f64,
-        conversion_ms: 0.0, // included in partition/package time
+        conversion_ms: 0.0,
         total_cpu_ms,
         wall_triangles: package.wall_triangles,
         floor_triangles: package.floor_triangles,
@@ -456,6 +527,10 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
         maze_links: maze_count,
         light_count: package.lights.len(),
         viewpoint_count: package.viewpoints.len(),
+        build_env: crate::telemetry::BuildEnv::default(),
+        request_id: format!("campaign-{}-{}-{}", case.preset_name, case.seed, case.resolution),
+        upload_ms: 0.0,
+        material_create_ms: 0.0,
     };
 
     CampaignRecord {
@@ -465,6 +540,7 @@ fn run_case(case: &CampaignCase) -> CampaignRecord {
         passed: true,
         error: None,
         timing: Some(timing),
+                build_env: crate::telemetry::BuildEnv::default(),
     }
 }
 
@@ -482,9 +558,9 @@ fn is_in_air(
     z: u32,
 ) -> bool {
     if x >= w || y >= h || z >= d {
-        return true; // outside bounds → considered air
+        return false; // out of bounds → considered solid
     }
-    lattice.get(x, y, z).map_or(true, |&den| den >= 0)
+    lattice.get(x, y, z).map_or(false, |&den| den >= 0)
 }
 
 // ─── Public Entrypoint ─────────────────────────────────────────────────────
