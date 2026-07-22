@@ -27,12 +27,25 @@
 //! - **Pass Ordering**: The order of passes in the graph is the order they are recorded into
 //!   the command buffer.
 //!
+//! ## Current Model: Ordered Pass List
+//!
+//! The render graph is a **linear ordered list** of passes. It does **not** perform
+//! automatic dependency-graph scheduling, topological sort, resource-usage analysis, or
+//! transient-memory aliasing. Passes execute in the fixed order declared in
+//! [`RenderGraph::default_graph`] and each pass is responsible for explicit layout
+//! transitions and synchronization. The documentation in
+//! `docs/internal/07-rendergraph-dependencies-and-aliasing.md` describes the current
+//! ownership and transition contract for each pass.
+//!
+//! Future work may add resource-declaration and DAG scheduling; that direction is tracked
+//! separately and has no effect on current behavior.
+//!
 //! ## Why use a RenderGraph?
 //! - **Modularity**: New rendering features (like shadows or post-processing) can be added as
 //!   new nodes without touching the core frame loop.
 //! - **Clarity**: It provides a clear high-level overview of the frame's structure.
-//! - **Future-Proofing**: It allows for automatic optimization of resource transitions and
-//!   memory aliases between passes.
+//! - **Explicit ordering**: The default graph makes the current pass list easy to inspect
+//!   without implying automatic scheduling or resource aliasing.
 
 use crate::rendergraph::passes::{
     DebugCapturePass, GeometryPass, ImguiPass, PrepareTargetsPass, PresentCopyPass, ShadowPass,
@@ -40,7 +53,7 @@ use crate::rendergraph::passes::{
 };
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_commands::RecordingDispatcher;
-use crate::vulkan::vk_types::{VkFrame, VkQueueType};
+use crate::vulkan::vk_types::VkFrame;
 use std::time::Instant;
 
 pub mod passes;
@@ -72,7 +85,11 @@ impl<'a> RenderGraphContext<'a> {
         frame: &'a mut VkFrame,
         recording: &'a mut RecordingDispatcher<'a>,
     ) -> Self {
-        Self { submission, frame, recording }
+        Self {
+            submission,
+            frame,
+            recording,
+        }
     }
 }
 
@@ -127,8 +144,11 @@ impl RenderGraph {
         let mut pass_timings = Vec::with_capacity(self.passes.len());
 
         for pass in self.passes.iter() {
-            let cmd_pool = ctx.frame.cmd_pools.get(VkQueueType::Graphics);
-            let cmd_buffer = cmd_pool.buffers[0];
+            let cmd_buffer = ctx
+                .frame
+                .cmd_pools
+                .frame_graphics_primary()
+                .map_err(|e| format!("cannot record pass '{}': {e}", pass.name()))?;
             ctx.begin_gpu_pass_timing(cmd_buffer, pass.name());
 
             let pass_start = Instant::now();

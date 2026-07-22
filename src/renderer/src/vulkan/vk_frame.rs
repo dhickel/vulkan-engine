@@ -434,8 +434,10 @@ pub(crate) fn acquire_frame_slot(
     let frame_data = &ctx.presentation.frame_data[frame_index as usize];
     let frame_slot_index = frame_index as usize;
     let frame_sync = frame_data.sync;
-    let cmd_pool = frame_data.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame_data
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("cannot acquire frame slot: {e}"))?;
     let queue = ctx.queues.get_queue(VkQueueType::Graphics);
 
     let fence_wait_start = Instant::now();

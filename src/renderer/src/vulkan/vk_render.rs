@@ -1367,10 +1367,11 @@ impl VkRenderCore {
             &device,
             &allocator.lock().expect("allocator lock poisoned"),
             brdf_pipeline,
-            presentation.frame_data[0]
-                .cmd_pools
-                .get(VkQueueType::Graphics)
-                .buffers[0],
+            presentation
+                .bootstrap_command_pools()
+                .expect("bootstrap pools missing")
+                .bootstrap_graphics_primary()
+                .expect("bootstrap graphics primary missing"),
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         )?;
 
@@ -1553,10 +1554,11 @@ impl VkRenderCore {
             &device,
             &allocator.lock().expect("allocator lock poisoned"),
             brdf_pipeline,
-            presentation.frame_data[0]
-                .cmd_pools
-                .get(VkQueueType::Graphics)
-                .buffers[0],
+            presentation
+                .bootstrap_command_pools()
+                .expect("bootstrap pools missing")
+                .bootstrap_graphics_primary()
+                .expect("bootstrap graphics primary missing"),
             vulkan_cache.queues.get_queue(VkQueueType::Graphics),
         )
         .map_err(|err| {
@@ -2687,7 +2689,8 @@ impl VkRenderCore {
         )?;
         frame_transaction.mark_submitted();
         // Commit image state transitions only after successful submit.
-        self.image_state_tracker.commit_transitions(&pending_transitions);
+        self.image_state_tracker
+            .commit_transitions(&pending_transitions);
         let submit_ms = elapsed_ms(submit_start);
 
         let present_start = Instant::now();
@@ -3541,8 +3544,13 @@ impl VkRenderCore {
             cube_dim, cube_format
         );
 
-        let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
-        let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
+        let cmd_pool = self
+            .presentation
+            .bootstrap_command_pools()
+            .map_err(|e| format!("equirect convert: {e}"))?;
+        let render_buffer = cmd_pool
+            .bootstrap_graphics_primary()
+            .map_err(|e| format!("equirect convert: {e}"))?;
         let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         // Allocate descriptor for the equirect source texture
@@ -3777,8 +3785,13 @@ impl VkRenderCore {
         skybox_sampler: vk::Sampler,
     ) -> Result<EnvMaps, String> {
         let start = SystemTime::now();
-        let cmd_pool = &self.presentation.frame_data[0].cmd_pools;
-        let render_buffer = cmd_pool.get(VkQueueType::Graphics).buffers[0];
+        let cmd_pool = self
+            .presentation
+            .bootstrap_command_pools()
+            .map_err(|e| format!("generate environment: {e}"))?;
+        let render_buffer = cmd_pool
+            .bootstrap_graphics_primary()
+            .map_err(|e| format!("generate environment: {e}"))?;
         let render_queue = self.vulkan_cache.queues.get_queue(VkQueueType::Graphics);
 
         let desc_pool = VkDescriptorAllocator::new(

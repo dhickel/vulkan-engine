@@ -408,6 +408,12 @@ pub enum VkError {
     NoActiveReservation,
     /// `VkPresent::new` was called with zero frame-data sources.
     NoFrameSources,
+    /// A command-buffer role accessor found the wrong number of buffers.
+    InvalidCommandBufferCardinality {
+        role: &'static str,
+        expected: usize,
+        actual: usize,
+    },
 }
 
 impl std::fmt::Display for VkError {
@@ -417,6 +423,16 @@ impl std::fmt::Display for VkError {
             Self::NoActiveReservation => f.write_str("no active frame reservation"),
             Self::NoFrameSources => {
                 f.write_str("zero frame-data sources provided to VkPresent::new")
+            }
+            Self::InvalidCommandBufferCardinality {
+                role,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "command-buffer role '{role}' expected {expected} buffer(s), found {actual}"
+                )
             }
         }
     }
@@ -702,14 +718,50 @@ impl VkCommandPoolMap {
             .try_into()
             .map_err(|_| "Invalid pool count, expected 4".to_string())?;
 
-        Ok(Self {
+        let map = Self {
             pools: sorted_pools,
-        })
+        };
+        // Validate every named role at construction so callers discover an
+        // invalid pool shape before frame/bootstrap/host recording begins.
+        map.frame_graphics_primary()
+            .map_err(|err| err.to_string())?;
+        map.bootstrap_graphics_primary()
+            .map_err(|err| err.to_string())?;
+        map.host_transfer_primary().map_err(|err| err.to_string())?;
+        map.host_graphics_acquire().map_err(|err| err.to_string())?;
+        Ok(map)
     }
 
     /// Get pool for a specific queue type using enum value as array index.
     pub fn get(&self, typ: VkQueueType) -> &VkCommandPool {
         &self.pools[typ as usize]
+    }
+
+    /// Frame-local graphics primary command buffer (for per-frame render passes).
+    /// Returns an error if the pool does not contain exactly one primary buffer.
+    pub(crate) fn frame_graphics_primary(&self) -> Result<vk::CommandBuffer, VkError> {
+        self.get(VkQueueType::Graphics)
+            .primary("frame_graphics_primary")
+    }
+
+    /// Bootstrap graphics primary (for one-time init: BRDF LUT, env map generation).
+    /// Semantically identical pool to `frame_graphics_primary` but documents
+    /// bootstrap-only usage, not per-frame rendering.
+    pub(crate) fn bootstrap_graphics_primary(&self) -> Result<vk::CommandBuffer, VkError> {
+        self.get(VkQueueType::Graphics)
+            .primary("bootstrap_graphics_primary")
+    }
+
+    /// Host transfer primary (for async buffer-to-image uploads).
+    pub(crate) fn host_transfer_primary(&self) -> Result<vk::CommandBuffer, VkError> {
+        self.get(VkQueueType::Transfer)
+            .primary("host_transfer_primary")
+    }
+
+    /// Host graphics acquire (for ownership-transfer barriers after async upload).
+    pub(crate) fn host_graphics_acquire(&self) -> Result<vk::CommandBuffer, VkError> {
+        self.get(VkQueueType::Graphics)
+            .primary("host_graphics_acquire")
     }
 }
 
@@ -730,6 +782,20 @@ impl VkCommandPoolMap {
 pub struct VkCommandPool {
     pub pool: vk::CommandPool,
     pub buffers: Vec<vk::CommandBuffer>,
+}
+
+impl VkCommandPool {
+    /// Return the sole primary command buffer, validating expected cardinality.
+    pub(crate) fn primary(&self, role: &'static str) -> Result<vk::CommandBuffer, VkError> {
+        if self.buffers.len() != 1 {
+            return Err(VkError::InvalidCommandBufferCardinality {
+                role,
+                expected: 1,
+                actual: self.buffers.len(),
+            });
+        }
+        Ok(self.buffers[0])
+    }
 }
 
 #[derive(Debug)]
@@ -1177,6 +1243,16 @@ impl VkPresent {
         &self.present_targets
     }
 
+    /// Return the command pools for frame slot 0, to be used only for bootstrap
+    /// (one-time) operations like BRDF LUT generation and environment map generation.
+    /// Must not be used for per-frame rendering.
+    pub(crate) fn bootstrap_command_pools(&self) -> Result<&VkCommandPoolMap, VkError> {
+        if self.frame_data.is_empty() {
+            return Err(VkError::NoFrameSources);
+        }
+        Ok(&self.frame_data[0].cmd_pools)
+    }
+
     /// Replace present image targets (e.g. after swapchain rebuild).
     ///
     /// Resets frame-slot selection state: after this call there is no active
@@ -1335,7 +1411,10 @@ impl VkHostBuffer {
         submit_params: VkSubmitParam,
     ) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
-            cmd_buffer: self.transfer_pool.buffers[0],
+            cmd_buffer: self
+                .transfer_pool
+                .primary("host_transfer_submit")
+                .expect("VkHostBuffer transfer pool must have 1 buffer"),
             fence: [self.fence[0]],
             semaphore: self.semaphore,
             submit_params,
@@ -1360,7 +1439,10 @@ impl VkHostBuffer {
         submit_params: VkSubmitParam,
     ) -> Result<(), SendError<VkCmdSubmitInfo>> {
         let submit_info = VkCmdSubmitInfo {
-            cmd_buffer: self.graphics_pool.buffers[0],
+            cmd_buffer: self
+                .graphics_pool
+                .primary("host_graphics_submit")
+                .expect("VkHostBuffer graphics pool must have 1 buffer"),
             fence: [self.fence[1]],
             semaphore: self.semaphore,
             submit_params,
@@ -1389,13 +1471,17 @@ impl VkHostBuffer {
         unsafe {
             device
                 .reset_command_buffer(
-                    self.transfer_pool.buffers[0],
+                    self.transfer_pool
+                        .primary("host_transfer_reset")
+                        .expect("VkHostBuffer transfer pool must have 1 buffer"),
                     vk::CommandBufferResetFlags::empty(),
                 )
                 .map_err(|e| format!("failed to reset transfer command buffer: {:?}", e))?;
             device
                 .reset_command_buffer(
-                    self.graphics_pool.buffers[0],
+                    self.graphics_pool
+                        .primary("host_graphics_reset")
+                        .expect("VkHostBuffer graphics pool must have 1 buffer"),
                     vk::CommandBufferResetFlags::empty(),
                 )
                 .map_err(|e| format!("failed to reset graphics command buffer: {:?}", e))
@@ -2008,6 +2094,42 @@ mod tests {
             tracker.committed_state(image, &ImageSubresourceKey::all_mips_single_layer(2)),
             None
         );
+    }
+
+    #[test]
+    fn command_pool_primary_validates_single_buffer_cardinality() {
+        let empty_pool = VkCommandPool {
+            pool: vk::CommandPool::null(),
+            buffers: Vec::new(),
+        };
+        assert!(matches!(
+            empty_pool.primary("test_empty"),
+            Err(VkError::InvalidCommandBufferCardinality {
+                role: "test_empty",
+                expected: 1,
+                actual: 0,
+            })
+        ));
+
+        let one = vk::CommandBuffer::from_raw(0x44);
+        let single_pool = VkCommandPool {
+            pool: vk::CommandPool::null(),
+            buffers: vec![one],
+        };
+        assert_eq!(single_pool.primary("test_single").unwrap(), one);
+
+        let two_pool = VkCommandPool {
+            pool: vk::CommandPool::null(),
+            buffers: vec![one, vk::CommandBuffer::from_raw(0x45)],
+        };
+        assert!(matches!(
+            two_pool.primary("test_many"),
+            Err(VkError::InvalidCommandBufferCardinality {
+                role: "test_many",
+                expected: 1,
+                actual: 2,
+            })
+        ));
     }
 
     #[test]

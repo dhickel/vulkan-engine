@@ -1145,7 +1145,9 @@ pub fn upload_skybox(
         (alloc, device_memory, offset)
     };
 
-    let cmd_buffer = transfer_pool.buffers[0];
+    let cmd_buffer = transfer_pool
+        .primary("transfer_skybox_upload")
+        .expect("transfer pool must have 1 buffer");
     // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -1332,7 +1334,9 @@ pub fn upload_texture_2d(
         1,
     )?;
 
-    let cmd_buffer = transfer_pool.buffers[0];
+    let cmd_buffer = transfer_pool
+        .primary("transfer_texture_2d_upload")
+        .expect("transfer pool must have 1 buffer");
     // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
     unsafe {
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -1634,8 +1638,14 @@ pub fn record_host_to_storage_buffer(
     bytes: &[&[u8]],
     alignment: u64,
 ) -> Result<(), String> {
-    let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
-    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
+    let transfer_cmd_buffer = host_info
+        .transfer_pool
+        .primary("host_transfer_storage_upload")
+        .expect("VkHostBuffer transfer pool must have 1 buffer");
+    let graphics_cmd_buffer = host_info
+        .graphics_pool
+        .primary("host_graphics_storage_upload")
+        .expect("VkHostBuffer graphics pool must have 1 buffer");
     let host_buffer = &host_info.buffer;
 
     let alignment = usize::try_from(alignment.max(4))
@@ -1832,8 +1842,14 @@ pub fn record_host_to_image_buffer(
         .map_err(|_| "image upload alignment does not fit in usize".to_string())?;
 
     let host_buffer = &host_info.buffer;
-    let transfer_cmd_buffer = host_info.transfer_pool.buffers[0];
-    let graphics_cmd_buffer = host_info.graphics_pool.buffers[0];
+    let transfer_cmd_buffer = host_info
+        .transfer_pool
+        .primary("host_transfer_image_upload")
+        .expect("VkHostBuffer transfer pool must have 1 buffer");
+    let graphics_cmd_buffer = host_info
+        .graphics_pool
+        .primary("host_graphics_image_upload")
+        .expect("VkHostBuffer graphics pool must have 1 buffer");
     let host_capacity = mapped_write_capacity(host_buffer, "image upload")?;
 
     let mut offset: DeviceSize = 0;
@@ -2422,8 +2438,12 @@ pub fn record_image_barrier(
 
 #[cfg(test)]
 mod tests {
-    use super::{queue_family_indices_for_barrier, resolve_upload_mip_levels, FrameTransitionOverlay};
-    use crate::vulkan::vk_types::{ImageStateTracker, ImageSubresourceKey, TrackedSubresourceState};
+    use super::{
+        queue_family_indices_for_barrier, resolve_upload_mip_levels, FrameTransitionOverlay,
+    };
+    use crate::vulkan::vk_types::{
+        ImageStateTracker, ImageSubresourceKey, TrackedSubresourceState,
+    };
     use ash::vk;
     use ash::vk::Handle;
 

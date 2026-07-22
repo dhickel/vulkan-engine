@@ -19,7 +19,6 @@ use crate::data::gpu_data::{
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
-use crate::vulkan::vk_types::PendingTransition;
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_debug::{record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture};
 use crate::vulkan::vk_frame::{imgui_pass_plan, ImguiPassPlan};
@@ -29,6 +28,7 @@ use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
 use crate::vulkan::vk_shadow::{
     compute_csm_cascades, derive_camera_near_far_from_corners, frustum_corners_from_vp,
 };
+use crate::vulkan::vk_types::PendingTransition;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
@@ -154,7 +154,11 @@ pub(crate) struct TerminalPresentRecording<'a> {
 
 impl PrepareTargetsRecording<'_> {
     pub(crate) fn prepare_draw_targets(&mut self) -> Result<(), String> {
-        let cmd_buffer = self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0];
+        let cmd_buffer = self
+            .frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .map_err(|e| format!("PrepareTargetsPass: {e}"))?;
         let key = ImageSubresourceKey::all_mips_all_layers(1, 1);
         self.transition_overlay.record_and_emit_transition(
             self.device,
@@ -223,7 +227,10 @@ impl ShadowRecording<'_> {
         self.submission
     }
     pub(crate) fn cmd_buffer(&self) -> vk::CommandBuffer {
-        self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0]
+        self.frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .expect("ShadowRecording: frame graphics primary missing")
     }
 }
 
@@ -313,7 +320,11 @@ impl TerminalPresentRecording<'_> {
         self.surface_mode.is_headless()
     }
     pub(crate) fn transition_present_for_present(&mut self) -> Result<(), String> {
-        let cmd_buffer = self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0];
+        let cmd_buffer = self
+            .frame
+            .cmd_pools
+            .frame_graphics_primary()
+            .map_err(|e| format!("TerminalPresent: {e}"))?;
         self.transition_overlay.record_and_emit_transition(
             self.device,
             cmd_buffer,
@@ -544,8 +555,10 @@ fn draw_geometry_from_submission_impl(
     submission: &RenderSubmission,
 ) {
     let frame_index = frame.index;
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .expect("geometry: frame graphics primary missing");
 
     let color_clear = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -709,8 +722,10 @@ fn draw_skybox_from_submission_impl(
     frame: &mut VkFrame,
     submission: &RenderSubmission,
 ) {
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .expect("skybox: frame graphics primary missing");
 
     let clear_color = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -757,8 +772,10 @@ fn copy_draw_to_present_impl(
     transition_overlay: &mut vk_util::FrameTransitionOverlay,
     graphics_queue_family: u32,
 ) -> Result<(), String> {
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("PresentCopy: {e}"))?;
     let extent = window_state.get_curr_extent();
 
     let key = ImageSubresourceKey::all_mips_all_layers(1, 1);
@@ -819,8 +836,10 @@ fn prepare_present_color_attachment_impl(
     transition_overlay: &mut vk_util::FrameTransitionOverlay,
     graphics_queue_family: u32,
 ) -> Result<(), String> {
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("PresentCopy: {e}"))?;
 
     transition_overlay.record_and_emit_transition(
         device,
@@ -867,8 +886,10 @@ fn draw_imgui_to_present_impl(
         return Ok(());
     }
 
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .map_err(|e| format!("Imgui: {e}"))?;
     draw_imgui_impl(
         device,
         window_state,
@@ -894,8 +915,10 @@ fn record_due_frame_captures_impl(
         return;
     }
 
-    let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
-    let cmd_buffer = cmd_pool.buffers[0];
+    let cmd_buffer = frame
+        .cmd_pools
+        .frame_graphics_primary()
+        .expect("DebugCapture: frame graphics primary missing");
     let extent = window_state.get_curr_extent();
     let due = std::mem::take(due_frame_captures);
 

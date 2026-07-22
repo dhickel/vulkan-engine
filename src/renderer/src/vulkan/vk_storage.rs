@@ -1817,8 +1817,7 @@ mod tests {
         }
 
         // Construct two VkStorageBuffer instances with different identities.
-        // Primary has buffer_index = 0. Extra has buffer_index = 1.
-        // In the mock, extra_buffers[0] maps to overflow id 1.
+        // Primary has buffer_index = 0. The first overflow buffer maps to id 1.
         let primary = make_dummy_storage_buffer();
         let extra = VkStorageBuffer::new(
             1,
@@ -1851,7 +1850,14 @@ mod tests {
         };
         deallocate(&mut mock, prim_alloc);
         assert_eq!(mock.buffer.free_chunks.total_free, 128);
-        assert_eq!(mock.extra_buffers[0].free_chunks.total_free, 0);
+        assert_eq!(
+            mock.extra_buffers
+                .first()
+                .expect("mock has one overflow buffer")
+                .free_chunks
+                .total_free,
+            0
+        );
 
         // Deallocate to overflow buffer (sub_buffer_index 1)
         let extra_alloc = VkSubAlloc {
@@ -1862,7 +1868,14 @@ mod tests {
             sub_buffer_index: 1,
         };
         deallocate(&mut mock, extra_alloc);
-        assert_eq!(mock.extra_buffers[0].free_chunks.total_free, 256);
+        assert_eq!(
+            mock.extra_buffers
+                .first()
+                .expect("mock has one overflow buffer")
+                .free_chunks
+                .total_free,
+            256
+        );
         assert_eq!(mock.buffer.free_chunks.total_free, 128); // unchanged
 
         // Deallocate to missing index (no-op, as in production code)
@@ -1876,7 +1889,14 @@ mod tests {
         deallocate(&mut mock, missing_alloc);
         // State unchanged
         assert_eq!(mock.buffer.free_chunks.total_free, 128);
-        assert_eq!(mock.extra_buffers[0].free_chunks.total_free, 256);
+        assert_eq!(
+            mock.extra_buffers
+                .first()
+                .expect("mock has one overflow buffer")
+                .free_chunks
+                .total_free,
+            256
+        );
     }
 
     // ── Address stability across overflow ─────────────────────────────
