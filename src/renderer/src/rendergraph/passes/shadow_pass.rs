@@ -33,7 +33,6 @@ impl RenderPassNode for ShadowPass {
 
         let mut recording = ctx.shadow_ctx();
 
-        #[cfg(feature = "csm")]
         let frame_index = recording.frame_index();
         let shadow_draws = recording.resolve_shadow_draw_objects();
 
@@ -48,6 +47,30 @@ impl RenderPassNode for ShadowPass {
         let light_active = light_data.map_or(false, |l| l.intensity > 0.0);
 
         if !light_active || shadow_draws.is_empty() {
+            #[cfg(feature = "csm")]
+            if let Some(csm_resources) = recording.csm_shadow_resources() {
+                let csm_frame = csm_resources.get_frame(frame_index);
+                let mip_levels = csm_frame.csm_image.mip_levels;
+                let image = csm_frame.csm_image.image;
+                recording.transition_shadow_image(
+                    image,
+                    mip_levels,
+                    CSM_CASCADE_COUNT,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )?;
+            }
+            #[cfg(not(feature = "csm"))]
+            {
+                let shadow_frame = recording.shadow_resources().get_frame(frame_index);
+                let mip_levels = shadow_frame.shadow_map.mip_levels;
+                let image = shadow_frame.shadow_map.image;
+                recording.transition_shadow_image(
+                    image,
+                    mip_levels,
+                    1,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                )?;
+            }
             return Ok(());
         }
 
@@ -57,8 +80,6 @@ impl RenderPassNode for ShadowPass {
 
         #[cfg(feature = "csm")]
         let cmd_buffer = recording.cmd_buffer();
-        #[cfg(feature = "csm")]
-        let device = recording.device();
 
         // CSM feature gate: when compiled, only the CSM path renders shadows;
         // the legacy single-map path is inactive. This ensures the scene
@@ -69,13 +90,19 @@ impl RenderPassNode for ShadowPass {
             if !light.enable_shadows {
                 return Ok(());
             }
-            let csm_resources = match recording.csm_shadow_resources() {
-                Some(r) => r,
-                None => return Ok(()),
+            let (csm_extent, csm_image, csm_mip_levels, csm_layer_views) = {
+                let csm_resources = match recording.csm_shadow_resources() {
+                    Some(r) => r,
+                    None => return Ok(()),
+                };
+                let csm_frame = csm_resources.get_frame(frame_index);
+                (
+                    csm_resources.extent,
+                    csm_frame.csm_image.image,
+                    csm_frame.csm_image.mip_levels,
+                    csm_frame.csm_layer_views,
+                )
             };
-            let csm_frame = csm_resources.get_frame(frame_index);
-            let csm_extent = csm_resources.extent;
-            let csm_image = csm_frame.csm_image.image;
 
             let camera = &recording.submission().camera;
             let view = camera.view;
@@ -111,33 +138,14 @@ impl RenderPassNode for ShadowPass {
             );
 
             // Transition entire array to DEPTH_ATTACHMENT_OPTIMAL.
-            let barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-                .src_access_mask(vk::AccessFlags2::empty())
-                .dst_stage_mask(
-                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                )
-                .dst_access_mask(
-                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
-                        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-                )
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .image(csm_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: CSM_CASCADE_COUNT,
-                });
+            recording.transition_shadow_image(
+                csm_image,
+                csm_mip_levels,
+                CSM_CASCADE_COUNT,
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            )?;
 
-            let barriers = [barrier];
-            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            unsafe {
-                device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
-            }
+            let device = recording.device();
 
             // Bind shadow pipeline once.
             let shadow_pipeline = recording
@@ -176,7 +184,7 @@ impl RenderPassNode for ShadowPass {
                 let visible =
                     cull_casters_for_cascade(shadow_draws.iter(), &cascade.light_view_proj);
 
-                let layer_view = csm_frame.csm_layer_views[layer_idx as usize];
+                let layer_view = csm_layer_views[layer_idx as usize];
                 let depth_attachment = vk::RenderingAttachmentInfo::default()
                     .image_view(layer_view)
                     .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
@@ -278,30 +286,12 @@ impl RenderPassNode for ShadowPass {
             }
 
             // Final transition: all layers to SHADER_READ_ONLY_OPTIMAL.
-            let read_barrier = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(
-                    vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                        | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-                )
-                .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-                .dst_access_mask(vk::AccessFlags2::SHADER_READ)
-                .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                .image(csm_image)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::DEPTH,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: CSM_CASCADE_COUNT,
-                });
-
-            let read_barriers = [read_barrier];
-            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
-            unsafe {
-                device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
-            }
+            recording.transition_shadow_image(
+                csm_image,
+                csm_mip_levels,
+                CSM_CASCADE_COUNT,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )?;
 
             return Ok(());
         }
@@ -315,15 +305,19 @@ impl RenderPassNode for ShadowPass {
 impl ShadowPass {
     fn execute_legacy(
         &self,
-        recording: crate::vulkan::vk_commands::ShadowRecording<'_>,
+        mut recording: crate::vulkan::vk_commands::ShadowRecording<'_>,
         shadow_draws: &[RenderObject],
         light: &crate::scene::render_submission::FrameDirectionalLight,
     ) -> Result<(), String> {
         let frame_index = recording.frame_index();
         let shadow_extent = recording.shadow_resources().shadow_map_extent;
-        let (shadow_map_image, shadow_map_view) = {
+        let (shadow_map_image, shadow_map_view, shadow_mip_levels) = {
             let shadow_frame = recording.shadow_resources().get_frame(frame_index);
-            (shadow_frame.shadow_map.image, shadow_frame.shadow_map_view)
+            (
+                shadow_frame.shadow_map.image,
+                shadow_frame.shadow_map_view,
+                shadow_frame.shadow_map.mip_levels,
+            )
         };
 
         let light_view_proj =
@@ -336,36 +330,16 @@ impl ShadowPass {
         );
 
         let cmd_buffer = recording.cmd_buffer();
-        let device = recording.device();
 
         // Transition shadow map to depth attachment optimal
-        let barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-            .src_access_mask(vk::AccessFlags2::empty())
-            .dst_stage_mask(
-                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            )
-            .dst_access_mask(
-                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
-                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-            )
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .image(shadow_map_image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
+        recording.transition_shadow_image(
+            shadow_map_image,
+            shadow_mip_levels,
+            1,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        )?;
 
-        let barriers = [barrier];
-        let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-        unsafe {
-            device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
-        }
+        let device = recording.device();
 
         // Begin depth-only rendering
         let depth_attachment = vk::RenderingAttachmentInfo::default()
@@ -466,30 +440,12 @@ impl ShadowPass {
         }
 
         // Transition shadow map to SHADER_READ_ONLY_OPTIMAL for sampling
-        let read_barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(
-                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            )
-            .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
-            .old_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(shadow_map_image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-
-        let read_barriers = [read_barrier];
-        let dep_info = vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
-        unsafe {
-            device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
-        }
+        recording.transition_shadow_image(
+            shadow_map_image,
+            shadow_mip_levels,
+            1,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )?;
 
         Ok(())
     }

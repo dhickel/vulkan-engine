@@ -769,9 +769,8 @@ impl TextureCache {
     /// path for buffer-upload paths, and `poll_texture_uploads` returns 0 when no
     /// progress was made, letting the caller retry or fail with bounded backpressure).
     pub fn allocate_textures(&mut self, texture_ids: Vec<TextureHandle>) -> bool {
-        // Track how many consecutive idle polls we've seen.
-        let mut idle_polls: u32 = 0;
-        const MAX_IDLE_POLLS: u32 = 1000;
+        let started = Instant::now();
+        const MAX_IDLE_DURATION: Duration = Duration::from_secs(30);
 
         loop {
             let all_loaded = texture_ids.iter().all(|id| self.is_texture_loaded(*id));
@@ -792,16 +791,30 @@ impl TextureCache {
                 }
             };
             if finalized == 0 {
-                idle_polls += 1;
-                if idle_polls >= MAX_IDLE_POLLS {
+                let failed_batch = self.pending_batches.values().find_map(|batch| {
+                    if batch
+                        .texture_ids
+                        .iter()
+                        .any(|id| texture_ids.iter().any(|requested| requested == id))
+                    {
+                        if let UploadBatchStatus::Failed(message) = &batch.status {
+                            return Some((batch.batch_id, message.as_str()));
+                        }
+                    }
+                    None
+                });
+                if let Some((batch_id, message)) = failed_batch {
+                    error!("texture upload batch {batch_id} failed while allocating textures: {message}");
+                    return false;
+                }
+                if started.elapsed() >= MAX_IDLE_DURATION {
                     error!(
-                        "allocate_textures: no progress after {} polls, returning bounded backpressure",
-                        MAX_IDLE_POLLS
+                        "allocate_textures: no progress after {:?}, returning bounded backpressure",
+                        MAX_IDLE_DURATION
                     );
                     return false;
                 }
-            } else {
-                idle_polls = 0;
+                std::thread::yield_now();
             }
         }
     }
@@ -1714,7 +1727,9 @@ impl VkDestroyable for TextureCache {
             .flat_map(|(_, batch)| batch.image_allocs.into_iter())
             .collect();
         self.pending_textures.clear();
-        self.destroy_uploaded_images(pending_images);
+        for (image_alloc, _) in pending_images {
+            vk_util::destroy_image(device, allocator, image_alloc);
+        }
 
         for slot in self.cached_textures.iter_mut() {
             let old_tex = std::mem::replace(slot, CachedTexture::_NULL);

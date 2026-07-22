@@ -91,6 +91,9 @@ pub(crate) struct ShadowRecording<'a> {
     next_submit_serial: u64,
     frame: &'a VkFrame,
     submission: &'a RenderSubmission,
+    image_state_tracker: &'a ImageStateTracker,
+    transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
+    graphics_queue_family: u32,
 }
 pub(crate) struct SkyboxRecording<'a> {
     device: &'a ash::Device,
@@ -231,6 +234,25 @@ impl ShadowRecording<'_> {
             .cmd_pools
             .frame_graphics_primary()
             .expect("ShadowRecording: frame graphics primary missing")
+    }
+
+    pub(crate) fn transition_shadow_image(
+        &mut self,
+        image: vk::Image,
+        mip_count: u32,
+        layer_count: u32,
+        layout: vk::ImageLayout,
+    ) -> Result<(), String> {
+        let key = ImageSubresourceKey::all_mips_all_layers(mip_count, layer_count);
+        self.transition_overlay.record_and_emit_transition(
+            self.device,
+            self.cmd_buffer(),
+            self.image_state_tracker,
+            image,
+            key,
+            vk::ImageAspectFlags::DEPTH,
+            vk_util::tracked_state_for_layout(layout, self.graphics_queue_family),
+        )
     }
 }
 
@@ -381,6 +403,15 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
             core.image_state_tracker
                 .register_image_if_absent(frame.present_image, graphics_queue_family);
         }
+        let shadow_frame = core.shadow_resources.get_frame(frame.index);
+        core.image_state_tracker
+            .register_image_if_absent(shadow_frame.shadow_map.image, graphics_queue_family);
+        #[cfg(feature = "csm")]
+        if let Some(csm_resources) = core.csm_shadow_resources.as_ref() {
+            let csm_frame = csm_resources.get_frame(frame.index);
+            core.image_state_tracker
+                .register_image_if_absent(csm_frame.csm_image.image, graphics_queue_family);
+        }
     }
 
     // Create the per-frame transition overlay. Staging is local to the overlay.
@@ -454,6 +485,9 @@ impl RenderGraphContext<'_> {
             next_submit_serial: self.recording.next_submit_serial,
             frame: self.frame,
             submission: self.submission,
+            image_state_tracker: self.recording.image_state_tracker,
+            transition_overlay: self.recording.transition_overlay,
+            graphics_queue_family: self.recording.graphics_queue_family,
         }
     }
 
