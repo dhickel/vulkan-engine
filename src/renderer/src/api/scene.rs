@@ -22,7 +22,7 @@ use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto};
 
 use super::errors::SceneError;
 
-pub const SCENE_FORMAT_VERSION: u32 = 1;
+pub const SCENE_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default)]
 pub struct SceneValidationOptions {
@@ -196,11 +196,64 @@ pub struct SpotLightId {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct DirectionalShadowConfig {
     pub enabled: bool,
+    pub shadow_map_size: u32,
+    pub cascade_count: u32,
+    pub cascade_split_lambda: f32,
 }
 
 impl Default for DirectionalShadowConfig {
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            shadow_map_size: 2048,
+            cascade_count: 1,
+            cascade_split_lambda: 0.5,
+        }
+    }
+}
+
+/// Serialized form of [`DirectionalShadowConfig`] for scene persistence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedDirectionalShadowConfig {
+    enabled: bool,
+    #[serde(default = "default_shadow_map_size")]
+    shadow_map_size: u32,
+    #[serde(default = "default_cascade_count")]
+    cascade_count: u32,
+    #[serde(default = "default_cascade_split_lambda")]
+    cascade_split_lambda: f32,
+}
+
+fn default_shadow_map_size() -> u32 {
+    2048
+}
+fn default_cascade_count() -> u32 {
+    1
+}
+fn default_cascade_split_lambda() -> f32 {
+    0.5
+}
+
+impl From<DirectionalShadowConfig> for SerializedDirectionalShadowConfig {
+    fn from(cfg: DirectionalShadowConfig) -> Self {
+        Self {
+            enabled: cfg.enabled,
+            shadow_map_size: cfg.shadow_map_size,
+            cascade_count: cfg.cascade_count,
+            cascade_split_lambda: cfg.cascade_split_lambda,
+        }
+    }
+}
+
+impl From<SerializedDirectionalShadowConfig> for DirectionalShadowConfig {
+    fn from(s: SerializedDirectionalShadowConfig) -> Self {
+        Self {
+            enabled: s.enabled,
+            shadow_map_size: s.shadow_map_size,
+            cascade_count: s.cascade_count,
+            cascade_split_lambda: s.cascade_split_lambda,
+        }
     }
 }
 
@@ -575,6 +628,7 @@ pub struct Scene {
     directional_light_parents: HashMap<DirectionalLightId, String>,
     spot_light_stable_ids: HashMap<SpotLightId, String>,
     spot_light_parents: HashMap<SpotLightId, String>,
+    directional_shadow_configs: HashMap<DirectionalLightId, DirectionalShadowConfig>,
     audio: Vec<SerializedAudioReference>,
     /// Editor-specific metadata blob.
     ///
@@ -614,6 +668,7 @@ impl Scene {
             directional_light_parents: HashMap::new(),
             spot_light_stable_ids: HashMap::new(),
             spot_light_parents: HashMap::new(),
+            directional_shadow_configs: HashMap::new(),
             audio: Vec::new(),
             editor: serde_json::json!({}),
         }
@@ -1216,6 +1271,7 @@ impl Scene {
         if self.world.remove_directional_light(id) {
             self.directional_light_stable_ids.remove(&id);
             self.directional_light_parents.remove(&id);
+            self.directional_shadow_configs.remove(&id);
             return Ok(());
         }
 
@@ -1295,6 +1351,7 @@ impl Scene {
         } else if self.world.shadow_casting_directional() == Some(id) {
             self.world.set_shadow_casting_directional(None);
         }
+        self.directional_shadow_configs.insert(id, config);
         Ok(())
     }
 
@@ -1514,7 +1571,33 @@ impl Scene {
                 )),
             )
         })?;
-        let serialized: SerializedScene = serde_json::from_str(&json).map_err(|e| {
+
+        // Detect format version and migrate v1 → v2 before strict deserialization.
+        let raw: serde_json::Value = serde_json::from_str(&json).map_err(|e| {
+            crate::api::errors::RendererError::Scene(SceneError::SerializationError(format!(
+                "scene deserialization failed: {e}"
+            )))
+        })?;
+
+        let version = raw
+            .get("format_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let migrated = if version == 1 {
+            migrate_v1_to_v2(raw)
+        } else if version == SCENE_FORMAT_VERSION as u64 {
+            raw
+        } else {
+            return Err(crate::api::errors::RendererError::Scene(
+                SceneError::UnsupportedSceneVersion {
+                    found: version as u32,
+                    expected: SCENE_FORMAT_VERSION,
+                },
+            ));
+        };
+
+        let serialized: SerializedScene = serde_json::from_value(migrated).map_err(|e| {
             crate::api::errors::RendererError::Scene(SceneError::SerializationError(format!(
                 "scene deserialization failed: {e}"
             )))
@@ -1538,6 +1621,7 @@ impl Scene {
             directional_light_parents: HashMap::new(),
             spot_light_stable_ids: HashMap::new(),
             spot_light_parents: HashMap::new(),
+            directional_shadow_configs: HashMap::new(),
             audio: Vec::new(),
             editor: serde_json::json!({}),
         }
@@ -1970,6 +2054,8 @@ struct SerializedDirectionalLight {
     direction: [f32; 3],
     color: [f32; 3],
     intensity: f32,
+    #[serde(default)]
+    shadow_config: Option<SerializedDirectionalShadowConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2177,6 +2263,11 @@ impl SerializedScene {
                 direction: light.direction.to_array(),
                 color: light.color.to_array(),
                 intensity: light.intensity,
+                shadow_config: scene
+                    .directional_shadow_configs
+                    .get(&id)
+                    .copied()
+                    .map(SerializedDirectionalShadowConfig::from),
             })
             .collect();
 
@@ -2335,6 +2426,13 @@ impl SerializedScene {
                 .insert(id, light.id.clone());
             if let Some(parent) = &light.parent {
                 scene.directional_light_parents.insert(id, parent.clone());
+            }
+            // Restore shadow configuration if present.
+            if let Some(ref shadow_cfg) = light.shadow_config {
+                let cfg: DirectionalShadowConfig = shadow_cfg.clone().into();
+                scene
+                    .set_directional_shadow_config(id, cfg)
+                    .map_err(crate::api::errors::RendererError::from)?;
             }
         }
 
@@ -2709,7 +2807,19 @@ fn validate_scene_content(
         return Err(ValidationError::new(diagnostics));
     }
 
-    let serialized: SerializedScene = serde_json::from_value(raw).map_err(|err| {
+    // Migrate v1 → v2 before strict deserialization so validation can
+    // proceed on forward-compatible documents.
+    let version = raw
+        .get("format_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let migrated = if version == 1 {
+        migrate_v1_to_v2(raw)
+    } else {
+        raw
+    };
+
+    let serialized: SerializedScene = serde_json::from_value(migrated).map_err(|err| {
         ValidationError::single(
             ValidationDiagnostic::new(
                 "scene.parse",
@@ -3383,6 +3493,57 @@ fn write_and_flush_staged_file(path: &std::path::Path, bytes: &[u8]) -> std::io:
     std::fs::write(path, bytes)
 }
 
+/// Migrate a v1 scene JSON Value to v2 format so it can be deserialized
+/// by the strict (deny_unknown_fields) `SerializedScene` parser.
+///
+/// - Sets `format_version` to 2.
+/// - Strips unrecognized top-level keys so v1 extras don't fail strict parsing.
+/// - Adds `shadow_config: null` default to directional lights that lack it.
+fn migrate_v1_to_v2(mut raw: serde_json::Value) -> serde_json::Value {
+    const V2_TOP_LEVEL_KEYS: &[&str] = &[
+        "format_version",
+        "scene_id",
+        "display_name",
+        "root_nodes",
+        "nodes",
+        "lights",
+        "directional_lights",
+        "spot_lights",
+        "environment",
+        "materials",
+        "audio",
+        "editor",
+    ];
+
+    // Bump version.
+    if let Some(obj) = raw.as_object_mut() {
+        obj.insert(
+            "format_version".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(2)),
+        );
+
+        // Strip unknown top-level keys.
+        let known: std::collections::HashSet<&str> = V2_TOP_LEVEL_KEYS.iter().copied().collect();
+        obj.retain(|key, _| known.contains(key.as_str()));
+
+        // Add shadow_config default to each directional light.
+        if let Some(directional_lights) = obj
+            .get_mut("directional_lights")
+            .and_then(|v| v.as_array_mut())
+        {
+            for light in directional_lights.iter_mut() {
+                if let Some(light_obj) = light.as_object_mut() {
+                    if !light_obj.contains_key("shadow_config") {
+                        light_obj.insert("shadow_config".to_string(), serde_json::Value::Null);
+                    }
+                }
+            }
+        }
+    }
+
+    raw
+}
+
 fn default_visibility() -> SerializedVisibility {
     SerializedVisibility {
         visible: true,
@@ -3543,10 +3704,22 @@ mod tests {
         ));
 
         scene
-            .set_directional_shadow_config(first, DirectionalShadowConfig { enabled: true })
+            .set_directional_shadow_config(
+                first,
+                DirectionalShadowConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(matches!(
-            scene.set_directional_shadow_config(second, DirectionalShadowConfig { enabled: true }),
+            scene.set_directional_shadow_config(
+                second,
+                DirectionalShadowConfig {
+                    enabled: true,
+                    ..Default::default()
+                }
+            ),
             Err(SceneError::UnsupportedLightFeature(_))
         ));
         let submission = scene.build_submission();
@@ -3711,7 +3884,7 @@ mod tests {
 
         let serialized = SerializedScene::from_scene(&scene);
         let json = serde_json::to_string_pretty(&serialized).unwrap();
-        assert!(json.contains("\"format_version\": 1"));
+        assert!(json.contains("\"format_version\": 2"));
         assert!(json.contains("\"id\": \"core.wall.stone_2m\""));
         assert!(json.contains("\"id\": \"core.env.indoor_4k\""));
         assert!(json.contains("\"mat_override.damp_stone\""));
@@ -4029,7 +4202,7 @@ mod tests {
     fn scene_persistence_rejects_malformed_scene_documents() {
         assert_scene_load_error(
             r#"{
-                "format_version": 2,
+                "format_version": 99,
                 "scene_id": "scene.bad",
                 "root_nodes": [],
                 "nodes": [],
@@ -4047,7 +4220,7 @@ mod tests {
 
         assert_scene_load_error(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.duplicate",
                 "root_nodes": ["node.a"],
                 "nodes": [
@@ -4063,7 +4236,7 @@ mod tests {
 
         assert_scene_load_error(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.bad_parent",
                 "root_nodes": ["node.child"],
                 "nodes": [
@@ -4078,7 +4251,7 @@ mod tests {
 
         assert_scene_load_error(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.cycle",
                 "root_nodes": ["node.a"],
                 "nodes": [
@@ -4094,7 +4267,7 @@ mod tests {
 
         assert_scene_load_error(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.disconnected",
                 "root_nodes": ["node.root"],
                 "nodes": [
@@ -4110,7 +4283,7 @@ mod tests {
 
         assert_scene_load_error(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.missing_asset",
                 "root_nodes": ["node.asset"],
                 "nodes": [
@@ -4128,7 +4301,7 @@ mod tests {
     fn scene_validation_accepts_valid_schema_without_loading_assets() {
         validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.valid",
                 "root_nodes": ["node.root"],
                 "nodes": [
@@ -4162,7 +4335,7 @@ mod tests {
 
         let duplicate = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.duplicate",
                 "root_nodes": ["node.a"],
                 "nodes": [
@@ -4182,7 +4355,7 @@ mod tests {
 
         let missing_parent = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.bad_parent",
                 "root_nodes": ["node.child"],
                 "nodes": [
@@ -4204,7 +4377,7 @@ mod tests {
     fn scene_validation_rejects_runtime_handle_identity_and_missing_asset_id() {
         let runtime_handle = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.bad_handle",
                 "root_nodes": ["node.a"],
                 "nodes": [
@@ -4223,7 +4396,7 @@ mod tests {
 
         let missing_asset_id = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.path_only",
                 "root_nodes": ["node.asset"],
                 "nodes": [
@@ -4245,7 +4418,7 @@ mod tests {
     fn scene_validation_can_report_unknown_asset_ids_from_known_package_records() {
         let err = validate_scene_str_with_options(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.unknown_asset",
                 "root_nodes": ["node.asset"],
                 "nodes": [
@@ -4269,7 +4442,7 @@ mod tests {
     #[test]
     fn scene_validation_accepts_collision_metadata_round_trip_schema() {
         let json = r#"{
-            "format_version": 1,
+            "format_version": 2,
             "scene_id": "scene.collision",
             "root_nodes": ["node.wall"],
             "nodes": [
@@ -4317,7 +4490,7 @@ mod tests {
     fn scene_validation_rejects_invalid_collision_metadata() {
         let invalid_dimensions = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.bad_collision",
                 "root_nodes": ["node.bad"],
                 "nodes": [
@@ -4348,7 +4521,7 @@ mod tests {
 
         let duplicate_ids = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.duplicate_collision",
                 "root_nodes": ["node.a"],
                 "nodes": [
@@ -4392,7 +4565,7 @@ mod tests {
 
         let unknown_collision_asset = validate_scene_str_with_options(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.unknown_collision_asset",
                 "root_nodes": ["node.asset"],
                 "nodes": [
@@ -4427,7 +4600,7 @@ mod tests {
 
         let runtime_collision_handle = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.runtime_collision_handle",
                 "root_nodes": ["node.handle"],
                 "nodes": [
@@ -4460,7 +4633,7 @@ mod tests {
     #[test]
     fn scene_validation_accepts_audio_references() {
         let json = r#"{
-            "format_version": 1,
+            "format_version": 2,
             "scene_id": "scene.audio",
             "root_nodes": ["node.root"],
             "nodes": [
@@ -4507,7 +4680,7 @@ mod tests {
     fn scene_validation_rejects_invalid_audio_references() {
         let unknown_clip = validate_scene_str_with_options(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.unknown_audio",
                 "root_nodes": ["node.root"],
                 "nodes": [
@@ -4533,7 +4706,7 @@ mod tests {
 
         let invalid_gain = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.bad_audio_gain",
                 "root_nodes": ["node.root"],
                 "nodes": [
@@ -4555,7 +4728,7 @@ mod tests {
 
         let runtime_audio_handle = validate_scene_str(
             r#"{
-                "format_version": 1,
+                "format_version": 2,
                 "scene_id": "scene.runtime_audio_handle",
                 "root_nodes": ["node.root"],
                 "nodes": [
@@ -4728,5 +4901,356 @@ mod tests {
             count_on, 1,
             "Expected exactly 1 visible mesh with culling on, got {count_on}"
         );
+    }
+
+    // ── H-A1: v1 forward-compatible migration tests ────────────────────
+
+    #[test]
+    fn v1_scene_migrates_to_v2_on_load() {
+        // A minimal v1 scene with a directional light and one node.
+        let v1_json = r#"{
+            "format_version": 1,
+            "scene_id": "scene.v1_forward",
+            "root_nodes": ["node.root"],
+            "nodes": [
+                {
+                    "id": "node.root",
+                    "parent": null,
+                    "name": "Root",
+                    "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                    "asset": null
+                }
+            ],
+            "lights": [],
+            "directional_lights": [
+                {
+                    "id": "directional.000001",
+                    "kind": "directional",
+                    "direction": [0.5, 1.0, 0.25],
+                    "color": [1.0, 0.95, 0.8],
+                    "intensity": 2.5
+                }
+            ],
+            "spot_lights": [],
+            "environment": null,
+            "editor": {}
+        }"#;
+
+        // Load through the migration path (simulates what `read_serialized_scene` does).
+        let parsed: SerializedScene = {
+            let raw: serde_json::Value = serde_json::from_str(v1_json).unwrap();
+            let migrated = super::migrate_v1_to_v2(raw);
+            serde_json::from_value(migrated).unwrap()
+        };
+
+        assert_eq!(parsed.format_version, 2);
+        assert_eq!(parsed.scene_id, "scene.v1_forward");
+        assert_eq!(parsed.root_nodes, vec!["node.root"]);
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.directional_lights.len(), 1);
+        assert!(parsed.directional_lights[0].shadow_config.is_none());
+
+        // Load through FakeSceneAssetLoader (full load path).
+        let mut loader = FakeSceneAssetLoader::default();
+        let scene = parsed.into_scene_with_loader(&mut loader).unwrap();
+        assert_eq!(scene.directional_lights().len(), 1);
+        assert!(scene.shadow_casting_directional_light_id().is_none());
+    }
+
+    #[test]
+    fn v1_scene_with_extra_unknown_keys_still_loads() {
+        // A v1 document produced by a tool that added editor-specific extras.
+        let v1_json = r#"{
+            "format_version": 1,
+            "scene_id": "scene.v1_extras",
+            "root_nodes": ["node.a"],
+            "nodes": [
+                {
+                    "id": "node.a",
+                    "parent": null,
+                    "name": "A",
+                    "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                    "asset": null
+                }
+            ],
+            "lights": [],
+            "directional_lights": [],
+            "spot_lights": [],
+            "environment": null,
+            "editor": {},
+            "custom_tool_metadata": {"version": "3.1.0"},
+            "extra_field": true
+        }"#;
+
+        let parsed: SerializedScene = {
+            let raw: serde_json::Value = serde_json::from_str(v1_json).unwrap();
+            let migrated = super::migrate_v1_to_v2(raw);
+            serde_json::from_value(migrated).unwrap()
+        };
+
+        assert_eq!(parsed.format_version, 2);
+        assert_eq!(parsed.scene_id, "scene.v1_extras");
+
+        let mut loader = FakeSceneAssetLoader::default();
+        let scene = parsed.into_scene_with_loader(&mut loader).unwrap();
+        assert!(scene.root().is_some());
+    }
+
+    #[test]
+    fn validation_accepts_v1_document_through_migration() {
+        let v1_json = r#"{
+            "format_version": 1,
+            "scene_id": "scene.v1_validation",
+            "root_nodes": ["node.x"],
+            "nodes": [
+                {
+                    "id": "node.x",
+                    "parent": null,
+                    "name": "X",
+                    "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                    "asset": null
+                }
+            ],
+            "lights": [],
+            "directional_lights": [],
+            "spot_lights": [],
+            "environment": null,
+            "editor": {}
+        }"#;
+
+        // This should pass because the migration bumps format_version to 2.
+        validate_scene_str(v1_json).unwrap();
+    }
+
+    #[test]
+    fn strict_v2_rejects_unknown_fields() {
+        let top_level_extra = validate_scene_str(
+            r#"{
+                "format_version": 2,
+                "scene_id": "scene.v2_strict_top",
+                "root_nodes": [],
+                "nodes": [],
+                "lights": [],
+                "directional_lights": [],
+                "spot_lights": [],
+                "environment": null,
+                "editor": {},
+                "custom_tool_metadata": {"version": "3.1.0"}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(top_level_extra.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "scene.parse"
+                && diagnostic
+                    .message
+                    .contains("unknown field `custom_tool_metadata`")
+        }));
+
+        let shadow_config_extra = validate_scene_str(
+            r#"{
+                "format_version": 2,
+                "scene_id": "scene.v2_strict_shadow_config",
+                "root_nodes": [],
+                "nodes": [],
+                "lights": [],
+                "directional_lights": [
+                    {
+                        "id": "directional.strict",
+                        "kind": "directional",
+                        "direction": [0.0, 1.0, 0.0],
+                        "color": [1.0, 1.0, 1.0],
+                        "intensity": 1.0,
+                        "shadow_config": {
+                            "enabled": true,
+                            "shadow_map_size": 2048,
+                            "cascade_count": 1,
+                            "cascade_split_lambda": 0.5,
+                            "extra": true
+                        }
+                    }
+                ],
+                "spot_lights": [],
+                "environment": null,
+                "editor": {}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(shadow_config_extra.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code == "scene.parse" && diagnostic.message.contains("unknown field `extra`")
+        }));
+    }
+
+    // ── H-A4: shadow config persistence tests ──────────────────────────
+
+    #[test]
+    fn directional_shadow_config_round_trips_through_save_load() {
+        let mut scene = Scene::new();
+        let root = scene.create_node_default(None).unwrap();
+        scene.set_node_name(root, "Shadow Test Root").unwrap();
+
+        let light = DirectionalLight {
+            direction: Vec3::new(0.25, 1.0, 0.5),
+            color: Vec3::ONE,
+            intensity: 1.5,
+        };
+        let id = scene.add_directional_light(light).unwrap();
+
+        let cfg = DirectionalShadowConfig {
+            enabled: true,
+            shadow_map_size: 4096,
+            cascade_count: 3,
+            cascade_split_lambda: 0.75,
+        };
+        scene.set_directional_shadow_config(id, cfg).unwrap();
+
+        assert_eq!(scene.shadow_casting_directional_light_id(), Some(id));
+        assert!(scene
+            .directional_shadow_configs
+            .get(&id)
+            .is_some_and(|c| c.shadow_map_size == 4096));
+
+        let serialized = SerializedScene::from_scene(&scene);
+        let json = serde_json::to_string_pretty(&serialized).unwrap();
+        assert!(json.contains("\"format_version\": 2"));
+        assert!(json.contains("\"shadow_config\""));
+        assert!(json.contains("\"shadow_map_size\": 4096"));
+        assert!(json.contains("\"cascade_count\": 3"));
+        assert!(json.contains("\"cascade_split_lambda\": 0.75"));
+        assert!(json.contains("\"enabled\": true"));
+
+        let parsed: SerializedScene = serde_json::from_str(&json).unwrap();
+        let mut loader = FakeSceneAssetLoader::default();
+        let loaded = parsed.into_scene_with_loader(&mut loader).unwrap();
+
+        let loaded_id = loaded
+            .directional_lights()
+            .first()
+            .map(|_| loaded.shadow_casting_directional_light_id())
+            .flatten();
+        assert!(loaded_id.is_some());
+        let loaded_cfg = loaded
+            .directional_shadow_configs
+            .get(&loaded_id.unwrap())
+            .copied();
+        assert!(loaded_cfg.is_some_and(|c| {
+            c.enabled
+                && c.shadow_map_size == 4096
+                && c.cascade_count == 3
+                && (c.cascade_split_lambda - 0.75).abs() < 0.001
+        }));
+    }
+
+    #[test]
+    fn shadow_config_defaults_are_applied_when_absent_from_json() {
+        // A v2 scene with a directional light but no shadow_config.
+        let json = r#"{
+            "format_version": 2,
+            "scene_id": "scene.no_shadow_cfg",
+            "root_nodes": ["node.root"],
+            "nodes": [
+                {
+                    "id": "node.root",
+                    "parent": null,
+                    "name": "Root",
+                    "transform": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+                    "asset": null
+                }
+            ],
+            "lights": [],
+            "directional_lights": [
+                {
+                    "id": "directional.000001",
+                    "kind": "directional",
+                    "direction": [0.0, 1.0, 0.0],
+                    "color": [1.0, 1.0, 1.0],
+                    "intensity": 1.0
+                }
+            ],
+            "spot_lights": [],
+            "environment": null,
+            "editor": {}
+        }"#;
+
+        let parsed: SerializedScene = serde_json::from_str(json).unwrap();
+        assert!(parsed.directional_lights[0].shadow_config.is_none());
+
+        let mut loader = FakeSceneAssetLoader::default();
+        let scene = parsed.into_scene_with_loader(&mut loader).unwrap();
+        // No shadow config was provided, so none should be active.
+        assert!(scene.shadow_casting_directional_light_id().is_none());
+        assert!(scene.directional_shadow_configs.is_empty());
+    }
+
+    // ── Fixture-based integration tests ────────────────────────────────
+
+    #[test]
+    fn load_v1_fixture_file_through_migration() {
+        let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scenes/v1-forward-compatible.engine.scene.json");
+
+        let mut loader = FakeSceneAssetLoader::default();
+        let scene = Scene::load_with_loader(&fixture_path, &mut loader).unwrap();
+
+        assert_eq!(scene.directional_lights().len(), 1);
+        // v1 fixture has no shadow_config, so nothing should be enabled.
+        assert!(scene.shadow_casting_directional_light_id().is_none());
+        assert!(scene.directional_shadow_configs.is_empty());
+    }
+
+    #[test]
+    fn load_v2_shadow_owner_fixture_preserves_shadow_config() {
+        let fixture_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scenes/v2-shadow-owner.engine.scene.json");
+
+        let mut loader = FakeSceneAssetLoader::default();
+        let scene = Scene::load_with_loader(&fixture_path, &mut loader).unwrap();
+
+        let directional = scene.directional_lights();
+        assert_eq!(directional.len(), 2);
+
+        // The shadow caster should be the first light (enabled in the fixture).
+        let caster_id = scene.shadow_casting_directional_light_id();
+        assert!(caster_id.is_some());
+        let cfg = scene
+            .directional_shadow_configs
+            .get(&caster_id.unwrap())
+            .copied();
+        assert!(cfg.is_some_and(|c| {
+            c.enabled
+                && c.shadow_map_size == 4096
+                && c.cascade_count == 4
+                && (c.cascade_split_lambda - 0.75).abs() < 0.001
+        }));
+    }
+
+    #[test]
+    fn v1_migration_adds_null_shadow_config_to_directional_lights() {
+        // v1 directional lights lacked shadow_config; migration should add null.
+        let v1_json = r#"{
+            "format_version": 1,
+            "scene_id": "scene.v1_directional",
+            "root_nodes": [],
+            "nodes": [],
+            "lights": [],
+            "directional_lights": [
+                {
+                    "id": "directional.000001",
+                    "kind": "directional",
+                    "direction": [0.0, -1.0, 0.0],
+                    "color": [1.0, 1.0, 1.0],
+                    "intensity": 1.0
+                }
+            ],
+            "spot_lights": [],
+            "environment": null,
+            "editor": {}
+        }"#;
+
+        let raw: serde_json::Value = serde_json::from_str(v1_json).unwrap();
+        let migrated = super::migrate_v1_to_v2(raw);
+        let parsed: SerializedScene = serde_json::from_value(migrated).unwrap();
+
+        assert_eq!(parsed.format_version, 2);
+        assert!(parsed.directional_lights[0].shadow_config.is_none());
     }
 }

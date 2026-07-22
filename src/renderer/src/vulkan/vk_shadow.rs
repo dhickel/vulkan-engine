@@ -211,6 +211,13 @@ impl VkShadowResources {
         &self.frames[frame_index as usize]
     }
 
+    /// Enumerate every owned `vk::Image` across all shadow frames for
+    /// bulk lifetime operations (registration / unregistration) in the
+    /// core image state tracker.
+    pub fn enumerate_images(&self) -> Vec<vk::Image> {
+        self.frames.iter().map(|f| f.shadow_map.image).collect()
+    }
+
     pub fn destroy(&mut self, device: &ash::Device, allocator: &Allocator) {
         for frame in &mut self.frames {
             frame.destroy(device, allocator);
@@ -376,6 +383,13 @@ impl VkCsmShadowResources {
 
     pub fn get_frame(&self, frame_index: u32) -> &VkCsmShadowFrame {
         &self.frames[frame_index as usize]
+    }
+
+    /// Enumerate every owned `vk::Image` across all CSM frames for
+    /// bulk lifetime operations (registration / unregistration) in the
+    /// core image state tracker.
+    pub fn enumerate_images(&self) -> Vec<vk::Image> {
+        self.frames.iter().map(|f| f.csm_image.image).collect()
     }
 
     pub fn destroy(&mut self, device: &ash::Device, allocator: &Allocator) {

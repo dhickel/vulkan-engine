@@ -97,7 +97,10 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     scene
         .set_directional_shadow_config(
             directional,
-            renderer::prelude::DirectionalShadowConfig { enabled: true },
+            renderer::prelude::DirectionalShadowConfig {
+                enabled: true,
+                ..Default::default()
+            },
         )
         .expect("enable CSM shadows");
 

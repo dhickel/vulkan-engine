@@ -537,6 +537,18 @@ impl Drop for VkRenderCore {
                 self.device.destroy_query_pool(slot.query_pool, None);
             }
 
+            // Unregister every core-tracked image from the state tracker before
+            // destroying the underlying Vulkan resources. Shadow and CSM images
+            // are unregistered just before their respective destroys below.
+            for image in self.presentation.enumerate_core_images() {
+                self.image_state_tracker.unregister_image(image);
+            }
+            for image in self.presentation.enumerate_present_images() {
+                if image != vk::Image::null() {
+                    self.image_state_tracker.unregister_image(image);
+                }
+            }
+
             self.presentation.destroy(&self.device, allocator);
 
             self.scene_descriptors
@@ -546,7 +558,13 @@ impl Drop for VkRenderCore {
 
             #[cfg(feature = "csm")]
             if let Some(ref mut csm) = self.csm_shadow_resources {
+                for image in csm.enumerate_images() {
+                    self.image_state_tracker.unregister_image(image);
+                }
                 csm.destroy(&self.device, allocator);
+            }
+            for image in self.shadow_resources.enumerate_images() {
+                self.image_state_tracker.unregister_image(image);
             }
             self.shadow_resources.destroy(&self.device, allocator);
 
@@ -600,6 +618,38 @@ impl VkRenderCore {
     fn abandon_device_resources(&mut self) {
         if let Some(imgui) = self.imgui.take() {
             std::mem::forget(imgui);
+        }
+    }
+
+    /// Register every core production image in the authoritative image state
+    /// tracker. Called once at construction and after swapchain rebuild.
+    /// All images start at `UNDEFINED` with the owning queue family.
+    fn register_all_core_images(&mut self) {
+        let gfx = self.queue_family_indices.graphics;
+
+        // Frame draw, depth, and owned present images.
+        for image in self.presentation.enumerate_core_images() {
+            self.image_state_tracker.register_image(image, gfx);
+        }
+
+        // Swapchain (window-system or headless) present images.
+        for image in self.presentation.enumerate_present_images() {
+            if image != vk::Image::null() {
+                self.image_state_tracker.register_image(image, gfx);
+            }
+        }
+
+        // Legacy shadow images.
+        for image in self.shadow_resources.enumerate_images() {
+            self.image_state_tracker.register_image(image, gfx);
+        }
+
+        // CSM shadow images.
+        #[cfg(feature = "csm")]
+        if let Some(ref csm) = self.csm_shadow_resources {
+            for image in csm.enumerate_images() {
+                self.image_state_tracker.register_image(image, gfx);
+            }
         }
     }
 
@@ -1435,6 +1485,8 @@ impl VkRenderCore {
             queue_family_indices,
         };
 
+        render.register_all_core_images();
+
         let scene_world = if preload_startup_scene {
             Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
         } else {
@@ -1632,6 +1684,8 @@ impl VkRenderCore {
             queue_family_indices,
         };
 
+        render.register_all_core_images();
+
         let scene_world = if preload_startup_scene {
             Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
         } else {
@@ -1736,6 +1790,15 @@ impl VkRenderCore {
             })?;
         }
 
+        // Unregister old present images from the image state tracker before
+        // destroying their views. View destruction must precede swapchain
+        // retirement; tracker removal must precede both.
+        for image in self.presentation.enumerate_present_images() {
+            if image != vk::Image::null() {
+                self.image_state_tracker.unregister_image(image);
+            }
+        }
+
         // Destroy present views BEFORE retiring to maintain view-before-swapchain order.
         self.swapchain_owner.destroy_present_views(&self.device);
 
@@ -1825,6 +1888,15 @@ impl VkRenderCore {
                     "failed to publish replacement present images: {err:?}"
                 ))
             })?;
+
+        // Register new present images in the tracker before committing the owner.
+        let gfx = self.queue_family_indices.graphics;
+        for &(image, _) in &self.presentation.present_targets().to_vec() {
+            if image != vk::Image::null() {
+                self.image_state_tracker.register_image(image, gfx);
+            }
+        }
+
         self.swapchain_owner
             .install_new(new_swapchain, present_images)
             .map_err(SwapchainRebuildFailure::terminal)?;

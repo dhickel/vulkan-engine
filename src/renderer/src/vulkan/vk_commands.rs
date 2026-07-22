@@ -392,27 +392,9 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         .map_err(|e| format!("no active frame for rendergraph recording: {e}"))?
         as *mut VkFrame;
 
-    let graphics_queue_family = core.queue_family_indices.graphics;
-    {
-        let frame = unsafe { &*frame_ptr };
-        core.image_state_tracker
-            .register_image_if_absent(frame.draw.image, graphics_queue_family);
-        core.image_state_tracker
-            .register_image_if_absent(frame.depth.image, graphics_queue_family);
-        if frame.present_image != vk::Image::null() {
-            core.image_state_tracker
-                .register_image_if_absent(frame.present_image, graphics_queue_family);
-        }
-        let shadow_frame = core.shadow_resources.get_frame(frame.index);
-        core.image_state_tracker
-            .register_image_if_absent(shadow_frame.shadow_map.image, graphics_queue_family);
-        #[cfg(feature = "csm")]
-        if let Some(csm_resources) = core.csm_shadow_resources.as_ref() {
-            let csm_frame = csm_resources.get_frame(frame.index);
-            core.image_state_tracker
-                .register_image_if_absent(csm_frame.csm_image.image, graphics_queue_family);
-        }
-    }
+    // All core images (draw, depth, present, shadow, CSM) are registered in
+    // the tracker at construction time and on swapchain rebuild. Per-frame
+    // lazy registration is no longer needed here.
 
     // Create the per-frame transition overlay. Staging is local to the overlay.
     // On recording failure, the overlay is dropped without committing; on
