@@ -282,11 +282,16 @@ impl VkSubAllocator {
             (tb.transfer_queue_index, tb.graphics_queue_index)
         };
 
+        let (src_family, dst_family) =
+            crate::vulkan::vk_util::queue_family_indices_for_barrier(
+                transfer_queue_index,
+                graphics_queue_index,
+            );
         let dst_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::MEMORY_READ)
-            .src_queue_family_index(transfer_queue_index)
-            .dst_queue_family_index(graphics_queue_index);
+            .src_queue_family_index(src_family)
+            .dst_queue_family_index(dst_family);
 
         Self::new(
             device,

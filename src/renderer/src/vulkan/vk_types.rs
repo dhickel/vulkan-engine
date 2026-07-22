@@ -36,11 +36,296 @@ use crate::vulkan::vk_util;
 use ash::vk::{DeviceSize, Extent2D};
 use ash::{vk, Device};
 use log::debug;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, SendError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vk_mem::Allocator;
+
+// ---------------------------------------------------------------------------
+// Image state tracking (Phase 06)
+// ---------------------------------------------------------------------------
+
+/// Identifies a subresource range on a tracked image.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ImageSubresourceKey {
+    pub base_mip: u32,
+    pub mip_count: u32,
+    pub base_layer: u32,
+    pub layer_count: u32,
+}
+
+impl ImageSubresourceKey {
+    pub(crate) fn full() -> Self {
+        Self {
+            base_mip: 0,
+            mip_count: vk::REMAINING_MIP_LEVELS,
+            base_layer: 0,
+            layer_count: vk::REMAINING_ARRAY_LAYERS,
+        }
+    }
+
+    pub(crate) fn single_mip(mip: u32) -> Self {
+        Self {
+            base_mip: mip,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: 1,
+        }
+    }
+
+    pub(crate) fn layer_range(base_layer: u32, count: u32) -> Self {
+        Self {
+            base_mip: 0,
+            mip_count: 1,
+            base_layer,
+            layer_count: count,
+        }
+    }
+
+    pub(crate) fn all_mips_single_layer(mip_count: u32) -> Self {
+        Self {
+            base_mip: 0,
+            mip_count,
+            base_layer: 0,
+            layer_count: 1,
+        }
+    }
+
+    pub(crate) fn all_mips_all_layers(mip_count: u32, layer_count: u32) -> Self {
+        Self {
+            base_mip: 0,
+            mip_count,
+            base_layer: 0,
+            layer_count,
+        }
+    }
+
+    pub(crate) fn to_vk(&self, aspect_mask: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
+        vk::ImageSubresourceRange::default()
+            .aspect_mask(aspect_mask)
+            .base_mip_level(self.base_mip)
+            .level_count(self.mip_count)
+            .base_array_layer(self.base_layer)
+            .layer_count(self.layer_count)
+    }
+
+    fn range_end(base: u32, count: u32) -> Option<u32> {
+        if count == vk::REMAINING_MIP_LEVELS || count == vk::REMAINING_ARRAY_LAYERS {
+            None
+        } else {
+            Some(base.saturating_add(count))
+        }
+    }
+
+    fn axis_contains(outer_base: u32, outer_count: u32, inner_base: u32, inner_count: u32) -> bool {
+        if inner_base < outer_base {
+            return false;
+        }
+        match (
+            Self::range_end(outer_base, outer_count),
+            Self::range_end(inner_base, inner_count),
+        ) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(outer_end), Some(inner_end)) => inner_end <= outer_end,
+        }
+    }
+
+    pub(crate) fn contains(&self, other: &Self) -> bool {
+        Self::axis_contains(self.base_mip, self.mip_count, other.base_mip, other.mip_count)
+            && Self::axis_contains(
+                self.base_layer,
+                self.layer_count,
+                other.base_layer,
+                other.layer_count,
+            )
+    }
+
+    fn finite_count(count: u32) -> u64 {
+        if count == vk::REMAINING_MIP_LEVELS || count == vk::REMAINING_ARRAY_LAYERS {
+            u64::MAX / 4
+        } else {
+            count.max(1) as u64
+        }
+    }
+
+    fn specificity_area(&self) -> u64 {
+        Self::finite_count(self.mip_count).saturating_mul(Self::finite_count(self.layer_count))
+    }
+}
+
+/// Committed per-subresource state for a single image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TrackedSubresourceState {
+    pub layout: vk::ImageLayout,
+    pub access: vk::AccessFlags2,
+    pub stage: vk::PipelineStageFlags2,
+    pub queue_family: u32,
+}
+
+impl TrackedSubresourceState {
+    pub(crate) fn undefined(queue_family: u32) -> Self {
+        Self {
+            layout: vk::ImageLayout::UNDEFINED,
+            access: vk::AccessFlags2::empty(),
+            stage: vk::PipelineStageFlags2::TOP_OF_PIPE,
+            queue_family,
+        }
+    }
+}
+
+/// Staged transition delta that has not yet been committed.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingTransition {
+    pub image: vk::Image,
+    pub key: ImageSubresourceKey,
+    pub aspect: vk::ImageAspectFlags,
+    pub old_state: TrackedSubresourceState,
+    pub new_state: TrackedSubresourceState,
+}
+
+/// Authoritative per-image state tracker.
+///
+/// Owns the committed layout/access/stage/queue-family state for every
+/// tracked image. State is committed only after a successful queue submit.
+/// During recording, pending deltas are staged in a [`FrameTransitionOverlay`]
+/// and committed atomically on submit success.
+#[derive(Debug, Default)]
+pub(crate) struct ImageStateTracker {
+    images: HashMap<vk::Image, HashMap<ImageSubresourceKey, TrackedSubresourceState>>,
+}
+
+impl ImageStateTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            images: HashMap::new(),
+        }
+    }
+
+    /// Register a newly created image with its owning queue family.
+    /// Defaults all subresources to UNDEFINED.
+    pub(crate) fn register_image(
+        &mut self,
+        image: vk::Image,
+        owning_queue_family: u32,
+    ) {
+        let full = ImageSubresourceKey::full();
+        self.images.insert(image, {
+            let mut states = HashMap::new();
+            states.insert(full, TrackedSubresourceState::undefined(owning_queue_family));
+            states
+        });
+    }
+
+    /// Register a newly created image only when it is not already tracked.
+    pub(crate) fn register_image_if_absent(
+        &mut self,
+        image: vk::Image,
+        owning_queue_family: u32,
+    ) {
+        if !self.images.contains_key(&image) {
+            self.register_image(image, owning_queue_family);
+        }
+    }
+
+    /// Remove all tracked state for an image (e.g., on destruction).
+    pub(crate) fn unregister_image(&mut self, image: vk::Image) {
+        self.images.remove(&image);
+    }
+
+    /// Query the committed state for an image subresource range.
+    ///
+    /// Exact range matches are preferred. If a narrower range has not been
+    /// committed yet, a containing range (for example the `full()` registration
+    /// state) supplies the state. When the queried range spans multiple more
+    /// specific committed states, this returns `None` rather than fabricating a
+    /// single old state for a non-uniform range.
+    pub(crate) fn committed_state(
+        &self,
+        image: vk::Image,
+        key: &ImageSubresourceKey,
+    ) -> Option<TrackedSubresourceState> {
+        let states = self.images.get(&image)?;
+        if let Some(exact) = states.get(key) {
+            return Some(*exact);
+        }
+
+        let mut best: Option<(&ImageSubresourceKey, TrackedSubresourceState)> = None;
+        for (candidate_key, candidate_state) in states.iter() {
+            if candidate_key.contains(key) {
+                match best {
+                    Some((best_key, _))
+                        if best_key.specificity_area() <= candidate_key.specificity_area() => {}
+                    _ => best = Some((candidate_key, *candidate_state)),
+                }
+            } else if key.contains(candidate_key) {
+                return None;
+            }
+        }
+        best.map(|(_, state)| state)
+    }
+
+    /// Get a mutable reference to an exact committed state entry.
+    pub(crate) fn committed_state_mut(
+        &mut self,
+        image: vk::Image,
+        key: &ImageSubresourceKey,
+    ) -> Option<&mut TrackedSubresourceState> {
+        self.images.get_mut(&image)?.get_mut(key)
+    }
+
+    /// Commit a set of staged transitions. Called after a successful submit.
+    pub(crate) fn commit_transitions(
+        &mut self,
+        transitions: &[PendingTransition],
+    ) {
+        for t in transitions {
+            if let Some(states) = self.images.get_mut(&t.image) {
+                states.retain(|existing, _| !t.key.contains(existing));
+                states.insert(t.key.clone(), t.new_state);
+            }
+        }
+    }
+
+    /// Release queue family ownership for all images owned by a given family.
+    /// Used during teardown when the queue is being destroyed.
+    pub(crate) fn release_all_for_family(&mut self, _queue_family: u32) {
+        // Ownership release at teardown is implicit via device destruction;
+        // we simply clear the tracker to prevent stale references.
+        self.images.clear();
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.images.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.images.clear();
+    }
+}
+
+/// Dense queue-family index lookup for barrier ownership decisions.
+#[derive(Debug, Clone)]
+pub(crate) struct QueueFamilyIndices {
+    pub graphics: u32,
+    pub transfer: u32,
+}
+
+impl QueueFamilyIndices {
+    pub(crate) fn from_queues(queues: &VkDeviceQueues) -> Self {
+        Self {
+            graphics: queues.get_queue_index(VkQueueType::Graphics),
+            transfer: queues.get_queue_index(VkQueueType::Transfer),
+        }
+    }
+
+    /// Returns `true` when the graphics and transfer queues reside in the same
+    /// family. Ownership transfers are omitted when families match.
+    pub(crate) fn same_family(&self) -> bool {
+        self.graphics == self.transfer
+    }
+}
 
 /// Proof that a frame-slot fence has completed.
 ///
@@ -1193,9 +1478,16 @@ impl VkDestroyable for VkTransfer {
     fn destroy(&mut self, device: &Device, allocator: &Allocator) {
         self.transfer_pool.destroy(device, allocator);
         self.host_buffers.iter().for_each(|buf| {
-            buf.lock()
-                .expect("transfer buffer lock poisoned during destroy")
-                .destroy(device, allocator)
+            let mut host_buffer = match buf.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::error!(
+                        "transfer buffer lock poisoned during destroy; recovering for best-effort teardown"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            host_buffer.destroy(device, allocator);
         });
         self.host_buffers.clear();
     }
@@ -1620,6 +1912,7 @@ impl VkFenceQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ash::vk::Handle;
 
     fn empty_present(curr_frame_count: u32, max_frames_active: u32, frame_epoch: u64) -> VkPresent {
         VkPresent {
@@ -1629,6 +1922,92 @@ mod tests {
             max_frames_active,
             frame_epoch,
         }
+    }
+
+    fn tracked_state(
+        layout: vk::ImageLayout,
+        access: vk::AccessFlags2,
+        stage: vk::PipelineStageFlags2,
+        queue_family: u32,
+    ) -> TrackedSubresourceState {
+        TrackedSubresourceState {
+            layout,
+            access,
+            stage,
+            queue_family,
+        }
+    }
+
+    #[test]
+    fn image_state_tracker_resolves_registered_full_range_for_mips_and_layers() {
+        let image = vk::Image::from_raw(0x100);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 7);
+
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::single_mip(2)),
+            Some(TrackedSubresourceState::undefined(7))
+        );
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::layer_range(3, 2)),
+            Some(TrackedSubresourceState::undefined(7))
+        );
+    }
+
+    #[test]
+    fn image_state_tracker_commits_subresource_ranges_after_submit_boundary() {
+        let image = vk::Image::from_raw(0x101);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        let mip_key = ImageSubresourceKey::single_mip(1);
+        let desired = tracked_state(
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::AccessFlags2::SHADER_READ,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            0,
+        );
+        let pending = PendingTransition {
+            image,
+            key: mip_key.clone(),
+            aspect: vk::ImageAspectFlags::COLOR,
+            old_state: TrackedSubresourceState::undefined(0),
+            new_state: desired,
+        };
+
+        assert_eq!(
+            tracker.committed_state(image, &mip_key),
+            Some(TrackedSubresourceState::undefined(0))
+        );
+        tracker.commit_transitions(&[pending]);
+        assert_eq!(tracker.committed_state(image, &mip_key), Some(desired));
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::single_mip(2)),
+            Some(TrackedSubresourceState::undefined(0))
+        );
+    }
+
+    #[test]
+    fn image_state_tracker_rejects_non_uniform_broad_query() {
+        let image = vk::Image::from_raw(0x102);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        tracker.commit_transitions(&[PendingTransition {
+            image,
+            key: ImageSubresourceKey::single_mip(0),
+            aspect: vk::ImageAspectFlags::COLOR,
+            old_state: TrackedSubresourceState::undefined(0),
+            new_state: tracked_state(
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::AccessFlags2::TRANSFER_READ,
+                vk::PipelineStageFlags2::TRANSFER,
+                0,
+            ),
+        }]);
+
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::all_mips_single_layer(2)),
+            None
+        );
     }
 
     #[test]

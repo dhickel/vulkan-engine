@@ -13,9 +13,9 @@ impl RenderPassNode for PresentCopyPass {
         let has_draw_targets = ctx.submission.has_draw_targets();
         let mut recording = ctx.present_copy_ctx();
         if has_draw_targets {
-            recording.copy_draw_to_present();
+            recording.copy_draw_to_present()?;
         } else {
-            recording.prepare_present_color_attachment();
+            recording.prepare_present_color_attachment()?;
         }
         Ok(())
     }

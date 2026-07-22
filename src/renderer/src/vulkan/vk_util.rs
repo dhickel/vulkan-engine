@@ -45,6 +45,7 @@ use ash::vk::{
     PipelineLayoutCreateInfo, Rect2D, RenderingInfo,
 };
 use log::{info, warn};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -97,6 +98,233 @@ pub fn async_texture_upload_wait_stage_mask() -> vk::PipelineStageFlags2 {
 /// Stage used when graphics queue waits before consuming uploaded vertex/index buffers.
 pub fn async_buffer_upload_wait_stage_mask() -> vk::PipelineStageFlags2 {
     vk::PipelineStageFlags2::VERTEX_INPUT
+}
+
+// ---------------------------------------------------------------------------
+// Frame transition overlay (Phase 06)
+// ---------------------------------------------------------------------------
+
+/// Per-frame or one-shot transaction overlay for image state transitions.
+///
+/// Accumulates staged [`PendingTransition`] deltas. Reads committed state
+/// from the authoritative [`ImageStateTracker`] (passed at query time,
+/// not stored). Deltas are committed only after a successful submit;
+/// on recording failure the overlay is discarded.
+#[derive(Debug, Default)]
+pub(crate) struct FrameTransitionOverlay {
+    staging: HashMap<(vk::Image, ImageSubresourceKey), TrackedSubresourceState>,
+    pending: Vec<PendingTransition>,
+}
+
+impl FrameTransitionOverlay {
+    pub(crate) fn new() -> Self {
+        Self {
+            staging: HashMap::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Read the effective state for an image subresource range: committed state
+    /// overlaid with any prior staged delta from this overlay.
+    pub(crate) fn effective_state(
+        &self,
+        tracker: &ImageStateTracker,
+        image: vk::Image,
+        key: &ImageSubresourceKey,
+        _default_aspect: vk::ImageAspectFlags,
+    ) -> Option<TrackedSubresourceState> {
+        let composite_key = (image, key.clone());
+        if let Some(staged) = self.staging.get(&composite_key) {
+            return Some(*staged);
+        }
+        tracker.committed_state(image, key)
+    }
+
+    /// Record a subresource transition from a known old state to a desired new state.
+    ///
+    /// Validates that the old state matches the effective state. Derives narrow
+    /// barriers (access/stage/queue-family). If the source and destination queue
+    /// families match, ownership transfer is omitted (indices set to IGNORED).
+    /// If they differ, a matched release/acquire pair is recorded.
+    pub(crate) fn record_transition(
+        &mut self,
+        tracker: &ImageStateTracker,
+        image: vk::Image,
+        key: ImageSubresourceKey,
+        aspect: vk::ImageAspectFlags,
+        desired: TrackedSubresourceState,
+    ) -> Result<(), String> {
+        let old = self.effective_state(tracker, image, &key, aspect).ok_or_else(|| {
+            format!(
+                "image transition requested for untracked or non-uniform subresource range: image={image:?}, range={key:?}"
+            )
+        })?;
+
+        // Skip no-op transitions.
+        if old.layout == desired.layout
+            && old.access == desired.access
+            && old.stage == desired.stage
+            && old.queue_family == desired.queue_family
+        {
+            return Ok(());
+        }
+
+        let pending = PendingTransition {
+            image,
+            key: key.clone(),
+            aspect,
+            old_state: old,
+            new_state: desired,
+        };
+
+        let composite_key = (image, key);
+        self.staging.insert(composite_key, desired);
+        self.pending.push(pending);
+        Ok(())
+    }
+
+    /// Build barrier structs for all pending transitions.
+    ///
+    /// Uses the narrowest stage/access masks derived from the old and new state.
+    /// For same-family operations, uses `QUEUE_FAMILY_IGNORED` for ownership indices.
+    /// For split-family operations, emits explicit family indices.
+    pub(crate) fn pending_barriers(&self) -> Vec<vk::ImageMemoryBarrier2<'static>> {
+        self.pending
+            .iter()
+            .map(|t| image_barrier_for_pending_transition(t))
+            .collect()
+    }
+
+    /// Emit the barrier commands for all pending transitions onto a command buffer.
+    pub(crate) fn emit_barriers(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
+        let barriers = self.pending_barriers();
+        if barriers.is_empty() {
+            return;
+        }
+        let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+        unsafe { device.cmd_pipeline_barrier2(cmd, &dep_info) };
+    }
+
+    /// Record one tracked image transition and immediately emit its barrier.
+    pub(crate) fn record_and_emit_transition(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        tracker: &ImageStateTracker,
+        image: vk::Image,
+        key: ImageSubresourceKey,
+        aspect: vk::ImageAspectFlags,
+        desired: TrackedSubresourceState,
+    ) -> Result<(), String> {
+        let pending_start = self.pending.len();
+        self.record_transition(tracker, image, key, aspect, desired)?;
+        if let Some(transition) = self.pending.get(pending_start) {
+            let barrier = [image_barrier_for_pending_transition(transition)];
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&barrier);
+            unsafe { device.cmd_pipeline_barrier2(cmd, &dep_info) };
+        }
+        Ok(())
+    }
+
+    /// Consume the overlay and return the pending transitions for commit.
+    pub(crate) fn take_pending(self) -> Vec<PendingTransition> {
+        self.pending
+    }
+
+    /// Returns true if no transitions have been staged.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+pub(crate) fn queue_family_indices_for_barrier(src_family: u32, dst_family: u32) -> (u32, u32) {
+    if src_family == dst_family {
+        (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED)
+    } else {
+        (src_family, dst_family)
+    }
+}
+
+pub(crate) fn tracked_state_for_layout(
+    layout: vk::ImageLayout,
+    queue_family: u32,
+) -> TrackedSubresourceState {
+    match layout {
+        vk::ImageLayout::UNDEFINED => TrackedSubresourceState::undefined(queue_family),
+        vk::ImageLayout::GENERAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+            stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+            queue_family,
+        },
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            queue_family,
+        },
+        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
+        | vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            queue_family,
+        },
+        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::TRANSFER_READ,
+            stage: vk::PipelineStageFlags2::TRANSFER,
+            queue_family,
+        },
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::TRANSFER_WRITE,
+            stage: vk::PipelineStageFlags2::TRANSFER,
+            queue_family,
+        },
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::SHADER_READ,
+            stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            queue_family,
+        },
+        vk::ImageLayout::PRESENT_SRC_KHR => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::empty(),
+            stage: vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+            queue_family,
+        },
+        _ => TrackedSubresourceState {
+            layout,
+            access: vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+            stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+            queue_family,
+        },
+    }
+}
+
+pub(crate) fn image_barrier_for_pending_transition(
+    transition: &PendingTransition,
+) -> vk::ImageMemoryBarrier2<'static> {
+    let (src_family, dst_family) = queue_family_indices_for_barrier(
+        transition.old_state.queue_family,
+        transition.new_state.queue_family,
+    );
+
+    vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(transition.old_state.stage)
+        .src_access_mask(transition.old_state.access)
+        .dst_stage_mask(transition.new_state.stage)
+        .dst_access_mask(transition.new_state.access)
+        .old_layout(transition.old_state.layout)
+        .new_layout(transition.new_state.layout)
+        .src_queue_family_index(src_family)
+        .dst_queue_family_index(dst_family)
+        .image(transition.image)
+        .subresource_range(transition.key.to_vk(transition.aspect))
 }
 
 pub fn command_buffer_submit_info<'a>(cmd: vk::CommandBuffer) -> vk::CommandBufferSubmitInfo<'a> {
@@ -1496,13 +1724,17 @@ pub fn record_host_to_storage_buffer(
             &copy_info,
         );
 
+        let (src_family, dst_family) = queue_family_indices_for_barrier(
+            host_info.transfer_queue_index,
+            host_info.graphics_queue_index,
+        );
         let release_barrier = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             // Queue-family release operations make writes available; the acquire operation
-            // defines the consumer access scope.
+            // defines the consumer access scope. Same-family queues use ignored indices.
             .dst_access_mask(vk::AccessFlags::empty())
-            .src_queue_family_index(host_info.transfer_queue_index)
-            .dst_queue_family_index(host_info.graphics_queue_index)
+            .src_queue_family_index(src_family)
+            .dst_queue_family_index(dst_family)
             .buffer(device_buffer.buffer)
             .offset(device_offset)
             .size(total_size_u64);
@@ -1531,8 +1763,8 @@ pub fn record_host_to_storage_buffer(
             // operation only needs to define visibility to vertex/index reads.
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::INDEX_READ)
-            .src_queue_family_index(host_info.transfer_queue_index)
-            .dst_queue_family_index(host_info.graphics_queue_index)
+            .src_queue_family_index(src_family)
+            .dst_queue_family_index(dst_family)
             .buffer(device_buffer.buffer)
             .offset(device_offset)
             .size(total_size_u64);
@@ -2190,7 +2422,159 @@ pub fn record_image_barrier(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_upload_mip_levels;
+    use super::{queue_family_indices_for_barrier, resolve_upload_mip_levels, FrameTransitionOverlay};
+    use crate::vulkan::vk_types::{ImageStateTracker, ImageSubresourceKey, TrackedSubresourceState};
+    use ash::vk;
+    use ash::vk::Handle;
+
+    fn tracked_state(
+        layout: vk::ImageLayout,
+        access: vk::AccessFlags2,
+        stage: vk::PipelineStageFlags2,
+        queue_family: u32,
+    ) -> TrackedSubresourceState {
+        TrackedSubresourceState {
+            layout,
+            access,
+            stage,
+            queue_family,
+        }
+    }
+
+    #[test]
+    fn frame_transition_overlay_discards_without_tracker_commit() {
+        let image = vk::Image::from_raw(0x200);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        let key = ImageSubresourceKey::single_mip(0);
+        let desired = tracked_state(
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::AccessFlags2::TRANSFER_WRITE,
+            vk::PipelineStageFlags2::TRANSFER,
+            0,
+        );
+
+        {
+            let mut overlay = FrameTransitionOverlay::new();
+            overlay
+                .record_transition(
+                    &tracker,
+                    image,
+                    key.clone(),
+                    vk::ImageAspectFlags::COLOR,
+                    desired,
+                )
+                .expect("registered full range covers mip 0");
+            assert_eq!(overlay.pending_barriers().len(), 1);
+        }
+
+        assert_eq!(
+            tracker.committed_state(image, &key),
+            Some(TrackedSubresourceState::undefined(0))
+        );
+    }
+
+    #[test]
+    fn frame_transition_overlay_rejects_untracked_images() {
+        let tracker = ImageStateTracker::new();
+        let mut overlay = FrameTransitionOverlay::new();
+        let err = overlay
+            .record_transition(
+                &tracker,
+                vk::Image::from_raw(0x201),
+                ImageSubresourceKey::single_mip(0),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::TRANSFER,
+                    0,
+                ),
+            )
+            .expect_err("unregistered images cannot invent an UNDEFINED old layout");
+        assert!(err.contains("untracked"));
+    }
+
+    #[test]
+    fn frame_transition_overlay_uses_mip_and_layer_ranges_in_barriers() {
+        let image = vk::Image::from_raw(0x202);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 3);
+        let mut overlay = FrameTransitionOverlay::new();
+        overlay
+            .record_transition(
+                &tracker,
+                image,
+                ImageSubresourceKey::all_mips_all_layers(4, 6),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags2::SHADER_READ,
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    3,
+                ),
+            )
+            .expect("full registration covers explicit mip/layer range");
+
+        let barriers = overlay.pending_barriers();
+        assert_eq!(barriers.len(), 1);
+        let range = barriers[0].subresource_range;
+        assert_eq!(range.base_mip_level, 0);
+        assert_eq!(range.level_count, 4);
+        assert_eq!(range.base_array_layer, 0);
+        assert_eq!(range.layer_count, 6);
+    }
+
+    #[test]
+    fn queue_family_barrier_indices_ignore_same_family_and_keep_split_family() {
+        assert_eq!(
+            queue_family_indices_for_barrier(2, 2),
+            (vk::QUEUE_FAMILY_IGNORED, vk::QUEUE_FAMILY_IGNORED)
+        );
+        assert_eq!(queue_family_indices_for_barrier(2, 5), (2, 5));
+    }
+
+    #[test]
+    fn frame_transition_overlay_barriers_encode_same_and_split_family_ownership() {
+        let image = vk::Image::from_raw(0x203);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 1);
+        let mut overlay = FrameTransitionOverlay::new();
+        overlay
+            .record_transition(
+                &tracker,
+                image,
+                ImageSubresourceKey::single_mip(0),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::TRANSFER,
+                    1,
+                ),
+            )
+            .expect("same-family transition records");
+        overlay
+            .record_transition(
+                &tracker,
+                image,
+                ImageSubresourceKey::single_mip(1),
+                vk::ImageAspectFlags::COLOR,
+                tracked_state(
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::AccessFlags2::SHADER_READ,
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    4,
+                ),
+            )
+            .expect("split-family transition records");
+
+        let barriers = overlay.pending_barriers();
+        assert_eq!(barriers[0].src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        assert_eq!(barriers[0].dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        assert_eq!(barriers[1].src_queue_family_index, 1);
+        assert_eq!(barriers[1].dst_queue_family_index, 4);
+    }
 
     #[test]
     fn resolve_upload_mips_keeps_requested_when_blit_supported() {

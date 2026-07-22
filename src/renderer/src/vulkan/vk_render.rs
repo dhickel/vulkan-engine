@@ -182,6 +182,13 @@ pub struct VkRenderCore {
     pub(crate) due_frame_captures: Vec<DueFrameCapture>,
     pub(crate) pending_frame_captures: Vec<PendingFrameCapture>,
     pub(crate) frame_capture_statuses: Vec<FrameCaptureStatus>,
+    /// Authoritative image state tracker. State is committed only after a
+    /// successful queue submit. During recording, transitions are staged in a
+    /// per-frame [`FrameTransitionOverlay`]; on recording failure the overlay
+    /// is discarded without committing.
+    pub(crate) image_state_tracker: ImageStateTracker,
+    /// Queue family indices for ownership-transfer decisions.
+    pub(crate) queue_family_indices: QueueFamilyIndices,
 }
 
 pub struct VkRender {
@@ -513,58 +520,49 @@ impl Drop for VkRenderCore {
                 imgui.renderer.destroy();
             }
 
-            self.transfer.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            let allocator_guard = match self.allocator.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::error!(
+                        "Render drop: allocator lock poisoned; recovering inner allocator for best-effort teardown"
+                    );
+                    poisoned.into_inner()
+                }
+            };
+            let allocator = &*allocator_guard;
+
+            self.transfer.destroy(&self.device, allocator);
 
             for slot in self.gpu_timing.slots.iter() {
                 self.device.destroy_query_pool(slot.query_pool, None);
             }
 
-            self.presentation.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.presentation.destroy(&self.device, allocator);
 
-            self.scene_descriptors.values_mut().for_each(|descriptors| {
-                descriptors.destroy(
-                    &self.device,
-                    &self.allocator.lock().expect("allocator lock poisoned"),
-                )
-            });
+            self.scene_descriptors
+                .values_mut()
+                .for_each(|descriptors| descriptors.destroy(&self.device, allocator));
             self.scene_descriptors.clear();
 
             #[cfg(feature = "csm")]
             if let Some(ref mut csm) = self.csm_shadow_resources {
-                let alloc = self.allocator.lock().expect("allocator lock poisoned");
-                csm.destroy(&self.device, &alloc);
+                csm.destroy(&self.device, allocator);
             }
-            self.shadow_resources.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.shadow_resources.destroy(&self.device, allocator);
 
             for descriptor in self.sky_box.descriptors.values() {
                 descriptor.desc_alloc.destroy(&self.device);
             }
             self.sky_box.descriptors.clear();
 
-            self.data_cache.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.data_cache.destroy(&self.device, allocator);
             ManuallyDrop::drop(&mut self.data_cache);
 
-            self.vulkan_cache.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.vulkan_cache.destroy(&self.device, allocator);
 
-            self.brdf_lut.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+            self.brdf_lut.destroy(&self.device, allocator);
+
+            drop(allocator_guard);
 
             self.swapchain_owner.destroy_present_views(&self.device);
             if let Some(swapchain) = self.swapchain_owner.swapchain.as_ref() {
@@ -1342,6 +1340,8 @@ impl VkRenderCore {
             swapchain_image_count as usize,
         );
 
+        let queue_family_indices = QueueFamilyIndices::from_queues(&device_queues);
+
         let (data_cache, vulkan_cache, default_env_id) = init_caches(
             &instance,
             physical_device.p_device,
@@ -1430,6 +1430,8 @@ impl VkRenderCore {
             visual_tuning,
             data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
+            image_state_tracker: ImageStateTracker::new(),
+            queue_family_indices,
         };
 
         let scene_world = if preload_startup_scene {
@@ -1519,6 +1521,8 @@ impl VkRenderCore {
             device_queues.get_queue_index(VkQueueType::Graphics),
             frame_slot_count as usize,
         );
+
+        let queue_family_indices = QueueFamilyIndices::from_queues(&device_queues);
 
         let (data_cache, vulkan_cache, default_env_id) = init_caches(
             &instance,
@@ -1622,6 +1626,8 @@ impl VkRenderCore {
             visual_tuning,
             data_cache: ManuallyDrop::new(data_cache),
             brdf_lut: brd_flut,
+            image_state_tracker: ImageStateTracker::new(),
+            queue_family_indices,
         };
 
         let scene_world = if preload_startup_scene {
@@ -2536,8 +2542,8 @@ impl VkRenderCore {
         let graph_result =
             unsafe { vk_commands::execute_rendergraph_for_frame(self, submission, rendergraph) };
         let rendergraph_ms = elapsed_ms(rendergraph_start);
-        let graph_report = match graph_result {
-            Ok(report) => report,
+        let (graph_report, pending_transitions) = match graph_result {
+            Ok(record_result) => (record_result.report, record_result.pending_transitions),
             Err(err) => {
                 error!("RenderGraph execution failed: {err}");
                 let capture_failure = format!("frame capture skipped: rendergraph failed: {err}");
@@ -2680,6 +2686,8 @@ impl VkRenderCore {
             frame,
         )?;
         frame_transaction.mark_submitted();
+        // Commit image state transitions only after successful submit.
+        self.image_state_tracker.commit_transitions(&pending_transitions);
         let submit_ms = elapsed_ms(submit_start);
 
         let present_start = Instant::now();

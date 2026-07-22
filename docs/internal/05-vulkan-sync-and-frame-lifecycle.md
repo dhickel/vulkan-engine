@@ -219,6 +219,7 @@ else:
 - Frame-ring and sync types: `src/renderer/src/vulkan/vk_types.rs`
 - Descriptor allocators: `src/renderer/src/vulkan/vk_descriptor.rs`
 - Barrier helpers and upload transitions: `src/renderer/src/vulkan/vk_util.rs`
+- Image state tracking: `ImageStateTracker` (`vk_types.rs`), `FrameTransitionOverlay` (`vk_util.rs`). Transitions committed only after successful submit; same-family omits ownership transfer; split-family emits matched release/acquire.
 - Rendergraph ordering: `src/renderer/src/rendergraph/mod.rs`
 - Shadow pass: `src/renderer/src/rendergraph/passes/shadow_pass.rs`, `src/renderer/src/vulkan/vk_shadow.rs`
 - Present/UI/capture boundaries: `src/renderer/src/rendergraph/passes/present_copy_pass.rs`, `imgui_pass.rs`, `debug_capture_pass.rs`, `terminal_present_pass.rs`

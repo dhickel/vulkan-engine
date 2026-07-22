@@ -12,7 +12,7 @@ impl RenderPassNode for TerminalPresentPass {
     fn execute(&self, ctx: &mut RenderGraphContext) -> Result<(), String> {
         let mut recording = ctx.terminal_present_ctx();
         if !recording.is_headless() {
-            recording.transition_present_for_present();
+            recording.transition_present_for_present()?;
         }
         Ok(())
     }
