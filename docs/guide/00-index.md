@@ -36,28 +36,28 @@ Use these chapters when you need a specific capability. They do not depend on re
 
 | # | Chapter | What You'll Learn |
 |---|---------|-------------------|
-| [06](06-input-and-actions.md) | Input & Actions | Action maps, layer priority, snapshots, `InputActionEventEmitter` |
-| [07](07-scene-graph.md) | Scene Graph | Nodes, transforms, meshes, materials, fragments, culling |
-| [08](08-asset-loading.md) | Asset Loading | `AssetManager`, handles, load tickets, packages, environments |
-| [09](09-events-and-lifecycle.md) | Events & Lifecycle | `EventBus`, stages, lifecycle events, recorders, subscribers |
-| [10](10-camera-and-view.md) | Camera & View | `Camera`, `FPSController`, `CameraView`, `camera_view_for_size` |
-| [11](11-frame-timing.md) | Frame Timing | `FrameClock`, `FixedStepClock`, fixed-step simulation vs display rate |
-| [12](12-debug-and-capture.md) | Debug & Capture | Debug UI, timing capture, frame capture for visual validation |
-| [13](13-renderer-configuration.md) | Renderer Configuration | `RendererConfig`, asset policies, visual tuning, validation layers |
+| [06](06-input.md) | Input System | Action maps, layer priority, snapshots, `InputActionEventEmitter`, platform routing |
+| [07](07-events-and-lifecycle.md) | Events & Lifecycle | `EventBus`, stages, lifecycle events, typed subscribers, recorders, dispatch reports |
+| [08](08-scene-construction.md) | Scene Construction | Nodes, transforms, meshes with bounds, materials, lights, fragments, culling |
+| [09](09-asset-pipeline.md) | Asset Pipeline | `AssetManager`, sync/deferred loading, handles, tickets, procedural upload, geometry queries |
+| [10](10-physics.md) | Physics (Alpha) | Rigid bodies, colliders, ray casting, contact events, convex hull validation |
+| [11](11-audio.md) | Audio (Alpha) | Clip loading, device-backed playback, device-independent probe, event bridging |
+| [12](12-debug-and-diagnostics.md) | Debug & Diagnostics | Logging, timing capture, headless capture, debug UI, validation layers, asset/collider validation |
+| [13](13-packaging-and-distribution.md) | Packaging & Distribution | `engine_pack`: scaffolding, validation, asset scanning, packed distribution |
 
 ### Part III — Real-World Reference
 
 | # | Chapter | What It Covers |
 |---|---------|----------------|
-| [14](14-dogfood-case-study.md) | Case Study: Dungeon Dogfood | Full walkthrough of the dogfood app — architecture, collision, audio bridge, headless capture |
-| [15](15-voxel-demo-case-study.md) | Case Study: Voxel Demo | Procedural cave generation, MC33 meshing, configurable presets, regeneration |
+| 14 | Case Study: Dungeon Dogfood *(planned)* | Full walkthrough of the dogfood app — architecture, collision, audio bridge, headless capture |
+| 15 | Case Study: Voxel Demo *(planned)* | Procedural cave generation, MC33 meshing, configurable presets, regeneration |
 
 ### Part IV — Compatibility & Troubleshooting
 
 | # | Chapter | What It Covers |
 |---|---------|----------------|
-| [16](16-compatibility.md) | Renderer Compatibility Paths | Distinguishing renderer-owned `update_input`/`render_scene` examples from app-owned loops; when to use each |
-| [17](17-troubleshooting.md) | Troubleshooting | Common errors, Vulkan setup issues, resize problems, asset loading failures |
+| 16 | Renderer Compatibility Paths *(planned)* | Distinguishing renderer-owned `update_input`/`render_scene` examples from app-owned loops; when to use each |
+| 17 | Troubleshooting *(planned)* | Common errors, Vulkan setup issues, resize problems, asset loading failures |
 
 ## Conventions
 

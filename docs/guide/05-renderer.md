@@ -224,11 +224,9 @@ The renderer maintains its own `EventBus` accessible via `renderer.events()` and
 
 Continue to the independently adoptable subsystem chapters:
 
-- [06 — Input & Actions](06-input-and-actions.md)
-- [07 — Scene Graph](07-scene-graph.md)
-- [08 — Asset Loading](08-asset-loading.md)
+- [06 — Input System](06-input.md)
+- [07 — Events & Lifecycle](07-events-and-lifecycle.md)
+- [08 — Scene Construction](08-scene-construction.md)
+- [09 — Asset Pipeline](09-asset-pipeline.md)
 
-Or explore the real-world case studies:
-
-- [14 — Case Study: Dungeon Dogfood](14-dogfood-case-study.md)
-- [15 — Case Study: Voxel Demo](15-voxel-demo-case-study.md)
+Real-world case studies for Dungeon Dogfood and Voxel Demo are planned as later guide chapters.
