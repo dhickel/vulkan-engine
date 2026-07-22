@@ -123,6 +123,9 @@ impl VkSingleDescriptor {
 pub struct VkRenderCore {
     pub surface_mode: RenderSurfaceMode,
     pub window_state: VkWindowState,
+    /// Once set, no Vulkan or VMA destruction may be attempted during teardown.
+    /// The process/driver owns reclamation after a terminal device loss.
+    device_lost: AtomicBool,
     pub allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
     #[allow(
         dead_code,
@@ -199,10 +202,13 @@ pub(crate) enum VkRenderError {
     BackendPoisoned(String),
 }
 
+fn backend_message_is_device_lost(message: &str) -> bool {
+    message.contains("ERROR_DEVICE_LOST") || message.to_ascii_lowercase().contains("device lost")
+}
+
 impl VkRenderError {
     fn from_backend_message(message: String) -> Self {
-        let normalized = message.to_ascii_lowercase();
-        if message.contains("ERROR_DEVICE_LOST") || normalized.contains("device lost") {
+        if backend_message_is_device_lost(&message) {
             Self::DeviceLost(message)
         } else {
             Self::Backend(message)
@@ -472,11 +478,30 @@ pub fn init_present_pools(
 impl Drop for VkRenderCore {
     fn drop(&mut self) {
         unsafe {
-            if let Err(err) = self.device.device_wait_idle() {
+            if self.device_is_lost() {
                 log::error!(
-                    "Render drop: device_wait_idle failed ({:?}); proceeding with best-effort cleanup",
-                    err
+                    "Render drop: Vulkan device is lost; skipping all Vulkan and VMA destruction"
                 );
+                self.abandon_device_resources();
+                return;
+            }
+
+            match self.device.device_wait_idle() {
+                Ok(()) => {}
+                Err(vk::Result::ERROR_DEVICE_LOST) => {
+                    self.mark_device_lost();
+                    log::error!(
+                        "Render drop: device_wait_idle returned ERROR_DEVICE_LOST; skipping all Vulkan and VMA destruction"
+                    );
+                    self.abandon_device_resources();
+                    return;
+                }
+                Err(err) => {
+                    log::error!(
+                        "Render drop: device_wait_idle failed ({:?}); proceeding with best-effort cleanup",
+                        err
+                    );
+                }
             }
 
             if let Some(imgui) = self.imgui.as_mut() {
@@ -562,6 +587,27 @@ impl Drop for VkRenderCore {
 }
 
 impl VkRenderCore {
+    fn mark_device_lost(&self) {
+        self.device_lost.store(true, Ordering::Release);
+    }
+
+    /// Prevent fields with Vulkan-calling `Drop` implementations from running after loss.
+    /// `data_cache` and `allocator` are already `ManuallyDrop`; ImGui must be forgotten too.
+    fn abandon_device_resources(&mut self) {
+        if let Some(imgui) = self.imgui.take() {
+            std::mem::forget(imgui);
+        }
+    }
+
+    fn mark_device_lost_from_message(&self, message: &str) {
+        if backend_message_is_device_lost(message) {
+            self.mark_device_lost();
+        }
+    }
+
+    fn device_is_lost(&self) -> bool {
+        self.device_lost.load(Ordering::Acquire)
+    }
 
     /// Returns `true` when a resize is pending.
     pub fn resize_pending(&self) -> bool {
@@ -1318,6 +1364,7 @@ impl VkRenderCore {
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::Windowed,
             window_state,
+            device_lost: AtomicBool::new(false),
             allocator: ManuallyDrop::new(allocator),
             entry,
             instance,
@@ -1509,6 +1556,7 @@ impl VkRenderCore {
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::HeadlessOffscreen,
             window_state,
+            device_lost: AtomicBool::new(false),
             allocator: ManuallyDrop::new(allocator),
             entry,
             instance,
@@ -1851,6 +1899,9 @@ impl VkRender {
             Ok(value) => Ok(value),
             Err(message) => {
                 let error = VkRenderError::from_backend_message(message);
+                if matches!(error, VkRenderError::DeviceLost(_)) {
+                    self.core.mark_device_lost();
+                }
                 self.backend_health.poison(error.to_string());
                 Err(error)
             }
@@ -1870,6 +1921,9 @@ impl VkRender {
                         }
                         _ => unreachable!("retryable resize was already classified as backend"),
                     };
+                }
+                if matches!(error, VkRenderError::DeviceLost(_)) {
+                    self.core.mark_device_lost();
                 }
                 self.backend_health.poison(error.to_string());
                 Err(error)
@@ -1966,7 +2020,9 @@ impl EnvTarget {
     fn dimension(self) -> u32 {
         match self {
             Self::Irradiance => 64,
-            Self::PreFiltered => 512,
+            // 256 keeps the one-off convolution below common Linux GPU watchdog budgets while
+            // retaining nine roughness mip levels for IBL.
+            Self::PreFiltered => 256,
         }
     }
 
@@ -2729,15 +2785,19 @@ impl VkRenderCore {
                         format,
                     );
 
-                    // Destroy temporary source texture
-                    unsafe {
-                        self.device.destroy_sampler(src_sampler, None);
+                    // A lost device invalidates every subsequent driver/VMA teardown call.
+                    // Leak these temporary handles in that terminal state; the OS/driver will
+                    // reclaim them with the process.
+                    if !self.device_is_lost() {
+                        unsafe {
+                            self.device.destroy_sampler(src_sampler, None);
+                        }
+                        let mut src_img = src_image;
+                        src_img.destroy(
+                            &self.device,
+                            &self.allocator.lock().expect("allocator lock poisoned"),
+                        );
                     }
-                    let mut src_img = src_image;
-                    src_img.destroy(
-                        &self.device,
-                        &self.allocator.lock().expect("allocator lock poisoned"),
-                    );
 
                     result.map_err(|e| format!("Equirect-to-cubemap conversion failed: {}", e))
                 }
@@ -2943,12 +3003,25 @@ impl VkRenderCore {
     }
 
     pub fn ensure_environment_ready(&mut self, env_id: EnvironmentHandle) -> Result<(), String> {
-        self.upload_pending_skybox_if_needed(env_id)?;
-        self.generate_env_maps_if_missing(env_id)?;
-        self.ensure_skybox_descriptor(env_id)?;
-        self.ensure_scene_descriptor(env_id)?;
-        self.ensure_skybox_vertex_address_cached()?;
-        Ok(())
+        let result: Result<(), String> = (|| -> Result<(), String> {
+            self.upload_pending_skybox_if_needed(env_id)?;
+            self.generate_env_maps_if_missing(env_id)?;
+            self.ensure_skybox_descriptor(env_id)?;
+            self.ensure_scene_descriptor(env_id)?;
+            self.ensure_skybox_vertex_address_cached()?;
+            Ok(())
+        })();
+
+        match &result {
+            Ok(()) => {
+                self.environment_failures.remove(&env_id);
+            }
+            Err(message) => {
+                self.mark_device_lost_from_message(message);
+                self.environment_failures.insert(env_id, message.clone());
+            }
+        }
+        result
     }
 
     fn prepare_submission_environment(
@@ -3096,25 +3169,47 @@ impl VkRenderCore {
     ) -> Result<(), String> {
         let cmd_info = [vk_util::command_buffer_submit_info(render_buffer)];
         let submit_info = [vk_util::submit_info_2(&cmd_info, &[], &[])];
-        let fence = self
+        let fence = match self
             .device
             .create_fence(&vk::FenceCreateInfo::default(), None)
-            .map_err(|e| format!("create_fence failed: {:?}", e))?;
+        {
+            Ok(fence) => fence,
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                self.mark_device_lost();
+                return Err("Vulkan device lost while creating env generation fence".to_string());
+            }
+            Err(err) => return Err(format!("create_fence failed: {err:?}")),
+        };
         let fences = [fence];
 
-        let submit_result = self.device.queue_submit2(render_queue, &submit_info, fence);
-        if let Err(vk::Result::ERROR_DEVICE_LOST) = submit_result {
-            self.device.destroy_fence(fence, None);
-            return Err("Vulkan device lost during env generation submission".to_string());
+        match self.device.queue_submit2(render_queue, &submit_info, fence) {
+            Ok(()) => {}
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                self.mark_device_lost();
+                // Never call vkDestroyFence after terminal device loss.
+                return Err("Vulkan device lost during env generation submission".to_string());
+            }
+            Err(err) => {
+                self.device.destroy_fence(fence, None);
+                return Err(format!("queue_submit2 failed: {err:?}"));
+            }
         }
-        submit_result.map_err(|e| format!("queue_submit2 failed: {:?}", e))?;
 
-        let wait_result = self.device.wait_for_fences(&fences, true, u64::MAX);
-        self.device.destroy_fence(fence, None);
-        if let Err(vk::Result::ERROR_DEVICE_LOST) = wait_result {
-            return Err("Vulkan device lost during env generation wait".to_string());
+        match self.device.wait_for_fences(&fences, true, u64::MAX) {
+            Ok(()) => {
+                self.device.destroy_fence(fence, None);
+                Ok(())
+            }
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                self.mark_device_lost();
+                // Never call vkDestroyFence after terminal device loss.
+                Err("Vulkan device lost during env generation wait".to_string())
+            }
+            Err(err) => {
+                self.device.destroy_fence(fence, None);
+                Err(format!("wait_for_fences failed: {err:?}"))
+            }
         }
-        wait_result.map_err(|e| format!("wait_for_fences failed: {:?}", e))
     }
 
     /// Generate one target cubemap (irradiance or prefiltered) from the source skybox.
@@ -3354,10 +3449,15 @@ impl VkRenderCore {
             Ok((final_cubemap, prefilter_mips_count))
         })();
 
-        offscreen_image.destroy(
-            &self.device,
-            &self.allocator.lock().expect("allocator lock poisoned"),
-        );
+        if let Err(message) = &generation_result {
+            self.mark_device_lost_from_message(message);
+        }
+        if !self.device_is_lost() {
+            offscreen_image.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
+        }
 
         let target_end = SystemTime::now()
             .duration_since(target_start)
@@ -3602,11 +3702,16 @@ impl VkRenderCore {
             })
         })();
 
-        offscreen_image.destroy(
-            &self.device,
-            &self.allocator.lock().expect("allocator lock poisoned"),
-        );
-        desc_pool.destroy(&self.device);
+        if let Err(message) = &generation_result {
+            self.mark_device_lost_from_message(message);
+        }
+        if !self.device_is_lost() {
+            offscreen_image.destroy(
+                &self.device,
+                &self.allocator.lock().expect("allocator lock poisoned"),
+            );
+            desc_pool.destroy(&self.device);
+        }
 
         generation_result
     }
@@ -3707,6 +3812,15 @@ mod backend_tests {
             ),
             VkRenderError::DeviceLost(_)
         ));
+        assert!(backend_message_is_device_lost(
+            "Vulkan device lost during env generation wait"
+        ));
+    }
+
+    #[test]
+    fn prefilter_target_uses_watchdog_safe_resolution() {
+        assert_eq!(EnvTarget::PreFiltered.dimension(), 256);
+        assert_eq!(data_util::calc_mips_count(256, 256), 9);
     }
 
     #[test]

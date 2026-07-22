@@ -24,6 +24,7 @@ Per-frame backend flow:
 - Frame acquisition waits and cleans the slot first, acquires/binds an image, and resets the fence only after acquisition succeeds.
 - Once the fence is reset, a recording failure uses a drain transaction: replace partial commands, submit to signal the fence, and, for windowed acquisition, present to consume/release the semaphore and image state.
 - Rendergraph pass order is explicit and semantic: `PrepareTargets -> Shadow -> Skybox -> Geometry -> PresentCopy -> Imgui -> DebugCapture -> TerminalPresent`.
+- Device loss is terminal. `VkRenderCore` records it immediately, rejects later backend work through backend poisoning, and skips Vulkan/VMA teardown (including Vulkan-calling field destructors) rather than entering driver cleanup after `ERROR_DEVICE_LOST`.
 
 Synchronization primitive role table:
 
@@ -162,6 +163,7 @@ else:
 - Resize requests are coalesced to the latest event, including zero extents. A zero extent remains pending and is deferred without capability queries or replacement calls. A successful non-zero rebuild consumes only the request generation it installed, so a newer concurrent request remains pending.
 - Acquire and present results are classified structurally via `AcquireClass` / `PresentClass` enums without string parsing. Surface-lost is distinct from out-of-date; both trigger explicit terminal or rebuild paths rather than silent loops.
 - `VkPresent::get_next_frame`/`get_curr_frame_mut` ring semantics depend on counter ordering; changing this can silently desync acquired image binding.
+- Environment-map generation uses a dedicated fence. If fence creation, graphics submission, or fence wait reports `ERROR_DEVICE_LOST`, mark the requested environment failed before returning, do not publish partially generated maps, and do not destroy the fence or temporary image/descriptor resources. Teardown observes the same device-lost flag and abandons all Vulkan/VMA destruction. The prefiltered cubemap is capped at 256px (nine mips) to keep the one-off convolution below the observed RADV watchdog budget.
 
 ## 7. Debugging Playbook
 - Step 1: enable validation layers and capture the first synchronization warning (later warnings are often cascades).
