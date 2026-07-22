@@ -295,7 +295,7 @@ let placed_node = result.created_node.expect("placement created a node");
 
 ### Picking contract
 
-`Scene::pick_last_camera` casts from screen coordinates using the last camera matrices supplied by `Renderer::render_scene`. Picking uses authoritative world bounds when known (`SceneBounds::Known`) or explicit proxy when set (`SceneBounds::Proxy`). Conservative-visible mesh-bearing nodes skip exact hit to avoid false positives. Empty group nodes still receive a small editor-origin proxy for selection.
+`Scene::pick_last_camera` casts from screen coordinates using the last camera matrices supplied by `Renderer::render_scene`. Picking takes mutable scene access so it can rebuild world transforms and bounds before the query. Picking uses authoritative world bounds when known (`SceneBounds::Known`) or explicit proxy when set (`SceneBounds::Proxy`). Conservative-visible mesh-bearing nodes skip exact hit to avoid false positives. Empty group nodes still receive a small editor-origin proxy for selection.
 
 Snippet Type: Real
 ```rust
@@ -374,6 +374,47 @@ scene.set_frustum_culling(false);         // diagnostic/content compatibility op
 - Fragment roots can be ambiguous if not set and multiple parentless nodes exist.
 - Invalid point light values (non-finite color, non-positive range, negative intensity) are rejected.
 - Directional-light directions must be finite and non-zero; a second live directional light is rejected.
+- Non-finite transforms are rejected at mutation time (`SceneError::InvalidMutation`).
+- Stale animation targets return `AnimationError::StaleTarget` during playback.
+- Command history at zero capacity cannot undo or redo; execute succeeds but stores nothing.
+
+### Canonical Scene Persistence (Phase 08)
+
+`Scene::save` writes a failure-atomic file: serialization and validation happen first, then a staged temporary file is written, flushed, and renamed over the target. Partial writes are never published.
+
+All three light kinds round-trip through the canonical DTO:
+- Point lights serialize under `lights` with `kind: "point"`
+- Directional lights serialize under `directional_lights` with `kind: "directional"`
+- Spot lights serialize under `spot_lights` with `kind: "spot"`
+
+Excluded from serialization (reconstructed at load):
+- Runtime handles (`SceneNodeId`, `MeshHandle`, `EnvironmentHandle`)
+- World transforms (recomputed from local transform + hierarchy)
+- Dirty flags, child indexes, bounds caches, descriptors, GPU payloads
+
+Validation at load time checks:
+- Unique stable IDs, parent existence and acyclicity
+- Finite transforms, valid asset references
+- Finite/ranged lights, valid cone angles for spots
+- Collision/audio schema integrity
+
+### Animation Targets (Phase 08)
+
+Animation channels reference scene nodes by durable `SceneNodeId` instead of by volatile index. Clips are validated at acceptance (duration, sampler indices, monotonic timestamps, interpolation cardinality, target-path type consistency).
+
+Interpolation modes:
+- **Step**: previous key value.
+- **Linear**: lerp for translation/scale, shortest-path normalized quaternion slerp for rotation.
+- **CubicSpline**: glTF Hermite with three output elements per key (in-tangent, value, out-tangent). Tangents are scaled by the key interval. Quaternion output is normalized and finite-checked.
+
+### Command History (Phase 08)
+
+Zero-capacity `CommandHistory::new(0)`:
+- `execute` succeeds, clears redo, discards the command (stores nothing)
+- `undo` returns `CommandError::NothingToUndo`
+- `redo` returns `CommandError::NothingToRedo`
+
+`PlaceAssetCommand` clones every authoritative `SceneFragmentNode` field including `mesh_bounds` so geometry metadata survives placement.
 
 ## 7. Debugging Playbook
 - Step 1: print node IDs (`slot`, `generation`) for failing operations.

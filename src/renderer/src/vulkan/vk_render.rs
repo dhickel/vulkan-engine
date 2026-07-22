@@ -1007,9 +1007,24 @@ impl VkRenderCore {
             PoolSizeRatio::new(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 4.0),
         ];
 
+        let descriptor_limits =
+            vk_init::get_buffer_and_descriptor_limits(instance, physical_device.p_device);
+        let descriptor_set_budget = if descriptor_limits.max_update_after_bind_descriptors_in_all_pools == 0 {
+            VkDynamicDescriptorAllocator::MAX_SETS_CAP
+        } else {
+            descriptor_limits
+                .max_update_after_bind_descriptors_in_all_pools
+                .min(VkDynamicDescriptorAllocator::MAX_SETS_CAP)
+                .max(1000)
+        };
         let descriptor_allocators: Vec<VkDynamicDescriptorAllocator> = (0..swapchain_image_count)
             .map(|i| -> Result<VkDynamicDescriptorAllocator, String> {
-                let mut alloc = VkDynamicDescriptorAllocator::new(device, 1000, &pool_ratios)?;
+                let mut alloc = VkDynamicDescriptorAllocator::new_with_total_set_budget(
+                    device,
+                    1000,
+                    &pool_ratios,
+                    descriptor_set_budget,
+                )?;
                 alloc.set_frame_slot_index(i);
                 Ok(alloc)
             })

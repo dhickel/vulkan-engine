@@ -590,6 +590,7 @@ fn draw_geometry_from_submission_impl(
         light_view_projection,
     );
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         record_geometry_draw_sequence_impl(
             device,
@@ -646,6 +647,7 @@ fn draw_skybox_from_submission_impl(
     );
     update_skybox_push_constants_impl(sky_box, visual_tuning, scene_data);
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_begin_rendering(cmd_buffer, &rendering_info);
         device.cmd_set_viewport(cmd_buffer, 0, window_state.get_viewport());
@@ -731,6 +733,7 @@ fn prepare_present_color_attachment_impl(
     let render_info =
         vk_util::rendering_info(window_state.get_curr_extent(), &attachment_info, None);
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_begin_rendering(cmd_buffer, &render_info);
         device.cmd_end_rendering(cmd_buffer);
@@ -897,6 +900,8 @@ fn update_skybox_push_constants_impl(
     sky_box.skybox_consts.gamma = visual_tuning.gamma;
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn record_skybox_draw_impl(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -1154,6 +1159,8 @@ fn visit_geometry_phases(
     );
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn record_geometry_draw_sequence_impl(
     device: &ash::Device,
     window_state: &VkWindowState,
@@ -1300,6 +1307,7 @@ fn draw_imgui_impl(
     let render_info =
         vk_util::rendering_info(window_state.get_curr_extent(), &attachment_info, None);
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_begin_rendering(cmd_buffer, &render_info);
     }
@@ -1314,6 +1322,7 @@ fn draw_imgui_impl(
         .cmd_draw(cmd_buffer, draw_data)
         .map_err(|err| format!("imgui cmd_draw failed: {err}"));
 
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_end_rendering(cmd_buffer);
     }
@@ -1377,6 +1386,7 @@ fn begin_gpu_pass_timing(
     if let Some((name, start_query)) = slot.open_pass.take() {
         if slot.next_query < timing.max_queries {
             let end_query = slot.next_query;
+            // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
             unsafe {
                 device.cmd_write_timestamp2(
                     cmd_buffer,
@@ -1398,6 +1408,7 @@ fn begin_gpu_pass_timing(
         return;
     }
     let start_query = slot.next_query;
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_write_timestamp2(
             cmd_buffer,
@@ -1431,6 +1442,7 @@ fn end_gpu_pass_timing(
         return;
     }
     let end_query = slot.next_query;
+    // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         device.cmd_write_timestamp2(
             cmd_buffer,

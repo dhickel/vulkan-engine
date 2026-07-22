@@ -363,7 +363,10 @@ fn animation_player_evaluates_at_time() {
         AnimationChannel, AnimationClip, AnimationPlayer, AnimationSampler, AnimationTarget,
         Interpolation, KeyframeValue,
     };
+    use renderer::SceneNodeId;
+    use std::collections::HashMap;
 
+    let target = SceneNodeId::new(1, 0);
     let mut clip = AnimationClip::new("test", 2.0);
     clip.samplers.push(AnimationSampler {
         input: vec![0.0, 1.0, 2.0],
@@ -375,28 +378,31 @@ fn animation_player_evaluates_at_time() {
         interpolation: Interpolation::Linear,
     });
     clip.channels.push(AnimationChannel {
-        node_index: 0,
+        target,
         target_path: AnimationTarget::Translation,
         sampler_index: 0,
     });
 
     let mut player = AnimationPlayer::new();
-    player.set_clip(clip);
+    player.set_clip(clip).unwrap();
     player.play();
 
+    let mut valid_targets = HashMap::new();
+    valid_targets.insert(target, ());
+
     // At t=0, should be at origin
-    let transforms = player.update(0.0);
-    let mat = transforms.get(&0).expect("node 0");
+    let transforms = player.update(0.0, &valid_targets).unwrap();
+    let mat = transforms.get(&target).expect("target node");
     assert!((mat.w_axis.x - 0.0).abs() < 0.01);
 
     // At t=1, should be at x=1
-    let transforms = player.update(1.0);
-    let mat = transforms.get(&0).expect("node 0");
+    let transforms = player.update(1.0, &valid_targets).unwrap();
+    let mat = transforms.get(&target).expect("target node");
     assert!((mat.w_axis.x - 1.0).abs() < 0.01);
 
     // At t=2, should be at x=2
-    let transforms = player.update(1.0);
-    let mat = transforms.get(&0).expect("node 0");
+    let transforms = player.update(1.0, &valid_targets).unwrap();
+    let mat = transforms.get(&target).expect("target node");
     assert!((mat.w_axis.x - 2.0).abs() < 0.01);
 }
 

@@ -174,6 +174,10 @@ pub enum SceneError {
     BadSerializedParent { node_id: String, parent_id: String },
     DuplicateSerializedNodeId(String),
     DisconnectedGraph(String),
+    AnimationError(AnimationError),
+    CommandError(CommandError),
+    SerializationError(String),
+    InvalidMutation(String),
 }
 
 impl Display for SceneError {
@@ -230,7 +234,23 @@ impl Display for SceneError {
                 write!(f, "duplicate serialized scene node id '{id}'")
             }
             Self::DisconnectedGraph(msg) => write!(f, "disconnected scene graph: {msg}"),
+            Self::AnimationError(err) => write!(f, "animation error: {err}"),
+            Self::CommandError(err) => write!(f, "command error: {err}"),
+            Self::SerializationError(msg) => write!(f, "serialization error: {msg}"),
+            Self::InvalidMutation(msg) => write!(f, "invalid mutation: {msg}"),
         }
+    }
+}
+
+impl From<AnimationError> for SceneError {
+    fn from(err: AnimationError) -> Self {
+        Self::AnimationError(err)
+    }
+}
+
+impl From<CommandError> for SceneError {
+    fn from(err: CommandError) -> Self {
+        Self::CommandError(err)
     }
 }
 
@@ -437,4 +457,76 @@ pub(crate) fn map_frame_input_err(err: impl Into<String>) -> RendererError {
 
 pub(crate) fn map_frame_render_err(err: impl Into<String>) -> RendererError {
     RendererFrameError::Render(err.into()).into()
+}
+
+// ── Animation errors ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum AnimationError {
+    InvalidClip(String),
+    InvalidChannel(String),
+    InvalidSampler(String),
+    InvalidTarget(String),
+    InvalidKeyframe(String),
+    StaleTarget(crate::scene::SceneNodeId),
+    InvalidDuration(String),
+    InvalidTimestamp(String),
+    NonFiniteOutput(String),
+    CardinalityMismatch(String),
+}
+
+impl Display for AnimationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidClip(msg) => write!(f, "invalid animation clip: {msg}"),
+            Self::InvalidChannel(msg) => write!(f, "invalid animation channel: {msg}"),
+            Self::InvalidSampler(msg) => write!(f, "invalid animation sampler: {msg}"),
+            Self::InvalidTarget(msg) => write!(f, "invalid animation target: {msg}"),
+            Self::InvalidKeyframe(msg) => write!(f, "invalid keyframe: {msg}"),
+            Self::StaleTarget(id) => write!(
+                f,
+                "stale animation target (slot={}, generation={})",
+                id.slot, id.generation
+            ),
+            Self::InvalidDuration(msg) => write!(f, "invalid animation duration: {msg}"),
+            Self::InvalidTimestamp(msg) => write!(f, "invalid animation timestamp: {msg}"),
+            Self::NonFiniteOutput(msg) => write!(f, "non-finite animation output: {msg}"),
+            Self::CardinalityMismatch(msg) => write!(f, "animation cardinality mismatch: {msg}"),
+        }
+    }
+}
+
+impl Error for AnimationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
+}
+
+// ── Command errors ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum CommandError {
+    NothingToUndo,
+    NothingToRedo,
+    CommandExecutionFailed(String),
+    UndoFailed(String),
+    RedoFailed(String),
+}
+
+impl Display for CommandError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NothingToUndo => write!(f, "nothing to undo"),
+            Self::NothingToRedo => write!(f, "nothing to redo"),
+            Self::CommandExecutionFailed(msg) => write!(f, "command execution failed: {msg}"),
+            Self::UndoFailed(msg) => write!(f, "undo failed: {msg}"),
+            Self::RedoFailed(msg) => write!(f, "redo failed: {msg}"),
+        }
+    }
+}
+
+impl Error for CommandError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        None
+    }
 }

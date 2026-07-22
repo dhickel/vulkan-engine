@@ -51,6 +51,9 @@ pub struct SceneNode {
     /// Per-mesh bounds aligned with `meshes`; must never desynchronize.
     #[serde(skip)]
     pub mesh_bounds: Vec<MeshBoundsEntry>,
+    /// Explicit local proxy bounds for geometry that is intentionally unavailable.
+    #[serde(skip)]
+    pub local_proxy_bounds: Option<Aabb>,
     /// Cached node-world bounds from local mesh aggregation.
     #[serde(skip)]
     pub node_world_bounds: Option<SceneBounds>,
@@ -81,6 +84,7 @@ impl Default for SceneNode {
             children: Vec::new(),
             meshes: Vec::new(),
             mesh_bounds: Vec::new(),
+            local_proxy_bounds: None,
             node_world_bounds: None,
             subtree_world_bounds: None,
             asset: None,
@@ -243,6 +247,46 @@ impl SceneWorld {
             })
     }
 
+    /// Returns all active directional lights with their IDs.
+    pub(crate) fn serializable_directional_lights(
+        &self,
+    ) -> impl Iterator<Item = (DirectionalLightId, &DirectionalLight)> {
+        self.directional_lights
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| {
+                entry.light.as_ref().map(|light| {
+                    (
+                        DirectionalLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        },
+                        light,
+                    )
+                })
+            })
+    }
+
+    /// Returns all active spot lights with their IDs.
+    pub(crate) fn serializable_spot_lights(
+        &self,
+    ) -> impl Iterator<Item = (SpotLightId, &SpotLight)> {
+        self.spot_lights
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| {
+                entry.light.as_ref().map(|light| {
+                    (
+                        SpotLightId {
+                            slot: slot as u32,
+                            generation: entry.generation,
+                        },
+                        light,
+                    )
+                })
+            })
+    }
+
     pub(crate) fn validate_node_ref(&self, id: SceneNodeId) -> Result<(), SceneNodeRefError> {
         let Some(entry) = self.nodes.get(id.slot as usize) else {
             return Err(SceneNodeRefError::OutOfBounds);
@@ -274,6 +318,29 @@ impl SceneWorld {
             return None;
         }
         entry.node.as_mut()
+    }
+
+    /// Invalidate all derived state (world bounds, subtree bounds) for a
+    /// node and mark it dirty. Call this after any authoritative change
+    /// (local transform, parent, meshes, mesh_bounds, proxy bounds).
+    pub(crate) fn invalidate_derived_state(&mut self, id: SceneNodeId) {
+        if let Some(node) = self.get_node_mut(id) {
+            node.dirty = true;
+            node.node_world_bounds = None;
+            node.subtree_world_bounds = None;
+        }
+    }
+
+    pub(crate) fn refresh_derived_state(&mut self) {
+        let Some(root_id) = self.root else {
+            return;
+        };
+        if !self.is_valid_node_id(root_id) {
+            self.root = None;
+            return;
+        }
+        self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
+        self.compute_subtree_bounds_post_order(root_id);
     }
 
     pub(crate) fn add_node(
@@ -399,9 +466,9 @@ impl SceneWorld {
             }
         }
 
+        self.invalidate_derived_state(node_id);
         if let Some(node) = self.get_node_mut(node_id) {
             node.parent = new_parent;
-            node.dirty = true;
         }
 
         if self.root == Some(node_id) && new_parent.is_some() {
@@ -519,12 +586,8 @@ impl SceneWorld {
             return submission;
         }
 
-        // Parent world transform must be resolved before recursing into children.
-        // Children multiply against this exact value, so order is critical.
-        self.refresh_world_recursive(root_id, Mat4::IDENTITY, false);
-
-        // Compute world and subtree bounds post-order so culling can use them.
-        self.compute_subtree_bounds_post_order(root_id);
+        // Parent world transform and bounds must be resolved before culling.
+        self.refresh_derived_state();
 
         // Frustum culling is enabled by default and can be disabled through
         // the Scene facade for diagnostics or compatibility.
@@ -668,14 +731,10 @@ impl SceneWorld {
         let node = self.get_node(node_id)?;
 
         // If an explicit proxy is set and no known meshes exist, use it.
-        if let Some(ref proxy @ SceneBounds::Proxy(_)) = node.node_world_bounds {
-            // Transform proxy from local to world.
-            if let Some(aabb) = proxy.aabb() {
-                return aabb
-                    .transformed(&node.world_transform)
-                    .map(SceneBounds::Proxy);
-            }
-            return Some(*proxy);
+        if let Some(proxy) = node.local_proxy_bounds {
+            return proxy
+                .transformed(&node.world_transform)
+                .map(SceneBounds::Proxy);
         }
 
         // Aggregate all mesh local bounds into node-local union.
@@ -1839,12 +1898,12 @@ mod tests {
     fn proxy_bounds_are_used_when_no_known_mesh() {
         let mut scene = SceneWorld::new();
         let root = scene.add_node(None, SceneNode::default());
-        // Set proxy through node_world_bounds (simulating set_node_proxy_bounds).
+        // Set local proxy bounds (simulating set_node_proxy_bounds).
         if let Some(n) = scene.get_node_mut(root) {
-            n.node_world_bounds = Some(SceneBounds::Proxy(Aabb::from_min_max(
+            n.local_proxy_bounds = Some(Aabb::from_min_max(
                 Vec3::new(1.0, 2.0, 3.0),
                 Vec3::new(4.0, 5.0, 6.0),
-            )));
+            ));
         }
         scene.set_root(root);
         scene.enable_frustum_culling = false;

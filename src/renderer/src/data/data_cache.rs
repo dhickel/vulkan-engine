@@ -225,18 +225,21 @@ impl VkDestroyable for VkCache {
 
 impl VkDataCache {
     pub fn destroy(&self, device: &Device, allocator: &Allocator) {
-        self.mesh_cache
-            .lock()
-            .expect("mesh_cache lock poisoned during destroy")
-            .destroy(device, allocator);
-        self.texture_cache
-            .lock()
-            .expect("texture_cache lock poisoned during destroy")
-            .destroy(device, allocator);
-        self.environment_cache
-            .lock()
-            .expect("environment_cache lock poisoned during destroy")
-            .destroy(device, allocator);
+        if let Ok(mut mesh_cache) = self.mesh_cache.lock() {
+            mesh_cache.destroy(device, allocator);
+        } else {
+            error!("mesh_cache lock poisoned during destroy");
+        }
+        if let Ok(mut texture_cache) = self.texture_cache.lock() {
+            texture_cache.destroy(device, allocator);
+        } else {
+            error!("texture_cache lock poisoned during destroy");
+        }
+        if let Ok(mut environment_cache) = self.environment_cache.lock() {
+            environment_cache.destroy(device, allocator);
+        } else {
+            error!("environment_cache lock poisoned during destroy");
+        }
     }
 }
 
@@ -262,6 +265,21 @@ pub struct TextureCache {
     pending_batches: HashMap<u64, PendingTextureBatch>,
     pending_textures: HashMap<TextureHandle, u64>,
     next_batch_id: u64,
+}
+
+fn descriptor_set_budget_from_limits(
+    limits: &VkBufferAndDescriptorLimits,
+    requested_initial_sets: u32,
+) -> u32 {
+    let device_descriptor_ceiling = limits.max_update_after_bind_descriptors_in_all_pools;
+    let derived = if device_descriptor_ceiling == 0 {
+        VkDynamicDescriptorAllocator::MAX_SETS_CAP
+    } else {
+        device_descriptor_ceiling.min(VkDynamicDescriptorAllocator::MAX_SETS_CAP)
+    };
+    derived
+        .max(requested_initial_sets.clamp(1, VkDynamicDescriptorAllocator::MAX_SETS_CAP))
+        .clamp(1, VkDynamicDescriptorAllocator::MAX_SETS_CAP)
 }
 
 impl TextureCache {
@@ -371,9 +389,16 @@ impl TextureCache {
             sampler_info: None,
         });
 
+        // 2×2 pink error texture: exactly 16 bytes for 4 RGBA pixels.
+        // Each pixel: [255, 20, 147, 255] = hot pink, fully opaque.
         let def_error = CachedTexture::Unloaded(TextureMeta {
             payload: gpu_data::TexturePayload::Raw {
-                bytes: vec![255, 20, 147, 255],
+                bytes: vec![
+                    255, 20, 147, 255,
+                    255, 20, 147, 255,
+                    255, 20, 147, 255,
+                    255, 20, 147, 255,
+                ],
                 width: 2,
                 height: 2,
                 format: vk::Format::R8G8B8A8_UNORM,
@@ -409,9 +434,13 @@ impl TextureCache {
             vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             5.0,
         )];
-        let image_desc_allocator =
-            VkDynamicDescriptorAllocator::new(device, 5_000, &image_desc_ratios)
-                .map_err(|err| format!("failed to create image descriptor allocator: {err}"))?;
+        let image_desc_allocator = VkDynamicDescriptorAllocator::new_with_total_set_budget(
+            device,
+            5_000,
+            &image_desc_ratios,
+            descriptor_set_budget_from_limits(limits, 5_000),
+        )
+        .map_err(|err| format!("failed to create image descriptor allocator: {err}"))?;
 
         let material_meta_storage = VkSubAllocator::new_storage_buffer(
             device,
@@ -453,10 +482,14 @@ impl TextureCache {
     }
 
     fn supports_linear_mip_blit(&self, format: vk::Format) -> bool {
-        let mut cache = self
-            .linear_blit_support
-            .lock()
-            .expect("linear_blit_support lock poisoned");
+        let Ok(mut cache) = self.linear_blit_support.lock() else {
+            error!("linear_blit_support lock poisoned; probing format without cache");
+            return vk_util::format_supports_linear_mip_blit(
+                &self.instance,
+                self.physical_device,
+                format,
+            );
+        };
         if let Some(supported) = cache.get(&format) {
             return *supported;
         }
@@ -667,7 +700,10 @@ impl TextureCache {
         }
 
         for (image_alloc, _) in image_allocs.into_iter() {
-            let allocator = self.allocator.lock().expect("allocator lock poisoned");
+            let Ok(allocator) = self.allocator.lock() else {
+                error!("allocator lock poisoned while destroying failed texture upload");
+                continue;
+            };
             vk_util::destroy_image(&self.device, &allocator, image_alloc);
         }
     }
@@ -709,8 +745,18 @@ impl TextureCache {
     }
 
     /// Synchronous texture upload: submits GPU transfers and blocks until complete.
-    /// This is the backward-compatible wrapper used by startup and sync loading paths.
+    ///
+    /// Returns `true` when all requested textures are loaded. Returns `false` on
+    /// any submission or polling failure. Does NOT sleep or spin-wait — callers must
+    /// pump transfer submissions externally or call from a thread where blocking is
+    /// acceptable (the `await_done` latch inside `add_items` provides the blocking
+    /// path for buffer-upload paths, and `poll_texture_uploads` returns 0 when no
+    /// progress was made, letting the caller retry or fail with bounded backpressure).
     pub fn allocate_textures(&mut self, texture_ids: Vec<TextureHandle>) -> bool {
+        // Track how many consecutive idle polls we've seen.
+        let mut idle_polls: u32 = 0;
+        const MAX_IDLE_POLLS: u32 = 1000;
+
         loop {
             let all_loaded = texture_ids.iter().all(|id| self.is_texture_loaded(*id));
             if all_loaded {
@@ -730,7 +776,16 @@ impl TextureCache {
                 }
             };
             if finalized == 0 {
-                std::thread::sleep(Duration::from_millis(1));
+                idle_polls += 1;
+                if idle_polls >= MAX_IDLE_POLLS {
+                    error!(
+                        "allocate_textures: no progress after {} polls, returning bounded backpressure",
+                        MAX_IDLE_POLLS
+                    );
+                    return false;
+                }
+            } else {
+                idle_polls = 0;
             }
         }
     }
@@ -743,7 +798,10 @@ impl TextureCache {
         &mut self,
         texture_ids: &[TextureHandle],
     ) -> Result<Option<u64>, String> {
-        let host_buffer = self.host_buffer.lock().expect("host_buffer lock poisoned");
+        let host_buffer = self
+            .host_buffer
+            .lock()
+            .map_err(|_| "host_buffer lock poisoned during texture submit".to_string())?;
         let max_upload_bytes = host_buffer.buffer.size;
 
         // A staging upload is already in flight; poll/finalize first, then submit again.
@@ -782,11 +840,13 @@ impl TextureCache {
 
             match self.cached_textures.get(slot) {
                 Some(CachedTexture::Unloaded(meta)) => {
-                    let aligned_size = meta
-                        .payload
-                        .bytes()
-                        .len()
-                        .next_multiple_of(self.host_alignment as usize);
+                    let payload_len = meta.payload.bytes().len();
+                    let alignment = self.host_alignment.max(1) as usize;
+                    let aligned_size = payload_len
+                        .checked_next_multiple_of(alignment)
+                        .ok_or_else(|| {
+                            format!("texture {:?} aligned upload size overflow", id)
+                        })?;
 
                     if aligned_size > max_upload_bytes as usize {
                         return Err(format!(
@@ -797,11 +857,14 @@ impl TextureCache {
 
                     // Submit one non-blocking batch per call; larger workloads are chunked
                     // by repeated submit/poll cycles via allocate_textures().
-                    if curr_bytes + aligned_size > max_upload_bytes as usize {
+                    let next_bytes = curr_bytes
+                        .checked_add(aligned_size)
+                        .ok_or_else(|| "texture batch byte count overflow".to_string())?;
+                    if next_bytes > max_upload_bytes as usize {
                         break;
                     }
 
-                    curr_bytes += aligned_size;
+                    curr_bytes = next_bytes;
                     next_upload.push(meta);
                     next_upload_blit_support
                         .push(self.supports_linear_mip_blit(meta.payload.format()));
@@ -818,6 +881,11 @@ impl TextureCache {
             return Ok(None);
         }
 
+        let reserved_batch_id = self.next_batch_id;
+        let reserved_next_batch_id = reserved_batch_id
+            .checked_add(1)
+            .ok_or_else(|| "texture upload batch id exhausted".to_string())?;
+
         let image_allocs = match vk_util::record_host_to_image_buffer(
             &self.device,
             &self.allocator,
@@ -831,9 +899,19 @@ impl TextureCache {
         ) {
             Ok(images) => images,
             Err(err) => {
-                return Err(format!("texture upload record failed: {:?}", err));
+                let reset_error = host_buffer.reset_buffers(&self.device).err();
+                return Err(match reset_error {
+                    Some(reset_err) => format!(
+                        "texture upload record failed: {:?}; resetting host buffers also failed: {}",
+                        err, reset_err
+                    ),
+                    None => format!("texture upload record failed: {:?}", err),
+                });
             }
         };
+
+        drop(next_upload);
+        drop(next_upload_blit_support);
 
         debug!("Submitting texture upload batch (non-blocking)");
         if let Err(err) = host_buffer.submit_transfer_commands(VkSubmitParam::signaling(
@@ -867,8 +945,9 @@ impl TextureCache {
 
             // Transfer submission may already be in flight; defer image cleanup through
             // normal pending-batch finalization once the latch reaches zero.
-            let batch_id = self.next_batch_id;
-            self.next_batch_id = self.next_batch_id.wrapping_add(1).max(1);
+            drop(host_buffer);
+            self.next_batch_id = reserved_next_batch_id;
+            let batch_id = reserved_batch_id;
             for id in batch_texture_ids.iter() {
                 self.pending_textures.insert(*id, batch_id);
             }
@@ -899,8 +978,9 @@ impl TextureCache {
         }
 
         // Store as pending batch for later poll_texture_uploads() finalization
-        let batch_id = self.next_batch_id;
-        self.next_batch_id = self.next_batch_id.wrapping_add(1).max(1);
+        drop(host_buffer);
+        self.next_batch_id = reserved_next_batch_id;
+        let batch_id = reserved_batch_id;
 
         for id in batch_texture_ids.iter() {
             self.pending_textures.insert(*id, batch_id);
@@ -929,7 +1009,10 @@ impl TextureCache {
             return Ok(0);
         }
 
-        let host_buffer = self.host_buffer.lock().expect("host_buffer lock poisoned");
+        let host_buffer = self
+            .host_buffer
+            .lock()
+            .map_err(|_| "host_buffer lock poisoned during texture poll".to_string())?;
         let latch_count = host_buffer.countdown_latch.get_count();
 
         if latch_count != 0 {
@@ -992,12 +1075,18 @@ impl TextureCache {
         Ok(finalized)
     }
 
+    /// Load and publish materials with transactional semantics.
+    ///
+    /// Stages all texture loads, meta-buffer allocations, and descriptor writes
+    /// BEFORE publishing any handle state. If any step fails, all staged resources
+    /// are rolled back and no cache handles are updated.
     fn allocate_materials(
         &mut self,
         material_ids: Vec<MaterialHandle>,
         buffer_placement: BufferPlacement,
         rtn_alloc: bool,
     ) -> LoadResult<VkLoadedMaterial> {
+        // ── Phase 1: Validate and collect unloaded materials ──────────
         let mut materials =
             Vec::<(MaterialHandle, MaterialMeta)>::with_capacity(material_ids.len());
         for id in material_ids {
@@ -1013,12 +1102,11 @@ impl TextureCache {
             materials.push((id, *meta));
         }
 
+        // ── Phase 2: Load all referenced textures ────────────────────
         let mut texture_ids: Vec<TextureHandle> = materials
             .iter()
             .flat_map(|(_, meta)| meta.texture_ids.to_vec())
             .collect();
-
-        // Dedupe
         texture_ids.sort_unstable();
         texture_ids.dedup();
 
@@ -1026,6 +1114,7 @@ impl TextureCache {
             return LoadResult::Failed(None);
         }
 
+        // ── Phase 3: Allocate meta-buffer storage ────────────────────
         let meta_bytes: Vec<&[u8]> = materials
             .iter()
             .map(|(_, material)| bytemuck::bytes_of(&material.material_values))
@@ -1041,40 +1130,77 @@ impl TextureCache {
                 successful_allocs,
             } => {
                 error!("Error allocating material meta: {:?}", error_msg);
-                successful_allocs
-                    .into_iter()
-                    .for_each(|alloc| self.material_meta_storage.deallocate(alloc));
+                for alloc in successful_allocs {
+                    self.material_meta_storage.deallocate(alloc);
+                }
                 return LoadResult::Failed(None);
             }
         };
 
+        // ── Phase 4: Stage descriptor writes (no cache mutation yet) ─
+        // Build a flat list of (slot, &meta, alloc) entries for staging.
+        let entries: Vec<(usize, &MaterialMeta, VkSubAlloc)> = materials
+            .iter()
+            .map(|(id, meta)| {
+                let slot = self
+                    .validate_material_slot(*id)
+                    .expect("material handle validated in phase 1");
+                (slot, meta)
+            })
+            .zip(meta_allocs.into_iter())
+            .map(|((slot, meta), alloc)| (slot, meta, alloc))
+            .collect();
+
+        let mut staged: Vec<(usize, VkLoadedMaterial)> =
+            Vec::with_capacity(entries.len());
+
+        let entry_count = entries.len();
+        for (entry_index, (slot, meta, alloc)) in entries.iter().enumerate() {
+            let slot = *slot;
+            let alloc = *alloc;
+            match self.write_material_descriptors(*meta, alloc) {
+                Ok(mat) => {
+                    staged.push((slot, mat));
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to write material descriptors for slot {}: {:?}",
+                        slot, err
+                    );
+                    // Roll back all descriptor metadata allocs for materials
+                    // that were successfully staged so far.
+                    for (_, mat) in &staged {
+                        // VkSubAlloc is Copy; deallocate the GPU backing.
+                        self.material_meta_storage.deallocate(mat.meta_alloc);
+                    }
+                    // Deallocate the current alloc and every not-yet-staged alloc.
+                    self.material_meta_storage.deallocate(alloc);
+                    for (_, _, remaining_alloc) in entries
+                        .iter()
+                        .skip(entry_index + 1)
+                        .take(entry_count.saturating_sub(entry_index + 1))
+                    {
+                        self.material_meta_storage.deallocate(*remaining_alloc);
+                    }
+                    return LoadResult::Failed(None);
+                }
+            }
+        }
+
+        // ── Phase 5: Commit all staged materials atomically ──────────
         let mut loaded_materials = if rtn_alloc {
-            Some(Vec::<VkLoadedMaterial>::with_capacity(materials.len()))
+            Some(Vec::<VkLoadedMaterial>::with_capacity(staged.len()))
         } else {
             None
         };
 
-        for ((id, meta), alloc) in materials.into_iter().zip(meta_allocs.into_iter()) {
-            let loaded_mat = match self.write_material_descriptors(&meta, alloc) {
-                Ok(mat) => mat,
-                Err(err) => {
-                    error!(
-                        "Failed to write material descriptors for {:?}: {:?}",
-                        id, err
-                    );
-                    return LoadResult::Failed(None);
-                }
-            };
-            let Ok(slot) = self.validate_material_slot(id) else {
-                error!("Failed to update loaded material slot for {:?}", id);
-                return LoadResult::Failed(None);
-            };
-            self.cached_materials[slot] = CachedMaterial::Loaded(loaded_mat);
-
+        for (slot, mat) in staged {
             if let Some(rtn_vec) = &mut loaded_materials {
-                rtn_vec.push(loaded_mat)
+                rtn_vec.push(mat);
             }
+            self.cached_materials[slot] = CachedMaterial::Loaded(mat);
         }
+
         LoadResult::Success(loaded_materials)
     }
 
@@ -1312,8 +1438,11 @@ impl TextureCache {
             if let Some(slot) = self.cached_textures.get_mut(slot_idx) {
                 let old_tex = std::mem::replace(slot, CachedTexture::_NULL);
                 if let CachedTexture::Loaded(tex) = old_tex {
-                    let allocator = self.allocator.lock().expect("allocator lock poisoned");
-                    vk_util::destroy_image(&self.device, &allocator, tex.alloc)
+                    if let Ok(allocator) = self.allocator.lock() {
+                        vk_util::destroy_image(&self.device, &allocator, tex.alloc)
+                    } else {
+                        error!("allocator lock poisoned while deallocating texture payload");
+                    }
                 }
                 if bump_cache_generation(&mut self.texture_generations[slot_idx]) {
                     self.free_texture_slots.push(slot_idx as u32);
@@ -1573,6 +1702,7 @@ impl MeshCache {
             }
         }
 
+        // Stage 1: allocate vertices through vertex_storage.
         let vertex_allocs = match self
             .vertex_storage
             .allocate_bytes(&vertex_data, buffer_placement)
@@ -1582,14 +1712,16 @@ impl MeshCache {
                 error_msg,
                 successful_allocs,
             } => {
-                successful_allocs
-                    .into_iter()
-                    .for_each(|alloc| self.vertex_storage.deallocate(alloc));
+                // Roll back any partial vertex allocs through the correct owner.
+                for alloc in successful_allocs {
+                    self.vertex_storage.deallocate(alloc);
+                }
                 error!("Failed to allocate vertices: {:?}", error_msg);
                 return LoadResult::Failed(None);
             }
         };
 
+        // Stage 2: allocate indices through index_storage (distinct ownership domain).
         let index_allocs = match self
             .index_storage
             .allocate_bytes(&index_data, buffer_placement)
@@ -1599,10 +1731,15 @@ impl MeshCache {
                 error_msg,
                 successful_allocs,
             } => {
-                successful_allocs
-                    .into_iter()
-                    .for_each(|alloc| self.vertex_storage.deallocate(alloc));
-                error!("Failed to allocate vertices: {:?}", error_msg);
+                // Roll back all staged vertex allocations first.
+                for alloc in vertex_allocs {
+                    self.vertex_storage.deallocate(alloc);
+                }
+                // Then deallocate any partial index allocs through the correct owner.
+                for alloc in successful_allocs {
+                    self.index_storage.deallocate(alloc);
+                }
+                error!("Failed to allocate indices (rolled back {} vertex allocs): {:?}", vertex_data.len(), error_msg);
                 return LoadResult::Failed(None);
             }
         };
@@ -2021,7 +2158,9 @@ impl VkShaderCache {
         let mut compiled_shaders = shader_paths
             .iter()
             .map(|(typ, path)| {
-                vk_util::load_shader_module(device, path).map(|shader| (*typ, shader))
+                vk_util::load_shader_module(device, path)
+                    .map(|shader| (*typ, shader))
+                    .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<(CoreShaderType, vk::ShaderModule)>, String>>()?;
 

@@ -335,7 +335,7 @@ impl AssetLoadTracker {
             }
             Err(std::sync::TryLockError::WouldBlock) => {}
             Err(std::sync::TryLockError::Poisoned(_)) => {
-                panic!("texture_cache lock poisoned during asset pump")
+                return Err(format!("texture_cache lock poisoned during asset pump"));
             }
         }
 

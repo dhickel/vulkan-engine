@@ -252,6 +252,11 @@ pub struct PointLight {
 impl PointLight {
     /// Validate point light parameters.
     fn validate(&self) -> Result<(), SceneError> {
+        if !self.position.is_finite() {
+            return Err(SceneError::InvalidPointLight(
+                "position must be finite".to_string(),
+            ));
+        }
         if !self.range.is_finite() || self.range <= 0.0 {
             return Err(SceneError::InvalidPointLight(
                 "range must be finite and > 0.0".to_string(),
@@ -511,6 +516,14 @@ pub struct Scene {
     next_stable_node_id: u64,
     skybox_asset: Option<SceneAssetReference>,
     materials: BTreeMap<String, SerializedMaterialOverride>,
+    node_persistence: HashMap<SceneNodeId, SerializedNodePersistence>,
+    point_light_stable_ids: HashMap<PointLightId, String>,
+    point_light_parents: HashMap<PointLightId, String>,
+    directional_light_stable_ids: HashMap<DirectionalLightId, String>,
+    directional_light_parents: HashMap<DirectionalLightId, String>,
+    spot_light_stable_ids: HashMap<SpotLightId, String>,
+    spot_light_parents: HashMap<SpotLightId, String>,
+    audio: Vec<SerializedAudioReference>,
     /// Editor-specific metadata blob.
     ///
     /// This field is preserved for serialization compatibility but is not
@@ -542,6 +555,14 @@ impl Scene {
             next_stable_node_id: 1,
             skybox_asset: None,
             materials: BTreeMap::new(),
+            node_persistence: HashMap::new(),
+            point_light_stable_ids: HashMap::new(),
+            point_light_parents: HashMap::new(),
+            directional_light_stable_ids: HashMap::new(),
+            directional_light_parents: HashMap::new(),
+            spot_light_stable_ids: HashMap::new(),
+            spot_light_parents: HashMap::new(),
+            audio: Vec::new(),
             editor: serde_json::json!({}),
         }
     }
@@ -573,6 +594,11 @@ impl Scene {
         parent: Option<SceneNodeId>,
         transform: Mat4,
     ) -> Result<SceneNodeId, SceneError> {
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
         if let Some(parent_id) = parent {
             self.validate_parent(parent_id)?;
         }
@@ -598,6 +624,7 @@ impl Scene {
     pub fn remove_node(&mut self, node: SceneNodeId) -> Result<(), SceneError> {
         self.validate_node(node)?;
         if self.world.remove_node(node) {
+            self.node_persistence.remove(&node);
             return Ok(());
         }
 
@@ -612,8 +639,13 @@ impl Scene {
         let Some(node_ref) = self.world.get_node_mut(node) else {
             return Err(SceneError::InvalidNode(node));
         };
+        if !transform.is_finite() {
+            return Err(SceneError::InvalidMutation(
+                "transform must contain only finite values".to_string(),
+            ));
+        }
         node_ref.local_transform = transform;
-        node_ref.dirty = true;
+        self.world.invalidate_derived_state(node);
 
         Ok(())
     }
@@ -856,7 +888,7 @@ impl Scene {
             mesh,
             bounds: SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry),
         });
-        node_ref.dirty = true;
+        self.world.invalidate_derived_state(node);
 
         Ok(())
     }
@@ -893,7 +925,7 @@ impl Scene {
         };
         node_ref.meshes.push(mesh);
         node_ref.mesh_bounds.push(MeshBoundsEntry { mesh, bounds });
-        node_ref.dirty = true;
+        self.world.invalidate_derived_state(node);
 
         Ok(())
     }
@@ -917,18 +949,21 @@ impl Scene {
         let Some(node_ref) = self.world.get_node_mut(node) else {
             return Err(SceneError::InvalidNode(node));
         };
-        // Only set proxy when no known bound is present.
-        if node_ref
-            .mesh_bounds
-            .iter()
-            .any(|e| matches!(e.bounds, SceneBounds::Known(_)))
-        {
+        // Only set proxy when no geometry exists or all mesh bounds are known
+        // missing. Skinned, deformed, stale, invalid, known, and existing proxy
+        // mesh bounds remain conservatively governed by their own state.
+        if node_ref.mesh_bounds.iter().any(|entry| {
+            !matches!(
+                entry.bounds,
+                SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry)
+            )
+        }) {
             return Err(SceneError::MergeFailed(
-                "cannot set proxy bounds on a node that already has known mesh bounds".to_string(),
+                "cannot set proxy bounds when mesh bounds are known, stale, skinned, deformed, invalid, or already proxied".to_string(),
             ));
         }
-        node_ref.node_world_bounds = Some(SceneBounds::Proxy(local_aabb));
-        node_ref.dirty = true;
+        node_ref.local_proxy_bounds = Some(local_aabb);
+        self.world.invalidate_derived_state(node);
         Ok(())
     }
 
@@ -941,9 +976,8 @@ impl Scene {
         let Some(node_ref) = self.world.get_node_mut(node) else {
             return Err(SceneError::InvalidNode(node));
         };
-        if matches!(node_ref.node_world_bounds, Some(SceneBounds::Proxy(_))) {
-            node_ref.node_world_bounds = None;
-            node_ref.dirty = true;
+        if node_ref.local_proxy_bounds.take().is_some() {
+            self.world.invalidate_derived_state(node);
         }
         Ok(())
     }
@@ -958,8 +992,8 @@ impl Scene {
         };
         node_ref.meshes.clear();
         node_ref.mesh_bounds.clear();
-        node_ref.node_world_bounds = None;
-        node_ref.dirty = true;
+        node_ref.local_proxy_bounds = None;
+        self.world.invalidate_derived_state(node);
 
         Ok(())
     }
@@ -1062,6 +1096,8 @@ impl Scene {
         self.validate_point_light(id)?;
 
         if self.world.remove_point_light(id) {
+            self.point_light_stable_ids.remove(&id);
+            self.point_light_parents.remove(&id);
             return Ok(());
         }
 
@@ -1126,6 +1162,8 @@ impl Scene {
         self.validate_directional_light(id)?;
 
         if self.world.remove_directional_light(id) {
+            self.directional_light_stable_ids.remove(&id);
+            self.directional_light_parents.remove(&id);
             return Ok(());
         }
 
@@ -1253,7 +1291,11 @@ impl Scene {
     /// Remove a spot light.
     pub fn remove_spot_light(&mut self, id: SpotLightId) -> Result<(), SceneError> {
         self.validate_spot_light(id)?;
-        if self.world.remove_spot_light(id) { return Ok(()); }
+        if self.world.remove_spot_light(id) {
+            self.spot_light_stable_ids.remove(&id);
+            self.spot_light_parents.remove(&id);
+            return Ok(());
+        }
         Err(SceneError::InvalidSpotLight(format!("failed to remove spot light")))
     }
 
@@ -1329,14 +1371,35 @@ impl Scene {
     /// Serialize the scene to a versioned JSON file. Runtime handles are not
     /// written; asset-backed content uses durable asset IDs plus optional path hints.
     ///
+    /// The save is failure-atomic: serialization and validation happen first,
+    /// then a staged file is written, flushed, and renamed over the target.
+    /// Partial writes or I/O errors are not published.
+    ///
     /// Thread: Any
     /// May Stall: Yes (file I/O)
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), SceneError> {
+        let path = path.as_ref();
         let serialized = SerializedScene::from_scene(self);
-        let json = serde_json::to_string_pretty(&serialized)
-            .map_err(|e| SceneError::MergeFailed(format!("scene serialization failed: {e}")))?;
-        std::fs::write(path.as_ref(), json)
-            .map_err(|e| SceneError::MergeFailed(format!("failed to write scene file: {e}")))?;
+        let json = serde_json::to_string_pretty(&serialized).map_err(|e| {
+            SceneError::SerializationError(format!("scene serialization failed: {e}"))
+        })?;
+
+        // Write to a staged temporary file next to the target, flush it, then
+        // atomically rename over the destination. Every fallible staged step
+        // removes the staged file and propagates the original error.
+        let staged = staged_path(path)?;
+        if let Err(e) = write_and_flush_staged_file(&staged, json.as_bytes()) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(SceneError::SerializationError(format!(
+                "failed to write staged scene file: {e}"
+            )));
+        }
+
+        std::fs::rename(&staged, path).map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            SceneError::SerializationError(format!("failed to rename staged scene: {e}"))
+        })?;
+
         Ok(())
     }
 
@@ -1373,11 +1436,9 @@ impl Scene {
             )
         })?;
         let serialized: SerializedScene = serde_json::from_str(&json).map_err(|e| {
-            crate::api::errors::RendererError::Init(
-                crate::api::errors::RendererInitError::StartupScene(format!(
-                    "scene deserialization failed: {e}"
-                )),
-            )
+            crate::api::errors::RendererError::Scene(SceneError::SerializationError(format!(
+                "scene deserialization failed: {e}"
+            )))
         })?;
         Ok(serialized)
     }
@@ -1391,6 +1452,14 @@ impl Scene {
             next_stable_node_id: 1,
             skybox_asset: None,
             materials: BTreeMap::new(),
+            node_persistence: HashMap::new(),
+            point_light_stable_ids: HashMap::new(),
+            point_light_parents: HashMap::new(),
+            directional_light_stable_ids: HashMap::new(),
+            directional_light_parents: HashMap::new(),
+            spot_light_stable_ids: HashMap::new(),
+            spot_light_parents: HashMap::new(),
+            audio: Vec::new(),
             editor: serde_json::json!({}),
         }
     }
@@ -1405,7 +1474,7 @@ impl Scene {
     /// Thread: Any
     /// May Stall: No
     pub fn pick(
-        &self,
+        &mut self,
         screen_x: f32,
         screen_y: f32,
         viewport_width: u32,
@@ -1421,6 +1490,7 @@ impl Scene {
             inv_vp,
             camera_position,
         );
+        self.world.refresh_derived_state();
         self.world.pick_ray(&ray)
     }
 
@@ -1442,7 +1512,7 @@ impl Scene {
     /// Thread: Any
     /// May Stall: No
     pub fn pick_last_camera(
-        &self,
+        &mut self,
         screen_x: f32,
         screen_y: f32,
         viewport_width: u32,
@@ -1742,6 +1812,7 @@ fn build_fragment_merge_plan_recursive(
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedTransform {
     translation: [f32; 3],
     rotation: [f32; 4],
@@ -1749,6 +1820,7 @@ struct SerializedTransform {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedAssetReference {
     #[serde(default)]
     id: Option<String>,
@@ -1756,7 +1828,8 @@ struct SerializedAssetReference {
     path_hint: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedVisibility {
     visible: bool,
     locked: bool,
@@ -1764,6 +1837,7 @@ struct SerializedVisibility {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedNode {
     id: String,
     parent: Option<String>,
@@ -1782,7 +1856,15 @@ struct SerializedNode {
     prefab: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Debug)]
+struct SerializedNodePersistence {
+    visibility: SerializedVisibility,
+    collision: Option<SerializedCollisionComponent>,
+    prefab: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedPointLight {
     id: String,
     kind: String,
@@ -1795,11 +1877,43 @@ struct SerializedPointLight {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedDirectionalLight {
+    id: String,
+    kind: String,
+    #[serde(default)]
+    parent: Option<String>,
+    direction: [f32; 3],
+    color: [f32; 3],
+    intensity: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedSpotLight {
+    id: String,
+    kind: String,
+    #[serde(default)]
+    parent: Option<String>,
+    position: [f32; 3],
+    direction: [f32; 3],
+    color: [f32; 3],
+    intensity: f32,
+    range: f32,
+    #[serde(default)]
+    inner_cone_angle: f32,
+    #[serde(default)]
+    outer_cone_angle: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedEnvironment {
     asset: SerializedAssetReference,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedMaterialOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base: Option<String>,
@@ -1808,6 +1922,7 @@ struct SerializedMaterialOverride {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedCollisionComponent {
     body: SerializedCollisionBody,
     #[serde(default)]
@@ -1815,12 +1930,14 @@ struct SerializedCollisionComponent {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedCollisionBody {
     id: String,
     kind: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedCollisionCollider {
     id: String,
     shape: SerializedCollisionShape,
@@ -1833,6 +1950,7 @@ struct SerializedCollisionCollider {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedCollisionShape {
     kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1844,6 +1962,7 @@ struct SerializedCollisionShape {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedAudioClipReference {
     #[serde(default)]
     id: Option<String>,
@@ -1852,6 +1971,7 @@ struct SerializedAudioClipReference {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedAudioReference {
     id: String,
     clip: SerializedAudioClipReference,
@@ -1866,6 +1986,7 @@ struct SerializedAudioReference {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SerializedScene {
     #[serde(default)]
     format_version: u32,
@@ -1874,7 +1995,12 @@ struct SerializedScene {
     display_name: Option<String>,
     root_nodes: Vec<String>,
     nodes: Vec<SerializedNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lights: Vec<SerializedPointLight>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    directional_lights: Vec<SerializedDirectionalLight>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    spot_lights: Vec<SerializedSpotLight>,
     environment: Option<SerializedEnvironment>,
     #[serde(default)]
     materials: BTreeMap<String, SerializedMaterialOverride>,
@@ -1890,7 +2016,8 @@ impl SerializedScene {
         let nodes: Vec<SerializedNode> = scene
             .world
             .serializable_nodes()
-            .map(|(_, node)| {
+            .map(|(node_id, node)| {
+                let persistence = scene.node_persistence.get(&node_id);
                 let id = node.stable_id.clone().unwrap_or_else(|| {
                     let generated = format!("node.autogenerated.{fallback_index:06}");
                     fallback_index += 1;
@@ -1916,15 +2043,13 @@ impl SerializedScene {
                         .asset
                         .as_ref()
                         .map(SerializedAssetReference::from_scene_ref),
-                    collision: None,
+                    collision: persistence.and_then(|entry| entry.collision.clone()),
                     material_overrides: node.material_overrides.clone(),
-                    visibility: SerializedVisibility {
-                        visible: true,
-                        locked: false,
-                        layer: "world".to_string(),
-                    },
+                    visibility: persistence
+                        .map(|entry| entry.visibility.clone())
+                        .unwrap_or_else(default_visibility),
                     tags: node.tags.clone(),
-                    prefab: None,
+                    prefab: persistence.and_then(|entry| entry.prefab.clone()),
                 }
             })
             .collect();
@@ -1938,14 +2063,58 @@ impl SerializedScene {
             .world
             .serializable_lights()
             .enumerate()
-            .map(|(idx, (_, light))| SerializedPointLight {
-                id: format!("light.{:06}", idx + 1),
+            .map(|(idx, (id, light))| SerializedPointLight {
+                id: scene
+                    .point_light_stable_ids
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("light.{:06}", idx + 1)),
                 kind: "point".to_string(),
-                parent: None,
+                parent: scene.point_light_parents.get(&id).cloned(),
                 position: light.position.to_array(),
                 color: light.color.to_array(),
                 intensity: light.intensity,
                 range: light.range,
+            })
+            .collect();
+
+        let directional_lights: Vec<SerializedDirectionalLight> = scene
+            .world
+            .serializable_directional_lights()
+            .enumerate()
+            .map(|(idx, (id, light))| SerializedDirectionalLight {
+                id: scene
+                    .directional_light_stable_ids
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("directional.{:06}", idx + 1)),
+                kind: "directional".to_string(),
+                parent: scene.directional_light_parents.get(&id).cloned(),
+                direction: light.direction.to_array(),
+                color: light.color.to_array(),
+                intensity: light.intensity,
+            })
+            .collect();
+
+        let spot_lights: Vec<SerializedSpotLight> = scene
+            .world
+            .serializable_spot_lights()
+            .enumerate()
+            .map(|(idx, (id, light))| SerializedSpotLight {
+                id: scene
+                    .spot_light_stable_ids
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("spot.{:06}", idx + 1)),
+                kind: "spot".to_string(),
+                parent: scene.spot_light_parents.get(&id).cloned(),
+                position: light.position.to_array(),
+                direction: light.direction.to_array(),
+                color: light.color.to_array(),
+                intensity: light.intensity,
+                range: light.range,
+                inner_cone_angle: light.inner_cone_angle,
+                outer_cone_angle: light.outer_cone_angle,
             })
             .collect();
 
@@ -1956,6 +2125,8 @@ impl SerializedScene {
             root_nodes,
             nodes,
             lights,
+            directional_lights,
+            spot_lights,
             environment: scene
                 .skybox_asset
                 .as_ref()
@@ -1963,7 +2134,7 @@ impl SerializedScene {
                     asset: SerializedAssetReference::from_scene_ref(asset),
                 }),
             materials: scene.materials.clone(),
-            audio: Vec::new(),
+            audio: scene.audio.clone(),
             editor: scene.editor_metadata().clone(),
         }
     }
@@ -1984,6 +2155,7 @@ impl SerializedScene {
         scene.scene_id = self.scene_id.clone();
         scene.display_name = self.display_name.clone();
         scene.materials = self.materials.clone();
+        scene.audio = self.audio.clone();
         scene.set_editor_metadata(self.editor.clone());
 
         let mut id_map: HashMap<String, SceneNodeId> = HashMap::new();
@@ -2024,6 +2196,14 @@ impl SerializedScene {
                 node_ref.material_overrides = serialized_node.material_overrides.clone();
                 node_ref.tags = serialized_node.tags.clone();
             }
+            scene.node_persistence.insert(
+                node_id,
+                SerializedNodePersistence {
+                    visibility: serialized_node.visibility.clone(),
+                    collision: serialized_node.collision.clone(),
+                    prefab: serialized_node.prefab.clone(),
+                },
+            );
             id_map.insert(serialized_node.id.clone(), node_id);
         }
 
@@ -2035,7 +2215,7 @@ impl SerializedScene {
                 ))
                 .into());
             }
-            scene
+            let id = scene
                 .create_point_light(PointLight {
                     position: Vec3::from_array(light.position),
                     color: Vec3::from_array(light.color),
@@ -2043,6 +2223,58 @@ impl SerializedScene {
                     range: light.range,
                 })
                 .map_err(crate::api::errors::RendererError::from)?;
+            scene.point_light_stable_ids.insert(id, light.id.clone());
+            if let Some(parent) = &light.parent {
+                scene.point_light_parents.insert(id, parent.clone());
+            }
+        }
+
+        for light in &self.directional_lights {
+            if light.kind != "directional" {
+                return Err(SceneError::InvalidDirectionalLight(format!(
+                    "unsupported directional light kind '{}'",
+                    light.kind
+                ))
+                .into());
+            }
+            let dl = DirectionalLight {
+                direction: Vec3::from_array(light.direction),
+                color: Vec3::from_array(light.color),
+                intensity: light.intensity,
+            };
+            // Use add_directional_light to avoid the single-light cap during load.
+            let id = scene
+                .add_directional_light(dl)
+                .map_err(crate::api::errors::RendererError::from)?;
+            scene.directional_light_stable_ids.insert(id, light.id.clone());
+            if let Some(parent) = &light.parent {
+                scene.directional_light_parents.insert(id, parent.clone());
+            }
+        }
+
+        for light in &self.spot_lights {
+            if light.kind != "spot" {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "unsupported spot light kind '{}'",
+                    light.kind
+                ))
+                .into());
+            }
+            let id = scene
+                .create_spot_light(SpotLight {
+                    position: Vec3::from_array(light.position),
+                    direction: Vec3::from_array(light.direction),
+                    color: Vec3::from_array(light.color),
+                    intensity: light.intensity,
+                    range: light.range,
+                    inner_cone_angle: light.inner_cone_angle,
+                    outer_cone_angle: light.outer_cone_angle,
+                })
+                .map_err(crate::api::errors::RendererError::from)?;
+            scene.spot_light_stable_ids.insert(id, light.id.clone());
+            if let Some(parent) = &light.parent {
+                scene.spot_light_parents.insert(id, parent.clone());
+            }
         }
 
         if let Some(environment) = self.environment {
@@ -2096,6 +2328,171 @@ impl SerializedScene {
                         parent_id: parent_id.clone(),
                     });
                 }
+            }
+            // Validate finite transforms.
+            let t = &node.transform;
+            if !t.translation.iter().all(|v| v.is_finite())
+                || !t.rotation.iter().all(|v| v.is_finite())
+                || !t.scale.iter().all(|v| v.is_finite())
+            {
+                return Err(SceneError::DisconnectedGraph(format!(
+                    "node '{}' has non-finite transform components",
+                    node.id
+                )));
+            }
+        }
+
+        // Validate point lights.
+        for light in &self.lights {
+            if light.kind != "point" {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "unsupported light kind '{}'",
+                    light.kind
+                )));
+            }
+            if let Some(parent) = &light.parent {
+                if !index_by_id.contains_key(parent) {
+                    return Err(SceneError::BadSerializedParent {
+                        node_id: light.id.clone(),
+                        parent_id: parent.clone(),
+                    });
+                }
+            }
+            if !light.position.iter().all(|v| v.is_finite()) {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "point light '{}' has non-finite position",
+                    light.id
+                )));
+            }
+            if !light.range.is_finite() || light.range <= 0.0 {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "point light '{}' has invalid range",
+                    light.id
+                )));
+            }
+            if !light.intensity.is_finite() || light.intensity < 0.0 {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "point light '{}' has invalid intensity",
+                    light.id
+                )));
+            }
+            if !light.color.iter().all(|v| v.is_finite()) {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "point light '{}' has non-finite color",
+                    light.id
+                )));
+            }
+        }
+
+        // Validate directional lights.
+        for light in &self.directional_lights {
+            if light.kind != "directional" {
+                return Err(SceneError::InvalidDirectionalLight(format!(
+                    "unsupported directional light kind '{}'",
+                    light.kind
+                )));
+            }
+            if let Some(parent) = &light.parent {
+                if !index_by_id.contains_key(parent) {
+                    return Err(SceneError::BadSerializedParent {
+                        node_id: light.id.clone(),
+                        parent_id: parent.clone(),
+                    });
+                }
+            }
+            if !light.direction.iter().all(|v| v.is_finite())
+                || light.direction.iter().all(|v| v.abs() < 1e-6)
+            {
+                return Err(SceneError::InvalidDirectionalLight(format!(
+                    "directional light '{}' has non-finite or zero direction",
+                    light.id
+                )));
+            }
+            if !light.intensity.is_finite() || light.intensity < 0.0 {
+                return Err(SceneError::InvalidDirectionalLight(format!(
+                    "directional light '{}' has invalid intensity",
+                    light.id
+                )));
+            }
+            if !light.color.iter().all(|v| v.is_finite()) {
+                return Err(SceneError::InvalidDirectionalLight(format!(
+                    "directional light '{}' has non-finite color",
+                    light.id
+                )));
+            }
+        }
+
+        // Validate spot lights.
+        for light in &self.spot_lights {
+            if light.kind != "spot" {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "unsupported spot light kind '{}'",
+                    light.kind
+                )));
+            }
+            if let Some(parent) = &light.parent {
+                if !index_by_id.contains_key(parent) {
+                    return Err(SceneError::BadSerializedParent {
+                        node_id: light.id.clone(),
+                        parent_id: parent.clone(),
+                    });
+                }
+            }
+            if !light.position.iter().all(|v| v.is_finite()) {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has non-finite position",
+                    light.id
+                )));
+            }
+            if !light.direction.iter().all(|v| v.is_finite())
+                || light.direction.iter().all(|v| v.abs() < 1e-6)
+            {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has non-finite or zero direction",
+                    light.id
+                )));
+            }
+            if !light.range.is_finite() || light.range <= 0.0 {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has invalid range",
+                    light.id
+                )));
+            }
+            if !light.intensity.is_finite() || light.intensity < 0.0 {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has invalid intensity",
+                    light.id
+                )));
+            }
+            if !light.color.iter().all(|v| v.is_finite()) {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has non-finite color",
+                    light.id
+                )));
+            }
+            if !light.inner_cone_angle.is_finite()
+                || light.inner_cone_angle < 0.0
+                || light.inner_cone_angle > std::f32::consts::PI
+            {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has invalid inner_cone_angle",
+                    light.id
+                )));
+            }
+            if !light.outer_cone_angle.is_finite()
+                || light.outer_cone_angle < 0.0
+                || light.outer_cone_angle > std::f32::consts::PI
+            {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' has invalid outer_cone_angle",
+                    light.id
+                )));
+            }
+            if light.inner_cone_angle > light.outer_cone_angle {
+                return Err(SceneError::InvalidSpotLight(format!(
+                    "spot light '{}' inner_cone_angle must be <= outer_cone_angle",
+                    light.id
+                )));
             }
         }
 
@@ -2866,6 +3263,38 @@ fn validate_material_override(slot: &str, material_override_id: &str) -> Result<
         ));
     }
     Ok(())
+}
+
+/// Produce a staged path adjacent to `target`.
+fn staged_path(target: &std::path::Path) -> Result<std::path::PathBuf, SceneError> {
+    let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .ok_or_else(|| {
+            SceneError::SerializationError("target path has no file name".to_string())
+        })?;
+    let staged_name = format!(".{file_name}.staged");
+    Ok(parent.join(staged_name))
+}
+
+/// Write and flush a staged file before publication.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_and_flush_staged_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    file.sync_all()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_and_flush_staged_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 fn default_visibility() -> SerializedVisibility {

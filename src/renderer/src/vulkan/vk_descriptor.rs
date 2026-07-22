@@ -89,6 +89,8 @@ pub(crate) enum DescriptorAllocError {
     ResetRejected(String),
     /// A Vulkan pool reset operation failed.
     ResetFailed(String),
+    /// Total descriptor budget exhausted; the ceiling is encoded in the message.
+    BudgetExhausted { current: u32, ceiling: u32 },
 }
 
 impl fmt::Display for DescriptorAllocError {
@@ -100,6 +102,10 @@ impl fmt::Display for DescriptorAllocError {
             Self::PoolCreationFailed(msg) => write!(f, "descriptor pool creation failed: {msg}"),
             Self::ResetRejected(msg) => write!(f, "descriptor reset rejected: {msg}"),
             Self::ResetFailed(msg) => write!(f, "descriptor reset failed: {msg}"),
+            Self::BudgetExhausted { current, ceiling } => write!(
+                f,
+                "descriptor budget exhausted: {current}/{ceiling} total sets across all pools"
+            ),
         }
     }
 }
@@ -529,6 +535,10 @@ pub struct VkDynamicDescriptorAllocator {
     stats: DescriptorAllocatorStats,
     /// Maximum sets per pool; growth is clamped to this cap.
     max_sets_cap: u32,
+    /// Hard device-compatible total budget across all pools. Pre-commit check
+    /// rejects allocation before pool creation when the sum of existing pool
+    /// capacities plus the new pool's planned capacity would exceed this ceiling.
+    total_set_budget: u32,
     /// Private fault-injection adapter. Production uses `DefaultVulkanAdapter`.
     adapter: Box<dyn VkDescriptorAdapter>,
 }
@@ -544,6 +554,7 @@ impl std::fmt::Debug for VkDynamicDescriptorAllocator {
             .field("last_reset_epoch", &self.last_reset_epoch)
             .field("stats", &self.stats)
             .field("max_sets_cap", &self.max_sets_cap)
+            .field("total_set_budget", &self.total_set_budget)
             .field("adapter", &"<opaque>")
             .finish()
     }
@@ -560,6 +571,7 @@ impl Default for VkDynamicDescriptorAllocator {
             last_reset_epoch: 0,
             stats: DescriptorAllocatorStats::default(),
             max_sets_cap: 4092,
+            total_set_budget: 4092,
             adapter: Box::new(DefaultVulkanAdapter),
         }
     }
@@ -574,7 +586,27 @@ impl VkDynamicDescriptorAllocator {
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
     ) -> Result<VkDynamicDescriptorAllocator, String> {
-        Self::new_with_adapter(device, max_sets, pool_ratios, Box::new(DefaultVulkanAdapter))
+        Self::new_with_total_set_budget(
+            device,
+            max_sets,
+            pool_ratios,
+            Self::MAX_SETS_CAP,
+        )
+    }
+
+    pub fn new_with_total_set_budget(
+        device: &ash::Device,
+        max_sets: u32,
+        pool_ratios: &[PoolSizeRatio],
+        total_set_budget: u32,
+    ) -> Result<VkDynamicDescriptorAllocator, String> {
+        Self::new_with_adapter(
+            device,
+            max_sets,
+            pool_ratios,
+            Box::new(DefaultVulkanAdapter),
+            total_set_budget,
+        )
     }
 
     /// Internal constructor with injectable adapter for testing.
@@ -583,12 +615,24 @@ impl VkDynamicDescriptorAllocator {
         max_sets: u32,
         pool_ratios: &[PoolSizeRatio],
         adapter: Box<dyn VkDescriptorAdapter>,
+        total_set_budget: u32,
     ) -> Result<VkDynamicDescriptorAllocator, String> {
         let mut pool = VkDynamicDescriptorAllocator::default();
         pool_ratios.iter().for_each(|r| pool.ratios.push(*r));
         pool.adapter = adapter;
         pool.max_sets_cap = Self::MAX_SETS_CAP;
         pool.sets_per_pool = max_sets.clamp(1, pool.max_sets_cap);
+        pool.total_set_budget = total_set_budget
+            .clamp(pool.sets_per_pool.max(1), Self::MAX_SETS_CAP);
+
+        // Pre-commit budget check for the initial pool.
+        let current_total = pool.total_allocated_sets();
+        if current_total.saturating_add(pool.sets_per_pool) > pool.total_set_budget {
+            return Err(format!(
+                "descriptor budget exhausted: {} + {} > {} total sets",
+                current_total, pool.sets_per_pool, pool.total_set_budget
+            ));
+        }
 
         let handle = pool
             .adapter
@@ -603,6 +647,15 @@ impl VkDynamicDescriptorAllocator {
     /// Set the frame slot identity this allocator belongs to.
     pub fn set_frame_slot_index(&mut self, index: u32) {
         self.frame_slot_index = index;
+    }
+
+    /// Override the total descriptor-set budget ceiling.
+    ///
+    /// Callers should derive this from `VkBufferAndDescriptorLimits`
+    /// (e.g., `max_bound_descriptor_sets` or a fraction thereof).
+    /// The default is `MAX_SETS_CAP` (4092).
+    pub fn set_total_set_budget(&mut self, budget: u32) {
+        self.total_set_budget = budget.clamp(1, Self::MAX_SETS_CAP);
     }
 
     /// Clear and consolidate all pools after an authorized frame-fence completion.
@@ -724,6 +777,16 @@ impl VkDynamicDescriptorAllocator {
             .sets_per_pool
             .saturating_add(self.sets_per_pool / 2)
             .clamp(1, self.max_sets_cap);
+
+        // Pre-commit budget check: reject before any Vulkan pool creation.
+        let current_total = self.total_allocated_sets();
+        if current_total.saturating_add(next_sets) > self.total_set_budget {
+            return Err(DescriptorAllocError::BudgetExhausted {
+                current: current_total,
+                ceiling: self.total_set_budget,
+            });
+        }
+
         self.sets_per_pool = next_sets;
 
         let handle = self
@@ -736,6 +799,15 @@ impl VkDynamicDescriptorAllocator {
         self.stats.pool_count = (self.ready_pools.len() + self.full_pools.len() + 1) as u32;
         self.stats.pool_growth_events += 1;
         Ok(record)
+    }
+
+    /// Sum the capacity of all currently tracked pools (ready + exhausted).
+    fn total_allocated_sets(&self) -> u32 {
+        self.ready_pools
+            .iter()
+            .chain(self.full_pools.iter())
+            .map(|r| r.capacity_sets)
+            .sum()
     }
 
     /// Allocate a descriptor set from a managed pool.
@@ -1175,6 +1247,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1212,6 +1285,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1228,6 +1302,38 @@ mod tests {
             assert_eq!(create_capacity_log.borrow().as_slice(), &[10, 15]);
             // The exhausted pool moved to full_pools.
             assert_eq!(alloc.pool_count(), 2);
+        }
+    }
+
+    #[test]
+    fn budget_exhausted_rejects_growth_before_pool_creation() {
+        unsafe {
+            let adapter = FaultInjectAdapter::new();
+            let create_capacity_log = adapter.create_capacity_log.clone();
+            let fake_dev = fake_device();
+            adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
+            adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
+
+            let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
+                &fake_dev,
+                10,
+                &make_ratios(),
+                Box::new(adapter),
+                10,
+            )
+            .expect("allocator creation");
+            alloc.set_frame_slot_index(0);
+
+            let err = alloc.allocate(&fake_dev, &[]).expect_err("budget exhausted");
+            assert!(matches!(
+                err,
+                DescriptorAllocError::BudgetExhausted {
+                    current: 10,
+                    ceiling: 10
+                }
+            ));
+            assert_eq!(create_capacity_log.borrow().as_slice(), &[10]);
+            assert_eq!(alloc.pool_count(), 1);
         }
     }
 
@@ -1248,6 +1354,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1277,6 +1384,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1302,6 +1410,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             );
             assert!(result.is_err());
         }
@@ -1322,6 +1431,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             let result = alloc.allocate(&fake_dev, &[]);
@@ -1352,6 +1462,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1380,6 +1491,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1412,6 +1524,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(2);
@@ -1437,6 +1550,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1462,6 +1576,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1504,6 +1619,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1545,6 +1661,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1588,6 +1705,7 @@ mod tests {
             let create_capacity_log = adapter.create_capacity_log.clone();
             let fake_dev = fake_device();
             // Initial request exceeds the cap; both initial and growth pools are clamped.
+            // Use a small initial pool so the growth chain stays within the default budget.
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(1)));
             adapter.push_allocate(Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY));
             adapter.push_create(Ok(vk::DescriptorPool::from_raw(2))); // growth pool: clamped to cap
@@ -1595,11 +1713,14 @@ mod tests {
 
             let mut alloc = VkDynamicDescriptorAllocator::new_with_adapter(
                 &fake_dev,
-                5000,
+                10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
+            // Override budget to fit the expected test capacities: initial 10 + growth 15 = 25.
+            alloc.set_total_set_budget(4092);
             alloc.set_frame_slot_index(0);
 
             let set = alloc.allocate(&fake_dev, &[]).expect("allocate");
@@ -1609,7 +1730,9 @@ mod tests {
             let snap = alloc.stats_snapshot();
             assert_eq!(snap.pool_growth_events, 1);
             assert_eq!(snap.pools_created, 2);
-            assert_eq!(create_capacity_log.borrow().as_slice(), &[4092, 4092]);
+            // Initial pool clamped to cap (10 clamped to 4092 = 10).
+            // Growth from 10 -> 15.
+            assert_eq!(create_capacity_log.borrow().as_slice(), &[10, 15]);
         }
     }
 
@@ -1632,6 +1755,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);
@@ -1684,6 +1808,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
 
@@ -1712,6 +1837,7 @@ mod tests {
                 10,
                 &make_ratios(),
                 Box::new(adapter),
+                VkDynamicDescriptorAllocator::MAX_SETS_CAP,
             )
             .expect("allocator creation");
             alloc.set_frame_slot_index(0);

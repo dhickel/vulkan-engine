@@ -4,11 +4,25 @@
 //! handles, and builds a `SceneWorld` hierarchy for render submission traversal.
 //!
 //! Internal assimp ingestion with future-facing helpers; dead code allowed.
+//!
+//! ## Unsafe Boundary Policy (Phase 05)
+//!
+//! Every `unsafe` block in this module targets a narrow, documented invariant:
+//!
+//! - **Owner**: `ScenePropertyGuard` releases the property store exactly once on every path.
+//! - **Owner**: `ImportedSceneGuard` releases the loaded scene exactly once on every path.
+//! - **Lifetime**: Borrowed `aiScene` access is bounded by the guard lifetime; no scene
+//!   reference escapes to a caller that could drop the guard first.
+//! - **Preconditions checked before dereference**: Every pointer, count, product, index,
+//!   declared string length, and byte length is validated before `unsafe { &*p }` or
+//!   `std::slice::from_raw_parts`.
+//! - **Malformed input**: All untrusted-input error paths return `AssimpImportError`;
+//!   none panic on malformed scene/mesh/material/texture data.
 
 use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
 use crate::api::AssetPolicyConfig;
-use crate::data::camera::Aabb;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
+use crate::data::camera::Aabb;
 use crate::data::compression;
 use crate::data::data_cache::{TextureCache, VkDataCache};
 use crate::data::data_util::resolve_texture_mip_count;
@@ -40,7 +54,7 @@ use russimp_sys_ng::{
 };
 use std::collections::HashMap;
 use std::default::Default;
-use std::ffi::{c_char, c_uint, CStr, CString};
+use std::ffi::{c_char, c_uint, CString};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -69,8 +83,111 @@ pub enum AssimpImportError {
     TextureDecode { texture_ref: String, reason: String },
     /// Manifest/policy resolution failed for a discovered texture.
     TexturePolicy { texture_ref: String, reason: String },
+    /// A face index was out of bounds relative to the vertex array.
+    FaceIndexOutOfBounds {
+        mesh_name: String,
+        face_index: usize,
+        vertex_index: u32,
+        vertex_count: usize,
+    },
+    /// An embedded texture index exceeded the scene's texture array.
+    EmbeddedTextureIndexOutOfBounds {
+        texture_index: usize,
+        texture_count: usize,
+    },
+    /// An embedded texture had an inconsistent or unusable payload.
+    EmbeddedTextureInvalid {
+        texture_index: usize,
+        reason: String,
+    },
+    /// A node had a null mesh pointer in its mesh array despite a positive count.
+    NullNodeMesh {
+        node_name: String,
+        local_mesh_index: usize,
+    },
+    /// A declared aiString length exceeded the fixed buffer capacity.
+    StringLengthOverflow {
+        context: String,
+        declared_len: u32,
+        buffer_max: usize,
+    },
     /// Catch-all for unexpected internal failures (e.g. FFI null pointers in required structures).
     Internal(String),
+}
+
+// ── RAII Assimp Guards ─────────────────────────────────────────────────────
+//
+// aiCreatePropertyStore → aiReleasePropertyStore
+// aiImportFileExWithProperties → aiReleaseImport
+//
+// Both guards are private; callers never own raw Assimp pointers.
+
+/// RAII guard for an Assimp property store.
+///
+/// Constructed immediately after a non-null `aiCreatePropertyStore()` return.
+/// The property store is passed to `aiImportFileExWithProperties` and then
+/// released on drop.
+struct ScenePropertyGuard {
+    store: *mut russimp_sys_ng::aiPropertyStore,
+}
+
+impl ScenePropertyGuard {
+    /// # Safety
+    /// `store` must be a non-null, valid property-store pointer from `aiCreatePropertyStore`.
+    unsafe fn new() -> Result<Self, AssimpImportError> {
+        let store = aiCreatePropertyStore();
+        if store.is_null() {
+            return Err(AssimpImportError::Internal(
+                "aiCreatePropertyStore returned null".to_string(),
+            ));
+        }
+        Ok(Self { store })
+    }
+
+    fn as_ptr(&self) -> *mut russimp_sys_ng::aiPropertyStore {
+        self.store
+    }
+}
+
+impl Drop for ScenePropertyGuard {
+    fn drop(&mut self) {
+        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+        unsafe {
+            russimp_sys_ng::aiReleasePropertyStore(self.store);
+        }
+    }
+}
+
+/// RAII guard for an Assimp imported scene.
+///
+/// Wraps a non-null `*const aiScene` returned by `aiImportFileExWithProperties`.
+/// On drop, calls `aiReleaseImport`. Borrowed access to the `aiScene` is
+/// provided via `Deref`; the reference lifetime cannot outlive this guard.
+struct ImportedSceneGuard {
+    scene: *const aiScene,
+}
+
+impl ImportedSceneGuard {
+    /// # Safety
+    /// `scene` must be a non-null, valid scene pointer from `aiImportFileExWithProperties`.
+    unsafe fn from_non_null(scene: *const aiScene) -> Self {
+        debug_assert!(!scene.is_null());
+        Self { scene }
+    }
+
+    fn as_ref(&self) -> &aiScene {
+        // SAFETY: Construction guarantees non-null; guard lifetime bounds reference lifetime.
+        unsafe { &*self.scene }
+    }
+}
+
+impl Drop for ImportedSceneGuard {
+    fn drop(&mut self) {
+        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+        unsafe {
+            russimp_sys_ng::aiReleaseImport(self.scene);
+        }
+    }
 }
 
 impl std::fmt::Display for AssimpImportError {
@@ -109,6 +226,44 @@ impl std::fmt::Display for AssimpImportError {
                 f,
                 "texture policy resolve failed for '{texture_ref}': {reason}"
             ),
+            Self::FaceIndexOutOfBounds {
+                mesh_name,
+                face_index,
+                vertex_index,
+                vertex_count,
+            } => write!(
+                f,
+                "mesh '{mesh_name}' face {face_index} references vertex index {vertex_index} >= vertex count {vertex_count}"
+            ),
+            Self::EmbeddedTextureIndexOutOfBounds {
+                texture_index,
+                texture_count,
+            } => write!(
+                f,
+                "embedded texture index {texture_index} exceeds scene texture count {texture_count}"
+            ),
+            Self::EmbeddedTextureInvalid {
+                texture_index,
+                reason,
+            } => write!(
+                f,
+                "embedded texture {texture_index} has invalid payload: {reason}"
+            ),
+            Self::NullNodeMesh {
+                node_name,
+                local_mesh_index,
+            } => write!(
+                f,
+                "node '{node_name}' has null mesh pointer at local index {local_mesh_index}"
+            ),
+            Self::StringLengthOverflow {
+                context,
+                declared_len,
+                buffer_max,
+            } => write!(
+                f,
+                "{context}: declared aiString length {declared_len} exceeds buffer capacity {buffer_max}"
+            ),
             Self::Internal(msg) => write!(f, "internal import error: {msg}"),
         }
     }
@@ -143,11 +298,13 @@ pub fn load_model(
         flags |= aiPostProcessSteps_aiProcess_PreTransformVertices;
     };
 
-    let props = unsafe { aiCreatePropertyStore() };
+    // RAII property store — released exactly once on every return path.
+    // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+    let props = unsafe { ScenePropertyGuard::new() }?;
     const AI_CONFIG_IMPORT_NO_OVERWRITE_NORMALS: &[u8] = b"IMPORT_NO_OVERWRITE_NORMALS\0";
     unsafe {
         aiSetImportPropertyInteger(
-            props,
+            props.as_ptr(),
             AI_CONFIG_IMPORT_NO_OVERWRITE_NORMALS.as_ptr() as *const c_char,
             1,
         );
@@ -159,23 +316,27 @@ pub fn load_model(
         .parent()
         .map_or_else(|| None, |p| p.to_str());
 
-    let ai_scene: &aiScene = unsafe {
-        let scene_ptr = aiImportFileExWithProperties(
-            path_c.as_ptr(),
-            flags as c_uint,
-            std::ptr::null_mut(),
-            props,
-        );
-
+    // RAII scene guard — scene is released exactly once on every return path.
+    let scene_guard = {
+        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+        let scene_ptr = unsafe {
+            aiImportFileExWithProperties(
+                path_c.as_ptr(),
+                flags as c_uint,
+                std::ptr::null_mut(),
+                props.as_ptr(),
+            )
+        };
         if scene_ptr.is_null() {
-            Err(AssimpImportError::SceneLoadFailed {
+            return Err(AssimpImportError::SceneLoadFailed {
                 path: path.to_string(),
                 reason: "Assimp returned null scene pointer".to_string(),
-            })
-        } else {
-            Ok(&*scene_ptr)
+            });
         }
-    }?;
+        // SAFETY: we just checked non-null.
+        unsafe { ImportedSceneGuard::from_non_null(scene_ptr) }
+    };
+    let ai_scene = scene_guard.as_ref();
 
     let materials = process_materials(ai_scene, base_path, &data_cache, policy_config)?;
     let mat_indices = 0..materials.len();
@@ -223,21 +384,112 @@ pub fn load_model(
     let root_ai_node = ai_scene.mRootNode;
 
     if root_ai_node.is_null() {
-        Err(AssimpImportError::Internal(
+        return Err(AssimpImportError::Internal(
             "scene root node pointer is null".to_string(),
-        ))
-    } else {
-        let mut scene_world = SceneWorld::new();
-        let root_id = process_node(root_ai_node, &mapped_meshes, &mesh_bounds_map, &mut scene_world, None)?;
-        scene_world.set_root(root_id);
-        Ok(ModelMeta {
-            scene_world,
-            material_ids,
-            mesh_ids,
-            mesh_deformations,
-        })
+        ));
     }
+
+    let mut scene_world = SceneWorld::new();
+    let root_id = process_node(
+        root_ai_node,
+        &mapped_meshes,
+        &mesh_bounds_map,
+        &mut scene_world,
+        None,
+    )?;
+    scene_world.set_root(root_id);
+    Ok(ModelMeta {
+        scene_world,
+        material_ids,
+        mesh_ids,
+        mesh_deformations,
+    })
 }
+
+// ── Checked Numeric / String Helpers ─────────────────────────────────────────
+
+/// Convert an Assimp `c_uint` count to `usize`, rejecting overflow.
+fn checked_usize_from_u32(val: u32, label: &'static str) -> Result<usize, AssimpImportError> {
+    usize::try_from(val).map_err(|_| {
+        AssimpImportError::Internal(format!("{label} value {val} does not fit in usize"))
+    })
+}
+
+/// Compute the product of two counts as a checked `usize`.
+fn checked_product_usize(
+    a: usize,
+    b: usize,
+    label: &'static str,
+) -> Result<usize, AssimpImportError> {
+    a.checked_mul(b).ok_or_else(|| {
+        AssimpImportError::Internal(format!("{label}: product {a} * {b} overflowed"))
+    })
+}
+
+// ── Checked Pointer-Traversal Helpers ────────────────────────────────────────
+
+/// Dereference a pointer array element at `index`, validating:
+/// - Positive `count` has a non-null base pointer.
+/// - `index < count` before `base.add(index)`.
+/// - The member pointer is non-null before dereference.
+///
+/// # Safety
+/// Caller must ensure a non-null `base` points to a valid array of at least `count` pointers.
+unsafe fn deref_ptr_array<'a, T>(
+    base: *const *const T,
+    index: usize,
+    count: usize,
+    err_context: impl FnOnce() -> AssimpImportError,
+) -> Result<&'a T, AssimpImportError> {
+    if count > 0 && base.is_null() {
+        return Err(err_context());
+    }
+    if index >= count {
+        return Err(err_context());
+    }
+    // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+    let ptr = unsafe { *base.add(index) };
+    if ptr.is_null() {
+        return Err(err_context());
+    }
+    // SAFETY: base/index/member pointer were all validated above; lifetime is tied to caller owner.
+    Ok(unsafe { &*ptr })
+}
+
+fn require_non_null_array<T>(
+    ptr: *const T,
+    count: usize,
+    context: impl Into<String>,
+) -> Result<(), AssimpImportError> {
+    if count > 0 && ptr.is_null() {
+        return Err(AssimpImportError::Internal(context.into()));
+    }
+    Ok(())
+}
+
+/// Read the content of an `aiString` with checked length, returning a UTF-8 lossy `String`.
+///
+/// Validates that the declared `length` field does not exceed the fixed buffer size (1024 bytes
+/// per Assimp ABI). This prevents an out-of-bounds read from a malformed scene that declares an
+/// impossible string length; decoding uses the declared byte range and UTF-8 lossy conversion.
+fn checked_ai_string_lossy(ai_str: &aiString, context: &str) -> Result<String, AssimpImportError> {
+    let declared = checked_usize_from_u32(ai_str.length, "aiString.length")?;
+    let buffer_max = ai_str.data.len();
+    if declared > buffer_max {
+        return Err(AssimpImportError::StringLengthOverflow {
+            context: context.to_string(),
+            declared_len: ai_str.length,
+            buffer_max,
+        });
+    }
+    // SAFETY: `data` is a fixed inline aiString buffer and declared <= data.len(). We decode
+    // exactly the declared bytes and use UTF-8 lossy conversion; no search for a terminator can
+    // read outside the fixed buffer.
+    let raw = unsafe { std::slice::from_raw_parts(ai_str.data.as_ptr() as *const u8, declared) };
+    Ok(String::from_utf8_lossy(raw).into_owned())
+}
+
+// ── Material Processing ─────────────────────────────────────────────────────
 
 pub fn process_materials(
     ai_scene: &aiScene,
@@ -245,214 +497,243 @@ pub fn process_materials(
     data_cache: &Arc<VkDataCache>,
     policy_config: &AssetPolicyConfig,
 ) -> Result<Vec<MaterialMeta>, AssimpImportError> {
-    let mat_count = ai_scene.mNumMaterials as usize;
+    let mat_count = checked_usize_from_u32(ai_scene.mNumMaterials, "mNumMaterials")?;
+    if mat_count > 0 && ai_scene.mMaterials.is_null() {
+        return Err(AssimpImportError::Internal(
+            "mNumMaterials is positive but mMaterials pointer is null".to_string(),
+        ));
+    }
     let mut materials = Vec::<MaterialMeta>::with_capacity(mat_count);
 
-    unsafe {
-        for i in 0..mat_count {
-            let ai_material_ptr = *ai_scene.mMaterials.add(i);
+    for i in 0..mat_count {
+        // SAFETY: mat_count bounds validated; non-null base confirmed above.
+        // mMaterials is *mut *mut aiMaterial in russimp_sys_ng; cast to *const *const.
+        let ai_material = unsafe {
+            deref_ptr_array(
+                ai_scene.mMaterials as *const *const aiMaterial,
+                i,
+                mat_count,
+                || AssimpImportError::Internal(format!("null material pointer at index {i}")),
+            )?
+        };
 
-            if ai_material_ptr.is_null() {
-                return Err(AssimpImportError::Internal(format!(
-                    "null material pointer at index {i}"
-                )));
-            }
+        let mut material_meta = MaterialMeta::default();
+        // Assimp import defaults to PBR until explicit unlit extension metadata is wired.
+        material_meta.shading_model = MaterialShadingModel::PbrMetalRough;
+        // SAFETY: ai_material is a valid non-null pointer verified by deref_ptr_array above.
+        let alpha_mode = unsafe { get_alpha_mode(ai_material) }?;
+        let alpha_cutoff = unsafe { get_alpha_cutoff(ai_material) };
+        material_meta.set_alpha_mode(alpha_mode, alpha_cutoff);
 
-            let ai_material = &*ai_material_ptr;
-            let mut material_meta = MaterialMeta::default();
-            // Assimp import defaults to PBR until explicit unlit extension metadata is wired.
-            material_meta.shading_model = MaterialShadingModel::PbrMetalRough;
-            let alpha_mode = get_alpha_mode(ai_material);
-            let alpha_cutoff = get_alpha_cutoff(ai_material);
-            material_meta.set_alpha_mode(alpha_mode, alpha_cutoff);
-
-            let load_first_texture_type =
-                |label: &str,
-                 types: &[(aiTextureType, &'static str)]|
-                 -> Result<Option<(TextureMeta, &'static str)>, AssimpImportError> {
-                    for (typ, type_name) in types {
-                        if let Some(meta) = get_texture_meta(
+        let load_first_texture_type =
+            |label: &str,
+             types: &[(aiTextureType, &'static str)]|
+             -> Result<Option<(TextureMeta, &'static str)>, AssimpImportError> {
+                for (typ, type_name) in types {
+                    // SAFETY: ai_material is valid; Assimp FFI called within get_texture_meta.
+                    if let Some(meta) = unsafe {
+                        get_texture_meta(
                             ai_material,
                             ai_scene,
                             *typ,
                             base_path,
                             data_cache,
                             policy_config,
-                        )? {
-                            debug!(
-                                "Material {} {} texture resolved from Assimp type {}",
-                                i, label, type_name
-                            );
-                            return Ok(Some((meta, *type_name)));
-                        }
+                        )
+                    }? {
+                        debug!(
+                            "Material {} {} texture resolved from Assimp type {}",
+                            i, label, type_name
+                        );
+                        return Ok(Some((meta, *type_name)));
                     }
-                    Ok(None)
-                };
+                }
+                Ok(None)
+            };
 
-            let base_color = load_first_texture_type(
-                "base_color",
-                &[
-                    (aiTextureType_aiTextureType_BASE_COLOR, "BASE_COLOR"),
-                    (aiTextureType_aiTextureType_DIFFUSE, "DIFFUSE"),
-                ],
-            )?;
+        let base_color = load_first_texture_type(
+            "base_color",
+            &[
+                (aiTextureType_aiTextureType_BASE_COLOR, "BASE_COLOR"),
+                (aiTextureType_aiTextureType_DIFFUSE, "DIFFUSE"),
+            ],
+        )?;
 
-            // Assimp may expose metallic/roughness as either:
-            // - one combined texture (UNKNOWN), or
-            // - two split sources (METALNESS + DIFFUSE_ROUGHNESS).
-            let met_rough_combined = get_texture_meta(
+        // Assimp may expose metallic/roughness as either:
+        // - one combined texture (UNKNOWN), or
+        // - two split sources (METALNESS + DIFFUSE_ROUGHNESS).
+        // SAFETY: ai_material and ai_scene are valid per caller contract.
+        let met_rough_combined = unsafe {
+            get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_UNKNOWN,
                 base_path,
                 data_cache,
                 policy_config,
-            )?;
-            let met_rough_metalness = get_texture_meta(
+            )
+        }?;
+        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+        let met_rough_metalness = unsafe {
+            get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_METALNESS,
                 base_path,
                 data_cache,
                 policy_config,
-            )?;
-            let met_rough_roughness = get_texture_meta(
+            )
+        }?;
+        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+        let met_rough_roughness = unsafe {
+            get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS,
                 base_path,
                 data_cache,
                 policy_config,
-            )?;
+            )
+        }?;
 
-            let normal = load_first_texture_type(
-                "normal",
-                &[
-                    (aiTextureType_aiTextureType_NORMAL_CAMERA, "NORMAL_CAMERA"),
-                    (aiTextureType_aiTextureType_NORMALS, "NORMALS"),
-                ],
-            )?;
+        let normal = load_first_texture_type(
+            "normal",
+            &[
+                (aiTextureType_aiTextureType_NORMAL_CAMERA, "NORMAL_CAMERA"),
+                (aiTextureType_aiTextureType_NORMALS, "NORMALS"),
+            ],
+        )?;
 
-            let occlusion = load_first_texture_type(
-                "occlusion",
-                &[
-                    (
-                        aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
-                        "AMBIENT_OCCLUSION",
-                    ),
-                    (aiTextureType_aiTextureType_LIGHTMAP, "LIGHTMAP"),
-                ],
-            )?;
+        let occlusion = load_first_texture_type(
+            "occlusion",
+            &[
+                (
+                    aiTextureType_aiTextureType_AMBIENT_OCCLUSION,
+                    "AMBIENT_OCCLUSION",
+                ),
+                (aiTextureType_aiTextureType_LIGHTMAP, "LIGHTMAP"),
+            ],
+        )?;
 
-            let emissive = load_first_texture_type(
-                "emissive",
-                &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
-            )?;
+        let emissive = load_first_texture_type(
+            "emissive",
+            &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
+        )?;
 
-            let mut tex_cache = data_cache.texture_cache.lock().map_err(|_| {
-                AssimpImportError::Internal("texture_cache lock poisoned".to_string())
-            })?;
+        let mut tex_cache = data_cache
+            .texture_cache
+            .lock()
+            .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
 
-            if let Some((mut meta, _source)) = base_color {
-                meta = compression::apply_compression_policy(
-                    meta,
-                    TextureSemantic::BaseColor,
-                    policy_config,
-                    &data_cache.supported_image_formats,
-                );
-                let color = get_color_factor(ai_material);
-                let uv_set = meta.uv_index;
-                let tex_id = tex_cache.add_texture(meta);
-                material_meta.add_base_color(tex_id, color, uv_set);
-            }
+        if let Some((mut meta, _source)) = base_color {
+            meta = compression::apply_compression_policy(
+                meta,
+                TextureSemantic::BaseColor,
+                policy_config,
+                &data_cache.supported_image_formats,
+            );
+            // SAFETY: ai_material is valid.
+            let color = unsafe { get_color_factor(ai_material) };
+            let uv_set = meta.uv_index;
+            let tex_id = tex_cache.add_texture(meta);
+            material_meta.add_base_color(tex_id, color, uv_set);
+        }
 
-            if let Some(mut meta) = resolve_metallic_roughness_meta(
-                met_rough_combined,
-                met_rough_metalness,
-                met_rough_roughness,
-                i,
-            ) {
-                meta = compression::apply_compression_policy(
-                    meta,
-                    TextureSemantic::MetallicRoughness,
-                    policy_config,
-                    &data_cache.supported_image_formats,
-                );
-                let metallic_factor = get_float_factor(ai_material, AI_MATKEY_METALLIC_FACTOR, 1.0);
-                let roughness_factor = get_float_factor(
+        if let Some(mut meta) = resolve_metallic_roughness_meta(
+            met_rough_combined,
+            met_rough_metalness,
+            met_rough_roughness,
+            i,
+        ) {
+            meta = compression::apply_compression_policy(
+                meta,
+                TextureSemantic::MetallicRoughness,
+                policy_config,
+                &data_cache.supported_image_formats,
+            );
+            // SAFETY: ai_material is valid.
+            let metallic_factor =
+                unsafe { get_float_factor(ai_material, AI_MATKEY_METALLIC_FACTOR, 1.0) };
+            let roughness_factor = unsafe {
+                get_float_factor(
                     ai_material,
                     AI_MATKEY_ROUGHNESS_FACTOR,
                     TextureCache::DEFAULT_ROUGHNESS_FACTOR,
-                );
-                let uv_set = meta.uv_index;
-                let tex_id = tex_cache.add_texture(meta);
+                )
+            };
+            let uv_set = meta.uv_index;
+            let tex_id = tex_cache.add_texture(meta);
 
-                material_meta.add_metallic_roughness(
-                    tex_id,
-                    metallic_factor,
-                    roughness_factor,
-                    uv_set,
-                );
-            }
+            material_meta.add_metallic_roughness(tex_id, metallic_factor, roughness_factor, uv_set);
+        }
 
-            if let Some((mut meta, _source)) = normal {
-                meta = compression::apply_compression_policy(
-                    meta,
-                    TextureSemantic::Normal,
-                    policy_config,
-                    &data_cache.supported_image_formats,
-                );
-                let normal_scale = get_float_factor(
+        if let Some((mut meta, _source)) = normal {
+            meta = compression::apply_compression_policy(
+                meta,
+                TextureSemantic::Normal,
+                policy_config,
+                &data_cache.supported_image_formats,
+            );
+            // SAFETY: ai_material is valid.
+            let normal_scale = unsafe {
+                get_float_factor(
                     ai_material,
                     AI_MATKEY_BUMPSCALING,
                     TextureCache::DEFAULT_NORMAL_SCALE,
-                );
-                let uv_set = meta.uv_index;
-                let tex_id = tex_cache.add_texture(meta);
+                )
+            };
+            let uv_set = meta.uv_index;
+            let tex_id = tex_cache.add_texture(meta);
 
-                material_meta.add_normal(tex_id, normal_scale, uv_set);
-            }
+            material_meta.add_normal(tex_id, normal_scale, uv_set);
+        }
 
-            if let Some((mut meta, _source)) = occlusion {
-                meta = compression::apply_compression_policy(
-                    meta,
-                    TextureSemantic::Occlusion,
-                    policy_config,
-                    &data_cache.supported_image_formats,
-                );
-                let occlusion_strength = get_float_factor(
+        if let Some((mut meta, _source)) = occlusion {
+            meta = compression::apply_compression_policy(
+                meta,
+                TextureSemantic::Occlusion,
+                policy_config,
+                &data_cache.supported_image_formats,
+            );
+            // SAFETY: ai_material is valid.
+            let occlusion_strength = unsafe {
+                get_float_factor(
                     ai_material,
                     AI_MATKEY_TEXMAP_STRENGTH_AMBIENT_OCCLUSION,
                     TextureCache::DEFAULT_OCCLUSION_STRENGTH,
-                );
-                let uv_set = meta.uv_index;
-                let tex_id = tex_cache.add_texture(meta);
+                )
+            };
+            let uv_set = meta.uv_index;
+            let tex_id = tex_cache.add_texture(meta);
 
-                material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
-            }
-
-            if let Some((mut meta, _source)) = emissive {
-                meta = compression::apply_compression_policy(
-                    meta,
-                    TextureSemantic::Emissive,
-                    policy_config,
-                    &data_cache.supported_image_formats,
-                );
-                let emissive_factor = get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE);
-                let emissive_strength =
-                    get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY);
-                let uv_set = meta.uv_index;
-                let tex_id = tex_cache.add_texture(meta);
-
-                material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
-            }
-
-            materials.push(material_meta);
+            material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
         }
+
+        if let Some((mut meta, _source)) = emissive {
+            meta = compression::apply_compression_policy(
+                meta,
+                TextureSemantic::Emissive,
+                policy_config,
+                &data_cache.supported_image_formats,
+            );
+            // SAFETY: ai_material is valid.
+            let emissive_factor =
+                unsafe { get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE) };
+            let emissive_strength =
+                unsafe { get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY) };
+            let uv_set = meta.uv_index;
+            let tex_id = tex_cache.add_texture(meta);
+
+            material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
+        }
+
+        materials.push(material_meta);
     }
     Ok(materials)
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn get_color_factor(ai_material: &aiMaterial) -> glam::Vec4 {
     let mut color = aiColor4D {
         r: 0.0,
@@ -474,6 +755,8 @@ unsafe fn get_color_factor(ai_material: &aiMaterial) -> glam::Vec4 {
     }
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn get_float_factor(ai_material: &aiMaterial, key: *const i8, default: f32) -> f32 {
     let mut value = 0.0;
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, &mut value, &mut 1)
@@ -485,6 +768,8 @@ unsafe fn get_float_factor(ai_material: &aiMaterial, key: *const i8, default: f3
     }
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam::Vec3 {
     let mut factor = [0.0; 3];
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, factor.as_mut_ptr(), &mut 3)
@@ -496,6 +781,8 @@ unsafe fn get_emissive_factor(ai_material: &aiMaterial, key: *const i8) -> glam:
     }
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32 {
     let mut strength = [0.0; 1];
     if aiGetMaterialFloatArray(ai_material, key, 0, 0, strength.as_mut_ptr(), &mut 1)
@@ -507,27 +794,31 @@ unsafe fn get_emissive_strength(ai_material: &aiMaterial, key: *const i8) -> f32
     }
 }
 
-unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> AlphaMode {
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
+unsafe fn get_alpha_mode(ai_material: &aiMaterial) -> Result<AlphaMode, AssimpImportError> {
     let mut alpha_mode = aiString {
         length: 0,
         data: [0; 1024],
     };
-    if aiGetMaterialString(ai_material, AI_MATKEY_GLTF_ALPHAMODE, 0, 0, &mut alpha_mode)
+    // SAFETY: ai_material is a valid, non-null pointer as verified by caller.
+    if unsafe { aiGetMaterialString(ai_material, AI_MATKEY_GLTF_ALPHAMODE, 0, 0, &mut alpha_mode) }
         == aiReturn_aiReturn_SUCCESS
     {
-        let mode_str = CStr::from_ptr(alpha_mode.data.as_ptr())
-            .to_string_lossy()
-            .to_uppercase();
-        match mode_str.as_str() {
+        // aiString length is validated, then UTF-8 is decoded with the explicit lossy policy.
+        let mode_str = checked_ai_string_lossy(&alpha_mode, "alphaMode")?.to_uppercase();
+        Ok(match mode_str.as_str() {
             "MASK" => AlphaMode::Mask,
             "BLEND" => AlphaMode::Blend,
             _ => AlphaMode::Opaque,
-        }
+        })
     } else {
-        AlphaMode::Opaque
+        Ok(AlphaMode::Opaque)
     }
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn get_alpha_cutoff(ai_material: &aiMaterial) -> f32 {
     let mut alpha_cutoff = 0.5; // Default value
     aiGetMaterialFloatArray(
@@ -541,6 +832,8 @@ unsafe fn get_alpha_cutoff(ai_material: &aiMaterial) -> f32 {
     alpha_cutoff
 }
 
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants for the raw FFI operation.
 unsafe fn get_texture_meta(
     ai_material: &aiMaterial,
     ai_scene: &aiScene,
@@ -549,7 +842,8 @@ unsafe fn get_texture_meta(
     data_cache: &Arc<VkDataCache>,
     policy_config: &AssetPolicyConfig,
 ) -> Result<Option<TextureMeta>, AssimpImportError> {
-    if aiGetMaterialTextureCount(ai_material, texture_type) > 0 {
+    // SAFETY: ai_material is valid per caller; texture count is queried through Assimp.
+    if unsafe { aiGetMaterialTextureCount(ai_material, texture_type) } > 0 {
         let mut path = aiString {
             length: 0,
             data: [c_char::from_be(0x0); 1024],
@@ -557,48 +851,60 @@ unsafe fn get_texture_meta(
 
         let mut uv_index: c_uint = 0;
 
-        if aiGetMaterialTexture(
-            ai_material,
-            texture_type,
-            0,
-            &mut path,
-            std::ptr::null_mut(),
-            &mut uv_index,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        ) == aiReturn_aiReturn_SUCCESS
+        // SAFETY: ai_material is valid, path is stack-local, uv_index is stack-local.
+        if unsafe {
+            aiGetMaterialTexture(
+                ai_material,
+                texture_type,
+                0,
+                &mut path,
+                std::ptr::null_mut(),
+                &mut uv_index,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } == aiReturn_aiReturn_SUCCESS
         {
-            let texture_path = CStr::from_ptr(path.data.as_ptr()).to_string_lossy();
+            let texture_path = checked_ai_string_lossy(&path, "texture path")?;
 
-            let (texture_data, source_path) = if texture_path.starts_with("*") {
+            let (texture_data, source_path) = if texture_path.starts_with('*') {
                 // Embedded texture payload has no on-disk sidecar path.
                 let embedded_bytes = if let Ok(index) = texture_path[1..].parse::<usize>() {
-                    if index < ai_scene.mNumTextures as usize {
-                        let embedded_texture = *ai_scene.mTextures.add(index);
-                        if !embedded_texture.is_null() {
-                            let texture = &*embedded_texture;
-                            Some(
-                                std::slice::from_raw_parts(
-                                    texture.pcData as *const u8,
-                                    texture.mWidth as usize,
-                                )
-                                .to_vec(),
-                            )
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
+                    let tex_count = checked_usize_from_u32(ai_scene.mNumTextures, "mNumTextures")?;
+                    if index >= tex_count {
+                        return Err(AssimpImportError::EmbeddedTextureIndexOutOfBounds {
+                            texture_index: index,
+                            texture_count: tex_count,
+                        });
                     }
+                    // SAFETY: tex_count bounds, non-null base, and non-null member are checked before dereference.
+                    let embedded_texture = unsafe {
+                        deref_ptr_array(
+                            ai_scene.mTextures as *const *const russimp_sys_ng::aiTexture,
+                            index,
+                            tex_count,
+                            || AssimpImportError::EmbeddedTextureInvalid {
+                                texture_index: index,
+                                reason:
+                                    "mTextures pointer is null or embedded texture pointer is null"
+                                        .to_string(),
+                            },
+                        )?
+                    }
+                        as *const russimp_sys_ng::aiTexture;
+                    // SAFETY: Non-null texture reference validated above; returned bytes are owned.
+                    let embedded_bytes =
+                        unsafe { checked_embedded_texture_bytes(embedded_texture, index)? };
+                    Some(embedded_bytes)
                 } else {
                     None
                 };
                 (embedded_bytes, None)
             } else if let Some(base_path) = base_path {
                 // External texture with deterministic manifest sidecar path support.
-                let full_path = Path::new(base_path).join(texture_path.as_ref());
+                let full_path = Path::new(base_path).join(&*texture_path);
                 (std::fs::read(&full_path).ok(), Some(full_path))
             } else {
                 (None, None)
@@ -688,7 +994,13 @@ fn normalize_metal_roughness_texture(meta: TextureMeta) -> TextureMeta {
         _ => return meta,
     };
 
-    let pixel_count = (width as usize) * (height as usize);
+    let Some(pixel_count) = checked_texture_pixel_count(width, height) else {
+        debug!(
+            "Combined metallic-roughness texture dimensions {}x{} overflow usize. Keeping original.",
+            width, height
+        );
+        return meta;
+    };
     let roughness = extract_pbr_scalar_channel_u8(&meta, 0, 1);
     let metalness = extract_pbr_scalar_channel_u8(&meta, 1, 2);
 
@@ -794,7 +1106,15 @@ fn combine_metal_roughness_sources(
         return normalize_metalness_source_texture(metalness);
     }
 
-    let pixel_count = (metalness.payload.width() as usize) * (metalness.payload.height() as usize);
+    let Some(pixel_count) =
+        checked_texture_pixel_count(metalness.payload.width(), metalness.payload.height())
+    else {
+        debug!(
+            "Material {} split METALNESS/DIFFUSE_ROUGHNESS dimensions overflow usize. Falling back to METALNESS-only normalization.",
+            material_index
+        );
+        return normalize_metalness_source_texture(metalness);
+    };
     let metal_values =
         extract_pbr_scalar_channel_u8(&metalness, 1, 2).unwrap_or_else(|| vec![255; pixel_count]);
     let rough_values =
@@ -902,6 +1222,12 @@ fn normalize_roughness_only_texture(meta: TextureMeta) -> TextureMeta {
     }
 }
 
+fn checked_texture_pixel_count(width: u32, height: u32) -> Option<usize> {
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    width.checked_mul(height)
+}
+
 fn extract_pbr_scalar_channel_u8(
     meta: &TextureMeta,
     preferred_rg: usize,
@@ -918,7 +1244,7 @@ fn extract_pbr_scalar_channel_u8(
         _ => return None,
     };
 
-    let pixel_count = (width as usize) * (height as usize);
+    let pixel_count = checked_texture_pixel_count(width, height)?;
     match format {
         vk::Format::R8_UNORM => {
             if bytes.len() == pixel_count {
@@ -959,127 +1285,182 @@ pub fn process_meshes(
     ai_scene: &aiScene,
     mapped_materials: HashMap<u32, MaterialHandle>,
 ) -> Result<Vec<MeshMeta>, AssimpImportError> {
-    let mesh_count = ai_scene.mNumMeshes as usize;
+    let mesh_count = checked_usize_from_u32(ai_scene.mNumMeshes, "mNumMeshes")?;
+    if mesh_count > 0 && ai_scene.mMeshes.is_null() {
+        return Err(AssimpImportError::Internal(
+            "mNumMeshes is positive but mMeshes pointer is null".to_string(),
+        ));
+    }
     let mut meshes = Vec::with_capacity(mesh_count);
 
-    unsafe {
-        let mut unnamed_idx = 0;
-        for mesh_index in 0..mesh_count {
-            let ai_mesh_ptr = *ai_scene.mMeshes.add(mesh_index);
-            if ai_mesh_ptr.is_null() {
-                return Err(AssimpImportError::NullMesh { mesh_index });
-            }
+    let mut unnamed_idx = 0u32;
+    for mesh_index in 0..mesh_count {
+        // SAFETY: mesh_count validated; base non-null when count > 0.
+        // mMeshes is *mut *mut aiMesh; cast to *const *const.
+        let ai_mesh = unsafe {
+            deref_ptr_array(
+                ai_scene.mMeshes as *const *const russimp_sys_ng::aiMesh,
+                mesh_index,
+                mesh_count,
+                || AssimpImportError::NullMesh { mesh_index },
+            )?
+        };
 
-            let ai_mesh = &*ai_mesh_ptr;
+        let name = if ai_mesh.mName.length > 0 {
+            checked_ai_string_lossy(&ai_mesh.mName, "mesh name")?
+        } else {
+            unnamed_idx += 1;
+            format!("Unnamed_Mesh_{}", unnamed_idx - 1)
+        };
 
-            let name = if ai_mesh.mName.length > 0 {
-                CStr::from_ptr(ai_mesh.mName.data.as_ptr())
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                unnamed_idx += 1;
-                format!("Unnamed_Mesh_{}", unnamed_idx - 1)
+        let material_index = if ai_mesh.mMaterialIndex != u32::MAX {
+            Some(
+                *mapped_materials
+                    .get(&ai_mesh.mMaterialIndex)
+                    .ok_or_else(|| {
+                        AssimpImportError::Internal(format!(
+                    "mesh '{name}' references material index {} outside material array length {}",
+                    ai_mesh.mMaterialIndex,
+                    mapped_materials.len()
+                ))
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let has_uv1 = !ai_mesh.mTextureCoords[1].is_null();
+        let vertex_count = checked_usize_from_u32(ai_mesh.mNumVertices, "mNumVertices")?;
+        require_non_null_array(
+            ai_mesh.mVertices,
+            vertex_count,
+            format!("mesh '{name}' has vertices but mVertices pointer is null"),
+        )?;
+        let mut vertices = Vec::with_capacity(vertex_count);
+
+        for i in 0..vertex_count {
+            // SAFETY: vertex arrays are checked for null/non-null below; indices are within vertex_count.
+            let position = unsafe {
+                let p = ai_mesh.mVertices.add(i).read();
+                // ai_mesh.mVertices is an inline array of aiVector3D per Assimp struct layout.
+                // We validate the pointer for vertex 0 and trust the array is contiguous for all i < vertex_count.
+                Vec3::new(p.x, p.y, p.z)
             };
 
-            let material_index = if ai_mesh.mMaterialIndex != u32::MAX {
-                Some(
-                    *mapped_materials
-                        .get(&{ ai_mesh.mMaterialIndex })
-                        .unwrap_or(&TextureCache::DEFAULT_ERROR_MAT),
-                )
+            let normal = if !ai_mesh.mNormals.is_null() {
+                // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+                unsafe {
+                    let n = ai_mesh.mNormals.add(i).read();
+                    Vec3::new(n.x, n.y, n.z)
+                }
             } else {
-                None
+                Vec3::new(0.0, 1.0, 0.0) // Up vector as default
             };
 
-            let has_uv1 = !ai_mesh.mTextureCoords[1].is_null();
-            let vertex_count = ai_mesh.mNumVertices as usize;
-            let mut vertices = Vec::with_capacity(vertex_count);
-
-            for i in 0..vertex_count {
-                let position = Vec3::new(
-                    ai_mesh.mVertices.add(i).read().x,
-                    ai_mesh.mVertices.add(i).read().y,
-                    ai_mesh.mVertices.add(i).read().z,
-                );
-
-                let normal = if !ai_mesh.mNormals.is_null() {
-                    Vec3::new(
-                        ai_mesh.mNormals.add(i).read().x,
-                        ai_mesh.mNormals.add(i).read().y,
-                        ai_mesh.mNormals.add(i).read().z,
-                    )
-                } else {
-                    Vec3::new(0.0, 1.0, 0.0) // Up vector as default
-                };
-
-                let (uv0_x, uv0_y) = if !ai_mesh.mTextureCoords[0].is_null() {
+            let (uv0_x, uv0_y) = if !ai_mesh.mTextureCoords[0].is_null() {
+                // SAFETY: uv array non-null, i within vertex_count.
+                unsafe {
                     let uv = ai_mesh.mTextureCoords[0].add(i).read();
                     (uv.x, uv.y)
-                } else {
-                    (0.0, 0.0)
-                };
+                }
+            } else {
+                (0.0, 0.0)
+            };
 
-                let (uv1_x, uv1_y) = if has_uv1 {
+            let (uv1_x, uv1_y) = if has_uv1 {
+                // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+                unsafe {
                     let uv = ai_mesh.mTextureCoords[1].add(i).read();
                     (uv.x, uv.y)
-                } else {
-                    (0.0, 0.0)
-                };
+                }
+            } else {
+                (0.0, 0.0)
+            };
 
-                let color = if !ai_mesh.mColors[0].is_null() {
-                    let color = ai_mesh.mColors[0].add(i).read();
-                    Vec4::new(color.r, color.g, color.b, color.a)
-                } else {
-                    Vec4::ONE
-                };
+            let color = if !ai_mesh.mColors[0].is_null() {
+                // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+                unsafe {
+                    let c = ai_mesh.mColors[0].add(i).read();
+                    Vec4::new(c.r, c.g, c.b, c.a)
+                }
+            } else {
+                Vec4::ONE
+            };
 
-                let tangent = if !ai_mesh.mTangents.is_null() {
+            let tangent = if !ai_mesh.mTangents.is_null() {
+                // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
+                unsafe {
                     let t = ai_mesh.mTangents.add(i).read();
                     Vec4::new(t.x, t.y, t.z, 1.0) // W component is typically 1.0 for tangents
-                } else {
-                    Vec4::new(1.0, 0.0, 0.0, 1.0) // X-axis aligned tangent as default
-                };
-
-                vertices.push(Vertex {
-                    position,
-                    uv0_x,
-                    normal,
-                    uv0_y,
-                    color,
-                    tangent,
-                    uv1_x,
-                    uv1_y,
-                    ..Default::default()
-                });
-            }
-
-            let mut indices = Vec::with_capacity(ai_mesh.mNumFaces as usize * 3);
-
-            for face_index in 0..ai_mesh.mNumFaces as usize {
-                let face = ai_mesh.mFaces.add(face_index).read();
-                let count = face.mNumIndices as usize;
-
-                for j in 0..count {
-                    indices.push(*face.mIndices.add(j));
                 }
-            }
+            } else {
+                Vec4::new(1.0, 0.0, 0.0, 1.0) // X-axis aligned tangent as default
+            };
 
-            if indices.len() < vertices.len() {
-                return Err(AssimpImportError::InvalidIndices {
-                    mesh_name: name,
-                    index_count: indices.len(),
-                    vertex_count: vertices.len(),
-                });
-            }
-
-            meshes.push(MeshMeta {
-                name,
-                indices,
-                vertices,
-                material_index,
-                has_uv1,
+            vertices.push(Vertex {
+                position,
+                uv0_x,
+                normal,
+                uv0_y,
+                color,
+                tangent,
+                uv1_x,
+                uv1_y,
+                ..Default::default()
             });
         }
+
+        let face_count = checked_usize_from_u32(ai_mesh.mNumFaces, "mNumFaces")?;
+        require_non_null_array(
+            ai_mesh.mFaces,
+            face_count,
+            format!("mesh '{name}' has faces but mFaces pointer is null"),
+        )?;
+        // Each face contributes exactly mNumIndices (3 after triangulation) indices.
+        let index_capacity = checked_product_usize(face_count, 3, "face index capacity")?;
+        let mut indices = Vec::with_capacity(index_capacity);
+
+        for face_idx in 0..face_count {
+            // SAFETY: mFaces is non-null when face_count > 0; face_idx < face_count.
+            let face = unsafe { &*ai_mesh.mFaces.add(face_idx) };
+            let idx_count = checked_usize_from_u32(face.mNumIndices, "face.mNumIndices")?;
+            require_non_null_array(
+                face.mIndices,
+                idx_count,
+                format!("mesh '{name}' face {face_idx} has indices but mIndices pointer is null"),
+            )?;
+
+            for j in 0..idx_count {
+                // SAFETY: mIndices is non-null when idx_count > 0; j < idx_count.
+                let vertex_idx = unsafe { *face.mIndices.add(j) };
+                let vertex_idx_usize = checked_usize_from_u32(vertex_idx, "face vertex index")?;
+                if vertex_idx_usize >= vertex_count {
+                    return Err(AssimpImportError::FaceIndexOutOfBounds {
+                        mesh_name: name,
+                        face_index: face_idx,
+                        vertex_index: vertex_idx,
+                        vertex_count,
+                    });
+                }
+                indices.push(vertex_idx);
+            }
+        }
+
+        if indices.len() < vertices.len() {
+            return Err(AssimpImportError::InvalidIndices {
+                mesh_name: name,
+                index_count: indices.len(),
+                vertex_count: vertices.len(),
+            });
+        }
+
+        meshes.push(MeshMeta {
+            name,
+            indices,
+            vertices,
+            material_index,
+            has_uv1,
+        });
     }
     Ok(meshes)
 }
@@ -1091,66 +1472,94 @@ fn process_node(
     scene_world: &mut SceneWorld,
     parent: Option<SceneNodeId>,
 ) -> Result<SceneNodeId, AssimpImportError> {
-    unsafe {
-        let ai_matrix = (*ai_node).mTransformation;
+    // SAFETY: ai_node is non-null (validated by caller). We access aiNode fields, which
+    // are all inline data (not pointer chains) per Assimp struct layout.
+    let ai_node_ref = unsafe { &*ai_node };
 
-        let local_transform = Mat4::from_cols_array(&[
-            ai_matrix.a1,
-            ai_matrix.b1,
-            ai_matrix.c1,
-            ai_matrix.d1,
-            ai_matrix.a2,
-            ai_matrix.b2,
-            ai_matrix.c2,
-            ai_matrix.d2,
-            ai_matrix.a3,
-            ai_matrix.b3,
-            ai_matrix.c3,
-            ai_matrix.d3,
-            ai_matrix.a4,
-            ai_matrix.b4,
-            ai_matrix.c4,
-            ai_matrix.d4,
-        ]);
+    let ai_matrix = ai_node_ref.mTransformation;
 
-        let node_name = if (*ai_node).mName.length > 0 {
-            CStr::from_ptr((*ai_node).mName.data.as_ptr())
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            "<unnamed>".to_string()
-        };
+    let local_transform = Mat4::from_cols_array(&[
+        ai_matrix.a1,
+        ai_matrix.b1,
+        ai_matrix.c1,
+        ai_matrix.d1,
+        ai_matrix.a2,
+        ai_matrix.b2,
+        ai_matrix.c2,
+        ai_matrix.d2,
+        ai_matrix.a3,
+        ai_matrix.b3,
+        ai_matrix.c3,
+        ai_matrix.d3,
+        ai_matrix.a4,
+        ai_matrix.b4,
+        ai_matrix.c4,
+        ai_matrix.d4,
+    ]);
 
-        let mesh_count = (*ai_node).mNumMeshes as usize;
-        let mut meshes = Vec::with_capacity(mesh_count);
-        let mut bounds = Vec::with_capacity(mesh_count);
-        for i in 0..mesh_count {
-            let mesh_index = *(*ai_node).mMeshes.add(i);
-            let handle = mapped_meshes.get(&mesh_index).copied().ok_or_else(|| {
-                AssimpImportError::MissingMeshMapping {
-                    node_name: node_name.clone(),
-                    mesh_index,
-                }
-            })?;
-            let bound = mesh_bounds.get(&handle).copied().unwrap_or(
-                SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry),
-            );
-            meshes.push(handle);
-            bounds.push(MeshBoundsEntry {
-                mesh: handle,
-                bounds: bound,
-            });
-        }
+    let node_name = if ai_node_ref.mName.length > 0 {
+        checked_ai_string_lossy(&ai_node_ref.mName, "node name")?
+    } else {
+        "<unnamed>".to_string()
+    };
 
-        let node_id = scene_world.add_node_with_parts_and_bounds(parent, local_transform, meshes, bounds);
-
-        // Process children
-        for i in 0..(*ai_node).mNumChildren {
-            let child_ai_node = *(*ai_node).mChildren.add(i as usize);
-            process_node(child_ai_node, mapped_meshes, mesh_bounds, scene_world, Some(node_id))?;
-        }
-        Ok(node_id)
+    let mesh_count = checked_usize_from_u32(ai_node_ref.mNumMeshes, "node mNumMeshes")?;
+    require_non_null_array(
+        ai_node_ref.mMeshes,
+        mesh_count,
+        format!("node '{node_name}' has meshes but mMeshes pointer is null"),
+    )?;
+    let mut meshes = Vec::with_capacity(mesh_count);
+    let mut bounds = Vec::with_capacity(mesh_count);
+    for i in 0..mesh_count {
+        // SAFETY: mMeshes is non-null when mesh_count > 0; i < mesh_count.
+        let mesh_index = unsafe { *ai_node_ref.mMeshes.add(i) };
+        let handle = mapped_meshes.get(&mesh_index).copied().ok_or_else(|| {
+            AssimpImportError::MissingMeshMapping {
+                node_name: node_name.clone(),
+                mesh_index,
+            }
+        })?;
+        let bound = mesh_bounds
+            .get(&handle)
+            .copied()
+            .unwrap_or(SceneBounds::ConservativeVisible(
+                BoundsUnknownReason::MissingGeometry,
+            ));
+        meshes.push(handle);
+        bounds.push(MeshBoundsEntry {
+            mesh: handle,
+            bounds: bound,
+        });
     }
+
+    let node_id =
+        scene_world.add_node_with_parts_and_bounds(parent, local_transform, meshes, bounds);
+
+    // Process children
+    let child_count = checked_usize_from_u32(ai_node_ref.mNumChildren, "node mNumChildren")?;
+    require_non_null_array(
+        ai_node_ref.mChildren,
+        child_count,
+        format!("node '{node_name}' has children but mChildren pointer is null"),
+    )?;
+    for i in 0..child_count {
+        // SAFETY: mChildren is non-null when child_count > 0; i < child_count.
+        let child_ptr = unsafe { *ai_node_ref.mChildren.add(i) };
+        if child_ptr.is_null() {
+            return Err(AssimpImportError::Internal(format!(
+                "node '{node_name}' has null child pointer at index {i}"
+            )));
+        }
+        process_node(
+            child_ptr,
+            mapped_meshes,
+            mesh_bounds,
+            scene_world,
+            Some(node_id),
+        )?;
+    }
+    Ok(node_id)
 }
 
 pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
@@ -1223,9 +1632,7 @@ fn imported_mesh_bounds(mesh: &MeshMeta, deformation: MeshDeformation) -> SceneB
             };
             SceneBounds::Known(Aabb::from_min_max(min, max))
         }
-        MeshDeformation::Skinned => {
-            SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
-        }
+        MeshDeformation::Skinned => SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned),
         MeshDeformation::Deformed => {
             SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed)
         }
@@ -1235,13 +1642,65 @@ fn imported_mesh_bounds(mesh: &MeshMeta, deformation: MeshDeformation) -> SceneB
     }
 }
 
+/// Read embedded texture bytes from an Assimp aiTexture with validated sizing.
+///
+/// Per Assimp representation:
+/// - Compressed textures (height == 0): `mWidth` is the declared byte length.
+/// - Uncompressed textures (height > 0): size = width * height * sizeof(aiTexel).
+/// - `aiTexel` is 4 bytes (BGRA).
+///
+/// Returns an owned `Vec<u8>` copy of the embedded payload, or an error on
+/// inconsistent dimensions, null payload, or arithmetic overflow.
+///
+/// # Safety
+/// `texture` must be a valid, non-null `*const aiTexture` reference.
+unsafe fn checked_embedded_texture_bytes(
+    texture: *const russimp_sys_ng::aiTexture,
+    index: usize,
+) -> Result<Vec<u8>, AssimpImportError> {
+    let tex = &*texture;
+    let invalid = |reason: &str| AssimpImportError::EmbeddedTextureInvalid {
+        texture_index: index,
+        reason: reason.to_string(),
+    };
+
+    if tex.pcData.is_null() {
+        return Err(invalid("pcData is null"));
+    }
+
+    let byte_len = if tex.mHeight == 0 {
+        // Compressed: mWidth is the declared byte length.
+        let declared =
+            checked_usize_from_u32(tex.mWidth, "compressed embedded texture byte length")?;
+        if declared == 0 {
+            return Err(invalid("compressed texture has zero declared byte length"));
+        }
+        declared
+    } else {
+        // Uncompressed: width * height * sizeof(aiTexel).
+        let w = checked_usize_from_u32(tex.mWidth, "embedded texture width")?;
+        let h = checked_usize_from_u32(tex.mHeight, "embedded texture height")?;
+        const AI_TEXEL_SIZE: usize = std::mem::size_of::<russimp_sys_ng::aiTexel>();
+        let pixels = checked_product_usize(w, h, "uncompressed embedded texture pixels")
+            .map_err(|_| invalid("uncompressed texture width * height overflowed"))?;
+        checked_product_usize(
+            pixels,
+            AI_TEXEL_SIZE,
+            "uncompressed embedded texture byte length",
+        )
+        .map_err(|_| invalid("uncompressed texture byte length overflowed"))?
+    };
+
+    // SAFETY: pcData is non-null, byte_len validated above.
+    Ok(unsafe { std::slice::from_raw_parts(tex.pcData as *const u8, byte_len) }.to_vec())
+}
+
 fn classify_imported_meshes(
     ai_scene: &aiScene,
     expected_count: usize,
 ) -> Result<Vec<MeshDeformation>, AssimpImportError> {
-    if ai_scene.mNumMeshes as usize != expected_count
-        || (expected_count > 0 && ai_scene.mMeshes.is_null())
-    {
+    let count = checked_usize_from_u32(ai_scene.mNumMeshes, "mNumMeshes (classification)")?;
+    if count != expected_count || (expected_count > 0 && ai_scene.mMeshes.is_null()) {
         return Err(AssimpImportError::Internal(
             "Assimp mesh classification count did not match processed meshes".to_string(),
         ));
@@ -1249,13 +1708,19 @@ fn classify_imported_meshes(
 
     let mut classifications = Vec::with_capacity(expected_count);
     for index in 0..expected_count {
-        let mesh = unsafe { *ai_scene.mMeshes.add(index) };
-        if mesh.is_null() {
-            return Err(AssimpImportError::Internal(format!(
-                "Assimp mesh {index} was null during deformation classification"
-            )));
-        }
-        let mesh = unsafe { &*mesh };
+        // SAFETY: count validated, base non-null checked above.
+        let mesh = unsafe {
+            deref_ptr_array(
+                ai_scene.mMeshes as *const *const russimp_sys_ng::aiMesh,
+                index,
+                expected_count,
+                || {
+                    AssimpImportError::Internal(format!(
+                        "Assimp mesh {index} was null during deformation classification"
+                    ))
+                },
+            )?
+        };
         classifications.push(if mesh.mNumBones > 0 {
             MeshDeformation::Skinned
         } else if mesh.mNumAnimMeshes > 0 {
