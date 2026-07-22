@@ -7,6 +7,7 @@ mod loading;
 pub mod prelude;
 mod renderer;
 pub(crate) mod scene;
+mod scene_file_tx;
 mod utils;
 
 #[cfg(feature = "advanced-interop")]
@@ -16,8 +17,9 @@ pub use crate::data::asset_manifest::{
     FilterMode, ResolvedTexturePolicy, SamplerOverride, TextureLoadOptions, WrapMode,
 };
 pub use crate::data::asset_registry::{
-    normalize_logical_key, parse_package_manifest, validate_package_manifest_file,
-    validate_package_manifest_str, validate_project_file, validate_project_str, AssetKind,
+    normalize_logical_key, parse_package_manifest, try_normalize_logical_key,
+    validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
+    validate_project_str, AssetKind,
     AssetRegistry, AssetRegistryError, DurableAssetRecord, PackageAssetRecord, PackageManifest,
     PackageValidationOptions, Project, ProjectPackage, ProjectSettings, ProjectValidationOptions,
 };

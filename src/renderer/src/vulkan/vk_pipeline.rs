@@ -50,6 +50,7 @@ use crate::data::gpu_data::{
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
+use std::collections::HashSet;
 use std::ffi::CStr;
 
 /// Builder for Vulkan graphics pipelines with dynamic rendering.
@@ -250,13 +251,6 @@ impl<'a> PipelineBuilder<'a> {
     pub fn set_color_attachment_format(mut self, format: vk::Format) -> Self {
         self.color_attachment_format = [format];
         self.color_attachment_count = 1;
-
-        // self.render_info = vk::PipelineRenderingCreateInfo::default()
-        //     .color_attachment_formats(&self.color_attachment_format);
-        //
-        // println!(":? {:?}", self.color_attachment_format);
-        // println!(":? {:?}", self.render_info);
-        //
         self
     }
 
@@ -278,8 +272,6 @@ impl<'a> PipelineBuilder<'a> {
             .depth_compare_op(vk::CompareOp::NEVER)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false)
-            // .front(vk::StencilOpState::default())
-            // .back(vk::StencilOpState::default()) // maybe skip these
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
         self
@@ -293,8 +285,6 @@ impl<'a> PipelineBuilder<'a> {
             .depth_compare_op(compare_op)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false)
-            // .front(vk::StencilOpState::default())
-            // .back(vk::StencilOpState::default()) // maybe skip these
             .min_depth_bounds(0.0)
             .max_depth_bounds(1.0);
         self
@@ -432,44 +422,239 @@ pub(crate) fn create_pipeline_from_spec(
     builder.build_pipeline(device)
 }
 
-/// Create two pipelines that share one layout, with atomic rollback.
+// ---------------------------------------------------------------------------
+// Owned pipeline wrappers — transactional construction
+// ---------------------------------------------------------------------------
+
+/// Owns a single Vulkan pipeline and its layout.
 ///
-/// If the second pipeline fails, the first pipeline *and* the shared layout
-/// are destroyed before the error propagates.
+/// On drop, destroys both the pipeline and the layout. Use [`OwnedPipeline::disarm`]
+/// to transfer ownership to a cache without destroying.
+struct OwnedPipeline {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    device: ash::Device,
+}
+
+impl OwnedPipeline {
+    fn new(device: ash::Device, pipeline: vk::Pipeline, layout: vk::PipelineLayout) -> Self {
+        Self {
+            pipeline,
+            layout,
+            device,
+        }
+    }
+
+    /// Consume `self` without destroying Vulkan resources, returning the
+    /// pipeline and layout handles for insertion into a cache.
+    fn disarm(self) -> (vk::Pipeline, vk::PipelineLayout) {
+        let result = (self.pipeline, self.layout);
+        std::mem::forget(self);
+        result
+    }
+}
+
+impl Drop for OwnedPipeline {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline_layout(self.layout, None);
+        }
+    }
+}
+
+/// Owns a pair of pipelines that share a single layout.
+///
+/// On drop, destroys both pipelines (deduplicating equal handles) and the
+/// shared layout. Use [`PipelinePair::disarm`] to transfer ownership to a
+/// cache without destroying.
+struct PipelinePair {
+    pipeline_a: vk::Pipeline,
+    pipeline_b: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    device: ash::Device,
+}
+
+impl PipelinePair {
+    fn new(
+        device: ash::Device,
+        pipeline_a: vk::Pipeline,
+        pipeline_b: vk::Pipeline,
+        layout: vk::PipelineLayout,
+    ) -> Self {
+        Self {
+            pipeline_a,
+            pipeline_b,
+            layout,
+            device,
+        }
+    }
+
+    /// Consume `self` without destroying Vulkan resources, returning the
+    /// pipeline handles and shared layout for insertion into a cache.
+    fn disarm(self) -> (vk::Pipeline, vk::Pipeline, vk::PipelineLayout) {
+        let result = (self.pipeline_a, self.pipeline_b, self.layout);
+        std::mem::forget(self);
+        result
+    }
+}
+
+impl Drop for PipelinePair {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline_a, None);
+            if self.pipeline_b != self.pipeline_a {
+                self.device.destroy_pipeline(self.pipeline_b, None);
+            }
+            self.device.destroy_pipeline_layout(self.layout, None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PipelineStage — staged cache builder with transactional rollback
+// ---------------------------------------------------------------------------
+
+/// Collects successfully created pipelines and commits them atomically.
+///
+/// On drop (if not committed), destroys every collected pipeline and unique
+/// layout. Call [`PipelineStage::commit`] to validate and build a
+/// [`VkPipelineCache`]; on success the stage is disarmed and no resources are
+/// leaked.
+trait PipelineDestroyer {
+    fn destroy_pipeline(&self, pipeline: vk::Pipeline);
+    fn destroy_pipeline_layout(&self, layout: vk::PipelineLayout);
+}
+
+struct DevicePipelineDestroyer {
+    device: ash::Device,
+}
+
+impl PipelineDestroyer for DevicePipelineDestroyer {
+    fn destroy_pipeline(&self, pipeline: vk::Pipeline) {
+        unsafe { self.device.destroy_pipeline(pipeline, None) };
+    }
+
+    fn destroy_pipeline_layout(&self, layout: vk::PipelineLayout) {
+        unsafe { self.device.destroy_pipeline_layout(layout, None) };
+    }
+}
+
+struct PipelineStage<D: PipelineDestroyer = DevicePipelineDestroyer> {
+    destroyer: D,
+    entries: Vec<(VkPipelineType, VkPipeline)>,
+}
+
+impl PipelineStage<DevicePipelineDestroyer> {
+    fn new(device: ash::Device) -> Self {
+        Self {
+            destroyer: DevicePipelineDestroyer { device },
+            entries: Vec::with_capacity(VkPipelineType::COUNT),
+        }
+    }
+}
+
+impl<D: PipelineDestroyer> PipelineStage<D> {
+    /// Add a single owned pipeline to the stage.
+    fn push_single(&mut self, typ: VkPipelineType, owned: OwnedPipeline) {
+        let (pipeline, layout) = owned.disarm();
+        self.entries
+            .push((typ, VkPipeline::new(pipeline, layout)));
+    }
+
+    /// Add a pipeline pair to the stage.
+    fn push_pair(&mut self, type_a: VkPipelineType, type_b: VkPipelineType, pair: PipelinePair) {
+        let (pipeline_a, pipeline_b, layout) = pair.disarm();
+        self.entries
+            .push((type_a, VkPipeline::new(pipeline_a, layout)));
+        self.entries
+            .push((type_b, VkPipeline::new(pipeline_b, layout)));
+    }
+
+    /// Consume the stage and produce a [`VkPipelineCache`].
+    ///
+    /// On success the stage is disarmed and no resources are destroyed by
+    /// drop. On failure (e.g. wrong pipeline count) the error is returned and
+    /// the stage's drop path cleans up the still-staged entries.
+    fn commit(mut self) -> Result<VkPipelineCache, String> {
+        VkPipelineCache::validate_entries(&self.entries)?;
+        let entries = std::mem::take(&mut self.entries);
+        let cache = VkPipelineCache::new(entries)
+            .unwrap_or_else(|_| unreachable!("pipeline cache entries prevalidated"));
+        // Disarm — drop must not destroy anything.
+        std::mem::forget(self);
+        Ok(cache)
+    }
+}
+
+impl<D: PipelineDestroyer> Drop for PipelineStage<D> {
+    fn drop(&mut self) {
+        let mut destroyed_pipelines = HashSet::new();
+        let mut destroyed_layouts = HashSet::new();
+        for (_, entry) in self.entries.drain(..) {
+            if destroyed_pipelines.insert(entry.pipeline) {
+                self.destroyer.destroy_pipeline(entry.pipeline);
+            }
+            // Opaque/alpha variants intentionally share pipeline layouts.
+            if destroyed_layouts.insert(entry.layout) {
+                self.destroyer.destroy_pipeline_layout(entry.layout);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// create_pipeline_pair — caller-owned layout, NO layout destruction
+// ---------------------------------------------------------------------------
+
+/// Create two pipelines that share one layout.
+///
+/// # Ownership contract
+/// The layout is **caller-owned** on every return path. On mismatch or
+/// first-pipeline failure the layout is untouched. On second-pipeline failure
+/// only the first created pipeline is destroyed.
+///
+/// The caller is responsible for the layout lifecycle (create and destroy).
 pub(crate) fn create_pipeline_pair(
     device: &ash::Device,
     spec_a: &PipelineSpec,
     spec_b: &PipelineSpec,
-) -> Result<(VkPipeline, VkPipeline), String> {
+) -> Result<(vk::Pipeline, vk::Pipeline), String> {
+    create_pipeline_pair_with_creator(
+        spec_a,
+        spec_b,
+        |spec| create_pipeline_from_spec(device, spec),
+        |pipeline| unsafe { device.destroy_pipeline(pipeline, None) },
+    )
+}
+
+fn create_pipeline_pair_with_creator<CreatePipeline, DestroyPipeline>(
+    spec_a: &PipelineSpec,
+    spec_b: &PipelineSpec,
+    mut create_pipeline: CreatePipeline,
+    mut destroy_pipeline: DestroyPipeline,
+) -> Result<(vk::Pipeline, vk::Pipeline), String>
+where
+    CreatePipeline: FnMut(&PipelineSpec) -> Result<vk::Pipeline, String>,
+    DestroyPipeline: FnMut(vk::Pipeline),
+{
     if spec_a.layout != spec_b.layout {
-        unsafe {
-            device.destroy_pipeline_layout(spec_a.layout, None);
-            if spec_b.layout != spec_a.layout {
-                device.destroy_pipeline_layout(spec_b.layout, None);
-            }
-        }
         return Err("pipeline pair specs must share the same layout".to_string());
     }
 
-    let pipeline_a = create_pipeline_from_spec(device, spec_a).map_err(|err| {
-        // Layout was never consumed; destroy it.
-        unsafe { device.destroy_pipeline_layout(spec_a.layout, None) };
+    let pipeline_a = create_pipeline(spec_a)?;
+
+    let pipeline_b = create_pipeline(spec_b).map_err(|err| {
+        destroy_pipeline(pipeline_a);
         err
     })?;
 
-    let pipeline_b = create_pipeline_from_spec(device, spec_b).map_err(|err| {
-        unsafe {
-            device.destroy_pipeline(pipeline_a, None);
-            device.destroy_pipeline_layout(spec_a.layout, None);
-        }
-        err
-    })?;
-
-    Ok((
-        VkPipeline::new(pipeline_a, spec_a.layout),
-        VkPipeline::new(pipeline_b, spec_b.layout),
-    ))
+    Ok((pipeline_a, pipeline_b))
 }
+
+// ---------------------------------------------------------------------------
+// init_pipeline_cache — transactional with PipelineStage
+// ---------------------------------------------------------------------------
 
 pub fn init_pipeline_cache(
     device: &ash::Device,
@@ -478,76 +663,92 @@ pub fn init_pipeline_cache(
     draw_color_format: vk::Format,
     draw_depth_format: vk::Format,
 ) -> Result<VkPipelineCache, String> {
-    let (pbr_opaque, pbr_alpha) = init_met_rough_pipelines(
-        device,
-        desc_layout_cache,
-        shader_cache,
-        draw_color_format,
-        draw_depth_format,
-    )?;
-    let (unlit_opaque, unlit_alpha) = init_unlit_pipelines(
-        device,
-        desc_layout_cache,
-        shader_cache,
-        draw_color_format,
-        draw_depth_format,
-    )?;
+    let mut stage = PipelineStage::new(device.clone());
 
-    let brd_flut_pipeline = init_brd_flut_pipeline(
-        device,
-        desc_layout_cache,
-        shader_cache,
-        draw_color_format,
-        draw_depth_format,
-    )?;
-
-    let skybox_pipeline = init_skybox_pipeline(
-        device,
-        desc_layout_cache,
-        shader_cache,
-        draw_color_format,
-        draw_depth_format,
-    )?;
-
-    let env_irradiance_pipeline =
-        init_irradiance_pipeline(device, desc_layout_cache, shader_cache)?;
-
-    let env_prefilter_pipeline = init_pre_filter_pipeline(device, desc_layout_cache, shader_cache)?;
-
-    let env_equirect_pipeline =
-        init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache)?;
-
-    let shadow_depth_pipeline = init_shadow_depth_pipeline(device, shader_cache)?;
-
-    #[allow(unused_mut)]
-    let mut pipelines = vec![
-        (VkPipelineType::PbrMetRoughOpaque, pbr_opaque),
-        (VkPipelineType::PbrMetRoughAlpha, pbr_alpha),
-        (VkPipelineType::UnlitOpaque, unlit_opaque),
-        (VkPipelineType::UnlitAlpha, unlit_alpha),
-        (VkPipelineType::BrdfLut, brd_flut_pipeline),
-        (VkPipelineType::Skybox, skybox_pipeline),
-        (VkPipelineType::EnvIrradiance, env_irradiance_pipeline),
-        (VkPipelineType::EnvPreFilter, env_prefilter_pipeline),
-        (VkPipelineType::EnvEquirectToCube, env_equirect_pipeline),
-        (VkPipelineType::ShadowDepth, shadow_depth_pipeline),
-    ];
-
-    #[cfg(feature = "instancing")]
+    // PBR material pipelines (opaque + alpha pair)
     {
-        let (pbr_instanced, unlit_instanced) = init_instanced_pipelines(
+        let pair = init_met_rough_pipelines(
             device,
             desc_layout_cache,
             shader_cache,
             draw_color_format,
             draw_depth_format,
         )?;
-        pipelines.push((VkPipelineType::PbrMetRoughOpaqueInstanced, pbr_instanced));
-        pipelines.push((VkPipelineType::UnlitOpaqueInstanced, unlit_instanced));
+        stage.push_pair(VkPipelineType::PbrMetRoughOpaque, VkPipelineType::PbrMetRoughAlpha, pair);
     }
 
-    VkPipelineCache::new(pipelines)
+    // Unlit material pipelines (opaque + alpha pair)
+    {
+        let pair = init_unlit_pipelines(
+            device,
+            desc_layout_cache,
+            shader_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        stage.push_pair(VkPipelineType::UnlitOpaque, VkPipelineType::UnlitAlpha, pair);
+    }
+
+    // Single pipelines
+    {
+        let owned = init_brd_flut_pipeline(
+            device,
+            desc_layout_cache,
+            shader_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        stage.push_single(VkPipelineType::BrdfLut, owned);
+    }
+    {
+        let owned = init_skybox_pipeline(
+            device,
+            desc_layout_cache,
+            shader_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        stage.push_single(VkPipelineType::Skybox, owned);
+    }
+    {
+        let owned = init_irradiance_pipeline(device, desc_layout_cache, shader_cache)?;
+        stage.push_single(VkPipelineType::EnvIrradiance, owned);
+    }
+    {
+        let owned = init_pre_filter_pipeline(device, desc_layout_cache, shader_cache)?;
+        stage.push_single(VkPipelineType::EnvPreFilter, owned);
+    }
+    {
+        let owned = init_equirect_to_cube_pipeline(device, desc_layout_cache, shader_cache)?;
+        stage.push_single(VkPipelineType::EnvEquirectToCube, owned);
+    }
+    {
+        let owned = init_shadow_depth_pipeline(device, shader_cache)?;
+        stage.push_single(VkPipelineType::ShadowDepth, owned);
+    }
+
+    #[cfg(feature = "instancing")]
+    {
+        let pair = init_instanced_pipelines(
+            device,
+            desc_layout_cache,
+            shader_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        stage.push_pair(
+            VkPipelineType::PbrMetRoughOpaqueInstanced,
+            VkPipelineType::UnlitOpaqueInstanced,
+            pair,
+        );
+    }
+
+    stage.commit()
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline initializers — each returns an owned wrapper
+// ---------------------------------------------------------------------------
 
 fn init_met_rough_pipelines(
     device: &ash::Device,
@@ -555,7 +756,7 @@ fn init_met_rough_pipelines(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
-) -> Result<(VkPipeline, VkPipeline), String> {
+) -> Result<PipelinePair, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
 
@@ -598,6 +799,11 @@ fn init_met_rough_pipelines(
     };
 
     create_pipeline_pair(device, &opaque_spec, &alpha_spec)
+        .map(|(pipe_a, pipe_b)| PipelinePair::new(device.clone(), pipe_a, pipe_b, layout))
+        .map_err(|err| {
+            unsafe { device.destroy_pipeline_layout(layout, None) };
+            err
+        })
 }
 
 fn init_unlit_pipelines(
@@ -606,7 +812,7 @@ fn init_unlit_pipelines(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
-) -> Result<(VkPipeline, VkPipeline), String> {
+) -> Result<PipelinePair, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughFragUnlit);
 
@@ -649,6 +855,11 @@ fn init_unlit_pipelines(
     };
 
     create_pipeline_pair(device, &opaque_spec, &alpha_spec)
+        .map(|(pipe_a, pipe_b)| PipelinePair::new(device.clone(), pipe_a, pipe_b, layout))
+        .map_err(|err| {
+            unsafe { device.destroy_pipeline_layout(layout, None) };
+            err
+        })
 }
 
 fn init_brd_flut_pipeline(
@@ -657,7 +868,7 @@ fn init_brd_flut_pipeline(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     _depth_format: vk::Format,
-) -> Result<VkPipeline, String> {
+) -> Result<OwnedPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::BrtFlutFrag);
 
@@ -685,7 +896,7 @@ fn init_brd_flut_pipeline(
         err
     })?;
 
-    Ok(VkPipeline::new(pipeline, layout))
+    Ok(OwnedPipeline::new(device.clone(), pipeline, layout))
 }
 
 fn init_skybox_pipeline(
@@ -694,7 +905,7 @@ fn init_skybox_pipeline(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     _depth_format: vk::Format,
-) -> Result<VkPipeline, String> {
+) -> Result<OwnedPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::SkyBoxFrag);
 
@@ -736,14 +947,14 @@ fn init_skybox_pipeline(
         err
     })?;
 
-    Ok(VkPipeline::new(pipeline, layout))
+    Ok(OwnedPipeline::new(device.clone(), pipeline, layout))
 }
 
 fn init_irradiance_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> Result<VkPipeline, String> {
+) -> Result<OwnedPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvIrradianceFrag);
 
@@ -778,14 +989,14 @@ fn init_irradiance_pipeline(
         err
     })?;
 
-    Ok(VkPipeline::new(pipeline, layout))
+    Ok(OwnedPipeline::new(device.clone(), pipeline, layout))
 }
 
 fn init_pre_filter_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> Result<VkPipeline, String> {
+) -> Result<OwnedPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvPrefilterFrag);
 
@@ -820,14 +1031,14 @@ fn init_pre_filter_pipeline(
         err
     })?;
 
-    Ok(VkPipeline::new(pipeline, layout))
+    Ok(OwnedPipeline::new(device.clone(), pipeline, layout))
 }
 
 fn init_equirect_to_cube_pipeline(
     device: &ash::Device,
     desc_layout_cache: &VkDescLayoutCache,
     shader_cache: &VkShaderCache,
-) -> Result<VkPipeline, String> {
+) -> Result<OwnedPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::CubeFilterVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::EnvEquirectToCubeFrag);
 
@@ -862,7 +1073,7 @@ fn init_equirect_to_cube_pipeline(
         err
     })?;
 
-    Ok(VkPipeline::new(pipeline, layout))
+    Ok(OwnedPipeline::new(device.clone(), pipeline, layout))
 }
 
 /// Push constants for shadow depth pass (per-draw data).
@@ -877,7 +1088,7 @@ pub struct PushConstShadowDepth {
 fn init_shadow_depth_pipeline(
     device: &ash::Device,
     shader_cache: &VkShaderCache,
-) -> Result<VkPipeline, String> {
+) -> Result<OwnedPipeline, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthVert);
     let frag_shader = shader_cache.get_core_shader(CoreShaderType::ShadowDepthFrag);
 
@@ -912,7 +1123,7 @@ fn init_shadow_depth_pipeline(
         err
     })?;
 
-    Ok(VkPipeline::new(pipeline, layout))
+    Ok(OwnedPipeline::new(device.clone(), pipeline, layout))
 }
 
 // ---------------------------------------------------------------------------
@@ -926,7 +1137,7 @@ fn init_instanced_pipelines(
     shader_cache: &VkShaderCache,
     color_format: vk::Format,
     depth_format: vk::Format,
-) -> Result<(VkPipeline, VkPipeline), String> {
+) -> Result<PipelinePair, String> {
     let vert_shader = shader_cache.get_core_shader(CoreShaderType::MetRoughInstancedVert);
     let pbr_frag = shader_cache.get_core_shader(CoreShaderType::MetRoughFrag);
     let unlit_frag = shader_cache.get_core_shader(CoreShaderType::MetRoughFragUnlit);
@@ -970,12 +1181,32 @@ fn init_instanced_pipelines(
     };
 
     create_pipeline_pair(device, &pbr_spec, &unlit_spec)
+        .map(|(pipe_a, pipe_b)| PipelinePair::new(device.clone(), pipe_a, pipe_b, layout))
+        .map_err(|err| {
+            unsafe { device.destroy_pipeline_layout(layout, None) };
+            err
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Fault-injection adapter (test-only, crate-private)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+trait VkPipelineAdapter {
+    fn create_graphics_pipeline(&self) -> Result<vk::Pipeline, String>;
+    fn destroy_pipeline(&self, pipeline: vk::Pipeline);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ash::vk::Handle;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+
+    // ── Test helpers ──────────────────────────────────────────────────────
 
     fn valid_spec() -> PipelineSpec {
         PipelineSpec {
@@ -992,6 +1223,91 @@ mod tests {
             layout: vk::PipelineLayout::from_raw(0x103),
         }
     }
+
+    // ── FaultInjectAdapter ────────────────────────────────────────────────
+
+    /// Scripted adapter that logs every destroy call without invoking real
+    /// Vulkan. Each pipeline creation consumes the next scripted result.
+    struct FaultInjectAdapter {
+        pipeline_results: RefCell<VecDeque<Result<vk::Pipeline, String>>>,
+        destroyed_pipelines: Rc<RefCell<Vec<vk::Pipeline>>>,
+    }
+
+    impl FaultInjectAdapter {
+        fn new() -> Self {
+            Self {
+                pipeline_results: RefCell::new(VecDeque::new()),
+                destroyed_pipelines: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        fn push_pipeline_result(&self, result: Result<vk::Pipeline, String>) {
+            self.pipeline_results.borrow_mut().push_back(result);
+        }
+    }
+
+    impl VkPipelineAdapter for FaultInjectAdapter {
+        fn create_graphics_pipeline(&self) -> Result<vk::Pipeline, String> {
+            self.pipeline_results
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    static NEXT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(1000);
+                    Ok(vk::Pipeline::from_raw(
+                        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    ))
+                })
+        }
+
+        fn destroy_pipeline(&self, pipeline: vk::Pipeline) {
+            self.destroyed_pipelines.borrow_mut().push(pipeline);
+        }
+    }
+
+    fn create_pipeline_pair_with_adapter(
+        adapter: &impl VkPipelineAdapter,
+        spec_a: &PipelineSpec,
+        spec_b: &PipelineSpec,
+    ) -> Result<(vk::Pipeline, vk::Pipeline), String> {
+        create_pipeline_pair_with_creator(
+            spec_a,
+            spec_b,
+            |_| adapter.create_graphics_pipeline(),
+            |pipeline| adapter.destroy_pipeline(pipeline),
+        )
+    }
+
+    #[derive(Clone)]
+    struct RecordingDestroyer {
+        destroyed_pipelines: Rc<RefCell<Vec<vk::Pipeline>>>,
+        destroyed_layouts: Rc<RefCell<Vec<vk::PipelineLayout>>>,
+    }
+
+    impl RecordingDestroyer {
+        fn new() -> Self {
+            Self {
+                destroyed_pipelines: Rc::new(RefCell::new(Vec::new())),
+                destroyed_layouts: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+    }
+
+    impl PipelineDestroyer for RecordingDestroyer {
+        fn destroy_pipeline(&self, pipeline: vk::Pipeline) {
+            self.destroyed_pipelines.borrow_mut().push(pipeline);
+        }
+
+        fn destroy_pipeline_layout(&self, layout: vk::PipelineLayout) {
+            self.destroyed_layouts.borrow_mut().push(layout);
+        }
+    }
+
+    fn dummy_pipeline(index: u64, layout: vk::PipelineLayout) -> VkPipeline {
+        VkPipeline::new(vk::Pipeline::from_raw(0xA000 + index), layout)
+    }
+
+    // ── PipelineSpec validation tests ─────────────────────────────────────
 
     #[test]
     fn pipeline_spec_accepts_color_only_pipeline() {
@@ -1026,5 +1342,157 @@ mod tests {
         let mut null_layout = valid_spec();
         null_layout.layout = vk::PipelineLayout::null();
         assert!(null_layout.validate().is_err());
+    }
+
+    // ── M-A1: create_pipeline_pair ownership tests ────────────────────────
+
+    #[test]
+    fn create_pipeline_pair_mismatch_does_not_destroy_caller_layout() {
+        let adapter = FaultInjectAdapter::new();
+        let layout_a = vk::PipelineLayout::from_raw(0x701);
+        let layout_b = vk::PipelineLayout::from_raw(0x702);
+
+        let mut spec_a = valid_spec();
+        spec_a.layout = layout_a;
+        let mut spec_b = valid_spec();
+        spec_b.layout = layout_b;
+
+        let result = create_pipeline_pair_with_adapter(&adapter, &spec_a, &spec_b);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("same layout"));
+        assert!(adapter.pipeline_results.borrow().is_empty());
+        assert!(adapter.destroyed_pipelines.borrow().is_empty());
+    }
+
+    #[test]
+    fn create_pipeline_pair_first_pipeline_failure_preserves_caller_layout() {
+        let adapter = FaultInjectAdapter::new();
+        adapter.push_pipeline_result(Err("first failed".to_string()));
+        let spec_a = valid_spec();
+        let spec_b = valid_spec();
+
+        let result = create_pipeline_pair_with_adapter(&adapter, &spec_a, &spec_b);
+        assert!(result.is_err());
+        assert_eq!(adapter.destroyed_pipelines.borrow().as_slice(), &[]);
+    }
+
+    #[test]
+    fn create_pipeline_pair_second_pipeline_failure_destroys_only_first_pipeline() {
+        let adapter = FaultInjectAdapter::new();
+        let first = vk::Pipeline::from_raw(0x801);
+        adapter.push_pipeline_result(Ok(first));
+        adapter.push_pipeline_result(Err("second failed".to_string()));
+        let spec_a = valid_spec();
+        let spec_b = valid_spec();
+
+        let result = create_pipeline_pair_with_adapter(&adapter, &spec_a, &spec_b);
+        assert!(result.is_err());
+        assert_eq!(adapter.destroyed_pipelines.borrow().as_slice(), &[first]);
+    }
+
+    #[test]
+    fn create_pipeline_pair_success_transfers_pipeline_handles_without_destroys() {
+        let adapter = FaultInjectAdapter::new();
+        let first = vk::Pipeline::from_raw(0x811);
+        let second = vk::Pipeline::from_raw(0x812);
+        adapter.push_pipeline_result(Ok(first));
+        adapter.push_pipeline_result(Ok(second));
+        let spec_a = valid_spec();
+        let spec_b = valid_spec();
+
+        let result = create_pipeline_pair_with_adapter(&adapter, &spec_a, &spec_b).unwrap();
+        assert_eq!(result, (first, second));
+        assert!(adapter.destroyed_pipelines.borrow().is_empty());
+    }
+
+    #[test]
+    fn pipeline_stage_commit_failure_rolls_back_all_staged_pipelines_and_unique_layouts() {
+        let destroyer = RecordingDestroyer::new();
+        let shared_layout = vk::PipelineLayout::from_raw(0x901);
+        let unique_layout = vk::PipelineLayout::from_raw(0x902);
+        let mut stage = PipelineStage {
+            destroyer: destroyer.clone(),
+            entries: Vec::new(),
+        };
+
+        for index in 0..VkPipelineType::COUNT {
+            let layout = if index % 2 == 0 { shared_layout } else { unique_layout };
+            stage
+                .entries
+                .push((VkPipelineType::PbrMetRoughOpaque, dummy_pipeline(index as u64, layout)));
+        }
+
+        let result = stage.commit();
+        assert!(result.is_err());
+
+        let destroyed_pipelines = destroyer.destroyed_pipelines.borrow();
+        assert_eq!(destroyed_pipelines.len(), VkPipelineType::COUNT);
+        for index in 0..VkPipelineType::COUNT {
+            assert!(destroyed_pipelines.contains(&vk::Pipeline::from_raw(0xA000 + index as u64)));
+        }
+
+        let destroyed_layouts = destroyer.destroyed_layouts.borrow();
+        assert_eq!(destroyed_layouts.len(), 2);
+        assert!(destroyed_layouts.contains(&shared_layout));
+        assert!(destroyed_layouts.contains(&unique_layout));
+    }
+
+    // ── M-A2: VkPipelineCache::new validation tests ───────────────────────
+
+    #[test]
+    fn pipeline_cache_new_rejects_wrong_count() {
+        let result = VkPipelineCache::new(vec![]);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("expected"));
+    }
+
+    #[test]
+    fn pipeline_cache_new_rejects_duplicate_types() {
+        let pipe = VkPipeline::new(
+            vk::Pipeline::from_raw(0xB01),
+            vk::PipelineLayout::from_raw(0xB02),
+        );
+        let mut entries = Vec::new();
+        // Push duplicates of the same type.
+        for _ in 0..VkPipelineType::COUNT {
+            entries.push((VkPipelineType::PbrMetRoughOpaque, pipe));
+        }
+        let result = VkPipelineCache::new(entries);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pipeline_cache_new_rejects_missing_type() {
+        let pipe = VkPipeline::new(
+            vk::Pipeline::from_raw(0xC01),
+            vk::PipelineLayout::from_raw(0xC02),
+        );
+        let mut entries = Vec::new();
+        // Fill with COUNT entries, all with discriminant 1 (PbrMetRoughAlpha).
+        // This ensures count matches but not all discriminants are covered.
+        for _ in 0..VkPipelineType::COUNT {
+            entries.push((VkPipelineType::PbrMetRoughAlpha, pipe));
+        }
+        let result = VkPipelineCache::new(entries);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pipeline_cache_new_accepts_valid_full_set() {
+        // Build a complete, non-duplicate set of dummy pipelines.
+        let dummy_pipe = VkPipeline::new(
+            vk::Pipeline::from_raw(0xD01),
+            vk::PipelineLayout::from_raw(0xD02),
+        );
+        let mut entries: Vec<(VkPipelineType, VkPipeline)> = Vec::new();
+        // Enumerate all variants by discriminant.
+        for disc in 0..VkPipelineType::COUNT {
+            // SAFETY: disc is in [0, COUNT), which are all valid discriminants
+            // for the #[repr(u8)] VkPipelineType enum.
+            let typ: VkPipelineType = unsafe { std::mem::transmute(disc as u8) };
+            entries.push((typ, dummy_pipe));
+        }
+        let result = VkPipelineCache::new(entries);
+        assert!(result.is_ok());
     }
 }

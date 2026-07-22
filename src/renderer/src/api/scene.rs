@@ -1520,20 +1520,10 @@ impl Scene {
             SceneError::SerializationError(format!("scene serialization failed: {e}"))
         })?;
 
-        // Write to a staged temporary file next to the target, flush it, then
-        // atomically rename over the destination. Every fallible staged step
-        // removes the staged file and propagates the original error.
-        let staged = staged_path(path)?;
-        if let Err(e) = write_and_flush_staged_file(&staged, json.as_bytes()) {
-            let _ = std::fs::remove_file(&staged);
-            return Err(SceneError::SerializationError(format!(
-                "failed to write staged scene file: {e}"
-            )));
-        }
-
-        std::fs::rename(&staged, path).map_err(|e| {
-            let _ = std::fs::remove_file(&staged);
-            SceneError::SerializationError(format!("failed to rename staged scene: {e}"))
+        // Write through a same-directory staged-file owner that keeps the
+        // reserved handle until publication and removes only its own stage.
+        crate::api::scene_file_tx::save_scene_file(path, json.as_bytes()).map_err(|e| {
+            SceneError::SerializationError(format!("failed to publish scene file: {e}"))
         })?;
 
         Ok(())
@@ -3461,38 +3451,6 @@ fn validate_material_override(slot: &str, material_override_id: &str) -> Result<
     Ok(())
 }
 
-/// Produce a staged path adjacent to `target`.
-fn staged_path(target: &std::path::Path) -> Result<std::path::PathBuf, SceneError> {
-    let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = target
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .ok_or_else(|| {
-            SceneError::SerializationError("target path has no file name".to_string())
-        })?;
-    let staged_name = format!(".{file_name}.staged");
-    Ok(parent.join(staged_name))
-}
-
-/// Write and flush a staged file before publication.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_and_flush_staged_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-    file.sync_all()
-}
-
-#[cfg(target_arch = "wasm32")]
-fn write_and_flush_staged_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
-}
-
 /// Migrate a v1 scene JSON Value to v2 format so it can be deserialized
 /// by the strict (deny_unknown_fields) `SerializedScene` parser.
 ///
@@ -4147,6 +4105,70 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_scene_saves_publish_only_complete_documents() {
+        let dir = unique_scene_temp_dir("concurrent-save");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("scene.engine.scene.json");
+
+        let mut initial = Scene::new();
+        initial.scene_id = "scene.initial".to_string();
+        initial.save(&target).unwrap();
+
+        let writer_count = 8usize;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(writer_count));
+        let mut handles = Vec::new();
+        for index in 0..writer_count {
+            let target = target.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut scene = Scene::new();
+                scene.scene_id = format!("scene.concurrent.{index}");
+                barrier.wait();
+                scene.save(target).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let raw = fs::read_to_string(&target).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["format_version"].as_u64(), Some(2));
+        let scene_id = parsed["scene_id"].as_str().unwrap();
+        assert!(scene_id == "scene.initial" || scene_id.starts_with("scene.concurrent."));
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().contains("scene-save"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover staged files: {leftovers:?}");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scene_save_rejects_symlink_target_without_touching_referent() {
+        let dir = unique_scene_temp_dir("symlink-save");
+        fs::create_dir_all(&dir).unwrap();
+        let referent = dir.join("referent.json");
+        fs::write(&referent, b"referent").unwrap();
+        let link = dir.join("scene.engine.scene.json");
+        std::os::unix::fs::symlink(&referent, &link).unwrap();
+
+        let err = Scene::new().save(&link).unwrap_err();
+        assert!(matches!(err, SceneError::SerializationError(_)));
+        assert_eq!(fs::read(&referent).unwrap(), b"referent");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn inspector_metadata_edits_round_trip_name_tags_and_material_override() {
         let mut scene = Scene::new();
         let root = scene.create_node_default(None).unwrap();
@@ -4762,6 +4784,17 @@ mod tests {
     fn phase_02_saved_scene_copy_path() -> PathBuf {
         std::env::temp_dir().join(format!(
             "renderer-phase-02-saved-scene-copy-{}.engine.scene.json",
+            std::process::id()
+        ))
+    }
+
+    fn unique_scene_temp_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "renderer-scene-{label}-{}-{nanos}",
             std::process::id()
         ))
     }

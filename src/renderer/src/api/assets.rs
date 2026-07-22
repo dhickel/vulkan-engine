@@ -1841,6 +1841,7 @@ fn asset_registry_error_to_asset_error(err: AssetRegistryError) -> AssetError {
         | AssetRegistryError::DuplicateAssetId(_)
         | AssetRegistryError::InvalidAssetId(_)
         | AssetRegistryError::InvalidAssetPath { .. }
+        | AssetRegistryError::InvalidPathUtf8 { .. }
         | AssetRegistryError::UnsupportedAssetKind(_)
         | AssetRegistryError::MissingAssetId(_) => AssetError::Unsupported(err.to_string()),
     }

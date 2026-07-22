@@ -954,6 +954,7 @@ name = "engine_pack"
 version = "0.1.0"
 dependencies = [
  "launch_shared",
+ "libc",
  "renderer",
  "serde",
  "serde_json",
@@ -3130,6 +3131,7 @@ dependencies = [
  "imgui-winit-support",
  "input",
  "intel_tex_2",
+ "libc",
  "log",
  "mikktspace",
  "notify",

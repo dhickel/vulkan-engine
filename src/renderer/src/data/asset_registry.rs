@@ -68,6 +68,9 @@ pub enum AssetRegistryError {
         asset_id: String,
         path: PathBuf,
     },
+    InvalidPathUtf8 {
+        path: PathBuf,
+    },
     UnsupportedAssetKind(String),
     MissingAssetId(String),
 }
@@ -107,6 +110,13 @@ impl Display for AssetRegistryError {
                 write!(
                     f,
                     "invalid path '{}' for asset '{asset_id}'",
+                    path.display()
+                )
+            }
+            Self::InvalidPathUtf8 { path } => {
+                write!(
+                    f,
+                    "path contains a non-UTF-8 logical component: '{}'",
                     path.display()
                 )
             }
@@ -368,6 +378,7 @@ impl AssetRegistry {
                     record.asset_id.clone(),
                 ));
             }
+            try_normalize_logical_key(&record.package_relative_path)?;
         }
 
         for record in records {
@@ -1380,6 +1391,15 @@ fn package_error_to_diagnostic(
         )
         .with_optional_path(manifest_path)
         .with_durable_id(asset_id),
+        AssetRegistryError::InvalidPathUtf8 { path } => ValidationDiagnostic::new(
+            "asset.invalid_path_utf8",
+            ValidationArea::Asset,
+            format!(
+                "asset path contains a non-UTF-8 logical component: '{}'",
+                path.display()
+            ),
+        )
+        .with_optional_path(manifest_path),
         AssetRegistryError::UnsupportedAssetKind(kind) => ValidationDiagnostic::new(
             "asset.unsupported_kind",
             ValidationArea::Asset,
@@ -1484,7 +1504,14 @@ fn normalize_asset_relative_path(
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(part) => normalized.push(part),
+            Component::Normal(part) => {
+                if part.to_str().is_none() {
+                    return Err(AssetRegistryError::InvalidPathUtf8 {
+                        path: path.to_path_buf(),
+                    });
+                }
+                normalized.push(part);
+            }
             Component::ParentDir => {
                 if !normalized.pop() {
                     return Err(AssetRegistryError::InvalidAssetPath {
@@ -1531,34 +1558,55 @@ fn join_normalized(base: &Path, relative: &Path) -> PathBuf {
 /// - Resolves lexical `..` only within root (rejects escape attempts)
 /// - Normalizes separators to `/`
 /// - Rejects empty, absolute, prefix, and root-escape paths
-pub fn normalize_logical_key(path: &Path) -> Option<String> {
+pub fn try_normalize_logical_key(path: &Path) -> Result<String, AssetRegistryError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
-        return None;
+        return Err(AssetRegistryError::InvalidAssetPath {
+            asset_id: "<logical-key>".to_string(),
+            path: path.to_path_buf(),
+        });
     }
 
     let mut parts = VecDeque::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::Normal(part) => parts.push_back(part),
+            Component::Normal(part) => {
+                let part = part
+                    .to_str()
+                    .ok_or_else(|| AssetRegistryError::InvalidPathUtf8 {
+                        path: path.to_path_buf(),
+                    })?;
+                parts.push_back(part.to_string());
+            }
             Component::ParentDir => {
                 if parts.pop_back().is_none() {
-                    return None; // escapes root
+                    return Err(AssetRegistryError::InvalidAssetPath {
+                        asset_id: "<logical-key>".to_string(),
+                        path: path.to_path_buf(),
+                    });
                 }
             }
-            Component::Prefix(_) | Component::RootDir => return None,
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(AssetRegistryError::InvalidAssetPath {
+                    asset_id: "<logical-key>".to_string(),
+                    path: path.to_path_buf(),
+                });
+            }
         }
     }
 
     if parts.is_empty() {
-        return None;
+        return Err(AssetRegistryError::InvalidAssetPath {
+            asset_id: "<logical-key>".to_string(),
+            path: path.to_path_buf(),
+        });
     }
 
-    let key: Vec<String> = parts
-        .into_iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
-    Some(key.join("/"))
+    Ok(parts.into_iter().collect::<Vec<_>>().join("/"))
+}
+
+pub fn normalize_logical_key(path: &Path) -> Option<String> {
+    try_normalize_logical_key(path).ok()
 }
 
 fn default_package_version() -> String {
@@ -1727,9 +1775,9 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_logical_key, validate_package_manifest_file, validate_package_manifest_str,
-        validate_project_file, validate_project_str, AssetKind, PackageValidationOptions, Project,
-        ProjectValidationOptions,
+        normalize_logical_key, try_normalize_logical_key, validate_package_manifest_file,
+        validate_package_manifest_str, validate_project_file, validate_project_str, AssetKind,
+        PackageValidationOptions, Project, ProjectValidationOptions,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -2259,6 +2307,26 @@ vsync = true
             normalize_logical_key(PathBuf::from("a/../../escape").as_path()),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn try_normalize_logical_key_rejects_non_utf8_components() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid_a = PathBuf::from(OsString::from_vec(vec![b'm', b'o', 0xff]));
+        let invalid_b = PathBuf::from(OsString::from_vec(vec![b'm', b'o', 0xfe]));
+        assert!(matches!(
+            try_normalize_logical_key(&invalid_a),
+            Err(super::AssetRegistryError::InvalidPathUtf8 { .. })
+        ));
+        assert!(matches!(
+            try_normalize_logical_key(&invalid_b),
+            Err(super::AssetRegistryError::InvalidPathUtf8 { .. })
+        ));
+        assert_eq!(normalize_logical_key(&invalid_a), None);
+        assert_eq!(normalize_logical_key(&invalid_b), None);
     }
 
     #[test]

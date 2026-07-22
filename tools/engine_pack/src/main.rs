@@ -671,7 +671,7 @@ fn pack_cmd(args: &[String]) -> CliResult<String> {
                 .iter()
                 .filter(|e| e.entry_type == EntryType::File)
                 .map(|e| slash_path(&e.destination))
-                .collect(),
+                .collect::<CliResult<Vec<_>>>()?,
             skipped_disabled_packages: project
                 .packages
                 .iter()
@@ -814,7 +814,7 @@ fn collect_scan_records(
             continue;
         }
 
-        let Some(kind) = classify_asset_kind(&path) else {
+        let Some(kind) = classify_asset_kind(&path)? else {
             continue;
         };
 
@@ -843,9 +843,9 @@ fn collect_scan_records(
                 format!("failed to relativize '{}': {err}", path.display()),
             )))
         })?;
-        let relative_string = slash_path(relative);
+        let relative_string = slash_path(relative)?;
         let stem = relative.with_extension("");
-        let name = sanitize_id_component(&slash_path(&stem));
+        let name = sanitize_id_component(&slash_path(&stem)?);
         records.push(ScanRecord {
             id: format!("{package_id}.{}.{}", kind.as_str(), name),
             kind,
@@ -870,15 +870,23 @@ fn read_package_manifest(path: &Path) -> CliResult<PackageManifest> {
     })
 }
 
-fn classify_asset_kind(path: &Path) -> Option<AssetKind> {
-    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
-    match extension.as_str() {
+fn classify_asset_kind(path: &Path) -> CliResult<Option<AssetKind>> {
+    let Some(extension) = path.extension() else {
+        return Ok(None);
+    };
+    let extension = extension.to_str().ok_or_else(|| {
+        CliError::FsTx(fs_tx::FsTxError::InvalidEntryPath(format!(
+            "asset extension is not valid UTF-8: '{}'",
+            path.display()
+        )))
+    })?;
+    Ok(match extension.to_ascii_lowercase().as_str() {
         "gltf" | "glb" | "obj" => Some(AssetKind::Model),
         "png" | "jpg" | "jpeg" | "ktx" | "ktx2" => Some(AssetKind::Texture),
         "hdr" | "exr" => Some(AssetKind::Environment),
         "wav" | "ogg" | "flac" | "mp3" => Some(AssetKind::Audio),
         _ => None,
-    }
+    })
 }
 
 fn parse_asset_kind(value: &str) -> CliResult<AssetKind> {
@@ -917,14 +925,20 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
-fn slash_path(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+fn slash_path(path: &Path) -> CliResult<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(part) = component {
+            let part = part.to_str().ok_or_else(|| {
+                CliError::FsTx(fs_tx::FsTxError::InvalidEntryPath(format!(
+                    "path component is not valid UTF-8: '{}'",
+                    path.display()
+                )))
+            })?;
+            parts.push(part.to_string());
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 fn sanitize_id_component(value: &str) -> String {

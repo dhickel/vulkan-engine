@@ -2912,15 +2912,57 @@ pub struct VkPipelineCache {
 }
 
 impl VkPipelineCache {
+    pub(crate) fn validate_entries(entries: &[(VkPipelineType, VkPipeline)]) -> Result<(), String> {
+        if entries.len() != VkPipelineType::COUNT {
+            return Err(format!(
+                "VkPipelineCache: expected {} pipeline entries, got {}",
+                VkPipelineType::COUNT,
+                entries.len()
+            ));
+        }
+
+        let mut seen = [false; VkPipelineType::COUNT];
+        for (typ, _) in entries {
+            let index = *typ as usize;
+            if index >= VkPipelineType::COUNT {
+                return Err(format!(
+                    "VkPipelineCache: pipeline type {:?} has out-of-range discriminant {}",
+                    typ, index
+                ));
+            }
+            if seen[index] {
+                return Err(format!(
+                    "VkPipelineCache: duplicate pipeline type {:?}",
+                    typ
+                ));
+            }
+            seen[index] = true;
+        }
+
+        for (index, present) in seen.into_iter().enumerate() {
+            if !present {
+                return Err(format!(
+                    "VkPipelineCache: missing pipeline type with discriminant {}",
+                    index
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn new(mut pipelines: Vec<(VkPipelineType, VkPipeline)>) -> Result<Self, String> {
+        Self::validate_entries(&pipelines)?;
+
         pipelines.sort_by_key(|(typ, _)| *typ);
 
+        // Length and complete coverage were validated above; conversion is infallible.
         let sorted_pipelines: [VkPipeline; VkPipelineType::COUNT] = pipelines
             .into_iter()
             .map(|(_, pipeline)| pipeline)
             .collect::<Vec<_>>()
             .try_into()
-            .map_err(|_| "Number of pipelines did not match number of enum keys".to_string())?;
+            .unwrap_or_else(|_| unreachable!("pipeline count validated above"));
 
         Ok(Self {
             pipelines: sorted_pipelines,
@@ -2928,7 +2970,9 @@ impl VkPipelineCache {
     }
 
     pub fn get_pipeline(&self, typ: VkPipelineType) -> &VkPipeline {
-        unsafe { self.pipelines.get_unchecked(typ as usize) }
+        self.pipelines
+            .get(typ as usize)
+            .expect("VkPipelineCache: pipeline type index out of bounds; cache invariant broken")
     }
 }
 
