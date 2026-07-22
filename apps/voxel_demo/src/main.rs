@@ -1001,9 +1001,7 @@ fn service_window_resize(
     match renderer.resize(width, height) {
         Ok(()) if width == 0 || height == 0 => WindowResizeOutcome::Deferred,
         Ok(()) => WindowResizeOutcome::Ready,
-        Err(renderer::RendererError::Frame(
-            renderer::api::RendererFrameError::Resize(message),
-        )) => {
+        Err(renderer::RendererError::Frame(renderer::api::RendererFrameError::Resize(message))) => {
             log::warn!(
                 "{context} deferred for {width}x{height}; swapchain preflight will retry: {message}"
             );
@@ -1313,11 +1311,7 @@ fn write_enriched_sidecar(
 
 // ─── v2 Windowed mode ─────────────────────────────────────────────────────
 
-fn is_editor_toggle_key(
-    physical_key: PhysicalKey,
-    state: ElementState,
-    repeat: bool,
-) -> bool {
+fn is_editor_toggle_key(physical_key: PhysicalKey, state: ElementState, repeat: bool) -> bool {
     !repeat
         && state == ElementState::Pressed
         && matches!(physical_key, PhysicalKey::Code(KeyCode::F1 | KeyCode::F2))

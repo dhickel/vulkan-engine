@@ -37,8 +37,7 @@ pub enum KeyframeValue {
     Scale(Vec3),
 }
 
-/// A channel targets a specific node and property by durable
-/// [`SceneNodeId`] instead of a volatile index.
+/// A channel targets a specific node and property by legacy node index.
 #[derive(Clone, Debug)]
 pub struct AnimationChannel {
     /// Legacy node index resolved through the player's target map before
@@ -102,7 +101,6 @@ struct ResolvedChannel {
 /// Fully-resolved clip ready for evaluation.
 #[derive(Clone, Debug)]
 struct ResolvedClip {
-    name: String,
     duration: f32,
     channels: Vec<ResolvedChannel>,
     samplers: Vec<AnimationSampler>,
@@ -234,11 +232,7 @@ impl AnimationClip {
                 if kind != expected_kind {
                     return Err(AnimationError::CardinalityMismatch(format!(
                         "sampler {} output[{}] is {} but channel {} expects {}",
-                        channel.sampler_index,
-                        oi,
-                        kind,
-                        ci,
-                        expected_kind
+                        channel.sampler_index, oi, kind, ci, expected_kind
                     )));
                 }
             }
@@ -250,15 +244,21 @@ impl AnimationClip {
     /// Resolve legacy `node_index` fields into [`SceneNodeId`] targets
     /// using a user-supplied map.  Returns an error if any channel
     /// references a `node_index` not present in the map.
-    fn resolve(&self, target_map: &HashMap<usize, SceneNodeId>) -> Result<ResolvedClip, AnimationError> {
+    fn resolve(
+        &self,
+        target_map: &HashMap<usize, SceneNodeId>,
+    ) -> Result<ResolvedClip, AnimationError> {
         let mut channels = Vec::with_capacity(self.channels.len());
         for channel in &self.channels {
-            let target = target_map.get(&channel.node_index).copied().ok_or_else(|| {
-                AnimationError::InvalidChannel(format!(
-                    "channel node_index {} is not in the target map",
-                    channel.node_index
-                ))
-            })?;
+            let target = target_map
+                .get(&channel.node_index)
+                .copied()
+                .ok_or_else(|| {
+                    AnimationError::InvalidChannel(format!(
+                        "channel node_index {} is not in the target map",
+                        channel.node_index
+                    ))
+                })?;
             channels.push(ResolvedChannel {
                 target,
                 target_path: channel.target_path,
@@ -266,7 +266,6 @@ impl AnimationClip {
             });
         }
         Ok(ResolvedClip {
-            name: self.name.clone(),
             duration: self.duration,
             channels,
             samplers: self.samplers.clone(),
@@ -386,30 +385,37 @@ impl AnimationPlayer {
     /// empty map if no clip is set or an error occurs.  Invalid `dt`
     /// (NaN, ∞, negative) does not mutate player state.
     pub fn update(&mut self, dt: f32) -> HashMap<usize, Mat4> {
-        // Resolve targets lazily if needed.
-        if self.resolved.is_none() {
-            if let Some(ref clip) = self.clip {
-                match clip.resolve(&self.target_map) {
-                    Ok(r) => self.resolved = Some(r),
-                    Err(_) => return HashMap::new(),
-                }
-            } else {
-                return HashMap::new();
-            }
+        if Self::validate_update_delta(dt).is_err() {
+            return HashMap::new();
         }
 
-        match self.try_compute_update(dt) {
-            Ok((transforms_scene_id, new_time, new_playing)) => {
-                // Commit.
+        let computed = if let Some(resolved) = self.resolved.as_ref() {
+            self.try_compute_update(dt, resolved)
+                .map(|candidate| (candidate, None))
+        } else {
+            let Some(clip) = self.clip.as_ref() else {
+                return HashMap::new();
+            };
+            let resolved = match clip.resolve(&self.target_map) {
+                Ok(resolved) => resolved,
+                Err(_) => return HashMap::new(),
+            };
+            self.try_compute_update(dt, &resolved)
+                .map(|candidate| (candidate, Some(resolved)))
+        };
+
+        match computed {
+            Ok(((transforms_scene_id, new_time, new_playing), resolved_to_commit)) => {
+                if let Some(resolved) = resolved_to_commit {
+                    self.resolved = Some(resolved);
+                }
                 self.current_time = new_time;
                 self.playing = new_playing;
+
                 // Convert SceneNodeId-keyed map to usize-keyed map for
                 // legacy return type.  Build a reverse lookup.
-                let reverse: HashMap<SceneNodeId, usize> = self
-                    .target_map
-                    .iter()
-                    .map(|(k, v)| (*v, *k))
-                    .collect();
+                let reverse: HashMap<SceneNodeId, usize> =
+                    self.target_map.iter().map(|(k, v)| (*v, *k)).collect();
                 let mut result = HashMap::with_capacity(transforms_scene_id.len());
                 for (scene_id, mat) in transforms_scene_id {
                     if let Some(idx) = reverse.get(&scene_id) {
@@ -418,10 +424,7 @@ impl AnimationPlayer {
                 }
                 result
             }
-            Err(_) => {
-                // Non-mutating: leave state unchanged, return empty.
-                HashMap::new()
-            }
+            Err(_) => HashMap::new(),
         }
     }
 
@@ -455,21 +458,25 @@ impl AnimationPlayer {
     /// non-finite interpolation output.
     ///
     /// On failure the player state is unchanged.
-    pub fn try_update(
-        &mut self,
-        dt: f32,
-    ) -> Result<HashMap<SceneNodeId, Mat4>, AnimationError> {
-        // Resolve targets lazily if needed.
-        if self.resolved.is_none() {
-            if let Some(ref clip) = self.clip {
-                self.resolved = Some(clip.resolve(&self.target_map)?);
-            } else {
-                return Ok(HashMap::new());
-            }
-        }
+    pub fn try_update(&mut self, dt: f32) -> Result<HashMap<SceneNodeId, Mat4>, AnimationError> {
+        Self::validate_update_delta(dt)?;
 
-        let (transforms, new_time, new_playing) = self.try_compute_update(dt)?;
-        // Commit only after success.
+        let (transforms, new_time, new_playing, resolved_to_commit) =
+            if let Some(resolved) = self.resolved.as_ref() {
+                let (transforms, new_time, new_playing) = self.try_compute_update(dt, resolved)?;
+                (transforms, new_time, new_playing, None)
+            } else {
+                let Some(clip) = self.clip.as_ref() else {
+                    return Ok(HashMap::new());
+                };
+                let resolved = clip.resolve(&self.target_map)?;
+                let (transforms, new_time, new_playing) = self.try_compute_update(dt, &resolved)?;
+                (transforms, new_time, new_playing, Some(resolved))
+            };
+
+        if let Some(resolved) = resolved_to_commit {
+            self.resolved = Some(resolved);
+        }
         self.current_time = new_time;
         self.playing = new_playing;
         Ok(transforms)
@@ -483,6 +490,7 @@ impl AnimationPlayer {
     fn try_compute_update(
         &self,
         dt: f32,
+        resolved: &ResolvedClip,
     ) -> Result<
         (
             HashMap<SceneNodeId, Mat4>,
@@ -491,16 +499,7 @@ impl AnimationPlayer {
         ),
         AnimationError,
     > {
-        if !dt.is_finite() || dt < 0.0 {
-            return Err(AnimationError::InvalidTimestamp(format!(
-                "delta time must be finite and non-negative, got {dt}"
-            )));
-        }
-
-        let resolved = match &self.resolved {
-            Some(r) => r,
-            None => return Ok((HashMap::new(), self.current_time, self.playing)),
-        };
+        Self::validate_update_delta(dt)?;
 
         let candidate_time = if !self.playing {
             self.current_time
@@ -536,6 +535,15 @@ impl AnimationPlayer {
 
         let transforms = evaluate_resolved(resolved, clamped_time)?;
         Ok((transforms, clamped_time, new_playing))
+    }
+
+    fn validate_update_delta(dt: f32) -> Result<(), AnimationError> {
+        if !dt.is_finite() || dt < 0.0 {
+            return Err(AnimationError::InvalidTimestamp(format!(
+                "delta time must be finite and non-negative, got {dt}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -687,7 +695,9 @@ fn interpolate_linear(
         (KeyframeValue::Rotation(qa), KeyframeValue::Rotation(qb)) => {
             let qa = normalize_quat(*qa, "linear rotation start")?;
             let qb = normalize_quat(*qb, "linear rotation end")?;
-            Ok(KeyframeValue::Rotation(shortest_path_slerp(qa, qb, factor)?))
+            Ok(KeyframeValue::Rotation(shortest_path_slerp(
+                qa, qb, factor,
+            )?))
         }
         (KeyframeValue::Scale(va), KeyframeValue::Scale(vb)) => {
             Ok(KeyframeValue::Scale(va.lerp(*vb, factor)))
@@ -731,7 +741,9 @@ fn interpolate_cubic_spline(
         .input
         .binary_search_by(|t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Less))
     {
-        Ok(i) => i.saturating_sub(1).min(sampler.input.len().saturating_sub(2)),
+        Ok(i) => i
+            .saturating_sub(1)
+            .min(sampler.input.len().saturating_sub(2)),
         Err(0) => 0,
         Err(i) => (i - 1).min(sampler.input.len().saturating_sub(2)),
     };
@@ -836,7 +848,9 @@ fn find_surrounding_keys(
         .input
         .binary_search_by(|t| t.partial_cmp(&time).unwrap_or(std::cmp::Ordering::Less))
     {
-        Ok(i) => i.saturating_sub(1).min(sampler.input.len().saturating_sub(2)),
+        Ok(i) => i
+            .saturating_sub(1)
+            .min(sampler.input.len().saturating_sub(2)),
         Err(0) => 0,
         Err(i) => (i - 1).min(sampler.input.len().saturating_sub(2)),
     };
@@ -921,10 +935,7 @@ mod tests {
         map
     }
 
-    fn make_translation_sampler_linear(
-        times: Vec<f32>,
-        values: Vec<Vec3>,
-    ) -> AnimationSampler {
+    fn make_translation_sampler_linear(times: Vec<f32>, values: Vec<Vec3>) -> AnimationSampler {
         AnimationSampler {
             input: times,
             output: values.into_iter().map(KeyframeValue::Translation).collect(),
@@ -932,10 +943,7 @@ mod tests {
         }
     }
 
-    fn make_translation_sampler_step(
-        times: Vec<f32>,
-        values: Vec<Vec3>,
-    ) -> AnimationSampler {
+    fn make_translation_sampler_step(times: Vec<f32>, values: Vec<Vec3>) -> AnimationSampler {
         AnimationSampler {
             input: times,
             output: values.into_iter().map(KeyframeValue::Translation).collect(),
@@ -1182,8 +1190,16 @@ mod tests {
         let sampler = make_translation_sampler_cubic(
             vec![0.0, 2.0],
             vec![
-                (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)),
-                (Vec3::new(-2.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.0)),
+                (
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(2.0, 0.0, 0.0),
+                ),
+                (
+                    Vec3::new(-2.0, 0.0, 0.0),
+                    Vec3::new(4.0, 0.0, 0.0),
+                    Vec3::new(0.0, 0.0, 0.0),
+                ),
             ],
         );
 
@@ -1211,7 +1227,7 @@ mod tests {
                 KeyframeValue::Rotation(q_ident), // value
                 KeyframeValue::Rotation(q_ident), // out-tan
                 KeyframeValue::Rotation(q_ident), // in-tan
-                KeyframeValue::Rotation(q_90), // value
+                KeyframeValue::Rotation(q_90),    // value
                 KeyframeValue::Rotation(q_ident), // out-tan
             ],
             interpolation: Interpolation::CubicSpline,
@@ -1346,9 +1362,37 @@ mod tests {
 
         let result = player.update(-0.1);
         assert!(result.is_empty());
-        // State unchanged.
+        // State unchanged, including lazy resolved-cache state.
         assert_eq!(player.current_time(), 0.0);
         assert!(player.is_playing());
+        assert!(player.resolved.is_none());
+    }
+
+    #[test]
+    fn player_update_overflow_is_failure_atomic_before_resolution_commit() {
+        let mut clip = AnimationClip::new("overflow", 1.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 1.0],
+            vec![Vec3::ZERO, Vec3::ONE],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.set_speed(f32::MAX);
+        player.play();
+
+        let result = player.update(2.0);
+        assert!(result.is_empty());
+        assert_eq!(player.current_time(), 0.0);
+        assert!(player.is_playing());
+        assert_eq!(player.speed(), f32::MAX);
+        assert!(player.resolved.is_none());
     }
 
     #[test]
@@ -1543,7 +1587,11 @@ mod tests {
         let mut clip = AnimationClip::new("snapshot", 2.0);
         clip.samplers.push(make_translation_sampler_linear(
             vec![0.0, 1.0, 2.0],
-            vec![Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
+            vec![
+                Vec3::ZERO,
+                Vec3::new(5.0, 0.0, 0.0),
+                Vec3::new(10.0, 0.0, 0.0),
+            ],
         ));
         clip.channels.push(AnimationChannel {
             node_index: 0,
@@ -1562,6 +1610,7 @@ mod tests {
         let snap_time = player.current_time();
         let snap_playing = player.is_playing();
         let snap_speed = player.speed();
+        let snap_resolved = player.resolved.is_some();
 
         // Now trigger a failure with NaN dt.
         let result = player.try_update(f32::NAN);
@@ -1569,6 +1618,34 @@ mod tests {
         assert_eq!(player.current_time(), snap_time);
         assert_eq!(player.is_playing(), snap_playing);
         assert!((player.speed() - snap_speed).abs() < 0.01);
+        assert_eq!(player.resolved.is_some(), snap_resolved);
+    }
+
+    #[test]
+    fn try_update_overflow_is_failure_atomic_before_resolution_commit() {
+        let mut clip = AnimationClip::new("try_overflow", 1.0);
+        clip.samplers.push(make_translation_sampler_linear(
+            vec![0.0, 1.0],
+            vec![Vec3::ZERO, Vec3::ONE],
+        ));
+        clip.channels.push(AnimationChannel {
+            node_index: 0,
+            target_path: AnimationTarget::Translation,
+            sampler_index: 0,
+        });
+
+        let mut player = AnimationPlayer::new();
+        player.set_target_map(make_target_map());
+        player.set_clip(clip);
+        player.set_speed(f32::MAX);
+        player.play();
+
+        let result = player.try_update(2.0);
+        assert!(matches!(result, Err(AnimationError::InvalidTimestamp(_))));
+        assert_eq!(player.current_time(), 0.0);
+        assert!(player.is_playing());
+        assert_eq!(player.speed(), f32::MAX);
+        assert!(player.resolved.is_none());
     }
 
     // ── Shortest-path slerp ──────────────────────────────────────────

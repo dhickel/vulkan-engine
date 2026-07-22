@@ -913,7 +913,8 @@ mod mesh_geometry_proof {
 
     #[test]
     fn dto_arc_positions_shareable() {
-        let positions: Arc<[[f32; 3]]> = Arc::from(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]].into_boxed_slice());
+        let positions: Arc<[[f32; 3]]> =
+            Arc::from(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]].into_boxed_slice());
         let p2 = Arc::clone(&positions);
         assert_eq!(positions.len(), p2.len());
         assert_eq!(positions[0], p2[0]);

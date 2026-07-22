@@ -19,7 +19,7 @@ use crate::data::data_cache::{
     CachedEnvironment, CachedMesh, LoadResult, MeshCache, TextureCache, VkDataCache,
 };
 use crate::data::data_util::resolve_texture_mip_count;
-use crate::data::gpu_data::{MaterialMeta, MeshMeta, TextureMeta, TextureSemantic, Vertex};
+use crate::data::gpu_data::{MaterialPayload, MeshMeta, TextureMeta, TextureSemantic, Vertex};
 use crate::data::handles::{
     CacheError, EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle,
 };
@@ -1271,7 +1271,7 @@ fn create_material_pbr_gpu_ready(
     data_cache: Arc<VkDataCache>,
 ) -> Result<MaterialHandle, AssetError> {
     validate_material_desc(&desc)?;
-    let material_meta = material_desc_to_meta(&desc);
+    let material_payload = material_desc_to_payload(&desc);
 
     {
         let texture_cache = data_cache
@@ -1279,7 +1279,7 @@ fn create_material_pbr_gpu_ready(
             .lock()
             .map_err(|_| poisoned_lock_err("texture_cache"))?;
 
-        for tex_handle in material_meta.texture_ids.to_vec() {
+        for tex_handle in material_payload.texture_ids.to_vec() {
             if tex_handle.slot >= TextureCache::DEFAULT_TEX_ITER_START as u32 {
                 texture_cache.get_texture(tex_handle).map_err(|err| {
                     map_cache_err("texture", tex_handle.slot, tex_handle.generation, err)
@@ -1293,7 +1293,7 @@ fn create_material_pbr_gpu_ready(
             .texture_cache
             .lock()
             .map_err(|_| poisoned_lock_err("texture_cache"))?;
-        texture_cache.add_material(material_meta)
+        texture_cache.add_material(material_payload)
     };
 
     let allocation_result = {
@@ -2048,9 +2048,9 @@ fn validate_procedural_mesh(mesh: &ProceduralMeshData) -> Result<(), AssetError>
     Ok(())
 }
 
-/// Convert PbrMaterialDesc to internal MaterialMeta with clamping.
-fn material_desc_to_meta(desc: &PbrMaterialDesc) -> MaterialMeta {
-    let mut meta = MaterialMeta::default();
+/// Convert PbrMaterialDesc to an internal material payload with clamping.
+fn material_desc_to_payload(desc: &PbrMaterialDesc) -> MaterialPayload {
+    let mut meta = MaterialPayload::default();
 
     // Clamp base color channels to [0.0, 1.0]
     meta.material_values.base_color_factor =
@@ -2149,7 +2149,7 @@ mod tests {
             ..Default::default()
         };
 
-        let meta = material_desc_to_meta(&desc);
+        let meta = material_desc_to_payload(&desc);
         assert_eq!(meta.material_values.metallic_factor, 1.0);
         assert_eq!(meta.material_values.roughness_factor, 0.02);
     }

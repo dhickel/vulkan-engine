@@ -160,19 +160,31 @@ impl ScriptEngine {
     pub fn new() -> Self {
         let mut engine = Engine::new();
 
-        engine.register_fn("log_info", |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-            with_top_context(|ctx| ctx.log(log::Level::Info, msg))
-        });
-        engine.register_fn("log_warn", |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-            with_top_context(|ctx| ctx.log(log::Level::Warn, msg))
-        });
-        engine.register_fn("log_error", |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-            with_top_context(|ctx| ctx.log(log::Level::Error, msg))
-        });
+        engine.register_fn(
+            "log_info",
+            |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                with_top_context(|ctx| ctx.log(log::Level::Info, msg))
+            },
+        );
+        engine.register_fn(
+            "log_warn",
+            |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                with_top_context(|ctx| ctx.log(log::Level::Warn, msg))
+            },
+        );
+        engine.register_fn(
+            "log_error",
+            |msg: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                with_top_context(|ctx| ctx.log(log::Level::Error, msg))
+            },
+        );
 
-        engine.register_fn("emit_event", |name: &str| -> Result<(), Box<rhai::EvalAltResult>> {
-            with_top_context(|ctx| ctx.emit_event(name, None))
-        });
+        engine.register_fn(
+            "emit_event",
+            |name: &str| -> Result<(), Box<rhai::EvalAltResult>> {
+                with_top_context(|ctx| ctx.emit_event(name, None))
+            },
+        );
         engine.register_fn(
             "emit_event",
             |name: &str, payload: rhai::Dynamic| -> Result<(), Box<rhai::EvalAltResult>> {
@@ -266,12 +278,9 @@ impl ScriptEngine {
     {
         let guard = EvaluationGuard::push(script.clone());
         let result = evaluate(&self.engine);
-        let ctx = guard.finish().ok_or_else(|| {
-            ScriptError::new(
-                script.clone(),
-                "evaluation context stack corrupt",
-            )
-        })?;
+        let ctx = guard
+            .finish()
+            .ok_or_else(|| ScriptError::new(script.clone(), "evaluation context stack corrupt"))?;
 
         match result {
             Ok(value) => Ok(ScriptEvalReport {

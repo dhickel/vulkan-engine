@@ -178,6 +178,9 @@ impl Default for TextureIds {
     }
 }
 
+/// CPU-side material payload accepted by the public asset facade.
+pub type MaterialPayload = MaterialMeta;
+
 impl Default for MaterialMeta {
     fn default() -> Self {
         Self {
@@ -520,10 +523,10 @@ pub struct GpuPointLight {
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 pub struct GpuSpotLight {
-    pub position_range: Vec4,       // xyz = position, w = range
-    pub direction_inner_cos: Vec4,  // xyz = direction, w = inner cos
-    pub color_intensity: Vec4,      // rgb = color, w = intensity
-    pub outer_cos: Vec4,            // x = outer cos, yzw = pad
+    pub position_range: Vec4,      // xyz = position, w = range
+    pub direction_inner_cos: Vec4, // xyz = direction, w = inner cos
+    pub color_intensity: Vec4,     // rgb = color, w = intensity
+    pub outer_cos: Vec4,           // x = outer cos, yzw = pad
 }
 
 /// Extended EnvironmentUBO with CSM cascade data and spot lights.
@@ -808,7 +811,10 @@ mod tests {
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, light_view_proj), 32);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, exposure), 96);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, cascade_count), 120);
-        assert_eq!(std::mem::offset_of!(EnvironmentUBO, directional_light_count), 124);
+        assert_eq!(
+            std::mem::offset_of!(EnvironmentUBO, directional_light_count),
+            124
+        );
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, cascade_splits), 128);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_light_count), 144);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, spot_light_count), 160);
@@ -816,7 +822,10 @@ mod tests {
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, blend_fraction), 368);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, point_lights), 384);
         assert_eq!(std::mem::offset_of!(EnvironmentUBO, spot_lights), 896);
-        assert_eq!(std::mem::offset_of!(EnvironmentUBO, directional_lights), 1920);
+        assert_eq!(
+            std::mem::offset_of!(EnvironmentUBO, directional_lights),
+            1920
+        );
         assert_eq!(std::mem::size_of::<EnvironmentUBO>(), 2048);
     }
 

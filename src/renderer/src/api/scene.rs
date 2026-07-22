@@ -12,8 +12,8 @@ use crate::scene::render_submission::{
     RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
 use crate::scene::scene_world::{
-    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError,
-    SceneWorld, SpotLightRefError,
+    DirectionalLightRefError, PointLightRefError, ReparentError, SceneNodeRefError, SceneWorld,
+    SpotLightRefError,
 };
 use crate::scene::SceneNodeId;
 
@@ -108,9 +108,7 @@ pub(crate) fn scene_bounds_from_dto(dto: &MeshGeometryDto) -> SceneBounds {
             }
             SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry)
         }
-        MeshDeformation::Skinned => {
-            SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
-        }
+        MeshDeformation::Skinned => SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned),
         MeshDeformation::Deformed => {
             SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed)
         }
@@ -221,23 +219,77 @@ pub struct SpotLight {
 
 impl SpotLight {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(position: Vec3, direction: Vec3, color: Vec3, intensity: f32, range: f32, inner: f32, outer: f32) -> Self {
-        Self { position, direction, color, intensity, range, inner_cone_angle: inner, outer_cone_angle: outer }
+    pub fn new(
+        position: Vec3,
+        direction: Vec3,
+        color: Vec3,
+        intensity: f32,
+        range: f32,
+        inner: f32,
+        outer: f32,
+    ) -> Self {
+        Self {
+            position,
+            direction,
+            color,
+            intensity,
+            range,
+            inner_cone_angle: inner,
+            outer_cone_angle: outer,
+        }
     }
 
     fn validate(&self) -> Result<(), SceneError> {
-        if !self.position.is_finite() { return Err(SceneError::InvalidSpotLight("position must be finite".into())); }
-        if !self.direction.is_finite() || self.direction.length_squared() < 1e-6 { return Err(SceneError::InvalidSpotLight("direction must be finite and non-zero".into())); }
-        if !self.range.is_finite() || self.range <= 0.0 { return Err(SceneError::InvalidSpotLight("range must be finite and > 0.0".into())); }
-        if !self.intensity.is_finite() || self.intensity < 0.0 { return Err(SceneError::InvalidSpotLight("intensity must be finite and >= 0.0".into())); }
-        if !self.color.is_finite() { return Err(SceneError::InvalidSpotLight("color must be finite".into())); }
-        if !self.inner_cone_angle.is_finite() || self.inner_cone_angle < 0.0 || self.inner_cone_angle > std::f32::consts::PI { return Err(SceneError::InvalidSpotLight("inner_cone_angle must be in [0, PI]".into())); }
-        if !self.outer_cone_angle.is_finite() || self.outer_cone_angle < 0.0 || self.outer_cone_angle > std::f32::consts::PI { return Err(SceneError::InvalidSpotLight("outer_cone_angle must be in [0, PI]".into())); }
-        if self.inner_cone_angle > self.outer_cone_angle { return Err(SceneError::InvalidSpotLight("inner_cone_angle must be <= outer_cone_angle".into())); }
+        if !self.position.is_finite() {
+            return Err(SceneError::InvalidSpotLight(
+                "position must be finite".into(),
+            ));
+        }
+        if !self.direction.is_finite() || self.direction.length_squared() < 1e-6 {
+            return Err(SceneError::InvalidSpotLight(
+                "direction must be finite and non-zero".into(),
+            ));
+        }
+        if !self.range.is_finite() || self.range <= 0.0 {
+            return Err(SceneError::InvalidSpotLight(
+                "range must be finite and > 0.0".into(),
+            ));
+        }
+        if !self.intensity.is_finite() || self.intensity < 0.0 {
+            return Err(SceneError::InvalidSpotLight(
+                "intensity must be finite and >= 0.0".into(),
+            ));
+        }
+        if !self.color.is_finite() {
+            return Err(SceneError::InvalidSpotLight("color must be finite".into()));
+        }
+        if !self.inner_cone_angle.is_finite()
+            || self.inner_cone_angle < 0.0
+            || self.inner_cone_angle > std::f32::consts::PI
+        {
+            return Err(SceneError::InvalidSpotLight(
+                "inner_cone_angle must be in [0, PI]".into(),
+            ));
+        }
+        if !self.outer_cone_angle.is_finite()
+            || self.outer_cone_angle < 0.0
+            || self.outer_cone_angle > std::f32::consts::PI
+        {
+            return Err(SceneError::InvalidSpotLight(
+                "outer_cone_angle must be in [0, PI]".into(),
+            ));
+        }
+        if self.inner_cone_angle > self.outer_cone_angle {
+            return Err(SceneError::InvalidSpotLight(
+                "inner_cone_angle must be <= outer_cone_angle".into(),
+            ));
+        }
         Ok(())
     }
 
-    fn sanitize_color(&self) -> Vec3 { self.color.max(Vec3::ZERO) }
+    fn sanitize_color(&self) -> Vec3 {
+        self.color.max(Vec3::ZERO)
+    }
 }
 
 /// Point light definition.
@@ -1180,8 +1232,13 @@ impl Scene {
 
     /// Set which directional light (if any) casts shadows.
     /// Only one directional light may be the shadow caster at a time.
-    pub fn set_shadow_casting_directional(&mut self, id: Option<DirectionalLightId>) -> Result<(), SceneError> {
-        if let Some(id) = id { self.validate_directional_light(id)?; }
+    pub fn set_shadow_casting_directional(
+        &mut self,
+        id: Option<DirectionalLightId>,
+    ) -> Result<(), SceneError> {
+        if let Some(id) = id {
+            self.validate_directional_light(id)?;
+        }
         self.world.set_shadow_casting_directional(id);
         Ok(())
     }
@@ -1194,14 +1251,20 @@ impl Scene {
     /// Add a directional light without enforcing the legacy single-light cap.
     /// Multiple directional lights are supported for direct illumination;
     /// shadow casting remains limited to at most one.
-    pub fn add_directional_light(&mut self, light: DirectionalLight) -> Result<DirectionalLightId, SceneError> {
+    pub fn add_directional_light(
+        &mut self,
+        light: DirectionalLight,
+    ) -> Result<DirectionalLightId, SceneError> {
         light.validate()?;
         if self.world.active_directional_light_count() >= MAX_DIRECTIONAL_LIGHTS_GPU {
             return Err(SceneError::InvalidDirectionalLight(format!(
                 "directional-light cap ({MAX_DIRECTIONAL_LIGHTS_GPU}) reached"
             )));
         }
-        let sanitized = DirectionalLight { color: light.sanitize_color(), ..light };
+        let sanitized = DirectionalLight {
+            color: light.sanitize_color(),
+            ..light
+        };
         Ok(self.world.add_directional_light(sanitized))
     }
 
@@ -1275,17 +1338,31 @@ impl Scene {
                 "spot-light cap ({MAX_SPOT_LIGHTS_GPU}) reached"
             )));
         }
-        let sanitized = SpotLight { color: light.sanitize_color(), ..light };
+        let sanitized = SpotLight {
+            color: light.sanitize_color(),
+            ..light
+        };
         Ok(self.world.add_spot_light(sanitized))
     }
 
     /// Update a spot light.
-    pub fn update_spot_light(&mut self, id: SpotLightId, light: SpotLight) -> Result<(), SceneError> {
+    pub fn update_spot_light(
+        &mut self,
+        id: SpotLightId,
+        light: SpotLight,
+    ) -> Result<(), SceneError> {
         light.validate()?;
         self.validate_spot_light(id)?;
-        let sanitized = SpotLight { color: light.sanitize_color(), ..light };
-        if self.world.update_spot_light(id, sanitized) { return Ok(()); }
-        Err(SceneError::InvalidSpotLight(format!("failed to update spot light")))
+        let sanitized = SpotLight {
+            color: light.sanitize_color(),
+            ..light
+        };
+        if self.world.update_spot_light(id, sanitized) {
+            return Ok(());
+        }
+        Err(SceneError::InvalidSpotLight(format!(
+            "failed to update spot light"
+        )))
     }
 
     /// Remove a spot light.
@@ -1296,7 +1373,9 @@ impl Scene {
             self.spot_light_parents.remove(&id);
             return Ok(());
         }
-        Err(SceneError::InvalidSpotLight(format!("failed to remove spot light")))
+        Err(SceneError::InvalidSpotLight(format!(
+            "failed to remove spot light"
+        )))
     }
 
     /// Returns all active spot lights.
@@ -1657,8 +1736,9 @@ fn map_directional_light_ref_error(
 fn map_spot_light_ref_error(id: SpotLightId, err: SpotLightRefError) -> SceneError {
     match err {
         SpotLightRefError::GenerationMismatch => SceneError::StaleSpotLight(id),
-        SpotLightRefError::OutOfBounds | SpotLightRefError::Vacant =>
-            SceneError::InvalidSpotLight(format!("spot light out of bounds or vacant")),
+        SpotLightRefError::OutOfBounds | SpotLightRefError::Vacant => {
+            SceneError::InvalidSpotLight(format!("spot light out of bounds or vacant"))
+        }
     }
 }
 
@@ -2250,7 +2330,9 @@ impl SerializedScene {
             let id = scene
                 .add_directional_light(dl)
                 .map_err(crate::api::errors::RendererError::from)?;
-            scene.directional_light_stable_ids.insert(id, light.id.clone());
+            scene
+                .directional_light_stable_ids
+                .insert(id, light.id.clone());
             if let Some(parent) = &light.parent {
                 scene.directional_light_parents.insert(id, parent.clone());
             }
@@ -3464,14 +3546,14 @@ mod tests {
             .set_directional_shadow_config(first, DirectionalShadowConfig { enabled: true })
             .unwrap();
         assert!(matches!(
-            scene.set_directional_shadow_config(
-                second,
-                DirectionalShadowConfig { enabled: true }
-            ),
+            scene.set_directional_shadow_config(second, DirectionalShadowConfig { enabled: true }),
             Err(SceneError::UnsupportedLightFeature(_))
         ));
         let submission = scene.build_submission();
-        assert_eq!(submission.directional_lights.len(), MAX_DIRECTIONAL_LIGHTS_GPU);
+        assert_eq!(
+            submission.directional_lights.len(),
+            MAX_DIRECTIONAL_LIGHTS_GPU
+        );
         assert_eq!(
             submission
                 .directional_lights
@@ -4603,10 +4685,8 @@ mod tests {
         let root = scene.create_node_default(None).unwrap();
 
         // Use an explicit unit proxy so culling can operate on known bounds.
-        let unit_proxy = SceneBounds::Proxy(Aabb::from_min_max(
-            Vec3::splat(-0.5),
-            Vec3::splat(0.5),
-        ));
+        let unit_proxy =
+            SceneBounds::Proxy(Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)));
 
         // Node in front of camera — should stay visible.
         let in_front = scene

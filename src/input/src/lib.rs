@@ -900,7 +900,6 @@ impl ActionBinding {
         self.modifiers = modifiers;
         self
     }
-
 }
 
 fn default_binding_scale() -> f32 {
@@ -1455,11 +1454,7 @@ impl InputLayer for ActionMapLayer {
                         for entry in &mut self.tracked {
                             if entry.active_trigger == Some(trigger) {
                                 entry.active_trigger = None;
-                                ctx.set_instance_value(
-                                    &entry.binding.action,
-                                    entry.instance,
-                                    0.0,
-                                );
+                                ctx.set_instance_value(&entry.binding.action, entry.instance, 0.0);
                                 if entry.binding.consume {
                                     consumed = true;
                                 }
@@ -1496,11 +1491,7 @@ impl InputLayer for ActionMapLayer {
                         for entry in &mut self.tracked {
                             if entry.active_trigger == Some(trigger) {
                                 entry.active_trigger = None;
-                                ctx.set_instance_value(
-                                    &entry.binding.action,
-                                    entry.instance,
-                                    0.0,
-                                );
+                                ctx.set_instance_value(&entry.binding.action, entry.instance, 0.0);
                                 if entry.binding.consume {
                                     consumed = true;
                                 }

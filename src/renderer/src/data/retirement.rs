@@ -784,9 +784,7 @@ mod tests {
             .map(|r| (r.class, r.retire_after, r.payload))
             .collect();
 
-        let result = q.try_reap(FrameSerial(4), |_eligible| {
-            Err("simulated lock failure")
-        });
+        let result = q.try_reap(FrameSerial(4), |_eligible| Err("simulated lock failure"));
         assert!(matches!(
             result,
             Err(TryReapError::ClosureFailed("simulated lock failure"))
@@ -861,11 +859,7 @@ mod tests {
         let mut q: GpuRetirementQueue<&str> = GpuRetirementQueue::new();
         q.enqueue(RetirementClass::BoundsEntry, FrameSerial(3), "A");
         q.enqueue(RetirementClass::MeshGeometry, FrameSerial(3), "B");
-        q.enqueue(
-            RetirementClass::ColliderRecipe,
-            FrameSerial(3),
-            "C",
-        );
+        q.enqueue(RetirementClass::ColliderRecipe, FrameSerial(3), "C");
 
         let reaped = q
             .try_reap(FrameSerial(3), |eligible| {
@@ -907,7 +901,9 @@ mod tests {
 
         // No eligible records, closure not called
         let reaped = q
-            .try_reap(FrameSerial(2), |_| -> Result<(), ()> { panic!("closure must not be called") })
+            .try_reap(FrameSerial(2), |_| -> Result<(), ()> {
+                panic!("closure must not be called")
+            })
             .unwrap();
         assert!(reaped.is_empty());
         assert_eq!(q.pending_count(), 1);
@@ -962,14 +958,10 @@ mod tests {
         let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
         q.enqueue(RetirementClass::MeshGeometry, FrameSerial(1), 10);
 
-        let first = q
-            .try_reap(FrameSerial(1), |_| Ok::<(), ()>(()))
-            .unwrap();
+        let first = q.try_reap(FrameSerial(1), |_| Ok::<(), ()>(())).unwrap();
         assert_eq!(first.len(), 1);
 
-        let second = q
-            .try_reap(FrameSerial(1), |_| Ok::<(), ()>(()))
-            .unwrap();
+        let second = q.try_reap(FrameSerial(1), |_| Ok::<(), ()>(())).unwrap();
         assert!(second.is_empty());
     }
 

@@ -1266,7 +1266,9 @@ fn pick_bounds_readonly(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
             SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
                 if aabb.is_finite() && aabb.is_ordered() {
                     match local_union {
-                        Some(ref mut u) => { u.extend_to_enclose(aabb); }
+                        Some(ref mut u) => {
+                            u.extend_to_enclose(aabb);
+                        }
                         None => local_union = Some(*aabb),
                     }
                 } else {
@@ -1597,6 +1599,38 @@ mod tests {
         };
 
         assert_eq!(scene.pick_ray(&ray), Some(root));
+    }
+
+    #[test]
+    fn pick_ray_readonly_does_not_mutate_dirty_or_cached_state() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+
+        let before = scene.get_node(root).expect("root should exist").clone();
+        assert!(before.dirty);
+        assert_eq!(before.world_transform, Mat4::IDENTITY);
+        assert!(before.node_world_bounds.is_none());
+        assert!(before.subtree_world_bounds.is_none());
+
+        let ray = Ray {
+            origin: Vec3::new(3.0, 0.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        assert_eq!(scene.pick_ray_readonly(&ray), Some(root));
+
+        let after = scene.get_node(root).expect("root should exist");
+        assert_eq!(after.dirty, before.dirty);
+        assert_eq!(after.world_transform, before.world_transform);
+        assert_eq!(after.node_world_bounds, before.node_world_bounds);
+        assert_eq!(after.subtree_world_bounds, before.subtree_world_bounds);
     }
 
     #[test]
