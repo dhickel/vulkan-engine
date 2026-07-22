@@ -1,0 +1,17 @@
+[package]
+name = "guide_app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+engine = { path = "../.." }
+env_logger = "0.11"
+log = "0.4"
+winit = "0.29"
+
+[patch.crates-io]
+imgui-rs-vulkan-renderer = { git = "https://github.com/dhickel/imgui-rs-vulkan-renderer", branch = "dev" }
