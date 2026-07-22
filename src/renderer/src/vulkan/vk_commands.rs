@@ -301,7 +301,11 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
     submission: &RenderSubmission,
     rendergraph: &RenderGraph,
 ) -> Result<RenderGraphExecutionReport, String> {
-    let frame_ptr = core.presentation.get_curr_frame_mut() as *mut VkFrame;
+    let frame_ptr = core
+        .presentation
+        .get_curr_frame_mut()
+        .map_err(|e| format!("no active frame for rendergraph recording: {e}"))?
+        as *mut VkFrame;
     let mut dispatcher = RecordingDispatcher {
         device: &core.device,
         window_state: &core.window_state,
@@ -1466,12 +1470,15 @@ pub(crate) fn build_frame_environment_ubo(
     #[cfg(feature = "csm")] csm_data: Option<&CsmUboData>,
 ) -> EnvironmentUBO {
     use crate::data::gpu_data::{
-        CSM_CASCADE_COUNT, CSM_CASCADE_DIM, GpuDirectionalLight, GpuPointLight, GpuSpotLight,
+        GpuDirectionalLight, GpuPointLight, GpuSpotLight, CSM_CASCADE_COUNT, CSM_CASCADE_DIM,
         MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
     };
 
     let mut env = *base;
-    debug_assert_eq!(env.cascade_view_proj.len(), (CSM_CASCADE_COUNT as usize) * 4);
+    debug_assert_eq!(
+        env.cascade_view_proj.len(),
+        (CSM_CASCADE_COUNT as usize) * 4
+    );
     debug_assert!(CSM_CASCADE_DIM > 0);
     env.exposure = visual_tuning.exposure;
     env.gamma = visual_tuning.gamma;

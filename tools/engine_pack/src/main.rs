@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use renderer::prelude::{
     validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
@@ -12,6 +12,14 @@ use renderer::prelude::{
 };
 use renderer::AssetKind;
 use serde::Serialize;
+
+use engine_pack::cli;
+use engine_pack::fs_tx;
+use engine_pack::fs_tx::{
+    build_publication_plan, cleanup_staging, contained_child_no_symlinks,
+    create_staging_file_sibling, create_staging_sibling, publish_staging,
+    replace_file_with_staging, stage_entry, EntryType, PlanEntry, RollbackJournal,
+};
 
 type CliResult<T> = Result<T, CliError>;
 
@@ -25,6 +33,10 @@ fn main() {
             eprintln!("error[cli.usage]: {message}");
             2
         }
+        Err(CliError::FsTx(err)) => {
+            eprintln!("error[cli.fs_tx]: {err}");
+            1
+        }
         Err(CliError::Validation(err)) => {
             print_validation_error(&err);
             1
@@ -35,9 +47,14 @@ fn main() {
 
 fn run(args: Vec<String>) -> CliResult<String> {
     let Some(command) = args.first().map(String::as_str) else {
-        return Err(CliError::Usage(usage()));
+        return Err(CliError::Usage(cli::global_help()));
     };
     let rest = &args[1..];
+    if rest.len() == 1 && matches!(rest[0].as_str(), "-h" | "--help") {
+        if let Some(help) = cli::command_help(command) {
+            return Ok(help);
+        }
+    }
     match command {
         "validate-package" => validate_package_cmd(rest),
         "validate-project" => validate_project_cmd(rest),
@@ -48,22 +65,27 @@ fn run(args: Vec<String>) -> CliResult<String> {
         "scan-assets" => scan_assets_cmd(rest),
         "add-asset" => add_asset_cmd(rest),
         "pack" => pack_cmd(rest),
-        "-h" | "--help" | "help" => Ok(usage()),
+        "-h" | "--help" | "help" => Ok(cli::global_help()),
         other => Err(CliError::Usage(format!(
             "unknown command '{other}'\n\n{}",
-            usage()
+            cli::global_help()
         ))),
     }
 }
 
-fn new_app_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let app_id = parser.required_option_value("--id")?;
-    let name = parser.required_option_value("--name")?;
-    let dir = parser.required_path("new-app <dir> --id <app_id> --name <display_name>")?;
-    parser.finish()?;
+// ---------------------------------------------------------------------------
+// new-app — transactional scaffold via staging
+// ---------------------------------------------------------------------------
 
-    if dir.exists() {
+fn new_app_cmd(args: &[String]) -> CliResult<String> {
+    let parsed = cli::parse_command("new-app", cli::new_app_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let app_id = require_option("--id", &parsed)?;
+    let name = require_option("--name", &parsed)?;
+    let dir = require_positional(&parsed, "new-app <dir> --id <app_id> --name <display_name>")?;
+
+    if path_exists_no_follow(&dir) {
         return Err(CliError::Validation(ValidationError::single(
             ValidationDiagnostic::new(
                 "app.path_exists",
@@ -76,29 +98,53 @@ fn new_app_cmd(args: &[String]) -> CliResult<String> {
     }
 
     let engine_root = engine_root_path()?;
-    fs::create_dir_all(dir.join("src")).map_err(|err| io_error("app.io", &dir, err))?;
 
-    let cargo_path = dir.join("Cargo.toml");
-    fs::write(&cargo_path, app_cargo_toml(&app_id, &engine_root))
-        .map_err(|err| io_error("app.io", &cargo_path, err))?;
+    // Stage generated files into a sibling directory and publish only via rename.
+    let staging = create_staging_sibling(&dir).map_err(|e| CliError::FsTx(e))?;
+    let result = (|| -> CliResult<()> {
+        fs::create_dir_all(staging.join("src")).map_err(|e| fs_tx_err("app.io", &staging, e))?;
 
-    let main_path = dir.join("src/main.rs");
-    fs::write(&main_path, app_main_rs(&app_id, &name))
-        .map_err(|err| io_error("app.io", &main_path, err))?;
+        let cargo_path = staging.join("Cargo.toml");
+        fs::write(&cargo_path, app_cargo_toml(&app_id, &engine_root)?)
+            .map_err(|e| fs_tx_err("app.io", &cargo_path, e))?;
 
-    let readme_path = dir.join("README.md");
-    fs::write(&readme_path, app_readme_md(&app_id, &name))
-        .map_err(|err| io_error("app.io", &readme_path, err))?;
+        let main_path = staging.join("src/main.rs");
+        fs::write(&main_path, app_main_rs(&app_id, &name))
+            .map_err(|e| fs_tx_err("app.io", &main_path, e))?;
 
-    Ok(format!("created[app]: {}", cargo_path.display()))
+        let readme_path = staging.join("README.md");
+        fs::write(&readme_path, app_readme_md(&app_id, &name))
+            .map_err(|e| fs_tx_err("app.io", &readme_path, e))?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            publish_staging(&staging, &dir).map_err(|e| CliError::FsTx(e))?;
+            Ok(format!(
+                "created[app]: {}",
+                dir.join("Cargo.toml").display()
+            ))
+        }
+        Err(err) => {
+            cleanup_staging(&staging);
+            Err(err)
+        }
+    }
 }
 
+// ---------------------------------------------------------------------------
+// Validation commands (unchanged — read-only)
+// ---------------------------------------------------------------------------
+
 fn validate_package_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let expected_package_id = parser.optional_value("--expected-package-id")?;
-    let project_root = parser.optional_path("--project-root")?;
-    let path = parser.required_path("validate-package <package.toml>")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("validate-package", cli::validate_package_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let expected_package_id = parsed.singleton_value("--expected-package-id");
+    let project_root = parsed.singleton_value("--project-root");
+    let path = require_positional(&parsed, "validate-package <package.toml>")?;
 
     let base_options = PackageValidationOptions::default().check_source_files(true);
     let options = if let Some(expected_package_id) = expected_package_id {
@@ -118,7 +164,7 @@ fn validate_package_cmd(args: &[String]) -> CliResult<String> {
                 .with_path(&path),
             ))
         })?;
-        validate_package_manifest_str(&content, project_root, &options)?
+        validate_package_manifest_str(&content, PathBuf::from(project_root), &options)?
     } else {
         validate_package_manifest_file(&path, &options)?
     };
@@ -131,9 +177,9 @@ fn validate_package_cmd(args: &[String]) -> CliResult<String> {
 }
 
 fn validate_project_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let path = parser.required_path("validate-project <engine.project.toml>")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("validate-project", cli::validate_project_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+    let path = require_positional(&parsed, "validate-project <engine.project.toml>")?;
 
     let project = validate_project_and_startup_scene(&path)?;
     Ok(format!(
@@ -144,14 +190,15 @@ fn validate_project_cmd(args: &[String]) -> CliResult<String> {
 }
 
 fn validate_scene_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let project = parser.required_option_path("--project")?;
-    let path = parser.required_path(
+    let parsed = cli::parse_command("validate-scene", cli::validate_scene_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+    let project = require_option("--project", &parsed)?;
+    let path = require_positional(
+        &parsed,
         "validate-scene <scene.engine.scene.json> --project <engine.project.toml>",
     )?;
-    parser.finish()?;
 
-    let asset_ids = collect_project_asset_ids(&project)?;
+    let asset_ids = collect_project_asset_ids(&PathBuf::from(project))?;
     validate_scene_file_with_options(
         &path,
         &SceneValidationOptions::default().with_known_asset_ids(asset_ids),
@@ -159,93 +206,209 @@ fn validate_scene_cmd(args: &[String]) -> CliResult<String> {
     Ok(format!("valid[scene]: {}", path.display()))
 }
 
+// ---------------------------------------------------------------------------
+// new-project — transactional staging
+// ---------------------------------------------------------------------------
+
 fn new_project_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let project_id = parser.required_option_value("--id")?;
-    let name = parser.required_option_value("--name")?;
-    let dir = parser.required_path("new-project <dir> --id <project_id> --name <name>")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("new-project", cli::new_project_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
 
-    fs::create_dir_all(dir.join("assets")).map_err(|err| io_error("project.io", &dir, err))?;
-    fs::create_dir_all(dir.join("scenes")).map_err(|err| io_error("project.io", &dir, err))?;
-    let project_path = dir.join("engine.project.toml");
-    let content = format!(
-        "format_version = 1\nproject_id = \"{}\"\nname = \"{}\"\nproject_version = \"0.1.0\"\nasset_root = \"assets\"\nstartup_scene = \"scenes/start.engine.scene.json\"\npackages = []\n\n[settings]\nwindow_width = 1280\nwindow_height = 720\nfullscreen = false\nvsync = true\n",
-        toml_escape(&project_id),
-        toml_escape(&name)
-    );
-    fs::write(&project_path, content).map_err(|err| io_error("project.io", &project_path, err))?;
-    let scene_path = dir.join("scenes/start.engine.scene.json");
-    fs::write(&scene_path, starter_scene_json(&project_id))
-        .map_err(|err| io_error("project.io", &scene_path, err))?;
-    validate_project_and_startup_scene(&project_path)?;
+    let project_id = require_option("--id", &parsed)?;
+    let name = require_option("--name", &parsed)?;
+    let dir = require_positional(&parsed, "new-project <dir> --id <project_id> --name <name>")?;
 
-    Ok(format!("created[project]: {}", project_path.display()))
+    if path_exists_no_follow(&dir) {
+        return Err(CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "project.path_exists",
+                ValidationArea::Project,
+                format!("project target already exists: {}", dir.display()),
+            )
+            .with_path(&dir)
+            .with_durable_id(project_id),
+        )));
+    }
+
+    let staging = create_staging_sibling(&dir).map_err(|e| CliError::FsTx(e))?;
+    let result = (|| -> CliResult<()> {
+        fs::create_dir_all(staging.join("assets"))
+            .map_err(|e| fs_tx_err("project.io", &staging, e))?;
+        fs::create_dir_all(staging.join("scenes"))
+            .map_err(|e| fs_tx_err("project.io", &staging, e))?;
+
+        let project_path = staging.join("engine.project.toml");
+        let content = project_toml_content(&project_id, &name)?;
+        fs::write(&project_path, content).map_err(|e| fs_tx_err("project.io", &project_path, e))?;
+
+        let scene_path = staging.join("scenes/start.engine.scene.json");
+        fs::write(&scene_path, starter_scene_json(&project_id)?)
+            .map_err(|e| fs_tx_err("project.io", &scene_path, e))?;
+
+        // Validate from staging before publishing
+        validate_project_and_startup_scene(&project_path)?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            publish_staging(&staging, &dir).map_err(|e| CliError::FsTx(e))?;
+            Ok(format!(
+                "created[project]: {}",
+                dir.join("engine.project.toml").display()
+            ))
+        }
+        Err(err) => {
+            cleanup_staging(&staging);
+            Err(err)
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// new-package — transactional staging
+// ---------------------------------------------------------------------------
 
 fn new_package_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let package_id = parser.required_option_value("--id")?;
-    let name = parser.required_option_value("--name")?;
-    let path =
-        parser.required_path("new-package <path> --id <package_id> --name <display_name>")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("new-package", cli::new_package_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| io_error("package.io", parent, err))?;
-    }
-    let content = format!(
-        "format_version = 1\npackage_id = \"{}\"\ndisplay_name = \"{}\"\npackage_version = \"0.1.0\"\n",
-        toml_escape(&package_id),
-        toml_escape(&name)
-    );
-    fs::write(&path, content).map_err(|err| io_error("package.io", &path, err))?;
-    validate_package_manifest_file(
-        &path,
-        &PackageValidationOptions::default().with_expected_package_id(package_id),
+    let package_id = require_option("--id", &parsed)?;
+    let name = require_option("--name", &parsed)?;
+    let path = require_positional(
+        &parsed,
+        "new-package <path> --id <package_id> --name <display_name>",
     )?;
 
-    Ok(format!("created[package]: {}", path.display()))
+    if path_exists_no_follow(&path) {
+        return Err(CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "package.path_exists",
+                ValidationArea::Package,
+                format!("package manifest already exists: {}", path.display()),
+            )
+            .with_path(&path)
+            .with_durable_id(package_id),
+        )));
+    }
+
+    let staging = create_staging_file_sibling(&path).map_err(CliError::FsTx)?;
+    let result = (|| -> CliResult<()> {
+        let content = toml::to_string(&PackageScaffoldToml {
+            format_version: 1,
+            package_id: package_id.clone(),
+            display_name: name.clone(),
+            package_version: "0.1.0".to_string(),
+        })
+        .map_err(|e| CliError::Validation(internal_error("package.serialize", e.to_string())))?;
+        fs::write(&staging, content).map_err(|e| fs_tx_err("package.io", &staging, e))?;
+
+        validate_package_manifest_file(
+            &staging,
+            &PackageValidationOptions::default().with_expected_package_id(&package_id),
+        )?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            publish_staging(&staging, &path).map_err(CliError::FsTx)?;
+            Ok(format!("created[package]: {}", path.display()))
+        }
+        Err(err) => {
+            cleanup_staging(&staging);
+            Err(err)
+        }
+    }
 }
 
+// ---------------------------------------------------------------------------
+// scan-assets — safe traversal (no-follow, root-contained)
+// ---------------------------------------------------------------------------
+
 fn scan_assets_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let package_id = parser
-        .optional_value("--package-id")?
-        .unwrap_or_else(|| "scanned".to_string());
-    let root = parser.required_path("scan-assets <asset-root> [--package-id <id>]")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("scan-assets", cli::scan_assets_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let package_id = parsed
+        .singleton_value("--package-id")
+        .unwrap_or("scanned")
+        .to_string();
+    let root = require_positional(&parsed, "scan-assets <asset-root> [--package-id <id>]")?;
 
     let mut records = Vec::new();
-    collect_scan_records(&root, &root, &package_id, &mut records)?;
+    let mut plan = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    collect_scan_records(
+        &root,
+        &root,
+        &package_id,
+        &mut records,
+        &mut plan,
+        &mut visited,
+    )?;
+
     records.sort_by(|left, right| left.path.cmp(&right.path));
     if records.is_empty() {
         return Ok("scan[assets]: no supported assets found".to_string());
     }
 
+    // Serialize with TOML serializer for safe output
     let mut output = String::new();
     for record in records {
-        output.push_str("[[assets]]\n");
-        output.push_str(&format!("id = \"{}\"\n", toml_escape(&record.id)));
-        output.push_str(&format!("kind = \"{}\"\n", record.kind.as_str()));
-        output.push_str(&format!("path = \"{}\"\n", toml_escape(&record.path)));
-        output.push_str(&format!(
-            "display_name = \"{}\"\n\n",
-            toml_escape(&record.display_name)
-        ));
+        // Serialize each record through serde to ensure valid TOML
+        let value = toml::Value::try_from(ScanRecordToml {
+            id: record.id.clone(),
+            kind: record.kind.as_str().to_string(),
+            path: record.path.clone(),
+            display_name: record.display_name.clone(),
+        })
+        .map_err(|e| CliError::Validation(internal_error("scan.serialize", e.to_string())))?;
+
+        output.push_str(
+            &toml::to_string(&value).map_err(|e| {
+                CliError::Validation(internal_error("scan.serialize", e.to_string()))
+            })?,
+        );
+        output.push('\n');
     }
     Ok(output.trim_end().to_string())
 }
 
+#[derive(Serialize)]
+struct ScanRecordToml {
+    id: String,
+    kind: String,
+    path: String,
+    display_name: String,
+}
+
+#[derive(Serialize)]
+struct PackageScaffoldToml {
+    format_version: u32,
+    package_id: String,
+    display_name: String,
+    package_version: String,
+}
+
+// ---------------------------------------------------------------------------
+// add-asset — transactional manifest mutation with rollback journal
+// ---------------------------------------------------------------------------
+
 fn add_asset_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let asset_id = parser.required_option_value("--id")?;
-    let kind = parser.required_option_value("--kind")?;
-    let asset_path = parser.required_option_value("--path")?;
-    let tags = parser.optional_values("--tag")?;
-    let manifest_path = parser
-        .required_path("add-asset <package.toml> --id <asset_id> --kind <kind> --path <path>")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("add-asset", cli::add_asset_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let asset_id = require_option("--id", &parsed)?;
+    let kind = require_option("--kind", &parsed)?;
+    let asset_path = require_option("--path", &parsed)?;
+    let tags = parsed.repeated_values("--tag");
+    let manifest_path = require_positional(
+        &parsed,
+        "add-asset <package.toml> --id <asset_id> --kind <kind> --path <path>",
+    )?;
 
     let kind = parse_asset_kind(&kind)?;
     let asset_path_buf = PathBuf::from(&asset_path);
@@ -261,30 +424,98 @@ fn add_asset_cmd(args: &[String]) -> CliResult<String> {
         )));
     }
 
-    let mut content = fs::read_to_string(&manifest_path)
+    fs_tx::inspect_entry_no_follow(&manifest_path).map_err(CliError::FsTx)?;
+
+    // Build new content via serializer (not ad-hoc escaping)
+    let original_content = fs::read_to_string(&manifest_path)
         .map_err(|err| io_error("package.io", &manifest_path, err))?;
-    if !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push('\n');
-    content.push_str("[[assets]]\n");
-    content.push_str(&format!("id = \"{}\"\n", toml_escape(&asset_id)));
-    content.push_str(&format!("kind = \"{}\"\n", kind.as_str()));
-    content.push_str(&format!("path = \"{}\"\n", toml_escape(&asset_path)));
+
+    let mut manifest: toml::Value = toml::from_str(&original_content).map_err(|e| {
+        CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "package.parse",
+                ValidationArea::Package,
+                format!("invalid package TOML: {e}"),
+            )
+            .with_path(&manifest_path),
+        ))
+    })?;
+
+    let assets = {
+        let table = manifest.as_table_mut().ok_or_else(|| {
+            CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "package.parse",
+                    ValidationArea::Package,
+                    "manifest is not a table".to_string(),
+                )
+                .with_path(&manifest_path),
+            ))
+        })?;
+        table
+            .entry("assets".to_string())
+            .or_insert_with(|| toml::Value::Array(vec![]))
+            .as_array_mut()
+            .ok_or_else(|| {
+                CliError::Validation(ValidationError::single(
+                    ValidationDiagnostic::new(
+                        "package.parse",
+                        ValidationArea::Package,
+                        "assets is not an array".to_string(),
+                    )
+                    .with_path(&manifest_path),
+                ))
+            })?
+    };
+
+    let mut asset_table = toml::value::Table::new();
+    asset_table.insert("id".to_string(), toml::Value::String(asset_id.clone()));
+    asset_table.insert(
+        "kind".to_string(),
+        toml::Value::String(kind.as_str().to_string()),
+    );
+    asset_table.insert("path".to_string(), toml::Value::String(asset_path.clone()));
+
     if !tags.is_empty() {
-        let tags = tags
+        let tag_values: Vec<toml::Value> = tags
             .iter()
-            .map(|tag| format!("\"{}\"", toml_escape(tag)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        content.push_str(&format!("tags = [{tags}]\n"));
+            .map(|t| toml::Value::String(t.to_string()))
+            .collect();
+        asset_table.insert("tags".to_string(), toml::Value::Array(tag_values));
     }
-    fs::write(&manifest_path, content)
-        .map_err(|err| io_error("package.io", &manifest_path, err))?;
-    validate_package_manifest_file(
-        &manifest_path,
-        &PackageValidationOptions::default().check_source_files(true),
-    )?;
+
+    assets.push(toml::Value::Table(asset_table));
+
+    let new_content = toml::to_string_pretty(&manifest)
+        .map_err(|e| CliError::Validation(internal_error("add-asset.serialize", e.to_string())))?;
+
+    let staging = create_staging_file_sibling(&manifest_path).map_err(CliError::FsTx)?;
+    let stage_result = (|| -> CliResult<()> {
+        fs::write(&staging, new_content).map_err(|err| io_error("package.io", &staging, err))?;
+        validate_package_manifest_file(
+            &staging,
+            &PackageValidationOptions::default().check_source_files(true),
+        )?;
+        Ok(())
+    })();
+    if let Err(err) = stage_result {
+        cleanup_staging(&staging);
+        return Err(err);
+    }
+
+    let mut journal = RollbackJournal::new();
+    if let Err(err) = journal.record_backup(&manifest_path) {
+        cleanup_staging(&staging);
+        return Err(CliError::FsTx(err));
+    }
+    if let Err(err) = replace_file_with_staging(&staging, &manifest_path) {
+        cleanup_staging(&staging);
+        if let Err(rollback_err) = journal.rollback() {
+            return Err(CliError::FsTx(rollback_err));
+        }
+        return Err(CliError::FsTx(err));
+    }
+    journal.commit().map_err(CliError::FsTx)?;
 
     Ok(format!(
         "added[asset]: {} -> {}",
@@ -293,40 +524,66 @@ fn add_asset_cmd(args: &[String]) -> CliResult<String> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// pack — transactional multi-artifact publication
+// ---------------------------------------------------------------------------
+
 fn pack_cmd(args: &[String]) -> CliResult<String> {
-    let mut parser = ArgParser::new(args);
-    let out = parser.required_option_path("--out")?;
-    let project_path = parser.required_path("pack <engine.project.toml> --out <dir>")?;
-    parser.finish()?;
+    let parsed = cli::parse_command("pack", cli::pack_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
 
-    fs::create_dir_all(&out).map_err(|err| io_error("pack.io", &out, err))?;
-    remove_stale_pack_report(&out)?;
-    let project = validate_project_and_startup_scene(&project_path)?;
-    let project_root = project_path.parent().unwrap_or_else(|| Path::new(""));
+    let out = require_option("--out", &parsed)?;
+    let out = PathBuf::from(out);
+    let project_path = require_positional(&parsed, "pack <engine.project.toml> --out <dir>")?;
 
-    let mut report = PackReport {
-        source_project: project_path.display().to_string(),
-        copied_files: Vec::new(),
-        skipped_disabled_packages: Vec::new(),
-        warnings: Vec::new(),
-        validation_status: "passed".to_string(),
-    };
-
-    copy_file_to_pack(
-        project_root,
-        Path::new("engine.project.toml"),
-        &out,
-        &mut report,
-    )?;
-    if let Some(scene) = &project.startup_scene {
-        copy_file_to_pack(project_root, scene, &out, &mut report)?;
+    if path_exists_no_follow(&out) {
+        return Err(CliError::FsTx(fs_tx::FsTxError::ExistingTarget(
+            out.clone(),
+        )));
     }
 
+    // Validate everything first (preflight) before staging.
+    fs_tx::inspect_entry_no_follow(&project_path).map_err(CliError::FsTx)?;
+    let project = validate_project_and_startup_scene(&project_path)?;
+    let project_root = project_path.parent().unwrap_or_else(|| Path::new(""));
+    let canonical_project_root = project_root
+        .canonicalize()
+        .map_err(|err| fs_tx_err("pack.project_root", project_root, err))?;
+    let project_source = fs_tx::canonicalize_contained(&project_path, &canonical_project_root)
+        .map_err(CliError::FsTx)?;
+
+    // Build plan from preflight
+    let mut plan_entries = Vec::new();
+
+    plan_entries.push(PlanEntry {
+        source: project_source,
+        destination: PathBuf::from("engine.project.toml"),
+        entry_type: EntryType::File,
+        label: "engine.project.toml".into(),
+    });
+
+    if let Some(scene) = &project.startup_scene {
+        let scene_rel = normalize_relative_path(scene).ok_or_else(|| {
+            CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "pack.invalid_scene_path",
+                    ValidationArea::Scene,
+                    format!("invalid startup_scene path '{}'", scene.display()),
+                )
+                .with_path(&project_path),
+            ))
+        })?;
+        let scene_source = contained_child_no_symlinks(&canonical_project_root, &scene_rel)
+            .map_err(CliError::FsTx)?;
+        plan_entries.push(PlanEntry {
+            source: scene_source,
+            destination: scene_rel.clone(),
+            entry_type: EntryType::File,
+            label: format!("scene: {}", scene_rel.display()),
+        });
+    }
     for package in &project.packages {
         if !package.enabled {
-            report
-                .skipped_disabled_packages
-                .push(package.package_id.clone());
             continue;
         }
         let manifest_rel = normalize_relative_path(&package.manifest).ok_or_else(|| {
@@ -343,9 +600,17 @@ fn pack_cmd(args: &[String]) -> CliResult<String> {
                 .with_durable_id(package.package_id.clone()),
             ))
         })?;
-        copy_file_to_pack(project_root, &manifest_rel, &out, &mut report)?;
-        let manifest_path = project_root.join(&manifest_rel);
-        let records = validate_package_manifest_file(
+
+        let manifest_path = contained_child_no_symlinks(&canonical_project_root, &manifest_rel)
+            .map_err(CliError::FsTx)?;
+        plan_entries.push(PlanEntry {
+            source: manifest_path.clone(),
+            destination: manifest_rel.clone(),
+            entry_type: EntryType::File,
+            label: format!("manifest: {}", manifest_rel.display()),
+        });
+
+        validate_package_manifest_file(
             &manifest_path,
             &PackageValidationOptions::default()
                 .check_source_files(true)
@@ -353,6 +618,7 @@ fn pack_cmd(args: &[String]) -> CliResult<String> {
         )?;
         let manifest = read_package_manifest(&manifest_path)?;
         let manifest_dir = manifest_rel.parent().unwrap_or_else(|| Path::new(""));
+
         for asset in &manifest.assets {
             let asset_package_rel = normalize_relative_path(&asset.path).ok_or_else(|| {
                 CliError::Validation(ValidationError::single(
@@ -377,28 +643,85 @@ fn pack_cmd(args: &[String]) -> CliResult<String> {
                         .with_durable_id(asset.id.clone()),
                     ))
                 })?;
-            copy_file_to_pack(project_root, &asset_rel, &out, &mut report)?;
+            let source_path = contained_child_no_symlinks(&canonical_project_root, &asset_rel)
+                .map_err(CliError::FsTx)?;
+            plan_entries.push(PlanEntry {
+                source: source_path,
+                destination: asset_rel.clone(),
+                entry_type: EntryType::File,
+                label: format!("asset: {}", asset.id),
+            });
         }
-        debug_assert_eq!(records.len(), manifest.assets.len());
     }
 
-    let report_path = out.join("PACK_REPORT.json");
-    let report_json = serde_json::to_string_pretty(&report).map_err(|err| {
-        CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
-            "pack.report",
-            ValidationArea::Project,
-            format!("failed to serialize pack report: {err}"),
-        )))
-    })?;
-    fs::write(&report_path, report_json).map_err(|err| io_error("pack.io", &report_path, err))?;
+    // Validate plan before staging
+    let _plan = build_publication_plan(plan_entries.clone()).map_err(|e| CliError::FsTx(e))?;
 
-    Ok(format!(
-        "packed[project]: {} -> {} ({} files)",
-        project_path.display(),
-        out.display(),
-        report.copied_files.len()
-    ))
+    // Stage
+    let staging = create_staging_sibling(&out).map_err(|e| CliError::FsTx(e))?;
+    let result = (|| -> CliResult<()> {
+        for entry in &plan_entries {
+            stage_entry(&staging, entry).map_err(|e| CliError::FsTx(e))?;
+        }
+
+        // Write PACK_REPORT.json via serde_json (not ad-hoc)
+        let mut report = PackReport {
+            source_project: project_path.display().to_string(),
+            copied_files: plan_entries
+                .iter()
+                .filter(|e| e.entry_type == EntryType::File)
+                .map(|e| slash_path(&e.destination))
+                .collect(),
+            skipped_disabled_packages: project
+                .packages
+                .iter()
+                .filter(|p| !p.enabled)
+                .map(|p| p.package_id.clone())
+                .collect(),
+            warnings: Vec::new(),
+            validation_status: "passed".to_string(),
+        };
+
+        // Sort for determinism
+        report.copied_files.sort();
+
+        let report_json = serde_json::to_string_pretty(&report).map_err(|err| {
+            CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
+                "pack.report",
+                ValidationArea::Project,
+                format!("failed to serialize pack report: {err}"),
+            )))
+        })?;
+        let report_path = staging.join("PACK_REPORT.json");
+        fs::write(&report_path, report_json)
+            .map_err(|err| io_error("pack.io", &report_path, err))?;
+
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            publish_staging(&staging, &out).map_err(|e| CliError::FsTx(e))?;
+            Ok(format!(
+                "packed[project]: {} -> {} ({} files)",
+                project_path.display(),
+                out.display(),
+                plan_entries
+                    .iter()
+                    .filter(|e| e.entry_type == EntryType::File)
+                    .count()
+            ))
+        }
+        Err(err) => {
+            cleanup_staging(&staging);
+            Err(err)
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 fn validate_project_and_startup_scene(path: &Path) -> CliResult<Project> {
     let project =
@@ -440,21 +763,79 @@ fn collect_scan_records(
     dir: &Path,
     package_id: &str,
     records: &mut Vec<ScanRecord>,
+    _plan: &mut Vec<PlanEntry>,
+    visited: &mut HashSet<PathBuf>,
 ) -> CliResult<()> {
+    // Safe traversal: use symlink_metadata, reject symlinks, check root containment
+    let dir_meta = fs_tx::inspect_entry_no_follow(dir).map_err(CliError::FsTx)?;
+    if !dir_meta.is_dir() {
+        return Err(CliError::FsTx(fs_tx::FsTxError::InvalidEntryPath(format!(
+            "not a directory: '{}'",
+            dir.display()
+        ))));
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|err| io_error("scan.io", root, err))?;
+
+    // Track filesystem identity to reject cycles
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|err| io_error("scan.io", dir, err))?;
+    if !canonical_dir.starts_with(&canonical_root) {
+        return Err(CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "scan.root_escape",
+                ValidationArea::Asset,
+                format!(
+                    "scan entry '{}' escapes root '{}'",
+                    dir.display(),
+                    root.display()
+                ),
+            ),
+        )));
+    }
+    if !visited.insert(canonical_dir) {
+        return Ok(()); // cycle detected, skip
+    }
+
     let mut entries = fs::read_dir(dir)
         .map_err(|err| io_error("scan.io", dir, err))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| io_error("scan.io", dir, err))?;
     entries.sort_by_key(|entry| entry.path());
+
     for entry in entries {
         let path = entry.path();
-        if path.is_dir() {
-            collect_scan_records(root, &path, package_id, records)?;
+        let meta = fs_tx::inspect_entry_no_follow(&path).map_err(CliError::FsTx)?;
+
+        if meta.is_dir() {
+            collect_scan_records(root, &path, package_id, records, _plan, visited)?;
             continue;
         }
+
         let Some(kind) = classify_asset_kind(&path) else {
             continue;
         };
+
+        // Containment check
+        let canonical = path
+            .canonicalize()
+            .map_err(|err| io_error("scan.io", &path, err))?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "scan.root_escape",
+                    ValidationArea::Asset,
+                    format!(
+                        "file '{}' escapes root '{}'",
+                        path.display(),
+                        root.display()
+                    ),
+                ),
+            )));
+        }
+
         let relative = path.strip_prefix(root).map_err(|err| {
             CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
                 "scan.path",
@@ -473,38 +854,6 @@ fn collect_scan_records(
         });
     }
     Ok(())
-}
-
-fn copy_file_to_pack(
-    project_root: &Path,
-    relative: &Path,
-    out: &Path,
-    report: &mut PackReport,
-) -> CliResult<()> {
-    let relative = normalize_relative_path(relative).ok_or_else(|| {
-        CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
-            "pack.invalid_copy_path",
-            ValidationArea::Project,
-            format!("invalid pack copy path '{}'", relative.display()),
-        )))
-    })?;
-    let source = project_root.join(&relative);
-    let destination = out.join(&relative);
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|err| io_error("pack.io", parent, err))?;
-    }
-    fs::copy(&source, &destination).map_err(|err| io_error("pack.io", &source, err))?;
-    report.copied_files.push(slash_path(&relative));
-    Ok(())
-}
-
-fn remove_stale_pack_report(out: &Path) -> CliResult<()> {
-    let report_path = out.join("PACK_REPORT.json");
-    match fs::remove_file(&report_path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(io_error("pack.io", &report_path, err)),
-    }
 }
 
 fn read_package_manifest(path: &Path) -> CliResult<PackageManifest> {
@@ -559,10 +908,10 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
     }
     for component in path.components() {
         match component {
-            Component::CurDir => {}
-            Component::Normal(part) => normalized.push(part),
-            Component::ParentDir => return None,
-            Component::Prefix(_) | Component::RootDir => return None,
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => return None,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => return None,
         }
     }
     (!normalized.as_os_str().is_empty()).then_some(normalized)
@@ -571,7 +920,7 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
 fn slash_path(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().to_string()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -621,7 +970,7 @@ fn sanitize_crate_name(value: &str) -> String {
     }
 }
 
-fn toml_escape(value: &str) -> String {
+fn rust_string_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
@@ -642,18 +991,46 @@ fn engine_root_path() -> CliResult<PathBuf> {
         })
 }
 
-fn app_cargo_toml(app_id: &str, engine_root: &Path) -> String {
-    let package_name = sanitize_crate_name(app_id);
-    let events_path = cargo_path_literal(&engine_root.join("src/events"));
-    let input_path = cargo_path_literal(&engine_root.join("src/input"));
-    let physics_path = cargo_path_literal(&engine_root.join("src/physics"));
-    format!(
-        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nengine_events = {{ path = \"{}\" }}\ninput = {{ path = \"{}\" }}\nphysics = {{ path = \"{}\" }}\n",
-        toml_escape(&package_name),
-        toml_escape(&events_path),
-        toml_escape(&input_path),
-        toml_escape(&physics_path)
-    )
+fn app_cargo_toml(app_id: &str, engine_root: &Path) -> CliResult<String> {
+    let mut root = toml::value::Table::new();
+    root.insert(
+        "package".to_string(),
+        toml::Value::Table(toml_table([
+            ("name", toml::Value::String(sanitize_crate_name(app_id))),
+            ("version", toml::Value::String("0.1.0".to_string())),
+            ("edition", toml::Value::String("2021".to_string())),
+        ])),
+    );
+    root.insert(
+        "dependencies".to_string(),
+        toml::Value::Table(toml_table([
+            (
+                "engine_events",
+                toml::Value::Table(dep_path_table(&engine_root.join("src/events"))),
+            ),
+            (
+                "input",
+                toml::Value::Table(dep_path_table(&engine_root.join("src/input"))),
+            ),
+            (
+                "physics",
+                toml::Value::Table(dep_path_table(&engine_root.join("src/physics"))),
+            ),
+        ])),
+    );
+    toml::to_string(&toml::Value::Table(root))
+        .map_err(|e| CliError::Validation(internal_error("app.serialize", e.to_string())))
+}
+
+fn toml_table<const N: usize>(entries: [(&str, toml::Value); N]) -> toml::value::Table {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+fn dep_path_table(path: &Path) -> toml::value::Table {
+    toml_table([("path", toml::Value::String(cargo_path_literal(path)))])
 }
 
 fn cargo_path_literal(path: &Path) -> String {
@@ -663,8 +1040,8 @@ fn cargo_path_literal(path: &Path) -> String {
 fn app_main_rs(app_id: &str, name: &str) -> String {
     format!(
         "use engine_events::{{EngineEvent, EventBus, EventStage, LifecycleEvent}};\nuse input::{{ActionId, InputSnapshot}};\nuse physics::PhysicsWorld;\n\nconst APP_ID: &str = \"{}\";\nconst APP_NAME: &str = \"{}\";\n\nfn main() {{\n    let mut events = EventBus::default();\n    events.emit(\n        EventStage::Startup,\n        None,\n        EngineEvent::Lifecycle(LifecycleEvent::AppStarted {{\n            app_name: APP_NAME.to_string(),\n        }}),\n    );\n\n    let input = InputSnapshot::default();\n    let confirm_action = ActionId::new(format!(\"{{APP_ID}}.confirm\"));\n\n    let mut physics = PhysicsWorld::new();\n    physics.set_gravity(0.0, -9.81, 0.0);\n\n    println!(\n        \"{{APP_NAME}} initialized: {{}} pending event(s), confirm={{}}\",\n        events.pending_len(),\n        input.action_value(&confirm_action)\n    );\n}}\n",
-        toml_escape(app_id),
-        toml_escape(name)
+        rust_string_escape(app_id),
+        rust_string_escape(name)
     )
 }
 
@@ -676,11 +1053,94 @@ fn app_readme_md(app_id: &str, name: &str) -> String {
     )
 }
 
-fn starter_scene_json(project_id: &str) -> String {
-    format!(
-        "{{\n  \"format_version\": 1,\n  \"scene_id\": \"{}.start\",\n  \"root_nodes\": [\"node.root\"],\n  \"nodes\": [\n    {{\n      \"id\": \"node.root\",\n      \"parent\": null,\n      \"name\": \"Root\",\n      \"transform\": {{\n        \"translation\": [0.0, 0.0, 0.0],\n        \"rotation\": [0.0, 0.0, 0.0, 1.0],\n        \"scale\": [1.0, 1.0, 1.0]\n      }},\n      \"asset\": null\n    }}\n  ],\n  \"lights\": [],\n  \"environment\": null,\n  \"editor\": {{}}\n}}\n",
-        toml_escape(project_id)
-    )
+fn starter_scene_json(project_id: &str) -> CliResult<String> {
+    let scene = serde_json::json!({
+        "format_version": 1,
+        "scene_id": format!("{project_id}.start"),
+        "root_nodes": ["node.root"],
+        "nodes": [{
+            "id": "node.root",
+            "parent": null,
+            "name": "Root",
+            "transform": {
+                "translation": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0, 1.0],
+                "scale": [1.0, 1.0, 1.0]
+            },
+            "asset": null
+        }],
+        "lights": [],
+        "environment": null,
+        "editor": {}
+    });
+    serde_json::to_string_pretty(&scene)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| CliError::Validation(internal_error("scene.serialize", e.to_string())))
+}
+
+fn project_toml_content(project_id: &str, name: &str) -> CliResult<String> {
+    let mut root = toml::value::Table::new();
+    root.insert("format_version".to_string(), toml::Value::Integer(1));
+    root.insert(
+        "project_id".to_string(),
+        toml::Value::String(project_id.to_string()),
+    );
+    root.insert("name".to_string(), toml::Value::String(name.to_string()));
+    root.insert(
+        "project_version".to_string(),
+        toml::Value::String("0.1.0".to_string()),
+    );
+    root.insert(
+        "asset_root".to_string(),
+        toml::Value::String("assets".to_string()),
+    );
+    root.insert(
+        "startup_scene".to_string(),
+        toml::Value::String("scenes/start.engine.scene.json".to_string()),
+    );
+    root.insert("packages".to_string(), toml::Value::Array(Vec::new()));
+    root.insert(
+        "settings".to_string(),
+        toml::Value::Table(toml_table([
+            ("window_width", toml::Value::Integer(1280)),
+            ("window_height", toml::Value::Integer(720)),
+            ("fullscreen", toml::Value::Boolean(false)),
+            ("vsync", toml::Value::Boolean(true)),
+        ])),
+    );
+    toml::to_string(&toml::Value::Table(root))
+        .map_err(|e| CliError::Validation(internal_error("project.serialize", e.to_string())))
+}
+
+fn require_option(name: &str, parsed: &launch_shared::CliParseResult) -> CliResult<String> {
+    parsed
+        .singleton_value(name)
+        .map(|s| s.to_string())
+        .ok_or_else(|| CliError::Usage(format!("missing required {name}")))
+}
+
+fn require_positional(parsed: &launch_shared::CliParseResult, usage: &str) -> CliResult<PathBuf> {
+    match parsed.positionals.as_slice() {
+        [path] => Ok(PathBuf::from(path)),
+        [] => Err(CliError::Usage(format!("missing path: {usage}"))),
+        extra => Err(CliError::Usage(format!(
+            "expected exactly one positional path for {usage}, got {} ({})",
+            extra.len(),
+            extra.join(", ")
+        ))),
+    }
+}
+
+fn path_exists_no_follow(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+fn internal_error(code: &str, message: String) -> ValidationError {
+    ValidationError::single(ValidationDiagnostic::new(
+        code,
+        ValidationArea::Project,
+        message,
+    ))
 }
 
 fn io_error(code: &'static str, path: &Path, err: std::io::Error) -> CliError {
@@ -694,26 +1154,17 @@ fn io_error(code: &'static str, path: &Path, err: std::io::Error) -> CliError {
     ))
 }
 
+fn fs_tx_err(code: &'static str, path: &Path, err: std::io::Error) -> CliError {
+    CliError::FsTx(engine_pack::fs_tx::FsTxError::Io {
+        path: path.to_path_buf(),
+        message: format!("{code}: {err}"),
+    })
+}
+
 fn print_validation_error(err: &ValidationError) {
     for diagnostic in err.diagnostics() {
         eprintln!("{diagnostic}");
     }
-}
-
-fn usage() -> String {
-    [
-        "engine_pack commands:",
-        "  validate-package <package.toml> [--expected-package-id <id>] [--project-root <path>]",
-        "  validate-project <engine.project.toml>",
-        "  validate-scene <scene.engine.scene.json> --project <engine.project.toml>",
-        "  new-app <dir> --id <app_id> --name <display_name>",
-        "  new-project <dir> --id <project_id> --name <name>",
-        "  new-package <path> --id <package_id> --name <display_name>",
-        "  scan-assets <asset-root> [--package-id <id>]",
-        "  add-asset <package.toml> --id <asset_id> --kind <kind> --path <path> [--tag <tag>]",
-        "  pack <engine.project.toml> --out <dir>",
-    ]
-    .join("\n")
 }
 
 #[derive(Debug)]
@@ -736,94 +1187,12 @@ struct PackReport {
 #[derive(Debug)]
 enum CliError {
     Usage(String),
+    FsTx(fs_tx::FsTxError),
     Validation(ValidationError),
 }
 
 impl From<ValidationError> for CliError {
     fn from(value: ValidationError) -> Self {
         Self::Validation(value)
-    }
-}
-
-struct ArgParser<'a> {
-    args: &'a [String],
-    used: Vec<bool>,
-}
-
-impl<'a> ArgParser<'a> {
-    fn new(args: &'a [String]) -> Self {
-        Self {
-            args,
-            used: vec![false; args.len()],
-        }
-    }
-
-    fn required_path(&mut self, usage: &str) -> CliResult<PathBuf> {
-        for (index, arg) in self.args.iter().enumerate() {
-            if !self.used[index] && !arg.starts_with("--") {
-                self.used[index] = true;
-                return Ok(PathBuf::from(arg));
-            }
-        }
-        Err(CliError::Usage(format!("missing path: {usage}")))
-    }
-
-    fn optional_value(&mut self, flag: &str) -> CliResult<Option<String>> {
-        let Some(index) = self.flag_index(flag) else {
-            return Ok(None);
-        };
-        let value_index = index + 1;
-        if value_index >= self.args.len() || self.args[value_index].starts_with("--") {
-            return Err(CliError::Usage(format!("{flag} requires a value")));
-        }
-        self.used[index] = true;
-        self.used[value_index] = true;
-        Ok(Some(self.args[value_index].clone()))
-    }
-
-    fn optional_path(&mut self, flag: &str) -> CliResult<Option<PathBuf>> {
-        Ok(self.optional_value(flag)?.map(PathBuf::from))
-    }
-
-    fn required_option_path(&mut self, flag: &str) -> CliResult<PathBuf> {
-        self.optional_path(flag)?
-            .ok_or_else(|| CliError::Usage(format!("missing required {flag}")))
-    }
-
-    fn required_option_value(&mut self, flag: &str) -> CliResult<String> {
-        self.optional_value(flag)?
-            .ok_or_else(|| CliError::Usage(format!("missing required {flag}")))
-    }
-
-    fn optional_values(&mut self, flag: &str) -> CliResult<Vec<String>> {
-        let mut values = Vec::new();
-        while let Some(value) = self.optional_value(flag)? {
-            values.push(value);
-        }
-        Ok(values)
-    }
-
-    fn finish(&self) -> CliResult<()> {
-        let unused: Vec<_> = self
-            .args
-            .iter()
-            .enumerate()
-            .filter_map(|(index, arg)| (!self.used[index]).then_some(arg.as_str()))
-            .collect();
-        if unused.is_empty() {
-            Ok(())
-        } else {
-            Err(CliError::Usage(format!(
-                "unexpected arguments: {}",
-                unused.join(" ")
-            )))
-        }
-    }
-
-    fn flag_index(&self, flag: &str) -> Option<usize> {
-        self.args
-            .iter()
-            .enumerate()
-            .find_map(|(index, arg)| (!self.used[index] && arg == flag).then_some(index))
     }
 }

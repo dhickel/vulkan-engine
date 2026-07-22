@@ -145,6 +145,7 @@ if let Some(value) = arg.strip_prefix("--record_debug_path=") {
 - If shader compilation is enabled and tools are missing, startup can fail (`glslc` or `glslangValidator` not found).
 - Validation layers have significant performance impact — development only.
 - Setting `config.headless = true` on the windowed `Renderer::new(config, window)` path is an error; use `Renderer::new_headless(config)` instead.
+- Duplicate singleton options (e.g., `--project a --project b`) are rejected with a structured error. The root launcher and `engine_pack` both enforce this. Repeatable options such as `--tag` in `engine_pack` are explicitly declared and accumulated.
 
 ## 7. Debugging Playbook
 - Basic capture on startup:

@@ -19,8 +19,8 @@ use crate::data::gpu_data::SceneDataUBO;
 use crate::data::handles::EnvironmentHandle;
 use crate::data::handles::MeshHandle;
 use crate::scene::render_submission::{
-    FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight,
-    RenderSubmission, MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
+    FrameDirectionalLight, FrameDrawItem, FramePointLight, FrameSpotLight, RenderSubmission,
+    MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
 };
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
@@ -606,8 +606,9 @@ impl SceneWorld {
         }
 
         entry.node = None;
-        entry.generation = entry.generation.wrapping_add(1);
-        self.free_slots.push(node_id.slot);
+        if bump_generation(&mut entry.generation) {
+            self.free_slots.push(node_id.slot);
+        }
         true
     }
 
@@ -670,7 +671,9 @@ impl SceneWorld {
         if let Some(ref proxy @ SceneBounds::Proxy(_)) = node.node_world_bounds {
             // Transform proxy from local to world.
             if let Some(aabb) = proxy.aabb() {
-                return aabb.transformed(&node.world_transform).map(SceneBounds::Proxy);
+                return aabb
+                    .transformed(&node.world_transform)
+                    .map(SceneBounds::Proxy);
             }
             return Some(*proxy);
         }
@@ -684,7 +687,9 @@ impl SceneWorld {
                 SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
                     if aabb.is_finite() && aabb.is_ordered() {
                         match local_union {
-                            Some(ref mut u) => { u.extend_to_enclose(aabb); }
+                            Some(ref mut u) => {
+                                u.extend_to_enclose(aabb);
+                            }
                             None => local_union = Some(*aabb),
                         }
                     } else {
@@ -706,9 +711,7 @@ impl SceneWorld {
 
         // Transform the local union to world space.
         local_union
-            .and_then(|local| {
-                local.transformed(&node.world_transform)
-            })
+            .and_then(|local| local.transformed(&node.world_transform))
             .map(SceneBounds::Known)
     }
 
@@ -735,7 +738,9 @@ impl SceneWorld {
                 match child_bounds {
                     SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
                         match child_subtree_union {
-                            Some(ref mut u) => { u.extend_to_enclose(&aabb); }
+                            Some(ref mut u) => {
+                                u.extend_to_enclose(&aabb);
+                            }
                             None => child_subtree_union = Some(aabb),
                         }
                     }
@@ -922,8 +927,9 @@ impl SceneWorld {
             return false;
         }
         entry.light = None;
-        entry.generation = entry.generation.wrapping_add(1);
-        self.free_point_light_slots.push(id.slot);
+        if bump_generation(&mut entry.generation) {
+            self.free_point_light_slots.push(id.slot);
+        }
         true
     }
 
@@ -993,8 +999,9 @@ impl SceneWorld {
             return false;
         }
         entry.light = None;
-        entry.generation = entry.generation.wrapping_add(1);
-        self.free_directional_light_slots.push(id.slot);
+        if bump_generation(&mut entry.generation) {
+            self.free_directional_light_slots.push(id.slot);
+        }
         if self.shadow_casting_directional == Some(id) {
             self.shadow_casting_directional = None;
         }
@@ -1008,19 +1015,31 @@ impl SceneWorld {
 
     /// Returns all active directional lights.
     pub(crate) fn get_active_directional_lights(&self) -> Vec<DirectionalLight> {
-        self.directional_lights.iter().filter_map(|entry| entry.light).collect()
+        self.directional_lights
+            .iter()
+            .filter_map(|entry| entry.light)
+            .collect()
     }
 
     pub(crate) fn active_directional_light_count(&self) -> usize {
-        self.directional_lights.iter().filter(|entry| entry.light.is_some()).count()
+        self.directional_lights
+            .iter()
+            .filter(|entry| entry.light.is_some())
+            .count()
     }
 
     pub(crate) fn active_point_light_count(&self) -> usize {
-        self.point_lights.iter().filter(|entry| entry.light.is_some()).count()
+        self.point_lights
+            .iter()
+            .filter(|entry| entry.light.is_some())
+            .count()
     }
 
     pub(crate) fn active_spot_light_count(&self) -> usize {
-        self.spot_lights.iter().filter(|entry| entry.light.is_some()).count()
+        self.spot_lights
+            .iter()
+            .filter(|entry| entry.light.is_some())
+            .count()
     }
 
     pub(crate) fn set_shadow_casting_directional(&mut self, id: Option<DirectionalLightId>) {
@@ -1034,9 +1053,15 @@ impl SceneWorld {
     // ── Spot light lifecycle ────────────────────────────────────────────
 
     pub(crate) fn validate_spot_light_ref(&self, id: SpotLightId) -> Result<(), SpotLightRefError> {
-        let Some(entry) = self.spot_lights.get(id.slot as usize) else { return Err(SpotLightRefError::OutOfBounds); };
-        if entry.generation != id.generation { return Err(SpotLightRefError::GenerationMismatch); }
-        if entry.light.is_none() { return Err(SpotLightRefError::Vacant); }
+        let Some(entry) = self.spot_lights.get(id.slot as usize) else {
+            return Err(SpotLightRefError::OutOfBounds);
+        };
+        if entry.generation != id.generation {
+            return Err(SpotLightRefError::GenerationMismatch);
+        }
+        if entry.light.is_none() {
+            return Err(SpotLightRefError::Vacant);
+        }
         Ok(())
     }
 
@@ -1044,31 +1069,52 @@ impl SceneWorld {
         if let Some(slot) = self.free_spot_light_slots.pop() {
             let entry = &mut self.spot_lights[slot as usize];
             entry.light = Some(light);
-            return SpotLightId { slot, generation: entry.generation };
+            return SpotLightId {
+                slot,
+                generation: entry.generation,
+            };
         }
         let slot = self.spot_lights.len() as u32;
-        self.spot_lights.push(SpotLightEntry { generation: 0, light: Some(light) });
-        SpotLightId { slot, generation: 0 }
+        self.spot_lights.push(SpotLightEntry {
+            generation: 0,
+            light: Some(light),
+        });
+        SpotLightId {
+            slot,
+            generation: 0,
+        }
     }
 
     pub(crate) fn update_spot_light(&mut self, id: SpotLightId, light: SpotLight) -> bool {
-        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else { return false; };
-        if entry.generation != id.generation || entry.light.is_none() { return false; }
+        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.light.is_none() {
+            return false;
+        }
         entry.light = Some(light);
         true
     }
 
     pub(crate) fn remove_spot_light(&mut self, id: SpotLightId) -> bool {
-        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else { return false; };
-        if entry.generation != id.generation || entry.light.is_none() { return false; }
+        let Some(entry) = self.spot_lights.get_mut(id.slot as usize) else {
+            return false;
+        };
+        if entry.generation != id.generation || entry.light.is_none() {
+            return false;
+        }
         entry.light = None;
-        entry.generation = entry.generation.wrapping_add(1);
-        self.free_spot_light_slots.push(id.slot);
+        if bump_generation(&mut entry.generation) {
+            self.free_spot_light_slots.push(id.slot);
+        }
         true
     }
 
     pub(crate) fn get_active_spot_lights(&self) -> Vec<SpotLight> {
-        self.spot_lights.iter().filter_map(|entry| entry.light).collect()
+        self.spot_lights
+            .iter()
+            .filter_map(|entry| entry.light)
+            .collect()
     }
 }
 
@@ -1114,9 +1160,24 @@ pub(crate) enum ReparentError {
     Cycle,
 }
 
+/// Bump a slot generation by one. Returns `true` when the slot can safely
+/// return to the free list. Returns `false` when the generation has reached
+/// `u32::MAX` and the slot is terminally exhausted (do NOT return to free list).
+fn bump_generation(generation: &mut u32) -> bool {
+    match generation.checked_add(1) {
+        Some(next) => {
+            *generation = next;
+            true
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PointLightRefError, SceneNode, SceneNodeId, SceneWorld};
+    use super::{
+        bump_generation, PointLightRefError, SceneNode, SceneNodeId, SceneNodeRefError, SceneWorld,
+    };
     use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
     use crate::data::camera::{Aabb, Ray};
     use crate::data::handles::MeshHandle;
@@ -1239,10 +1300,8 @@ mod tests {
 
         let mut scene = SceneWorld::new();
         let root = scene.add_node(None, SceneNode::default());
-        let unit_proxy = SceneBounds::Proxy(Aabb::from_min_max(
-            Vec3::splat(-0.5),
-            Vec3::splat(0.5),
-        ));
+        let unit_proxy =
+            SceneBounds::Proxy(Aabb::from_min_max(Vec3::splat(-0.5), Vec3::splat(0.5)));
         let offscreen_parent = scene.add_node(
             Some(root),
             SceneNode {
@@ -1552,7 +1611,11 @@ mod tests {
             ),
         );
         scene.set_root(root);
-        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
         scene.build_submission();
 
         let node = scene.get_node(root).unwrap();
@@ -1580,7 +1643,11 @@ mod tests {
             ),
         );
         scene.set_root(root);
-        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
         scene.build_submission();
 
         let node = scene.get_node(root).unwrap();
@@ -1610,7 +1677,11 @@ mod tests {
             ),
         );
         scene.set_root(root);
-        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
         scene.build_submission();
 
         let node = scene.get_node(root).unwrap();
@@ -1679,7 +1750,11 @@ mod tests {
             ),
         );
         scene.set_root(root);
-        scene.update_camera(Mat4::IDENTITY, Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0), Vec3::ZERO);
+        scene.update_camera(
+            Mat4::IDENTITY,
+            Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0),
+            Vec3::ZERO,
+        );
         scene.build_submission();
 
         let node = scene.get_node(root).unwrap();
@@ -1766,11 +1841,10 @@ mod tests {
         let root = scene.add_node(None, SceneNode::default());
         // Set proxy through node_world_bounds (simulating set_node_proxy_bounds).
         if let Some(n) = scene.get_node_mut(root) {
-            n.node_world_bounds =
-                Some(SceneBounds::Proxy(Aabb::from_min_max(
-                    Vec3::new(1.0, 2.0, 3.0),
-                    Vec3::new(4.0, 5.0, 6.0),
-                )));
+            n.node_world_bounds = Some(SceneBounds::Proxy(Aabb::from_min_max(
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(4.0, 5.0, 6.0),
+            )));
         }
         scene.set_root(root);
         scene.enable_frustum_culling = false;
@@ -1778,7 +1852,10 @@ mod tests {
 
         let node = scene.get_node(root).unwrap();
         // Proxy should persist when no known meshes are present.
-        assert!(matches!(node.node_world_bounds, Some(SceneBounds::Proxy(_))));
+        assert!(matches!(
+            node.node_world_bounds,
+            Some(SceneBounds::Proxy(_))
+        ));
         assert!(node.subtree_world_bounds.is_some());
     }
 
@@ -1869,11 +1946,7 @@ mod tests {
         // A known in-frustum child under a skip-pruning parent should still draw.
         scene.add_node(
             Some(parent),
-            node_with_mesh_and_transform(
-                2,
-                make_unit_known(),
-                Mat4::IDENTITY,
-            ),
+            node_with_mesh_and_transform(2, make_unit_known(), Mat4::IDENTITY),
         );
         scene.set_root(root);
         scene.update_camera(
@@ -1958,5 +2031,144 @@ mod tests {
         // The group node has no meshes but its child is at origin.
         assert_eq!(submission.draw_items.len(), 1);
         assert_eq!(submission.draw_items[0].mesh_id, MeshHandle::new(1, 0));
+    }
+
+    // ── Generation exhaustion & handle safety ────────────────────────────
+
+    #[test]
+    fn bump_generation_returns_false_at_u32_max() {
+        let mut gen = u32::MAX;
+        assert!(!bump_generation(&mut gen));
+        assert_eq!(gen, u32::MAX);
+    }
+
+    #[test]
+    fn bump_generation_preserves_identity_through_normal_range() {
+        let mut gen = 7;
+        assert!(bump_generation(&mut gen));
+        assert_eq!(gen, 8);
+    }
+
+    #[test]
+    fn node_removal_at_max_generation_terminally_retires_slot() {
+        let mut scene = SceneWorld::new();
+        let node = scene.add_node(None, SceneNode::default());
+
+        // Artificially push generation to u32::MAX and create a matching handle.
+        scene.nodes[node.slot as usize].generation = u32::MAX;
+        let max_gen_id = SceneNodeId::new(node.slot, u32::MAX);
+
+        assert!(scene.remove_node(max_gen_id));
+        assert!(!scene.is_valid_node_id(max_gen_id));
+
+        // Slot must NOT be in free list (terminal exhaustion)
+        assert!(!scene.free_slots.contains(&node.slot));
+
+        // Any lookup for the slot still rejects
+        assert!(!scene.is_valid_node_id(max_gen_id));
+    }
+
+    #[test]
+    fn point_light_at_max_generation_terminally_retires() {
+        use crate::api::scene::PointLight;
+
+        let mut scene = SceneWorld::new();
+        let light = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::ONE,
+            intensity: 1.0,
+            range: 1.0,
+        };
+        let id = scene.add_point_light(light);
+
+        scene.point_lights[id.slot as usize].generation = u32::MAX;
+        let max_gen_id = crate::api::scene::PointLightId {
+            slot: id.slot,
+            generation: u32::MAX,
+        };
+        assert!(scene.remove_point_light(max_gen_id));
+        assert!(!scene.free_point_light_slots.contains(&id.slot));
+        // After removal, the slot is vacant (generation stays at u32::MAX, terminal).
+        assert!(matches!(
+            scene.validate_point_light_ref(max_gen_id),
+            Err(PointLightRefError::Vacant)
+        ));
+    }
+
+    #[test]
+    fn out_of_range_slot_rejected() {
+        let scene = SceneWorld::new();
+        let bad_id = SceneNodeId::new(99999, 0);
+        assert!(matches!(
+            scene.validate_node_ref(bad_id),
+            Err(SceneNodeRefError::OutOfBounds)
+        ));
+        assert!(scene.get_node(bad_id).is_none());
+    }
+
+    #[test]
+    fn generation_mismatch_rejected() {
+        let mut scene = SceneWorld::new();
+        let id = scene.add_node(None, SceneNode::default());
+        assert!(scene.is_valid_node_id(id));
+
+        let wrong_gen = SceneNodeId::new(id.slot, id.generation + 1);
+        assert!(!scene.is_valid_node_id(wrong_gen));
+    }
+
+    #[test]
+    fn repeated_allocate_remove_cycle_preserves_handle_safety() {
+        let mut scene = SceneWorld::new();
+
+        for cycle in 0..10u32 {
+            let id = scene.add_node(None, SceneNode::default());
+            assert_eq!(id.slot, 0);
+            assert_eq!(id.generation, cycle);
+            assert!(scene.is_valid_node_id(id));
+            assert!(scene.remove_node(id));
+            assert!(!scene.is_valid_node_id(id));
+        }
+
+        // After 10 cycles, slot 0 generation should be 10
+        let id = SceneNodeId::new(0, 9);
+        assert!(!scene.is_valid_node_id(id));
+
+        let fresh = scene.add_node(None, SceneNode::default());
+        assert_eq!(fresh.slot, 0);
+        assert_eq!(fresh.generation, 10);
+        assert!(scene.is_valid_node_id(fresh));
+    }
+
+    #[test]
+    fn repeated_light_remove_reallocate_rejects_stale() {
+        use crate::api::scene::PointLight;
+
+        let mut scene = SceneWorld::new();
+        let light = PointLight {
+            position: Vec3::ZERO,
+            color: Vec3::ONE,
+            intensity: 1.0,
+            range: 1.0,
+        };
+
+        let id0 = scene.add_point_light(light);
+        assert_eq!(id0.generation, 0);
+        assert!(scene.remove_point_light(id0));
+
+        // Old handle must be rejected
+        assert!(matches!(
+            scene.validate_point_light_ref(id0),
+            Err(PointLightRefError::GenerationMismatch)
+        ));
+
+        let id1 = scene.add_point_light(light);
+        assert_eq!(id1.slot, 0);
+        assert_eq!(id1.generation, 1);
+        assert!(scene.validate_point_light_ref(id1).is_ok());
+        // Old handle still rejected
+        assert!(matches!(
+            scene.validate_point_light_ref(id0),
+            Err(PointLightRefError::GenerationMismatch)
+        ));
     }
 }

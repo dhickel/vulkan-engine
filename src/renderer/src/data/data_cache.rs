@@ -614,9 +614,11 @@ impl TextureCache {
 
     pub fn get_material(&self, id: MaterialHandle) -> Result<&CachedMaterial, CacheError> {
         let slot = self.validate_material_slot(id)?;
-        self.cached_materials
-            .get(slot)
-            .ok_or(CacheError::OutOfBounds)
+        match self.cached_materials.get(slot) {
+            Some(CachedMaterial::_NULL) => Err(CacheError::InvalidHandle),
+            Some(material) => Ok(material),
+            None => Err(CacheError::OutOfBounds),
+        }
     }
 
     pub fn get_loaded_material(&self, id: MaterialHandle) -> Result<VkLoadedMaterial, CacheError> {
@@ -631,9 +633,11 @@ impl TextureCache {
 
     pub fn get_texture(&self, id: TextureHandle) -> Result<&CachedTexture, CacheError> {
         let slot = self.validate_texture_slot(id)?;
-        self.cached_textures
-            .get(slot)
-            .ok_or(CacheError::OutOfBounds)
+        match self.cached_textures.get(slot) {
+            Some(CachedTexture::_NULL) => Err(CacheError::InvalidHandle),
+            Some(texture) => Ok(texture),
+            None => Err(CacheError::OutOfBounds),
+        }
     }
 
     pub fn get_loaded_texture(&self, id: TextureHandle) -> Result<&VkLoadedTexture, CacheError> {
@@ -1311,9 +1315,9 @@ impl TextureCache {
                     let allocator = self.allocator.lock().expect("allocator lock poisoned");
                     vk_util::destroy_image(&self.device, &allocator, tex.alloc)
                 }
-                self.texture_generations[slot_idx] =
-                    self.texture_generations[slot_idx].wrapping_add(1);
-                self.free_texture_slots.push(slot_idx as u32);
+                if bump_cache_generation(&mut self.texture_generations[slot_idx]) {
+                    self.free_texture_slots.push(slot_idx as u32);
+                }
             }
         }
     }
@@ -1348,9 +1352,9 @@ impl TextureCache {
                     texture_ids.extend(mat.texture_ids.to_vec());
                     self.material_meta_storage.deallocate(mat.meta_alloc)
                 }
-                self.material_generations[slot_idx] =
-                    self.material_generations[slot_idx].wrapping_add(1);
-                self.free_material_slots.push(slot_idx as u32);
+                if bump_cache_generation(&mut self.material_generations[slot_idx]) {
+                    self.free_material_slots.push(slot_idx as u32);
+                }
             }
         }
 
@@ -1520,7 +1524,11 @@ impl MeshCache {
 
     pub fn get_id(&self, id: MeshHandle) -> Result<&CachedMesh, CacheError> {
         let slot = self.validate_mesh_slot(id)?;
-        self.cached_meshes.get(slot).ok_or(CacheError::OutOfBounds)
+        match self.cached_meshes.get(slot) {
+            Some(CachedMesh::_NULL) => Err(CacheError::InvalidHandle),
+            Some(mesh) => Ok(mesh),
+            None => Err(CacheError::OutOfBounds),
+        }
     }
 
     pub fn get_loaded_id(&self, id: MeshHandle) -> Result<VkMeshBuffers, CacheError> {
@@ -1755,8 +1763,9 @@ impl MeshCache {
                 self.index_storage.deallocate(loaded_mesh.index_buffer);
                 self.vertex_storage.deallocate(loaded_mesh.vertex_buffer);
             }
-            self.mesh_generations[slot_idx] = self.mesh_generations[slot_idx].wrapping_add(1);
-            self.free_mesh_slots.push(slot_idx as u32);
+            if bump_cache_generation(&mut self.mesh_generations[slot_idx]) {
+                self.free_mesh_slots.push(slot_idx as u32);
+            }
         }
     }
 
@@ -1796,9 +1805,8 @@ impl MeshCache {
         // Determine the replacement generation before moving any payload. Exhaustion must
         // leave both visibility and ownership unchanged.
         let next_gen = checked_retired_generation(self.mesh_generations[slot_idx])?;
-        let last_referenced = crate::data::retirement::FrameSerial::new(
-            self.last_referenced_serials[slot_idx],
-        );
+        let last_referenced =
+            crate::data::retirement::FrameSerial::new(self.last_referenced_serials[slot_idx]);
         let retire_after = last_referenced.max(latest_submitted_serial);
 
         let slot = self
@@ -1837,7 +1845,8 @@ impl MeshCache {
         payload: &crate::data::retirement::MeshRetiredPayload,
     ) {
         self.index_storage.deallocate(payload.buffers.index_buffer);
-        self.vertex_storage.deallocate(payload.buffers.vertex_buffer);
+        self.vertex_storage
+            .deallocate(payload.buffers.vertex_buffer);
     }
 
     /// Release a cache slot back to the free list after its retired payload
@@ -1857,6 +1866,19 @@ fn checked_retired_generation(generation: u32) -> Result<u32, CacheError> {
     generation
         .checked_add(1)
         .ok_or(CacheError::GenerationExhausted)
+}
+
+/// Bump a cache slot generation by one. Returns `true` when the slot can safely
+/// return to the free list. Returns `false` when the generation has reached
+/// `u32::MAX` and the slot is terminally exhausted — do NOT push to the free list.
+fn bump_cache_generation(generation: &mut u32) -> bool {
+    match generation.checked_add(1) {
+        Some(next) => {
+            *generation = next;
+            true
+        }
+        None => false,
+    }
 }
 
 impl VkDestroyable for MeshCache {
@@ -2625,5 +2647,135 @@ mod tests {
 
         assert!(pending_batches.is_empty());
         assert!(pending_textures.is_empty());
+    }
+
+    // ── Generation exhaustion & handle safety for caches ────────────────
+
+    #[test]
+    fn bump_cache_generation_returns_false_at_u32_max() {
+        let mut gen = u32::MAX;
+        assert!(!bump_cache_generation(&mut gen));
+        assert_eq!(gen, u32::MAX);
+    }
+
+    #[test]
+    fn bump_cache_generation_preserves_identity_through_normal_range() {
+        let mut gen = 7;
+        assert!(bump_cache_generation(&mut gen));
+        assert_eq!(gen, 8);
+    }
+
+    #[test]
+    fn texture_handle_generation_mismatch_rejected() {
+        let handle = TextureHandle::new(10, 3);
+        let generations = vec![0; 11];
+        // Slot 10 has gen 0, handle expects gen 3 — mismatch
+        let slot = handle.slot as usize;
+        let Some(generation) = generations.get(slot) else {
+            panic!("slot out of bounds");
+        };
+        assert_ne!(*generation, handle.generation);
+    }
+
+    #[test]
+    fn material_handle_out_of_range_slot_rejected() {
+        let handle = MaterialHandle::new(99999, 0);
+        let generations: Vec<u32> = vec![0; 10];
+        assert!(generations.get(handle.slot as usize).is_none());
+    }
+
+    #[test]
+    fn mesh_handle_stale_rejected_after_generation_bump() {
+        let mut generations = vec![0u32; 5];
+        let handle = MeshHandle::new(3, 0);
+        assert_eq!(generations[3], handle.generation);
+
+        // Simulate deallocation: bump generation
+        bump_cache_generation(&mut generations[3]);
+
+        let slot = handle.slot as usize;
+        let Some(generation) = generations.get(slot) else {
+            panic!("slot out of bounds");
+        };
+        assert_ne!(*generation, handle.generation);
+    }
+
+    #[test]
+    fn repeated_texture_handle_alloc_dealloc_cycle_rejects_stale() {
+        // Simulate the generation-tracking pattern without a full TextureCache.
+        let mut generations: Vec<u32> = Vec::new();
+        let mut free_slots: Vec<u32> = Vec::new();
+        let mut cached: Vec<CachedTexture> = Vec::new();
+
+        // Helper to make a dummy texture.
+        let make_tex = || {
+            CachedTexture::Unloaded(TextureMeta {
+                payload: crate::data::gpu_data::TexturePayload::Raw {
+                    bytes: vec![255; 4],
+                    width: 1,
+                    height: 1,
+                    format: vk::Format::R8G8B8A8_UNORM,
+                    mips_levels: 1,
+                },
+                uv_index: 0,
+                sampler_info: None,
+            })
+        };
+
+        for cycle in 0..5u32 {
+            // Allocate: try free list first, else grow.
+            let slot = if let Some(s) = free_slots.pop() {
+                cached[s as usize] = make_tex();
+                s as usize
+            } else {
+                let s = cached.len();
+                cached.push(make_tex());
+                generations.push(0);
+                s
+            };
+
+            let gen = generations[slot];
+            assert_eq!(gen, cycle);
+            let handle = TextureHandle::new(slot as u32, gen);
+            assert_eq!(generations[handle.slot as usize], handle.generation);
+
+            // Deallocate: invalidate the slot.
+            let _ = std::mem::replace(&mut cached[slot], CachedTexture::_NULL);
+            if bump_cache_generation(&mut generations[slot]) {
+                free_slots.push(slot as u32);
+            }
+
+            // Stale handle must now fail generation check.
+            assert_ne!(generations[handle.slot as usize], handle.generation);
+        }
+
+        // After 5 cycles on slot 0, gen should be 5.
+        assert_eq!(generations[0], 5);
+    }
+
+    #[test]
+    fn material_tombstones_with_max_generation_never_reuse() {
+        let mut generations = vec![u32::MAX];
+        let mut free_slots: Vec<u32> = Vec::new();
+        let mut cached = vec![CachedMaterial::Unloaded(MaterialMeta::default())];
+
+        // Attempt deallocation at max generation
+        let handle = MaterialHandle::new(0, u32::MAX);
+        assert_eq!(generations[0], handle.generation);
+
+        let _ = std::mem::replace(&mut cached[0], CachedMaterial::_NULL);
+        if bump_cache_generation(&mut generations[0]) {
+            free_slots.push(0);
+        }
+
+        // Slot must NOT be in free list (terminal exhaustion)
+        assert!(!free_slots.contains(&0));
+        assert_eq!(generations[0], u32::MAX);
+
+        // Even a handle matching u32::MAX is rejected because slot is NULL
+        let handle_max = MaterialHandle::new(0, u32::MAX);
+        assert_eq!(generations[handle_max.slot as usize], handle_max.generation);
+        // But the slot is occupied by _NULL
+        assert!(matches!(cached[0], CachedMaterial::_NULL));
     }
 }

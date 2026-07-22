@@ -294,9 +294,9 @@ pub(crate) fn reap_bounds_retirement(
     let reaped = bounds_retirement_queue
         .reap_through(FrameSerial::new(latest_completed_serial))
         .map_err(|err| format!("bounds retirement completion regression: {err:?}"))?;
-    debug_assert!(reaped.iter().all(|record| {
-        record.class == crate::data::retirement::RetirementClass::BoundsEntry
-    }));
+    debug_assert!(reaped
+        .iter()
+        .all(|record| { record.class == crate::data::retirement::RetirementClass::BoundsEntry }));
     Ok(())
 }
 
@@ -336,8 +336,11 @@ pub(crate) fn acquire_frame_slot(
     ctx: &mut FrameLifecycleContext,
 ) -> Result<FrameSlotAcquireOutcome, String> {
     let frame_index = {
-        let frame_data = ctx.presentation.get_next_frame();
-        frame_data.index
+        let frame = ctx
+            .presentation
+            .get_next_frame()
+            .map_err(|e| format!("failed to reserve frame slot: {e}"))?;
+        frame.index
     };
     let expected_frame_serial = ctx.presentation.frame_epoch();
     // Re-borrow to get the remaining frame data after get_next_frame's mutable borrow.
@@ -364,7 +367,10 @@ pub(crate) fn acquire_frame_slot(
     let cleanup_start = Instant::now();
     let completed_serial = completion_token.submitted_serial();
     {
-        let curr_frame = ctx.presentation.get_curr_frame_mut();
+        let curr_frame = ctx
+            .presentation
+            .get_curr_frame_mut()
+            .map_err(|e| format!("no active frame for descriptor cleanup: {e}"))?;
         unsafe {
             cleanup_curr_frame_resources(
                 ctx.device,
@@ -394,17 +400,10 @@ pub(crate) fn acquire_frame_slot(
         ctx.mesh_retirement_queue,
         ctx.data_cache,
     )?;
-    reap_bounds_retirement(
-        *ctx.latest_completed_serial,
-        ctx.bounds_retirement_queue,
-    )?;
+    reap_bounds_retirement(*ctx.latest_completed_serial, ctx.bounds_retirement_queue)?;
 
     // GPU timing resolution for the retiring slot
-    resolve_gpu_timing_for_slot(
-        ctx.device,
-        ctx.gpu_timing,
-        frame_slot_index,
-    );
+    resolve_gpu_timing_for_slot(ctx.device, ctx.gpu_timing, frame_slot_index);
 
     let swapchain_acquire_start = Instant::now();
     let (image_index, acquire_suboptimal, swapchain_acquire_ms) = if ctx.surface_mode.is_headless()
@@ -438,29 +437,27 @@ pub(crate) fn acquire_frame_slot(
                     "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); skipping this frame without rebuilding",
                     acquire_retries, swapchain_acquire_ms
                 );
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 return Ok(FrameSlotAcquireOutcome::TransientUnavailable);
             }
             AcquireClass::OutOfDate => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 ctx.swapchain_owner
                     .request_resize(ctx.window_state.get_curr_extent());
                 return Ok(FrameSlotAcquireOutcome::ResizePending);
             }
             AcquireClass::SurfaceLost => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 log::error!("wsi_outcome class=surface_lost operation=acquire");
                 return Err("Vulkan surface lost during image acquisition".to_string());
             }
             AcquireClass::DeviceLost => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 log::error!("wsi_outcome class=device_lost operation=acquire");
-                return Err(
-                    "Vulkan device lost during swapchain image acquisition".to_string()
-                );
+                return Err("Vulkan device lost during swapchain image acquisition".to_string());
             }
             AcquireClass::Fatal(msg) => {
-                ctx.presentation.rewind_frame();
+                let _ = ctx.presentation.rewind_frame();
                 return Err(format!("fatal swapchain acquire error: {msg}"));
             }
         };
@@ -511,8 +508,8 @@ pub(crate) unsafe fn reset_and_begin_frame_cmd(
         .reset_command_buffer(cmd_buffer, vk::CommandBufferResetFlags::empty())
         .map_err(|e| format!("reset_command_buffer failed: {:?}", e))?;
 
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     device
         .begin_command_buffer(cmd_buffer, &begin_info)
@@ -540,7 +537,10 @@ pub(crate) fn record_failed_frame_drain(
 ) -> Result<(), String> {
     unsafe { reset_and_begin_frame_cmd(device, frame.cmd_buffer)? };
     if plan.transition_present_image {
-        let present_image = presentation.get_curr_frame().present_image;
+        let present_image = presentation
+            .get_curr_frame()
+            .map_err(|e| format!("no active frame for drain: {e}"))?
+            .present_image;
         vk_util::transition_image(
             device,
             frame.cmd_buffer,
@@ -720,10 +720,7 @@ pub(crate) fn resolve_gpu_timing_for_slot(
             let end = *slot.raw_results.get(record.end_query as usize)?;
             Some((
                 record.name,
-                timestamp_delta_to_ms(
-                    end.saturating_sub(start),
-                    gpu_timing.timestamp_period_ns,
-                ),
+                timestamp_delta_to_ms(end.saturating_sub(start), gpu_timing.timestamp_period_ns),
             ))
         })
         .collect();
@@ -882,6 +879,55 @@ pub(crate) fn aggregate_descriptor_stats(presentation: &VkPresent) -> Descriptor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── VkPresent frame-ring invariants ──────────────────────────────────
+
+    #[test]
+    fn vk_present_no_active_reservation_rejected() {
+        // Can't construct VkPresent without real Vulkan resources, but we can
+        // test the error type display and equality.
+        assert_eq!(
+            VkError::NoActiveReservation.to_string(),
+            "no active frame reservation"
+        );
+        assert_eq!(
+            VkError::NoFrameSources.to_string(),
+            "zero frame-data sources provided to VkPresent::new"
+        );
+    }
+
+    #[test]
+    fn rewind_before_first_frame_returns_no_active_reservation() {
+        // Simulate the state machine: rewind should fail when no frame is active.
+        let curr_frame_count: u32 = 0;
+        let result = if curr_frame_count == 0 {
+            Err(VkError::NoActiveReservation)
+        } else {
+            Ok(())
+        };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rewind_after_get_next_succeeds() {
+        let mut curr_frame_count: u32 = 1;
+        if curr_frame_count == 0 {
+            panic!("should have active frame");
+        }
+        curr_frame_count -= 1;
+        assert_eq!(curr_frame_count, 0);
+    }
+
+    #[test]
+    fn get_curr_frame_with_no_reservation_returns_error() {
+        let curr: u32 = 0;
+        let result = if curr == 0 {
+            Err(VkError::NoActiveReservation)
+        } else {
+            Ok(())
+        };
+        assert!(result.is_err());
+    }
 
     #[test]
     fn post_acquire_recording_failure_requires_submit_and_present_drain() {

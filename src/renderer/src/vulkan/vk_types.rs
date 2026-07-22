@@ -119,12 +119,20 @@ pub trait VkDestroyable {
 #[derive(Debug)]
 pub enum VkError {
     Present(String),
+    /// No frame has been reserved via `get_next_frame`.
+    NoActiveReservation,
+    /// `VkPresent::new` was called with zero frame-data sources.
+    NoFrameSources,
 }
 
 impl std::fmt::Display for VkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Present(message) => f.write_str(message),
+            Self::NoActiveReservation => f.write_str("no active frame reservation"),
+            Self::NoFrameSources => {
+                f.write_str("zero frame-data sources provided to VkPresent::new")
+            }
         }
     }
 }
@@ -729,6 +737,11 @@ impl VkPresent {
             descriptor_allocators.len(),
         ];
 
+        // Reject zero-length sources before any work.
+        if lengths[0] == 0 {
+            return Err(VkError::NoFrameSources);
+        }
+
         let length_match = lengths.iter().all(|len| len == &lengths[0]);
         if !length_match {
             return Err(VkError::Present(
@@ -779,14 +792,36 @@ impl VkPresent {
         })
     }
 
-    pub fn get_next_frame(&mut self) -> &VkFrame {
-        let index = self.curr_frame_count % self.max_frames_active;
-        // max_frames_active == data_len == frame_data.len(), so modulo guarantees
-        // index is always in bounds.
-        let frame = &self.frame_data[index as usize];
-        self.curr_frame_count += 1;
-        self.frame_epoch += 1;
-        frame
+    /// Reserve the next frame slot and return a shared reference to its data.
+    ///
+    /// On success the slot becomes the active (current) frame. Callers must wait
+    /// for its fence, clean its descriptor pools, and bind a present target before
+    /// recording work into it.
+    ///
+    /// # Errors
+    /// Returns `NoFrameSources` if the frame ring is empty. This is a construction
+    /// invariant; callers that hold a valid `VkPresent` will never observe this error.
+    pub fn get_next_frame(&mut self) -> Result<&VkFrame, VkError> {
+        if self.max_frames_active == 0 || self.frame_data.is_empty() {
+            return Err(VkError::NoFrameSources);
+        }
+        let index = (self.curr_frame_count % self.max_frames_active) as usize;
+        if index >= self.frame_data.len() {
+            return Err(VkError::Present(format!(
+                "frame ring index {} out of range ({} frame slots)",
+                index,
+                self.frame_data.len()
+            )));
+        }
+        self.curr_frame_count = self
+            .curr_frame_count
+            .checked_add(1)
+            .ok_or_else(|| VkError::Present("frame reservation counter exhausted".to_string()))?;
+        self.frame_epoch = self
+            .frame_epoch
+            .checked_add(1)
+            .ok_or_else(|| VkError::Present("frame epoch exhausted".to_string()))?;
+        Ok(&self.frame_data[index])
     }
 
     /// Current frame epoch. Use to stamp `CompletedFrameSlot` tokens.
@@ -798,24 +833,70 @@ impl VkPresent {
     ///
     /// This keeps frame-slot selection in lock-step with systems that only advance
     /// on successful submission paths (for example ImGui internal in-flight buffers).
-    pub fn rewind_frame(&mut self) {
-        self.curr_frame_count = self.curr_frame_count.saturating_sub(1);
+    ///
+    /// Cannot underflow: returns `NoActiveReservation` when there is no active
+    /// frame to rewind.
+    pub fn rewind_frame(&mut self) -> Result<(), VkError> {
+        if self.curr_frame_count == 0 {
+            return Err(VkError::NoActiveReservation);
+        }
+        self.curr_frame_count = self.curr_frame_count - 1;
+        Ok(())
     }
 
-    pub fn get_curr_frame_mut(&mut self) -> &mut VkFrame {
-        let index = (self.curr_frame_count - 1) % self.max_frames_active;
-        unsafe { self.frame_data.get_unchecked_mut(index as usize) }
+    /// Return a mutable reference to the currently active frame (the one most
+    /// recently returned by `get_next_frame` that has not been rewound).
+    ///
+    /// # Errors
+    /// Returns `NoActiveReservation` when `curr_frame_count == 0` (no frame
+    /// has been reserved, or all reservations have been rewound/reset).
+    pub fn get_curr_frame_mut(&mut self) -> Result<&mut VkFrame, VkError> {
+        if self.curr_frame_count == 0 {
+            return Err(VkError::NoActiveReservation);
+        }
+        if self.max_frames_active == 0 || self.frame_data.is_empty() {
+            return Err(VkError::NoFrameSources);
+        }
+        let index = ((self.curr_frame_count - 1) % self.max_frames_active) as usize;
+        let frame_count = self.frame_data.len();
+        self.frame_data.get_mut(index).ok_or_else(|| {
+            VkError::Present(format!(
+                "current frame index {} out of range ({} frame slots)",
+                index, frame_count
+            ))
+        })
     }
 
-    pub fn get_curr_frame(&self) -> &VkFrame {
-        let index = (self.curr_frame_count - 1) % self.max_frames_active;
-        unsafe { self.frame_data.get_unchecked(index as usize) }
+    /// Return a shared reference to the currently active frame.
+    ///
+    /// # Errors
+    /// Returns `NoActiveReservation` when `curr_frame_count == 0`.
+    pub fn get_curr_frame(&self) -> Result<&VkFrame, VkError> {
+        if self.curr_frame_count == 0 {
+            return Err(VkError::NoActiveReservation);
+        }
+        if self.max_frames_active == 0 || self.frame_data.is_empty() {
+            return Err(VkError::NoFrameSources);
+        }
+        let index = ((self.curr_frame_count - 1) % self.max_frames_active) as usize;
+        self.frame_data.get(index).ok_or_else(|| {
+            VkError::Present(format!(
+                "current frame index {} out of range ({} frame slots)",
+                index,
+                self.frame_data.len()
+            ))
+        })
     }
 
     pub(crate) fn present_targets(&self) -> &[(vk::Image, vk::ImageView)] {
         &self.present_targets
     }
 
+    /// Replace present image targets (e.g. after swapchain rebuild).
+    ///
+    /// Resets frame-slot selection state: after this call there is no active
+    /// reservation (`curr_frame_count == 0`). The caller must call
+    /// `get_next_frame` before accessing any frame data.
     pub fn replace_present_images(
         &mut self,
         images: Vec<(vk::Image, vk::ImageView)>,
@@ -828,12 +909,16 @@ impl VkPresent {
             )));
         }
         self.present_targets = images.clone();
-        for x in 0..images.len() {
-            self.frame_data[x].present_image = images[x].0;
-            self.frame_data[x].present_image_view = images[x].1;
+        for (frame, (present_image, present_image_view)) in
+            self.frame_data.iter_mut().zip(images.into_iter())
+        {
+            frame.present_image = present_image;
+            frame.present_image_view = present_image_view;
         }
+        // Reset frame selection: no active reservation after replacement. Keep
+        // frame_epoch monotonic so descriptor-reset tokens cannot become stale
+        // solely because the swapchain was rebuilt.
         self.curr_frame_count = 0;
-        self.frame_epoch = 0;
         Ok(())
     }
 
@@ -848,7 +933,7 @@ impl VkPresent {
             )));
         };
 
-        let curr_frame = self.get_curr_frame_mut();
+        let curr_frame = self.get_curr_frame_mut()?;
         curr_frame.present_image = present_image;
         curr_frame.present_image_view = present_image_view;
         Ok(())
@@ -1529,5 +1614,71 @@ impl VkFenceQueue {
 
         self.fence_awaits = pending;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_present(curr_frame_count: u32, max_frames_active: u32, frame_epoch: u64) -> VkPresent {
+        VkPresent {
+            frame_data: Vec::new(),
+            present_targets: Vec::new(),
+            curr_frame_count,
+            max_frames_active,
+            frame_epoch,
+        }
+    }
+
+    #[test]
+    fn get_next_frame_rejects_zero_length_ring() {
+        let mut present = empty_present(0, 0, 0);
+        assert!(matches!(
+            present.get_next_frame(),
+            Err(VkError::NoFrameSources)
+        ));
+    }
+
+    #[test]
+    fn get_current_frame_without_reservation_rejects_before_indexing() {
+        let present = empty_present(0, 0, 0);
+        assert!(matches!(
+            present.get_curr_frame(),
+            Err(VkError::NoActiveReservation)
+        ));
+    }
+
+    #[test]
+    fn get_current_frame_with_corrupt_empty_ring_rejects_without_modulo_by_zero() {
+        let mut present = empty_present(1, 0, 0);
+        assert!(matches!(
+            present.get_curr_frame(),
+            Err(VkError::NoFrameSources)
+        ));
+        assert!(matches!(
+            present.get_curr_frame_mut(),
+            Err(VkError::NoFrameSources)
+        ));
+    }
+
+    #[test]
+    fn rewind_frame_cannot_underflow() {
+        let mut present = empty_present(0, 0, 0);
+        assert!(matches!(
+            present.rewind_frame(),
+            Err(VkError::NoActiveReservation)
+        ));
+        assert_eq!(present.curr_frame_count, 0);
+    }
+
+    #[test]
+    fn replace_present_images_resets_active_reservation_without_rewinding_epoch() {
+        let mut present = empty_present(7, 0, 42);
+        present
+            .replace_present_images(Vec::new())
+            .expect("empty replacement matches empty test ring");
+        assert_eq!(present.curr_frame_count, 0);
+        assert_eq!(present.frame_epoch(), 42);
     }
 }

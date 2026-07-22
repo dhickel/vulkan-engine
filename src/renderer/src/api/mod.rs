@@ -16,10 +16,10 @@ pub use crate::data::asset_manifest::{
     FilterMode, ResolvedTexturePolicy, SamplerOverride, TextureLoadOptions, WrapMode,
 };
 pub use crate::data::asset_registry::{
-    parse_package_manifest, validate_package_manifest_file, validate_package_manifest_str,
-    validate_project_file, validate_project_str, AssetKind, AssetRegistry, AssetRegistryError,
-    DurableAssetRecord, PackageAssetRecord, PackageManifest, PackageValidationOptions, Project,
-    ProjectPackage, ProjectSettings, ProjectValidationOptions,
+    normalize_logical_key, parse_package_manifest, validate_package_manifest_file,
+    validate_package_manifest_str, validate_project_file, validate_project_str, AssetKind,
+    AssetRegistry, AssetRegistryError, DurableAssetRecord, PackageAssetRecord, PackageManifest,
+    PackageValidationOptions, Project, ProjectPackage, ProjectSettings, ProjectValidationOptions,
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
 pub use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto, MeshLocalAabb};
@@ -68,9 +68,7 @@ pub use renderer::{
 pub use scene::{
     validate_scene_file, validate_scene_file_with_options, validate_scene_str,
     validate_scene_str_with_options, BoundsUnknownReason, DirectionalLight, DirectionalLightId,
-    DirectionalShadowConfig,
-    MeshBoundsEntry, PointLight, PointLightId, SpotLight, SpotLightId, Scene,
-    SceneAssetReference, SceneBounds,
-    SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId, SceneNodeSummary,
-    SceneValidationOptions,
+    DirectionalShadowConfig, MeshBoundsEntry, PointLight, PointLightId, Scene, SceneAssetReference,
+    SceneBounds, SceneFragment, SceneFragmentMount, SceneFragmentNode, SceneFragmentNodeId,
+    SceneNodeSummary, SceneValidationOptions, SpotLight, SpotLightId,
 };
