@@ -122,6 +122,6 @@ Material factors and GPU addresses are carried in the geometry push-constant rec
 
 ## See Also
 
-- [07-rendergraph.md](07-rendergraph.md) — which passes use which shaders
-- [04-vulkan-subsystem.md](04-vulkan-subsystem.md) — descriptor layout and pipeline creation
+- [07-rendergraph-dependencies-and-aliasing.md](07-rendergraph-dependencies-and-aliasing.md) — which passes use which shaders
+- [14-renderer-descriptor-abi.md](14-renderer-descriptor-abi.md) — descriptor layout and pipeline consumers
 - [src/renderer/src/shaders/AGENTS.md](../../src/renderer/src/shaders/AGENTS.md) — shader contributor guide

@@ -1,16 +1,16 @@
 # Asset Pipeline — Disk to GPU
 
-> Source: [`src/renderer/src/api/assets.rs`](../src/renderer/src/api/assets.rs), [`src/renderer/src/data/`](../src/renderer/src/data/), [`src/renderer/src/vulkan/`](../src/renderer/src/vulkan/) — no legacy docs consulted.
+> Source: [`src/renderer/src/api/assets.rs`](../../src/renderer/src/api/assets.rs), [`src/renderer/src/data/`](../../src/renderer/src/data/), [`src/renderer/src/vulkan/`](../../src/renderer/src/vulkan/) — no legacy docs consulted.
 
 ## End-to-End Flow: Loading a glTF Model
 
 ### 1. API Entry
 
-`AssetManager::load_model(path)` at [`api/assets.rs`](../src/renderer/src/api/assets.rs) → delegates to `AssetManager::load_model_impl()`.
+`AssetManager::load_model(path)` at [`api/assets.rs`](../../src/renderer/src/api/assets.rs) → delegates to `AssetManager::load_model_impl()`.
 
 ### 2. Assimp Parsing
 
-`assimp_util::load_model()` at [`data/assimp_util.rs:157`](../src/renderer/src/data/assimp_util.rs:157) calls russimp_sys directly (no higher-level crate wrapper).
+`assimp_util::load_model()` at [`data/assimp_util.rs:157`](../../src/renderer/src/data/assimp_util.rs#L157) calls russimp_sys directly (no higher-level crate wrapper).
 
 **Post-processing flags**: `GenSmoothNormals | JoinIdenticalVertices | Triangulate | FlipUVs | FixInfacingNormals | CalcTangentSpace`.
 
@@ -37,7 +37,7 @@ For each texture reference in the material:
 1. Load image from disk (PNG, JPG, HDR via image crate)
 2. Generate mipmap chain
 3. Determine format (sRGB for color, linear for data textures)
-4. Resolve sampler parameters via the manifest chain: API override → `.meta` file → filename heuristics → defaults (resolution at [`asset_manifest.rs:390`](../src/renderer/src/data/asset_manifest.rs:390))
+4. Resolve sampler parameters via the manifest chain: API override → `.meta` file → filename heuristics → defaults (resolution at [`asset_manifest.rs:390`](../../src/renderer/src/data/asset_manifest.rs#L390))
 5. Upload to GPU via staging buffer
 
 ### 5. Mesh Data Upload
@@ -62,7 +62,7 @@ Materials are stored in a **shader storage buffer object (SSBO)** via `VkSubAllo
 
 ### 7. Handle Issuance
 
-Each loaded asset gets a `MeshHandle` / `MaterialHandle` / `TextureHandle` with `slot + generation` from [`data/handles.rs`](../src/renderer/src/data/handles.rs). The slot indexes into the cache; generation invalidates stale references.
+Each loaded asset gets a `MeshHandle` / `MaterialHandle` / `TextureHandle` with `slot + generation` from [`data/handles.rs`](../../src/renderer/src/data/handles.rs). The slot indexes into the cache; generation invalidates stale references.
 
 Default/reserved slots in `TextureCache`:
 - Slot 0: white (base color fallback)
@@ -99,14 +99,14 @@ Progress is tracked via `EnvironmentState` enum; current stage queryable via `Re
 
 ### TextureCache
 
-`Vec<CachedTexture>` at [`data_cache.rs:218`](../src/renderer/src/data/data_cache.rs:218). Each entry is `Unloaded(TextureMeta) | Loaded(VkLoadedTexture)`. `load_texture(slot)` transitions Unloaded → Loaded by allocating GPU image, uploading, creating descriptor.
+`Vec<CachedTexture>` at [`data_cache.rs:218`](../../src/renderer/src/data/data_cache.rs#L218). Each entry is `Unloaded(TextureMeta) | Loaded(VkLoadedTexture)`. `load_texture(slot)` transitions Unloaded → Loaded by allocating GPU image, uploading, creating descriptor.
 
 ### MeshCache
 
-`Vec<CachedMesh>` at [`data_cache.rs:1454`](../src/renderer/src/data/data_cache.rs:1454). Vertex/index data in `VkSubAllocator` blocks. Buffer device addresses enable bindless vertex pulling in the geometry shader.
+`Vec<CachedMesh>` at [`data_cache.rs:1454`](../../src/renderer/src/data/data_cache.rs#L1454). Vertex/index data in `VkSubAllocator` blocks. Buffer device addresses enable bindless vertex pulling in the geometry shader.
 
 ## See Also
 
-- [04-vulkan-subsystem.md](04-vulkan-subsystem.md) — transfer queue, staging, memory allocation
-- [08-shaders.md](08-shaders.md) — PBR material evaluation
+- [06-data-suballocation-and-transfer.md](06-data-suballocation-and-transfer.md) — transfer queue, staging, memory allocation
+- [14-renderer-descriptor-abi.md](14-renderer-descriptor-abi.md) — shader/descriptor consumers and PBR material bindings
 - [../api/04-assets.md](../api/04-assets.md) — public asset API

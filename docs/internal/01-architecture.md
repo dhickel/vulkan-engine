@@ -65,6 +65,6 @@ App-owned custom loops can instead build a `CameraView` from app camera/gameplay
 
 ## See Also
 
-- [02-renderer-internals.md](02-renderer-internals.md) — frame lifecycle deep dive
+- [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md) — frame lifecycle deep dive
 - [src/renderer/AGENTS.md](../../src/renderer/AGENTS.md) — renderer package guide
 - [src/renderer/src/vulkan/AGENTS.md](../../src/renderer/src/vulkan/AGENTS.md) — Vulkan subsystem guide

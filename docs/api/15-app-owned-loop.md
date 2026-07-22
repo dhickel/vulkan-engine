@@ -2,7 +2,7 @@
 
 App-owned loops keep application state in the app: input dispatch, frame timing, lifecycle/event bus, camera/controller state, gameplay simulation, and scene mutation. The renderer still owns renderer-only work: Vulkan submission, asset pumping, swapchain/headless targets, resize handling, debug UI/platform side effects, and capture output.
 
-Renderer-owned loops remain available for compatibility and examples. In those loops, apps call `Renderer::update_input(...)` and `Renderer::render_scene(...)`; see [Renderer Lifecycle](02-renderer.md) and [Events and Lifecycle](12-events-and-lifecycle.md).
+Renderer-owned loops remain available for compatibility and examples. In those loops, apps call `Renderer::update_input(...)` and `Renderer::render_scene(...)`; see [Renderer Lifecycle](02-renderer-lifecycle-and-frame-api.md) and [Events and Lifecycle](12-events-and-lifecycle.md).
 
 ## Minimal pattern
 

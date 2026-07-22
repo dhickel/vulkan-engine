@@ -34,14 +34,14 @@ Renderer (public API)
 
 | Order | Document | What It Covers |
 |-------|----------|----------------|
-| 1 | [01-architecture.md](01-architecture.md) | Module map, data flow, subsystem boundaries |
-| 2 | [02-renderer-internals.md](02-renderer-internals.md) | API→backend handoff, frame lifecycle, synchronization |
-| 3 | [03-asset-pipeline.md](03-asset-pipeline.md) | Disk→GPU asset pipeline, caches, staging |
-| 4 | [04-vulkan-subsystem.md](04-vulkan-subsystem.md) | Vulkan init, descriptors, pipelines, memory |
-| 5 | [05-scene-internals.md](05-scene-internals.md) | Scene flattening, render submission, culling |
-| 6 | [06-input-internals.md](06-input-internals.md) | Input dispatch, priority groups, action resolution |
-| 7 | [07-rendergraph.md](07-rendergraph.md) | Pass traits, dependencies, attachment aliasing |
-| 8 | [08-shaders.md](08-shaders.md) | Shader contracts, compilation, PBR pipeline |
+| 1 | [01-rendering-pipeline-mental-model.md](01-rendering-pipeline-mental-model.md) | Renderer frame data flow, pass order, command-recording ownership |
+| 2 | [02-synchronization-and-fencing.md](02-synchronization-and-fencing.md) | Synchronization primer, frame timeline, fence ownership |
+| 3 | [03-asset-lifecycle-and-io.md](03-asset-lifecycle-and-io.md) | Disk→GPU asset lifecycle, caches, staging, package identity resolution |
+| 4 | [04-api-to-backend-handoff.md](04-api-to-backend-handoff.md) | API→backend handoff, copied draw records, CameraView ownership boundary |
+| 5 | [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md) | Vulkan frame state machines, descriptor pools, swapchain/drain transactions |
+| 6 | [06-data-suballocation-and-transfer.md](06-data-suballocation-and-transfer.md) | Suballocation, storage buffers, transfer completion, fence-observed retirement |
+| 7 | [07-rendergraph-dependencies-and-aliasing.md](07-rendergraph-dependencies-and-aliasing.md) | Fixed pass order, dependencies, attachment transitions, aliasing caveats |
+| 8 | [08-scene-flattening-and-culling.md](08-scene-flattening-and-culling.md) | Scene flattening, render submission, light caps, conservative culling |
 | 9 | [09-input-winit-integration.md](09-input-winit-integration.md) | Winit ingestion, input dispatch, snapshot bridge |
 | 10 | [10-event-system-and-lifecycle.md](10-event-system-and-lifecycle.md) | Event ownership boundaries, emission ordering, validation |
 | 11 | [11-physics-and-collision.md](11-physics-and-collision.md) | Physics crate boundaries, collision metadata validation, event bridge |
@@ -79,6 +79,23 @@ Module-level guides provide subsystem detail:
 - Data/caches: [`src/renderer/src/data/AGENTS.md`](../../src/renderer/src/data/AGENTS.md)
 - Shaders: [`src/renderer/src/shaders/AGENTS.md`](../../src/renderer/src/shaders/AGENTS.md)
 - Renderer: [`src/renderer/AGENTS.md`](../../src/renderer/AGENTS.md)
+
+## Conceptual Deep Dives
+
+These eight chapters are the canonical conceptual reference for contributors working inside the renderer internals. Each file has been verified against live code at Phase 05 and is current. These replace the older numbered internal docs (01-architecture through 08-shaders) for conceptual learning; the older files remain as historical references for topics not yet migrated.
+
+**Historical disposition (Phase 05):** The original 01-architecture.md, 02-renderer-internals.md, 03-asset-pipeline.md, 04-vulkan-subsystem.md, 05-scene-internals.md, 06-input-internals.md, 07-rendergraph.md, and 08-shaders.md remain in the tree as read-only historical artifacts. They are superseded by the eight Conceptual Deep Dive chapters below and should not receive new content. The Reading Order table above points at canonical deep dives; use historical files only when explicitly researching legacy context.
+
+| Chapter | Document | Purpose |
+|---------|----------|--------|
+| 1 | [01-rendering-pipeline-mental-model.md](01-rendering-pipeline-mental-model.md) | End-to-end pass list, command-recording ownership, terminal-present stage, both facade entry paths |
+| 2 | [02-synchronization-and-fencing.md](02-synchronization-and-fencing.md) | Primer: VkFrameSync transaction/fence ownership, frame timeline, barrier patterns |
+| 3 | [03-asset-lifecycle-and-io.md](03-asset-lifecycle-and-io.md) | Loader/cache/retirement facts, Assimp ingest, handle validation, package identity resolution |
+| 4 | [04-api-to-backend-handoff.md](04-api-to-backend-handoff.md) | Copied material draw records, CameraView boundary, ownership table, no raw-pointer design |
+| 5 | [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md) | Deep dive: state machines, descriptor pool lifecycle, swapchain states, drain transactions, RetirementClass taxonomy |
+| 6 | [06-data-suballocation-and-transfer.md](06-data-suballocation-and-transfer.md) | VkSubAllocator, VkStorageBuffer, free-list coalescing, fence-observed completion, latch semantics |
+| 7 | [07-rendergraph-dependencies-and-aliasing.md](07-rendergraph-dependencies-and-aliasing.md) | Fixed sequential pass order, transition ownership matrix, DAG/aliasing explicitly not promised |
+| 8 | [08-scene-flattening-and-culling.md](08-scene-flattening-and-culling.md) | Multiple point lights (clamped to MAX_POINT_LIGHTS_GPU), one directional shadow owner, conservative bounds/culling, vk_commands.rs recording ownership |
 
 ## See Also
 

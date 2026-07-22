@@ -14,13 +14,13 @@ The root workspace currently contains the root `engine` package plus `src/input`
 
 | Topic | Document | What You'll Learn |
 |-------|----------|-------------------|
-| First frame | [01-quickstart.md](01-quickstart.md) | Window → Renderer → Scene → loop |
-| Renderer lifecycle | [02-renderer.md](02-renderer.md) | `Renderer::new`, frame API, resize, hooks |
+| First frame | [01-student-quickstart.md](01-student-quickstart.md) | Window → Renderer → Scene → loop |
+| Renderer lifecycle | [02-renderer-lifecycle-and-frame-api.md](02-renderer-lifecycle-and-frame-api.md) | `Renderer::new`, frame API, resize, hooks |
 | Scene construction | [03-scene-graph-and-fragment-workflows.md](03-scene-graph-and-fragment-workflows.md) | `Scene`, fragments, transforms, default-on culling, directional shadows, persistence, editor commands |
 | Asset loading | [04-assets-sync-deferred-and-handles.md](04-assets-sync-deferred-and-handles.md) | `AssetManager`, packages, durable IDs, load tickets, models, environments |
 | Render hooks | [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md) | `RenderHook`, `RenderHookContext`, extension points |
-| Input system | [06-input.md](06-input.md) | `InputSystem`, layers, action maps, snapshots |
-| Configuration | [07-config.md](07-config.md) | `RendererConfig`, `VisualTuning`, asset policies |
+| Input system | [06-input-polling-and-listeners.md](06-input-polling-and-listeners.md) | `InputSystem`, layers, action maps, snapshots |
+| Configuration | [07-engine-arguments.md](07-engine-arguments.md) | `RendererConfig`, launch arguments, asset policies |
 | Debug & timing | [08-debug.md](08-debug.md) | Debug UI, timing capture, custom views |
 | Editor placement | [09-editor-asset-browser-and-wall-chunks.md](09-editor-asset-browser-and-wall-chunks.md) | Project package loading, asset browser, wall chunk prefab placement |
 | Packaging CLI | [10-packaging-cli.md](10-packaging-cli.md) | Rust CLI validation, authoring, and folder pack output |

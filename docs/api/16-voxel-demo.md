@@ -307,6 +307,6 @@ The retained Phase 07 CPU profile is `.internal-dev/debug_reports/voxel-demo-v2-
 ## See Also
 
 - [App-Owned Loop](15-app-owned-loop.md)
-- [Input](06-input.md)
-- [Configuration](07-config.md)
+- [Input](06-input-polling-and-listeners.md)
+- [Configuration](07-engine-arguments.md)
 - [Internal voxel-demo architecture](../internal/16-voxel-demo-config-regeneration.md)

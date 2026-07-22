@@ -120,6 +120,6 @@ The sub-allocator grows by allocating new backing `VkBuffer`s when full. Individ
 
 ## See Also
 
-- [02-renderer-internals.md](02-renderer-internals.md) — frame lifecycle
-- [03-asset-pipeline.md](03-asset-pipeline.md) — GPU upload and transfer
+- [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md) — frame lifecycle
+- [06-data-suballocation-and-transfer.md](06-data-suballocation-and-transfer.md) — GPU upload and transfer
 - [src/renderer/src/vulkan/AGENTS.md](../../src/renderer/src/vulkan/AGENTS.md) — Vulkan contributor guide

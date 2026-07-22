@@ -3,6 +3,8 @@
 ## 1. Purpose & Audience
 This chapter is for contributors changing frame orchestration, submission order, swapchain handling, transfer completion, or image/buffer barriers in `src/renderer/src/vulkan`.
 
+**Scope note:** This chapter is the primer overview of synchronization primitives and the frame timeline. For the deep-dive state-machine reference covering descriptor pool lifecycle, swapchain state machines, drain transactions, environment-generation fence behavior, and RetirementClass taxonomy, see [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md).
+
 ## 2. Where This Fits in Engine Flow
 Synchronization spans the full frame path in `VkRenderCore::render_with_hooks(...)`:
 1. service async transfers
