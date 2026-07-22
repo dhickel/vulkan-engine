@@ -32,6 +32,7 @@ struct RuntimeProject {
     project_root: PathBuf,
     project: Project,
     startup_scene_path: PathBuf,
+    startup_scene_id: String,
     enabled_package_count: usize,
 }
 
@@ -146,11 +147,14 @@ fn load_runtime_project(options: &LaunchOptions) -> Result<RuntimeProject, Strin
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
-    let startup_scene_path = resolve_startup_scene_path(
-        &project_root,
-        options.scene_path.as_deref(),
-        project.startup_scene.as_deref(),
-    )?;
+    let selected_scene = options
+        .scene_path
+        .as_deref()
+        .or(project.startup_scene.as_deref());
+    let startup_scene_path = resolve_startup_scene_path(&project_root, selected_scene, None)?;
+    let startup_scene_id = selected_scene
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| startup_scene_path.display().to_string());
     if !startup_scene_path.exists() {
         return Err(format!(
             "startup scene '{}' does not exist",
@@ -169,6 +173,7 @@ fn load_runtime_project(options: &LaunchOptions) -> Result<RuntimeProject, Strin
         project_root,
         project,
         startup_scene_path,
+        startup_scene_id,
         enabled_package_count,
     })
 }
@@ -565,12 +570,7 @@ fn emit_runtime_package_failed(
 }
 
 fn runtime_scene_id(runtime_project: &RuntimeProject) -> String {
-    runtime_project
-        .project
-        .startup_scene
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "startup".to_string())
+    runtime_project.startup_scene_id.clone()
 }
 
 fn validate_startup_scene(
@@ -822,6 +822,28 @@ vsync = true
         assert_eq!(
             loaded.startup_scene_path,
             loaded.project_root.join("scenes/start.engine.scene.json")
+        );
+        assert_eq!(loaded.startup_scene_id, "scenes/start.engine.scene.json");
+    }
+
+    #[test]
+    fn cli_selected_scene_id_overrides_project_default() {
+        let dir = temp_dir("selected-scene-id");
+        let project_path = write_project_fixture(&dir);
+        fs::write(dir.join("scenes/alternate.engine.scene.json"), "{}\n").unwrap();
+        let mut launch = options(&project_path);
+        launch.scene_path = Some(PathBuf::from("scenes/alternate.engine.scene.json"));
+
+        let loaded = load_runtime_project(&launch).expect("project should load");
+        assert_eq!(
+            loaded.startup_scene_path,
+            loaded
+                .project_root
+                .join("scenes/alternate.engine.scene.json")
+        );
+        assert_eq!(
+            runtime_scene_id(&loaded),
+            "scenes/alternate.engine.scene.json"
         );
     }
 

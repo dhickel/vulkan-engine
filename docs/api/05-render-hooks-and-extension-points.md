@@ -93,7 +93,20 @@ Future custom pass strategy (not stable API yet):
   expose a higher-level safe facade only after ordering/resource contracts are stable
 ```
 
-## 5. Best Practices
+## 5. Hook Failure Observation
+
+Hook failures produce a per-frame `HookReport` available through `Renderer::last_hook_report()`. Each report contains structured `HookFailureEntry` values carrying the frame index, stage (`PreRender` or `PostRender`), and failure message. Entries are also logged at `warn` level alongside the original `error!` log so diagnostics can correlate hook faults to specific frames:
+
+```text
+ERROR pre_render hook failed at frame 42: pre_render hook failed: bad registration
+WARN  pre_render hook failure entry: frame=42 stage=PreRender message=...
+```
+
+- Pre-frame hook failures are observed before rendering begins; the frame may still proceed.
+- Post-frame hook failures are observed after rendering completes; they do not retroactively fail a successful submit.
+- Backend-mutating extension failures route through `RendererError::HookBackend` before submit, not as retryable render failures.
+
+## 6. Best Practices
 - Keep hooks narrowly scoped and side-effect-light.
 - Use hooks for app-level orchestration, telemetry, and lightweight state checks.
 - Prefer debug views for ongoing UI tooling; use hooks for non-UI orchestration boundaries.
@@ -111,7 +124,7 @@ Future custom pass strategy (not stable API yet):
 ## 7. Debugging Playbook
 - Step 1: run `cargo run -p renderer --example api_test` and add temporary pre/post hook logs.
 - Step 2: confirm order in logs (`pre` before rendergraph-related logs, then `post`).
-- Step 3: if hook failures are silent in app flow, inspect logger output for `pre_render hook failed` / `post_render hook failed`.
+- Step 3: if hook failures are silent in app flow, inspect `renderer.last_hook_report().failures()` and logger output for `pre_render hook failed` / `post_render hook failed`.
 - Step 4: if post-hook never triggers, check for rendergraph failure logs and resize-pending behavior.
 - Step 5: if using advanced interop, reproduce with it disabled to isolate unsafe backend mutations.
 

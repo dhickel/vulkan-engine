@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -30,7 +31,8 @@ use super::config::{
     FrameCaptureSequence, FrameCaptureStatus, RendererConfig,
 };
 use super::errors::{
-    map_frame_input_err, map_frame_render_err, map_init_err, RendererError, RendererInitError,
+    map_frame_input_err, map_frame_render_err, map_init_err, HookReport, RendererError,
+    RendererInitError,
 };
 use super::hooks::{invoke_render_hook, BoxedRenderHook, RenderHookStage};
 use super::scene::Scene;
@@ -178,6 +180,7 @@ pub struct Renderer {
     observed_action_values: HashMap<ActionId, f32>,
     pre_render_hook: Option<BoxedRenderHook>,
     post_render_hook: Option<BoxedRenderHook>,
+    last_hook_report: HookReport,
     frame_capture_scheduler: FrameCaptureScheduler,
     resize_skip_state_logged: bool,
     camera: Camera,
@@ -224,6 +227,7 @@ impl Renderer {
             observed_action_values: HashMap::new(),
             pre_render_hook: None,
             post_render_hook: None,
+            last_hook_report: HookReport::default(),
             frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
             resize_skip_state_logged: false,
             camera: Camera::default(),
@@ -268,6 +272,7 @@ impl Renderer {
             observed_action_values: HashMap::new(),
             pre_render_hook: None,
             post_render_hook: None,
+            last_hook_report: HookReport::default(),
             frame_capture_scheduler: FrameCaptureScheduler::new(app_name),
             resize_skip_state_logged: false,
             camera: Camera::default(),
@@ -371,8 +376,7 @@ impl Renderer {
 
         let ui_visible = self.runtime.core.debug_ui.is_any_visible();
         let app_ui_active = self.runtime.core.debug_ui.has_app_ui();
-        let (consume_keyboard, consume_mouse) =
-            ui_capture_policy(app_ui_active, ui_visible);
+        let (consume_keyboard, consume_mouse) = ui_capture_policy(app_ui_active, ui_visible);
 
         match event {
             Event::DeviceEvent {
@@ -827,6 +831,11 @@ impl Renderer {
         self.post_render_hook = hook;
     }
 
+    /// Returns structured hook diagnostics captured during the most recent render attempt.
+    pub fn last_hook_report(&self) -> &HookReport {
+        &self.last_hook_report
+    }
+
     /// Registers a debug view callback rendered by the in-engine debug UI manager.
     pub fn register_debug_view(
         &mut self,
@@ -1144,6 +1153,9 @@ impl Renderer {
         view: CameraView,
         input_debug: InputDebugSnapshot,
     ) -> Result<FrameRenderOutcome, RendererError> {
+        let frame_index = frame_number as u64;
+        self.last_hook_report = HookReport::new(frame_index);
+
         if self.runtime.resize_requested() {
             self.enter_resize_skip_state();
             return Ok(FrameRenderOutcome::SkippedResizePending);
@@ -1152,8 +1164,8 @@ impl Renderer {
         self.clear_resize_skip_state();
         let submission = build_submission_with_camera_view(scene, view);
         let viewport_size = self.viewport_size();
-        let frame_index = frame_number as u64;
         let hooks_enabled = self.pre_render_hook.is_some() || self.post_render_hook.is_some();
+        let hook_report = RefCell::new(HookReport::new(frame_index));
 
         let due_captures = self.frame_capture_scheduler.due_captures(frame_number);
 
@@ -1161,41 +1173,55 @@ impl Renderer {
         let pre_hook = &mut self.pre_render_hook;
         let post_hook = &mut self.post_render_hook;
 
-        let backend_outcome = if hooks_enabled {
-            runtime
-                .render_with_hooks(
-                    frame_number,
-                    &submission,
-                    due_captures,
-                    || {
-                        if let Err(err) = invoke_render_hook(
-                            pre_hook,
-                            RenderHookStage::PreRender,
-                            frame_index,
-                            viewport_size,
-                            None, // TODO: plumb depth texture from rendergraph
-                        ) {
-                            error!("pre_render hook failed at frame {}: {}", frame_index, err);
+        let backend_result = if hooks_enabled {
+            runtime.render_with_hooks(
+                frame_number,
+                &submission,
+                due_captures,
+                || {
+                    let (result, entry) = invoke_render_hook(
+                        pre_hook,
+                        RenderHookStage::PreRender,
+                        frame_index,
+                        viewport_size,
+                        None, // TODO: plumb depth texture from rendergraph
+                    );
+                    if let Err(err) = result {
+                        error!("pre_render hook failed at frame {}: {}", frame_index, err);
+                        if let Some(entry) = entry {
+                            warn!(
+                                "pre_render hook failure entry: frame={} stage={:?} message={}",
+                                entry.frame_index, entry.stage, entry.message
+                            );
+                            hook_report.borrow_mut().push_failure(entry);
                         }
-                    },
-                    || {
-                        if let Err(err) = invoke_render_hook(
-                            post_hook,
-                            RenderHookStage::PostRender,
-                            frame_index,
-                            viewport_size,
-                            None, // TODO: plumb depth texture from rendergraph
-                        ) {
-                            error!("post_render hook failed at frame {}: {}", frame_index, err);
+                    }
+                },
+                || {
+                    let (result, entry) = invoke_render_hook(
+                        post_hook,
+                        RenderHookStage::PostRender,
+                        frame_index,
+                        viewport_size,
+                        None, // TODO: plumb depth texture from rendergraph
+                    );
+                    if let Err(err) = result {
+                        error!("post_render hook failed at frame {}: {}", frame_index, err);
+                        if let Some(entry) = entry {
+                            warn!(
+                                "post_render hook failure entry: frame={} stage={:?} message={}",
+                                entry.frame_index, entry.stage, entry.message
+                            );
+                            hook_report.borrow_mut().push_failure(entry);
                         }
-                    },
-                )
-                .map_err(renderer_error_from_backend)?
+                    }
+                },
+            )
         } else {
-            runtime
-                .render_with_hooks(frame_number, &submission, due_captures, || {}, || {})
-                .map_err(renderer_error_from_backend)?
+            runtime.render_with_hooks(frame_number, &submission, due_captures, || {}, || {})
         };
+        self.last_hook_report = hook_report.into_inner();
+        let backend_outcome = backend_result.map_err(renderer_error_from_backend)?;
 
         self.record_frame_capture_statuses();
 
@@ -1715,11 +1741,10 @@ mod tests {
             ));
         assert!(matches!(device_lost, crate::api::RendererError::DeviceLost));
 
-        let retryable_resize = renderer_error_from_backend(
-            crate::vulkan::vk_render::VkRenderError::RetryableResize(
+        let retryable_resize =
+            renderer_error_from_backend(crate::vulkan::vk_render::VkRenderError::RetryableResize(
                 "surface capabilities temporarily unavailable".to_string(),
-            ),
-        );
+            ));
         assert!(matches!(
             retryable_resize,
             crate::api::RendererError::Frame(

@@ -10,6 +10,7 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -17,6 +18,37 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 /// Stable typed action identifier. Re-exported from the canonical engine_events crate.
 pub use engine_events::ActionId;
+
+/// Private stable identifier for one binding instance within an action set.
+///
+/// Each `ActionBinding` registered with an `ActionMapLayer` receives a unique
+/// `BindingInstanceId`. When multiple bindings map to the same action, the
+/// input system tracks each binding's contribution independently so releasing
+/// one binding does not deactivate the action while another binding still
+/// contributes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct BindingInstanceId(pub(crate) u64);
+
+impl BindingInstanceId {
+    /// Creates a caller-assigned binding instance id.
+    ///
+    /// Use a distinct non-zero id for every independent contribution to the
+    /// same action. `ActionMapLayer` allocates ids automatically for mapped
+    /// bindings.
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+static NEXT_BINDING_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_binding_instance_id() -> BindingInstanceId {
+    BindingInstanceId(NEXT_BINDING_INSTANCE_ID.fetch_add(1, Ordering::Relaxed))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct LayerHandle(u64);
@@ -126,22 +158,56 @@ impl InputEvent {
 
 #[derive(Clone, Default)]
 struct ActionState {
+    /// Aggregate value computed from all active binding contributions.
     value: f32,
     just_pressed: bool,
     just_released: bool,
 }
 
+/// Per-binding-instance contribution tracked for multi-binding actions.
+#[derive(Clone, Copy, Debug, Default)]
+struct BindingContribution {
+    /// The value contributed by this specific binding instance.
+    value: f32,
+    /// Whether this binding instance is currently contributing (> 0).
+    active: bool,
+}
+
 #[derive(Default)]
 struct ActionStateStore {
+    /// Aggregated per-action state.
     states: HashMap<ActionId, ActionState>,
+    /// Per-binding-instance contributions, keyed by (action, instance).
+    contributions: HashMap<(ActionId, BindingInstanceId), BindingContribution>,
 }
 
 impl ActionStateStore {
-    fn set_action_value(&mut self, action: &ActionId, value: f32) {
+    /// Set the value for a specific binding instance, then recompute the
+    /// aggregate action value from all active instances.
+    fn set_instance_value(&mut self, action: &ActionId, instance: BindingInstanceId, value: f32) {
         let next_value = value.clamp(0.0, 1.0);
+        let key = (action.clone(), instance);
+        let contrib = self.contributions.entry(key).or_default();
+        contrib.value = next_value;
+        contrib.active = next_value > 0.0;
+
+        self.recompute_action(action);
+    }
+
+    fn recompute_action(&mut self, action: &ActionId) {
+        // Find the maximum contribution across all active instances for this action.
+        let mut max_value = 0.0f32;
+        let mut any_active = false;
+        for ((key_action, _), contrib) in self.contributions.iter() {
+            if key_action == action && contrib.active {
+                max_value = max_value.max(contrib.value);
+                any_active = true;
+            }
+        }
+
         let state = self.states.entry(action.clone()).or_default();
         let was_pressed = state.value > 0.0;
-        let is_pressed = next_value > 0.0;
+        let is_pressed = any_active;
 
         if is_pressed && !was_pressed {
             state.just_pressed = true;
@@ -149,7 +215,14 @@ impl ActionStateStore {
             state.just_released = true;
         }
 
-        state.value = next_value;
+        state.value = if any_active { max_value } else { 0.0 };
+    }
+
+    /// Legacy path: sets an action value without an instance (for layers that
+    /// don't use binding-instance tracking). Behaves as a single anonymous instance.
+    fn set_action_value(&mut self, action: &ActionId, value: f32) {
+        // Use instance 0 as the anonymous instance for backward compatibility.
+        self.set_instance_value(action, BindingInstanceId(0), value);
     }
 
     fn clear_transients(&mut self) {
@@ -196,8 +269,26 @@ pub struct InputContext<'a> {
 }
 
 impl<'a> InputContext<'a> {
+    /// Set the value of one binding instance contributing to an action.
+    ///
+    /// When multiple bindings map to the same action, each binding should use
+    /// its own `BindingInstanceId` so the system can track contributions
+    /// independently. Releasing one binding does not deactivate the action
+    /// while another binding instance still contributes.
     pub fn set_action_value(&mut self, action: &ActionId, value: f32) {
         self.action_state.set_action_value(action, value);
+    }
+
+    /// Set the value for a specific binding instance, then recompute the
+    /// aggregate action value from all active instances.
+    pub fn set_instance_value(
+        &mut self,
+        action: &ActionId,
+        instance: BindingInstanceId,
+        value: f32,
+    ) {
+        self.action_state
+            .set_instance_value(action, instance, value);
     }
 }
 
@@ -1309,11 +1400,22 @@ fn parse_mouse_button(value: &str) -> Option<MouseButton> {
 
 pub struct ActionMapLayer {
     map: ActionMap,
+    /// Per-binding instance IDs, assigned at construction time.
+    /// Indexes correspond to `map.bindings`.
+    binding_instances: Vec<BindingInstanceId>,
 }
 
 impl ActionMapLayer {
     pub fn new(map: ActionMap) -> Self {
-        Self { map }
+        let binding_instances: Vec<BindingInstanceId> = map
+            .bindings
+            .iter()
+            .map(|_| allocate_binding_instance_id())
+            .collect();
+        Self {
+            map,
+            binding_instances,
+        }
     }
 
     pub fn map(&self) -> &ActionMap {
@@ -1329,15 +1431,16 @@ impl InputLayer for ActionMapLayer {
     fn on_event(&mut self, event: &InputEvent, ctx: &mut InputContext<'_>) -> InputConsume {
         let mut consumed = false;
 
-        for binding in &self.map.bindings {
+        for (idx, binding) in self.map.bindings.iter().enumerate() {
+            let instance = self.binding_instances[idx];
             if binding.matches_press(event) {
-                ctx.set_action_value(&binding.action, binding.scale);
+                ctx.set_instance_value(&binding.action, instance, binding.scale);
                 if binding.consume {
                     consumed = true;
                 }
             }
             if binding.matches_release(event) {
-                ctx.set_action_value(&binding.action, 0.0);
+                ctx.set_instance_value(&binding.action, instance, 0.0);
                 if binding.consume {
                     consumed = true;
                 }
@@ -1665,5 +1768,185 @@ trigger = { key = "KeyW", mouse_button = "Left" }
             layer.on_event(&InputEvent::CursorFocus { entered: true }, &mut ctx,),
             InputConsume::Ignored
         );
+    }
+
+    // ── Multi-binding tests ──────────────────────────────────────────
+
+    #[test]
+    fn releasing_one_binding_keeps_action_active_when_another_contributes() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        // Two keys bound to the same action.
+        map.bind_key("move.forward", KeyCode::KeyW);
+        map.bind_key("move.forward", KeyCode::ArrowUp);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        // Press both keys.
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::ArrowUp,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        assert!(system
+            .snapshot()
+            .action_pressed(&ActionId::new("move.forward")));
+        assert_eq!(
+            system
+                .snapshot()
+                .action_value(&ActionId::new("move.forward")),
+            1.0
+        );
+
+        // Release only one key.
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        // Action should still be active because ArrowUp is still held.
+        assert!(
+            system
+                .snapshot()
+                .action_pressed(&ActionId::new("move.forward")),
+            "action should remain active when one of two bindings is released"
+        );
+        assert!(
+            !system
+                .snapshot()
+                .action_just_released(&ActionId::new("move.forward")),
+            "action should not report just_released while another binding contributes"
+        );
+
+        // Release the second key.
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::ArrowUp,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        // Now action should be released.
+        assert!(!system
+            .snapshot()
+            .action_pressed(&ActionId::new("move.forward")));
+        assert!(
+            system
+                .snapshot()
+                .action_just_released(&ActionId::new("move.forward")),
+            "action should report just_released when last binding releases"
+        );
+    }
+
+    #[test]
+    fn press_and_release_same_frame_preserves_transient_edges() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        // Press and release in the same frame.
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::Space,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        assert!(system
+            .snapshot()
+            .action_just_pressed(&ActionId::new("jump")));
+        assert!(system
+            .snapshot()
+            .action_just_released(&ActionId::new("jump")));
+
+        // Next frame, transients clear.
+        system.dispatch_frame();
+        assert!(!system
+            .snapshot()
+            .action_just_pressed(&ActionId::new("jump")));
+        assert!(!system
+            .snapshot()
+            .action_just_released(&ActionId::new("jump")));
+    }
+
+    #[test]
+    fn separate_action_ids_do_not_interfere_with_each_other() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("move.forward", KeyCode::KeyW);
+        map.bind_key("move.backward", KeyCode::KeyS);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        assert!(system
+            .snapshot()
+            .action_pressed(&ActionId::new("move.forward")));
+        assert!(!system
+            .snapshot()
+            .action_pressed(&ActionId::new("move.backward")));
+
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyS,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+
+        assert!(system
+            .snapshot()
+            .action_pressed(&ActionId::new("move.forward")));
+        assert!(system
+            .snapshot()
+            .action_pressed(&ActionId::new("move.backward")));
+    }
+
+    #[test]
+    fn binding_instance_id_is_stable_across_frame_dispatch() {
+        let mut map = ActionMap::new();
+        map.bind_key("jump", KeyCode::Space);
+        map.bind_key("jump", KeyCode::KeyJ);
+
+        let layer = ActionMapLayer::new(map);
+        assert_eq!(layer.binding_instances.len(), 2);
+        assert_ne!(layer.binding_instances[0], BindingInstanceId::new(0));
+        assert_ne!(layer.binding_instances[1], BindingInstanceId::new(0));
+        assert_ne!(layer.binding_instances[0], layer.binding_instances[1]);
     }
 }

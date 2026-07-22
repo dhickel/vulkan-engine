@@ -28,6 +28,15 @@ The event vocabulary lives in the standalone `engine_events` crate and is re-exp
 - `EventRecorder::bounded(capacity)` stores emitted envelopes for diagnostics and validation.
 - `Renderer::events()` and `Renderer::events_mut()` expose the bus through the public facade.
 - `engine::events::runtime_event_bus()` creates a caller-owned bus with bounded recording enabled.
+
+### Frame Lifecycle Guarantees
+
+- Frame `FrameStarted` and `FrameEnded` events are always paired when emitted through
+  `execute_frame_lifecycle`, `with_frame`, or `RuntimeEventDispatcher::frame_started` /
+  `frame_ended`. Even on error, the `FrameEnded` event records the terminal outcome.
+- The headless path (`render_scene_headless`) and windowed path (`render_scene`)
+  converge on the same lifecycle event sequence: `PreUpdate` (FrameStarted) → input → render → `PostUpdate` (FrameEnded).
+- `ScriptingEvent` now carries a `name()` accessor and `script_id()` for structured diagnostics.
 - `engine::frame::begin_app_frame(...)` and `engine::frame::end_app_frame(...)` are the recommended app-owned frame lifecycle helpers.
 - `engine::events::RuntimeEventDispatcher` remains the lower-level lifecycle emitter/drainer behind those helpers and is still available for direct use.
 - Listener callbacks receive `&EventEnvelope`, not `&mut Renderer`. Mutate app state you own, then perform renderer/scene mutations from your normal app loop.

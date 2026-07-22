@@ -51,8 +51,8 @@ pub use engine_events::{
     ScriptingEvent,
 };
 pub use errors::{
-    AnimationError, AssetError, CommandError, HookError, RendererError, RendererFrameError,
-    RendererInitError, SceneError,
+    AnimationError, AssetError, CommandError, HookError, HookFailureEntry, HookFailureStage,
+    HookReport, RendererError, RendererFrameError, RendererInitError, SceneError,
 };
 pub use hooks::{boxed_render_hook, BoxedRenderHook, RenderHook, RenderHookContext};
 pub use input::{

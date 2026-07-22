@@ -1029,15 +1029,16 @@ impl DebugUiManager {
         self.prepare_timing_record_path(report_path.as_str())?;
         fs::write(report_path.as_str(), "")
             .map_err(|err| format!("failed to initialize '{}': {err}", report_path))?;
+        let start_line = self.build_timing_jsonl_line(timings, 0, "start");
+        write_timing_jsonl_line(report_path.as_str(), &start_line)?;
 
         self.timing_recording_active = true;
         self.timing_record_started_at = Some(now);
         self.timing_record_next_snapshot_at = Some(now + interval);
         self.timing_record_end_at = Some(end_at);
-        self.timing_record_samples_written = 0;
+        self.timing_record_samples_written = 1;
         self.timing_record_active_path = Some(report_path.clone());
 
-        self.append_timing_jsonl_snapshot(timings, now, "start")?;
         Ok(report_path)
     }
 
@@ -1127,14 +1128,7 @@ impl DebugUiManager {
             .unwrap_or(0);
         let line = self.build_timing_jsonl_line(timings, elapsed_ms, reason);
 
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(report_path)
-            .map_err(|err| format!("failed to open '{}': {err}", report_path))?;
-        file.write_all(line.as_bytes())
-            .and_then(|_| file.write_all(b"\n"))
-            .map_err(|err| format!("failed to append '{}': {err}", report_path))?;
+        write_timing_jsonl_line(report_path, &line)?;
 
         self.timing_record_samples_written += 1;
         Ok(())
@@ -1146,7 +1140,7 @@ impl DebugUiManager {
         elapsed_ms: u64,
         reason: &str,
     ) -> String {
-        let mut fields = Vec::new();
+        use serde_json::{json, Value};
 
         let mode_label = if !timings.gpu_supported {
             "CPU-only fallback (GPU timestamps unsupported)"
@@ -1156,149 +1150,144 @@ impl DebugUiManager {
             "CPU-only fallback (GPU timing pending/unavailable)"
         };
 
-        fields.push(format!(
-            "\"record_type\":\"{}\"",
-            json_escape("timing_snapshot")
-        ));
-        fields.push(format!(
-            "\"frame_index\":{}",
-            self.frame_context.frame_index
-        ));
-        fields.push(format!(
-            "\"wall_timestamp_unix_s\":{}",
-            unix_timestamp_seconds().unwrap_or(0)
-        ));
-        fields.push(format!("\"elapsed_ms\":{}", elapsed_ms));
-        fields.push(format!("\"reason\":\"{}\"", json_escape(reason)));
-        fields.push(format!("\"mode\":\"{}\"", json_escape(mode_label)));
-        fields.push(format!("\"avg_window_frames\":{}", TIMING_AVG_WINDOW));
-        fields.push(format!(
-            "\"frame_cpu_ms\":{{\"current\":{:.3},\"avg\":{:.3},\"max\":{:.3}}}",
-            timings.frame_cpu_ms.max(0.0),
+        let frame_cpu_current = finite_or_null(timings.frame_cpu_ms.max(0.0));
+        let frame_cpu_avg = finite_or_null(
             self.frame_timing_window
                 .avg_cpu()
                 .unwrap_or(timings.frame_cpu_ms.max(0.0)),
+        );
+        let frame_cpu_max = finite_or_null(
             self.frame_timing_peak
                 .cpu_ms
                 .or_else(|| self.frame_timing_window.max_cpu())
-                .unwrap_or(timings.frame_cpu_ms.max(0.0))
-        ));
-        fields.push(format!(
-            "\"frame_gpu_ms\":{{\"current\":{},\"avg\":{},\"max\":{}}}",
-            json_number_or_null(timings.frame_gpu_ms),
-            json_number_or_null(self.frame_timing_window.avg_gpu()),
-            json_number_or_null(
-                self.frame_timing_peak
-                    .gpu_ms
-                    .or_else(|| self.frame_timing_window.max_gpu())
-            )
-        ));
+                .unwrap_or(timings.frame_cpu_ms.max(0.0)),
+        );
 
-        let mut stage_rows = Vec::new();
-        for row in timings.stage_timings.iter() {
-            let window = self.stage_timing_windows.get(row.label);
-            let peak = self
-                .stage_timing_peaks
-                .get(row.label)
-                .copied()
-                .unwrap_or_default();
-            stage_rows.push(format!(
-                "{{\"label\":\"{}\",\"cpu_ms\":{{\"current\":{:.3},\"avg\":{:.3},\"max\":{:.3}}},\"gpu_ms\":{{\"current\":{},\"avg\":{},\"max\":{}}}}}",
-                json_escape(row.label),
-                row.cpu_ms.max(0.0),
-                window
-                    .and_then(TimingWindow::avg_cpu)
-                    .unwrap_or(row.cpu_ms.max(0.0)),
-                peak.cpu_ms.unwrap_or(
-                    window
-                        .and_then(TimingWindow::max_cpu)
-                        .unwrap_or(row.cpu_ms.max(0.0))
-                ),
-                json_number_or_null(row.gpu_ms),
-                json_number_or_null(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
-                json_number_or_null(
-                    peak.gpu_ms
-                        .or(window.and_then(TimingWindow::max_gpu))
-                        .or(row.gpu_ms)
-                ),
-            ));
+        let stages: Vec<Value> = timings
+            .stage_timings
+            .iter()
+            .map(|row| {
+                let window = self.stage_timing_windows.get(row.label);
+                let peak = self
+                    .stage_timing_peaks
+                    .get(row.label)
+                    .copied()
+                    .unwrap_or_default();
+                json!({
+                    "label": row.label,
+                    "cpu_ms": {
+                        "current": finite_or_null(row.cpu_ms.max(0.0)),
+                        "avg": finite_or_null(window.and_then(TimingWindow::avg_cpu).unwrap_or(row.cpu_ms.max(0.0))),
+                        "max": finite_or_null(peak.cpu_ms.unwrap_or(window.and_then(TimingWindow::max_cpu).unwrap_or(row.cpu_ms.max(0.0))))
+                    },
+                    "gpu_ms": {
+                        "current": finite_or_null(row.gpu_ms),
+                        "avg": finite_or_null(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
+                        "max": finite_or_null(peak.gpu_ms.or(window.and_then(TimingWindow::max_gpu)).or(row.gpu_ms))
+                    }
+                })
+            })
+            .collect();
+
+        let passes: Vec<Value> = timings
+            .pass_timings
+            .iter()
+            .map(|row| {
+                let window = self.pass_timing_windows.get(row.label);
+                let peak = self
+                    .pass_timing_peaks
+                    .get(row.label)
+                    .copied()
+                    .unwrap_or_default();
+                json!({
+                    "label": row.label,
+                    "cpu_ms": {
+                        "current": finite_or_null(row.cpu_ms.max(0.0)),
+                        "avg": finite_or_null(window.and_then(TimingWindow::avg_cpu).unwrap_or(row.cpu_ms.max(0.0))),
+                        "max": finite_or_null(peak.cpu_ms.unwrap_or(window.and_then(TimingWindow::max_cpu).unwrap_or(row.cpu_ms.max(0.0))))
+                    },
+                    "gpu_ms": {
+                        "current": finite_or_null(row.gpu_ms),
+                        "avg": finite_or_null(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
+                        "max": finite_or_null(peak.gpu_ms.or(window.and_then(TimingWindow::max_gpu)).or(row.gpu_ms))
+                    }
+                })
+            })
+            .collect();
+
+        let cause_table: Vec<Value> = self
+            .spike_history
+            .iter()
+            .map(|spike| {
+                let stage_label = spike.top_stage.as_ref().map_or("n/a", |item| item.label);
+                let stage_cpu = spike.top_stage.as_ref().map(|item| item.cpu_ms);
+                let stage_gpu = spike.top_stage.as_ref().and_then(|item| item.gpu_ms);
+                let pass_label = spike.top_pass.as_ref().map_or("n/a", |item| item.label);
+                let pass_cpu = spike.top_pass.as_ref().map(|item| item.cpu_ms);
+                let pass_gpu = spike.top_pass.as_ref().and_then(|item| item.gpu_ms);
+                json!({
+                    "frame_index": spike.frame_index,
+                    "frame_cpu_ms": finite_or_null(spike.frame_cpu_ms),
+                    "frame_gpu_ms": finite_or_null(spike.frame_gpu_ms),
+                    "threshold_cpu_ms": finite_or_null(spike.threshold_cpu_ms),
+                    "top_stage": {
+                        "label": stage_label,
+                        "cpu_ms": finite_or_null(stage_cpu),
+                        "gpu_ms": finite_or_null(stage_gpu)
+                    },
+                    "top_pass": {
+                        "label": pass_label,
+                        "cpu_ms": finite_or_null(pass_cpu),
+                        "gpu_ms": finite_or_null(pass_gpu)
+                    }
+                })
+            })
+            .collect();
+
+        let mut root = json!({
+            "record_type": "timing_snapshot",
+            "frame_index": self.frame_context.frame_index,
+            "wall_timestamp_unix_s": unix_timestamp_seconds().unwrap_or(0),
+            "elapsed_ms": elapsed_ms,
+            "reason": reason,
+            "mode": mode_label,
+            "avg_window_frames": TIMING_AVG_WINDOW,
+            "frame_cpu_ms": {
+                "current": frame_cpu_current,
+                "avg": frame_cpu_avg,
+                "max": frame_cpu_max
+            },
+            "frame_gpu_ms": {
+                "current": finite_or_null(timings.frame_gpu_ms),
+                "avg": finite_or_null(self.frame_timing_window.avg_gpu()),
+                "max": finite_or_null(self.frame_timing_peak.gpu_ms.or_else(|| self.frame_timing_window.max_gpu()))
+            },
+            "stages": stages,
+            "passes": passes,
+            "cause_table": cause_table
+        });
+
+        if let (Some(root), Some(ds)) = (root.as_object_mut(), timings.descriptor_stats.as_ref()) {
+            root.insert(
+                "descriptor_stats".to_string(),
+                json!({
+                    "frame_serial": ds.frame_serial,
+                    "allocation_attempts": ds.allocation_attempts,
+                    "successful_allocations": ds.successful_allocations,
+                    "pool_count": ds.pool_count,
+                    "pools_created": ds.pools_created,
+                    "pool_growth_events": ds.pool_growth_events,
+                    "peak_allocated_sets": ds.peak_allocated_sets,
+                    "peak_utilization_ratio": finite_or_null(ds.peak_utilization_ratio),
+                    "out_of_pool_events": ds.out_of_pool_events,
+                    "fragmented_pool_events": ds.fragmented_pool_events,
+                    "reset_count": ds.reset_count,
+                    "reset_rejections": ds.reset_rejections,
+                }),
+            );
         }
-        fields.push(format!("\"stages\":[{}]", stage_rows.join(",")));
 
-        let mut pass_rows = Vec::new();
-        for row in timings.pass_timings.iter() {
-            let window = self.pass_timing_windows.get(row.label);
-            let peak = self
-                .pass_timing_peaks
-                .get(row.label)
-                .copied()
-                .unwrap_or_default();
-            pass_rows.push(format!(
-                "{{\"label\":\"{}\",\"cpu_ms\":{{\"current\":{:.3},\"avg\":{:.3},\"max\":{:.3}}},\"gpu_ms\":{{\"current\":{},\"avg\":{},\"max\":{}}}}}",
-                json_escape(row.label),
-                row.cpu_ms.max(0.0),
-                window
-                    .and_then(TimingWindow::avg_cpu)
-                    .unwrap_or(row.cpu_ms.max(0.0)),
-                peak.cpu_ms.unwrap_or(
-                    window
-                        .and_then(TimingWindow::max_cpu)
-                        .unwrap_or(row.cpu_ms.max(0.0))
-                ),
-                json_number_or_null(row.gpu_ms),
-                json_number_or_null(window.and_then(TimingWindow::avg_gpu).or(row.gpu_ms)),
-                json_number_or_null(
-                    peak.gpu_ms
-                        .or(window.and_then(TimingWindow::max_gpu))
-                        .or(row.gpu_ms)
-                ),
-            ));
-        }
-        fields.push(format!("\"passes\":[{}]", pass_rows.join(",")));
-
-        let mut cause_rows = Vec::new();
-        for spike in self.spike_history.iter() {
-            let stage_label = spike.top_stage.as_ref().map_or("n/a", |item| item.label);
-            let stage_cpu = spike.top_stage.as_ref().map(|item| item.cpu_ms);
-            let stage_gpu = spike.top_stage.as_ref().and_then(|item| item.gpu_ms);
-            let pass_label = spike.top_pass.as_ref().map_or("n/a", |item| item.label);
-            let pass_cpu = spike.top_pass.as_ref().map(|item| item.cpu_ms);
-            let pass_gpu = spike.top_pass.as_ref().and_then(|item| item.gpu_ms);
-            cause_rows.push(format!(
-                "{{\"frame_index\":{},\"frame_cpu_ms\":{:.3},\"frame_gpu_ms\":{},\"threshold_cpu_ms\":{:.3},\"top_stage\":{{\"label\":\"{}\",\"cpu_ms\":{},\"gpu_ms\":{}}},\"top_pass\":{{\"label\":\"{}\",\"cpu_ms\":{},\"gpu_ms\":{}}}}}",
-                spike.frame_index,
-                spike.frame_cpu_ms,
-                json_number_or_null(spike.frame_gpu_ms),
-                spike.threshold_cpu_ms,
-                json_escape(stage_label),
-                json_number_or_null(stage_cpu),
-                json_number_or_null(stage_gpu),
-                json_escape(pass_label),
-                json_number_or_null(pass_cpu),
-                json_number_or_null(pass_gpu)
-            ));
-        }
-        fields.push(format!("\"cause_table\":[{}]", cause_rows.join(",")));
-
-        if let Some(ref ds) = timings.descriptor_stats {
-            fields.push(format!(
-                "\"descriptor_stats\":{{\"frame_serial\":{},\"allocation_attempts\":{},\"successful_allocations\":{},\"pool_count\":{},\"pools_created\":{},\"pool_growth_events\":{},\"peak_allocated_sets\":{},\"peak_utilization_ratio\":{:.4},\"out_of_pool_events\":{},\"fragmented_pool_events\":{},\"reset_count\":{},\"reset_rejections\":{}}}",
-                ds.frame_serial,
-                ds.allocation_attempts,
-                ds.successful_allocations,
-                ds.pool_count,
-                ds.pools_created,
-                ds.pool_growth_events,
-                ds.peak_allocated_sets,
-                ds.peak_utilization_ratio,
-                ds.out_of_pool_events,
-                ds.fragmented_pool_events,
-                ds.reset_count,
-                ds.reset_rejections,
-            ));
-        }
-
-        format!("{{{}}}", fields.join(","))
+        root.to_string()
     }
 
     fn render_enabled_views(&mut self, ui: &Ui) {
@@ -1621,26 +1610,25 @@ fn format_gpu_ms(gpu_ms: Option<f32>) -> String {
     }
 }
 
-fn json_number_or_null(value: Option<f32>) -> String {
-    value
-        .filter(|candidate| candidate.is_finite())
-        .map(|number| format!("{number:.3}"))
-        .unwrap_or_else(|| "null".to_string())
+/// Map a non-finite float to JSON null; finite values pass through as a JSON number.
+fn finite_or_null(value: impl Into<Option<f32>>) -> serde_json::Value {
+    match value.into() {
+        Some(v) if v.is_finite() => serde_json::Number::from_f64(v as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        _ => serde_json::Value::Null,
+    }
 }
 
-fn json_escape(input: &str) -> String {
-    let mut escaped = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
+fn write_timing_jsonl_line(report_path: &str, line: &str) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(report_path)
+        .map_err(|err| format!("failed to open '{}': {err}", report_path))?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|err| format!("failed to append '{}': {err}", report_path))
 }
 
 fn unix_timestamp_seconds() -> Option<u64> {
@@ -1689,7 +1677,10 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DebugUiManager, DebugViewDescriptor, DebugViewId};
+    use super::{
+        DebugTimingRow, DebugTimingSnapshot, DebugUiManager, DebugViewDescriptor, DebugViewId,
+    };
+    use std::fs;
 
     #[test]
     fn register_unregister_and_toggle_view_state() {
@@ -1749,5 +1740,64 @@ mod tests {
         assert!(!manager.is_console_visible());
         assert!(manager.is_debug_visible());
         assert!(manager.is_any_visible());
+    }
+
+    #[test]
+    fn timing_json_uses_serde_and_maps_non_finite_to_null() {
+        let manager = DebugUiManager::new();
+        let timings = DebugTimingSnapshot {
+            frame_cpu_ms: f32::INFINITY,
+            frame_gpu_ms: Some(f32::NAN),
+            stage_timings: vec![DebugTimingRow {
+                label: "stage\"quoted",
+                cpu_ms: f32::INFINITY,
+                gpu_ms: Some(f32::NEG_INFINITY),
+            }],
+            pass_timings: vec![DebugTimingRow {
+                label: "pass\nnewline",
+                cpu_ms: 1.25,
+                gpu_ms: Some(2.5),
+            }],
+            gpu_supported: true,
+            descriptor_stats: None,
+        };
+
+        let line = manager.build_timing_jsonl_line(&timings, 0, "start\nquoted");
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["reason"], "start\nquoted");
+        assert!(parsed["frame_cpu_ms"]["current"].is_null());
+        assert!(parsed["frame_gpu_ms"]["current"].is_null());
+        assert_eq!(parsed["stages"][0]["label"], "stage\"quoted");
+        assert!(parsed["stages"][0]["cpu_ms"]["current"].is_null());
+        assert!(parsed["stages"][0]["gpu_ms"]["current"].is_null());
+        assert_eq!(parsed["passes"][0]["label"], "pass\nnewline");
+        assert_eq!(parsed["passes"][0]["cpu_ms"]["current"], 1.25);
+    }
+
+    #[test]
+    fn timing_recording_writes_start_record_before_activating() {
+        let mut manager = DebugUiManager::new();
+        let path = std::env::temp_dir().join(format!(
+            "engine-timing-start-{}-{}.jsonl",
+            std::process::id(),
+            super::unix_timestamp_seconds().unwrap_or(0)
+        ));
+        let _ = fs::remove_file(&path);
+        manager
+            .configure_timing_recording_options(Some(1), Some(1), Some(path.display().to_string()))
+            .unwrap();
+
+        let returned = manager
+            .start_timing_recording_now()
+            .expect("recording should start");
+        assert_eq!(returned, path.display().to_string());
+        assert!(manager.timing_recording_active);
+        assert_eq!(manager.timing_record_samples_written, 1);
+        let contents = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["reason"], "start");
+        let _ = fs::remove_file(&path);
     }
 }

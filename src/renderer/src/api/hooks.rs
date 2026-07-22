@@ -3,7 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::data::handles::TextureHandle;
 
-use super::errors::HookError;
+use super::errors::{HookError, HookFailureEntry};
 
 pub struct RenderHookContext<'a> {
     pub frame_index: u64,
@@ -84,23 +84,37 @@ pub(crate) fn invoke_render_hook(
     frame_index: u64,
     viewport_size: (u32, u32),
     depth_texture: Option<TextureHandle>,
-) -> Result<(), HookError> {
+) -> (Result<(), HookError>, Option<HookFailureEntry>) {
     let Some(hook) = hook.as_mut() else {
-        return Ok(());
+        return (Ok(()), None);
     };
 
     let mut context = RenderHookContext::new(frame_index, viewport_size, depth_texture);
-    let callback_result =
-        catch_unwind(AssertUnwindSafe(|| hook.invoke(&mut context))).map_err(|panic| {
-            HookError::Invocation(format!(
+    let callback_result = catch_unwind(AssertUnwindSafe(|| hook.invoke(&mut context)));
+
+    match callback_result {
+        Ok(Ok(())) => (Ok(()), None),
+        Ok(Err(err)) => {
+            let message = format!("{} hook failed: {}", stage.label(), err);
+            let entry = match stage {
+                RenderHookStage::PreRender => HookFailureEntry::pre_render(frame_index, &message),
+                RenderHookStage::PostRender => HookFailureEntry::post_render(frame_index, &message),
+            };
+            (Err(HookError::Invocation(message)), Some(entry))
+        }
+        Err(panic) => {
+            let message = format!(
                 "{} hook panicked: {}",
                 stage.label(),
                 super::utils::panic_payload_to_string(panic)
-            ))
-        })?;
-
-    callback_result
-        .map_err(|err| HookError::Invocation(format!("{} hook failed: {}", stage.label(), err)))
+            );
+            let entry = match stage {
+                RenderHookStage::PreRender => HookFailureEntry::pre_render(frame_index, &message),
+                RenderHookStage::PostRender => HookFailureEntry::post_render(frame_index, &message),
+            };
+            (Err(HookError::Invocation(message)), Some(entry))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -127,22 +141,22 @@ mod tests {
             Ok(())
         }));
 
-        invoke_render_hook(
+        let (result, _) = invoke_render_hook(
             &mut pre_hook,
             RenderHookStage::PreRender,
             7,
             (1280, 720),
             None,
-        )
-        .unwrap();
-        invoke_render_hook(
+        );
+        result.unwrap();
+        let (result, _) = invoke_render_hook(
             &mut post_hook,
             RenderHookStage::PostRender,
             7,
             (1280, 720),
             None,
-        )
-        .unwrap();
+        );
+        result.unwrap();
 
         let order = order.lock().unwrap();
         assert_eq!(order.as_slice(), ["pre", "post"]);
@@ -154,8 +168,9 @@ mod tests {
             Err(HookError::Registration("bad registration".to_string()))
         }));
 
-        let err = invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 1, (1, 1), None)
-            .unwrap_err();
+        let (result, entry) =
+            invoke_render_hook(&mut pre_hook, RenderHookStage::PreRender, 1, (1, 1), None);
+        let err = result.unwrap_err();
         match err {
             HookError::Invocation(msg) => {
                 assert!(msg.contains("pre_render hook failed"));
@@ -163,6 +178,10 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+        // Verify structured entry is present.
+        let entry = entry.expect("should have a failure entry");
+        assert_eq!(entry.frame_index, 1);
+        assert!(entry.message.contains("bad registration"));
     }
 
     #[test]
@@ -171,14 +190,14 @@ mod tests {
             panic!("boom");
         }));
 
-        let err = invoke_render_hook(
+        let (result, entry) = invoke_render_hook(
             &mut post_hook,
             RenderHookStage::PostRender,
             9,
             (800, 600),
             None,
-        )
-        .unwrap_err();
+        );
+        let err = result.unwrap_err();
         match err {
             HookError::Invocation(msg) => {
                 assert!(msg.contains("post_render hook panicked"));
@@ -186,12 +205,18 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+        let entry = entry.expect("should have a failure entry for panic");
+        assert_eq!(entry.frame_index, 9);
+        assert!(entry.message.contains("boom"));
     }
 
     #[test]
     fn invoke_render_hook_is_noop_when_unset() {
         let mut hook: Option<BoxedRenderHook> = None;
-        invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None).unwrap();
+        let (result, entry) =
+            invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None);
+        result.unwrap();
+        assert!(entry.is_none());
     }
 
     #[test]
@@ -208,7 +233,9 @@ mod tests {
         }
 
         let mut hook: Option<BoxedRenderHook> = Some(Box::new(CountingHook { count: 0 }));
-        invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None).unwrap();
+        let (result, _) =
+            invoke_render_hook(&mut hook, RenderHookStage::PreRender, 0, (0, 0), None);
+        result.unwrap();
         // The hook ran once
     }
 }

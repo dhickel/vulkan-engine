@@ -441,10 +441,10 @@ impl FrameCaptureScheduler {
         let mut due = Vec::new();
         let mut pending = Vec::with_capacity(self.single_captures.len());
         for capture in self.single_captures.drain(..) {
-            if capture.frame_number == frame_number {
+            if capture.frame_number <= frame_number {
                 due.push(DueFrameCapture {
                     request: capture.request,
-                    frame_number,
+                    frame_number: capture.frame_number,
                     sequence_index: None,
                     source: capture.source,
                 });
@@ -669,6 +669,20 @@ mod capture_tests {
         assert_eq!(due[0].request.output_path, PathBuf::from("capture.png"));
         assert!(scheduler.due_captures(3).is_empty());
         assert!(scheduler.due_captures(4).is_empty());
+    }
+
+    #[test]
+    fn overdue_single_capture_fires_on_next_valid_frame() {
+        let mut scheduler = FrameCaptureScheduler::new("api_test");
+        scheduler
+            .schedule_single_capture(3, FrameCaptureRequest::new(CaptureTarget::Draw, "late.png"))
+            .unwrap();
+
+        let due = scheduler.due_captures(5);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].frame_number, 3);
+        assert_eq!(due[0].request.output_path, PathBuf::from("late.png"));
+        assert!(scheduler.due_captures(6).is_empty());
     }
 
     #[test]

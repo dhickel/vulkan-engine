@@ -21,6 +21,9 @@ pub enum RendererError {
     /// A Vulkan operation was attempted after a prior terminal error.
     /// The backend is poisoned; destroy and recreate the Renderer.
     BackendPoisoned(String),
+    /// A backend-mutating operation failed during hook execution.
+    /// The frame backend may require drain/poison before the next submit.
+    HookBackend(String),
 }
 
 impl Display for RendererError {
@@ -36,6 +39,7 @@ impl Display for RendererError {
             Self::InvalidState(msg) => write!(f, "invalid state: {msg}"),
             Self::DeviceLost => write!(f, "renderer error: Vulkan device lost"),
             Self::BackendPoisoned(msg) => write!(f, "renderer backend poisoned: {msg}"),
+            Self::HookBackend(msg) => write!(f, "hook-induced backend failure: {msg}"),
         }
     }
 }
@@ -53,6 +57,7 @@ impl Error for RendererError {
             Self::InvalidState(_) => None,
             Self::DeviceLost => None,
             Self::BackendPoisoned(_) => None,
+            Self::HookBackend(_) => None,
         }
     }
 }
@@ -429,6 +434,17 @@ pub enum HookError {
     Unsupported(String),
     Registration(String),
     Invocation(String),
+    /// A pre-frame hook failure observed before rendering began.
+    /// Frame number is preserved for diagnostics.
+    PreFrameFailure {
+        frame: u64,
+        message: String,
+    },
+    /// A post-frame hook failure observed after rendering completed.
+    PostFrameFailure {
+        frame: u64,
+        message: String,
+    },
 }
 
 impl Display for HookError {
@@ -437,6 +453,12 @@ impl Display for HookError {
             Self::Unsupported(msg) => write!(f, "{msg}"),
             Self::Registration(msg) => write!(f, "{msg}"),
             Self::Invocation(msg) => write!(f, "{msg}"),
+            Self::PreFrameFailure { frame, message } => {
+                write!(f, "pre-frame hook failed at frame {frame}: {message}")
+            }
+            Self::PostFrameFailure { frame, message } => {
+                write!(f, "post-frame hook failed at frame {frame}: {message}")
+            }
         }
     }
 }
@@ -444,6 +466,70 @@ impl Display for HookError {
 impl Error for HookError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         None
+    }
+}
+
+/// Frame-scoped hook failure entry suitable for structured diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HookFailureEntry {
+    pub frame_index: u64,
+    pub stage: HookFailureStage,
+    pub message: String,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HookFailureStage {
+    PreRender,
+    PostRender,
+}
+
+/// Per-frame safe-facade hook diagnostics.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HookReport {
+    frame_index: u64,
+    failures: Vec<HookFailureEntry>,
+}
+
+impl HookReport {
+    pub fn new(frame_index: u64) -> Self {
+        Self {
+            frame_index,
+            failures: Vec::new(),
+        }
+    }
+
+    pub fn frame_index(&self) -> u64 {
+        self.frame_index
+    }
+
+    pub fn failures(&self) -> &[HookFailureEntry] {
+        &self.failures
+    }
+
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
+    pub(crate) fn push_failure(&mut self, failure: HookFailureEntry) {
+        self.failures.push(failure);
+    }
+}
+
+impl HookFailureEntry {
+    pub fn pre_render(frame_index: u64, message: impl Into<String>) -> Self {
+        Self {
+            frame_index,
+            stage: HookFailureStage::PreRender,
+            message: message.into(),
+        }
+    }
+
+    pub fn post_render(frame_index: u64, message: impl Into<String>) -> Self {
+        Self {
+            frame_index,
+            stage: HookFailureStage::PostRender,
+            message: message.into(),
+        }
     }
 }
 
