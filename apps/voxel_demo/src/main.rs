@@ -14,7 +14,9 @@ mod materials;
 mod meshers;
 mod regeneration;
 mod scene_package;
+mod telemetry;
 mod validate;
+mod validation_campaign;
 
 use std::collections::HashSet;
 use std::path::PathBuf;

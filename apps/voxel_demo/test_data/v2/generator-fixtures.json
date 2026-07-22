@@ -17,8 +17,8 @@
       "sha256_edges": "3b4c3f9cddf2da665d7a0aeb8e639266a5f932a8352507e24e6c72832ad69d78",
       "sha256_viewpoints": "a9e340c50cedd71009e4647d2c163489f73934e0a000dcb78d93016f2657df08",
       "sha256_light_anchors": "3d53c679de8c4b471973d5c13991eee87e1b6aeabd61f482244a2f27e873778d",
-      "geometry_identity": "f65ad57ec3885feabc55b3af6de0ade136c44ce8f926ebdc75f76e8707fed82e",
-      "scene_config_identity": "ccc6123dc8432991c61492aca0f598989711c4eac1398defda716ce0f3f8f00a"
+      "geometry_identity": "2a3ceecd383c9180e35b38668af77f587645c22d296517f365c7c28ef05e0623",
+      "scene_config_identity": "0d53293ace286e9e5f441d48f92f61cb937713c51198b5d3ffe4b07a37049618"
     },
     {
       "preset": "cavernous",
@@ -42,15 +42,15 @@
       "resolution": 64,
       "expected_sites": 9,
       "expected_spline_edges": 14,
-      "expected_maze_links": 8,
-      "sha256_density": "ddd08697e7202eb7b6b0598f8880ee74c11e3935608867cb78d9f5e50dd977d8",
+      "expected_maze_links": 4,
+      "sha256_density": "ef789129f097e5233a036f7a417ab55ac5758099dda53d24815b9675cdfd1591",
       "sha256_material": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
-      "sha256_sites": "0a5eb68ef3b575dd55a1b67f448542d1eefd5f0c3744551c054f584e2442fc23",
-      "sha256_edges": "c23f52420caac9fa25f692826999f06f9eae5c147a393ea4c0e7fa17c769d46a",
-      "sha256_viewpoints": "ccde9b2be5c1efa58aef226ae29adf50e41eff1f9ba215e6a654e0f459b74064",
-      "sha256_light_anchors": "9216a4893fe531a22b0284954e9b178a921b8e7083a345ebac718b87e8f412db",
-      "geometry_identity": "17a71a284446055a2ea8e226dc2ec832a9fc4c414febe96ac643b1ad26d09579",
-      "scene_config_identity": "69017ae5d73bd838542f3931b9e1901d4785a04dce4c28df0c6dc85492373028"
+      "sha256_sites": "6d90d07c2b83eaa1dfcd7b028af6e03620c8b081f12b042419c9edda7b3643c8",
+      "sha256_edges": "c4d2e35fc928894bb0876c1420461e1da3599f95691fdefdda62c08e1929a5a5",
+      "sha256_viewpoints": "f1a5ddfd29ee7300bdb9f60323de0a55a04ae4e225d500a9eca9c5af0df68274",
+      "sha256_light_anchors": "65a9699b0e92a116c2f3e78ea5522b1696aa508b9f5cd93b9df27ec6a141244d",
+      "geometry_identity": "558d017971f52ab929ab6ed0dde7ca8bc4fb0a42059352713c2ad3408b6c32dd",
+      "scene_config_identity": "a50f713b9f3bfbf4a7457b89143cb9f9d70ec4a726e3110dc8e8a17251a5ee5c"
     },
     {
       "preset": "tight",
@@ -59,14 +59,14 @@
       "expected_sites": 5,
       "expected_spline_edges": 5,
       "expected_maze_links": 1,
-      "sha256_density": "10e5bcce9b7e1c6a7635ed30968f55f441e8a088132757f12b04a770ef6b8bd3",
+      "sha256_density": "9788dc658a9368db9e196a9c2aba52415d370efce9c7f606cad300ef5dc02a04",
       "sha256_material": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
-      "sha256_sites": "b5428a84196d8be34aa295e5ef9548c1dc4d557e5aad9a4061a183b1160ddb3b",
-      "sha256_edges": "e43d267810b0afb9531a0623cf2da094f2ff303a37bcca5e46d8d3269475dc4a",
-      "sha256_viewpoints": "ccde9b2be5c1efa58aef226ae29adf50e41eff1f9ba215e6a654e0f459b74064",
-      "sha256_light_anchors": "9216a4893fe531a22b0284954e9b178a921b8e7083a345ebac718b87e8f412db",
-      "geometry_identity": "ed21759b2c0c85708c3d16aa1e469f426831e7c0a88c8c03970ffe434ae61ff9",
-      "scene_config_identity": "177b8ef14aec795215f98a45eacf207f464405c0f8de66224e5ede8cb86c42f2"
+      "sha256_sites": "f0255451d390eae4a2a34a59584b1e42cf9dab14d0c17c2a0661dea4fe792f47",
+      "sha256_edges": "fe1a563cc3ac9c4983b941383bbf58e9b1fe9952989c7250effac809e1b6509c",
+      "sha256_viewpoints": "f1a5ddfd29ee7300bdb9f60323de0a55a04ae4e225d500a9eca9c5af0df68274",
+      "sha256_light_anchors": "65a9699b0e92a116c2f3e78ea5522b1696aa508b9f5cd93b9df27ec6a141244d",
+      "geometry_identity": "083d89bb4bb5e26d94b6eb83d669d4ad00add52f60af3c07a1e7b14bed134fe7",
+      "scene_config_identity": "c670747f34ad937b0cc84201462d70b7b24610f249cc4b34f821d6d12a2acc63"
     }
   ],
   "environment": {

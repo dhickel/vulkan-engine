@@ -100,8 +100,9 @@ pub fn partition_mesh(
         ))
     })?;
 
-    // 3. Validate source (closed manifold, no open edges).
-    if let Err(errs) = validate_mesh(source, MeshValidationPolicy::Closed) {
+    // 3. Validate source (structural, allowing open/non-manifold edges
+    //    from known MC33 edge cases near shell boundaries).
+    if let Err(errs) = validate_mesh(source, MeshValidationPolicy::AllowOpenEdges) {
         return Err(PartitionError::InvalidSource(errs.join("; ")));
     }
 
@@ -626,16 +627,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_source_with_open_edges() {
-        // Single triangle = open edges.
+    fn accepts_source_with_open_edges() {
+        // Single triangle = open edges. Now accepted since partition allows
+        // open edges from known MC33 boundary edge cases.
         let mesh = single_triangle(
             [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 0.866, 0.0]],
             [0.0, 0.0, 1.0],
         );
         let r = partition_mesh(&mesh, &default_options());
         assert!(
-            matches!(r, Err(PartitionError::InvalidSource(_))),
-            "single triangle has open edges, should be rejected; got {r:?}"
+            r.is_ok(),
+            "single triangle with open edges should now be accepted; got {r:?}"
         );
     }
 

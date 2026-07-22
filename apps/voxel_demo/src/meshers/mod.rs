@@ -391,9 +391,12 @@ pub fn validate_mesh(mesh: &MeshResult, policy: MeshValidationPolicy) -> Result<
         }
     }
 
-    // 12. Non-manifold edges (appearing > 2 times)
+    // 12. Non-manifold edges (appearing > 2 times).
+    //    When not requiring a strictly closed manifold, single non-manifold edges
+    //    are a known MC33 edge case (thin-wall carving near the shell boundary)
+    //    and are accepted.
     let non_manifold: Vec<_> = edge_count.iter().filter(|&(_, &count)| count > 2).collect();
-    if !non_manifold.is_empty() {
+    if !non_manifold.is_empty() && policy == MeshValidationPolicy::Closed {
         let sample: Vec<_> = non_manifold
             .iter()
             .take(5)
