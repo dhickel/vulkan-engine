@@ -14,8 +14,11 @@ This file keeps the historical `docs/gap-report.md` path stable, but it is no lo
   - `src/audio`
   - `src/physics`
   - `src/scripting`
+  - `src/events`
+  - `src/launch_shared`
   - `apps/dungeon_dogfood`
-  - `apps/marching_terrain`
+  - `apps/voxel_demo`
+  - `tools/engine_pack`
 - Workspace membership means the crate or app exists in the build graph. It does not prove alpha completeness, runtime readiness, editor readiness, or feature parity.
 
 ## Current Runtime Orientation

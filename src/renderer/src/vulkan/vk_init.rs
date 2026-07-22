@@ -87,12 +87,6 @@ pub fn get_winit_extensions(window: &winit::window::Window) -> Result<Vec<*const
         .map_err(|err| format!("failed to enumerate required Vulkan extensions: {err:?}"))
 }
 
-// pub fn get_glfw_extensions(window: &glfw::PWindow) -> Vec<*const c_char> {
-//     ash_window::enumerate_required_extensions(window.display_handle().unwrap().as_raw())
-//         .unwrap()
-//         .to_vec()
-// }
-
 /// Create Vulkan instance with optional validation layers.
 ///
 /// ## Logic Flow
@@ -254,33 +248,6 @@ pub fn get_window_surface(
         surface_instance,
     })
 }
-
-// pub fn get_glfw_surface(
-//     entry: &ash::Entry,
-//     instance: &ash::Instance,
-//     window: &glfw::PWindow,
-// ) -> Result<VkSurface, String> {
-//     log::info!("Creating surface");
-//
-//     let surface = unsafe {
-//         ash_window::create_surface(
-//             &entry,
-//             &instance,
-//             window.display_handle().unwrap().as_raw(),
-//             window.window_handle().unwrap().as_raw(),
-//             None,
-//         )
-//         .map_err(|err| format!("Fatal: Failed to create surface: {:?}", err))?
-//     };
-//
-//     let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
-//
-//     log::info!("Surface created");
-//     Ok(VkSurface {
-//         surface,
-//         surface_instance,
-//     })
-// }
 
 pub fn get_physical_devices(
     instance: &ash::Instance,
@@ -850,8 +817,7 @@ pub fn build_swapchain_create_plan(
 
     log::info!("Swapchain: Setting surface format");
     let surface_format = if let Some(sf) = surface_format {
-        let (found, fmt) =
-            select_sc_surface_format(&support.formats, sf.format, sf.color_space);
+        let (found, fmt) = select_sc_surface_format(&support.formats, sf.format, sf.color_space);
         if !found && !allow_defaults {
             return Err("Couldn't find expected surface format".to_string());
         }
@@ -952,8 +918,13 @@ pub fn create_swapchain_with_plan(
     plan: &SwapchainCreatePlan,
     old_swapchain: Option<vk::SwapchainKHR>,
 ) -> Result<VkSwapchain, String> {
-    log::info!("Creating swapchain from plan: extent={:?} fmt={:?} mode={:?} count={}",
-        plan.extent, plan.surface_format.format, plan.present_mode, plan.image_count);
+    log::info!(
+        "Creating swapchain from plan: extent={:?} fmt={:?} mode={:?} count={}",
+        plan.extent,
+        plan.surface_format.format,
+        plan.present_mode,
+        plan.image_count
+    );
 
     let mut sc_create_info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface_info.surface)

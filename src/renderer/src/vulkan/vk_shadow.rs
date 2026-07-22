@@ -11,11 +11,15 @@
 //! one whole-array sampling view, three single-layer depth-attachment views,
 //! and one comparison sampler.
 
+#[cfg(feature = "csm")]
 use crate::data::camera::Aabb;
-use crate::data::gpu_data::{CSM_CASCADE_COUNT, CSM_CASCADE_DIM, RenderObject};
+use crate::data::gpu_data::RenderObject;
+#[cfg(feature = "csm")]
+use crate::data::gpu_data::{CSM_CASCADE_COUNT, CSM_CASCADE_DIM};
 use crate::vulkan::vk_types::{VkDestroyable, VkImageAlloc};
 use crate::vulkan::vk_util;
 use ash::vk;
+#[cfg(feature = "csm")]
 use glam::{Mat4, Vec3, Vec4Swizzles};
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
@@ -26,17 +30,22 @@ use vk_mem::Allocator;
 pub const LEGACY_SHADOW_MAP_DIM: u32 = 2048;
 
 /// CSM blend band fraction (0.0–1.0, clamped in shader).
+#[cfg(feature = "csm")]
 pub const CSM_BLEND_FRACTION: f32 = 0.1;
 /// Maximum view-space receiver distance covered by the fixed CSM vertical.
+#[cfg(feature = "csm")]
 pub const CSM_MAX_DISTANCE: f32 = 100.0;
 
 /// Guard band multiplier for depth bounds in light space.
+#[cfg(feature = "csm")]
 const DEPTH_GUARD_BAND: f32 = 0.1;
 
 /// Lambda for practical cascade split mix (0 = uniform, 1 = logarithmic).
+#[cfg(feature = "csm")]
 const CSM_LAMBDA: f32 = 0.75;
 
 /// Minimum near plane for cascade splits (meters).
+#[cfg(feature = "csm")]
 const MIN_CASCADE_NEAR: f32 = 0.01;
 
 /// ── Per-frame shadow resource types ──────────────────────────────────────
@@ -58,6 +67,7 @@ impl VkShadowFrame {
 }
 
 /// Per-frame CSM shadow map resources.
+#[cfg(feature = "csm")]
 pub struct VkCsmShadowFrame {
     /// D32 2D-array image (1024² × 3 layers).
     pub csm_image: VkImageAlloc,
@@ -69,6 +79,7 @@ pub struct VkCsmShadowFrame {
     pub csm_sampler: vk::Sampler,
 }
 
+#[cfg(feature = "csm")]
 impl VkCsmShadowFrame {
     pub fn destroy(&mut self, device: &ash::Device, allocator: &Allocator) {
         unsafe {
@@ -82,6 +93,7 @@ impl VkCsmShadowFrame {
     }
 }
 
+#[cfg(feature = "csm")]
 fn destroy_partial_csm_frame(
     device: &ash::Device,
     allocator: &Allocator,
@@ -208,11 +220,13 @@ impl VkShadowResources {
 }
 
 /// Collection of per-frame CSM shadow resources.
+#[cfg(feature = "csm")]
 pub struct VkCsmShadowResources {
     pub frames: Vec<VkCsmShadowFrame>,
     pub extent: vk::Extent2D,
 }
 
+#[cfg(feature = "csm")]
 impl VkCsmShadowResources {
     pub fn new(
         device: &ash::Device,
@@ -298,25 +312,24 @@ impl VkCsmShadowResources {
                         layer_count: 1,
                     });
 
-                csm_layer_views[layer as usize] =
-                    match unsafe { device.create_image_view(&layer_view_info, None) } {
-                        Ok(view) => view,
-                        Err(err) => {
-                            destroy_partial_csm_frame(
-                                device,
-                                &allocator,
-                                &mut csm_image,
-                                csm_array_view,
-                                &csm_layer_views,
-                            );
-                            for frame in &mut frames {
-                                frame.destroy(device, &allocator);
-                            }
-                            return Err(format!(
-                                "failed to create CSM layer {layer} view: {err:?}"
-                            ));
+                csm_layer_views[layer as usize] = match unsafe {
+                    device.create_image_view(&layer_view_info, None)
+                } {
+                    Ok(view) => view,
+                    Err(err) => {
+                        destroy_partial_csm_frame(
+                            device,
+                            &allocator,
+                            &mut csm_image,
+                            csm_array_view,
+                            &csm_layer_views,
+                        );
+                        for frame in &mut frames {
+                            frame.destroy(device, &allocator);
                         }
-                    };
+                        return Err(format!("failed to create CSM layer {layer} view: {err:?}"));
+                    }
+                };
             }
 
             // Comparison sampler.
@@ -376,6 +389,7 @@ impl VkCsmShadowResources {
 // ── Cascade fitting (Steps 7–9) ────────────────────────────────────────────
 
 /// Parameters computed per CSM cascade slice.
+#[cfg(feature = "csm")]
 #[derive(Debug, Clone)]
 pub struct CsmCascadeParams {
     /// Light view-projection matrix for this cascade.
@@ -393,6 +407,7 @@ pub struct CsmCascadeParams {
 
 /// Compute eight frustum corners in world space from the Vulkan [0,1]
 /// projection-view matrix. Returns `None` if the matrix is non-invertible.
+#[cfg(feature = "csm")]
 pub fn frustum_corners_from_vp(view_projection: &Mat4) -> Option<[Vec3; 8]> {
     let inv_vp = view_projection.inverse();
 
@@ -424,24 +439,10 @@ pub fn frustum_corners_from_vp(view_projection: &Mat4) -> Option<[Vec3; 8]> {
     Some(corners)
 }
 
-/// Compute the eight corners of a sub-frustum slice defined by near/far depth.
-/// (Unused stub — slice corners are computed via `compute_slice_corners_from_splits`.)
-#[allow(dead_code)]
-fn frustum_slice_corners(
-    _inv_vp: &Mat4,
-    _near: f32,
-    _far: f32,
-) -> Option<[Vec3; 8]> {
-    None
-}
-
 /// Compute three practical cascade split distances (lambda-weighted mix).
 /// Returns `[near0, far0, near1, far1, near2, far2]` as view-space depths.
-fn compute_cascade_splits(
-    camera_near: f32,
-    camera_far: f32,
-    lambda: f32,
-) -> [f32; 6] {
+#[cfg(feature = "csm")]
+fn compute_cascade_splits(camera_near: f32, camera_far: f32, lambda: f32) -> [f32; 6] {
     let count = CSM_CASCADE_COUNT as f32;
 
     let mut splits = [0.0_f32; 6];
@@ -472,6 +473,7 @@ fn compute_cascade_splits(
 /// 3. Derives world-units-per-texel at CSM resolution.
 /// 4. Snaps the light-space center to texel grid.
 /// 5. Extends depth bounds by projecting caster AABBs and adding guard band.
+#[cfg(feature = "csm")]
 pub fn compute_cascade_light_view_proj(
     light_dir: Vec3,
     frustum_corners: &[Vec3; 8],
@@ -512,8 +514,7 @@ pub fn compute_cascade_light_view_proj(
         center_ls.z,
     );
     let snapped_center = basis_view.inverse().transform_point3(snapped_center_ls);
-    let snapped_light_pos =
-        snapped_center + direction_to_light * (quantized_radius * 2.0 + 1.0);
+    let snapped_light_pos = snapped_center + direction_to_light * (quantized_radius * 2.0 + 1.0);
     let snapped_view = Mat4::look_at_rh(snapped_light_pos, snapped_center, up);
 
     let (receiver_min, receiver_max) = frustum_corners.iter().fold(
@@ -533,15 +534,13 @@ pub fn compute_cascade_light_view_proj(
     let mut z_min = receiver_min.z;
     let mut z_max = receiver_max.z;
     for aabb in caster_aabbs {
-        let (caster_min, caster_max) = aabb_corners_vec(aabb.min, aabb.max)
-            .iter()
-            .fold(
-                (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
-                |(min, max), corner| {
-                    let point = snapped_view.transform_point3(*corner);
-                    (min.min(point), max.max(point))
-                },
-            );
+        let (caster_min, caster_max) = aabb_corners_vec(aabb.min, aabb.max).iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(min, max), corner| {
+                let point = snapped_view.transform_point3(*corner);
+                (min.min(point), max.max(point))
+            },
+        );
         let overlaps_xy = caster_max.x >= left
             && caster_min.x <= right
             && caster_max.y >= bottom
@@ -563,21 +562,14 @@ pub fn compute_cascade_light_view_proj(
 }
 
 /// Check whether a caster AABB (in world space) overlaps with a cascade's light-space
-/// XY receiver footprint. This implements the off-camera caster invariant:
-/// a caster is included when its world AABB overlaps the cascade's footprint
-/// regardless of camera-frustum membership.
-pub fn caster_overlaps_cascade_light_footprint(
-    caster_aabb: &Aabb,
-    light_view_proj: &Mat4,
-) -> bool {
+/// XY receiver footprint.
+#[cfg(feature = "csm")]
+pub fn caster_overlaps_cascade_light_footprint(caster_aabb: &Aabb, light_view_proj: &Mat4) -> bool {
     let corners = aabb_corners_vec(caster_aabb.min, caster_aabb.max);
 
     // Project all corners into light clip space.
     let (clip_min, clip_max) = corners.iter().fold(
-        (
-            Vec3::splat(f32::INFINITY),
-            Vec3::splat(f32::NEG_INFINITY),
-        ),
+        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
         |(min, max), corner| {
             let clip = *light_view_proj * corner.extend(1.0);
             if clip.w.abs() > 1e-10 {
@@ -593,14 +585,12 @@ pub fn caster_overlaps_cascade_light_footprint(
     // that overlaps this receiver footprint. Cull on XY only so numeric
     // guard-band differences cannot reject an otherwise valid off-camera
     // caster at the near/far boundary.
-    clip_max.x >= -1.0
-        && clip_min.x <= 1.0
-        && clip_max.y >= -1.0
-        && clip_min.y <= 1.0
+    clip_max.x >= -1.0 && clip_min.x <= 1.0 && clip_max.y >= -1.0 && clip_min.y <= 1.0
 }
 
 /// Cull known rigid casters independently per cascade using conservative light-space AABB overlap.
 /// Unknown/skinned/deformed casters are included in every active cascade.
+#[cfg(feature = "csm")]
 pub fn cull_casters_for_cascade<'a>(
     casters: impl IntoIterator<Item = &'a RenderObject>,
     light_view_proj: &Mat4,
@@ -705,10 +695,12 @@ fn aabb_corners(min: glam::Vec3, max: glam::Vec3) -> [glam::Vec3; 8] {
     ]
 }
 
+#[cfg(feature = "csm")]
 fn aabb_corners_vec(min: Vec3, max: Vec3) -> [Vec3; 8] {
     aabb_corners(min, max)
 }
 
+#[cfg(feature = "csm")]
 fn aabb_transformed(aabb: &Aabb, transform: &Mat4) -> Aabb {
     let corners = aabb_corners_vec(aabb.min, aabb.max);
     let mut world_min = Vec3::splat(f32::INFINITY);
@@ -726,6 +718,7 @@ fn aabb_transformed(aabb: &Aabb, transform: &Mat4) -> Aabb {
 /// Compute CSM cascade parameters from camera matrices and caster bounds.
 ///
 /// Returns `None` if the view/projection is non-invertible.
+#[cfg(feature = "csm")]
 pub fn compute_csm_cascades(
     view: &Mat4,
     projection: &Mat4,
@@ -772,11 +765,10 @@ pub fn compute_csm_cascades(
         .sum::<f32>()
         / 4.0;
     if camera_far < matrix_far && matrix_far > matrix_near {
-        let far_ratio = ((camera_far - matrix_near) / (matrix_far - matrix_near))
-            .clamp(0.0, 1.0);
+        let far_ratio = ((camera_far - matrix_near) / (matrix_far - matrix_near)).clamp(0.0, 1.0);
         for index in 0..4 {
-            full_corners[index + 4] = full_corners[index]
-                + (full_corners[index + 4] - full_corners[index]) * far_ratio;
+            full_corners[index + 4] =
+                full_corners[index] + (full_corners[index + 4] - full_corners[index]) * far_ratio;
         }
     }
 
@@ -849,6 +841,7 @@ pub fn compute_csm_cascades(
 
 /// Compute frustum slice corners from split distances by interpolating
 /// between the full near and far plane corners.
+#[cfg(feature = "csm")]
 fn compute_slice_corners_from_splits(
     _inv_vp: &Mat4,
     full_corners: &[Vec3; 8],
@@ -880,7 +873,8 @@ fn compute_slice_corners_from_splits(
 
     let mut slice_corners = [Vec3::ZERO; 8];
     for i in 0..4 {
-        slice_corners[i] = full_near_corners[i] + (full_far_corners[i] - full_near_corners[i]) * near_ratio;
+        slice_corners[i] =
+            full_near_corners[i] + (full_far_corners[i] - full_near_corners[i]) * near_ratio;
         slice_corners[4 + i] =
             full_near_corners[i] + (full_far_corners[i] - full_near_corners[i]) * far_ratio;
     }
@@ -893,10 +887,8 @@ fn compute_slice_corners_from_splits(
 }
 
 /// Derive camera near/far from the frustum corners (conservative).
-pub fn derive_camera_near_far_from_corners(
-    view: &Mat4,
-    corners: &[Vec3; 8],
-) -> (f32, f32) {
+#[cfg(feature = "csm")]
+pub fn derive_camera_near_far_from_corners(view: &Mat4, corners: &[Vec3; 8]) -> (f32, f32) {
     let mut near = f32::INFINITY;
     let mut far = f32::NEG_INFINITY;
     for corner in corners {
@@ -935,105 +927,113 @@ mod tests {
         }
     }
 
-    #[test]
-    fn frustum_corners_produces_finite_results_from_standard_perspective() {
-        let view = Mat4::look_at_rh(
-            Vec3::new(0.0, 2.0, 5.0),
-            Vec3::ZERO,
-            Vec3::Y,
-        );
-        let proj = Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0);
-        let vp = proj * view;
+    #[cfg(feature = "csm")]
+    mod csm_tests {
+        use super::*;
+        use crate::data::camera::Aabb;
 
-        let corners = frustum_corners_from_vp(&vp);
-        assert!(corners.is_some());
-        let corners = corners.unwrap();
-        for c in &corners {
-            assert!(c.is_finite(), "corner not finite: {:?}", c);
+        #[test]
+        fn frustum_corners_produces_finite_results_from_standard_perspective() {
+            let view = Mat4::look_at_rh(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y);
+            let proj = Mat4::perspective_rh(60.0_f32.to_radians(), 1.0, 0.1, 100.0);
+            let vp = proj * view;
+
+            let corners = super::frustum_corners_from_vp(&vp);
+            assert!(corners.is_some());
+            let corners = corners.unwrap();
+            for c in &corners {
+                assert!(c.is_finite(), "corner not finite: {:?}", c);
+            }
         }
-    }
 
-    #[test]
-    fn cascade_splits_are_monotonic_and_bounded() {
-        let splits = compute_cascade_splits(0.1, 100.0, CSM_LAMBDA);
-        // 3 cascades => 6 values: [near0, far0, near1, far1, near2, far2]
-        assert_eq!(splits.len(), 6);
-        assert!(splits[0] >= 0.1);
-        assert!(splits[5] <= 100.0);
-        for i in 0..5 {
-            assert!(splits[i] <= splits[i + 1], "non-monotonic at {}", i);
+        #[test]
+        fn cascade_splits_are_monotonic_and_bounded() {
+            let splits = super::compute_cascade_splits(0.1, 100.0, super::CSM_LAMBDA);
+            // 3 cascades => 6 values: [near0, far0, near1, far1, near2, far2]
+            assert_eq!(splits.len(), 6);
+            assert!(splits[0] >= 0.1);
+            assert!(splits[5] <= 100.0);
+            for i in 0..5 {
+                assert!(splits[i] <= splits[i + 1], "non-monotonic at {}", i);
+            }
         }
-    }
 
-    #[test]
-    fn cascade_split_lambda_zero_is_uniform() {
-        let splits = compute_cascade_splits(0.1, 10.0, 0.0);
-        // Uniform: each cascade gets equal share of depth range.
-        let expected_step = (10.0 - 0.1) / 3.0;
-        for i in 0..3 {
-            let near = 0.1 + i as f32 * expected_step;
-            let far = near + expected_step;
-            assert!((splits[i * 2] - near).abs() < 0.01, "near mismatch cascade {i}");
-            assert!((splits[i * 2 + 1] - far).abs() < 0.01, "far mismatch cascade {i}");
+        #[test]
+        fn cascade_split_lambda_zero_is_uniform() {
+            let splits = super::compute_cascade_splits(0.1, 10.0, 0.0);
+            // Uniform: each cascade gets equal share of depth range.
+            let expected_step = (10.0 - 0.1) / 3.0;
+            for i in 0..3 {
+                let near = 0.1 + i as f32 * expected_step;
+                let far = near + expected_step;
+                assert!(
+                    (splits[i * 2] - near).abs() < 0.01,
+                    "near mismatch cascade {i}"
+                );
+                assert!(
+                    (splits[i * 2 + 1] - far).abs() < 0.01,
+                    "far mismatch cascade {i}"
+                );
+            }
         }
-    }
 
-    #[test]
-    fn cascade_split_lambda_one_is_logarithmic() {
-        let splits = compute_cascade_splits(0.1, 100.0, 1.0);
-        // With lambda=1, splits grow exponentially.
-        let ratio1 = splits[1] / splits[0];
-        let ratio2 = splits[3] / splits[2];
-        assert!(ratio1 > 1.5, "expected log growth for first split");
-        assert!(ratio2 > 1.5, "expected log growth for second split");
-    }
+        #[test]
+        fn cascade_split_lambda_one_is_logarithmic() {
+            let splits = super::compute_cascade_splits(0.1, 100.0, 1.0);
+            // With lambda=1, splits grow exponentially.
+            let ratio1 = splits[1] / splits[0];
+            let ratio2 = splits[3] / splits[2];
+            assert!(ratio1 > 1.5, "expected log growth for first split");
+            assert!(ratio2 > 1.5, "expected log growth for second split");
+        }
 
-    #[test]
-    fn caster_overlaps_detects_intersection() {
-        let light_dir = Vec3::Y;
-        let center = Vec3::ZERO;
-        let radius = 5.0;
-        let light_pos = center + light_dir.normalize() * (radius * 2.0 + 1.0);
-        let view = Mat4::look_at_rh(light_pos, center, Vec3::X);
-        let proj = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 100.0);
-        let vp = proj * view;
+        #[test]
+        fn caster_overlaps_detects_intersection() {
+            let light_dir = Vec3::Y;
+            let center = Vec3::ZERO;
+            let radius = 5.0;
+            let light_pos = center + light_dir.normalize() * (radius * 2.0 + 1.0);
+            let view = Mat4::look_at_rh(light_pos, center, Vec3::X);
+            let proj = Mat4::orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 100.0);
+            let vp = proj * view;
 
-        // AABB inside the footprint.
-        let inside = Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0));
-        assert!(caster_overlaps_cascade_light_footprint(&inside, &vp));
+            // AABB inside the footprint.
+            let inside = Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0));
+            assert!(super::caster_overlaps_cascade_light_footprint(&inside, &vp));
 
-        // AABB far outside the footprint.
-        let outside = Aabb::from_min_max(Vec3::splat(100.0), Vec3::splat(101.0));
-        assert!(!caster_overlaps_cascade_light_footprint(&outside, &vp));
-    }
+            // AABB far outside the footprint.
+            let outside = Aabb::from_min_max(Vec3::splat(100.0), Vec3::splat(101.0));
+            assert!(!super::caster_overlaps_cascade_light_footprint(
+                &outside, &vp
+            ));
+        }
 
-    #[test]
-    fn off_camera_caster_still_overlaps_if_in_light_footprint() {
-        // Light looking straight down, camera looking forward.
-        // A caster behind the camera should still cast shadow if it's
-        // within the light's XY footprint.
-        let light_dir = Vec3::NEG_Y;
-        let center = Vec3::new(0.0, 0.0, 5.0);
-        let radius = 10.0;
-        let light_pos = center + light_dir.normalize() * (radius * 2.0 + 1.0);
-        let view = Mat4::look_at_rh(light_pos, center, Vec3::Z);
-        let proj = Mat4::orthographic_rh(-20.0, 20.0, -20.0, 20.0, 0.1, 200.0);
-        let vp = proj * view;
+        #[test]
+        fn off_camera_caster_still_overlaps_if_in_light_footprint() {
+            // Light looking straight down, camera looking forward.
+            // A caster behind the camera should still cast shadow if it's
+            // within the light's XY footprint.
+            let light_dir = Vec3::NEG_Y;
+            let center = Vec3::new(0.0, 0.0, 5.0);
+            let radius = 10.0;
+            let light_pos = center + light_dir.normalize() * (radius * 2.0 + 1.0);
+            let view = Mat4::look_at_rh(light_pos, center, Vec3::Z);
+            let proj = Mat4::orthographic_rh(-20.0, 20.0, -20.0, 20.0, 0.1, 200.0);
+            let vp = proj * view;
 
-        // Caster behind camera but under the light.
-        let behind_camera = Aabb::from_min_max(
-            Vec3::new(-1.0, -0.1, 15.0),
-            Vec3::new(1.0, 0.1, 16.0),
-        );
-        assert!(caster_overlaps_cascade_light_footprint(
-            &behind_camera,
-            &vp
-        ));
-    }
+            // Caster behind camera but under the light.
+            let behind_camera =
+                Aabb::from_min_max(Vec3::new(-1.0, -0.1, 15.0), Vec3::new(1.0, 0.1, 16.0));
+            assert!(super::caster_overlaps_cascade_light_footprint(
+                &behind_camera,
+                &vp
+            ));
+        }
 
-    #[test]
-    fn frustum_corners_rejects_non_invertible_matrix() {
-        let zero = Mat4::ZERO;
-        assert!(frustum_corners_from_vp(&zero).is_none());
+        #[test]
+        fn frustum_corners_rejects_non_invertible_matrix() {
+            let zero = Mat4::ZERO;
+            assert!(super::frustum_corners_from_vp(&zero).is_none());
+        }
     }
 }
