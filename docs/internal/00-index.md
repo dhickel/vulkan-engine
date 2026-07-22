@@ -8,7 +8,7 @@ Contributors working inside the renderer internals — Vulkan orchestration, dat
 
 ## Workspace Context
 
-Root `Cargo.toml` currently declares `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, and `apps/voxel_demo`. These internals docs primarily cover the renderer/input path; support crates and apps should not be inferred production-ready from workspace membership alone.
+Root `Cargo.toml` currently declares the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `apps/dungeon_dogfood`, `apps/voxel_demo`, and `tools/engine_pack`. These internals docs primarily cover renderer/input and selected app-owned architecture; support crates and apps should not be inferred production-ready from workspace membership alone.
 
 ## Architecture at a Glance
 
@@ -49,6 +49,7 @@ Renderer (public API)
 | 13 | [13-engine-integration-contracts.md](13-engine-integration-contracts.md) | Phase 0 contracts: frame/swapchain/descriptor state machines, compatibility map, CSM camera proof, evidence index |
 | 14 | [14-renderer-descriptor-abi.md](14-renderer-descriptor-abi.md) | Descriptor ABI manifest: every set, binding, type, size, stage, pipeline consumer, and shader pair |
 | 15 | [15-visual-regression.md](15-visual-regression.md) | Decoded-pixel visual-regression harness, per-test tolerances, baseline-update workflow |
+| 16 | [16-voxel-demo-config-regeneration.md](16-voxel-demo-config-regeneration.md) | Voxel-demo config identities, deterministic v2 generation, CPU scene packages, editor lifecycle, and regeneration commit/retirement |
 
 ## Key Source Files
 
@@ -66,6 +67,10 @@ Renderer (public API)
 | [`src/events/src/lib.rs`](../../src/events/src/lib.rs) | Event contracts, staged bus, recorder |
 | [`src/physics/src/lib.rs`](../../src/physics/src/lib.rs) | Renderer-independent alpha physics API, Rapier wrapper, event bridge |
 | [`src/audio/src/lib.rs`](../../src/audio/src/lib.rs) | Renderer-independent alpha audio clip/probe/playback facade |
+| [`apps/voxel_demo/src/config.rs`](../../apps/voxel_demo/src/config.rs) | Strict preset documents, resolution, canonical identities, and save/load rules |
+| [`apps/voxel_demo/src/scene_package.rs`](../../apps/voxel_demo/src/scene_package.rs) | Renderer-free CPU generation/mesh/partition package boundary |
+| [`apps/voxel_demo/src/regeneration.rs`](../../apps/voxel_demo/src/regeneration.rs) | Latest-wins worker, main-thread replacement commit, material cache, and deferred retirement |
+| [`apps/voxel_demo/src/editor.rs`](../../apps/voxel_demo/src/editor.rs) | imgui draft model and event-loop-owned command queue |
 
 ## Distributed Knowledge
 

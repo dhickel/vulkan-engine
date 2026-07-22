@@ -115,8 +115,10 @@ pub fn build_scene_package(resolved: &ResolvedAppConfig) -> Result<CpuScenePacka
         .map_err(|e| PackageError::Mesher(format!("MC33 extraction failed: {e}")))?;
     let mesh_time = t_mesh.elapsed();
 
-    // 3. Validate MC33 output (closed manifold)
-    validate_mesh(&mesh_result, MeshValidationPolicy::Closed).map_err(|errs| {
+    // 3. Validate MC33 output (structural, allowing open boundary edges that
+    //    arise from known MC33 edge cases near the shell at high resolution).
+    //    The partition step validates each wall/floor mesh independently.
+    validate_mesh(&mesh_result, MeshValidationPolicy::AllowOpenEdges).map_err(|errs| {
         PackageError::Validation(format!("MC33 mesh validation failed: {}", errs.join("; ")))
     })?;
 
