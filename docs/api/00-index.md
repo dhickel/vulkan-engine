@@ -8,7 +8,7 @@ Rust developers building applications on this Vulkan rendering engine. Familiari
 
 ## Workspace Context
 
-The root workspace currently contains `engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`, `apps/voxel_demo`, and `tools/engine_pack`. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
+The root workspace currently contains the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `apps/dungeon_dogfood`, `apps/voxel_demo`, and `tools/engine_pack`. `apps/voxel_demo` is the configurable procedural-cave application. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
 
 ## Quick Navigation
 
@@ -29,7 +29,7 @@ The root workspace currently contains `engine`, `src/input`, `src/renderer`, `sr
 | Audio foundation | [13-audio-foundation.md](13-audio-foundation.md) | Packaged audio metadata, device-independent clips, opt-in playback, audio events |
 | Dogfood vertical slice | [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md) | Alpha demo app walkthrough, headless capture, package/project contracts |
 | App-owned loop | [15-app-owned-loop.md](15-app-owned-loop.md) | Root `engine` input/frame/render helpers for custom app-owned loops |
-| Voxel cave demo | [16-voxel-demo.md](16-voxel-demo.md) | Procedural cave generation, MC33 meshing, PBR rendering, interactive demo |
+| Configurable voxel demo | [16-voxel-demo.md](16-voxel-demo.md) | Strict presets, deterministic v2 generation, imgui editing, regeneration, MC33 partitioning, PBR rendering, and captures |
 
 ## Public API Contract
 
