@@ -403,7 +403,6 @@ impl OccupancyGrid {
         })
     }
 
-    #[allow(dead_code)]
     pub(super) const fn dimensions(&self) -> (u16, u16, u16) {
         (self.width, self.height, self.layers)
     }

@@ -76,19 +76,17 @@ use crate::rendergraph::RenderGraph;
 use crate::scene::debug_scenarios;
 use crate::scene::render_submission::RenderSubmission;
 use crate::scene::scene_world::SceneWorld;
-use crate::vulkan::vk_debug::{
-    discard_frame_capture, finalize_frame_capture, PendingFrameCapture,
-};
+use crate::vulkan::vk_debug::{discard_frame_capture, finalize_frame_capture, PendingFrameCapture};
 use crate::vulkan::vk_descriptor::*;
-use crate::vulkan::vk_shadow::{VkCsmShadowResources, VkShadowResources};
+#[cfg(feature = "csm")]
+use crate::vulkan::vk_shadow::VkCsmShadowResources;
+use crate::vulkan::vk_shadow::VkShadowResources;
 use crate::vulkan::vk_storage::{BufferPlacement, VkSubAllocator};
 use crate::vulkan::vk_swapchain::SwapchainOwner;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::{vk_descriptor, vk_init, vk_pipeline, vk_util};
 use ash::vk;
-use ash::vk::{
-    CommandBufferLevel, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D,
-};
+use ash::vk::{CommandBufferLevel, DescriptorType, ExtendsPhysicalDeviceFeatures2, Extent2D};
 use imgui_winit_support::{HiDpiMode, WinitPlatform};
 use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
@@ -148,6 +146,7 @@ pub struct VkRenderCore {
     pub shadow_resources: VkShadowResources,
     /// CSM shadow resources — created only when the `csm` feature is compiled
     /// and runtime-enabled. `None` for the legacy single-map path.
+    #[cfg(feature = "csm")]
     pub csm_shadow_resources: Option<VkCsmShadowResources>,
     pub default_env_id: EnvironmentHandle,
     pub requested_env_id: Option<EnvironmentHandle>,
@@ -530,6 +529,7 @@ impl Drop for VkRenderCore {
             });
             self.scene_descriptors.clear();
 
+            #[cfg(feature = "csm")]
             if let Some(ref mut csm) = self.csm_shadow_resources {
                 let alloc = self.allocator.lock().expect("allocator lock poisoned");
                 csm.destroy(&self.device, &alloc);
@@ -1355,11 +1355,11 @@ impl VkRenderCore {
         let shadow_resources = VkShadowResources::new(&device, &allocator, swapchain_image_count)?;
         // Create CSM resources when the feature is compiled.
         #[cfg(feature = "csm")]
-        let csm_shadow_resources = Some(
-            VkCsmShadowResources::new(&device, &allocator, swapchain_image_count)?,
-        );
-        #[cfg(not(feature = "csm"))]
-        let csm_shadow_resources: Option<VkCsmShadowResources> = None;
+        let csm_shadow_resources = Some(VkCsmShadowResources::new(
+            &device,
+            &allocator,
+            swapchain_image_count,
+        )?);
 
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::Windowed,
@@ -1381,6 +1381,7 @@ impl VkRenderCore {
             transfer,
             scene_descriptors: HashMap::new(),
             shadow_resources,
+            #[cfg(feature = "csm")]
             csm_shadow_resources,
             default_env_id,
             requested_env_id: None,
@@ -1544,14 +1545,11 @@ impl VkRenderCore {
         // Create CSM resources when the feature is compiled.
         #[cfg(feature = "csm")]
         let csm_shadow_resources = Some(
-            VkCsmShadowResources::new(&device, &allocator, frame_slot_count)
-                .map_err(|err| {
-                    error!("Headless CSM shadow initialization failed: {err}");
-                    err
-                })?,
+            VkCsmShadowResources::new(&device, &allocator, frame_slot_count).map_err(|err| {
+                error!("Headless CSM shadow initialization failed: {err}");
+                err
+            })?,
         );
-        #[cfg(not(feature = "csm"))]
-        let csm_shadow_resources: Option<VkCsmShadowResources> = None;
 
         let mut render = VkRenderCore {
             surface_mode: RenderSurfaceMode::HeadlessOffscreen,
@@ -1573,6 +1571,7 @@ impl VkRenderCore {
             transfer,
             scene_descriptors: HashMap::new(),
             shadow_resources,
+            #[cfg(feature = "csm")]
             csm_shadow_resources,
             default_env_id,
             requested_env_id: None,
@@ -1617,10 +1616,7 @@ impl VkRenderCore {
         Ok((render, scene_world))
     }
 
-    pub fn rebuild_swapchain(
-        &mut self,
-        new_size: Extent2D,
-    ) -> Result<(), SwapchainRebuildFailure> {
+    pub fn rebuild_swapchain(&mut self, new_size: Extent2D) -> Result<(), SwapchainRebuildFailure> {
         if self.surface_mode.is_headless() {
             self.window_state.update_curr_size(new_size);
             return Ok(());
@@ -1728,8 +1724,7 @@ impl VkRenderCore {
             Err(err) => {
                 // Old is already retired. Destroy the old handle.
                 if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
-                    self.swapchain_owner
-                        .destroy_retired(&self.device, old_sc);
+                    self.swapchain_owner.destroy_retired(&self.device, old_sc);
                 }
                 return Err(SwapchainRebuildFailure::terminal(format!(
                     "swapchain creation failed after old generation was retired: {err}"
@@ -1754,26 +1749,25 @@ impl VkRenderCore {
         }
 
         // --- Phase 4: Transactional view creation ---
-        let present_images =
-            match vk_init::create_basic_present_views(&self.device, &new_swapchain) {
-                Ok(views) => views,
-                Err(err) => {
-                    // Destroy the partially-created new swapchain.
-                    unsafe {
-                        new_swapchain
-                            .swapchain_loader
-                            .destroy_swapchain(new_swapchain.swapchain, None);
-                    }
-                    // Destroy the already-retired old swapchain.
-                    if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
-                        self.swapchain_owner
-                            .destroy_retired(&self.device, old_sc);
-                    }
-                    return Err(SwapchainRebuildFailure::terminal(format!(
-                        "create_basic_present_views failed during swapchain rebuild: {err}"
-                    )));
+        let present_images = match vk_init::create_basic_present_views(&self.device, &new_swapchain)
+        {
+            Ok(views) => views,
+            Err(err) => {
+                // Destroy the partially-created new swapchain.
+                unsafe {
+                    new_swapchain
+                        .swapchain_loader
+                        .destroy_swapchain(new_swapchain.swapchain, None);
                 }
-            };
+                // Destroy the already-retired old swapchain.
+                if let Some(old_sc) = self.swapchain_owner.swapchain.take() {
+                    self.swapchain_owner.destroy_retired(&self.device, old_sc);
+                }
+                return Err(SwapchainRebuildFailure::terminal(format!(
+                    "create_basic_present_views failed during swapchain rebuild: {err}"
+                )));
+            }
+        };
 
         // --- Phase 5: Install new, destroy retired ---
         // Sync window state to the actual created extent (may differ from requested).
@@ -1784,15 +1778,9 @@ impl VkRenderCore {
         // Keep the retired handle alive until replacement views are published and
         // the new generation is committed. It is no longer current and can never
         // be used for acquire/present or as oldSwapchain again.
-        let retired_swapchain = self
-            .swapchain_owner
-            .swapchain
-            .take()
-            .ok_or_else(|| {
-                SwapchainRebuildFailure::terminal(
-                    "retired generation lost its swapchain handle",
-                )
-            })?;
+        let retired_swapchain = self.swapchain_owner.swapchain.take().ok_or_else(|| {
+            SwapchainRebuildFailure::terminal("retired generation lost its swapchain handle")
+        })?;
 
         // Validate all dependent publication before committing the new owner state.
         // The count was checked above, so publication cannot partially fail.
@@ -1819,7 +1807,6 @@ impl VkRenderCore {
         Ok(())
     }
 }
-
 
 impl VkRender {
     pub fn new(
@@ -2184,11 +2171,7 @@ impl VkRenderCore {
         // The completion token is dropped — we don't need descriptor reset authorization here.
         let descriptor_reset_serial = self.presentation.frame_epoch();
         let _token = unsafe {
-            self.wait_for_frame_fence(
-                frame_sync,
-                frame_slot_index,
-                descriptor_reset_serial,
-            )?
+            self.wait_for_frame_fence(frame_sync, frame_slot_index, descriptor_reset_serial)?
         };
 
         let pending = std::mem::take(&mut self.pending_frame_captures);
@@ -2433,9 +2416,12 @@ impl VkRenderCore {
         PreRenderHook: FnMut(),
         PostRenderHook: FnMut(),
     {
-        use crate::vulkan::vk_frame::{self as frame_mod, elapsed_ms, FrameLifecycleContext, FrameTransaction, PresentFrameOutcome};
-        use crate::vulkan::vk_commands;
         use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot};
+        use crate::vulkan::vk_commands;
+        use crate::vulkan::vk_frame::{
+            self as frame_mod, elapsed_ms, FrameLifecycleContext, FrameTransaction,
+            PresentFrameOutcome,
+        };
 
         let frame_start = Instant::now();
         self.frame_capture_statuses.clear();
@@ -2506,8 +2492,7 @@ impl VkRenderCore {
         let frame_fence_wait_ms = frame.frame_fence_wait_ms;
         let frame_cleanup_ms = frame.frame_cleanup_ms;
         let swapchain_acquire_ms = frame.swapchain_acquire_ms;
-        let mut frame_transaction =
-            FrameTransaction::acquired(!self.surface_mode.is_headless());
+        let mut frame_transaction = FrameTransaction::acquired(!self.surface_mode.is_headless());
 
         // 3. Record this frame.
         let record_start = Instant::now();
@@ -2527,8 +2512,7 @@ impl VkRenderCore {
             Ok(report) => report,
             Err(err) => {
                 error!("RenderGraph execution failed: {err}");
-                let capture_failure =
-                    format!("frame capture skipped: rendergraph failed: {err}");
+                let capture_failure = format!("frame capture skipped: rendergraph failed: {err}");
                 self.fail_due_frame_captures(frame_number, &capture_failure);
                 self.swapchain_owner
                     .request_resize(self.window_state.get_curr_extent());
@@ -2569,16 +2553,14 @@ impl VkRenderCore {
                     ));
                 }
                 frame_transaction.mark_submitted();
-                let present_outcome = drain_plan
-                    .present_after_submit
-                    .then(|| {
-                        frame_mod::present_frame(
-                            &mut self.swapchain_owner,
-                            &self.window_state,
-                            self.surface_mode,
-                            frame,
-                        )
-                    });
+                let present_outcome = drain_plan.present_after_submit.then(|| {
+                    frame_mod::present_frame(
+                        &mut self.swapchain_owner,
+                        &self.window_state,
+                        self.surface_mode,
+                        frame,
+                    )
+                });
                 let present_succeeded = match present_outcome {
                     Some(Ok(outcome)) => Some(outcome.reached_present_engine()),
                     Some(Err(present_err)) => {
@@ -2680,9 +2662,8 @@ impl VkRenderCore {
             frame,
         )?;
         let present_succeeded = present_outcome.reached_present_engine();
-        frame_transaction.finish_after_submit(
-            (!self.surface_mode.is_headless()).then_some(present_succeeded),
-        );
+        frame_transaction
+            .finish_after_submit((!self.surface_mode.is_headless()).then_some(present_succeeded));
         debug_assert!(frame_transaction.fence_signal_queued());
         debug_assert_eq!(
             frame_transaction.requires_swapchain_rebuild(),
@@ -2957,7 +2938,9 @@ impl VkRenderCore {
                 .as_ref()
                 .ok_or_else(|| format!("Env maps missing for {:?}", env_id))?;
 
-            // Use CSM array view when available, otherwise fall back to legacy single-map view.
+            // Use CSM array view when available (feature-enabled), otherwise fall
+            // back to legacy single-map view.
+            #[cfg(feature = "csm")]
             let shadow_refs: Vec<ShadowMapRef> = if let Some(ref csm) = self.csm_shadow_resources {
                 csm.frames
                     .iter()
@@ -2976,6 +2959,16 @@ impl VkRenderCore {
                     })
                     .collect()
             };
+            #[cfg(not(feature = "csm"))]
+            let shadow_refs: Vec<ShadowMapRef> = self
+                .shadow_resources
+                .frames
+                .iter()
+                .map(|f| ShadowMapRef {
+                    image_view: f.shadow_map_view,
+                    sampler: f.shadow_sampler,
+                })
+                .collect();
 
             VkSceneDescriptors::new(
                 &self.device,

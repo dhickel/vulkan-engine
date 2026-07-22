@@ -42,15 +42,18 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 ## Scope and Runtime
 
 - Language/runtime: Rust 2021, desktop Vulkan renderer plus alpha-stage engine support crates/apps.
-- Root binary: `engine` (`src/main.rs`) is a migration stub that prints current example commands.
-- Canonical renderer runtime entrypoints: `src/renderer/examples/*.rs`.
-- Workspace members:
-  - `src/renderer` (`renderer`): renderer runtime and API facade.
+- Root binary: `engine` (`src/main.rs`) is the data-driven project runtime launcher; the root library (`src/lib.rs`) is a thin app-facing facade; renderer examples remain diagnostics and capture entrypoints.
+- Workspace members (membership is not production-readiness):
   - `src/input` (`input`): frame-buffered input broadcast/listener crate.
+  - `src/renderer` (`renderer`): renderer runtime and API facade.
   - `src/audio` (`audio`): alpha audio crate.
   - `src/physics` (`physics`): alpha physics crate.
   - `src/scripting` (`scripting`): alpha scripting crate.
+  - `src/events` (`engine_events`): event bus and lifecycle contracts.
+  - `src/launch_shared` (`launch_shared`): shared launch infrastructure.
   - `apps/dungeon_dogfood` (`dungeon_dogfood`): dogfood application.
+  - `apps/voxel_demo` (`voxel_demo`): configurable procedural-cave application.
+  - `tools/engine_pack` (`engine_pack`): packaging CLI and new-app scaffolding.
 
 ## Source-of-Truth Policy
 
@@ -60,6 +63,7 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 
 ## Documentation Map
 
+- App developer guide: `docs/guide/00-index.md`
 - API usage docs: `docs/api/00-index.md`
 - Internal implementation docs: `docs/internal/00-index.md`
 - Renderer package guide: `src/renderer/AGENTS.md`
@@ -80,14 +84,21 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 
 ## Repository Layout
 
-- `Cargo.toml`: workspace root (`engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `apps/dungeon_dogfood`)
-- `src/main.rs`: migration stub that prints example commands
-- `src/renderer/`: rendering runtime crate
+- `Cargo.toml`: workspace root (`engine`, `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events`, `src/launch_shared`, `apps/dungeon_dogfood`, `apps/voxel_demo`, `tools/engine_pack`)
+- `src/main.rs`: data-driven project launcher binary
+- `src/lib.rs`: thin app-facing library facade
+- `src/launch.rs`: launch command parsing and dispatch
+- `src/runtime.rs`: runtime orchestration
 - `src/input/`: input crate
-- `src/audio/`: audio crate
-- `src/physics/`: physics crate
-- `src/scripting/`: scripting crate
+- `src/renderer/`: rendering runtime crate
+- `src/audio/`: alpha audio crate
+- `src/physics/`: alpha physics crate
+- `src/scripting/`: alpha scripting crate
+- `src/events/`: event contracts and lifecycle bus
+- `src/launch_shared/`: shared launch infrastructure
 - `apps/dungeon_dogfood/`: dogfood application
+- `apps/voxel_demo/`: configurable procedural-cave application
+- `tools/engine_pack/`: packaging CLI and new-app scaffolding
 - `docs/api/`: facade/API learning and usage path
 - `docs/internal/`: internal implementation references
 - `.internal-dev/`: development document store
@@ -102,14 +113,20 @@ Use this file for repo-level orientation. For implementation details, jump to mo
 - `cargo check -p audio`
 - `cargo check -p physics`
 - `cargo check -p scripting`
+- `cargo check -p launch_shared`
 - `cargo check -p engine_pack`
 - `cargo check -p dungeon_dogfood`
+- `cargo check -p voxel_demo`
+- `cargo test -p engine`
 - `cargo test -p input`
 - `cargo test -p engine_events`
 - `cargo test -p audio`
 - `cargo test -p physics`
 - `cargo test -p scripting`
+- `cargo test -p launch_shared`
 - `cargo test -p renderer`
+- `cargo test -p dungeon_dogfood`
+- `cargo test -p voxel_demo`
 
 Headless smoke pattern:
 

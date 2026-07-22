@@ -85,8 +85,7 @@ impl RenderPassNode for ShadowPass {
             let Some(corners) = frustum_corners_from_vp(&vp) else {
                 return Ok(());
             };
-            let (camera_near, camera_far) =
-                derive_camera_near_far_from_corners(&view, &corners);
+            let (camera_near, camera_far) = derive_camera_near_far_from_corners(&view, &corners);
             let camera_far = camera_far.min(crate::vulkan::vk_shadow::CSM_MAX_DISTANCE);
 
             let cascades = match compute_csm_cascades(
@@ -174,10 +173,8 @@ impl RenderPassNode for ShadowPass {
             for (i, cascade) in cascades.iter().enumerate() {
                 let layer_idx = i as u32;
 
-                let visible = cull_casters_for_cascade(
-                    shadow_draws.iter(),
-                    &cascade.light_view_proj,
-                );
+                let visible =
+                    cull_casters_for_cascade(shadow_draws.iter(), &cascade.light_view_proj);
 
                 let layer_view = csm_frame.csm_layer_views[layer_idx as usize];
                 let depth_attachment = vk::RenderingAttachmentInfo::default()
@@ -215,8 +212,7 @@ impl RenderPassNode for ShadowPass {
                     }
 
                     let push_consts = PushConstShadowDepth {
-                        light_model_view_projection: cascade.light_view_proj
-                            * draw.transform,
+                        light_model_view_projection: cascade.light_view_proj * draw.transform,
                         vertex_buffer_addr: draw.vertex_buffer_addr,
                         _pad: [0; 2],
                     };
@@ -252,9 +248,7 @@ impl RenderPassNode for ShadowPass {
                             vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                                 | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
                         )
-                        .src_access_mask(
-                            vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                        )
+                        .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
                         .dst_stage_mask(
                             vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                                 | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
@@ -275,8 +269,8 @@ impl RenderPassNode for ShadowPass {
                         });
 
                     let layer_barriers = [layer_barrier];
-                    let dep_info = vk::DependencyInfo::default()
-                        .image_memory_barriers(&layer_barriers);
+                    let dep_info =
+                        vk::DependencyInfo::default().image_memory_barriers(&layer_barriers);
                     unsafe {
                         device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
                     }
@@ -304,8 +298,7 @@ impl RenderPassNode for ShadowPass {
                 });
 
             let read_barriers = [read_barrier];
-            let dep_info =
-                vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
+            let dep_info = vk::DependencyInfo::default().image_memory_barriers(&read_barriers);
             unsafe {
                 device.cmd_pipeline_barrier2(cmd_buffer, &dep_info);
             }
@@ -333,10 +326,8 @@ impl ShadowPass {
             (shadow_frame.shadow_map.image, shadow_frame.shadow_map_view)
         };
 
-        let light_view_proj = compute_draw_light_view_projection(
-            light.direction,
-            shadow_draws.iter(),
-        );
+        let light_view_proj =
+            compute_draw_light_view_projection(light.direction, shadow_draws.iter());
         log::debug!(
             "legacy shadow frame {}: draws={} fitted={}",
             frame_index,

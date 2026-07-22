@@ -13,7 +13,6 @@
 | `scene` | `src/renderer/src/scene/` | Scene graph hierarchy, render submission flattening | `data::handles`, `data::gpu_data` |
 | `rendergraph` | `src/renderer/src/rendergraph/` | Fixed pass orchestration (prepare → shadow → skybox → geometry → copy → imgui → capture → terminal present) | `vulkan::vk_render`, `scene` |
 | `debug_ui` | `src/renderer/src/debug_ui/` | ImGui debug overlay, timing/spike tracking | `imgui`, `data::handles` |
-| `texture` | `src/renderer/src/texture.rs` | **Legacy stub** — single comment line, retained for experimentation | — |
 | `input` | `src/input/src/lib.rs` | Layered input dispatch, action maps, polling snapshots | `winit` |
 
 The workspace also includes `apps/dungeon_dogfood/` — a dogfood application that exercises the engine with level loading, collision, marker-based content, app-owned runtime primitives, and caller-view rendering.
@@ -66,6 +65,6 @@ App-owned custom loops can instead build a `CameraView` from app camera/gameplay
 
 ## See Also
 
-- [02-renderer-internals.md](02-renderer-internals.md) — frame lifecycle deep dive
+- [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md) — frame lifecycle deep dive
 - [src/renderer/AGENTS.md](../../src/renderer/AGENTS.md) — renderer package guide
 - [src/renderer/src/vulkan/AGENTS.md](../../src/renderer/src/vulkan/AGENTS.md) — Vulkan subsystem guide

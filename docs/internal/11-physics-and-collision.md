@@ -35,8 +35,6 @@ The alpha `physics` crate wraps Rapier while exposing engine-owned IDs:
 - `PhysicsWorld::create_body` and `create_collider` validate duplicate IDs, missing parents, finite transforms, and positive dimensions.
 - `PhysicsWorld::cast_ray` returns `RayHit` using durable body/collider IDs.
 - `PhysicsWorld::step` records collision and trigger `Enter`, `Stay`, and `Exit` transitions.
-- Deprecated raw Rapier handle helpers remain for legacy smoke compatibility only.
-
 The crate does not depend on renderer internals, windowing, scene graph storage, editor UI, or package loading.
 
 ### 3.1 Convex Hull

@@ -148,6 +148,6 @@ Use true headless draw-target capture only when the event change also affects vi
 
 ## 10. See Also
 
-- [Internal Architecture](01-architecture.md)
+- [Rendering Pipeline Mental Model](01-rendering-pipeline-mental-model.md)
 - [Input winit Event Pump Integration](09-input-winit-integration.md)
 - [API Events and Lifecycle](../api/12-events-and-lifecycle.md)

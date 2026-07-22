@@ -16,6 +16,7 @@ This chapter is for students, hobbyists, and indie developers using the facade r
 - Data-driven projects run through the root launcher: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml`.
 - Renderer examples remain facade lifecycle diagnostics: `cargo run -p renderer --example api_test`.
 - Custom Rust apps run through their app crate: `cargo run -p <app>`.
+- `take_startup_scene()` transfers the optional preloaded startup scene out of the renderer once; after that, the app owns scene construction and mutation.
 - Two frame APIs exist (renderer compatibility path):
   - single-call path: `render_scene(...)`
   - explicit frame path: `begin_frame(...)`, `render_scene_in_frame(...)`, `end_frame(...)`
@@ -32,6 +33,8 @@ This chapter is for students, hobbyists, and indie developers using the facade r
   backend previously panicked or returned a terminal Vulkan failure rejects later backend work with
   `RendererError::BackendPoisoned`.
 - Rendering auto-pumps deferred asset work each frame; explicit pumping is available via `pump_asset_tasks(...)`.
+- Resize handling is explicit: call `resize(width, height)` from window resize events, and use `resize_requested()` to observe a pending swapchain rebuild request.
+- Render hooks are safe facade callbacks registered with `set_pre_render_hook(...)` and `set_post_render_hook(...)`; they do not expose raw Vulkan handles and hook failures are logged without failing the frame. See [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md).
 - Debug UI is now renderer-managed and can be controlled via:
   - `toggle_debug_ui()`, `set_debug_ui_visible(...)`, `is_debug_ui_visible()`
   - `register_debug_view(...)`, `unregister_debug_view(...)`, `set_debug_view_enabled(...)`
@@ -45,6 +48,8 @@ This chapter is for students, hobbyists, and indie developers using the facade r
 - Legacy renderer frame APIs emit renderer-owned lifecycle events. Apps using app-owned input/camera
   and `render_scene_with_view(...)` should prefer `engine::frame::begin_app_frame(...)` and
   `engine::frame::end_app_frame(...)` over relying on renderer-owned lifecycle state.
+- `camera_position()`, `set_camera_position(...)`, and `set_camera_look_at(...)` operate on the renderer-owned compatibility camera. Custom apps should prefer app-owned camera state and caller-provided `CameraView` values.
+- `environment_runtime_status()` reports requested, active, and transitioning environment-map runtime state for diagnostics and debug UI.
 - Default runtime toggle for debug UI visibility is backquote (`\``) in `update_input(...)`.
 - Headless validation uses `Renderer::new_headless(config)` and `render_scene_headless(...)`; do not set `config.headless = true` on the windowed `Renderer::new(config, window)` path.
 
@@ -86,6 +91,25 @@ Snippet Type: Real (renderer compatibility path)
 ```rust
 // Single-call API (src/renderer/src/api/renderer.rs)
 let outcome = renderer.render_scene(&window, &mut scene)?;
+```
+
+Snippet Type: Real
+```rust
+// Window resize path (src/renderer/src/api/renderer.rs)
+renderer.resize(size.width, size.height)?;
+if renderer.resize_requested() {
+    // keep the event loop alive; a later frame or resize call will complete rebuild work
+}
+```
+
+Snippet Type: Real
+```rust
+// Render hook registration API
+renderer.set_pre_render_hook(Some(renderer::boxed_render_hook(|ctx| {
+    log::trace!("pre-render frame {}", ctx.frame_index);
+    Ok(())
+})));
+renderer.set_post_render_hook(None);
 ```
 
 Snippet Type: Real
@@ -140,6 +164,7 @@ Every loop tick:
 - Calling `render_scene(...)` while an explicit frame is open returns `RendererError::InvalidState`.
 - Calling `begin_frame(...)` twice without `end_frame(...)` returns invalid state.
 - Calling `render_scene_in_frame(...)` twice for one `FrameContext` is invalid.
+- Calling `resize(...)` while an explicit frame is open returns `RendererError::InvalidState`.
 - `SkippedAcquireUnavailable` is transient and does not request a resize or rebuild; keep the loop alive and retry a later frame.
 - Resize flow can produce repeated `SkippedResizePending` outcomes until resize is serviced.
   Zero requested or capability-selected extents remain pending without Vulkan swapchain creation.
@@ -155,6 +180,7 @@ Every loop tick:
 - Running the wrong target is a common startup trap: use root `cargo run -- --project ...` for project manifests, renderer examples for facade diagnostics, and app crates for custom Rust behavior.
 - Registering app UI marks imgui/app chrome as active for input capture, cursor release, and
   built-in FPS-controller suppression.
+- `take_startup_scene()` is one-shot; subsequent calls return `None`.
 
 ## 7. Debugging Playbook
 - Step 1: choose the right runtime path: `cargo run -- --project apps/dungeon_dogfood/engine.project.toml` for project launcher issues, or `cargo run -p renderer --example api_test` for renderer facade diagnostics.
@@ -167,6 +193,7 @@ Every loop tick:
 ## 8. Cross-Module Links
 - Facade API surface: `src/renderer/src/api/mod.rs`
 - Renderer lifecycle implementation: `src/renderer/src/api/renderer.rs`
+- Render hook contract: `docs/api/05-render-hooks-and-extension-points.md`
 - Debug UI manager internals: `src/renderer/src/debug_ui/mod.rs`
 - Renderer facade diagnostic example: `src/renderer/examples/api_test.rs`
 - Runtime launcher docs: `docs/api/11-runtime-project-launcher.md`

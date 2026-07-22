@@ -8,8 +8,8 @@ Use this guide for physics body/collider identity, simulation stepping, and engi
 
 - Durable `PhysicsBodyId` and `PhysicsColliderId` for authored identity
 - `PhysicsWorld` wrapping Rapier's rigid body and collider sets
-- Collision and contact force event converters that bridge to `engine_events` types
-- Query interfaces for ray casts and spatial lookups
+- Collision, trigger, and ray-query event converters that bridge to `engine_events` types
+- Ray casts plus durable-ID body/collider lookups
 
 ## Public API
 
@@ -29,7 +29,7 @@ Use this guide for physics body/collider identity, simulation stepping, and engi
 - `PhysicsWorld` does **not** own an `EventBus` — callers pass an external bus to `emit_contact_records()` for event emission
 - Bodies and colliders are identified by durable string IDs
 - Simulation step is explicit and synchronous
-- `From` impls exist between crate-local IDs (`PhysicsBodyId`, `PhysicsColliderId`) and `engine_events` ID types
+- `PhysicsBodyId` and `PhysicsColliderId` are re-exported from `engine_events`; there are no crate-local wrapper IDs
 
 ## Current Alpha Status
 
@@ -39,9 +39,11 @@ Use this guide for physics body/collider identity, simulation stepping, and engi
 - Dogfood app has separate collision (`apps/dungeon_dogfood/src/collision.rs`)
 - Track for full engine integration: Track E (future sprint)
 
-## Deprecation Notice
+## Deprecation Status
 
-Compatibility helpers exist for the original smoke tests that use Rapier handles directly (`create_dynamic_body`, `create_static_body`, `attach_cuboid`, `body_position`). New code should use `PhysicsBodyId`/`PhysicsColliderId`.
+No public item is declared deprecated. The public authored API uses durable
+`PhysicsBodyId` / `PhysicsColliderId` IDs exclusively. Rapier handles are
+internal runtime detail and are not exposed in public signatures.
 
 ## Working Rules
 

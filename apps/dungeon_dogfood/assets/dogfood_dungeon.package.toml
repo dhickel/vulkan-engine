@@ -1,0 +1,68 @@
+format_version = 1
+package_id = "dogfood_dungeon"
+display_name = "Dungeon Dogfood Assets"
+
+[[assets]]
+id = "dogfood_dungeon.model.torch_sconce"
+kind = "model"
+path = "models/props/torch_sconce/scene.gltf"
+display_name = "Torch Sconce"
+
+[[assets]]
+id = "dogfood_dungeon.model.crate_a"
+kind = "model"
+path = "models/props/crate_a/wooden_crate_01_4k.gltf"
+display_name = "Wooden Crate A"
+
+[[assets]]
+id = "dogfood_dungeon.texture.wall_base_color"
+kind = "texture"
+path = "textures/pbr/stone_rough/textures/rabdentse_ruins_wall_diff_4k.jpg"
+display_name = "Stone Wall Base Color"
+
+[[assets]]
+id = "dogfood_dungeon.texture.wall_normal"
+kind = "texture"
+path = "textures/pbr/stone_rough/textures/rabdentse_ruins_wall_nor_gl_4k.jpg"
+display_name = "Stone Wall Normal"
+
+[[assets]]
+id = "dogfood_dungeon.texture.wall_arm"
+kind = "texture"
+path = "textures/pbr/stone_rough/textures/rabdentse_ruins_wall_arm_4k.jpg"
+display_name = "Stone Wall ARM"
+
+[[assets]]
+id = "dogfood_dungeon.texture.floor_base_color"
+kind = "texture"
+path = "textures/pbr/stone_floor/textures/stone_embedded_concrete_diff_4k.jpg"
+display_name = "Stone Floor Base Color"
+
+[[assets]]
+id = "dogfood_dungeon.texture.floor_normal"
+kind = "texture"
+path = "textures/pbr/stone_floor/textures/stone_embedded_concrete_nor_gl_4k.jpg"
+display_name = "Stone Floor Normal"
+
+[[assets]]
+id = "dogfood_dungeon.texture.floor_arm"
+kind = "texture"
+path = "textures/pbr/stone_floor/textures/stone_embedded_concrete_arm_4k.jpg"
+display_name = "Stone Floor ARM"
+
+[[assets]]
+id = "dogfood_dungeon.environment.neutral"
+kind = "environment"
+path = "environments/dungeon_neutral.exr"
+display_name = "Dungeon Neutral Environment"
+
+[[assets]]
+id = "dogfood_dungeon.audio.startup_ping"
+kind = "audio"
+path = "audio/startup_ping.wav"
+display_name = "Startup Ping"
+
+[assets.metadata.audio]
+format = "wav"
+usage = "ui"
+default_gain = 0.15

@@ -1,6 +1,6 @@
 # Scene Internals — Flattening & Submission
 
-> Source: [`src/renderer/src/scene/scene_world.rs`](../src/renderer/src/scene/scene_world.rs), [`src/renderer/src/scene/render_submission.rs`](../src/renderer/src/scene/render_submission.rs) — no legacy docs consulted.
+> Source: [`src/renderer/src/scene/scene_world.rs`](../../src/renderer/src/scene/scene_world.rs), [`src/renderer/src/scene/render_submission.rs`](../../src/renderer/src/scene/render_submission.rs) — no legacy docs consulted.
 
 ## Scene Data Model
 
@@ -184,5 +184,5 @@ The directional-light store uses the same slot+generation lifecycle, while the p
 ## See Also
 
 - [../api/03-scene.md](../api/03-scene.md) — public scene API
-- [02-renderer-internals.md](02-renderer-internals.md) — how submission feeds the rendergraph
-- [src/renderer/src/scene/scene_world.rs](../src/renderer/src/scene/scene_world.rs) — implementation
+- [04-api-to-backend-handoff.md](04-api-to-backend-handoff.md) — how submission feeds the rendergraph
+- [src/renderer/src/scene/scene_world.rs](../../src/renderer/src/scene/scene_world.rs) — implementation

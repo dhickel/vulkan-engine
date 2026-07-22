@@ -11,7 +11,7 @@
 - `Renderer::set_pre_render_hook(Option<RenderHook>)` and `set_post_render_hook(Option<RenderHook>)` accept safe, API-level callbacks.
 - `RenderHookContext` exposes `frame_index: u64`, `viewport_size: (u32, u32)`, and `depth_texture: Option<TextureHandle>`.
 - Hooks do **not** expose command buffers, descriptor sets, rendergraph state, or any raw Vulkan handles.
-- `HookError` variants: `Unsupported(String)`, `Registration(String)`, `Invocation(String)` — see [`src/renderer/src/api/errors.rs`](../src/renderer/src/api/errors.rs).
+- `HookError` variants: `Unsupported(String)`, `Registration(String)`, `Invocation(String)` — see [`src/renderer/src/api/errors.rs`](../../src/renderer/src/api/errors.rs).
 - Hook errors are **logged** and the frame continues; they are **not** escalated to `RendererError`.
 - Panics inside hooks are caught and converted to `HookError::Invocation`.
 - Pre-hook fires before rendergraph execution; post-hook fires after successful rendergraph execution.
@@ -36,7 +36,7 @@ These paths are not beginner-stable and do not imply API compatibility across al
 ## See Also
 
 - [05-render-hooks-and-extension-points.md](05-render-hooks-and-extension-points.md) — canonical documentation
-- [02-renderer.md](02-renderer.md) — frame lifecycle
+- [02-renderer-lifecycle-and-frame-api.md](02-renderer-lifecycle-and-frame-api.md) — frame lifecycle
 - [08-debug.md](08-debug.md) — debug views and timing capture
 - [12-events-and-lifecycle.md](12-events-and-lifecycle.md) — event observation
 - [Internal: Rendergraph Dependencies](../internal/07-rendergraph-dependencies-and-aliasing.md) — pass ordering and resource contracts

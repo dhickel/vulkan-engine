@@ -82,7 +82,7 @@ Rendergraph resource aliasing is not implemented. Frame draw/depth, present, and
 
 ## See Also
 
-- [02-renderer-internals.md](02-renderer-internals.md) — frame lifecycle
+- [05-vulkan-sync-and-frame-lifecycle.md](05-vulkan-sync-and-frame-lifecycle.md) — frame lifecycle
 - [07-rendergraph-dependencies-and-aliasing.md](07-rendergraph-dependencies-and-aliasing.md) — current transition ownership and future graph direction
-- [08-shaders.md](08-shaders.md) — shader and descriptor contracts
+- [14-renderer-descriptor-abi.md](14-renderer-descriptor-abi.md) — shader and descriptor contracts
 - [`src/renderer/src/rendergraph/mod.rs`](../../src/renderer/src/rendergraph/mod.rs) — implementation

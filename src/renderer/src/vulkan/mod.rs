@@ -6,7 +6,7 @@
 pub(crate) mod vk_commands;
 pub mod vk_debug;
 pub mod vk_descriptor;
-#[allow(dead_code)]
+#[cfg(test)]
 mod vk_device_budget;
 pub(crate) mod vk_frame;
 pub mod vk_init;

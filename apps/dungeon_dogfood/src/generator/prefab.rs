@@ -1599,21 +1599,6 @@ impl PrefabCatalog {
         &self.variants
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn variants_by_role(&self, role: SocketRole) -> Vec<&PrefabVariant> {
-        self.variants
-            .iter()
-            .filter(|v| v.sockets.iter().any(|s| s.role == role))
-            .collect()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn variants_by_tag(&self, tag: &str) -> Vec<&PrefabVariant> {
-        self.variants
-            .iter()
-            .filter(|v| v.tags.iter().any(|t| t == tag))
-            .collect()
-    }
 }
 
 // ─── File collection ────────────────────────────────────────────────────────

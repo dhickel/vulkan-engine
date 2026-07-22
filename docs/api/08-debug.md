@@ -1,6 +1,6 @@
 # Debug UI & Timing Capture
 
-> Source: [`src/renderer/src/debug_ui/mod.rs`](../src/renderer/src/debug_ui/mod.rs), [`src/renderer/src/api/renderer.rs`](../src/renderer/src/api/renderer.rs) — no legacy docs consulted.
+> Source: [`src/renderer/src/debug_ui/mod.rs`](../../src/renderer/src/debug_ui/mod.rs), [`src/renderer/src/api/renderer.rs`](../../src/renderer/src/api/renderer.rs) — no legacy docs consulted.
 
 ## Overview
 
@@ -32,7 +32,7 @@ renderer.set_console_ui_visible(true);
 renderer.toggle_debug_overlay_ui();
 ```
 
-Defined at [`renderer.rs:262-280`](../src/renderer/src/api/renderer.rs:262).
+Defined at [`renderer.rs:262-280`](../../src/renderer/src/api/renderer.rs#L262).
 
 ## Custom Debug Views
 
@@ -66,7 +66,7 @@ renderer.set_debug_view_enabled(view_id, false);
 renderer.unregister_debug_view(view_id);
 ```
 
-Defined at [`renderer.rs:244-259`](../src/renderer/src/api/renderer.rs:244) and [`debug_ui/mod.rs`](../src/renderer/src/debug_ui/mod.rs).
+Defined at [`renderer.rs:244-259`](../../src/renderer/src/api/renderer.rs#L244) and [`debug_ui/mod.rs`](../../src/renderer/src/debug_ui/mod.rs).
 
 ## Timing Capture (JSONL)
 
@@ -88,7 +88,7 @@ let output_path = renderer.start_debug_timing_recording()?;
 
 ### CLI Integration
 
-Examples support launch flags (see [`examples/common/mod.rs`](../src/renderer/examples/common/mod.rs)):
+Examples support launch flags (see [`examples/common/mod.rs`](../../src/renderer/examples/common/mod.rs)):
 
 ```sh
 # Record 10 seconds at 50ms intervals
@@ -129,6 +129,6 @@ renderer-owned capture path.
 
 ## See Also
 
-- [02-renderer.md](02-renderer.md) — debug API on the Renderer
-- [src/renderer/src/debug_ui/mod.rs](../src/renderer/src/debug_ui/mod.rs) — debug UI implementation
-- [src/renderer/examples/common/mod.rs](../src/renderer/examples/common/mod.rs) — CLI argument parsing
+- [02-renderer-lifecycle-and-frame-api.md](02-renderer-lifecycle-and-frame-api.md) — debug API on the Renderer
+- [src/renderer/src/debug_ui/mod.rs](../../src/renderer/src/debug_ui/mod.rs) — debug UI implementation
+- [src/renderer/examples/common/mod.rs](../../src/renderer/examples/common/mod.rs) — CLI argument parsing

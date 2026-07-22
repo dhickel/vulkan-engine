@@ -11,9 +11,7 @@
 //! reach `VkRenderCore` or presentation state.
 
 use crate::api::config::{CaptureTarget, DueFrameCapture, FrameCaptureStatus, VisualTuning};
-use crate::data::data_cache::{
-    VkCache, VkDataCache, VkPipelineType,
-};
+use crate::data::data_cache::{VkCache, VkDataCache, VkPipelineType};
 use crate::data::gpu_data::{
     AsByteSlice, CopiedMaterialDrawRecord, EnvironmentUBO, RenderObject, SceneDataUBO,
     VkModelPushConsts,
@@ -22,12 +20,8 @@ use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
 use crate::scene::render_submission::RenderSubmission;
-use crate::vulkan::vk_debug::{
-    record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture,
-};
-use crate::vulkan::vk_frame::{
-    imgui_pass_plan, ImguiPassPlan,
-};
+use crate::vulkan::vk_debug::{record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture};
+use crate::vulkan::vk_frame::{imgui_pass_plan, ImguiPassPlan};
 use crate::vulkan::vk_render::VkRenderCore;
 use crate::vulkan::vk_shadow::compute_draw_light_view_projection;
 #[cfg(feature = "csm")]
@@ -69,14 +63,19 @@ pub(crate) struct RecordingDispatcher<'a> {
     frame_capture_statuses: &'a mut Vec<FrameCaptureStatus>,
     surface_mode: RenderSurfaceMode,
     shadow_resources: &'a crate::vulkan::vk_shadow::VkShadowResources,
+    #[cfg(feature = "csm")]
     csm_shadow_resources: Option<&'a crate::vulkan::vk_shadow::VkCsmShadowResources>,
     gpu_timing: &'a mut crate::vulkan::vk_render::GpuTimingState,
 }
 
-pub(crate) struct PrepareTargetsRecording<'a> { device: &'a ash::Device, frame: &'a VkFrame }
+pub(crate) struct PrepareTargetsRecording<'a> {
+    device: &'a ash::Device,
+    frame: &'a VkFrame,
+}
 pub(crate) struct ShadowRecording<'a> {
     device: &'a ash::Device,
     shadow_resources: &'a crate::vulkan::vk_shadow::VkShadowResources,
+    #[cfg(feature = "csm")]
     csm_shadow_resources: Option<&'a crate::vulkan::vk_shadow::VkCsmShadowResources>,
     vulkan_cache: &'a VkCache,
     data_cache: &'a Arc<VkDataCache>,
@@ -86,80 +85,201 @@ pub(crate) struct ShadowRecording<'a> {
     submission: &'a RenderSubmission,
 }
 pub(crate) struct SkyboxRecording<'a> {
-    device: &'a ash::Device, window_state: &'a VkWindowState, vulkan_cache: &'a VkCache,
-    data_cache: &'a Arc<VkDataCache>, sky_box: &'a mut crate::vulkan::vk_render::SkyBox,
-    visual_tuning: VisualTuning, scene_data: &'a SceneDataUBO, active_env_id: EnvironmentHandle,
-    frame: &'a mut VkFrame, submission: &'a RenderSubmission,
+    device: &'a ash::Device,
+    window_state: &'a VkWindowState,
+    vulkan_cache: &'a VkCache,
+    data_cache: &'a Arc<VkDataCache>,
+    sky_box: &'a mut crate::vulkan::vk_render::SkyBox,
+    visual_tuning: VisualTuning,
+    scene_data: &'a SceneDataUBO,
+    active_env_id: EnvironmentHandle,
+    frame: &'a mut VkFrame,
+    submission: &'a RenderSubmission,
 }
 pub(crate) struct GeometryRecording<'a> {
-    device: &'a ash::Device, window_state: &'a VkWindowState, vulkan_cache: &'a VkCache,
-    data_cache: &'a Arc<VkDataCache>, scene_descriptors: &'a mut HashMap<EnvironmentHandle, VkSceneDescriptors>,
-    visual_tuning: VisualTuning, scene_data: &'a SceneDataUBO, active_env_id: EnvironmentHandle,
-    uv_fallback_warnings: &'a Mutex<HashSet<(MeshHandle, MaterialHandle)>>, next_submit_serial: u64,
-    frame: &'a mut VkFrame, submission: &'a RenderSubmission,
+    device: &'a ash::Device,
+    window_state: &'a VkWindowState,
+    vulkan_cache: &'a VkCache,
+    data_cache: &'a Arc<VkDataCache>,
+    scene_descriptors: &'a mut HashMap<EnvironmentHandle, VkSceneDescriptors>,
+    visual_tuning: VisualTuning,
+    scene_data: &'a SceneDataUBO,
+    active_env_id: EnvironmentHandle,
+    uv_fallback_warnings: &'a Mutex<HashSet<(MeshHandle, MaterialHandle)>>,
+    next_submit_serial: u64,
+    frame: &'a mut VkFrame,
+    submission: &'a RenderSubmission,
 }
-pub(crate) struct PresentCopyRecording<'a> { device: &'a ash::Device, window_state: &'a VkWindowState, frame: &'a mut VkFrame }
+pub(crate) struct PresentCopyRecording<'a> {
+    device: &'a ash::Device,
+    window_state: &'a VkWindowState,
+    frame: &'a mut VkFrame,
+}
 pub(crate) struct ImguiRecording<'a> {
-    device: &'a ash::Device, window_state: &'a VkWindowState, imgui: &'a mut Option<VkImgui>,
-    debug_ui: &'a mut DebugUiManager, frame: &'a mut VkFrame,
+    device: &'a ash::Device,
+    window_state: &'a VkWindowState,
+    imgui: &'a mut Option<VkImgui>,
+    debug_ui: &'a mut DebugUiManager,
+    frame: &'a mut VkFrame,
 }
 pub(crate) struct DebugCaptureRecording<'a> {
-    device: &'a ash::Device, allocator: &'a Arc<Mutex<Allocator>>, window_state: &'a VkWindowState,
-    present_format: vk::Format, due_frame_captures: &'a mut Vec<DueFrameCapture>,
-    pending_frame_captures: &'a mut Vec<PendingFrameCapture>, frame_capture_statuses: &'a mut Vec<FrameCaptureStatus>,
+    device: &'a ash::Device,
+    allocator: &'a Arc<Mutex<Allocator>>,
+    window_state: &'a VkWindowState,
+    present_format: vk::Format,
+    due_frame_captures: &'a mut Vec<DueFrameCapture>,
+    pending_frame_captures: &'a mut Vec<PendingFrameCapture>,
+    frame_capture_statuses: &'a mut Vec<FrameCaptureStatus>,
     frame: &'a VkFrame,
 }
-pub(crate) struct TerminalPresentRecording<'a> { device: &'a ash::Device, surface_mode: RenderSurfaceMode, frame: &'a mut VkFrame }
+pub(crate) struct TerminalPresentRecording<'a> {
+    device: &'a ash::Device,
+    surface_mode: RenderSurfaceMode,
+    frame: &'a mut VkFrame,
+}
 
 impl PrepareTargetsRecording<'_> {
     pub(crate) fn prepare_draw_targets(&mut self) {
         let cmd_buffer = self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0];
-        vk_util::transition_image(self.device, cmd_buffer, self.frame.draw.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::GENERAL);
-        vk_util::transition_image(self.device, cmd_buffer, self.frame.depth.image, vk::ImageLayout::UNDEFINED, vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL);
-        vk_util::transition_image(self.device, cmd_buffer, self.frame.draw.image, vk::ImageLayout::GENERAL, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        vk_util::transition_image(
+            self.device,
+            cmd_buffer,
+            self.frame.draw.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::GENERAL,
+        );
+        vk_util::transition_image(
+            self.device,
+            cmd_buffer,
+            self.frame.depth.image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        );
+        vk_util::transition_image(
+            self.device,
+            cmd_buffer,
+            self.frame.draw.image,
+            vk::ImageLayout::GENERAL,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        );
     }
 }
 
 impl ShadowRecording<'_> {
-    pub(crate) fn shadow_resources(&self) -> &crate::vulkan::vk_shadow::VkShadowResources { self.shadow_resources }
-    pub(crate) fn csm_shadow_resources(&self) -> Option<&crate::vulkan::vk_shadow::VkCsmShadowResources> { self.csm_shadow_resources }
-    pub(crate) fn device(&self) -> &ash::Device { self.device }
-    pub(crate) fn vulkan_cache(&self) -> &VkCache { self.vulkan_cache }
-    pub(crate) fn resolve_shadow_draw_objects(&mut self) -> Vec<RenderObject> {
-        resolve_shadow_draw_objects_impl(self.data_cache, self.uv_fallback_warnings, self.next_submit_serial, self.submission)
+    pub(crate) fn shadow_resources(&self) -> &crate::vulkan::vk_shadow::VkShadowResources {
+        self.shadow_resources
     }
-    pub(crate) fn frame_index(&self) -> u32 { self.frame.index }
-    pub(crate) fn submission(&self) -> &RenderSubmission { self.submission }
-    pub(crate) fn cmd_buffer(&self) -> vk::CommandBuffer { self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0] }
+    #[cfg(feature = "csm")]
+    pub(crate) fn csm_shadow_resources(
+        &self,
+    ) -> Option<&crate::vulkan::vk_shadow::VkCsmShadowResources> {
+        self.csm_shadow_resources
+    }
+    pub(crate) fn device(&self) -> &ash::Device {
+        self.device
+    }
+    pub(crate) fn vulkan_cache(&self) -> &VkCache {
+        self.vulkan_cache
+    }
+    pub(crate) fn resolve_shadow_draw_objects(&mut self) -> Vec<RenderObject> {
+        resolve_shadow_draw_objects_impl(
+            self.data_cache,
+            self.uv_fallback_warnings,
+            self.next_submit_serial,
+            self.submission,
+        )
+    }
+    pub(crate) fn frame_index(&self) -> u32 {
+        self.frame.index
+    }
+    pub(crate) fn submission(&self) -> &RenderSubmission {
+        self.submission
+    }
+    pub(crate) fn cmd_buffer(&self) -> vk::CommandBuffer {
+        self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0]
+    }
 }
 
 impl SkyboxRecording<'_> {
     pub(crate) fn draw_skybox_from_submission(&mut self) {
-        draw_skybox_from_submission_impl(self.device, self.window_state, self.vulkan_cache, self.data_cache, self.sky_box, self.visual_tuning, self.scene_data, self.active_env_id, self.frame, self.submission);
+        draw_skybox_from_submission_impl(
+            self.device,
+            self.window_state,
+            self.vulkan_cache,
+            self.data_cache,
+            self.sky_box,
+            self.visual_tuning,
+            self.scene_data,
+            self.active_env_id,
+            self.frame,
+            self.submission,
+        );
     }
 }
 impl GeometryRecording<'_> {
     pub(crate) fn draw_geometry_from_submission(&mut self) {
-        draw_geometry_from_submission_impl(self.device, self.window_state, self.vulkan_cache, self.data_cache, self.scene_descriptors, self.visual_tuning, self.scene_data, self.active_env_id, self.uv_fallback_warnings, self.next_submit_serial, self.frame, self.submission);
+        draw_geometry_from_submission_impl(
+            self.device,
+            self.window_state,
+            self.vulkan_cache,
+            self.data_cache,
+            self.scene_descriptors,
+            self.visual_tuning,
+            self.scene_data,
+            self.active_env_id,
+            self.uv_fallback_warnings,
+            self.next_submit_serial,
+            self.frame,
+            self.submission,
+        );
     }
 }
 impl PresentCopyRecording<'_> {
-    pub(crate) fn copy_draw_to_present(&mut self) { copy_draw_to_present_impl(self.device, self.window_state, self.frame); }
-    pub(crate) fn prepare_present_color_attachment(&mut self) { prepare_present_color_attachment_impl(self.device, self.window_state, self.frame); }
+    pub(crate) fn copy_draw_to_present(&mut self) {
+        copy_draw_to_present_impl(self.device, self.window_state, self.frame);
+    }
+    pub(crate) fn prepare_present_color_attachment(&mut self) {
+        prepare_present_color_attachment_impl(self.device, self.window_state, self.frame);
+    }
 }
 impl ImguiRecording<'_> {
-    pub(crate) fn draw_imgui_to_present(&mut self) -> Result<(), String> { draw_imgui_to_present_impl(self.device, self.window_state, self.imgui, self.debug_ui, self.frame) }
+    pub(crate) fn draw_imgui_to_present(&mut self) -> Result<(), String> {
+        draw_imgui_to_present_impl(
+            self.device,
+            self.window_state,
+            self.imgui,
+            self.debug_ui,
+            self.frame,
+        )
+    }
 }
 impl DebugCaptureRecording<'_> {
     pub(crate) fn record_due_frame_captures(&mut self) {
-        record_due_frame_captures_impl(self.device, self.allocator, self.window_state, self.present_format, self.due_frame_captures, self.pending_frame_captures, self.frame_capture_statuses, self.frame);
+        record_due_frame_captures_impl(
+            self.device,
+            self.allocator,
+            self.window_state,
+            self.present_format,
+            self.due_frame_captures,
+            self.pending_frame_captures,
+            self.frame_capture_statuses,
+            self.frame,
+        );
     }
 }
 impl TerminalPresentRecording<'_> {
-    pub(crate) fn is_headless(&self) -> bool { self.surface_mode.is_headless() }
+    pub(crate) fn is_headless(&self) -> bool {
+        self.surface_mode.is_headless()
+    }
     pub(crate) fn transition_present_for_present(&mut self) {
         let cmd_buffer = self.frame.cmd_pools.get(VkQueueType::Graphics).buffers[0];
-        vk_util::transition_image(self.device, cmd_buffer, self.frame.present_image, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR);
+        vk_util::transition_image(
+            self.device,
+            cmd_buffer,
+            self.frame.present_image,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::PRESENT_SRC_KHR,
+        );
     }
 }
 
@@ -203,6 +323,7 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         frame_capture_statuses: &mut core.frame_capture_statuses,
         surface_mode: core.surface_mode,
         shadow_resources: &core.shadow_resources,
+        #[cfg(feature = "csm")]
         csm_shadow_resources: core.csm_shadow_resources.as_ref(),
         gpu_timing: &mut core.gpu_timing,
     };
@@ -218,13 +339,17 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
 
 impl RenderGraphContext<'_> {
     pub(crate) fn prepare_targets_ctx(&mut self) -> PrepareTargetsRecording<'_> {
-        PrepareTargetsRecording { device: self.recording.device, frame: self.frame }
+        PrepareTargetsRecording {
+            device: self.recording.device,
+            frame: self.frame,
+        }
     }
 
     pub(crate) fn shadow_ctx(&mut self) -> ShadowRecording<'_> {
         ShadowRecording {
             device: self.recording.device,
             shadow_resources: self.recording.shadow_resources,
+            #[cfg(feature = "csm")]
             csm_shadow_resources: self.recording.csm_shadow_resources,
             vulkan_cache: self.recording.vulkan_cache,
             data_cache: self.recording.data_cache,
@@ -268,11 +393,21 @@ impl RenderGraphContext<'_> {
     }
 
     pub(crate) fn present_copy_ctx(&mut self) -> PresentCopyRecording<'_> {
-        PresentCopyRecording { device: self.recording.device, window_state: self.recording.window_state, frame: self.frame }
+        PresentCopyRecording {
+            device: self.recording.device,
+            window_state: self.recording.window_state,
+            frame: self.frame,
+        }
     }
 
     pub(crate) fn imgui_ctx(&mut self) -> ImguiRecording<'_> {
-        ImguiRecording { device: self.recording.device, window_state: self.recording.window_state, imgui: self.recording.imgui, debug_ui: self.recording.debug_ui, frame: self.frame }
+        ImguiRecording {
+            device: self.recording.device,
+            window_state: self.recording.window_state,
+            imgui: self.recording.imgui,
+            debug_ui: self.recording.debug_ui,
+            frame: self.frame,
+        }
     }
 
     pub(crate) fn debug_capture_ctx(&mut self) -> DebugCaptureRecording<'_> {
@@ -289,7 +424,11 @@ impl RenderGraphContext<'_> {
     }
 
     pub(crate) fn terminal_present_ctx(&mut self) -> TerminalPresentRecording<'_> {
-        TerminalPresentRecording { device: self.recording.device, surface_mode: self.recording.surface_mode, frame: self.frame }
+        TerminalPresentRecording {
+            device: self.recording.device,
+            surface_mode: self.recording.surface_mode,
+            frame: self.frame,
+        }
     }
 }
 
@@ -431,15 +570,20 @@ fn draw_geometry_from_submission_impl(
                 blend_fraction: crate::vulkan::vk_shadow::CSM_BLEND_FRACTION,
             })
         });
-    #[cfg(not(feature = "csm"))]
-    let csm_data: Option<CsmUboData> = None;
-
+    #[cfg(feature = "csm")]
     let frame_env_ubo = build_frame_environment_ubo(
         &base_env_ubo,
         submission,
         visual_tuning,
         light_view_projection,
         csm_data.as_ref(),
+    );
+    #[cfg(not(feature = "csm"))]
+    let frame_env_ubo = build_frame_environment_ubo(
+        &base_env_ubo,
+        submission,
+        visual_tuning,
+        light_view_projection,
     );
 
     unsafe {
@@ -521,27 +665,33 @@ fn copy_draw_to_present_impl(
     let extent = window_state.get_curr_extent();
 
     vk_util::transition_image(
-        device, cmd_buffer,
+        device,
+        cmd_buffer,
         frame.draw.image,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
     );
 
     vk_util::transition_image(
-        device, cmd_buffer,
+        device,
+        cmd_buffer,
         frame.present_image,
         vk::ImageLayout::UNDEFINED,
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
     );
 
     vk_util::blit_copy_image_to_image(
-        device, cmd_buffer,
-        frame.draw.image, extent,
-        frame.present_image, extent,
+        device,
+        cmd_buffer,
+        frame.draw.image,
+        extent,
+        frame.present_image,
+        extent,
     );
 
     vk_util::transition_image(
-        device, cmd_buffer,
+        device,
+        cmd_buffer,
         frame.present_image,
         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -557,7 +707,8 @@ fn prepare_present_color_attachment_impl(
     let cmd_buffer = cmd_pool.buffers[0];
 
     vk_util::transition_image(
-        device, cmd_buffer,
+        device,
+        cmd_buffer,
         frame.present_image,
         vk::ImageLayout::UNDEFINED,
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -595,7 +746,14 @@ fn draw_imgui_to_present_impl(
 
     let cmd_pool = frame.cmd_pools.get(VkQueueType::Graphics);
     let cmd_buffer = cmd_pool.buffers[0];
-    draw_imgui_impl(device, window_state, imgui, debug_ui, cmd_buffer, frame.present_image_view)
+    draw_imgui_impl(
+        device,
+        window_state,
+        imgui,
+        debug_ui,
+        cmd_buffer,
+        frame.present_image_view,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -742,20 +900,28 @@ unsafe fn record_skybox_draw_impl(
     skybox: SkyboxDrawInputs,
 ) {
     device.cmd_bind_pipeline(
-        cmd_buffer, vk::PipelineBindPoint::GRAPHICS, skybox.pipeline.pipeline,
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        skybox.pipeline.pipeline,
     );
 
     device.cmd_bind_descriptor_sets(
-        cmd_buffer, vk::PipelineBindPoint::GRAPHICS,
-        skybox.pipeline.layout, 0, &skybox.descriptor, &[],
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        skybox.pipeline.layout,
+        0,
+        &skybox.descriptor,
+        &[],
     );
 
     device.cmd_bind_index_buffer(cmd_buffer, skybox.index_buffer, 0, vk::IndexType::UINT32);
 
     device.cmd_push_constants(
-        cmd_buffer, skybox.pipeline.layout,
+        cmd_buffer,
+        skybox.pipeline.layout,
         vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-        0, sky_box.skybox_consts.as_byte_slice(),
+        0,
+        sky_box.skybox_consts.as_byte_slice(),
     );
 
     device.cmd_draw_indexed(cmd_buffer, skybox.index_count, 1, 0, 0, 0);
@@ -870,7 +1036,12 @@ pub(crate) fn resolve_shadow_draw_objects_impl(
     )
     .into_iter()
     .flatten()
-    .filter(|draw| matches!(draw.material.alpha_mode, crate::data::gpu_data::AlphaMode::Opaque))
+    .filter(|draw| {
+        matches!(
+            draw.material.alpha_mode,
+            crate::data::gpu_data::AlphaMode::Opaque
+        )
+    })
     .collect()
 }
 
@@ -947,12 +1118,36 @@ fn visit_geometry_phases(
     draw_lists: &GeometryDrawLists,
     mut sink: impl FnMut(GeometryPhase, &[RenderObject], VkPipelineType),
 ) {
-    sink(GeometryPhase::PbrOpaque, &draw_lists.pbr_opaque, VkPipelineType::PbrMetRoughOpaque);
-    sink(GeometryPhase::UnlitOpaque, &draw_lists.unlit_opaque, VkPipelineType::UnlitOpaque);
-    sink(GeometryPhase::PbrMask, &draw_lists.pbr_mask, VkPipelineType::PbrMetRoughOpaque);
-    sink(GeometryPhase::UnlitMask, &draw_lists.unlit_mask, VkPipelineType::UnlitOpaque);
-    sink(GeometryPhase::PbrBlend, &draw_lists.pbr_blend, VkPipelineType::PbrMetRoughAlpha);
-    sink(GeometryPhase::UnlitBlend, &draw_lists.unlit_blend, VkPipelineType::UnlitAlpha);
+    sink(
+        GeometryPhase::PbrOpaque,
+        &draw_lists.pbr_opaque,
+        VkPipelineType::PbrMetRoughOpaque,
+    );
+    sink(
+        GeometryPhase::UnlitOpaque,
+        &draw_lists.unlit_opaque,
+        VkPipelineType::UnlitOpaque,
+    );
+    sink(
+        GeometryPhase::PbrMask,
+        &draw_lists.pbr_mask,
+        VkPipelineType::PbrMetRoughOpaque,
+    );
+    sink(
+        GeometryPhase::UnlitMask,
+        &draw_lists.unlit_mask,
+        VkPipelineType::UnlitOpaque,
+    );
+    sink(
+        GeometryPhase::PbrBlend,
+        &draw_lists.pbr_blend,
+        VkPipelineType::PbrMetRoughAlpha,
+    );
+    sink(
+        GeometryPhase::UnlitBlend,
+        &draw_lists.unlit_blend,
+        VkPipelineType::UnlitAlpha,
+    );
 }
 
 unsafe fn record_geometry_draw_sequence_impl(
@@ -980,8 +1175,7 @@ unsafe fn record_geometry_draw_sequence_impl(
         return;
     };
 
-    let scene_desc =
-        scene_descs.update_scene_uniforms(device, *scene_data, env_ubo, frame_index);
+    let scene_desc = scene_descs.update_scene_uniforms(device, *scene_data, env_ubo, frame_index);
 
     device.cmd_set_viewport(cmd_buffer, 0, window_state.get_viewport());
     device.cmd_set_scissor(cmd_buffer, 0, window_state.get_scissor());
@@ -1070,7 +1264,9 @@ unsafe fn record_geometry_draw_sequence_impl(
     };
 
     // Draw order: opaque -> masked -> blended. The callback is also the private fake-sink seam.
-    visit_geometry_phases(draw_lists, |_, objects, pipeline| draw_bucket(objects, pipeline));
+    visit_geometry_phases(draw_lists, |_, objects, pipeline| {
+        draw_bucket(objects, pipeline)
+    });
 
     device.cmd_end_rendering(cmd_buffer);
 }
@@ -1091,8 +1287,11 @@ fn draw_imgui_impl(
         return Ok(());
     };
 
-    let attachment_info =
-        [vk_util::attachment_info(image_view, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, None)];
+    let attachment_info = [vk_util::attachment_info(
+        image_view,
+        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        None,
+    )];
 
     let render_info =
         vk_util::rendering_info(window_state.get_curr_extent(), &attachment_info, None);
@@ -1143,7 +1342,12 @@ impl RenderGraphContext<'_> {
         cmd_buffer: vk::CommandBuffer,
         pass_name: &'static str,
     ) {
-        begin_gpu_pass_timing(self.recording.device, self.recording.gpu_timing, cmd_buffer, pass_name);
+        begin_gpu_pass_timing(
+            self.recording.device,
+            self.recording.gpu_timing,
+            cmd_buffer,
+            pass_name,
+        );
     }
 
     pub(crate) fn end_gpu_pass_timing(&mut self, cmd_buffer: vk::CommandBuffer) {
@@ -1157,20 +1361,47 @@ fn begin_gpu_pass_timing(
     cmd_buffer: vk::CommandBuffer,
     pass_name: &'static str,
 ) {
-    if !timing.supported { return; }
-    let Some(frame_slot_index) = timing.active_slot else { return; };
-    let Some(slot) = timing.slots.get_mut(frame_slot_index) else { return; };
+    if !timing.supported {
+        return;
+    }
+    let Some(frame_slot_index) = timing.active_slot else {
+        return;
+    };
+    let Some(slot) = timing.slots.get_mut(frame_slot_index) else {
+        return;
+    };
     if let Some((name, start_query)) = slot.open_pass.take() {
         if slot.next_query < timing.max_queries {
             let end_query = slot.next_query;
-            unsafe { device.cmd_write_timestamp2(cmd_buffer, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, slot.query_pool, end_query); }
+            unsafe {
+                device.cmd_write_timestamp2(
+                    cmd_buffer,
+                    vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                    slot.query_pool,
+                    end_query,
+                );
+            }
             slot.next_query += 1;
-            slot.pass_queries.push(crate::vulkan::vk_render::GpuPassQueryRecord { name, start_query, end_query });
+            slot.pass_queries
+                .push(crate::vulkan::vk_render::GpuPassQueryRecord {
+                    name,
+                    start_query,
+                    end_query,
+                });
         }
     }
-    if slot.next_query >= timing.max_queries { return; }
+    if slot.next_query >= timing.max_queries {
+        return;
+    }
     let start_query = slot.next_query;
-    unsafe { device.cmd_write_timestamp2(cmd_buffer, vk::PipelineStageFlags2::TOP_OF_PIPE, slot.query_pool, start_query); }
+    unsafe {
+        device.cmd_write_timestamp2(
+            cmd_buffer,
+            vk::PipelineStageFlags2::TOP_OF_PIPE,
+            slot.query_pool,
+            start_query,
+        );
+    }
     slot.next_query += 1;
     slot.open_pass = Some((pass_name, start_query));
 }
@@ -1180,15 +1411,37 @@ fn end_gpu_pass_timing(
     timing: &mut crate::vulkan::vk_render::GpuTimingState,
     cmd_buffer: vk::CommandBuffer,
 ) {
-    if !timing.supported { return; }
-    let Some(frame_slot_index) = timing.active_slot else { return; };
-    let Some(slot) = timing.slots.get_mut(frame_slot_index) else { return; };
-    let Some((name, start_query)) = slot.open_pass.take() else { return; };
-    if slot.next_query >= timing.max_queries { return; }
+    if !timing.supported {
+        return;
+    }
+    let Some(frame_slot_index) = timing.active_slot else {
+        return;
+    };
+    let Some(slot) = timing.slots.get_mut(frame_slot_index) else {
+        return;
+    };
+    let Some((name, start_query)) = slot.open_pass.take() else {
+        return;
+    };
+    if slot.next_query >= timing.max_queries {
+        return;
+    }
     let end_query = slot.next_query;
-    unsafe { device.cmd_write_timestamp2(cmd_buffer, vk::PipelineStageFlags2::BOTTOM_OF_PIPE, slot.query_pool, end_query); }
+    unsafe {
+        device.cmd_write_timestamp2(
+            cmd_buffer,
+            vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+            slot.query_pool,
+            end_query,
+        );
+    }
     slot.next_query += 1;
-    slot.pass_queries.push(crate::vulkan::vk_render::GpuPassQueryRecord { name, start_query, end_query });
+    slot.pass_queries
+        .push(crate::vulkan::vk_render::GpuPassQueryRecord {
+            name,
+            start_query,
+            end_query,
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,6 +1449,7 @@ fn end_gpu_pass_timing(
 // ---------------------------------------------------------------------------
 
 /// Pre-computed CSM cascade data ready for UBO upload.
+#[cfg(feature = "csm")]
 #[derive(Clone)]
 pub(crate) struct CsmUboData {
     pub cascade_view_proj: [glam::Vec4; 12],
@@ -1209,21 +1463,27 @@ pub(crate) fn build_frame_environment_ubo(
     submission: &RenderSubmission,
     visual_tuning: VisualTuning,
     light_view_projection: Option<glam::Mat4>,
-    csm_data: Option<&CsmUboData>,
+    #[cfg(feature = "csm")] csm_data: Option<&CsmUboData>,
 ) -> EnvironmentUBO {
     use crate::data::gpu_data::{
-        GpuDirectionalLight, GpuPointLight, GpuSpotLight, CSM_CASCADE_COUNT,
+        CSM_CASCADE_COUNT, CSM_CASCADE_DIM, GpuDirectionalLight, GpuPointLight, GpuSpotLight,
         MAX_DIRECTIONAL_LIGHTS_GPU, MAX_POINT_LIGHTS_GPU, MAX_SPOT_LIGHTS_GPU,
     };
 
     let mut env = *base;
+    debug_assert_eq!(env.cascade_view_proj.len(), (CSM_CASCADE_COUNT as usize) * 4);
+    debug_assert!(CSM_CASCADE_DIM > 0);
     env.exposure = visual_tuning.exposure;
     env.gamma = visual_tuning.gamma;
     env.ibl_ambient_scale = visual_tuning.ibl_ambient_scale;
 
     if let Some(dir_light) = &submission.directional_light {
         let dir = dir_light.direction.normalize();
-        let shadow_index = if cfg!(not(feature = "csm")) || csm_data.is_some() {
+        #[cfg(feature = "csm")]
+        let shadows_ready = csm_data.is_some();
+        #[cfg(not(feature = "csm"))]
+        let shadows_ready = true;
+        let shadow_index = if shadows_ready {
             submission
                 .directional_lights
                 .iter()
@@ -1273,6 +1533,7 @@ pub(crate) fn build_frame_environment_ubo(
     }
 
     // CSM cascade data — when present, the shader samples the cascade array.
+    #[cfg(feature = "csm")]
     if let Some(csm) = csm_data {
         env.cascade_count = csm.cascade_count.min(CSM_CASCADE_COUNT);
         env.cascade_splits = csm.cascade_splits;
@@ -1282,6 +1543,13 @@ pub(crate) fn build_frame_environment_ubo(
         env.cascade_view_proj = [glam::Vec4::ZERO; 12];
         env.cascade_view_proj[..copy_len].copy_from_slice(&csm.cascade_view_proj[..copy_len]);
     } else {
+        env.cascade_count = 0;
+        env.cascade_splits = glam::Vec4::ZERO;
+        env.cascade_view_proj = [glam::Vec4::ZERO; 12];
+        env.blend_fraction = 0.1;
+    }
+    #[cfg(not(feature = "csm"))]
+    {
         env.cascade_count = 0;
         env.cascade_splits = glam::Vec4::ZERO;
         env.cascade_view_proj = [glam::Vec4::ZERO; 12];
@@ -1371,12 +1639,20 @@ mod tests {
         submission.directional_lights.push(directional);
         let light_view_projection = glam::Mat4::from_translation(glam::Vec3::ONE);
 
+        #[cfg(feature = "csm")]
         let env = build_frame_environment_ubo(
             &EnvironmentUBO::default(),
             &submission,
             VisualTuning::default(),
             Some(light_view_projection),
             None,
+        );
+        #[cfg(not(feature = "csm"))]
+        let env = build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
+            Some(light_view_projection),
         );
 
         assert_eq!(env.light_dir, glam::Vec4::Y);
@@ -1398,7 +1674,11 @@ mod tests {
         );
     }
 
-    fn draw_object(pipeline: VkPipelineType, alpha_mode: crate::data::gpu_data::AlphaMode, z: f32) -> RenderObject {
+    fn draw_object(
+        pipeline: VkPipelineType,
+        alpha_mode: crate::data::gpu_data::AlphaMode,
+        z: f32,
+    ) -> RenderObject {
         RenderObject {
             index_count: 3,
             first_index: 0,
@@ -1408,7 +1688,13 @@ mod tests {
                 pipeline,
                 alpha_mode,
                 image_descriptor: vk::DescriptorSet::null(),
-                meta_alloc: VkSubAlloc { alloc_address: 0, offset: 0, buffer: vk::Buffer::null(), size: 0, sub_buffer_index: 0 },
+                meta_alloc: VkSubAlloc {
+                    alloc_address: 0,
+                    offset: 0,
+                    buffer: vk::Buffer::null(),
+                    size: 0,
+                    sub_buffer_index: 0,
+                },
                 requires_uv1: false,
             },
             transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, z)),
@@ -1422,16 +1708,26 @@ mod tests {
     #[test]
     fn fake_command_sink_observes_opaque_mask_blend_phase_order() {
         let lists = GeometryDrawLists {
-            pbr_opaque: vec![], unlit_opaque: vec![], pbr_mask: vec![], unlit_mask: vec![],
-            pbr_blend: vec![], unlit_blend: vec![],
+            pbr_opaque: vec![],
+            unlit_opaque: vec![],
+            pbr_mask: vec![],
+            unlit_mask: vec![],
+            pbr_blend: vec![],
+            unlit_blend: vec![],
         };
         let mut operations = Vec::new();
         visit_geometry_phases(&lists, |phase, _, _| operations.push(phase));
-        assert_eq!(operations, vec![
-            GeometryPhase::PbrOpaque, GeometryPhase::UnlitOpaque,
-            GeometryPhase::PbrMask, GeometryPhase::UnlitMask,
-            GeometryPhase::PbrBlend, GeometryPhase::UnlitBlend,
-        ]);
+        assert_eq!(
+            operations,
+            vec![
+                GeometryPhase::PbrOpaque,
+                GeometryPhase::UnlitOpaque,
+                GeometryPhase::PbrMask,
+                GeometryPhase::UnlitMask,
+                GeometryPhase::PbrBlend,
+                GeometryPhase::UnlitBlend,
+            ]
+        );
     }
 
     #[test]
@@ -1439,10 +1735,26 @@ mod tests {
         use crate::data::gpu_data::AlphaMode;
         let mut buckets: [Vec<RenderObject>; VkPipelineType::COUNT] =
             std::array::from_fn(|_| Vec::new());
-        buckets[VkPipelineType::PbrMetRoughOpaque as usize].push(draw_object(VkPipelineType::PbrMetRoughOpaque, AlphaMode::Opaque, 1.0));
-        buckets[VkPipelineType::PbrMetRoughOpaque as usize].push(draw_object(VkPipelineType::PbrMetRoughOpaque, AlphaMode::Mask, 2.0));
-        buckets[VkPipelineType::PbrMetRoughAlpha as usize].push(draw_object(VkPipelineType::PbrMetRoughAlpha, AlphaMode::Blend, 2.0));
-        buckets[VkPipelineType::PbrMetRoughAlpha as usize].push(draw_object(VkPipelineType::PbrMetRoughAlpha, AlphaMode::Blend, 5.0));
+        buckets[VkPipelineType::PbrMetRoughOpaque as usize].push(draw_object(
+            VkPipelineType::PbrMetRoughOpaque,
+            AlphaMode::Opaque,
+            1.0,
+        ));
+        buckets[VkPipelineType::PbrMetRoughOpaque as usize].push(draw_object(
+            VkPipelineType::PbrMetRoughOpaque,
+            AlphaMode::Mask,
+            2.0,
+        ));
+        buckets[VkPipelineType::PbrMetRoughAlpha as usize].push(draw_object(
+            VkPipelineType::PbrMetRoughAlpha,
+            AlphaMode::Blend,
+            2.0,
+        ));
+        buckets[VkPipelineType::PbrMetRoughAlpha as usize].push(draw_object(
+            VkPipelineType::PbrMetRoughAlpha,
+            AlphaMode::Blend,
+            5.0,
+        ));
 
         let mut lists = partition_geometry_draw_lists(buckets);
         assert_eq!(lists.pbr_opaque.len(), 1);
@@ -1453,17 +1765,45 @@ mod tests {
     }
 
     #[test]
-    fn spot_and_cascade_submission_populate_environment_ubo() {
+    fn spot_submission_populates_environment_ubo() {
         let mut submission = RenderSubmission::new(SceneDataUBO::default(), 0);
-        submission.spot_lights.push(crate::scene::render_submission::FrameSpotLight {
-            position: glam::Vec3::new(1.0, 2.0, 3.0),
-            direction: glam::Vec3::NEG_Y,
-            color: glam::Vec3::new(0.2, 0.4, 0.6),
-            intensity: 5.0,
-            range: 12.0,
-            inner_cos: 0.9,
-            outer_cos: 0.8,
-        });
+        submission
+            .spot_lights
+            .push(crate::scene::render_submission::FrameSpotLight {
+                position: glam::Vec3::new(1.0, 2.0, 3.0),
+                direction: glam::Vec3::NEG_Y,
+                color: glam::Vec3::new(0.2, 0.4, 0.6),
+                intensity: 5.0,
+                range: 12.0,
+                inner_cos: 0.9,
+                outer_cos: 0.8,
+            });
+        #[cfg(feature = "csm")]
+        let env = build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
+            None,
+            None,
+        );
+        #[cfg(not(feature = "csm"))]
+        let env = build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
+            None,
+        );
+        assert_eq!(env.spot_light_count, 1);
+        assert_eq!(
+            env.spot_lights[0].position_range,
+            glam::Vec4::new(1.0, 2.0, 3.0, 12.0)
+        );
+    }
+
+    #[cfg(feature = "csm")]
+    #[test]
+    fn cascade_submission_populates_environment_ubo() {
+        let submission = RenderSubmission::new(SceneDataUBO::default(), 0);
         let matrices = std::array::from_fn(|index| glam::Vec4::splat(index as f32));
         let csm = CsmUboData {
             cascade_view_proj: matrices,
@@ -1478,8 +1818,6 @@ mod tests {
             None,
             Some(&csm),
         );
-        assert_eq!(env.spot_light_count, 1);
-        assert_eq!(env.spot_lights[0].position_range, glam::Vec4::new(1.0, 2.0, 3.0, 12.0));
         assert_eq!(env.cascade_count, 3);
         assert_eq!(env.cascade_splits, csm.cascade_splits);
         assert_eq!(env.cascade_view_proj, matrices);
@@ -1489,11 +1827,19 @@ mod tests {
     #[test]
     fn missing_directional_light_disables_environment_default_direct_light() {
         let submission = RenderSubmission::new(SceneDataUBO::default(), 0);
+        #[cfg(feature = "csm")]
         let env = build_frame_environment_ubo(
             &EnvironmentUBO::default(),
             &submission,
             VisualTuning::default(),
             None,
+            None,
+        );
+        #[cfg(not(feature = "csm"))]
+        let env = build_frame_environment_ubo(
+            &EnvironmentUBO::default(),
+            &submission,
+            VisualTuning::default(),
             None,
         );
 

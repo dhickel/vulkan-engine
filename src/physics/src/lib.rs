@@ -1,8 +1,8 @@
 //! Renderer-independent alpha physics API built on Rapier.
 //!
 //! Authored code should use durable [`PhysicsBodyId`] and [`PhysicsColliderId`]
-//! values. Rapier handles remain an internal runtime detail except for the
-//! deprecated compatibility helpers kept for the original smoke tests.
+//! values. Rapier handles remain an internal runtime detail. No public item
+//! is declared deprecated; the public API uses durable IDs exclusively.
 
 use std::collections::{BTreeMap, BTreeSet};
 

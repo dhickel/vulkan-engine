@@ -22,12 +22,10 @@ pub struct AudioBridgeReport {
     pub device_smoke_status: DeviceSmokeStatus,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioRuntimeOutcome {
     Started,
     Stopped,
-    Finished,
     Failed(String),
 }
 
@@ -174,7 +172,6 @@ pub fn audio_event_for_outcome(clip_id: &str, outcome: AudioRuntimeOutcome) -> E
     EngineEvent::Audio(match outcome {
         AudioRuntimeOutcome::Started => AudioEvent::ClipStarted { clip },
         AudioRuntimeOutcome::Stopped => AudioEvent::ClipStopped { clip },
-        AudioRuntimeOutcome::Finished => AudioEvent::ClipFinished { clip },
         AudioRuntimeOutcome::Failed(message) => AudioEvent::ClipFailed { clip, message },
     })
 }
@@ -236,10 +233,6 @@ mod tests {
         assert!(matches!(
             audio_event_for_outcome("dogfood.audio.startup_ping", AudioRuntimeOutcome::Stopped),
             EngineEvent::Audio(AudioEvent::ClipStopped { clip }) if clip.as_str() == "dogfood.audio.startup_ping"
-        ));
-        assert!(matches!(
-            audio_event_for_outcome("dogfood.audio.startup_ping", AudioRuntimeOutcome::Finished),
-            EngineEvent::Audio(AudioEvent::ClipFinished { clip }) if clip.as_str() == "dogfood.audio.startup_ping"
         ));
         assert!(matches!(
             audio_event_for_outcome(

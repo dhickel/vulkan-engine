@@ -1,6 +1,6 @@
 # Input System Internals
 
-> Source: [`src/input/src/lib.rs`](../src/input/src/lib.rs) — no legacy docs consulted.
+> Source: [`src/input/src/lib.rs`](../../src/input/src/lib.rs) — no legacy docs consulted.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ The input system is a single-file crate with three layers of abstraction:
 
 ### Winit Bridge
 
-`InputSystem::queue_winit_window_event()` at [`lib.rs`](../src/input/src/lib.rs) maps winit events:
+`InputSystem::queue_winit_window_event()` at [`lib.rs`](../../src/input/src/lib.rs) maps winit events:
 
 | Winit Event | InputEvent |
 |-------------|-----------|
@@ -105,7 +105,7 @@ Query via `input.debug_snapshot()`. Register a custom debug view on the `Rendere
 
 ## TOML Profile Parser
 
-`ActionMap::from_toml_str()` at [`lib.rs:1172-1225`](../src/input/src/lib.rs:1172) expects:
+`ActionMap::from_toml_str()` at [`lib.rs:1172-1225`](../../src/input/src/lib.rs#L1172) expects:
 
 ```toml
 version = 1
@@ -125,5 +125,5 @@ The parser validates:
 
 ## See Also
 
-- [../api/06-input.md](../api/06-input.md) — public input API
-- [src/input/src/lib.rs](../src/input/src/lib.rs) — full implementation
+- [../api/06-input-polling-and-listeners.md](../api/06-input-polling-and-listeners.md) — public input API
+- [src/input/src/lib.rs](../../src/input/src/lib.rs) — full implementation
