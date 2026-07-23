@@ -403,6 +403,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsp_beta"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "bsp_runtime",
+ "engine_events",
+ "glam 0.28.0",
+ "input",
+ "log",
+ "physics",
+ "renderer",
+]
+
+[[package]]
 name = "bsp_runtime"
 version = "0.1.0"
 dependencies = [

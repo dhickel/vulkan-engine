@@ -23,6 +23,7 @@
 //! `engine_events`. It does NOT depend on `physics`, any app crate, or the
 //! root `engine` crate.
 
+pub mod behavior;
 pub mod bridge;
 pub mod cache;
 pub mod coordinator;
@@ -31,6 +32,11 @@ pub mod generation;
 pub mod source_link;
 
 // Re-export key types for convenience
+pub use behavior::{
+    Activation, BehaviorEntityInfo, ButtonPhase, ButtonState, DoorPhase, DoorState,
+    LightStyleState, PlatformPhase, PlatformState, StructuralBehaviorAdapter, TriggerEvent,
+    TriggerState,
+};
 pub use bridge::AppBridge;
 pub use cache::CacheIdentity;
 pub use coordinator::BspCoordinator;
