@@ -65,6 +65,16 @@ pub struct BspMountState {
     pub light_leafs: Vec<Option<u32>>,
     /// Hysteresis state for BSP imported-light selection.
     light_selection: BspLightSelectionState,
+    /// Per-model transforms for inline model draws (from simulation snapshot).
+    /// Keyed by model_index (1..n). Identity for static world (model 0).
+    pub inline_model_transforms: std::collections::HashMap<u32, glam::Mat4>,
+    /// Per-model world-space bounds for inline model culling.
+    /// Keyed by model_index (1..n).
+    pub inline_model_bounds: std::collections::HashMap<u32, (glam::Vec3, glam::Vec3)>,
+    /// Per-frame light-style intensities (64 elements).
+    pub frame_style_intensities: [f32; 64],
+    /// Per-frame liquid animation time.
+    pub frame_liquid_time: f32,
 }
 
 #[cfg(feature = "bsp")]
@@ -115,6 +125,10 @@ impl BspMountState {
             light_descriptors: Vec::new(),
             light_leafs: Vec::new(),
             light_selection: BspLightSelectionState::default(),
+            inline_model_transforms: std::collections::HashMap::new(),
+            inline_model_bounds: std::collections::HashMap::new(),
+            frame_style_intensities: [1.0_f32; 64],
+            frame_liquid_time: 0.0,
         }
     }
 
@@ -142,6 +156,10 @@ impl BspMountState {
             light_descriptors: Vec::new(),
             light_leafs: Vec::new(),
             light_selection: BspLightSelectionState::default(),
+            inline_model_transforms: std::collections::HashMap::new(),
+            inline_model_bounds: std::collections::HashMap::new(),
+            frame_style_intensities: [1.0_f32; 64],
+            frame_liquid_time: 0.0,
         }
     }
 
@@ -486,6 +504,13 @@ fn light_descriptor_to_frame_light(light: &bsp::extract::LightDescriptor) -> Fra
 /// Returns the subset of batches whose leaf membership intersects the
 /// camera PVS. When PVS is not available, returns all batches unchanged
 /// (conservative).
+///
+/// # Inline Model PVS Bypass
+///
+/// Inline models (`is_inline_model = true`) are **never** rejected by
+/// static-world PVS. They are always passed through for conservative
+/// frustum culling. Moving inline models must not be culled by the
+/// static PVS of their original leaf membership.
 pub fn filter_batches_by_pvs(
     batches: &[bsp::geometry::RenderBatch],
     _leaf_membership: &[Vec<u32>],
@@ -504,7 +529,7 @@ pub fn filter_batches_by_pvs(
     batches
         .iter()
         .filter(|batch| {
-            // Inline models are not PVS-eligible (always frustum-tested).
+            // Inline models and moving batches are not PVS-eligible (always frustum-tested).
             if !batch.pvs_eligible || batch.is_inline_model {
                 return true;
             }
@@ -523,6 +548,23 @@ pub fn filter_batches_by_pvs(
         })
         .cloned()
         .collect()
+}
+
+/// Test whether a world-space AABB intersects the camera frustum.
+///
+/// Used for conservative culling of inline model batches that bypass
+/// static PVS. Returns `true` when the frustum is not available
+/// (conservative: all visible).
+pub fn aabb_intersects_frustum(
+    world_min: glam::Vec3,
+    world_max: glam::Vec3,
+    frustum: Option<&crate::data::camera::Frustum>,
+) -> bool {
+    let Some(frustum) = frustum else {
+        return true;
+    };
+    let aabb = crate::data::camera::Aabb::from_min_max(world_min, world_max);
+    frustum.intersects_aabb(&aabb)
 }
 
 // ── Corrupt VIS fallback helpers ────────────────────────────────────────

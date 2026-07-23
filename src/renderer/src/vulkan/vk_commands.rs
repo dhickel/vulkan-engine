@@ -735,6 +735,8 @@ fn draw_geometry_from_submission_impl(
             data_cache,
             #[cfg(feature = "bsp")]
             &submission.bsp_draw_items,
+            #[cfg(feature = "bsp")]
+            submission.bsp_frame_values,
         );
     }
     Ok(())
@@ -1459,6 +1461,7 @@ unsafe fn record_geometry_draw_sequence_impl(
     #[cfg_attr(not(feature = "bsp"), allow(unused_variables))] next_submit_serial: u64,
     #[cfg(feature = "bsp")] data_cache: &Arc<VkDataCache>,
     #[cfg(feature = "bsp")] bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
+    #[cfg(feature = "bsp")] bsp_frame_values: crate::scene::render_submission::BspFrameValuesState,
 ) {
     device.cmd_begin_rendering(cmd_buffer, rendering_info);
 
@@ -1566,7 +1569,7 @@ unsafe fn record_geometry_draw_sequence_impl(
 
     #[cfg(feature = "bsp")]
     if !bsp_draw_items.is_empty() {
-        update_bsp_frame_values_for_slot(data_cache, frame_index, next_submit_serial);
+        update_bsp_frame_values_for_slot(data_cache, frame_index, bsp_frame_values);
         record_bsp_opaque_draw_sequence_impl(
             device,
             vulkan_cache,
@@ -1680,16 +1683,14 @@ unsafe fn draw_pbr_transparent_object_impl(
 fn update_bsp_frame_values_for_slot(
     data_cache: &Arc<VkDataCache>,
     frame_slot_index: u32,
-    next_submit_serial: u64,
+    frame_values: crate::scene::render_submission::BspFrameValuesState,
 ) {
-    let seconds = next_submit_serial as f32 / 60.0;
     let mut values = BspFrameValuesUniform::default();
-    // Until authored lightstyle animation curves are plumbed in, every valid
-    // style contributes at neutral weight so all four BSP style slots compose.
-    values.style_intensities.fill(1.0);
-    values.liquid_warp_time = seconds;
-    values.liquid_flow_time = seconds;
-    values.global_animation_time = seconds * 10.0;
+    values.style_intensities = frame_values.style_intensities;
+    values.style_intensities[0] = 1.0;
+    values.liquid_warp_time = frame_values.liquid_time;
+    values.liquid_flow_time = frame_values.liquid_time;
+    values.global_animation_time = frame_values.liquid_time * 10.0;
 
     let mut surface_cache = data_cache
         .bsp_surface_cache

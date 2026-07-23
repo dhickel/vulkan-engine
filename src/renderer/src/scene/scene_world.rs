@@ -616,8 +616,20 @@ impl SceneWorld {
         }
         submission.directional_light = submission.directional_lights.first().copied();
 
+        let frustum = if self.enable_frustum_culling {
+            Some(Frustum::from_view_projection(
+                &(self.camera.projection * self.camera.view),
+            ))
+        } else {
+            None
+        };
+
         #[cfg(feature = "bsp")]
         if self.bsp_mount.active {
+            submission.bsp_frame_values = crate::scene::render_submission::BspFrameValuesState {
+                style_intensities: self.bsp_mount.frame_style_intensities,
+                liquid_time: self.bsp_mount.frame_liquid_time,
+            };
             self.update_bsp_pvs();
             let bsp_lights = self
                 .bsp_mount
@@ -666,7 +678,7 @@ impl SceneWorld {
 
         #[cfg(feature = "bsp")]
         if self.bsp_mount.active {
-            self.collect_bsp_draw_items(&mut submission);
+            self.collect_bsp_draw_items(&mut submission, frustum.as_ref());
         }
 
         let Some(root_id) = self.root else {
@@ -680,23 +692,13 @@ impl SceneWorld {
         // Parent world transform and bounds must be resolved before culling.
         self.refresh_derived_state();
 
-        // Frustum culling is enabled by default and can be disabled through
-        // the Scene facade for diagnostics or compatibility.
-        let frustum = if self.enable_frustum_culling {
-            Some(Frustum::from_view_projection(
-                &(self.camera.projection * self.camera.view),
-            ))
-        } else {
-            None
-        };
-
         self.collect_draw_items_culled(root_id, &mut submission, frustum.as_ref());
 
         submission
     }
 
     #[cfg(feature = "bsp")]
-    fn collect_bsp_draw_items(&self, submission: &mut RenderSubmission) {
+    fn collect_bsp_draw_items(&self, submission: &mut RenderSubmission, frustum: Option<&Frustum>) {
         let visible_batches = crate::scene::bsp_visibility::filter_batches_by_pvs(
             &self.bsp_mount.render_batches,
             &self.bsp_mount.leaf_membership,
@@ -704,6 +706,34 @@ impl SceneWorld {
         );
 
         for batch in visible_batches {
+            // Determine the transform for this batch.
+            // Inline model batches use the snapshot-provided transform;
+            // static world batches use identity.
+            let batch_transform = if batch.is_inline_model {
+                self.bsp_mount
+                    .inline_model_transforms
+                    .get(&(batch.model_index as u32))
+                    .copied()
+                    .unwrap_or(Mat4::IDENTITY)
+            } else {
+                Mat4::IDENTITY
+            };
+
+            if batch.is_inline_model {
+                if let Some((world_min, world_max)) = self
+                    .bsp_mount
+                    .inline_model_bounds
+                    .get(&(batch.model_index as u32))
+                    .copied()
+                {
+                    if !crate::scene::bsp_visibility::aabb_intersects_frustum(
+                        world_min, world_max, frustum,
+                    ) {
+                        continue;
+                    }
+                }
+            }
+
             for face_index in batch.face_indices {
                 let face_index = face_index as usize;
                 let Some(mesh_id) = self.bsp_mount.face_meshes.get(face_index).copied() else {
@@ -722,7 +752,7 @@ impl SceneWorld {
                     .push(crate::scene::render_submission::BspFrameDrawItem {
                         mesh_id,
                         bsp_material_id,
-                        transform: Mat4::IDENTITY,
+                        transform: batch_transform,
                     });
                 submission.culling_stats.submitted_draw_items += 1;
             }
@@ -1334,6 +1364,36 @@ impl SceneWorld {
     pub(crate) fn update_bsp_pvs(&mut self) {
         let cam_pos = self.camera.cam_pos;
         self.bsp_mount.update_pvs(cam_pos);
+    }
+
+    /// Set per-frame BSP frame values (style intensities, liquid time).
+    ///
+    /// These are uploaded to the BSP frame-values UBO each frame.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_frame_values(&mut self, style_intensities: [f32; 64], liquid_time: f32) {
+        self.bsp_mount.frame_style_intensities = style_intensities;
+        self.bsp_mount.frame_liquid_time = liquid_time;
+    }
+
+    /// Set per-model transforms for inline model draws.
+    ///
+    /// `transforms` is model_index → world-space Mat4.
+    /// Model 0 (worldspawn) is always identity.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_inline_model_transforms(
+        &mut self,
+        transforms: std::collections::HashMap<u32, glam::Mat4>,
+    ) {
+        self.bsp_mount.inline_model_transforms = transforms;
+    }
+
+    /// Set per-model world-space bounds for inline model culling.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_inline_model_bounds(
+        &mut self,
+        bounds: std::collections::HashMap<u32, (glam::Vec3, glam::Vec3)>,
+    ) {
+        self.bsp_mount.inline_model_bounds = bounds;
     }
 }
 

@@ -8,7 +8,7 @@
 #[cfg(feature = "bsp")]
 use crate::data::data_cache::VkDescType;
 #[cfg(feature = "bsp")]
-use crate::data::handles::{BspMaterialHandle, MeshHandle, TextureHandle};
+use crate::data::handles::TextureHandle;
 
 // Re-exports for external consumers (tests, extraction pipeline).
 pub use crate::data::bsp_import::{
@@ -25,7 +25,10 @@ pub use crate::data::data_cache::{
 pub use crate::data::gpu_data::bsp_surface_flags;
 pub use crate::data::gpu_data::BspFrameValuesUniform;
 pub use crate::data::gpu_data::BspSurfaceUniform;
-pub use crate::scene::bsp_visibility::{filter_batches_by_pvs, pvs_should_disable, BspMountState};
+pub use crate::data::handles::{BspMaterialHandle, MeshHandle};
+pub use crate::scene::bsp_visibility::{
+    aabb_intersects_frustum, filter_batches_by_pvs, pvs_should_disable, BspMountState,
+};
 
 // ── BSP Mount State ────────────────────────────────────────────────────
 

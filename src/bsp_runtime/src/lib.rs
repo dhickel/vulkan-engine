@@ -31,6 +31,7 @@ pub mod coordinator;
 pub mod error;
 pub mod generation;
 pub mod package;
+pub mod snapshot;
 pub mod source_link;
 
 // Re-export key types for convenience
@@ -45,6 +46,10 @@ pub use candidate::BspCandidate;
 pub use coordinator::BspCoordinator;
 pub use error::{BridgePhase, BspRuntimeError};
 pub use generation::BspGenerationToken;
+pub use snapshot::{
+    BspSimulationSnapshot, ExternalInstance, SnapshotActivation, SnapshotBuilder,
+    SnapshotEntityPose, SnapshotEpoch, SnapshotGeneration, SnapshotLightStyles,
+};
 pub use source_link::{
     BspOverrideLayer, BspSourceLink, BspSourceReference, EntityOverride, LightOverride,
     OverrideReconciliation,

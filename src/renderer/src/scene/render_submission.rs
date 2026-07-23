@@ -75,6 +75,24 @@ pub struct BspFrameDrawItem {
     pub transform: Mat4,
 }
 
+/// BSP frame-varying values captured from the scene snapshot for this submission.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Copy, Clone)]
+pub struct BspFrameValuesState {
+    pub style_intensities: [f32; 64],
+    pub liquid_time: f32,
+}
+
+#[cfg(feature = "bsp")]
+impl Default for BspFrameValuesState {
+    fn default() -> Self {
+        Self {
+            style_intensities: [1.0; 64],
+            liquid_time: 0.0,
+        }
+    }
+}
+
 pub struct RenderSubmission {
     pub camera: SceneDataUBO,
     pub draw_items: Vec<FrameDrawItem>,
@@ -96,6 +114,9 @@ pub struct RenderSubmission {
     /// BSP light selection: PVS-filtered + scored lights for this frame.
     #[cfg(feature = "bsp")]
     pub bsp_selected_lights: Vec<FramePointLight>,
+    /// BSP frame-varying shader values captured with this submission.
+    #[cfg(feature = "bsp")]
+    pub bsp_frame_values: BspFrameValuesState,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -126,6 +147,8 @@ impl RenderSubmission {
             bsp_draw_items: Vec::new(),
             #[cfg(feature = "bsp")]
             bsp_selected_lights: Vec::new(),
+            #[cfg(feature = "bsp")]
+            bsp_frame_values: BspFrameValuesState::default(),
         }
     }
 

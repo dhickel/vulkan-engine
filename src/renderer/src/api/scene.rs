@@ -1225,6 +1225,51 @@ impl Scene {
         self.world.clear_bsp_mount();
     }
 
+    /// Set per-frame BSP frame values (light-style intensities, liquid time).
+    ///
+    /// These are consumed by the BSP frame-values UBO each rendered frame.
+    /// `style_intensities` is a 64-element array mapping style_id → intensity (0.0..1.0).
+    /// `liquid_time` is the accumulated liquid animation time in seconds.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_bsp_frame_values(&mut self, style_intensities: [f32; 64], liquid_time: f32) {
+        self.world
+            .set_bsp_frame_values(style_intensities, liquid_time);
+    }
+
+    /// Set per-model transforms for inline model BSP draws.
+    ///
+    /// `transforms` maps model_index (1..n) to world-space transform.
+    /// Model 0 (worldspawn) is always identity and need not be included.
+    /// These are applied as per-draw transforms for inline model batches.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_inline_model_transforms(
+        &mut self,
+        transforms: std::collections::HashMap<u32, glam::Mat4>,
+    ) {
+        self.world.set_inline_model_transforms(transforms);
+    }
+
+    /// Set per-model world-space bounds for inline model BSP culling.
+    ///
+    /// Bounds are keyed by model_index (1..n) and come from the same simulation
+    /// snapshot as the inline transforms.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_inline_model_bounds(
+        &mut self,
+        bounds: std::collections::HashMap<u32, (glam::Vec3, glam::Vec3)>,
+    ) {
+        self.world.set_inline_model_bounds(bounds);
+    }
+
     /// Thread: Any
     /// May Stall: No
     pub fn create_point_light(&mut self, light: PointLight) -> Result<PointLightId, SceneError> {
