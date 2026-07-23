@@ -173,3 +173,4 @@ on Ready(fragment):
 - `docs/internal/02-synchronization-and-fencing.md`
 - `docs/internal/01-rendering-pipeline-mental-model.md`
 - `src/renderer/src/data/AGENTS.md`
+- `docs/internal/18-bsp-runtime-and-lifetime.md` — BSP asset upload, lightmap atlas, and material retirement follow the same fence-aware patterns

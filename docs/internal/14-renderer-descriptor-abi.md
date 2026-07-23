@@ -147,3 +147,5 @@ std140 layout:
 ### BSP ABI exec guard
 
 BSP descriptor bindings are tested in `descriptor_abi_bsp_bindings_registered` (feature-gated behind `#[cfg(feature = "bsp")]`). BSP shader manifest is `src/renderer/src/shaders/bsp_shader_manifest.txt`.
+
+See [BSP Runtime and Lifetime](18-bsp-runtime-and-lifetime.md) for the ownership and commitment protocol that governs descriptor lifetimes.

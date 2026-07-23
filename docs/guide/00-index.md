@@ -45,7 +45,15 @@ Use these chapters when you need a specific capability. They do not depend on re
 | [12](12-debug-and-diagnostics.md) | Debug & Diagnostics | Logging, timing capture, headless capture, debug UI, validation layers, asset/collider validation |
 | [13](13-packaging-and-distribution.md) | Packaging & Distribution | `engine_pack`: scaffolding, validation, asset scanning, packed distribution |
 
-### Part III — Real-World Reference
+### Part IV — Beta Capabilities
+
+Opt-in features available behind Cargo feature flags. Each chapter documents the feature gate, API surface, and limitations.
+
+| # | Chapter | What You'll Learn |
+|---|---------|-------------------|
+| [18](18-bsp-beta.md) | BSP Map Support (Beta) | Load, render, query, and persist Quake 1 BSP maps behind the `bsp` feature gate |
+
+### Part V — Real-World Reference
 
 Case studies of two complete workspace applications. Read these to see how the concepts from Parts I and II compose into real apps.
 
@@ -54,7 +62,7 @@ Case studies of two complete workspace applications. Read these to see how the c
 | [14](14-dungeon-dogfood-walkthrough.md) | Case Study: Dungeon Dogfood | App-owned loop, procedural dungeon, AABB collision, mesh-collider bridge, audio telemetry, headless capture |
 | [15](15-voxel-demo-walkthrough.md) | Case Study: Voxel Demo | v2 presets/config, deterministic generation, MC33 partition, PBR materials, imgui editor, latest-wins regeneration |
 
-### Part IV — Compatibility & Troubleshooting
+### Part VI — Compatibility & Troubleshooting
 
 Reference chapters for distinguishing supported API paths and diagnosing common issues.
 

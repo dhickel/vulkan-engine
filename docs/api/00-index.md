@@ -8,7 +8,7 @@ Rust developers building applications on this Vulkan rendering engine. Familiari
 
 ## Workspace Context
 
-The root workspace currently contains the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `apps/dungeon_dogfood`, `apps/voxel_demo`, and `tools/engine_pack`. `apps/voxel_demo` is the configurable procedural-cave application. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
+The root workspace currently contains the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `src/package_io`, `src/bsp`, `src/bsp_runtime`, `apps/dungeon_dogfood`, `apps/voxel_demo`, `apps/bsp_beta`, and `tools/engine_pack`. `apps/voxel_demo` is the configurable procedural-cave application. The root `engine` crate is both the alpha data-driven project runtime launcher and a thin app facade over raw support crates. Custom Rust behavior belongs in app crates under `apps/<name>`. Renderer examples remain diagnostics/API references. Support crates and apps are alpha-stage workspace members unless their own docs say otherwise.
 
 > **New here?** Start with the [Engine Guide](../guide/00-index.md) — a cumulative learning path for building applications with this engine. This API reference is the companion contract-level documentation.
 
@@ -32,6 +32,7 @@ The root workspace currently contains the root `engine` package plus `src/input`
 | Dogfood vertical slice | [14-dogfood-vertical-slice.md](14-dogfood-vertical-slice.md) | Alpha demo app walkthrough, headless capture, package/project contracts |
 | App-owned loop | [15-app-owned-loop.md](15-app-owned-loop.md) | Root `engine` input/frame/render helpers for custom app-owned loops |
 | Configurable voxel demo | [16-voxel-demo.md](16-voxel-demo.md) | Strict presets, deterministic v2 generation, imgui editing, regeneration, MC33 partitioning, PBR rendering, and captures |
+| **BSP Map Support (Beta)** | [17-bsp-beta.md](17-bsp-beta.md) | Feature-gated BSP map loading, rendering, and lifecycle behind `renderer/bsp` feature |
 
 ## Public API Contract
 

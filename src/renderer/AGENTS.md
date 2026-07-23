@@ -63,6 +63,11 @@ Module guides:
 - `cargo run -p renderer --example capture_culling -- --headless --culling=on`
 - `cargo run -p renderer --example capture_shadows -- --headless`
 
+### BSP Feature Gate
+
+- `cargo check -p renderer --features bsp`
+- `cargo run -p renderer --example capture_bsp_beta --features bsp -- --headless`
+
 ## Headless Capture Validation
 
 - Use the project skill `.internal-dev/skills/engine-headless-capture-validation/SKILL.md` for renderer changes that need visual proof.

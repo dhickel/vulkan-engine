@@ -1,0 +1,258 @@
+# BSP Map Support — Beta
+
+> App-builder guide for loading, rendering, and interacting with Quake 1 BSP maps in the engine.
+
+## Audience
+
+Rust developers building applications that include compiled Quake-format BSP maps as scene content. You should be comfortable with the [App-Owned Loop](04-app-owned-loop.md) and [Asset Pipeline](09-asset-pipeline.md) before reading this chapter. This chapter describes a **beta** capability: the API is stable within the sprint but broader BSP features remain in development.
+
+## Prerequisites
+
+- **Feature flag**: The `bsp` Cargo feature must be enabled on the `renderer` crate. It is excluded from `default`.
+  ```toml
+  [dependencies]
+  renderer = { path = "src/renderer", features = ["bsp"] }
+  ```
+- **Compiler toolchain**: The engine does NOT bundle a BSP compiler. You must supply `ericw-tools 2.0.0-alpha3` (or a pinned compatible version) on your build host. The approved executables are `qbsp`, `vis`, and `light`.
+- **Fixture rights**: All `.map` sources, palettes, and compiled `.bsp` files must be your own work or licensed for redistribution (CC0 or project license). The engine includes **zero** copyrighted id Software content.
+
+## Package Layout
+
+A BSP-enabled package contains:
+
+```
+my_package/
+  maps/
+    my_level.map          ← TrenchBroom source
+    my_level.bsp          ← compiled BSP (output of qbsp + vis + light)
+    my_level.lit          ← optional colored light companion
+  palettes/
+    my_palette.lmp        ← 768-byte raw RGB palette
+  wads/
+    my_textures.wad       ← optional WAD2 texture archive
+  textures/
+    replacement/*.png     ← optional loose replacement textures
+  manifest.toml           ← package manifest referencing the BSP asset
+```
+
+### Package Manifest
+
+```toml
+# manifest.toml
+format_version = 1
+package_id = "com.example.my_package"
+[package]
+name = "My Package"
+version = "1.0.0"
+
+[[assets]]
+id = "maps/my_level"
+kind = "bsp"
+path = "maps/my_level.bsp"
+[assets.companions]
+palette = "palettes/my_palette.lmp"
+lit = "maps/my_level.lit"
+```
+
+## Loading a BSP Map
+
+### Quick Start — App-Owned Loop with BSP
+
+```rust
+use bsp::{BspLoader, LoadOptions};
+use bsp_runtime::BspCoordinator;
+use renderer::prelude::*;
+
+fn load_map(
+    renderer: &mut Renderer,
+    scene: &mut Scene,
+    bsp_bytes: Vec<u8>,
+    palette_bytes: Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Parse with authorized companion bytes. The raw coordinator prepare
+    // path has no palette/lit parameters; textured maps should enter through
+    // a parsed BspWorld or a package-owned resolver path.
+    let world = BspLoader::load(
+        &bsp_bytes,
+        &LoadOptions {
+            strict: false,
+            palette: Some(palette_bytes),
+            source_identity: "maps/my_level.bsp".to_string(),
+            ..LoadOptions::default()
+        },
+    )?;
+
+    // 2. Register any app bridges before prepare so their hidden resources are
+    // included in the candidate. Bridge implementations are app-specific; see
+    // the API reference for the exact AppBridge trait.
+    let mut coordinator = BspCoordinator::new();
+
+    // 3. Prepare hidden state, upload renderer resources, validate the target
+    // scene, then publish. Commit is publication-only.
+    let prepare = coordinator.prepare_from_world(world, Some(0.0254), "maps/my_level.bsp")?;
+    let mount = renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap())?;
+    coordinator.set_renderer_mount_ready(prepare.token, mount)?;
+    coordinator.validate_for_scene(prepare.token, scene)?;
+    coordinator.commit(prepare.token, scene)?;
+
+    Ok(())
+}
+```
+
+### Crate Dependencies
+
+The root `engine` crate does not currently re-export BSP APIs. BSP applications should depend directly on the support crates they use:
+
+```toml
+[dependencies]
+bsp = { path = "src/bsp" }
+bsp_runtime = { path = "src/bsp_runtime" }
+renderer = { path = "src/renderer", features = ["bsp"] }
+```
+
+## Compiling and Validating Maps
+
+### Compiler Invocation
+
+Use the `engine_pack compile-bsp` command:
+
+```bash
+engine_pack compile-bsp maps/my_level.map \
+  --profile profiles/ericw-tools.toml \
+  --out maps \
+  --palette palettes/my_palette.lmp
+```
+
+The CLI enforces:
+- Shell-free subprocess invocation (no shell interpolation)
+- Compiler identity verification (SHA-256 of executables)
+- Output size budget (default 128 MiB)
+- Post-compile re-validation through the `bsp` parser in strict mode
+- Timeout per stage (default 120 seconds)
+
+### Manual Compilation
+
+If you compile maps outside `engine_pack`, verify the compiler identity:
+
+```bash
+qbsp --version   # must report "ericw-tools 2.0.0-alpha3"
+vis --version    # must report "ericw-tools 2.0.0-alpha3"
+light --version  # must report "ericw-tools 2.0.0-alpha3"
+```
+
+Compile with:
+
+```bash
+qbsp my_level.map              # produces my_level.bsp
+vis my_level.bsp               # computes visibility
+light my_level.bsp             # bakes lightmaps
+```
+
+For BSP2 output with colored lights:
+
+```bash
+qbsp -bsp2 my_level.map
+vis my_level.bsp
+light -bsp2 -lit -colored my_level.bsp
+```
+
+## Development vs Strict Policy
+
+The BSP coordinator supports two diagnostic severity modes:
+
+| mode | behavior |
+|------|----------|
+| **Development** (`strict = false`, default) | Missing optional resources (WADs, models) produce warnings. Unsupported compatibility features are diagnosed but allowed. |
+| **Strict / Release** (`strict = true`) | All compatibility issues, missing resources, and structural concerns produce errors. Maps with errors are rejected. |
+
+Set strict mode when validating release-ready content:
+
+```rust
+let options = bsp::LoadOptions {
+    strict: true,
+    palette: Some(palette_bytes),
+    ..Default::default()
+};
+```
+
+## App-Owned Loop Responsibilities
+
+The app owns the full BSP lifecycle within its event loop:
+
+1. **Load**: Parse BSP bytes and prepare the coordinator.
+2. **Query**: Use public helpers such as `bsp::point_contents()`, `bsp::camera_leaf_index()`, and `bsp::camera_pvs()` before commit when app logic needs BSP spatial data.
+3. **Bridge**: Implement `AppBridge` for physics colliders and behavior state machines.
+4. **Simulate**: Run app-owned physics stepping and behavior updates each frame.
+5. **Snapshot**: Build an app-owned `BspSimulationSnapshot` with `SnapshotBuilder` or an app adapter such as `apps/bsp_beta/src/snapshot.rs`.
+6. **Sync to Scene**: Call `Scene::set_bsp_frame_values()` and update app-owned entity scene nodes from the snapshot.
+7. **Render**: Submit the scene normally — BSP geometry renders automatically when a mount is attached.
+8. **Reload**: Call `coordinator.reload()` to atomically swap a new map version.
+9. **Persist**: Call `coordinator.capture_mutable_behavior()`, then `coordinator.capture_source_link(mutable_behavior)` and `Scene::set_bsp_source_link()` to save state.
+10. **Unload**: Call `coordinator.unload(&mut scene)` to clean up all BSP resources.
+
+## Model Mappings
+
+Inline brush models (doors, platforms, buttons) and external models referenced by entities are placed as scene nodes by the coordinator. The `scene_sync` module maps snapshot entity transforms to scene-node world transforms each frame.
+
+```rust
+// In your app's frame loop (the workspace `apps/bsp_beta` crate contains
+// one reference `scene_sync` implementation):
+let snapshot = snapshot_producer.capture(dt);
+scene.set_bsp_frame_values(snapshot.light_styles.intensities, snapshot.liquid_time);
+scene_sync::sync_snapshot_to_scene(&snapshot, &entity_node_map, &mut scene);
+```
+
+## Deterministic Captures vs Live WSI
+
+- **Headless captures** (`--headless --capture_target draw`) are valid for pixel-correctness validation of BSP lighting and geometry. Use frozen settings: exposure 1.0, static style 0, animation time 0.0.
+- **Live WSI** (real GPU + windowing system) is required to validate swapchain lifecycle, resize, minimize/restore, and surface-loss recovery. Headless captures cannot substitute for WSI lifecycle checks.
+- If no live GPU/WSI is available, record the gap explicitly — do not substitute a headless claim.
+
+## Diagnostics
+
+All BSP diagnostics carry stable machine-readable codes (e.g., `BSP-STRUCT-CORRUPT-LUMP`, `BSP-MISSING-REQUIRED-PALETTE`). Diagnostic severity depends on the policy mode. Inspect diagnostics via:
+
+```rust
+match BspLoader::load(&data, &options) {
+    Ok(world) => {
+        for diag in &world.diagnostics {
+            println!("{} {:?} {}", diag.code, diag.severity, diag.message);
+        }
+    }
+    Err(report) => {
+        println!("{} {:?} {}", report.code, report.severity, report.message);
+    }
+}
+```
+
+## Supported Profiles
+
+| profile | magic | status |
+|---------|-------|--------|
+| `q1-portable-ericw` BSP29 | `29` (LE i32) | **beta** — supported |
+| `q1-portable-ericw` BSP2 | `BSP2` (4-byte ASCII) | **beta** — supported |
+
+## Excluded Formats
+
+The following BSP formats produce `BSP-UNSUPPORTED-DIALECT` errors and will never load:
+
+| dialect | magic | reason |
+|---------|-------|--------|
+| Half-Life BSP30 | version 30 | distinct product |
+| Quake 2 BSP38 | `"2PSB"` | distinct product |
+| Quake 3 / IBSP BSP46 | `"IBSP"` | distinct product |
+| Valve/Source VBSP | varied | distinct product |
+
+## Limitations (Beta)
+
+- **No visible-face fixtures**: Current project fixtures produce zero face geometry from the pinned compiler. The `capture_bsp_beta` example compiles behind `renderer/bsp`, but visual acceptance captures remain blocked until a valid visible, lightmapped BSP fixture exists.
+- **Render-to-texture deferred**: BSP surfaces render into the main color/depth targets using a dedicated BSP pipeline. Off-screen render targets are not yet supported.
+- **Dynamic entity transforms**: Inline brush model transforms update through `BspMountState` per-batch transform maps. Full entity-to-scene-node mapping for external models is partially implemented.
+- **Physics world colliders**: World trimesh collision from clipnodes is pending; point-contents and hull traces are functional.
+
+## See Also
+
+- [API: BSP Beta](../api/17-bsp-beta.md) — exact function signatures, feature flags, error types
+- [Internal: BSP Runtime and Lifetime](../internal/18-bsp-runtime-and-lifetime.md) — ownership graphs, protocol details
+- [BSP Acceptance Spec](../../.internal-dev/specifications/bsp-acceptance.md) — acceptance criteria and evidence
+- [Renderer AGENTS.md](../../src/renderer/AGENTS.md) — renderer contributor guide

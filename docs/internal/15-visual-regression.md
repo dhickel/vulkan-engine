@@ -53,3 +53,20 @@ VISUAL_REGRESSION_UPDATE=1 cargo test -p renderer visual_regression -- --nocaptu
 This copies both capture PNGs and mandatory sidecars over the reviewed baselines. Review the
 resulting decoded output and diff again before retaining it. The update path fails if either
 capture member is absent.
+
+## BSP Visual Regression
+
+BSP map captures use the dedicated `capture_bsp_beta` example behind the `bsp` feature gate:
+
+```bash
+cargo run -p renderer --example capture_bsp_beta --features bsp -- \
+  --headless --capture_target draw --capture_frame=5 \
+  --bsp maps/my_level.bsp
+```
+
+`capture_bsp_beta` currently loads `project_palette.lmp` from the BSP directory or the project
+fixture palette path; it does not accept a `--palette` flag. BSP fixtures currently produce zero
+face geometry from the pinned compiler, so visual regression baselines require a compiled map
+with visible lightmapped faces and an adjacent `project_palette.lmp`. See
+[`docs/internal/18-bsp-runtime-and-lifetime.md`](18-bsp-runtime-and-lifetime.md) for the
+full upload and capture pipeline.

@@ -8,7 +8,7 @@ Contributors working inside the renderer internals — Vulkan orchestration, dat
 
 ## Workspace Context
 
-Root `Cargo.toml` currently declares the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `apps/dungeon_dogfood`, `apps/voxel_demo`, and `tools/engine_pack`. These internals docs primarily cover renderer/input and selected app-owned architecture; support crates and apps should not be inferred production-ready from workspace membership alone.
+Root `Cargo.toml` currently declares the root `engine` package plus `src/input`, `src/renderer`, `src/audio`, `src/physics`, `src/scripting`, `src/events` (`engine_events`), `src/launch_shared`, `src/package_io`, `src/bsp`, `src/bsp_runtime`, `apps/dungeon_dogfood`, `apps/voxel_demo`, `apps/bsp_beta`, and `tools/engine_pack`. These internals docs primarily cover renderer/input and selected app-owned architecture; support crates and apps should not be inferred production-ready from workspace membership alone.
 
 ## Architecture at a Glance
 
@@ -51,6 +51,7 @@ Renderer (public API)
 | 15 | [15-visual-regression.md](15-visual-regression.md) | Decoded-pixel visual-regression harness, per-test tolerances, baseline-update workflow |
 | 16 | [16-voxel-demo-config-regeneration.md](16-voxel-demo-config-regeneration.md) | Voxel-demo config identities, deterministic v2 generation, CPU scene packages, editor lifecycle, and regeneration commit/retirement |
 | 17 | [17-safety-refactor-remediation-ledger.md](17-safety-refactor-remediation-ledger.md) | Phase 10 closeout: 21-row finding ledger, cross-reference map, status taxonomy, and companion to `tests/remediation_ledger.rs` |
+| 18 | [18-bsp-runtime-and-lifetime.md](18-bsp-runtime-and-lifetime.md) | BSP ownership graph, descriptor/frame ABI, commit protocol, generation safety, fence retirement, snapshot persistence, and failure matrix |
 
 ## Key Source Files
 
