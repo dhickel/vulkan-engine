@@ -104,7 +104,9 @@ cargo run -p renderer --example api_test -- \
 
 ### Timing Data Format
 
-Each JSONL line is a valid JSON object produced via `serde_json`. Non-finite floats (NaN, ±Inf) are serialized as JSON `null`. The recording subsystem validates the output path and writes an initial "start" record before activating, so a missing or unwritable path fails before any timing data is collected.
+Each JSONL line is a valid JSON object produced via `serde_json`. Non-finite floats (NaN, ±Inf) are serialized as JSON `null`. The recording subsystem validates the output path and writes an initial "start" record before activating, so a missing or unwritable path fails before any timing data is collected. If initialization fails, no partial recording state remains active.
+
+All debug capture and timing output is generated through serializer-backed code paths. Manual JSON string formatting (which previously could emit bare `NaN`, unescaped control characters, or invalid UTF-8) has been replaced with `serde_json` serialization that guarantees valid output.
 
 ```json
 pub struct DebugTimingSnapshot {
@@ -114,6 +116,14 @@ pub struct DebugTimingRow {
     // individual pass timing
 }
 ```
+
+### Frame Capture Scheduling
+
+Due capture requests fire when `target_frame <= current_frame`, so a request
+that becomes overdue is consumed on the next valid rendered frame instead of
+remaining queued indefinitely. Capture status and sidecar `frame` / `frame_number`
+fields describe the actual execution frame. Sidecars also include
+`requested_frame` / `requested_frame_number` so callers can detect scheduling drift.
 
 ## Frame Capture Evidence
 

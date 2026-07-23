@@ -27,6 +27,7 @@ pub struct FrameCaptureTargetDesc {
 #[derive(Debug)]
 pub struct PendingFrameCapture {
     pub frame_number: u32,
+    pub requested_frame_number: Option<u32>,
     pub sequence_index: Option<u32>,
     pub source: FrameCaptureSource,
     pub target: CaptureTarget,
@@ -75,6 +76,7 @@ pub fn record_frame_capture(
     allocator: &vk_mem::Allocator,
     cmd_buffer: vk::CommandBuffer,
     frame_number: u32,
+    requested_frame_number: Option<u32>,
     sequence_index: Option<u32>,
     source: FrameCaptureSource,
     output_path: &Path,
@@ -141,6 +143,7 @@ pub fn record_frame_capture(
 
     Ok(PendingFrameCapture {
         frame_number,
+        requested_frame_number,
         sequence_index,
         source,
         target: target_desc.target,
@@ -275,9 +278,25 @@ fn write_sidecar(path: &Path, pending: &PendingFrameCapture) -> Result<(), Frame
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let sidecar = json!({
+    let sidecar = capture_sidecar_json(pending, captured_at_unix_ms);
+
+    let bytes = serde_json::to_vec_pretty(&sidecar)
+        .map_err(|err| FrameCaptureError::new(format!("failed to serialize sidecar: {err}")))?;
+    fs::write(path, bytes).map_err(|err| {
+        FrameCaptureError::new(format!("failed to write sidecar {}: {err}", path.display()))
+    })
+}
+
+fn capture_sidecar_json(
+    pending: &PendingFrameCapture,
+    captured_at_unix_ms: u128,
+) -> serde_json::Value {
+    json!({
         "status": "succeeded",
         "frame_number": pending.frame_number,
+        "frame": pending.frame_number,
+        "requested_frame_number": pending.requested_frame_number,
+        "requested_frame": pending.requested_frame_number,
         "sequence_index": pending.sequence_index,
         "capture_target": pending.target.as_label(),
         "source": format!("{:?}", pending.source),
@@ -290,12 +309,6 @@ fn write_sidecar(path: &Path, pending: &PendingFrameCapture) -> Result<(), Frame
         "color_conversion": pending.color_conversion,
         "row_layout": "vkCmdCopyImageToBuffer tightly packed (buffer_row_length=0)",
         "captured_at_unix_ms": captured_at_unix_ms,
-    });
-
-    let bytes = serde_json::to_vec_pretty(&sidecar)
-        .map_err(|err| FrameCaptureError::new(format!("failed to serialize sidecar: {err}")))?;
-    fs::write(path, bytes).map_err(|err| {
-        FrameCaptureError::new(format!("failed to write sidecar {}: {err}", path.display()))
     })
 }
 

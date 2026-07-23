@@ -402,10 +402,16 @@ Validation at load time checks:
 
 Animation channels reference scene nodes by durable `SceneNodeId` instead of by volatile index. Clips are validated at acceptance (duration, sampler indices, monotonic timestamps, interpolation cardinality, target-path type consistency).
 
+**Fallible API**: `AnimationPlayer` provides both legacy infallible methods (`set_clip`, `set_speed`, `update`) and new fallible methods (`try_set_clip`, `try_set_speed`, `try_update`). Fallible methods validate inputs before mutating playback state and return typed `AnimationError` variants. Invalid animation inputs are rejected before altering play time, play state, speed, or the lazy-resolved target cache.
+
 Interpolation modes:
 - **Step**: previous key value.
 - **Linear**: lerp for translation/scale, shortest-path normalized quaternion slerp for rotation.
 - **CubicSpline**: glTF Hermite with three output elements per key (in-tangent, value, out-tangent). Tangents are scaled by the key interval. Quaternion output is normalized and finite-checked.
+
+### Directional Light Persistence (Phase 08)
+
+Directional lights with shadow ownership survive scene save/load round-trips. The v2 scene format serializes the shadow-owning directional's configuration under `directional_lights` with `kind: "directional"`. A scene loaded from v2 with a shadow owner restores the identical shadow configuration. The legacy single-light shadow path (v1 format) remains loadable through forward-compatible migration.
 
 ### Command History (Phase 08)
 

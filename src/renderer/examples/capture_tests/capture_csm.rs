@@ -138,7 +138,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     {
         let mut cube = build_cube_mesh("near_caster");
         cube.material = Some(near_caster_mat);
-        let cube_handle = assets.upload_procedural_mesh(cube).expect("near caster mesh");
+        let cube_handle = assets
+            .upload_procedural_mesh(cube)
+            .expect("near caster mesh");
         let node = scene
             .create_node(
                 Some(root),
@@ -157,7 +159,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     {
         let mut cube = build_cube_mesh("mid_caster");
         cube.material = Some(mid_caster_mat);
-        let cube_handle = assets.upload_procedural_mesh(cube).expect("mid caster mesh");
+        let cube_handle = assets
+            .upload_procedural_mesh(cube)
+            .expect("mid caster mesh");
         let node = scene
             .create_node(
                 Some(root),
@@ -176,7 +180,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     {
         let mut cube = build_cube_mesh("far_occluder");
         cube.material = Some(occluder_mat);
-        let cube_handle = assets.upload_procedural_mesh(cube).expect("far occluder mesh");
+        let cube_handle = assets
+            .upload_procedural_mesh(cube)
+            .expect("far occluder mesh");
         let node = scene
             .create_node(
                 Some(root),
@@ -195,7 +201,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
     {
         let mut cube = build_cube_mesh("boundary_pillar");
         cube.material = Some(pillar_mat);
-        let cube_handle = assets.upload_procedural_mesh(cube).expect("boundary pillar mesh");
+        let cube_handle = assets
+            .upload_procedural_mesh(cube)
+            .expect("boundary pillar mesh");
         let node = scene
             .create_node(
                 Some(root),
@@ -206,8 +214,12 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
                 ),
             )
             .expect("boundary pillar node");
-        scene.add_mesh(node, cube_handle).expect("add boundary pillar");
-        scene.set_node_name(node, "Cascade Boundary Pillar").unwrap();
+        scene
+            .add_mesh(node, cube_handle)
+            .expect("add boundary pillar");
+        scene
+            .set_node_name(node, "Cascade Boundary Pillar")
+            .unwrap();
     }
 
     // ── Off-camera caster (behind camera, still inside light footprint) ─
@@ -230,7 +242,9 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
                 ),
             )
             .expect("off-camera caster node");
-        scene.add_mesh(node, cube_handle).expect("add off-camera caster");
+        scene
+            .add_mesh(node, cube_handle)
+            .expect("add off-camera caster");
         scene.set_node_name(node, "Off-Camera Caster").unwrap();
     }
 
@@ -260,9 +274,7 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
                     ),
                 )
                 .expect("lit sphere node");
-            scene
-                .add_mesh(node, sphere_handle)
-                .expect("add lit sphere");
+            scene.add_mesh(node, sphere_handle).expect("add lit sphere");
             scene
                 .set_node_name(node, format!("Lit Sphere {}", i))
                 .unwrap();
@@ -288,7 +300,10 @@ fn build_scene(renderer: &mut renderer::prelude::Renderer) -> Scene {
         scene
             .set_directional_shadow_config(
                 dir_light_id,
-                DirectionalShadowConfig { enabled: true },
+                DirectionalShadowConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
             )
             .expect("enable CSM shadows");
     }

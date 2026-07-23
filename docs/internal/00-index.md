@@ -50,6 +50,7 @@ Renderer (public API)
 | 14 | [14-renderer-descriptor-abi.md](14-renderer-descriptor-abi.md) | Descriptor ABI manifest: every set, binding, type, size, stage, pipeline consumer, and shader pair |
 | 15 | [15-visual-regression.md](15-visual-regression.md) | Decoded-pixel visual-regression harness, per-test tolerances, baseline-update workflow |
 | 16 | [16-voxel-demo-config-regeneration.md](16-voxel-demo-config-regeneration.md) | Voxel-demo config identities, deterministic v2 generation, CPU scene packages, editor lifecycle, and regeneration commit/retirement |
+| 17 | [17-safety-refactor-remediation-ledger.md](17-safety-refactor-remediation-ledger.md) | Phase 10 closeout: 21-row finding ledger, cross-reference map, status taxonomy, and companion to `tests/remediation_ledger.rs` |
 
 ## Key Source Files
 

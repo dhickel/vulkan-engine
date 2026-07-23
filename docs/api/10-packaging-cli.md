@@ -120,6 +120,13 @@ The CLI follows the same durable identity rules as the renderer facade and scene
 | `environment` | `.hdr`, `.exr` |
 | `audio` | `.wav`, `.ogg`, `.flac`, `.mp3` |
 
+Path validation rejects non-UTF-8 file names at the scan boundary. All asset
+registry output (TOML manifests, scan suggestions, pack reports) is generated
+through serializer-backed paths that cannot emit invalid UTF-8 or escape
+sequences. The former ad-hoc `sanitize_id_component` and `toml_escape` helpers
+have been removed; identity components that are not valid UTF-8 are rejected
+rather than silently mangled.
+
 `scan-assets` infers basic audio asset records by extension. Audio metadata such as declared format, usage, and default gain may be authored manually under `[assets.metadata.audio]` and is validated by `validate-package`, `validate-project`, `validate-scene`, and `pack` through the renderer validators. Collision and material records are still manually authored; collision metadata is also validated through the same renderer-backed path. Package-level script asset records are deferred in this alpha and `script` is not currently accepted as an asset kind.
 
 ## 6. Pack Output Shape

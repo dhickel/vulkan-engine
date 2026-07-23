@@ -493,6 +493,10 @@ impl SceneWorld {
     /// Ray-pick the scene: iterate all active nodes, compute AABB from
     /// world bounds when known, explicit proxy when set, or a small
     /// editor-origin helper for empty non-mesh group nodes.
+    ///
+    /// **Mutable path:** requires `refresh_derived_state` to have been
+    /// called so that `node_world_bounds` is fresh.  The rendering path
+    /// (`build_submission`) uses this.
     pub(crate) fn pick_ray(&self, ray: &Ray) -> Option<SceneNodeId> {
         let mut closest: Option<(f32, SceneNodeId)> = None;
 
@@ -514,6 +518,72 @@ impl SceneWorld {
         }
 
         closest.map(|(_, id)| id)
+    }
+
+    /// Pure read-only ray-pick that computes world transforms and bounds
+    /// on the fly into scratch maps without mutating `dirty`, cached
+    /// transforms, or cached bounds.
+    ///
+    /// Walks the tree from the root, honoring parent transforms,
+    /// negative scale, known/proxy/conservative-visible rules, stale
+    /// IDs, and empty-group editor proxies.
+    pub(crate) fn pick_ray_readonly(&self, ray: &Ray) -> Option<SceneNodeId> {
+        let root_id = match self.root {
+            Some(id) if self.is_valid_node_id(id) => id,
+            _ => return None,
+        };
+
+        // Scratch world transforms built during traversal.
+        let mut world_transforms: std::collections::HashMap<SceneNodeId, Mat4> =
+            std::collections::HashMap::with_capacity(self.nodes.len());
+
+        let mut closest: Option<(f32, SceneNodeId)> = None;
+        self.pick_readonly_walk(
+            root_id,
+            Mat4::IDENTITY,
+            ray,
+            &mut world_transforms,
+            &mut closest,
+        );
+
+        closest.map(|(_, id)| id)
+    }
+
+    /// Recursive read-only walk for picking.
+    fn pick_readonly_walk(
+        &self,
+        node_id: SceneNodeId,
+        parent_world: Mat4,
+        ray: &Ray,
+        world_transforms: &mut std::collections::HashMap<SceneNodeId, Mat4>,
+        closest: &mut Option<(f32, SceneNodeId)>,
+    ) {
+        let node = match self.get_node(node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        let world = parent_world * node.local_transform;
+        world_transforms.insert(node_id, world);
+
+        // Compute world-space bounds from local mesh/proxy bounds using the
+        // on-the-fly world transform (mirrors node_pick_bounds_exact +
+        // compute_node_world_bounds but reads from scratch instead of
+        // cached fields).
+        if let Some(aabb) = pick_bounds_readonly(node, &world) {
+            if let Some(t) = aabb.intersect_ray(ray) {
+                if closest.map_or(true, |(best_t, _)| t < best_t) {
+                    *closest = Some((t, node_id));
+                }
+            }
+        }
+
+        // Recurse children.
+        for child_id in node.children.iter().copied() {
+            if self.is_valid_node_id(child_id) {
+                self.pick_readonly_walk(child_id, world, ray, world_transforms, closest);
+            }
+        }
     }
 
     pub(crate) fn build_submission(&mut self) -> RenderSubmission {
@@ -1177,6 +1247,65 @@ impl SceneWorld {
     }
 }
 
+/// Compute a world-space pickable AABB for a node using an on-the-fly
+/// world transform (`world`).  Mirrors the logic in
+/// `node_pick_bounds_exact` + `compute_node_world_bounds` but operates
+/// on scratch data without touching cached fields.
+fn pick_bounds_readonly(node: &SceneNode, world: &Mat4) -> Option<Aabb> {
+    // If an explicit local proxy is set and no known meshes exist, use it.
+    if let Some(proxy) = node.local_proxy_bounds {
+        return proxy.transformed(world);
+    }
+
+    // Aggregate local mesh bounds then transform.
+    let mut any_conservative = false;
+    let mut local_union: Option<Aabb> = None;
+
+    for entry in &node.mesh_bounds {
+        match &entry.bounds {
+            SceneBounds::Known(aabb) | SceneBounds::Proxy(aabb) => {
+                if aabb.is_finite() && aabb.is_ordered() {
+                    match local_union {
+                        Some(ref mut u) => {
+                            u.extend_to_enclose(aabb);
+                        }
+                        None => local_union = Some(*aabb),
+                    }
+                } else {
+                    any_conservative = true;
+                }
+            }
+            SceneBounds::ConservativeVisible(_) => {
+                any_conservative = true;
+            }
+        }
+    }
+
+    if any_conservative {
+        // Conservative-visible mesh-bearing: skip exact hit.
+        if !node.meshes.is_empty() {
+            return None;
+        }
+        // Empty group node: fall through to editor proxy.
+    }
+
+    if let Some(local) = local_union {
+        return local.transformed(world);
+    }
+
+    // No mesh bounds at all: editor-origin proxy for empty group nodes.
+    if node.meshes.is_empty() {
+        let half = 0.25;
+        let local = Aabb::from_min_max(Vec3::splat(-half), Vec3::splat(half));
+        return local.transformed(world);
+    }
+
+    // Mesh-bearing but no bounds: last-resort small transform-aware proxy.
+    let half = 0.5;
+    let local = Aabb::from_min_max(Vec3::splat(-half), Vec3::splat(half));
+    local.transformed(world)
+}
+
 /// Return the pickable world AABB for a node.
 /// - Known/proxy node_world_bounds are used directly.
 /// - Empty non-mesh group nodes get a small editor-origin helper.
@@ -1470,6 +1599,38 @@ mod tests {
         };
 
         assert_eq!(scene.pick_ray(&ray), Some(root));
+    }
+
+    #[test]
+    fn pick_ray_readonly_does_not_mutate_dirty_or_cached_state() {
+        let mut scene = SceneWorld::new();
+        let root = scene.add_node(
+            None,
+            node_with_mesh_and_transform(
+                1,
+                make_unit_known(),
+                Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0)),
+            ),
+        );
+        scene.set_root(root);
+
+        let before = scene.get_node(root).expect("root should exist").clone();
+        assert!(before.dirty);
+        assert_eq!(before.world_transform, Mat4::IDENTITY);
+        assert!(before.node_world_bounds.is_none());
+        assert!(before.subtree_world_bounds.is_none());
+
+        let ray = Ray {
+            origin: Vec3::new(3.0, 0.0, 5.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        };
+        assert_eq!(scene.pick_ray_readonly(&ray), Some(root));
+
+        let after = scene.get_node(root).expect("root should exist");
+        assert_eq!(after.dirty, before.dirty);
+        assert_eq!(after.world_transform, before.world_transform);
+        assert_eq!(after.node_world_bounds, before.node_world_bounds);
+        assert_eq!(after.subtree_world_bounds, before.subtree_world_bounds);
     }
 
     #[test]

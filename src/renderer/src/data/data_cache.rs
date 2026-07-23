@@ -58,6 +58,7 @@
 //! - Lazy loading: Only upload textures for visible objects
 //! - Batch transfers: Multiple textures uploaded in single frame
 
+use crate::data::assimp_util::{StagedImportPlan, StagedNode};
 use crate::data::environment_import::{self, EnvironmentSource, PendingSkyboxSource};
 use crate::data::gpu_data::{
     AlphaMode, AsByteSlice, EnvironmentUBO, MaterialMeta, MaterialShadingModel, MeshMeta,
@@ -71,6 +72,7 @@ use crate::data::retirement::{
     DescriptorReleaseData, FrameSerial, MaterialRetiredPayload, TextureRetiredPayload,
 };
 use crate::data::{data_util, gpu_data};
+use crate::scene::scene_world::{SceneNode, SceneWorld};
 use crate::vulkan::vk_descriptor::{
     PoolSizeRatio, VkDescriptorWriter, VkDynamicDescriptorAllocator,
 };
@@ -252,6 +254,450 @@ impl VkDataCache {
             error!("environment_cache lock poisoned during destroy");
         }
     }
+
+    /// Atomically commit a fully validated staged import plan to the caches.
+    ///
+    /// Acquires texture and mesh cache locks in order, precomputes all output
+    /// handles, resolves local references, constructs the `SceneWorld` against
+    /// those handles, and only then publishes textures, materials, and meshes.
+    ///
+    /// Every fallible validation step runs before the publication section; after
+    /// the first cache slot mutation, this method only performs deterministic
+    /// slot writes whose handles were already precomputed.
+    pub(crate) fn commit_import_plan(
+        &self,
+        plan: StagedImportPlan,
+    ) -> Result<crate::data::assimp_util::ModelMeta, crate::data::assimp_util::AssimpImportError>
+    {
+        use crate::data::assimp_util::{AssimpImportError, ModelMeta};
+
+        validate_staged_import_plan(&plan)?;
+
+        // Acquire locks in established order: mesh_cache → texture_cache.
+        let mut mesh_cache = self
+            .mesh_cache
+            .lock()
+            .map_err(|_| AssimpImportError::Internal("mesh_cache lock poisoned".to_string()))?;
+        let mut tex_cache = self
+            .texture_cache
+            .lock()
+            .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
+
+        validate_import_cache_preconditions(&plan, &tex_cache, &mesh_cache)?;
+
+        let texture_handles = preview_texture_handles(&tex_cache, plan.textures.len());
+        let material_ids = preview_material_handles(&tex_cache, plan.materials.len());
+        let mesh_ids = preview_mesh_handles(&mesh_cache, plan.meshes.len());
+
+        let material_metas = resolve_staged_materials(plan.materials, &texture_handles);
+        let mesh_metas = resolve_staged_meshes(plan.meshes, &material_ids);
+
+        let mut scene_world = SceneWorld::new();
+        let root_id = build_scene_world_from_staged(
+            &mut scene_world,
+            &plan.nodes,
+            plan.root_node_index,
+            &mesh_ids,
+            None,
+        );
+        scene_world.set_root(root_id);
+
+        // Publication section: all fallible validation and allocation planning has
+        // completed. The following writes must publish the whole import as a unit.
+        for (meta, expected) in plan
+            .textures
+            .into_iter()
+            .zip(texture_handles.iter().copied())
+        {
+            let actual = tex_cache.add_texture(meta);
+            debug_assert_eq!(actual, expected);
+        }
+        for (meta, expected) in material_metas.into_iter().zip(material_ids.iter().copied()) {
+            let actual = tex_cache.add_material(meta);
+            debug_assert_eq!(actual, expected);
+        }
+        for (meta, expected) in mesh_metas.into_iter().zip(mesh_ids.iter().copied()) {
+            let actual = mesh_cache.add(meta);
+            debug_assert_eq!(actual, expected);
+        }
+
+        Ok(ModelMeta {
+            scene_world,
+            material_ids,
+            mesh_ids,
+            mesh_deformations: plan.mesh_deformations,
+        })
+    }
+}
+
+fn validate_staged_import_plan(
+    plan: &StagedImportPlan,
+) -> Result<(), crate::data::assimp_util::AssimpImportError> {
+    use crate::data::assimp_util::AssimpImportError;
+
+    if plan.mesh_deformations.len() != plan.meshes.len() {
+        return Err(AssimpImportError::Internal(format!(
+            "staged import has {} mesh deformations for {} meshes",
+            plan.mesh_deformations.len(),
+            plan.meshes.len()
+        )));
+    }
+
+    let texture_count = plan.textures.len();
+    for (material_idx, material) in plan.materials.iter().enumerate() {
+        if let Some(base_color) = &material.base_color {
+            validate_staged_texture_ref(
+                material_idx,
+                "base color",
+                base_color.texture_idx,
+                texture_count,
+            )?;
+        }
+        if let Some(metallic_roughness) = &material.metallic_roughness {
+            validate_staged_texture_ref(
+                material_idx,
+                "metallic roughness",
+                metallic_roughness.texture_idx,
+                texture_count,
+            )?;
+        }
+        if let Some(normal) = &material.normal {
+            validate_staged_texture_ref(material_idx, "normal", normal.texture_idx, texture_count)?;
+        }
+        if let Some(occlusion) = &material.occlusion {
+            validate_staged_texture_ref(
+                material_idx,
+                "occlusion",
+                occlusion.texture_idx,
+                texture_count,
+            )?;
+        }
+        if let Some(emissive) = &material.emissive {
+            validate_staged_texture_ref(
+                material_idx,
+                "emissive",
+                emissive.texture_idx,
+                texture_count,
+            )?;
+        }
+    }
+
+    for (mesh_idx, mesh) in plan.meshes.iter().enumerate() {
+        if let Some(material_idx) = mesh.material_idx {
+            if material_idx >= plan.materials.len() {
+                return Err(AssimpImportError::Internal(format!(
+                    "staged mesh {mesh_idx} references material {material_idx} but only {} materials exist",
+                    plan.materials.len()
+                )));
+            }
+        }
+    }
+
+    if plan.root_node_index >= plan.nodes.len() {
+        return Err(AssimpImportError::Internal(format!(
+            "staged root node index {} is out of bounds for {} nodes",
+            plan.root_node_index,
+            plan.nodes.len()
+        )));
+    }
+
+    for (node_idx, node) in plan.nodes.iter().enumerate() {
+        if node.mesh_indices.len() != node.mesh_bounds.len() {
+            return Err(AssimpImportError::Internal(format!(
+                "staged node {node_idx} has {} mesh refs but {} mesh bounds",
+                node.mesh_indices.len(),
+                node.mesh_bounds.len()
+            )));
+        }
+        for &mesh_idx in &node.mesh_indices {
+            if mesh_idx >= plan.meshes.len() {
+                return Err(AssimpImportError::Internal(format!(
+                    "staged node {node_idx} references mesh {mesh_idx} but only {} meshes exist",
+                    plan.meshes.len()
+                )));
+            }
+        }
+        for &child_idx in &node.child_indices {
+            if child_idx >= plan.nodes.len() {
+                return Err(AssimpImportError::Internal(format!(
+                    "staged node {node_idx} references child {child_idx} but only {} nodes exist",
+                    plan.nodes.len()
+                )));
+            }
+        }
+    }
+
+    let mut visit_state = vec![0u8; plan.nodes.len()];
+    validate_staged_node_tree(plan.root_node_index, &plan.nodes, &mut visit_state)?;
+    if let Some(orphan_idx) = visit_state.iter().position(|state| *state == 0) {
+        return Err(AssimpImportError::Internal(format!(
+            "staged node {orphan_idx} is unreachable from root {}",
+            plan.root_node_index
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_staged_texture_ref(
+    material_idx: usize,
+    label: &str,
+    texture_idx: usize,
+    texture_count: usize,
+) -> Result<(), crate::data::assimp_util::AssimpImportError> {
+    use crate::data::assimp_util::AssimpImportError;
+    if texture_idx >= texture_count {
+        return Err(AssimpImportError::Internal(format!(
+            "staged material {material_idx} {label} references texture {texture_idx} but only {texture_count} textures exist"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_staged_node_tree(
+    node_idx: usize,
+    nodes: &[StagedNode],
+    visit_state: &mut [u8],
+) -> Result<(), crate::data::assimp_util::AssimpImportError> {
+    use crate::data::assimp_util::AssimpImportError;
+
+    match visit_state[node_idx] {
+        1 => {
+            return Err(AssimpImportError::Internal(format!(
+                "staged node graph contains a cycle at node {node_idx}"
+            )));
+        }
+        2 => {
+            return Err(AssimpImportError::Internal(format!(
+                "staged node graph shares node {node_idx} across multiple parents"
+            )));
+        }
+        _ => {}
+    }
+
+    visit_state[node_idx] = 1;
+    for &child_idx in &nodes[node_idx].child_indices {
+        validate_staged_node_tree(child_idx, nodes, visit_state)?;
+    }
+    visit_state[node_idx] = 2;
+    Ok(())
+}
+
+fn validate_import_cache_preconditions(
+    plan: &StagedImportPlan,
+    tex_cache: &TextureCache,
+    mesh_cache: &MeshCache,
+) -> Result<(), crate::data::assimp_util::AssimpImportError> {
+    use crate::data::assimp_util::AssimpImportError;
+
+    for (idx, texture) in plan.textures.iter().enumerate() {
+        let format = texture.payload.format();
+        if !tex_cache.supported_formats.contains(&format) {
+            return Err(AssimpImportError::Internal(format!(
+                "staged texture {idx} has unsupported format {format:?} after import validation"
+            )));
+        }
+    }
+
+    validate_slot_capacity(
+        tex_cache.cached_textures.len(),
+        tex_cache.free_texture_slots.len(),
+        plan.textures.len(),
+        "texture",
+    )?;
+    validate_slot_capacity(
+        tex_cache.cached_materials.len(),
+        tex_cache.free_material_slots.len(),
+        plan.materials.len(),
+        "material",
+    )?;
+    validate_slot_capacity(
+        mesh_cache.cached_meshes.len(),
+        mesh_cache.free_mesh_slots.len(),
+        plan.meshes.len(),
+        "mesh",
+    )?;
+    validate_slot_capacity(0, 0, plan.nodes.len(), "scene node")?;
+
+    Ok(())
+}
+
+fn validate_slot_capacity(
+    existing_len: usize,
+    free_slots: usize,
+    additional: usize,
+    label: &str,
+) -> Result<(), crate::data::assimp_util::AssimpImportError> {
+    use crate::data::assimp_util::AssimpImportError;
+
+    let new_slots = additional.saturating_sub(free_slots);
+    let final_len = existing_len.checked_add(new_slots).ok_or_else(|| {
+        AssimpImportError::Internal(format!(
+            "{label} slot capacity overflow during import commit"
+        ))
+    })?;
+    if final_len > u32::MAX as usize {
+        return Err(AssimpImportError::Internal(format!(
+            "{label} slot capacity {final_len} exceeds u32 handle space during import commit"
+        )));
+    }
+    Ok(())
+}
+
+fn preview_texture_handles(tex_cache: &TextureCache, count: usize) -> Vec<TextureHandle> {
+    let free_len = tex_cache.free_texture_slots.len();
+    (0..count)
+        .map(|idx| {
+            if idx < free_len {
+                let slot = tex_cache.free_texture_slots[free_len - 1 - idx];
+                tex_cache.texture_handle_for_slot(slot)
+            } else {
+                TextureHandle::new((tex_cache.cached_textures.len() + idx - free_len) as u32, 0)
+            }
+        })
+        .collect()
+}
+
+fn preview_material_handles(tex_cache: &TextureCache, count: usize) -> Vec<MaterialHandle> {
+    let free_len = tex_cache.free_material_slots.len();
+    (0..count)
+        .map(|idx| {
+            if idx < free_len {
+                let slot = tex_cache.free_material_slots[free_len - 1 - idx];
+                tex_cache.material_handle_for_slot(slot)
+            } else {
+                MaterialHandle::new(
+                    (tex_cache.cached_materials.len() + idx - free_len) as u32,
+                    0,
+                )
+            }
+        })
+        .collect()
+}
+
+fn preview_mesh_handles(mesh_cache: &MeshCache, count: usize) -> Vec<MeshHandle> {
+    let free_len = mesh_cache.free_mesh_slots.len();
+    (0..count)
+        .map(|idx| {
+            if idx < free_len {
+                let slot = mesh_cache.free_mesh_slots[free_len - 1 - idx];
+                mesh_cache.mesh_handle_for_slot(slot)
+            } else {
+                MeshHandle::new((mesh_cache.cached_meshes.len() + idx - free_len) as u32, 0)
+            }
+        })
+        .collect()
+}
+
+fn resolve_staged_materials(
+    materials: Vec<crate::data::assimp_util::StagedMaterial>,
+    texture_handles: &[TextureHandle],
+) -> Vec<MaterialMeta> {
+    materials
+        .into_iter()
+        .map(|staged| {
+            let mut meta = MaterialMeta::default();
+            meta.shading_model = staged.shading_model;
+            meta.set_alpha_mode(staged.alpha_mode, staged.alpha_cutoff);
+
+            if let Some(bc) = staged.base_color {
+                meta.add_base_color(texture_handles[bc.texture_idx], bc.color_factor, bc.uv_set);
+            }
+            if let Some(mr) = staged.metallic_roughness {
+                meta.add_metallic_roughness(
+                    texture_handles[mr.texture_idx],
+                    mr.metallic_factor,
+                    mr.roughness_factor,
+                    mr.uv_set,
+                );
+            }
+            if let Some(n) = staged.normal {
+                meta.add_normal(texture_handles[n.texture_idx], n.normal_scale, n.uv_set);
+            }
+            if let Some(o) = staged.occlusion {
+                meta.add_occlusion(
+                    texture_handles[o.texture_idx],
+                    o.occlusion_strength,
+                    o.uv_set,
+                );
+            }
+            if let Some(e) = staged.emissive {
+                meta.add_emissive(
+                    texture_handles[e.texture_idx],
+                    e.emissive_factor,
+                    e.emissive_strength,
+                    e.uv_set,
+                );
+            }
+
+            meta
+        })
+        .collect()
+}
+
+fn resolve_staged_meshes(
+    meshes: Vec<crate::data::assimp_util::StagedMesh>,
+    material_handles: &[MaterialHandle],
+) -> Vec<MeshMeta> {
+    meshes
+        .into_iter()
+        .map(|staged| MeshMeta {
+            name: staged.name,
+            indices: staged.indices,
+            vertices: staged.vertices,
+            material_index: staged.material_idx.map(|idx| material_handles[idx]),
+            has_uv1: staged.has_uv1,
+        })
+        .collect()
+}
+
+/// Recursively build `SceneWorld` nodes from a flat `StagedNode` list.
+///
+/// `mesh_ids` maps staged mesh indices (from `StagedNode::mesh_indices`) to
+/// runtime `MeshHandle` values. The function is non-fallible.
+fn build_scene_world_from_staged(
+    scene_world: &mut SceneWorld,
+    nodes: &[StagedNode],
+    node_idx: usize,
+    mesh_ids: &[MeshHandle],
+    parent: Option<crate::scene::scene_world::SceneNodeId>,
+) -> crate::scene::scene_world::SceneNodeId {
+    use crate::api::scene::MeshBoundsEntry;
+
+    let staged = &nodes[node_idx];
+
+    let meshes: Vec<MeshHandle> = staged
+        .mesh_indices
+        .iter()
+        .map(|&idx| mesh_ids[idx])
+        .collect();
+
+    let mesh_bounds: Vec<MeshBoundsEntry> = staged
+        .mesh_indices
+        .iter()
+        .zip(staged.mesh_bounds.iter())
+        .map(|(&mesh_idx, &bounds)| MeshBoundsEntry {
+            mesh: mesh_ids[mesh_idx],
+            bounds,
+        })
+        .collect();
+
+    let node = SceneNode {
+        name: staged.name.clone(),
+        local_transform: staged.local_transform,
+        meshes,
+        mesh_bounds,
+        ..SceneNode::default()
+    };
+
+    let node_id = scene_world.add_node(parent, node);
+
+    // Recursively build children.
+    for &child_idx in &staged.child_indices {
+        build_scene_world_from_staged(scene_world, nodes, child_idx, mesh_ids, Some(node_id));
+    }
+
+    node_id
 }
 
 pub struct TextureCache {
@@ -2466,15 +2912,57 @@ pub struct VkPipelineCache {
 }
 
 impl VkPipelineCache {
+    pub(crate) fn validate_entries(entries: &[(VkPipelineType, VkPipeline)]) -> Result<(), String> {
+        if entries.len() != VkPipelineType::COUNT {
+            return Err(format!(
+                "VkPipelineCache: expected {} pipeline entries, got {}",
+                VkPipelineType::COUNT,
+                entries.len()
+            ));
+        }
+
+        let mut seen = [false; VkPipelineType::COUNT];
+        for (typ, _) in entries {
+            let index = *typ as usize;
+            if index >= VkPipelineType::COUNT {
+                return Err(format!(
+                    "VkPipelineCache: pipeline type {:?} has out-of-range discriminant {}",
+                    typ, index
+                ));
+            }
+            if seen[index] {
+                return Err(format!(
+                    "VkPipelineCache: duplicate pipeline type {:?}",
+                    typ
+                ));
+            }
+            seen[index] = true;
+        }
+
+        for (index, present) in seen.into_iter().enumerate() {
+            if !present {
+                return Err(format!(
+                    "VkPipelineCache: missing pipeline type with discriminant {}",
+                    index
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn new(mut pipelines: Vec<(VkPipelineType, VkPipeline)>) -> Result<Self, String> {
+        Self::validate_entries(&pipelines)?;
+
         pipelines.sort_by_key(|(typ, _)| *typ);
 
+        // Length and complete coverage were validated above; conversion is infallible.
         let sorted_pipelines: [VkPipeline; VkPipelineType::COUNT] = pipelines
             .into_iter()
             .map(|(_, pipeline)| pipeline)
             .collect::<Vec<_>>()
             .try_into()
-            .map_err(|_| "Number of pipelines did not match number of enum keys".to_string())?;
+            .unwrap_or_else(|_| unreachable!("pipeline count validated above"));
 
         Ok(Self {
             pipelines: sorted_pipelines,
@@ -2482,7 +2970,9 @@ impl VkPipelineCache {
     }
 
     pub fn get_pipeline(&self, typ: VkPipelineType) -> &VkPipeline {
-        unsafe { self.pipelines.get_unchecked(typ as usize) }
+        self.pipelines
+            .get(typ as usize)
+            .expect("VkPipelineCache: pipeline type index out of bounds; cache invariant broken")
     }
 }
 
@@ -2980,6 +3470,85 @@ mod tests {
             checked_retired_generation(u32::MAX),
             Err(CacheError::GenerationExhausted)
         );
+    }
+
+    fn minimal_staged_import_plan() -> StagedImportPlan {
+        use crate::api::scene::{BoundsUnknownReason, SceneBounds};
+        use crate::data::assimp_util::{StagedMaterial, StagedMesh, StagedNode};
+        use crate::data::mesh_geometry::MeshDeformation;
+
+        let bounds = SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry);
+        StagedImportPlan {
+            textures: Vec::new(),
+            materials: vec![StagedMaterial {
+                base_color: None,
+                metallic_roughness: None,
+                normal: None,
+                occlusion: None,
+                emissive: None,
+                alpha_mode: AlphaMode::Opaque,
+                alpha_cutoff: 0.5,
+                shading_model: MaterialShadingModel::PbrMetalRough,
+            }],
+            meshes: vec![StagedMesh {
+                name: "mesh".to_string(),
+                indices: vec![0, 1, 2],
+                vertices: vec![crate::data::gpu_data::Vertex::default(); 3],
+                material_idx: Some(0),
+                has_uv1: false,
+                deformation: MeshDeformation::Rigid,
+                bounds,
+            }],
+            nodes: vec![StagedNode {
+                name: "root".to_string(),
+                local_transform: glam::Mat4::IDENTITY,
+                mesh_indices: vec![0],
+                child_indices: Vec::new(),
+                mesh_bounds: vec![bounds],
+            }],
+            root_node_index: 0,
+            mesh_deformations: vec![MeshDeformation::Rigid],
+        }
+    }
+
+    #[test]
+    fn staged_import_validation_rejects_bad_local_references_before_commit() {
+        use crate::data::assimp_util::StagedBaseColorRef;
+
+        let mut bad_texture = minimal_staged_import_plan();
+        bad_texture.materials[0].base_color = Some(StagedBaseColorRef {
+            texture_idx: 0,
+            color_factor: Vec4::ONE,
+            uv_set: 0,
+        });
+        assert!(validate_staged_import_plan(&bad_texture).is_err());
+
+        let mut bad_material = minimal_staged_import_plan();
+        bad_material.meshes[0].material_idx = Some(99);
+        assert!(validate_staged_import_plan(&bad_material).is_err());
+
+        let mut bad_mesh = minimal_staged_import_plan();
+        bad_mesh.nodes[0].mesh_indices = vec![99];
+        assert!(validate_staged_import_plan(&bad_mesh).is_err());
+    }
+
+    #[test]
+    fn staged_import_validation_requires_tree_reachable_from_root() {
+        use crate::data::assimp_util::StagedNode;
+
+        let mut orphan = minimal_staged_import_plan();
+        orphan.nodes.push(StagedNode {
+            name: "orphan".to_string(),
+            local_transform: glam::Mat4::IDENTITY,
+            mesh_indices: Vec::new(),
+            child_indices: Vec::new(),
+            mesh_bounds: Vec::new(),
+        });
+        assert!(validate_staged_import_plan(&orphan).is_err());
+
+        let mut cycle = minimal_staged_import_plan();
+        cycle.nodes[0].child_indices = vec![0];
+        assert!(validate_staged_import_plan(&cycle).is_err());
     }
 
     #[test]

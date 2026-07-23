@@ -954,6 +954,7 @@ name = "engine_pack"
 version = "0.1.0"
 dependencies = [
  "launch_shared",
+ "libc",
  "renderer",
  "serde",
  "serde_json",
@@ -3121,6 +3122,7 @@ dependencies = [
  "cfg-if",
  "engine_events",
  "env_logger 0.10.2",
+ "getrandom 0.3.3",
  "glam 0.28.0",
  "gltf",
  "half",
@@ -3130,6 +3132,7 @@ dependencies = [
  "imgui-winit-support",
  "input",
  "intel_tex_2",
+ "libc",
  "log",
  "mikktspace",
  "notify",

@@ -378,32 +378,186 @@ fn animation_player_evaluates_at_time() {
         interpolation: Interpolation::Linear,
     });
     clip.channels.push(AnimationChannel {
-        target,
+        node_index: 0,
         target_path: AnimationTarget::Translation,
         sampler_index: 0,
     });
 
+    let mut target_map = HashMap::new();
+    target_map.insert(0usize, target);
+
     let mut player = AnimationPlayer::new();
-    player.set_clip(clip).unwrap();
+    player.set_target_map(target_map);
+    player.set_clip(clip);
     player.play();
 
-    let mut valid_targets = HashMap::new();
-    valid_targets.insert(target, ());
-
     // At t=0, should be at origin
-    let transforms = player.update(0.0, &valid_targets).unwrap();
-    let mat = transforms.get(&target).expect("target node");
+    let transforms = player.update(0.0);
+    let mat = transforms.get(&0usize).expect("target node");
     assert!((mat.w_axis.x - 0.0).abs() < 0.01);
 
     // At t=1, should be at x=1
-    let transforms = player.update(1.0, &valid_targets).unwrap();
-    let mat = transforms.get(&target).expect("target node");
+    let transforms = player.update(1.0);
+    let mat = transforms.get(&0usize).expect("target node");
     assert!((mat.w_axis.x - 1.0).abs() < 0.01);
 
     // At t=2, should be at x=2
-    let transforms = player.update(1.0, &valid_targets).unwrap();
-    let mat = transforms.get(&target).expect("target node");
+    let transforms = player.update(1.0);
+    let mat = transforms.get(&0usize).expect("target node");
     assert!((mat.w_axis.x - 2.0).abs() < 0.01);
+}
+
+// ── Animation state-snapshot tests (M-A7) ───────────────────────────
+
+#[test]
+fn animation_try_update_nan_dt_preserves_state() {
+    use renderer::animation::{
+        AnimationChannel, AnimationClip, AnimationPlayer, AnimationSampler, AnimationTarget,
+        Interpolation, KeyframeValue,
+    };
+    use renderer::SceneNodeId;
+    use std::collections::HashMap;
+
+    let target = SceneNodeId::new(1, 0);
+    let mut clip = AnimationClip::new("test", 2.0);
+    clip.samplers.push(AnimationSampler {
+        input: vec![0.0, 1.0],
+        output: vec![
+            KeyframeValue::Translation(Vec3::ZERO),
+            KeyframeValue::Translation(Vec3::new(5.0, 0.0, 0.0)),
+        ],
+        interpolation: Interpolation::Linear,
+    });
+    clip.channels.push(AnimationChannel {
+        node_index: 0,
+        target_path: AnimationTarget::Translation,
+        sampler_index: 0,
+    });
+
+    let mut target_map = HashMap::new();
+    target_map.insert(0usize, target);
+
+    let mut player = AnimationPlayer::new();
+    player.set_target_map(target_map.clone());
+    player.set_clip(clip);
+    player.set_speed(2.0);
+    player.play();
+
+    // Advance a bit first.
+    let _ = player.try_update(0.5).unwrap();
+    let snap_time = player.current_time();
+    let snap_playing = player.is_playing();
+    let snap_speed = player.speed();
+
+    // NaN dt must fail and preserve state.
+    let result = player.try_update(f32::NAN);
+    assert!(result.is_err());
+    assert_eq!(player.current_time(), snap_time);
+    assert_eq!(player.is_playing(), snap_playing);
+    assert!((player.speed() - snap_speed).abs() < 0.01);
+}
+
+#[test]
+fn animation_try_update_negative_dt_preserves_state() {
+    use renderer::animation::{
+        AnimationChannel, AnimationClip, AnimationPlayer, AnimationSampler, AnimationTarget,
+        Interpolation, KeyframeValue,
+    };
+    use renderer::SceneNodeId;
+    use std::collections::HashMap;
+
+    let target = SceneNodeId::new(1, 0);
+    let mut clip = AnimationClip::new("test", 2.0);
+    clip.samplers.push(AnimationSampler {
+        input: vec![0.0, 1.0],
+        output: vec![
+            KeyframeValue::Translation(Vec3::ZERO),
+            KeyframeValue::Translation(Vec3::new(5.0, 0.0, 0.0)),
+        ],
+        interpolation: Interpolation::Linear,
+    });
+    clip.channels.push(AnimationChannel {
+        node_index: 0,
+        target_path: AnimationTarget::Translation,
+        sampler_index: 0,
+    });
+
+    let mut target_map = HashMap::new();
+    target_map.insert(0usize, target);
+
+    let mut player = AnimationPlayer::new();
+    player.set_target_map(target_map.clone());
+    player.set_clip(clip);
+    player.play();
+
+    let snap_time = player.current_time();
+    let snap_playing = player.is_playing();
+
+    let result = player.try_update(-0.1);
+    assert!(result.is_err());
+    assert_eq!(player.current_time(), snap_time);
+    assert_eq!(player.is_playing(), snap_playing);
+}
+
+#[test]
+fn animation_try_set_speed_nan_preserves_state() {
+    use renderer::animation::AnimationPlayer;
+
+    let mut player = AnimationPlayer::new();
+    player.set_speed(1.5);
+    let result = player.try_set_speed(f32::NAN);
+    assert!(result.is_err());
+    assert!((player.speed() - 1.5).abs() < 0.01);
+}
+
+#[test]
+fn animation_try_set_clip_invalid_preserves_state() {
+    use renderer::animation::{AnimationClip, AnimationPlayer};
+
+    let mut player = AnimationPlayer::new();
+    let bad_clip = AnimationClip::new("", 1.0);
+    let result = player.try_set_clip(bad_clip);
+    assert!(result.is_err());
+    assert!(player.clip().is_none());
+}
+
+#[test]
+fn animation_legacy_paused_update_does_not_advance() {
+    use renderer::animation::{
+        AnimationChannel, AnimationClip, AnimationPlayer, AnimationSampler, AnimationTarget,
+        Interpolation, KeyframeValue,
+    };
+    use renderer::SceneNodeId;
+    use std::collections::HashMap;
+
+    let target = SceneNodeId::new(1, 0);
+    let mut clip = AnimationClip::new("test", 2.0);
+    clip.samplers.push(AnimationSampler {
+        input: vec![0.0, 1.0, 2.0],
+        output: vec![
+            KeyframeValue::Translation(Vec3::ZERO),
+            KeyframeValue::Translation(Vec3::new(5.0, 0.0, 0.0)),
+            KeyframeValue::Translation(Vec3::new(10.0, 0.0, 0.0)),
+        ],
+        interpolation: Interpolation::Linear,
+    });
+    clip.channels.push(AnimationChannel {
+        node_index: 0,
+        target_path: AnimationTarget::Translation,
+        sampler_index: 0,
+    });
+
+    let mut target_map = HashMap::new();
+    target_map.insert(0usize, target);
+
+    let mut player = AnimationPlayer::new();
+    player.set_target_map(target_map);
+    player.set_clip(clip);
+    // Paused.
+
+    let _ = player.update(1.0);
+    assert!(!player.is_playing());
+    assert_eq!(player.current_time(), 0.0);
 }
 
 #[test]
@@ -759,7 +913,8 @@ mod mesh_geometry_proof {
 
     #[test]
     fn dto_arc_positions_shareable() {
-        let positions: Arc<[[f32; 3]]> = Arc::from(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]].into_boxed_slice());
+        let positions: Arc<[[f32; 3]]> =
+            Arc::from(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]].into_boxed_slice());
         let p2 = Arc::clone(&positions);
         assert_eq!(positions.len(), p2.len());
         assert_eq!(positions[0], p2[0]);

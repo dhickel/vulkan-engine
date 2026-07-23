@@ -863,7 +863,7 @@ impl InputChord {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ActionBinding {
     pub action: ActionId,
     pub trigger: BindingTrigger,
@@ -899,68 +899,6 @@ impl ActionBinding {
     pub fn with_modifiers(mut self, modifiers: BindingModifiers) -> Self {
         self.modifiers = modifiers;
         self
-    }
-
-    fn matches_press(&self, event: &InputEvent) -> bool {
-        match (self.trigger, event) {
-            (
-                BindingTrigger::Key(key),
-                InputEvent::Key {
-                    code,
-                    state,
-                    modifiers,
-                    ..
-                },
-            ) => {
-                *state == ElementState::Pressed
-                    && key == *code
-                    && self.modifiers.matches(*modifiers)
-            }
-            (
-                BindingTrigger::MouseButton(expected),
-                InputEvent::MouseButton {
-                    button,
-                    state,
-                    modifiers,
-                },
-            ) => {
-                *state == ElementState::Pressed
-                    && expected == *button
-                    && self.modifiers.matches(*modifiers)
-            }
-            _ => false,
-        }
-    }
-
-    fn matches_release(&self, event: &InputEvent) -> bool {
-        match (self.trigger, event) {
-            (
-                BindingTrigger::Key(key),
-                InputEvent::Key {
-                    code,
-                    state,
-                    modifiers,
-                    ..
-                },
-            ) => {
-                *state == ElementState::Released
-                    && key == *code
-                    && self.modifiers.matches(*modifiers)
-            }
-            (
-                BindingTrigger::MouseButton(expected),
-                InputEvent::MouseButton {
-                    button,
-                    state,
-                    modifiers,
-                },
-            ) => {
-                *state == ElementState::Released
-                    && expected == *button
-                    && self.modifiers.matches(*modifiers)
-            }
-            _ => false,
-        }
     }
 }
 
@@ -1398,24 +1336,35 @@ fn parse_mouse_button(value: &str) -> Option<MouseButton> {
     }
 }
 
+/// Private tracked entry for one binding in the ActionMapLayer.
+///
+/// Each entry carries a full binding fingerprint (for reconciliation),
+/// a unique stable instance ID, and the currently active trigger identity.
+#[derive(Clone, Debug)]
+struct TrackedBindingEntry {
+    binding: ActionBinding,
+    instance: BindingInstanceId,
+    active_trigger: Option<BindingTrigger>,
+}
+
 pub struct ActionMapLayer {
     map: ActionMap,
-    /// Per-binding instance IDs, assigned at construction time.
-    /// Indexes correspond to `map.bindings`.
-    binding_instances: Vec<BindingInstanceId>,
+    /// Tracked entries with stable IDs preserved across reconciliation.
+    tracked: Vec<TrackedBindingEntry>,
 }
 
 impl ActionMapLayer {
     pub fn new(map: ActionMap) -> Self {
-        let binding_instances: Vec<BindingInstanceId> = map
+        let tracked: Vec<TrackedBindingEntry> = map
             .bindings
             .iter()
-            .map(|_| allocate_binding_instance_id())
+            .map(|binding| TrackedBindingEntry {
+                binding: binding.clone(),
+                instance: allocate_binding_instance_id(),
+                active_trigger: None,
+            })
             .collect();
-        Self {
-            map,
-            binding_instances,
-        }
+        Self { map, tracked }
     }
 
     pub fn map(&self) -> &ActionMap {
@@ -1425,26 +1374,142 @@ impl ActionMapLayer {
     pub fn map_mut(&mut self) -> &mut ActionMap {
         &mut self.map
     }
+
+    /// Reconcile tracked entries with the current bindings.
+    ///
+    /// Greedy stable match by full binding equality plus occurrence ordinal:
+    /// each new binding reuses the first unused prior entry with the same
+    /// fingerprint.  Additions get new IDs.  Removed active entries have
+    /// their contributions cleared.
+    fn reconcile(&mut self, ctx: &mut InputContext<'_>) {
+        let new_bindings = &self.map.bindings;
+        let old_tracked = std::mem::take(&mut self.tracked);
+        let mut used: Vec<bool> = vec![false; old_tracked.len()];
+        let mut new_tracked: Vec<TrackedBindingEntry> = Vec::with_capacity(new_bindings.len());
+
+        for new_binding in new_bindings {
+            let reuse_idx = old_tracked
+                .iter()
+                .enumerate()
+                .position(|(idx, old)| !used[idx] && old.binding == *new_binding);
+
+            if let Some(idx) = reuse_idx {
+                used[idx] = true;
+                let mut entry = old_tracked[idx].clone();
+                entry.binding = new_binding.clone();
+                new_tracked.push(entry);
+            } else {
+                new_tracked.push(TrackedBindingEntry {
+                    binding: new_binding.clone(),
+                    instance: allocate_binding_instance_id(),
+                    active_trigger: None,
+                });
+            }
+        }
+
+        // Clear contributions for removed bindings that were active.
+        for (idx, old) in old_tracked.iter().enumerate() {
+            if !used[idx] && old.active_trigger.is_some() {
+                ctx.set_instance_value(&old.binding.action, old.instance, 0.0);
+            }
+        }
+
+        self.tracked = new_tracked;
+    }
 }
 
 impl InputLayer for ActionMapLayer {
     fn on_event(&mut self, event: &InputEvent, ctx: &mut InputContext<'_>) -> InputConsume {
+        self.reconcile(ctx);
+
         let mut consumed = false;
 
-        for (idx, binding) in self.map.bindings.iter().enumerate() {
-            let instance = self.binding_instances[idx];
-            if binding.matches_press(event) {
-                ctx.set_instance_value(&binding.action, instance, binding.scale);
-                if binding.consume {
-                    consumed = true;
+        match event {
+            InputEvent::Key {
+                code,
+                state,
+                modifiers,
+                ..
+            } => {
+                let trigger = BindingTrigger::Key(*code);
+                match state {
+                    ElementState::Pressed => {
+                        for entry in &mut self.tracked {
+                            if entry.binding.trigger == trigger
+                                && entry.binding.modifiers.matches(*modifiers)
+                            {
+                                entry.active_trigger = Some(trigger);
+                                ctx.set_instance_value(
+                                    &entry.binding.action,
+                                    entry.instance,
+                                    entry.binding.scale,
+                                );
+                                if entry.binding.consume {
+                                    consumed = true;
+                                }
+                            }
+                        }
+                    }
+                    ElementState::Released => {
+                        for entry in &mut self.tracked {
+                            if entry.active_trigger == Some(trigger) {
+                                entry.active_trigger = None;
+                                ctx.set_instance_value(&entry.binding.action, entry.instance, 0.0);
+                                if entry.binding.consume {
+                                    consumed = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            if binding.matches_release(event) {
-                ctx.set_instance_value(&binding.action, instance, 0.0);
-                if binding.consume {
-                    consumed = true;
+            InputEvent::MouseButton {
+                button,
+                state,
+                modifiers,
+            } => {
+                let trigger = BindingTrigger::MouseButton(*button);
+                match state {
+                    ElementState::Pressed => {
+                        for entry in &mut self.tracked {
+                            if entry.binding.trigger == trigger
+                                && entry.binding.modifiers.matches(*modifiers)
+                            {
+                                entry.active_trigger = Some(trigger);
+                                ctx.set_instance_value(
+                                    &entry.binding.action,
+                                    entry.instance,
+                                    entry.binding.scale,
+                                );
+                                if entry.binding.consume {
+                                    consumed = true;
+                                }
+                            }
+                        }
+                    }
+                    ElementState::Released => {
+                        for entry in &mut self.tracked {
+                            if entry.active_trigger == Some(trigger) {
+                                entry.active_trigger = None;
+                                ctx.set_instance_value(&entry.binding.action, entry.instance, 0.0);
+                                if entry.binding.consume {
+                                    consumed = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            InputEvent::CursorFocus { entered: false } => {
+                // Focus loss clears all active triggers so no action gets stuck.
+                for entry in &mut self.tracked {
+                    if entry.active_trigger.is_some() {
+                        entry.active_trigger = None;
+                        ctx.set_instance_value(&entry.binding.action, entry.instance, 0.0);
+                    }
+                }
+            }
+            _ => {}
         }
 
         if consumed {
@@ -1452,6 +1517,10 @@ impl InputLayer for ActionMapLayer {
         } else {
             InputConsume::Ignored
         }
+    }
+
+    fn on_frame_end(&mut self, _snapshot: &InputSnapshot, ctx: &mut InputContext<'_>) {
+        self.reconcile(ctx);
     }
 }
 
@@ -1938,15 +2007,456 @@ trigger = { key = "KeyW", mouse_button = "Left" }
     }
 
     #[test]
-    fn binding_instance_id_is_stable_across_frame_dispatch() {
+    fn two_keys_one_action_use_distinct_instances() {
         let mut map = ActionMap::new();
         map.bind_key("jump", KeyCode::Space);
         map.bind_key("jump", KeyCode::KeyJ);
 
         let layer = ActionMapLayer::new(map);
-        assert_eq!(layer.binding_instances.len(), 2);
-        assert_ne!(layer.binding_instances[0], BindingInstanceId::new(0));
-        assert_ne!(layer.binding_instances[1], BindingInstanceId::new(0));
-        assert_ne!(layer.binding_instances[0], layer.binding_instances[1]);
+        assert_eq!(layer.tracked.len(), 2);
+        assert_ne!(layer.tracked[0].instance, BindingInstanceId::new(0));
+        assert_ne!(layer.tracked[1].instance, BindingInstanceId::new(0));
+        assert_ne!(layer.tracked[0].instance, layer.tracked[1].instance);
+    }
+
+    // ── H-A6 modifier release ordering tests ─────────────────────────
+
+    /// Shift+W: release Shift before W; action must clear when W releases.
+    #[test]
+    fn shift_w_modifier_first_release_clears_on_key_release() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind(
+            ActionBinding::key("sprint", KeyCode::KeyW).with_modifiers(BindingModifiers {
+                shift: true,
+                ..BindingModifiers::default()
+            }),
+        );
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        // Press Shift, then W
+        system.queue_event(InputEvent::ModifiersChanged {
+            modifiers: ModifiersState::SHIFT,
+        });
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::SHIFT,
+        });
+        system.dispatch_frame();
+        assert!(system.snapshot().action_pressed(&ActionId::new("sprint")));
+
+        // Release Shift (modifier) first — action must stay active
+        system.queue_event(InputEvent::ModifiersChanged {
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+        assert!(
+            system.snapshot().action_pressed(&ActionId::new("sprint")),
+            "action must stay active when modifier releases before key"
+        );
+
+        // Release W — action must clear now
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+        assert!(
+            !system.snapshot().action_pressed(&ActionId::new("sprint")),
+            "action must clear when the key itself releases, even without modifier"
+        );
+    }
+
+    /// Shift+W: release W before Shift; action must clear immediately.
+    #[test]
+    fn shift_w_key_first_release_clears_action() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind(
+            ActionBinding::key("sprint", KeyCode::KeyW).with_modifiers(BindingModifiers {
+                shift: true,
+                ..BindingModifiers::default()
+            }),
+        );
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        // Press Shift, then W
+        system.queue_event(InputEvent::ModifiersChanged {
+            modifiers: ModifiersState::SHIFT,
+        });
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::SHIFT,
+        });
+        system.dispatch_frame();
+        assert!(system.snapshot().action_pressed(&ActionId::new("sprint")));
+
+        // Release W first — action must clear
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::SHIFT,
+        });
+        system.dispatch_frame();
+        assert!(!system.snapshot().action_pressed(&ActionId::new("sprint")));
+    }
+
+    /// Two modifiers required for activation; release matching uses trigger identity only.
+    #[test]
+    fn two_modifiers_with_key_release_uses_trigger_not_modifiers() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind(
+            ActionBinding::key("action", KeyCode::KeyA).with_modifiers(BindingModifiers {
+                shift: true,
+                ctrl: true,
+                ..BindingModifiers::default()
+            }),
+        );
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        let both = ModifiersState::SHIFT | ModifiersState::CONTROL;
+
+        system.queue_event(InputEvent::ModifiersChanged { modifiers: both });
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyA,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: both,
+        });
+        system.dispatch_frame();
+        assert!(system.snapshot().action_pressed(&ActionId::new("action")));
+
+        // Release both modifiers, then release key — action must still clear
+        system.queue_event(InputEvent::ModifiersChanged {
+            modifiers: ModifiersState::empty(),
+        });
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyA,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+        assert!(!system.snapshot().action_pressed(&ActionId::new("action")));
+    }
+
+    /// Duplicate bindings (same fingerprint) tracked independently.
+    #[test]
+    fn duplicate_bindings_activate_independently() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        // Two identical bindings for the same action
+        map.bind_key("action", KeyCode::KeyQ);
+        map.bind_key("action", KeyCode::KeyQ);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        // Press Q
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyQ,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+        assert!(system.snapshot().action_pressed(&ActionId::new("action")));
+
+        // Release Q — action must clear (both instances deactivated)
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyQ,
+            state: ElementState::Released,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+        assert!(!system.snapshot().action_pressed(&ActionId::new("action")));
+    }
+
+    // ── H-A7 mutable binding reconciliation tests ────────────────────
+
+    /// Append a binding through map_mut(); action must trigger after reconciliation.
+    #[test]
+    fn append_binding_via_map_mut_activates_after_reconciliation() {
+        let mut layer = ActionMapLayer::new(ActionMap::new());
+        let mut action_state = ActionStateStore::default();
+
+        let press_w = InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        };
+
+        // No bindings yet — key should do nothing.
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_event(&press_w, &mut ctx);
+        assert!(!action_state.pressed(&ActionId::new("move.forward")));
+
+        // Append binding through map_mut — next event triggers action.
+        layer.map_mut().bind_key("move.forward", KeyCode::KeyW);
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_event(&press_w, &mut ctx);
+        assert!(
+            action_state.pressed(&ActionId::new("move.forward")),
+            "action must activate after binding appended via map_mut"
+        );
+    }
+
+    /// Remove a binding through map_mut(); action contribution must clear.
+    #[test]
+    fn remove_binding_via_map_mut_clears_contribution() {
+        let mut map = ActionMap::new();
+        map.bind_key("action", KeyCode::KeyW);
+        let mut layer = map.into_layer();
+        let mut action_state = ActionStateStore::default();
+
+        // Press key, verify action active.
+        let press_w = InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        };
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_event(&press_w, &mut ctx);
+        assert!(action_state.pressed(&ActionId::new("action")));
+
+        // Remove binding via map_mut — call on_frame_end; action must clear.
+        layer.map_mut().unbind_action(&ActionId::new("action"));
+        let snapshot = InputSnapshot::default();
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_frame_end(&snapshot, &mut ctx);
+        assert!(
+            !action_state.pressed(&ActionId::new("action")),
+            "removed binding must stop contributing after reconciliation"
+        );
+    }
+
+    /// Reorder bindings; original contributions survive reorder.
+    #[test]
+    fn reorder_bindings_via_map_mut_preserves_active_state() {
+        let mut map = ActionMap::new();
+        map.bind_key("action.a", KeyCode::KeyA);
+        map.bind_key("action.b", KeyCode::KeyB);
+        let mut layer = map.into_layer();
+        let mut action_state = ActionStateStore::default();
+
+        // Press both keys.
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_event(
+            &InputEvent::Key {
+                code: KeyCode::KeyA,
+                state: ElementState::Pressed,
+                repeat: false,
+                modifiers: ModifiersState::empty(),
+            },
+            &mut ctx,
+        );
+        layer.on_event(
+            &InputEvent::Key {
+                code: KeyCode::KeyB,
+                state: ElementState::Pressed,
+                repeat: false,
+                modifiers: ModifiersState::empty(),
+            },
+            &mut ctx,
+        );
+        assert!(action_state.pressed(&ActionId::new("action.a")));
+        assert!(action_state.pressed(&ActionId::new("action.b")));
+
+        // Reorder: swap bindings via map_mut.
+        layer.map_mut().bindings.swap(0, 1);
+        // on_frame_end reconciliation — both actions must stay active.
+        let snapshot = InputSnapshot::default();
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_frame_end(&snapshot, &mut ctx);
+        assert!(
+            action_state.pressed(&ActionId::new("action.a")),
+            "action.a must stay active after reorder"
+        );
+        assert!(
+            action_state.pressed(&ActionId::new("action.b")),
+            "action.b must stay active after reorder"
+        );
+    }
+
+    /// Remove one active binding while another contributes; only removed binding clears.
+    #[test]
+    fn remove_one_active_contributor_clears_only_that_contributor() {
+        let mut map = ActionMap::new();
+        map.bind_key("action", KeyCode::KeyW);
+        map.bind_key("action", KeyCode::ArrowUp);
+        let mut layer = map.into_layer();
+        let mut action_state = ActionStateStore::default();
+
+        // Press both keys.
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_event(
+            &InputEvent::Key {
+                code: KeyCode::KeyW,
+                state: ElementState::Pressed,
+                repeat: false,
+                modifiers: ModifiersState::empty(),
+            },
+            &mut ctx,
+        );
+        layer.on_event(
+            &InputEvent::Key {
+                code: KeyCode::ArrowUp,
+                state: ElementState::Pressed,
+                repeat: false,
+                modifiers: ModifiersState::empty(),
+            },
+            &mut ctx,
+        );
+        assert!(action_state.pressed(&ActionId::new("action")));
+
+        // Remove only the KeyW binding via map_mut.
+        layer
+            .map_mut()
+            .bindings
+            .retain(|b| b.trigger != BindingTrigger::Key(KeyCode::KeyW));
+        let snapshot = InputSnapshot::default();
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_frame_end(&snapshot, &mut ctx);
+        assert!(
+            action_state.pressed(&ActionId::new("action")),
+            "action must remain active — ArrowUp still contributes"
+        );
+    }
+
+    /// Mutation with no events reconciles on_frame_end.
+    #[test]
+    fn mutation_with_no_event_reconciles_on_frame_end() {
+        let mut map = ActionMap::new();
+        map.bind_key("action", KeyCode::KeyW);
+        let mut layer = map.into_layer();
+        let mut action_state = ActionStateStore::default();
+
+        // Activate the action.
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_event(
+            &InputEvent::Key {
+                code: KeyCode::KeyW,
+                state: ElementState::Pressed,
+                repeat: false,
+                modifiers: ModifiersState::empty(),
+            },
+            &mut ctx,
+        );
+        assert!(action_state.pressed(&ActionId::new("action")));
+
+        // Mutate binding fingerprint (change scale) without queueing any event.
+        layer.map_mut().bindings[0].scale = 0.0;
+        let snapshot = InputSnapshot::default();
+        let mut ctx = InputContext {
+            action_state: &mut action_state,
+        };
+        layer.on_frame_end(&snapshot, &mut ctx);
+        // The old contribution must clear because the binding changed.
+        assert!(
+            !action_state.pressed(&ActionId::new("action")),
+            "binding change (scale=0) must be reflected even with no events"
+        );
+    }
+
+    /// Repeated mutation cycles do not panic or leak state.
+    #[test]
+    fn repeated_mutation_cycles_do_not_panic() {
+        let mut layer = ActionMapLayer::new(ActionMap::new());
+        let mut action_state = ActionStateStore::default();
+        let snapshot = InputSnapshot::default();
+
+        let press_w = InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        };
+
+        for _ in 0..10 {
+            // Add binding and press key.
+            layer.map_mut().bind_key("action", KeyCode::KeyW);
+            let mut ctx = InputContext {
+                action_state: &mut action_state,
+            };
+            layer.on_event(&press_w, &mut ctx);
+            assert!(action_state.pressed(&ActionId::new("action")));
+
+            // Remove binding and reconcile.
+            layer.map_mut().unbind_action(&ActionId::new("action"));
+            let mut ctx = InputContext {
+                action_state: &mut action_state,
+            };
+            layer.on_frame_end(&snapshot, &mut ctx);
+            assert!(!action_state.pressed(&ActionId::new("action")));
+        }
+    }
+
+    /// Focus loss (CursorFocus{entered:false}) clears active instances.
+    #[test]
+    fn focus_loss_clears_active_binding_instances() {
+        let mut system = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.bind_key("action", KeyCode::KeyW);
+        system.add_layer(
+            LayerDescriptor::new("actions", LayerPriority(0)),
+            map.into_layer(),
+        );
+
+        // Press key — action becomes active.
+        system.queue_event(InputEvent::Key {
+            code: KeyCode::KeyW,
+            state: ElementState::Pressed,
+            repeat: false,
+            modifiers: ModifiersState::empty(),
+        });
+        system.dispatch_frame();
+        assert!(system.snapshot().action_pressed(&ActionId::new("action")));
+
+        // Cursor leaves — action should clear.
+        system.queue_event(InputEvent::CursorFocus { entered: false });
+        system.dispatch_frame();
+        assert!(
+            !system.snapshot().action_pressed(&ActionId::new("action")),
+            "focus loss must clear active binding instances"
+        );
     }
 }

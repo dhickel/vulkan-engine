@@ -133,13 +133,17 @@ impl ImageSubresourceKey {
     }
 
     pub(crate) fn contains(&self, other: &Self) -> bool {
-        Self::axis_contains(self.base_mip, self.mip_count, other.base_mip, other.mip_count)
-            && Self::axis_contains(
-                self.base_layer,
-                self.layer_count,
-                other.base_layer,
-                other.layer_count,
-            )
+        Self::axis_contains(
+            self.base_mip,
+            self.mip_count,
+            other.base_mip,
+            other.mip_count,
+        ) && Self::axis_contains(
+            self.base_layer,
+            self.layer_count,
+            other.base_layer,
+            other.layer_count,
+        )
     }
 
     fn finite_count(count: u32) -> u64 {
@@ -204,26 +208,31 @@ impl ImageStateTracker {
     }
 
     /// Register a newly created image with its owning queue family.
-    /// Defaults all subresources to UNDEFINED.
-    pub(crate) fn register_image(
-        &mut self,
-        image: vk::Image,
-        owning_queue_family: u32,
-    ) {
+    ///
+    /// If the image handle was previously registered (e.g. a recycled raw
+    /// handle from the driver), the old state is explicitly removed first so
+    /// the new registration starts from `UNDEFINED`; stale committed layouts
+    /// are never inherited.
+    pub(crate) fn register_image(&mut self, image: vk::Image, owning_queue_family: u32) {
+        if self.images.remove(&image).is_some() {
+            debug!(
+                "image {:?} re-registered (raw handle reuse); prior state cleared",
+                image
+            );
+        }
         let full = ImageSubresourceKey::full();
         self.images.insert(image, {
             let mut states = HashMap::new();
-            states.insert(full, TrackedSubresourceState::undefined(owning_queue_family));
+            states.insert(
+                full,
+                TrackedSubresourceState::undefined(owning_queue_family),
+            );
             states
         });
     }
 
     /// Register a newly created image only when it is not already tracked.
-    pub(crate) fn register_image_if_absent(
-        &mut self,
-        image: vk::Image,
-        owning_queue_family: u32,
-    ) {
+    pub(crate) fn register_image_if_absent(&mut self, image: vk::Image, owning_queue_family: u32) {
         if !self.images.contains_key(&image) {
             self.register_image(image, owning_queue_family);
         }
@@ -276,10 +285,7 @@ impl ImageStateTracker {
     }
 
     /// Commit a set of staged transitions. Called after a successful submit.
-    pub(crate) fn commit_transitions(
-        &mut self,
-        transitions: &[PendingTransition],
-    ) {
+    pub(crate) fn commit_transitions(&mut self, transitions: &[PendingTransition]) {
         for t in transitions {
             if let Some(states) = self.images.get_mut(&t.image) {
                 states.retain(|existing, _| !t.key.contains(existing));
@@ -1149,6 +1155,10 @@ impl VkPresent {
     /// for its fence, clean its descriptor pools, and bind a present target before
     /// recording work into it.
     ///
+    /// Both `frame_epoch` and `curr_frame_count` are validated and advanced
+    /// atomically: if either overflow check fails, neither field is mutated and
+    /// no partial reservation is left behind.
+    ///
     /// # Errors
     /// Returns `NoFrameSources` if the frame ring is empty. This is a construction
     /// invariant; callers that hold a valid `VkPresent` will never observe this error.
@@ -1164,14 +1174,18 @@ impl VkPresent {
                 self.frame_data.len()
             )));
         }
-        self.curr_frame_count = self
-            .curr_frame_count
-            .checked_add(1)
-            .ok_or_else(|| VkError::Present("frame reservation counter exhausted".to_string()))?;
-        self.frame_epoch = self
+        // Validate both counters before mutating either field so a failed
+        // epoch check does not leave a partial reservation.
+        let next_epoch = self
             .frame_epoch
             .checked_add(1)
             .ok_or_else(|| VkError::Present("frame epoch exhausted".to_string()))?;
+        let next_count = self
+            .curr_frame_count
+            .checked_add(1)
+            .ok_or_else(|| VkError::Present("frame reservation counter exhausted".to_string()))?;
+        self.frame_epoch = next_epoch;
+        self.curr_frame_count = next_count;
         Ok(&self.frame_data[index])
     }
 
@@ -1241,6 +1255,35 @@ impl VkPresent {
 
     pub(crate) fn present_targets(&self) -> &[(vk::Image, vk::ImageView)] {
         &self.present_targets
+    }
+
+    /// Return every owned image handle across all frame slots that is
+    /// registered in the image state tracker. Used for bulk registration
+    /// and unregistration at construction/rebuild/teardown boundaries.
+    ///
+    /// Includes draw, depth, owned present images, and any swapchain-bound
+    /// present image (which is *not* owned but whose tracking lifetime ends
+    /// before the swapchain generation is destroyed).
+    pub(crate) fn enumerate_core_images(&self) -> Vec<vk::Image> {
+        let mut images = Vec::with_capacity(self.frame_data.len() * 4);
+        for frame in &self.frame_data {
+            images.push(frame.draw.image);
+            images.push(frame.depth.image);
+            if let Some(ref owned) = frame.owned_present {
+                images.push(owned.image);
+            }
+        }
+        images
+    }
+
+    /// Return every present image handle across all present targets (swapchain
+    /// images for windowed mode; these are the same as owned-present images for
+    /// headless mode).
+    pub(crate) fn enumerate_present_images(&self) -> Vec<vk::Image> {
+        self.present_targets
+            .iter()
+            .map(|(image, _)| *image)
+            .collect()
     }
 
     /// Return the command pools for frame slot 0, to be used only for bootstrap
@@ -2181,5 +2224,185 @@ mod tests {
             .expect("empty replacement matches empty test ring");
         assert_eq!(present.curr_frame_count, 0);
         assert_eq!(present.frame_epoch(), 42);
+    }
+
+    #[test]
+    fn get_next_frame_epoch_overflow_leaves_count_unchanged() {
+        let mut present = empty_present(5, 1, u64::MAX);
+        // Inject one frame so ring/index validation passes.
+        present.max_frames_active = 1;
+        let frame = make_test_frame(0);
+        present.frame_data.push(frame);
+        present
+            .present_targets
+            .push((vk::Image::null(), vk::ImageView::null()));
+        let saved_count = present.curr_frame_count;
+        let saved_epoch = present.frame_epoch();
+        assert!(present.get_next_frame().is_err());
+        assert_eq!(present.curr_frame_count, saved_count);
+        assert_eq!(present.frame_epoch(), saved_epoch);
+    }
+
+    #[test]
+    fn get_next_frame_count_overflow_leaves_epoch_unchanged() {
+        let mut present = empty_present(u32::MAX, 1, 100);
+        present.max_frames_active = 1;
+        let frame = make_test_frame(0);
+        present.frame_data.push(frame);
+        present
+            .present_targets
+            .push((vk::Image::null(), vk::ImageView::null()));
+        let saved_count = present.curr_frame_count;
+        let saved_epoch = present.frame_epoch();
+        assert!(present.get_next_frame().is_err());
+        assert_eq!(present.curr_frame_count, saved_count);
+        assert_eq!(present.frame_epoch(), saved_epoch);
+    }
+
+    #[test]
+    fn unregister_image_removes_tracked_state() {
+        let image = vk::Image::from_raw(0x200);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        assert!(tracker
+            .committed_state(image, &ImageSubresourceKey::full())
+            .is_some());
+        tracker.unregister_image(image);
+        assert!(tracker
+            .committed_state(image, &ImageSubresourceKey::full())
+            .is_none());
+    }
+
+    #[test]
+    fn unregister_then_reregister_yields_clean_undefined() {
+        let image = vk::Image::from_raw(0x201);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        // Commit a non-UNDEFINED state.
+        let desired = tracked_state(
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            0,
+        );
+        tracker.commit_transitions(&[PendingTransition {
+            image,
+            key: ImageSubresourceKey::full(),
+            aspect: vk::ImageAspectFlags::COLOR,
+            old_state: TrackedSubresourceState::undefined(0),
+            new_state: desired,
+        }]);
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::full()),
+            Some(desired)
+        );
+        tracker.unregister_image(image);
+        tracker.register_image(image, 5);
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::full()),
+            Some(TrackedSubresourceState::undefined(5))
+        );
+    }
+
+    #[test]
+    fn duplicate_register_overwrites_prior_state() {
+        let image = vk::Image::from_raw(0x202);
+        let mut tracker = ImageStateTracker::new();
+        tracker.register_image(image, 0);
+        let desired = tracked_state(
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::AccessFlags2::SHADER_READ,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            0,
+        );
+        tracker.commit_transitions(&[PendingTransition {
+            image,
+            key: ImageSubresourceKey::full(),
+            aspect: vk::ImageAspectFlags::COLOR,
+            old_state: TrackedSubresourceState::undefined(0),
+            new_state: desired,
+        }]);
+        // Re-register with a different queue family should reset to UNDEFINED.
+        tracker.register_image(image, 3);
+        assert_eq!(
+            tracker.committed_state(image, &ImageSubresourceKey::full()),
+            Some(TrackedSubresourceState::undefined(3))
+        );
+    }
+
+    /// Build a minimal `VkFrame` suitable for use in reservation tests.
+    /// All Vulkan handles are null; the descriptor allocator is default-constructed.
+    /// This frame must never be used for actual rendering.
+    fn make_test_frame(index: u32) -> VkFrame {
+        let pool = VkCommandPool {
+            pool: vk::CommandPool::null(),
+            buffers: vec![vk::CommandBuffer::null()],
+        };
+        VkFrame {
+            index,
+            sync: VkFrameSync {
+                swap_semaphore: vk::Semaphore::null(),
+                render_semaphore: vk::Semaphore::null(),
+                render_fence: vk::Fence::null(),
+            },
+            draw: VkImageAlloc {
+                image: vk::Image::null(),
+                image_view: vk::ImageView::null(),
+                // SAFETY: test-only null handle; never passed to Vulkan.
+                allocation: unsafe { std::mem::zeroed() },
+                image_extent: vk::Extent3D::default(),
+                image_format: vk::Format::UNDEFINED,
+                mip_levels: 0,
+            },
+            depth: VkImageAlloc {
+                image: vk::Image::null(),
+                image_view: vk::ImageView::null(),
+                // SAFETY: test-only null handle; never passed to Vulkan.
+                allocation: unsafe { std::mem::zeroed() },
+                image_extent: vk::Extent3D::default(),
+                image_format: vk::Format::UNDEFINED,
+                mip_levels: 0,
+            },
+            present_image: vk::Image::null(),
+            present_image_view: vk::ImageView::null(),
+            owned_present: None,
+            cmd_pools: VkCommandPoolMap {
+                pools: [pool.clone(), pool.clone(), pool.clone(), pool],
+            },
+            descriptors: VkDynamicDescriptorAllocator::default(),
+            last_submitted_serial: 0,
+        }
+    }
+
+    #[test]
+    fn frame_reservation_epoch_overflow_keeps_slot_and_count_intact() {
+        let mut present = empty_present(0, 2, u64::MAX);
+        present.frame_data = vec![make_test_frame(0), make_test_frame(1)];
+        present.present_targets = vec![
+            (vk::Image::null(), vk::ImageView::null()),
+            (vk::Image::null(), vk::ImageView::null()),
+        ];
+        let saved_count = present.curr_frame_count;
+        let saved_epoch = present.frame_epoch();
+        assert!(present.get_next_frame().is_err());
+        assert_eq!(present.curr_frame_count, saved_count);
+        assert_eq!(present.frame_epoch(), saved_epoch);
+    }
+
+    /// Texture images are managed through `TextureCache` and its retirement
+    /// queue, not the core `ImageStateTracker`. This test asserts that
+    /// boundary: a freshly created tracker never matches an arbitrary (mock
+    /// texture) image, and an image not registered by core construction cannot
+    /// reach a committed state. If a future change integrates texture images
+    /// into the tracker, this test must be updated with explicit registration
+    /// and unregistration alongside retire/destroy paths.
+    #[test]
+    fn texture_images_are_not_in_core_tracker() {
+        let tracker = ImageStateTracker::new();
+        let arbitrary_texture_image = vk::Image::from_raw(0xDEAD);
+        assert!(tracker
+            .committed_state(arbitrary_texture_image, &ImageSubresourceKey::full())
+            .is_none());
+        assert!(tracker.is_empty());
     }
 }

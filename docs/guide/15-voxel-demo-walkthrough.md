@@ -56,14 +56,15 @@ v1 golden files under `apps/voxel_demo/test_data/goldens/` are not regenerated b
 
 `run_v2()` in `main.rs` follows a strict resolution pipeline:
 
-1. **Base selection**: Exactly one base document is chosen from `--preset`, `--config`, or the embedded `default`.
-2. **Normalization**: The base is normalized (canonical float representations, field ordering).
-3. **Asset reference resolution**: All eight material references (wall/floor albedo, normal, roughness, AO) are resolved against the document's source directory and the known catalog IDs.
-4. **CLI override application**: Only explicitly present CLI flags override the corresponding generator fields. Omitted flags leave the base value intact.
-5. **Re-normalization**: The merged document is normalized again after overrides.
-6. **Validation**: `validate_preset_document()` checks version tuples, topology feasibility, radius ordering, allocation estimates, MC33 worst-case capacity, and maze work budgets.
-7. **Runtime validation**: `validate_runtime_light_budget()` checks `--light-budget` is in `9..=16`.
-8. **Identity computation**: `GeometryIdentity` and `SceneConfigIdentity` are computed from the validated canonical typed values (not from raw bytes).
+1. **Config path resolution**: A relative `--config` path checks the process working directory, then `apps/voxel_demo/`, then the workspace root, accepting the first existing regular file. Missing-path errors list every attempted location.
+2. **Base selection**: Exactly one base document is chosen from `--preset`, `--config`, or the embedded `default`.
+3. **Normalization**: The base is normalized (canonical float representations, field ordering).
+4. **Asset reference resolution**: All eight material references (wall/floor albedo, normal, roughness, AO) are resolved against the document's source directory and the known catalog IDs.
+5. **CLI override application**: Only explicitly present CLI flags override the corresponding generator fields. Omitted flags leave the base value intact.
+6. **Re-normalization**: The merged document is normalized again after overrides.
+7. **Validation**: `validate_preset_document()` checks version tuples, topology feasibility, radius ordering, allocation estimates, MC33 worst-case capacity, and maze work budgets.
+8. **Runtime validation**: `validate_runtime_light_budget()` checks `--light-budget` is in `9..=16`.
+9. **Identity computation**: `GeometryIdentity` and `SceneConfigIdentity` are computed from the validated canonical typed values (not from raw bytes).
 
 ### Built-in Presets
 

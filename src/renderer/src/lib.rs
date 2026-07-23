@@ -41,14 +41,12 @@ mod vulkan;
 pub use api::event_logging::install_app_event_logger;
 pub use api::{
     boxed_render_hook,
-    // Scene bounds
-    BoundsUnknownReason,
-    SceneBounds,
-    MeshBoundsEntry,
     AssetError,
     AssetKind,
     // Asset API
     AssetManager,
+    // Scene bounds
+    BoundsUnknownReason,
     BoxedRenderHook,
     CameraView,
     // Debug
@@ -57,8 +55,6 @@ pub use api::{
     DirectionalLight,
     DirectionalLightId,
     DirectionalShadowConfig,
-    SpotLight,
-    SpotLightId,
     EngineEvent,
     // Event API
     EventBus,
@@ -67,6 +63,7 @@ pub use api::{
     FrameRenderOutcome,
     // Handles (widely used)
     MaterialHandle,
+    MeshBoundsEntry,
     MeshDeformation,
     MeshGeometryDto,
     MeshHandle,
@@ -85,8 +82,11 @@ pub use api::{
     RendererInputSuppression,
     // Scene API
     Scene,
+    SceneBounds,
     SceneError,
     SceneNodeId,
+    SpotLight,
+    SpotLightId,
     TextureHandle,
     VisualTuning,
 };

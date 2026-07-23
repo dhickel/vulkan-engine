@@ -7,7 +7,7 @@ use crate::data::data_cache::VkDataCache;
 use crate::data::mesh_geometry::MeshGeometryDto;
 use crate::data::retirement::{
     FrameSerial, GpuRetirementQueue, MaterialRetiredPayload, MeshRetiredPayload,
-    TextureRetiredPayload,
+    TextureRetiredPayload, TryReapError,
 };
 use crate::debug_ui::{DebugTimingRow, DebugTimingSnapshot};
 use crate::rendergraph::RenderGraphExecutionReport;
@@ -261,32 +261,41 @@ pub(crate) unsafe fn cleanup_curr_frame_resources(
 
 /// Reap the mesh retirement queue up through `latest_completed_serial`.
 ///
-/// Destroys GPU suballocations and releases cache slots for every record
-/// whose `retire_after` has been reached.
+/// Acquires the mesh cache lock **before** removing records from the queue
+/// so lock poisoning preserves every queued payload. Destroys GPU suballocations
+/// through a transactional closure that commits removal only after all payloads
+/// are released.
 pub(crate) fn reap_mesh_retirement(
     latest_completed_serial: u64,
     mesh_retirement_queue: &mut GpuRetirementQueue<MeshRetiredPayload>,
     data_cache: &Arc<VkDataCache>,
 ) -> Result<(), String> {
     let completed = FrameSerial::new(latest_completed_serial);
-    let reaped = mesh_retirement_queue
-        .reap_through(completed)
-        .map_err(|err| format!("retirement completion regression: {err:?}"))?;
-    if reaped.is_empty() {
-        return Ok(());
-    }
 
     let mut mesh_cache = data_cache
         .mesh_cache
         .lock()
         .map_err(|_| "mesh_cache lock poisoned during retirement reaping".to_string())?;
 
+    let reaped = mesh_retirement_queue
+        .try_reap(completed, |eligible| {
+            for record in eligible {
+                debug_assert_eq!(
+                    record.class,
+                    crate::data::retirement::RetirementClass::MeshGeometry
+                );
+                mesh_cache.destroy_retired_payload(&record.payload);
+            }
+            Ok::<(), String>(())
+        })
+        .map_err(|err| match err {
+            TryReapError::CompletionRegressed { previous, observed } => {
+                format!("mesh retirement completion regression: previous={previous:?} observed={observed:?}")
+            }
+            TryReapError::ClosureFailed(e) => e,
+        })?;
+
     for record in reaped {
-        debug_assert_eq!(
-            record.class,
-            crate::data::retirement::RetirementClass::MeshGeometry
-        );
-        mesh_cache.destroy_retired_payload(&record.payload);
         mesh_cache.release_mesh_slot(record.payload.slot);
     }
     Ok(())
@@ -307,8 +316,9 @@ pub(crate) fn reap_bounds_retirement(
 
 /// Reap the material retirement queue up through `latest_completed_serial`.
 ///
-/// Destroys SSBO suballocations, frees descriptor sets, and releases cache slots
-/// for every record whose `retire_after` has been reached.
+/// Acquires the texture cache lock **before** removing records from the queue
+/// so lock poisoning preserves every queued payload. Destroys SSBO suballocations
+/// and frees descriptor sets through a transactional closure, then releases slots.
 pub(crate) fn reap_material_retirement(
     latest_completed_serial: u64,
     material_retirement_queue: &mut GpuRetirementQueue<MaterialRetiredPayload>,
@@ -316,31 +326,40 @@ pub(crate) fn reap_material_retirement(
     device: &ash::Device,
 ) -> Result<(), String> {
     let completed = FrameSerial::new(latest_completed_serial);
-    let reaped = material_retirement_queue
-        .reap_through(completed)
-        .map_err(|err| format!("material retirement completion regression: {err:?}"))?;
-    if reaped.is_empty() {
-        return Ok(());
-    }
 
     let mut texture_cache = data_cache.texture_cache.lock().map_err(|_| {
         "texture_cache lock poisoned during material retirement reaping".to_string()
     })?;
 
+    let reaped = material_retirement_queue
+        .try_reap(completed, |eligible| {
+            for record in eligible {
+                debug_assert_eq!(
+                    record.class,
+                    crate::data::retirement::RetirementClass::MaterialPayload
+                );
+                log::trace!(
+                    "reaping retired material slot {} generation {}",
+                    record.payload.slot,
+                    record.payload.generation
+                );
+                texture_cache.destroy_retired_material_payload(&record.payload);
+                for descriptor_set in &record.payload.descriptor_release.image_descriptor_sets {
+                    texture_cache.free_material_descriptor(device, *descriptor_set);
+                }
+            }
+            Ok::<(), String>(())
+        })
+        .map_err(|err| match err {
+            TryReapError::CompletionRegressed { previous, observed } => {
+                format!(
+                    "material retirement completion regression: previous={previous:?} observed={observed:?}"
+                )
+            }
+            TryReapError::ClosureFailed(e) => e,
+        })?;
+
     for record in reaped {
-        debug_assert_eq!(
-            record.class,
-            crate::data::retirement::RetirementClass::MaterialMeta
-        );
-        log::trace!(
-            "reaping retired material slot {} generation {}",
-            record.payload.slot,
-            record.payload.generation
-        );
-        texture_cache.destroy_retired_material_payload(&record.payload);
-        for descriptor_set in &record.payload.descriptor_release.image_descriptor_sets {
-            texture_cache.free_material_descriptor(device, *descriptor_set);
-        }
         texture_cache.release_material_slot(record.payload.slot);
     }
     Ok(())
@@ -348,30 +367,29 @@ pub(crate) fn reap_material_retirement(
 
 /// Reap the texture retirement queue up through `latest_completed_serial`.
 ///
-/// Destroys images, views, and samplers for every record whose
-/// `retire_after` has been reached.
+/// Acquires the texture cache lock **before** removing records from the queue
+/// so lock poisoning preserves every queued payload. Destroys images, views, and
+/// samplers, then releases cache slots.
 pub(crate) fn reap_texture_retirement(
     latest_completed_serial: u64,
     texture_retirement_queue: &mut GpuRetirementQueue<TextureRetiredPayload>,
     data_cache: &Arc<VkDataCache>,
 ) -> Result<(), String> {
     let completed = FrameSerial::new(latest_completed_serial);
-    let reaped = texture_retirement_queue
-        .reap_through(completed)
-        .map_err(|err| format!("texture retirement completion regression: {err:?}"))?;
-    if reaped.is_empty() {
-        return Ok(());
-    }
 
     let mut texture_cache = data_cache
         .texture_cache
         .lock()
         .map_err(|_| "texture_cache lock poisoned during texture retirement reaping".to_string())?;
 
+    let reaped = texture_retirement_queue
+        .reap_through(completed)
+        .map_err(|err| format!("texture retirement completion regression: {err:?}"))?;
+
     for record in reaped {
         debug_assert_eq!(
             record.class,
-            crate::data::retirement::RetirementClass::TextureImage
+            crate::data::retirement::RetirementClass::TextureGeometry
         );
         let slot = record.payload.slot;
         log::trace!(

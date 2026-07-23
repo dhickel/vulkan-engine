@@ -47,30 +47,7 @@ impl RenderPassNode for ShadowPass {
         let light_active = light_data.map_or(false, |l| l.intensity > 0.0);
 
         if !light_active || shadow_draws.is_empty() {
-            #[cfg(feature = "csm")]
-            if let Some(csm_resources) = recording.csm_shadow_resources() {
-                let csm_frame = csm_resources.get_frame(frame_index);
-                let mip_levels = csm_frame.csm_image.mip_levels;
-                let image = csm_frame.csm_image.image;
-                recording.transition_shadow_image(
-                    image,
-                    mip_levels,
-                    CSM_CASCADE_COUNT,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                )?;
-            }
-            #[cfg(not(feature = "csm"))]
-            {
-                let shadow_frame = recording.shadow_resources().get_frame(frame_index);
-                let mip_levels = shadow_frame.shadow_map.mip_levels;
-                let image = shadow_frame.shadow_map.image;
-                recording.transition_shadow_image(
-                    image,
-                    mip_levels,
-                    1,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                )?;
-            }
+            Self::clear_shadow_to_readable(&mut recording, frame_index)?;
             return Ok(());
         }
 
@@ -79,7 +56,7 @@ impl RenderPassNode for ShadowPass {
         let light_dir = light.direction;
 
         #[cfg(feature = "csm")]
-        let cmd_buffer = recording.cmd_buffer();
+        let cmd_buffer = recording.cmd_buffer()?;
 
         // CSM feature gate: when compiled, only the CSM path renders shadows;
         // the legacy single-map path is inactive. This ensures the scene
@@ -88,12 +65,16 @@ impl RenderPassNode for ShadowPass {
         #[cfg(feature = "csm")]
         {
             if !light.enable_shadows {
+                Self::clear_shadow_to_readable(&mut recording, frame_index)?;
                 return Ok(());
             }
             let (csm_extent, csm_image, csm_mip_levels, csm_layer_views) = {
                 let csm_resources = match recording.csm_shadow_resources() {
                     Some(r) => r,
-                    None => return Ok(()),
+                    None => {
+                        Self::clear_shadow_to_readable(&mut recording, frame_index)?;
+                        return Ok(());
+                    }
                 };
                 let csm_frame = csm_resources.get_frame(frame_index);
                 (
@@ -110,6 +91,7 @@ impl RenderPassNode for ShadowPass {
 
             let vp = projection * view;
             let Some(corners) = frustum_corners_from_vp(&vp) else {
+                Self::clear_shadow_to_readable(&mut recording, frame_index)?;
                 return Ok(());
             };
             let (camera_near, camera_far) = derive_camera_near_far_from_corners(&view, &corners);
@@ -124,7 +106,10 @@ impl RenderPassNode for ShadowPass {
                 &shadow_draws,
             ) {
                 Some(c) => c,
-                None => return Ok(()),
+                None => {
+                    Self::clear_shadow_to_readable(&mut recording, frame_index)?;
+                    return Ok(());
+                }
             };
 
             log::debug!(
@@ -298,18 +283,119 @@ impl RenderPassNode for ShadowPass {
 
         // Legacy single-map path (when CSM feature is not compiled).
         #[cfg(not(feature = "csm"))]
-        self.execute_legacy(recording, &shadow_draws, &light)
+        self.execute_legacy(recording, &shadow_draws, &light, frame_index)
     }
 }
 
 impl ShadowPass {
+    /// Clear whichever shadow image set is active to far depth, then transition it
+    /// to SHADER_READ_ONLY_OPTIMAL. Early-return paths render no casters, so stale
+    /// or undefined texels must become comparison-safe before descriptor sampling.
+    fn clear_shadow_to_readable(
+        recording: &mut crate::vulkan::vk_commands::ShadowRecording<'_>,
+        frame_index: u32,
+    ) -> Result<(), String> {
+        #[cfg(feature = "csm")]
+        if let Some(csm_resources) = recording.csm_shadow_resources() {
+            let csm_frame = csm_resources.get_frame(frame_index);
+            let layer_views = csm_frame.csm_layer_views;
+            return Self::clear_depth_layers_to_readable(
+                recording,
+                csm_frame.csm_image.image,
+                csm_frame.csm_image.mip_levels,
+                CSM_CASCADE_COUNT,
+                csm_resources.extent,
+                &layer_views,
+            );
+        }
+        #[cfg(not(feature = "csm"))]
+        {
+            let shadow_resources = recording.shadow_resources();
+            let shadow_frame = shadow_resources.get_frame(frame_index);
+            let layer_views = [shadow_frame.shadow_map_view];
+            return Self::clear_depth_layers_to_readable(
+                recording,
+                shadow_frame.shadow_map.image,
+                shadow_frame.shadow_map.mip_levels,
+                1,
+                shadow_resources.shadow_map_extent,
+                &layer_views,
+            );
+        }
+        #[cfg(feature = "csm")]
+        {
+            // CSM feature compiled but resources absent; initialize legacy fallback.
+            let shadow_resources = recording.shadow_resources();
+            let shadow_frame = shadow_resources.get_frame(frame_index);
+            let layer_views = [shadow_frame.shadow_map_view];
+            Self::clear_depth_layers_to_readable(
+                recording,
+                shadow_frame.shadow_map.image,
+                shadow_frame.shadow_map.mip_levels,
+                1,
+                shadow_resources.shadow_map_extent,
+                &layer_views,
+            )
+        }
+    }
+
+    fn clear_depth_layers_to_readable(
+        recording: &mut crate::vulkan::vk_commands::ShadowRecording<'_>,
+        image: vk::Image,
+        mip_levels: u32,
+        layer_count: u32,
+        extent: vk::Extent2D,
+        layer_views: &[vk::ImageView],
+    ) -> Result<(), String> {
+        recording.transition_shadow_image(
+            image,
+            mip_levels,
+            layer_count,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+        )?;
+
+        let cmd_buffer = recording.cmd_buffer()?;
+        let device = recording.device();
+        for &layer_view in layer_views.iter().take(layer_count as usize) {
+            let depth_attachment = vk::RenderingAttachmentInfo::default()
+                .image_view(layer_view)
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                });
+            let rendering_info = vk::RenderingInfo::default()
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent,
+                })
+                .layer_count(1)
+                .depth_attachment(&depth_attachment);
+            unsafe {
+                device.cmd_begin_rendering(cmd_buffer, &rendering_info);
+                device.cmd_end_rendering(cmd_buffer);
+            }
+        }
+
+        recording.transition_shadow_image(
+            image,
+            mip_levels,
+            layer_count,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        )
+    }
+
     fn execute_legacy(
         &self,
         mut recording: crate::vulkan::vk_commands::ShadowRecording<'_>,
         shadow_draws: &[RenderObject],
         light: &crate::scene::render_submission::FrameDirectionalLight,
+        frame_index: u32,
     ) -> Result<(), String> {
-        let frame_index = recording.frame_index();
         let shadow_extent = recording.shadow_resources().shadow_map_extent;
         let (shadow_map_image, shadow_map_view, shadow_mip_levels) = {
             let shadow_frame = recording.shadow_resources().get_frame(frame_index);
@@ -329,7 +415,7 @@ impl ShadowPass {
             light_view_proj.is_some()
         );
 
-        let cmd_buffer = recording.cmd_buffer();
+        let cmd_buffer = recording.cmd_buffer()?;
 
         // Transition shadow map to depth attachment optimal
         recording.transition_shadow_image(

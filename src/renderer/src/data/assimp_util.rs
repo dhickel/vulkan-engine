@@ -19,7 +19,8 @@
 //! - **Malformed input**: All untrusted-input error paths return `AssimpImportError`;
 //!   none panic on malformed scene/mesh/material/texture data.
 
-use crate::api::scene::{BoundsUnknownReason, MeshBoundsEntry, SceneBounds};
+use crate::api::scene::{BoundsUnknownReason, SceneBounds};
+
 use crate::api::AssetPolicyConfig;
 use crate::data::asset_manifest::{self, ResolvedTexturePolicy};
 use crate::data::camera::Aabb;
@@ -27,12 +28,11 @@ use crate::data::compression;
 use crate::data::data_cache::{TextureCache, VkDataCache};
 use crate::data::data_util::resolve_texture_mip_count;
 use crate::data::gpu_data::{
-    AlphaMode, MaterialMeta, MaterialShadingModel, MeshMeta, TextureMeta, TexturePayload,
-    TextureSemantic, Vertex,
+    AlphaMode, MaterialShadingModel, TextureMeta, TexturePayload, TextureSemantic, Vertex,
 };
 use crate::data::handles::{MaterialHandle, MeshHandle};
 use crate::data::mesh_geometry::MeshDeformation;
-use crate::scene::scene_world::{SceneNodeId, SceneWorld};
+use crate::scene::scene_world::SceneWorld;
 use ash::vk;
 use glam::{Mat4, Vec3, Vec4};
 use image::{DynamicImage, GenericImageView};
@@ -52,7 +52,7 @@ use russimp_sys_ng::{
     aiTextureType_aiTextureType_METALNESS, aiTextureType_aiTextureType_NORMALS,
     aiTextureType_aiTextureType_NORMAL_CAMERA, aiTextureType_aiTextureType_UNKNOWN,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::ffi::{c_char, c_uint, CString};
 use std::path::Path;
@@ -279,6 +279,78 @@ pub struct ModelMeta {
     pub mesh_deformations: Vec<MeshDeformation>,
 }
 
+// ── Staged Import DTOs (crate-private, used by data_cache::commit_import_plan) ──
+
+pub(crate) struct StagedBaseColorRef {
+    pub(crate) texture_idx: usize,
+    pub(crate) color_factor: Vec4,
+    pub(crate) uv_set: u32,
+}
+
+pub(crate) struct StagedMetallicRoughnessRef {
+    pub(crate) texture_idx: usize,
+    pub(crate) metallic_factor: f32,
+    pub(crate) roughness_factor: f32,
+    pub(crate) uv_set: u32,
+}
+
+pub(crate) struct StagedNormalRef {
+    pub(crate) texture_idx: usize,
+    pub(crate) normal_scale: f32,
+    pub(crate) uv_set: u32,
+}
+
+pub(crate) struct StagedOcclusionRef {
+    pub(crate) texture_idx: usize,
+    pub(crate) occlusion_strength: f32,
+    pub(crate) uv_set: u32,
+}
+
+pub(crate) struct StagedEmissiveRef {
+    pub(crate) texture_idx: usize,
+    pub(crate) emissive_factor: Vec3,
+    pub(crate) emissive_strength: f32,
+    pub(crate) uv_set: u32,
+}
+
+pub(crate) struct StagedMaterial {
+    pub(crate) base_color: Option<StagedBaseColorRef>,
+    pub(crate) metallic_roughness: Option<StagedMetallicRoughnessRef>,
+    pub(crate) normal: Option<StagedNormalRef>,
+    pub(crate) occlusion: Option<StagedOcclusionRef>,
+    pub(crate) emissive: Option<StagedEmissiveRef>,
+    pub(crate) alpha_mode: AlphaMode,
+    pub(crate) alpha_cutoff: f32,
+    pub(crate) shading_model: MaterialShadingModel,
+}
+
+pub(crate) struct StagedMesh {
+    pub(crate) name: String,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) vertices: Vec<Vertex>,
+    pub(crate) material_idx: Option<usize>,
+    pub(crate) has_uv1: bool,
+    pub(crate) deformation: MeshDeformation,
+    pub(crate) bounds: SceneBounds,
+}
+
+pub(crate) struct StagedNode {
+    pub(crate) name: String,
+    pub(crate) local_transform: Mat4,
+    pub(crate) mesh_indices: Vec<usize>,
+    pub(crate) child_indices: Vec<usize>,
+    pub(crate) mesh_bounds: Vec<SceneBounds>,
+}
+
+pub(crate) struct StagedImportPlan {
+    pub(crate) textures: Vec<TextureMeta>,
+    pub(crate) materials: Vec<StagedMaterial>,
+    pub(crate) meshes: Vec<StagedMesh>,
+    pub(crate) nodes: Vec<StagedNode>,
+    pub(crate) root_node_index: usize,
+    pub(crate) mesh_deformations: Vec<MeshDeformation>,
+}
+
 pub fn load_model(
     path: &str,
     data_cache: Arc<VkDataCache>,
@@ -338,72 +410,18 @@ pub fn load_model(
     };
     let ai_scene = scene_guard.as_ref();
 
-    let materials = process_materials(ai_scene, base_path, &data_cache, policy_config)?;
-    let mat_indices = 0..materials.len();
-
-    let mut mapped_materials = HashMap::<u32, MaterialHandle>::with_capacity(materials.len());
-    let material_ids = data_cache
-        .texture_cache
-        .lock()
-        .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?
-        .add_materials(materials);
-
-    for (og_idx, id) in mat_indices.into_iter().zip(material_ids.iter()) {
-        mapped_materials.insert(og_idx as u32, *id);
-    }
-
-    let meshes = process_meshes(ai_scene, mapped_materials)?;
-    let mesh_deformations = classify_imported_meshes(ai_scene, meshes.len())?;
-    let mesh_bound_states = meshes
-        .iter()
-        .zip(mesh_deformations.iter().copied())
-        .map(|(mesh, deformation)| imported_mesh_bounds(mesh, deformation))
-        .collect::<Vec<_>>();
-    let mesh_indices = 0..meshes.len();
-
-    let mut mapped_meshes = HashMap::<u32, MeshHandle>::with_capacity(meshes.len());
-    let mesh_ids = data_cache
-        .mesh_cache
-        .lock()
-        .map_err(|_| AssimpImportError::Internal("mesh_cache lock poisoned".to_string()))?
-        .add_multi(meshes);
-
-    for (og_idx, id) in mesh_indices.into_iter().zip(mesh_ids.iter()) {
-        mapped_meshes.insert(og_idx as u32, *id);
-    }
-
-    // Build node metadata directly from the CPU meshes before GPU promotion.
-    // DTO registration happens after this import function returns, so querying
-    // the geometry store here would incorrectly classify every mesh as stale.
-    let mesh_bounds_map = mesh_ids
-        .iter()
-        .copied()
-        .zip(mesh_bound_states)
-        .collect::<HashMap<_, _>>();
-
-    let root_ai_node = ai_scene.mRootNode;
-
-    if root_ai_node.is_null() {
-        return Err(AssimpImportError::Internal(
-            "scene root node pointer is null".to_string(),
-        ));
-    }
-
-    let mut scene_world = SceneWorld::new();
-    let root_id = process_node(
-        root_ai_node,
-        &mapped_meshes,
-        &mesh_bounds_map,
-        &mut scene_world,
-        None,
+    // Phase 1: Parse & validate the entire Assimp scene into a staged plan.
+    // No cache-visible handles are allocated yet.
+    let plan = parse_validate_entire_assimp_scene(
+        ai_scene,
+        base_path,
+        &data_cache.supported_image_formats,
+        policy_config,
     )?;
-    scene_world.set_root(root_id);
-    Ok(ModelMeta {
-        scene_world,
-        material_ids,
-        mesh_ids,
-        mesh_deformations,
-    })
+
+    // Phase 2: Atomically commit the staged plan to the caches.
+    // All handles are published together or not at all.
+    data_cache.commit_import_plan(plan)
 }
 
 // ── Checked Numeric / String Helpers ─────────────────────────────────────────
@@ -491,23 +509,27 @@ fn checked_ai_string_lossy(ai_str: &aiString, context: &str) -> Result<String, A
 
 // ── Material Processing ─────────────────────────────────────────────────────
 
-pub fn process_materials(
+/// Parse materials from an Assimp scene into staged textures and material recipes.
+///
+/// Does NOT allocate any cache-visible handles. Returns owned `TextureMeta` values and
+/// `StagedMaterial` recipes with local texture indices for later commit.
+pub(crate) fn process_materials_staged(
     ai_scene: &aiScene,
     base_path: Option<&str>,
-    data_cache: &Arc<VkDataCache>,
+    supported_formats: &HashSet<vk::Format>,
     policy_config: &AssetPolicyConfig,
-) -> Result<Vec<MaterialMeta>, AssimpImportError> {
+) -> Result<(Vec<TextureMeta>, Vec<StagedMaterial>), AssimpImportError> {
     let mat_count = checked_usize_from_u32(ai_scene.mNumMaterials, "mNumMaterials")?;
     if mat_count > 0 && ai_scene.mMaterials.is_null() {
         return Err(AssimpImportError::Internal(
             "mNumMaterials is positive but mMaterials pointer is null".to_string(),
         ));
     }
-    let mut materials = Vec::<MaterialMeta>::with_capacity(mat_count);
+    let mut textures = Vec::<TextureMeta>::new();
+    let mut materials = Vec::<StagedMaterial>::with_capacity(mat_count);
 
     for i in 0..mat_count {
         // SAFETY: mat_count bounds validated; non-null base confirmed above.
-        // mMaterials is *mut *mut aiMaterial in russimp_sys_ng; cast to *const *const.
         let ai_material = unsafe {
             deref_ptr_array(
                 ai_scene.mMaterials as *const *const aiMaterial,
@@ -517,13 +539,9 @@ pub fn process_materials(
             )?
         };
 
-        let mut material_meta = MaterialMeta::default();
-        // Assimp import defaults to PBR until explicit unlit extension metadata is wired.
-        material_meta.shading_model = MaterialShadingModel::PbrMetalRough;
         // SAFETY: ai_material is a valid non-null pointer verified by deref_ptr_array above.
         let alpha_mode = unsafe { get_alpha_mode(ai_material) }?;
         let alpha_cutoff = unsafe { get_alpha_cutoff(ai_material) };
-        material_meta.set_alpha_mode(alpha_mode, alpha_cutoff);
 
         let load_first_texture_type =
             |label: &str,
@@ -537,7 +555,7 @@ pub fn process_materials(
                             ai_scene,
                             *typ,
                             base_path,
-                            data_cache,
+                            supported_formats,
                             policy_config,
                         )
                     }? {
@@ -559,39 +577,33 @@ pub fn process_materials(
             ],
         )?;
 
-        // Assimp may expose metallic/roughness as either:
-        // - one combined texture (UNKNOWN), or
-        // - two split sources (METALNESS + DIFFUSE_ROUGHNESS).
-        // SAFETY: ai_material and ai_scene are valid per caller contract.
         let met_rough_combined = unsafe {
             get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_UNKNOWN,
                 base_path,
-                data_cache,
+                supported_formats,
                 policy_config,
             )
         }?;
-        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
         let met_rough_metalness = unsafe {
             get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_METALNESS,
                 base_path,
-                data_cache,
+                supported_formats,
                 policy_config,
             )
         }?;
-        // SAFETY: Assimp ownership is held by the RAII guard or caller-borrowed scene object; relevant counts, null pointers, indices, and byte lengths are checked before this operation.
         let met_rough_roughness = unsafe {
             get_texture_meta(
                 ai_material,
                 ai_scene,
                 aiTextureType_aiTextureType_DIFFUSE_ROUGHNESS,
                 base_path,
-                data_cache,
+                supported_formats,
                 policy_config,
             )
         }?;
@@ -620,23 +632,34 @@ pub fn process_materials(
             &[(aiTextureType_aiTextureType_EMISSIVE, "EMISSIVE")],
         )?;
 
-        let mut tex_cache = data_cache
-            .texture_cache
-            .lock()
-            .map_err(|_| AssimpImportError::Internal("texture_cache lock poisoned".to_string()))?;
+        // Build staged material with local texture indices (no cache access).
+        let mut staged = StagedMaterial {
+            base_color: None,
+            metallic_roughness: None,
+            normal: None,
+            occlusion: None,
+            emissive: None,
+            alpha_mode,
+            alpha_cutoff,
+            shading_model: MaterialShadingModel::PbrMetalRough,
+        };
 
         if let Some((mut meta, _source)) = base_color {
             meta = compression::apply_compression_policy(
                 meta,
                 TextureSemantic::BaseColor,
                 policy_config,
-                &data_cache.supported_image_formats,
+                supported_formats,
             );
-            // SAFETY: ai_material is valid.
             let color = unsafe { get_color_factor(ai_material) };
             let uv_set = meta.uv_index;
-            let tex_id = tex_cache.add_texture(meta);
-            material_meta.add_base_color(tex_id, color, uv_set);
+            let texture_idx = textures.len();
+            textures.push(meta);
+            staged.base_color = Some(StagedBaseColorRef {
+                texture_idx,
+                color_factor: color,
+                uv_set,
+            });
         }
 
         if let Some(mut meta) = resolve_metallic_roughness_meta(
@@ -649,9 +672,8 @@ pub fn process_materials(
                 meta,
                 TextureSemantic::MetallicRoughness,
                 policy_config,
-                &data_cache.supported_image_formats,
+                supported_formats,
             );
-            // SAFETY: ai_material is valid.
             let metallic_factor =
                 unsafe { get_float_factor(ai_material, AI_MATKEY_METALLIC_FACTOR, 1.0) };
             let roughness_factor = unsafe {
@@ -662,9 +684,14 @@ pub fn process_materials(
                 )
             };
             let uv_set = meta.uv_index;
-            let tex_id = tex_cache.add_texture(meta);
-
-            material_meta.add_metallic_roughness(tex_id, metallic_factor, roughness_factor, uv_set);
+            let texture_idx = textures.len();
+            textures.push(meta);
+            staged.metallic_roughness = Some(StagedMetallicRoughnessRef {
+                texture_idx,
+                metallic_factor,
+                roughness_factor,
+                uv_set,
+            });
         }
 
         if let Some((mut meta, _source)) = normal {
@@ -672,9 +699,8 @@ pub fn process_materials(
                 meta,
                 TextureSemantic::Normal,
                 policy_config,
-                &data_cache.supported_image_formats,
+                supported_formats,
             );
-            // SAFETY: ai_material is valid.
             let normal_scale = unsafe {
                 get_float_factor(
                     ai_material,
@@ -683,9 +709,13 @@ pub fn process_materials(
                 )
             };
             let uv_set = meta.uv_index;
-            let tex_id = tex_cache.add_texture(meta);
-
-            material_meta.add_normal(tex_id, normal_scale, uv_set);
+            let texture_idx = textures.len();
+            textures.push(meta);
+            staged.normal = Some(StagedNormalRef {
+                texture_idx,
+                normal_scale,
+                uv_set,
+            });
         }
 
         if let Some((mut meta, _source)) = occlusion {
@@ -693,9 +723,8 @@ pub fn process_materials(
                 meta,
                 TextureSemantic::Occlusion,
                 policy_config,
-                &data_cache.supported_image_formats,
+                supported_formats,
             );
-            // SAFETY: ai_material is valid.
             let occlusion_strength = unsafe {
                 get_float_factor(
                     ai_material,
@@ -704,9 +733,13 @@ pub fn process_materials(
                 )
             };
             let uv_set = meta.uv_index;
-            let tex_id = tex_cache.add_texture(meta);
-
-            material_meta.add_occlusion(tex_id, occlusion_strength, uv_set);
+            let texture_idx = textures.len();
+            textures.push(meta);
+            staged.occlusion = Some(StagedOcclusionRef {
+                texture_idx,
+                occlusion_strength,
+                uv_set,
+            });
         }
 
         if let Some((mut meta, _source)) = emissive {
@@ -714,22 +747,26 @@ pub fn process_materials(
                 meta,
                 TextureSemantic::Emissive,
                 policy_config,
-                &data_cache.supported_image_formats,
+                supported_formats,
             );
-            // SAFETY: ai_material is valid.
             let emissive_factor =
                 unsafe { get_emissive_factor(ai_material, AI_MATKEY_COLOR_EMISSIVE) };
             let emissive_strength =
                 unsafe { get_emissive_strength(ai_material, AI_MATKEY_EMISSIVE_INTENSITY) };
             let uv_set = meta.uv_index;
-            let tex_id = tex_cache.add_texture(meta);
-
-            material_meta.add_emissive(tex_id, emissive_factor, emissive_strength, uv_set);
+            let texture_idx = textures.len();
+            textures.push(meta);
+            staged.emissive = Some(StagedEmissiveRef {
+                texture_idx,
+                emissive_factor,
+                emissive_strength,
+                uv_set,
+            });
         }
 
-        materials.push(material_meta);
+        materials.push(staged);
     }
-    Ok(materials)
+    Ok((textures, materials))
 }
 
 /// # Safety
@@ -839,7 +876,7 @@ unsafe fn get_texture_meta(
     ai_scene: &aiScene,
     texture_type: aiTextureType,
     base_path: Option<&str>,
-    data_cache: &Arc<VkDataCache>,
+    supported_formats: &HashSet<vk::Format>,
     policy_config: &AssetPolicyConfig,
 ) -> Result<Option<TextureMeta>, AssimpImportError> {
     // SAFETY: ai_material is valid per caller; texture count is queried through Assimp.
@@ -936,7 +973,7 @@ unsafe fn get_texture_meta(
                         to_vk_format(&img)
                     };
 
-                    let bytes = if data_cache.is_supported_image_format(format) {
+                    let bytes = if supported_formats.contains(&format) {
                         img.as_bytes().to_vec()
                     } else {
                         format = if policy.is_srgb {
@@ -1281,10 +1318,14 @@ fn extract_pbr_scalar_channel_u8(
     }
 }
 
-pub fn process_meshes(
+/// Parse meshes from an Assimp scene into staged mesh values with local material indices.
+///
+/// Does NOT allocate any cache-visible handles. `material_count` is used only to validate
+/// that `ai_mesh.mMaterialIndex` is within bounds.
+pub(crate) fn process_meshes_staged(
     ai_scene: &aiScene,
-    mapped_materials: HashMap<u32, MaterialHandle>,
-) -> Result<Vec<MeshMeta>, AssimpImportError> {
+    material_count: usize,
+) -> Result<Vec<StagedMesh>, AssimpImportError> {
     let mesh_count = checked_usize_from_u32(ai_scene.mNumMeshes, "mNumMeshes")?;
     if mesh_count > 0 && ai_scene.mMeshes.is_null() {
         return Err(AssimpImportError::Internal(
@@ -1296,7 +1337,6 @@ pub fn process_meshes(
     let mut unnamed_idx = 0u32;
     for mesh_index in 0..mesh_count {
         // SAFETY: mesh_count validated; base non-null when count > 0.
-        // mMeshes is *mut *mut aiMesh; cast to *const *const.
         let ai_mesh = unsafe {
             deref_ptr_array(
                 ai_scene.mMeshes as *const *const russimp_sys_ng::aiMesh,
@@ -1313,18 +1353,14 @@ pub fn process_meshes(
             format!("Unnamed_Mesh_{}", unnamed_idx - 1)
         };
 
-        let material_index = if ai_mesh.mMaterialIndex != u32::MAX {
-            Some(
-                *mapped_materials
-                    .get(&ai_mesh.mMaterialIndex)
-                    .ok_or_else(|| {
-                        AssimpImportError::Internal(format!(
-                    "mesh '{name}' references material index {} outside material array length {}",
-                    ai_mesh.mMaterialIndex,
-                    mapped_materials.len()
-                ))
-                    })?,
-            )
+        let material_idx = if ai_mesh.mMaterialIndex != u32::MAX {
+            let idx = ai_mesh.mMaterialIndex as usize;
+            if idx >= material_count {
+                return Err(AssimpImportError::Internal(format!(
+                    "mesh '{name}' references material index {idx} >= material count {material_count}"
+                )));
+            }
+            Some(idx)
         } else {
             None
         };
@@ -1454,26 +1490,31 @@ pub fn process_meshes(
             });
         }
 
-        meshes.push(MeshMeta {
+        meshes.push(StagedMesh {
             name,
             indices,
             vertices,
-            material_index,
+            material_idx,
             has_uv1,
+            deformation: MeshDeformation::Unknown, // filled by classify_imported_meshes_staged
+            bounds: SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry), // filled after classification
         });
     }
     Ok(meshes)
 }
 
-fn process_node(
+/// Recursively traverse an Assimp node tree and produce a flat `Vec<StagedNode>` with
+/// local mesh indices and child indices. No `SceneWorld` or cache handles are created.
+///
+/// `mapped_meshes`: Assimp mesh index → staged mesh index.
+/// `mesh_bounds`: bounds aligned with staged mesh indices (index = staged mesh index).
+fn process_nodes_staged(
     ai_node: *const aiNode,
-    mapped_meshes: &HashMap<u32, MeshHandle>,
-    mesh_bounds: &HashMap<MeshHandle, SceneBounds>,
-    scene_world: &mut SceneWorld,
-    parent: Option<SceneNodeId>,
-) -> Result<SceneNodeId, AssimpImportError> {
-    // SAFETY: ai_node is non-null (validated by caller). We access aiNode fields, which
-    // are all inline data (not pointer chains) per Assimp struct layout.
+    mapped_meshes: &HashMap<u32, usize>,
+    mesh_bounds: &[SceneBounds],
+    nodes: &mut Vec<StagedNode>,
+) -> Result<usize, AssimpImportError> {
+    // SAFETY: ai_node is non-null (validated by caller).
     let ai_node_ref = unsafe { &*ai_node };
 
     let ai_matrix = ai_node_ref.mTransformation;
@@ -1503,46 +1544,14 @@ fn process_node(
         "<unnamed>".to_string()
     };
 
-    let mesh_count = checked_usize_from_u32(ai_node_ref.mNumMeshes, "node mNumMeshes")?;
-    require_non_null_array(
-        ai_node_ref.mMeshes,
-        mesh_count,
-        format!("node '{node_name}' has meshes but mMeshes pointer is null"),
-    )?;
-    let mut meshes = Vec::with_capacity(mesh_count);
-    let mut bounds = Vec::with_capacity(mesh_count);
-    for i in 0..mesh_count {
-        // SAFETY: mMeshes is non-null when mesh_count > 0; i < mesh_count.
-        let mesh_index = unsafe { *ai_node_ref.mMeshes.add(i) };
-        let handle = mapped_meshes.get(&mesh_index).copied().ok_or_else(|| {
-            AssimpImportError::MissingMeshMapping {
-                node_name: node_name.clone(),
-                mesh_index,
-            }
-        })?;
-        let bound = mesh_bounds
-            .get(&handle)
-            .copied()
-            .unwrap_or(SceneBounds::ConservativeVisible(
-                BoundsUnknownReason::MissingGeometry,
-            ));
-        meshes.push(handle);
-        bounds.push(MeshBoundsEntry {
-            mesh: handle,
-            bounds: bound,
-        });
-    }
-
-    let node_id =
-        scene_world.add_node_with_parts_and_bounds(parent, local_transform, meshes, bounds);
-
-    // Process children
+    // Process children first (post-order) so child indices are known before we push this node.
     let child_count = checked_usize_from_u32(ai_node_ref.mNumChildren, "node mNumChildren")?;
     require_non_null_array(
         ai_node_ref.mChildren,
         child_count,
         format!("node '{node_name}' has children but mChildren pointer is null"),
     )?;
+    let mut child_indices = Vec::with_capacity(child_count);
     for i in 0..child_count {
         // SAFETY: mChildren is non-null when child_count > 0; i < child_count.
         let child_ptr = unsafe { *ai_node_ref.mChildren.add(i) };
@@ -1551,15 +1560,49 @@ fn process_node(
                 "node '{node_name}' has null child pointer at index {i}"
             )));
         }
-        process_node(
-            child_ptr,
-            mapped_meshes,
-            mesh_bounds,
-            scene_world,
-            Some(node_id),
-        )?;
+        let child_idx = process_nodes_staged(child_ptr, mapped_meshes, mesh_bounds, nodes)?;
+        child_indices.push(child_idx);
     }
-    Ok(node_id)
+
+    // Collect local mesh references (staged indices) and bounds.
+    let mesh_count = checked_usize_from_u32(ai_node_ref.mNumMeshes, "node mNumMeshes")?;
+    require_non_null_array(
+        ai_node_ref.mMeshes,
+        mesh_count,
+        format!("node '{node_name}' has meshes but mMeshes pointer is null"),
+    )?;
+    let mut mesh_indices = Vec::with_capacity(mesh_count);
+    let mut node_mesh_bounds = Vec::with_capacity(mesh_count);
+    for i in 0..mesh_count {
+        // SAFETY: mMeshes is non-null when mesh_count > 0; i < mesh_count.
+        let assimp_mesh_idx = unsafe { *ai_node_ref.mMeshes.add(i) };
+        let staged_mesh_idx = mapped_meshes
+            .get(&assimp_mesh_idx)
+            .copied()
+            .ok_or_else(|| AssimpImportError::MissingMeshMapping {
+                node_name: node_name.clone(),
+                mesh_index: assimp_mesh_idx,
+            })?;
+        let bound =
+            mesh_bounds
+                .get(staged_mesh_idx)
+                .copied()
+                .unwrap_or(SceneBounds::ConservativeVisible(
+                    BoundsUnknownReason::MissingGeometry,
+                ));
+        mesh_indices.push(staged_mesh_idx);
+        node_mesh_bounds.push(bound);
+    }
+
+    let idx = nodes.len();
+    nodes.push(StagedNode {
+        name: node_name,
+        local_transform,
+        mesh_indices,
+        child_indices,
+        mesh_bounds: node_mesh_bounds,
+    });
+    Ok(idx)
 }
 
 pub fn to_vk_format(format: &DynamicImage) -> vk::Format {
@@ -1613,10 +1656,10 @@ const AI_MATKEY_GLTF_ALPHAMODE: *const c_char = b"$mat.gltf.alphaMode\0".as_ptr(
 const AI_MATKEY_GLTF_ALPHACUTOFF: *const c_char =
     b"$mat.gltf.alphaCutoff\0".as_ptr() as *const c_char;
 
-fn imported_mesh_bounds(mesh: &MeshMeta, deformation: MeshDeformation) -> SceneBounds {
+fn compute_mesh_bounds(vertices: &[Vertex], deformation: MeshDeformation) -> SceneBounds {
     match deformation {
         MeshDeformation::Rigid => {
-            let mut positions = mesh.vertices.iter().map(|vertex| vertex.position);
+            let mut positions = vertices.iter().map(|vertex| vertex.position);
             let Some(first) = positions.next() else {
                 return SceneBounds::ConservativeVisible(BoundsUnknownReason::InvalidGeometry);
             };
@@ -1640,6 +1683,57 @@ fn imported_mesh_bounds(mesh: &MeshMeta, deformation: MeshDeformation) -> SceneB
             SceneBounds::ConservativeVisible(BoundsUnknownReason::MissingGeometry)
         }
     }
+}
+
+/// Parse and validate the entire Assimp scene into a staged import plan.
+/// No cache-visible handles are allocated; all references are local indices.
+fn parse_validate_entire_assimp_scene(
+    ai_scene: &aiScene,
+    base_path: Option<&str>,
+    supported_formats: &HashSet<vk::Format>,
+    policy_config: &AssetPolicyConfig,
+) -> Result<StagedImportPlan, AssimpImportError> {
+    // ── Stage 1: Parse materials → textures + staged materials ──
+    let (textures, materials) =
+        process_materials_staged(ai_scene, base_path, supported_formats, policy_config)?;
+
+    // ── Stage 2: Parse meshes → staged meshes with local material indices ──
+    let mut meshes = process_meshes_staged(ai_scene, materials.len())?;
+
+    // ── Stage 3: Classify deformations and compute bounds ──
+    let mesh_deformations = classify_imported_meshes_staged(ai_scene, meshes.len())?;
+    for (mesh, deformation) in meshes.iter_mut().zip(mesh_deformations.iter().copied()) {
+        mesh.deformation = deformation;
+        mesh.bounds = compute_mesh_bounds(&mesh.vertices, deformation);
+    }
+
+    // Extract bounds slice aligned with staged mesh indices for node processing.
+    let mesh_bounds: Vec<SceneBounds> = meshes.iter().map(|m| m.bounds).collect();
+
+    // ── Stage 4: Build Assimp mesh index → staged mesh index mapping ──
+    let mapped_meshes: HashMap<u32, usize> =
+        (0..meshes.len()).map(|idx| (idx as u32, idx)).collect();
+
+    // ── Stage 5: Parse nodes → staged node graph ──
+    let root_ai_node = ai_scene.mRootNode;
+    if root_ai_node.is_null() {
+        return Err(AssimpImportError::Internal(
+            "scene root node pointer is null".to_string(),
+        ));
+    }
+
+    let mut nodes = Vec::new();
+    let root_node_index =
+        process_nodes_staged(root_ai_node, &mapped_meshes, &mesh_bounds, &mut nodes)?;
+
+    Ok(StagedImportPlan {
+        textures,
+        materials,
+        meshes,
+        nodes,
+        root_node_index,
+        mesh_deformations,
+    })
 }
 
 /// Read embedded texture bytes from an Assimp aiTexture with validated sizing.
@@ -1695,7 +1789,7 @@ unsafe fn checked_embedded_texture_bytes(
     Ok(unsafe { std::slice::from_raw_parts(tex.pcData as *const u8, byte_len) }.to_vec())
 }
 
-fn classify_imported_meshes(
+fn classify_imported_meshes_staged(
     ai_scene: &aiScene,
     expected_count: usize,
 ) -> Result<Vec<MeshDeformation>, AssimpImportError> {
@@ -1738,41 +1832,35 @@ mod tests {
     use crate::AssetError;
 
     #[test]
-    fn imported_mesh_bounds_classify_rigid_and_deformed_geometry() {
-        let mesh = MeshMeta {
-            name: "bounds-test".to_string(),
-            indices: vec![0, 1, 2],
-            vertices: vec![
-                Vertex {
-                    position: Vec3::new(-2.0, 3.0, 1.0),
-                    ..Vertex::default()
-                },
-                Vertex {
-                    position: Vec3::new(4.0, -1.0, 5.0),
-                    ..Vertex::default()
-                },
-                Vertex {
-                    position: Vec3::new(0.0, 2.0, -3.0),
-                    ..Vertex::default()
-                },
-            ],
-            material_index: None,
-            has_uv1: false,
-        };
+    fn compute_mesh_bounds_classify_rigid_and_deformed_geometry() {
+        let vertices = vec![
+            Vertex {
+                position: Vec3::new(-2.0, 3.0, 1.0),
+                ..Vertex::default()
+            },
+            Vertex {
+                position: Vec3::new(4.0, -1.0, 5.0),
+                ..Vertex::default()
+            },
+            Vertex {
+                position: Vec3::new(0.0, 2.0, -3.0),
+                ..Vertex::default()
+            },
+        ];
 
         assert_eq!(
-            imported_mesh_bounds(&mesh, MeshDeformation::Rigid),
+            compute_mesh_bounds(&vertices, MeshDeformation::Rigid),
             SceneBounds::Known(Aabb::from_min_max(
                 Vec3::new(-2.0, -1.0, -3.0),
                 Vec3::new(4.0, 3.0, 5.0),
             ))
         );
         assert_eq!(
-            imported_mesh_bounds(&mesh, MeshDeformation::Skinned),
+            compute_mesh_bounds(&vertices, MeshDeformation::Skinned),
             SceneBounds::ConservativeVisible(BoundsUnknownReason::Skinned)
         );
         assert_eq!(
-            imported_mesh_bounds(&mesh, MeshDeformation::Deformed),
+            compute_mesh_bounds(&vertices, MeshDeformation::Deformed),
             SceneBounds::ConservativeVisible(BoundsUnknownReason::Deformed)
         );
     }

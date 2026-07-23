@@ -343,26 +343,55 @@ fn temp_backup_path(target: &Path) -> Result<PathBuf, FsTxError> {
 
 /// Create a unique staging directory sibling to the given path.
 ///
+/// Uses process-local entropy (PID + nanosecond time + attempt counter)
+/// so the resulting path is unpredictable and immune to symlink
+/// pre-creation TOCTOU races. The final directory is created with
+/// `create_dir` (not `create_dir_all`) because the parent already exists;
+/// `create_dir` atomically returns `AlreadyExists` when anything—including
+/// a symlink—already occupies the name.
+///
 /// Returns the staging directory path. The caller is responsible for cleanup
 /// on failure (use `cleanup_staging`).
 pub fn create_staging_sibling(target: &Path) -> Result<PathBuf, FsTxError> {
+    use std::hash::{Hash, Hasher};
+
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|err| FsTxError::Io {
         path: parent.to_path_buf(),
         message: format!("create parent dir for staging: {err}"),
     })?;
-    let stem = target.file_stem().unwrap_or_default().to_string_lossy();
+    let stem = target
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("staging");
 
     let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
     for attempt in 0..100u32 {
-        let name = format!(".{stem}.staging.{pid}.{attempt}");
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pid.hash(&mut hasher);
+        nanos.hash(&mut hasher);
+        attempt.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let name = format!(".{stem}.{hash:016x}.{attempt}");
         let staging = parent.join(name);
-        if fs::symlink_metadata(&staging).is_err() {
-            fs::create_dir_all(&staging).map_err(|err| FsTxError::Io {
-                path: staging.clone(),
-                message: format!("create staging dir: {err}"),
-            })?;
-            return Ok(staging);
+
+        // create_dir is atomic: returns AlreadyExists for any existing
+        // entry (file, dir, symlink), closing the TOCTOU window.
+        match fs::create_dir(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(FsTxError::Io {
+                    path: staging,
+                    message: format!("create staging dir: {err}"),
+                });
+            }
         }
     }
     Err(FsTxError::StagingFailed {
@@ -372,22 +401,43 @@ pub fn create_staging_sibling(target: &Path) -> Result<PathBuf, FsTxError> {
 }
 
 /// Reserve a unique staging file sibling to the given target path.
+///
+/// On Unix, `O_NOFOLLOW` is added so the kernel rejects the open when the
+/// path component is a symlink, closing a TOCTOU race where an attacker
+/// replaces a non-existent path with a symlink between the implicit
+/// existence check and file creation.
+///
+/// On all platforms, the filename includes process-local entropy (PID +
+/// nanosecond time + attempt counter) so the path is unpredictable.
 pub fn create_staging_file_sibling(target: &Path) -> Result<PathBuf, FsTxError> {
+    use std::hash::{Hash, Hasher};
+
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|err| FsTxError::Io {
         path: parent.to_path_buf(),
         message: format!("create parent dir for staging file: {err}"),
     })?;
 
-    let stem = target.file_name().unwrap_or_default().to_string_lossy();
+    let stem = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("staging");
     let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
     for attempt in 0..100u32 {
-        let staging = parent.join(format!(".{stem}.staging.{pid}.{attempt}.tmp"));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)
-        {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        pid.hash(&mut hasher);
+        nanos.hash(&mut hasher);
+        attempt.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let staging = parent.join(format!(".{stem}.{hash:016x}.{attempt}.tmp"));
+
+        match reserve_new_file_no_follow(&staging) {
             Ok(_) => return Ok(staging),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(err) => {
@@ -402,6 +452,26 @@ pub fn create_staging_file_sibling(target: &Path) -> Result<PathBuf, FsTxError> 
         staging_path: parent.to_path_buf(),
         message: "could not reserve unique staging file".to_string(),
     })
+}
+
+fn reserve_new_file_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
 }
 
 /// Remove a staging path tree or file. Errors are logged through `eprintln` but not returned
@@ -745,8 +815,10 @@ pub fn build_publication_plan(entries: Vec<PlanEntry>) -> Result<Vec<PlanEntry>,
             _ => {}
         }
 
-        // Check for duplicate destinations
-        let dest_key = entry.destination.to_string_lossy().to_string();
+        // Check for duplicate destinations through the same UTF-8 logical
+        // identity used by package manifests. Invalid byte sequences fail
+        // closed instead of collapsing through replacement characters.
+        let dest_key = normalize_logical_key(&entry.destination)?;
         if !seen.insert(dest_key) {
             return Err(FsTxError::DuplicateDestination(entry.destination.clone()));
         }
@@ -845,8 +917,15 @@ pub fn normalize_logical_key(path: &Path) -> Result<String, FsTxError> {
 
     let key: Vec<String> = parts
         .into_iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
+        .map(|p| {
+            p.to_str().map(String::from).ok_or_else(|| {
+                FsTxError::InvalidEntryPath(format!(
+                    "path component is not valid UTF-8 in '{}'",
+                    path.display()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(key.join("/"))
 }
 
@@ -1013,6 +1092,60 @@ mod tests {
             let err = inspect_entry_no_follow(&link).unwrap_err();
             assert!(matches!(err, FsTxError::SymlinkRejected { .. }));
         }
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_file_reservation_uses_no_follow_for_symlink_candidate() {
+        let dir = unique_tmp("nofollow");
+        fs::create_dir_all(&dir).unwrap();
+        let referent = dir.join("real.txt");
+        fs::write(&referent, b"real").unwrap();
+        let link = dir.join("candidate.tmp");
+        std::os::unix::fs::symlink(&referent, &link).unwrap();
+
+        let err = reserve_new_file_no_follow(&link).unwrap_err();
+        assert!(
+            err.kind() == std::io::ErrorKind::AlreadyExists
+                || err.raw_os_error() == Some(libc::ELOOP)
+        );
+        assert_eq!(fs::read(&referent).unwrap(), b"real");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logical_keys_reject_non_utf8_before_duplicate_collapse() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = unique_tmp("invalid-utf8");
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.txt");
+        fs::write(&source, b"content").unwrap();
+        let invalid_a = PathBuf::from(OsString::from_vec(vec![b'a', 0xff, b'.', b't', b'x', b't']));
+        let invalid_b = PathBuf::from(OsString::from_vec(vec![b'a', 0xfe, b'.', b't', b'x', b't']));
+
+        assert!(normalize_logical_key(&invalid_a).is_err());
+        let err = build_publication_plan(vec![
+            PlanEntry {
+                source: source.clone(),
+                destination: invalid_a,
+                entry_type: EntryType::File,
+                label: "first".into(),
+            },
+            PlanEntry {
+                source,
+                destination: invalid_b,
+                entry_type: EntryType::File,
+                label: "second".into(),
+            },
+        ])
+        .unwrap_err();
+        assert!(matches!(err, FsTxError::InvalidEntryPath(_)));
 
         fs::remove_dir_all(&dir).unwrap();
     }

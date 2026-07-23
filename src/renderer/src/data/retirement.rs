@@ -120,10 +120,10 @@ pub enum RetirementClass {
     InstanceRecord,
     /// Mesh geometry payload (VkMeshBuffers + suballocations).
     MeshGeometry,
-    /// Material metadata (SSBO suballocation + descriptor set).
-    MaterialMeta,
-    /// Texture image, view, and sampler.
-    TextureImage,
+    /// Material payload (SSBO suballocation + descriptor set).
+    MaterialPayload,
+    /// Texture geometry, view, and sampler.
+    TextureGeometry,
 }
 
 impl std::fmt::Display for RetirementClass {
@@ -135,8 +135,8 @@ impl std::fmt::Display for RetirementClass {
             Self::LodChainReference => write!(f, "LodChainReference"),
             Self::InstanceRecord => write!(f, "InstanceRecord"),
             Self::MeshGeometry => write!(f, "MeshGeometry"),
-            Self::MaterialMeta => write!(f, "MaterialMeta"),
-            Self::TextureImage => write!(f, "TextureImage"),
+            Self::MaterialPayload => write!(f, "MaterialPayload"),
+            Self::TextureGeometry => write!(f, "TextureGeometry"),
         }
     }
 }
@@ -178,6 +178,19 @@ pub enum RetirementError {
         previous: FrameSerial,
         observed: FrameSerial,
     },
+}
+
+/// Error returned by [`GpuRetirementQueue::try_reap`].
+///
+/// Either a completion regression was detected or the caller-supplied
+/// closure failed. On closure failure the queue is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TryReapError<E> {
+    CompletionRegressed {
+        previous: FrameSerial,
+        observed: FrameSerial,
+    },
+    ClosureFailed(E),
 }
 
 impl<T> GpuRetirementQueue<T> {
@@ -228,6 +241,49 @@ impl<T> GpuRetirementQueue<T> {
         let split_idx = self
             .records
             .partition_point(|r| r.retire_after <= completed_serial);
+        Ok(self.records.drain(..split_idx).collect())
+    }
+
+    /// Try to reap eligible records within a caller-supplied closure.
+    ///
+    /// Validates completion, calls `f` with a shared reference to every
+    /// record whose `retire_after` ≤ `completed_serial`, and commits
+    /// removal only when `f` returns `Ok`. On closure failure the queue
+    /// retains every record unchanged.
+    ///
+    /// Completion regression is rejected before the closure runs.
+    /// Duplicate completion with no eligible records advances the
+    /// high-water mark idempotently without calling `f`.
+    pub(crate) fn try_reap<F, E>(
+        &mut self,
+        completed_serial: FrameSerial,
+        f: F,
+    ) -> Result<Vec<RetirementRecord<T>>, TryReapError<E>>
+    where
+        F: FnOnce(&[RetirementRecord<T>]) -> Result<(), E>,
+    {
+        if completed_serial < self.last_reaped_through {
+            return Err(TryReapError::CompletionRegressed {
+                previous: self.last_reaped_through,
+                observed: completed_serial,
+            });
+        }
+
+        let split_idx = self
+            .records
+            .partition_point(|r| r.retire_after <= completed_serial);
+
+        if split_idx == 0 {
+            self.last_reaped_through = completed_serial;
+            return Ok(Vec::new());
+        }
+
+        // Hand references to the caller. The queue still owns every record.
+        f(&self.records[..split_idx]).map_err(TryReapError::ClosureFailed)?;
+
+        // Commit: advance high-water mark and remove exactly the records
+        // that were validated.
+        self.last_reaped_through = completed_serial;
         Ok(self.records.drain(..split_idx).collect())
     }
 
@@ -313,6 +369,28 @@ pub struct TextureRetiredPayload {
     /// Descriptor allocator release data owned by this texture payload.
     /// Textures currently own no descriptor sets; material payloads own sampler descriptors.
     pub descriptor_release: DescriptorReleaseData,
+}
+
+// ---------------------------------------------------------------------------
+// Test-only fault hooks
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+impl<T> GpuRetirementQueue<T> {
+    /// Access records for state inspection after fault injection.
+    fn records_snapshot(&self) -> &[RetirementRecord<T>] {
+        &self.records
+    }
+
+    /// Return the high-water serial for completion-regression assertions.
+    fn last_reaped_through(&self) -> FrameSerial {
+        self.last_reaped_through
+    }
+
+    /// Replace the last-reaped-through serial (fault injection).
+    fn set_last_reaped_through(&mut self, serial: FrameSerial) {
+        self.last_reaped_through = serial;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -654,8 +732,8 @@ mod tests {
             RetirementClass::LodChainReference,
             RetirementClass::InstanceRecord,
             RetirementClass::MeshGeometry,
-            RetirementClass::MaterialMeta,
-            RetirementClass::TextureImage,
+            RetirementClass::MaterialPayload,
+            RetirementClass::TextureGeometry,
         ];
 
         let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
@@ -670,5 +748,349 @@ mod tests {
             assert_eq!(rec.class, classes[i]);
             assert_eq!(rec.payload, i as u32);
         }
+    }
+
+    // ── try_reap regression tests ───────────────────────────────────────
+
+    #[test]
+    fn try_reap_success_removes_eligible() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::MeshGeometry, FrameSerial(3), 100);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 200);
+
+        let mut seen = Vec::new();
+        let reaped = q
+            .try_reap(FrameSerial(4), |eligible| {
+                seen.extend(eligible.iter().map(|r| r.payload));
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(seen, vec![100]);
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].payload, 100);
+        assert_eq!(q.pending_count(), 1);
+        assert_eq!(q.pending_by_class(RetirementClass::BoundsEntry), 1);
+    }
+
+    #[test]
+    fn try_reap_closure_failure_leaves_queue_unchanged() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::MeshGeometry, FrameSerial(3), 100);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 200);
+
+        let snapshot_before: Vec<_> = q
+            .records_snapshot()
+            .iter()
+            .map(|r| (r.class, r.retire_after, r.payload))
+            .collect();
+
+        let result = q.try_reap(FrameSerial(4), |_eligible| Err("simulated lock failure"));
+        assert!(matches!(
+            result,
+            Err(TryReapError::ClosureFailed("simulated lock failure"))
+        ));
+
+        // Queue unchanged: same count, same records
+        assert_eq!(q.pending_count(), 2);
+        let snapshot_after: Vec<_> = q
+            .records_snapshot()
+            .iter()
+            .map(|r| (r.class, r.retire_after, r.payload))
+            .collect();
+        assert_eq!(snapshot_before, snapshot_after);
+        assert_eq!(q.last_reaped_through(), FrameSerial::ZERO);
+    }
+
+    #[test]
+    fn try_reap_retry_after_failure_succeeds() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::MeshGeometry, FrameSerial(2), 42);
+
+        // First attempt: simulated failure
+        let result = q.try_reap(FrameSerial(5), |_| Err("fail"));
+        assert!(result.is_err());
+        assert_eq!(q.pending_count(), 1);
+
+        // Retry succeeds
+        let reaped = q
+            .try_reap(FrameSerial(5), |eligible| {
+                assert_eq!(eligible.len(), 1);
+                assert_eq!(eligible[0].payload, 42);
+                Ok::<(), &str>(())
+            })
+            .unwrap();
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].payload, 42);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn try_reap_mixed_eligible_future() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(1), 10);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(3), 20);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 30);
+
+        let reaped = q
+            .try_reap(FrameSerial(2), |eligible| {
+                assert_eq!(eligible.len(), 1);
+                assert_eq!(eligible[0].payload, 10);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].payload, 10);
+        assert_eq!(q.pending_count(), 2);
+
+        // Closure failure on future-only reap leaves queue unchanged
+        let err = q.try_reap(FrameSerial(4), |eligible| {
+            assert_eq!(eligible.len(), 1);
+            assert_eq!(eligible[0].payload, 20);
+            Err("fail")
+        });
+        assert!(err.is_err());
+        assert_eq!(q.pending_count(), 2);
+        assert_eq!(q.records_snapshot()[0].payload, 20);
+        assert_eq!(q.records_snapshot()[1].payload, 30);
+    }
+
+    #[test]
+    fn try_reap_equal_serial_ordering() {
+        let mut q: GpuRetirementQueue<&str> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(3), "A");
+        q.enqueue(RetirementClass::MeshGeometry, FrameSerial(3), "B");
+        q.enqueue(RetirementClass::ColliderRecipe, FrameSerial(3), "C");
+
+        let reaped = q
+            .try_reap(FrameSerial(3), |eligible| {
+                assert_eq!(eligible.len(), 3);
+                assert_eq!(eligible[0].payload, "A");
+                assert_eq!(eligible[1].payload, "B");
+                assert_eq!(eligible[2].payload, "C");
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert_eq!(reaped.len(), 3);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn try_reap_completion_regression_rejected() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 10);
+
+        // Advance to serial 5 and reap
+        let reaped = q.reap_through(FrameSerial(5)).unwrap();
+        assert_eq!(reaped.len(), 1);
+
+        // Regression attempt via try_reap
+        let result = q.try_reap(FrameSerial(3), |_| Ok::<(), ()>(()));
+        assert!(matches!(
+            result,
+            Err(TryReapError::CompletionRegressed {
+                previous: FrameSerial(5),
+                observed: FrameSerial(3),
+            })
+        ));
+    }
+
+    #[test]
+    fn try_reap_idempotent_no_eligible() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 10);
+
+        // No eligible records, closure not called
+        let reaped = q
+            .try_reap(FrameSerial(2), |_| -> Result<(), ()> {
+                panic!("closure must not be called")
+            })
+            .unwrap();
+        assert!(reaped.is_empty());
+        assert_eq!(q.pending_count(), 1);
+        assert_eq!(q.last_reaped_through(), FrameSerial(2));
+    }
+
+    #[test]
+    fn try_reap_closure_receives_exact_eligible_slice() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(1), 1);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(2), 2);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(4), 4);
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 5);
+
+        q.try_reap(FrameSerial(2), |eligible| {
+            assert_eq!(eligible.len(), 2);
+            assert_eq!(eligible[0].retire_after, FrameSerial(1));
+            assert_eq!(eligible[1].retire_after, FrameSerial(2));
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn try_reap_preserves_exact_class_and_payload_identity_on_failure() {
+        // Simulates lock-poison: eligible records must retain every
+        // observable field (class, payload, slot for relevant payloads).
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::MaterialPayload, FrameSerial(2), 77);
+        q.enqueue(RetirementClass::TextureGeometry, FrameSerial(3), 88);
+
+        let snapshot: Vec<_> = q
+            .records_snapshot()
+            .iter()
+            .map(|r| (r.class, r.retire_after.raw(), r.payload))
+            .collect();
+
+        let _ = q.try_reap(FrameSerial(3), |_| Err("poison"));
+        assert_eq!(q.pending_count(), 2);
+
+        let after: Vec<_> = q
+            .records_snapshot()
+            .iter()
+            .map(|r| (r.class, r.retire_after.raw(), r.payload))
+            .collect();
+        assert_eq!(snapshot, after);
+    }
+
+    #[test]
+    fn try_reap_no_duplicate_slot_release() {
+        // After a successful reap, a second reap must return empty.
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::MeshGeometry, FrameSerial(1), 10);
+
+        let first = q.try_reap(FrameSerial(1), |_| Ok::<(), ()>(())).unwrap();
+        assert_eq!(first.len(), 1);
+
+        let second = q.try_reap(FrameSerial(1), |_| Ok::<(), ()>(())).unwrap();
+        assert!(second.is_empty());
+    }
+
+    /// Simulated descriptor-release retention: a custom payload that
+    /// carries a descriptor set vector must survive closure failure.
+    #[test]
+    fn try_reap_descriptor_release_retained_on_failure() {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct FakeMaterialPayload {
+            slot: u32,
+            generation: u32,
+            descriptor_sets: Vec<u32>,
+        }
+
+        let mut q: GpuRetirementQueue<FakeMaterialPayload> = GpuRetirementQueue::new();
+        q.enqueue(
+            RetirementClass::MaterialPayload,
+            FrameSerial(1),
+            FakeMaterialPayload {
+                slot: 5,
+                generation: 3,
+                descriptor_sets: vec![100, 101],
+            },
+        );
+        q.enqueue(
+            RetirementClass::MaterialPayload,
+            FrameSerial(2),
+            FakeMaterialPayload {
+                slot: 7,
+                generation: 1,
+                descriptor_sets: vec![200],
+            },
+        );
+
+        let snapshot: Vec<_> = q
+            .records_snapshot()
+            .iter()
+            .map(|r| {
+                (
+                    r.class,
+                    r.retire_after.raw(),
+                    r.payload.slot,
+                    r.payload.generation,
+                    r.payload.descriptor_sets.clone(),
+                )
+            })
+            .collect();
+
+        let _ = q.try_reap(FrameSerial(2), |_| Err("lock poison"));
+        assert_eq!(q.pending_count(), 2);
+
+        let after: Vec<_> = q
+            .records_snapshot()
+            .iter()
+            .map(|r| {
+                (
+                    r.class,
+                    r.retire_after.raw(),
+                    r.payload.slot,
+                    r.payload.generation,
+                    r.payload.descriptor_sets.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(snapshot, after);
+    }
+
+    /// Terminal cleanup: after a failed reap is retried and succeeds,
+    /// the queue is empty and reusable.
+    #[test]
+    fn try_reap_terminal_cleanup_after_retry() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.enqueue(RetirementClass::MeshGeometry, FrameSerial(1), 42);
+        q.enqueue(RetirementClass::TextureGeometry, FrameSerial(2), 99);
+
+        // Fail first
+        let _ = q.try_reap(FrameSerial(2), |_| Err("fail"));
+
+        // Succeed
+        let reaped = q
+            .try_reap(FrameSerial(2), |eligible| {
+                assert_eq!(eligible.len(), 2);
+                Ok::<(), &str>(())
+            })
+            .unwrap();
+        assert_eq!(reaped.len(), 2);
+        assert!(q.is_empty());
+        assert_eq!(q.last_reaped_through(), FrameSerial(2));
+
+        // Queue is still valid for new enqueues
+        q.enqueue(RetirementClass::BoundsEntry, FrameSerial(5), 55);
+        assert_eq!(q.pending_count(), 1);
+        let reaped = q.reap_through(FrameSerial(5)).unwrap();
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(reaped[0].payload, 55);
+    }
+
+    /// Completion regression: a completed serial must never regress.
+    #[test]
+    fn try_reap_rejects_completion_regression() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.reap_through(FrameSerial(10)).unwrap();
+
+        let result = q.try_reap(FrameSerial(9), |_| Ok::<(), ()>(()));
+        assert!(matches!(
+            result,
+            Err(TryReapError::CompletionRegressed {
+                previous: FrameSerial(10),
+                observed: FrameSerial(9),
+            })
+        ));
+    }
+
+    /// Verify that the fault-injection hook for last_reaped_through
+    /// correctly simulates a regressed state.
+    #[test]
+    fn fault_hook_set_last_reaped_through() {
+        let mut q: GpuRetirementQueue<u32> = GpuRetirementQueue::new();
+        q.set_last_reaped_through(FrameSerial(42));
+        assert_eq!(q.last_reaped_through(), FrameSerial(42));
+
+        // Regression from the injected state
+        let result = q.try_reap(FrameSerial(10), |_| Ok::<(), ()>(()));
+        assert!(matches!(
+            result,
+            Err(TryReapError::CompletionRegressed {
+                previous: FrameSerial(42),
+                observed: FrameSerial(10),
+            })
+        ));
     }
 }

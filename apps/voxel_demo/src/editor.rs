@@ -901,7 +901,7 @@ fn absolute_user_path(path: &str) -> Result<PathBuf, String> {
 }
 
 fn handle_load_config(path: &str, model: &Rc<RefCell<EditorModel>>) {
-    let result = absolute_user_path(path).and_then(|absolute| {
+    let result = config::resolve_config_document_path(Path::new(path)).and_then(|absolute| {
         let source_dir = absolute
             .parent()
             .map(Path::to_path_buf)

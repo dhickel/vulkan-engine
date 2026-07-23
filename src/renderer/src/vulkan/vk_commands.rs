@@ -71,6 +71,8 @@ pub(crate) struct RecordingDispatcher<'a> {
     graphics_queue_family: u32,
     /// Per-frame transition overlay. Staged deltas are committed after submit.
     transition_overlay: &'a mut vk_util::FrameTransitionOverlay,
+    /// Monotonic frame number for capture metadata.
+    frame_number: u32,
 }
 
 pub(crate) struct PrepareTargetsRecording<'a> {
@@ -145,6 +147,7 @@ pub(crate) struct DebugCaptureRecording<'a> {
     pending_frame_captures: &'a mut Vec<PendingFrameCapture>,
     frame_capture_statuses: &'a mut Vec<FrameCaptureStatus>,
     frame: &'a VkFrame,
+    frame_number: u32,
 }
 pub(crate) struct TerminalPresentRecording<'a> {
     device: &'a ash::Device,
@@ -229,11 +232,11 @@ impl ShadowRecording<'_> {
     pub(crate) fn submission(&self) -> &RenderSubmission {
         self.submission
     }
-    pub(crate) fn cmd_buffer(&self) -> vk::CommandBuffer {
+    pub(crate) fn cmd_buffer(&self) -> Result<vk::CommandBuffer, String> {
         self.frame
             .cmd_pools
             .frame_graphics_primary()
-            .expect("ShadowRecording: frame graphics primary missing")
+            .map_err(|e| format!("ShadowRecording: {e}"))
     }
 
     pub(crate) fn transition_shadow_image(
@@ -246,7 +249,7 @@ impl ShadowRecording<'_> {
         let key = ImageSubresourceKey::all_mips_all_layers(mip_count, layer_count);
         self.transition_overlay.record_and_emit_transition(
             self.device,
-            self.cmd_buffer(),
+            self.cmd_buffer()?,
             self.image_state_tracker,
             image,
             key,
@@ -257,7 +260,7 @@ impl ShadowRecording<'_> {
 }
 
 impl SkyboxRecording<'_> {
-    pub(crate) fn draw_skybox_from_submission(&mut self) {
+    pub(crate) fn draw_skybox_from_submission(&mut self) -> Result<(), String> {
         draw_skybox_from_submission_impl(
             self.device,
             self.window_state,
@@ -269,11 +272,11 @@ impl SkyboxRecording<'_> {
             self.active_env_id,
             self.frame,
             self.submission,
-        );
+        )
     }
 }
 impl GeometryRecording<'_> {
-    pub(crate) fn draw_geometry_from_submission(&mut self) {
+    pub(crate) fn draw_geometry_from_submission(&mut self) -> Result<(), String> {
         draw_geometry_from_submission_impl(
             self.device,
             self.window_state,
@@ -287,7 +290,7 @@ impl GeometryRecording<'_> {
             self.next_submit_serial,
             self.frame,
             self.submission,
-        );
+        )
     }
 }
 impl PresentCopyRecording<'_> {
@@ -324,7 +327,7 @@ impl ImguiRecording<'_> {
     }
 }
 impl DebugCaptureRecording<'_> {
-    pub(crate) fn record_due_frame_captures(&mut self) {
+    pub(crate) fn record_due_frame_captures(&mut self) -> Result<(), String> {
         record_due_frame_captures_impl(
             self.device,
             self.allocator,
@@ -334,7 +337,8 @@ impl DebugCaptureRecording<'_> {
             self.pending_frame_captures,
             self.frame_capture_statuses,
             self.frame,
-        );
+            self.frame_number,
+        )
     }
 }
 impl TerminalPresentRecording<'_> {
@@ -385,6 +389,7 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
     core: &mut VkRenderCore,
     submission: &RenderSubmission,
     rendergraph: &RenderGraph,
+    frame_number: u32,
 ) -> Result<FrameRecordResult, String> {
     let frame_ptr = core
         .presentation
@@ -392,27 +397,9 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         .map_err(|e| format!("no active frame for rendergraph recording: {e}"))?
         as *mut VkFrame;
 
-    let graphics_queue_family = core.queue_family_indices.graphics;
-    {
-        let frame = unsafe { &*frame_ptr };
-        core.image_state_tracker
-            .register_image_if_absent(frame.draw.image, graphics_queue_family);
-        core.image_state_tracker
-            .register_image_if_absent(frame.depth.image, graphics_queue_family);
-        if frame.present_image != vk::Image::null() {
-            core.image_state_tracker
-                .register_image_if_absent(frame.present_image, graphics_queue_family);
-        }
-        let shadow_frame = core.shadow_resources.get_frame(frame.index);
-        core.image_state_tracker
-            .register_image_if_absent(shadow_frame.shadow_map.image, graphics_queue_family);
-        #[cfg(feature = "csm")]
-        if let Some(csm_resources) = core.csm_shadow_resources.as_ref() {
-            let csm_frame = csm_resources.get_frame(frame.index);
-            core.image_state_tracker
-                .register_image_if_absent(csm_frame.csm_image.image, graphics_queue_family);
-        }
-    }
+    // All core images (draw, depth, present, shadow, CSM) are registered in
+    // the tracker at construction time and on swapchain rebuild. Per-frame
+    // lazy registration is no longer needed here.
 
     // Create the per-frame transition overlay. Staging is local to the overlay.
     // On recording failure, the overlay is dropped without committing; on
@@ -446,6 +433,7 @@ pub(crate) unsafe fn execute_rendergraph_for_frame(
         image_state_tracker: &core.image_state_tracker,
         graphics_queue_family: core.queue_family_indices.graphics,
         transition_overlay: &mut transition_overlay,
+        frame_number,
     };
     // SAFETY: `frame_ptr` is unique for this scope and dispatcher cannot reach presentation.
     let frame = unsafe { &mut *frame_ptr };
@@ -554,6 +542,7 @@ impl RenderGraphContext<'_> {
             pending_frame_captures: self.recording.pending_frame_captures,
             frame_capture_statuses: self.recording.frame_capture_statuses,
             frame: self.frame,
+            frame_number: self.recording.frame_number,
         }
     }
 
@@ -587,12 +576,12 @@ fn draw_geometry_from_submission_impl(
     next_submit_serial: u64,
     frame: &mut VkFrame,
     submission: &RenderSubmission,
-) {
+) -> Result<(), String> {
     let frame_index = frame.index;
     let cmd_buffer = frame
         .cmd_pools
         .frame_graphics_primary()
-        .expect("geometry: frame graphics primary missing");
+        .map_err(|e| format!("GeometryPass: {e}"))?;
 
     let color_clear = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -742,6 +731,7 @@ fn draw_geometry_from_submission_impl(
             frame_env_ubo,
         );
     }
+    Ok(())
 }
 
 fn draw_skybox_from_submission_impl(
@@ -755,11 +745,11 @@ fn draw_skybox_from_submission_impl(
     active_env_id: EnvironmentHandle,
     frame: &mut VkFrame,
     submission: &RenderSubmission,
-) {
+) -> Result<(), String> {
     let cmd_buffer = frame
         .cmd_pools
         .frame_graphics_primary()
-        .expect("skybox: frame graphics primary missing");
+        .map_err(|e| format!("SkyboxPass: {e}"))?;
 
     let clear_color = vk::ClearValue {
         color: vk::ClearColorValue {
@@ -796,6 +786,7 @@ fn draw_skybox_from_submission_impl(
 
         device.cmd_end_rendering(cmd_buffer);
     }
+    Ok(())
 }
 
 fn copy_draw_to_present_impl(
@@ -944,16 +935,20 @@ fn record_due_frame_captures_impl(
     pending_frame_captures: &mut Vec<PendingFrameCapture>,
     frame_capture_statuses: &mut Vec<FrameCaptureStatus>,
     frame: &VkFrame,
-) {
+    execution_frame_number: u32,
+) -> Result<(), String> {
     if due_frame_captures.is_empty() {
-        return;
+        return Ok(());
     }
 
     let cmd_buffer = frame
         .cmd_pools
         .frame_graphics_primary()
-        .expect("DebugCapture: frame graphics primary missing");
+        .map_err(|e| format!("DebugCapturePass: {e}"))?;
     let extent = window_state.get_curr_extent();
+    let allocator_guard = allocator
+        .lock()
+        .map_err(|e| format!("DebugCapturePass: allocator lock poisoned: {e}"))?;
     let due = std::mem::take(due_frame_captures);
 
     for capture in due {
@@ -984,9 +979,10 @@ fn record_due_frame_captures_impl(
 
         match record_frame_capture(
             device,
-            &allocator.lock().expect("allocator lock poisoned"),
+            &allocator_guard,
             cmd_buffer,
-            capture.frame_number,
+            execution_frame_number,
+            Some(capture.frame_number),
             capture.sequence_index,
             capture.source,
             &capture.request.output_path,
@@ -996,7 +992,7 @@ fn record_due_frame_captures_impl(
             Ok(pending) => {
                 info!(
                     "Recorded frame capture for frame {} target {} -> {}",
-                    capture.frame_number,
+                    execution_frame_number,
                     capture.request.target.as_label(),
                     capture.request.output_path.display()
                 );
@@ -1005,13 +1001,13 @@ fn record_due_frame_captures_impl(
             Err(err) => {
                 error!(
                     "Failed to record frame capture for frame {} target {} -> {}: {}",
-                    capture.frame_number,
+                    execution_frame_number,
                     capture.request.target.as_label(),
                     capture.request.output_path.display(),
                     err
                 );
                 frame_capture_statuses.push(FrameCaptureStatus::Failed {
-                    frame_number: capture.frame_number,
+                    frame_number: execution_frame_number,
                     target: capture.request.target,
                     output_path: capture.request.output_path,
                     source: capture.source,
@@ -1020,6 +1016,7 @@ fn record_due_frame_captures_impl(
             }
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

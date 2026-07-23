@@ -1,0 +1,52 @@
+{
+  "format_version": 2,
+  "scene_id": "scene.v2_shadow_owner",
+  "root_nodes": [
+    "node.root"
+  ],
+  "nodes": [
+    {
+      "id": "node.root",
+      "parent": null,
+      "name": "Shadow Owner Root",
+      "transform": {
+        "translation": [0, 0, 0],
+        "rotation": [0, 0, 0, 1],
+        "scale": [1, 1, 1]
+      },
+      "asset": null
+    }
+  ],
+  "lights": [],
+  "directional_lights": [
+    {
+      "id": "directional.shadow_caster",
+      "kind": "directional",
+      "direction": [0.3, 1.0, 0.15],
+      "color": [1.0, 0.9, 0.7],
+      "intensity": 3.0,
+      "shadow_config": {
+        "enabled": true,
+        "shadow_map_size": 4096,
+        "cascade_count": 4,
+        "cascade_split_lambda": 0.75
+      }
+    },
+    {
+      "id": "directional.fill_light",
+      "kind": "directional",
+      "direction": [-1.0, 0.25, 0.5],
+      "color": [0.3, 0.4, 0.6],
+      "intensity": 0.5,
+      "shadow_config": {
+        "enabled": false,
+        "shadow_map_size": 1024,
+        "cascade_count": 1,
+        "cascade_split_lambda": 0.5
+      }
+    }
+  ],
+  "spot_lights": [],
+  "environment": null,
+  "editor": {}
+}

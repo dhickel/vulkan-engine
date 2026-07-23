@@ -154,6 +154,8 @@ with a caller-assigned `BindingInstanceId` when they need multi-source aggregati
 - `mouse_delta` and `just_*` states are transient and valid only for the current frame.
 - Profile load is strict: unsupported keys, malformed triggers, or unknown fields are hard errors.
 - The renderer facade does not auto-load an input profile path from `RendererConfig`; profile TOML is app-owned setup code.
+- Modifier-release ordering is tracked per-binding. Releasing a modifier before releasing the bound key no longer leaves the action stuck active — the system tracks each binding's press/release independently via `BindingInstanceId` and recomputes the aggregate action value after every event.
+- `set_action_value` and `set_instance_value` are the two public paths for direct action injection. Use `set_instance_value` with a caller-assigned `BindingInstanceId` when multiple sources contribute to the same action; use `set_action_value` for single-source actions (behaves as an anonymous instance).
 
 ## 7. Debugging Playbook
 - Step 1: verify `renderer.update_input(...)` is called for every event.
