@@ -138,6 +138,7 @@ pub enum AssetKind {
     WallChunk,
     SceneFragment,
     Audio,
+    Bsp,
 }
 
 impl Serialize for AssetKind {
@@ -164,6 +165,7 @@ impl<'de> Deserialize<'de> for AssetKind {
             "wall_chunk" => Ok(Self::WallChunk),
             "scene_fragment" => Ok(Self::SceneFragment),
             "audio" => Ok(Self::Audio),
+            "bsp" => Ok(Self::Bsp),
             other => Err(serde::de::Error::custom(
                 AssetRegistryError::UnsupportedAssetKind(other.to_string()).to_string(),
             )),
@@ -182,6 +184,7 @@ impl AssetKind {
             Self::WallChunk => "wall_chunk",
             Self::SceneFragment => "scene_fragment",
             Self::Audio => "audio",
+            Self::Bsp => "bsp",
         }
     }
 }

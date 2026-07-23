@@ -14,6 +14,7 @@ use renderer::AssetKind;
 use serde::Serialize;
 
 use engine_pack::cli;
+use engine_pack::compiler;
 use engine_pack::fs_tx;
 use engine_pack::fs_tx::{
     build_publication_plan, cleanup_staging, contained_child_no_symlinks,
@@ -59,6 +60,8 @@ fn run(args: Vec<String>) -> CliResult<String> {
         "validate-package" => validate_package_cmd(rest),
         "validate-project" => validate_project_cmd(rest),
         "validate-scene" => validate_scene_cmd(rest),
+        "validate-bsp" => validate_bsp_cmd(rest),
+        "compile-bsp" => compile_bsp_cmd(rest),
         "new-app" => new_app_cmd(rest),
         "new-project" => new_project_cmd(rest),
         "new-package" => new_package_cmd(rest),
@@ -204,6 +207,312 @@ fn validate_scene_cmd(args: &[String]) -> CliResult<String> {
         &SceneValidationOptions::default().with_known_asset_ids(asset_ids),
     )?;
     Ok(format!("valid[scene]: {}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// validate-bsp — re-parse .bsp through the bsp parser
+// ---------------------------------------------------------------------------
+
+fn validate_bsp_cmd(args: &[String]) -> CliResult<String> {
+    let parsed = cli::parse_command("validate-bsp", cli::validate_bsp_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let strict = parsed.flag_present("--strict");
+    let palette_path = parsed.singleton_value("--palette");
+    let path = require_positional(
+        &parsed,
+        "validate-bsp <file.bsp> [--palette <file.lmp>] [--strict]",
+    )?;
+
+    fs_tx::inspect_entry_no_follow(&path).map_err(CliError::FsTx)?;
+    let bsp_data = std::fs::read(&path).map_err(|err| io_error("bsp.io", &path, err))?;
+
+    let palette_data = palette_path
+        .map(|pal_path| {
+            let pal = PathBuf::from(pal_path);
+            std::fs::read(&pal).map_err(|err| io_error("bsp.io", &pal, err))
+        })
+        .transpose()?;
+
+    let options = bsp::LoadOptions {
+        strict,
+        palette: palette_data,
+        lit_data: None,
+        wad_archives: Vec::new(),
+        texture_overrides: Vec::new(),
+        source_identity: path.display().to_string(),
+    };
+
+    let world = bsp::BspLoader::load(&bsp_data, &options).map_err(|report| {
+        CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "bsp.validation",
+                ValidationArea::Asset,
+                format!("BSP validation failed: {report}"),
+            )
+            .with_path(&path),
+        ))
+    })?;
+
+    let diag_count = world.diagnostics.len();
+    let profile_name = match world.profile {
+        bsp::profile::BspProfile::Bsp29 => "BSP29",
+        bsp::profile::BspProfile::Bsp2 => "BSP2",
+    };
+
+    Ok(format!(
+        "valid[bsp]: {} ({}) {} entities, {} faces, {} diagnostics",
+        path.display(),
+        profile_name,
+        world.entities.len(),
+        world.faces.len(),
+        diag_count,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// compile-bsp — shell-free external compiler invocation
+// ---------------------------------------------------------------------------
+
+fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
+    let parsed = cli::parse_command("compile-bsp", cli::compile_bsp_schema(), args);
+    let parsed = parsed.into_result().map_err(CliError::Usage)?;
+
+    let profile_path = require_option("--profile", &parsed)?;
+    let out_dir = require_option("--out", &parsed)?;
+    let palette_path = parsed.singleton_value("--palette");
+    let tool_path = parsed.singleton_value("--tool-path");
+    let source_map = require_positional(
+        &parsed,
+        "compile-bsp <source.map> --profile <profile.toml> --out <dir>",
+    )?;
+
+    // Read and parse compiler profile
+    let profile_content = std::fs::read_to_string(&profile_path)
+        .map_err(|err| io_error("compile-bsp.profile", Path::new(&profile_path), err))?;
+    let profile = compiler::parse_compiler_profile(&profile_content).map_err(|msg| {
+        CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "bsp.profile",
+                ValidationArea::Project,
+                format!("invalid compiler profile: {msg}"),
+            )
+            .with_path(&profile_path),
+        ))
+    })?;
+
+    // Resolve palette path
+    let palette = if let Some(pal_path) = &palette_path {
+        PathBuf::from(pal_path)
+    } else {
+        // Default: look for palette.lmp in same directory as profile
+        let profile_dir = Path::new(&profile_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        profile_dir.join("palette.lmp")
+    };
+
+    let out_dir = PathBuf::from(&out_dir);
+    if out_dir.exists() {
+        return Err(CliError::FsTx(fs_tx::FsTxError::ExistingTarget(
+            out_dir.clone(),
+        )));
+    }
+
+    // Use fs_tx staging for output
+    let staging = create_staging_sibling(&out_dir).map_err(CliError::FsTx)?;
+
+    let result = (|| -> CliResult<String> {
+        let work_dir = staging.join(".compile-work");
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|err| io_error("compile-bsp.workdir", &work_dir, err))?;
+
+        let tool_path_opt = tool_path.map(PathBuf::from);
+        let compile_result = compiler::compile_map(
+            &source_map,
+            &profile,
+            &work_dir,
+            &palette,
+            tool_path_opt.as_deref(),
+        )
+        .map_err(|err| {
+            CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "bsp.compile",
+                    ValidationArea::Asset,
+                    format!("compilation failed: {err}"),
+                )
+                .with_path(&source_map),
+            ))
+        })?;
+
+        std::fs::remove_dir_all(&work_dir)
+            .map_err(|err| io_error("compile-bsp.workdir", &work_dir, err))?;
+
+        // Write compiled outputs
+        let bsp_name = source_map
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let bsp_path = staging.join(format!("{bsp_name}.bsp"));
+        std::fs::write(&bsp_path, &compile_result.bsp_data)
+            .map_err(|err| io_error("compile-bsp.write", &bsp_path, err))?;
+
+        if let Some(ref lit_data) = compile_result.lit_data {
+            let lit_path = staging.join(format!("{bsp_name}.lit"));
+            std::fs::write(&lit_path, lit_data)
+                .map_err(|err| io_error("compile-bsp.write", &lit_path, err))?;
+        }
+
+        // Write provenance
+        let provenance_path = staging.join(format!("{bsp_name}.provenance.toml"));
+        let provenance_toml = {
+            let mut root = toml::value::Table::new();
+            root.insert(
+                "compiler_identity".into(),
+                toml::Value::String(compile_result.provenance.compiler_identity.clone()),
+            );
+            root.insert(
+                "compiler_version".into(),
+                toml::Value::String(compile_result.provenance.compiler_version.clone()),
+            );
+            if !compile_result.provenance.qbsp_args.is_empty() {
+                root.insert(
+                    "qbsp_args".into(),
+                    toml::Value::Array(
+                        compile_result
+                            .provenance
+                            .qbsp_args
+                            .iter()
+                            .map(|a| toml::Value::String(a.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+            if !compile_result.provenance.vis_args.is_empty() {
+                root.insert(
+                    "vis_args".into(),
+                    toml::Value::Array(
+                        compile_result
+                            .provenance
+                            .vis_args
+                            .iter()
+                            .map(|a| toml::Value::String(a.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+            if !compile_result.provenance.light_args.is_empty() {
+                root.insert(
+                    "light_args".into(),
+                    toml::Value::Array(
+                        compile_result
+                            .provenance
+                            .light_args
+                            .iter()
+                            .map(|a| toml::Value::String(a.clone()))
+                            .collect(),
+                    ),
+                );
+            }
+            if !compile_result.provenance.source_hashes.is_empty() {
+                root.insert(
+                    "source_hashes".into(),
+                    toml::Value::Array(
+                        compile_result
+                            .provenance
+                            .source_hashes
+                            .iter()
+                            .map(|hash| {
+                                let mut table = toml::value::Table::new();
+                                table.insert(
+                                    "path".into(),
+                                    toml::Value::String(
+                                        hash.path.to_string_lossy().replace('\\', "/"),
+                                    ),
+                                );
+                                table.insert(
+                                    "sha256".into(),
+                                    toml::Value::String(hash.sha256.clone()),
+                                );
+                                toml::Value::Table(table)
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            if !compile_result.provenance.output_hashes.is_empty() {
+                root.insert(
+                    "output_hashes".into(),
+                    toml::Value::Array(
+                        compile_result
+                            .provenance
+                            .output_hashes
+                            .iter()
+                            .map(|hash| {
+                                let mut table = toml::value::Table::new();
+                                table.insert(
+                                    "path".into(),
+                                    toml::Value::String(
+                                        hash.path.to_string_lossy().replace('\\', "/"),
+                                    ),
+                                );
+                                table.insert(
+                                    "sha256".into(),
+                                    toml::Value::String(hash.sha256.clone()),
+                                );
+                                toml::Value::Table(table)
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(hashes) = &compile_result.provenance.compiler_hashes {
+                let mut hash_table = toml::value::Table::new();
+                hash_table.insert(
+                    "qbsp_sha256".into(),
+                    toml::Value::String(hashes.qbsp_sha256.clone()),
+                );
+                hash_table.insert(
+                    "vis_sha256".into(),
+                    toml::Value::String(hashes.vis_sha256.clone()),
+                );
+                hash_table.insert(
+                    "light_sha256".into(),
+                    toml::Value::String(hashes.light_sha256.clone()),
+                );
+                root.insert("compiler_hashes".into(), toml::Value::Table(hash_table));
+            }
+            root.insert(
+                "stdout".into(),
+                toml::Value::String(compile_result.stdout.clone()),
+            );
+            root.insert(
+                "stderr".into(),
+                toml::Value::String(compile_result.stderr.clone()),
+            );
+            toml::Value::Table(root)
+        };
+        let provenance_str = toml::to_string_pretty(&provenance_toml)
+            .map_err(|e| CliError::Validation(internal_error("bsp.serialize", e.to_string())))?;
+        std::fs::write(&provenance_path, provenance_str)
+            .map_err(|err| io_error("compile-bsp.write", &provenance_path, err))?;
+
+        // Publish
+        publish_staging(&staging, &out_dir).map_err(CliError::FsTx)?;
+
+        Ok(format!(
+            "compiled[bsp]: {} -> {}/{}.bsp",
+            source_map.display(),
+            out_dir.display(),
+            bsp_name
+        ))
+    })();
+
+    if result.is_err() {
+        cleanup_staging(&staging);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +1194,7 @@ fn classify_asset_kind(path: &Path) -> CliResult<Option<AssetKind>> {
         "png" | "jpg" | "jpeg" | "ktx" | "ktx2" => Some(AssetKind::Texture),
         "hdr" | "exr" => Some(AssetKind::Environment),
         "wav" | "ogg" | "flac" | "mp3" => Some(AssetKind::Audio),
+        "bsp" => Some(AssetKind::Bsp),
         _ => None,
     })
 }
@@ -899,6 +1209,7 @@ fn parse_asset_kind(value: &str) -> CliResult<AssetKind> {
         "wall_chunk" => Ok(AssetKind::WallChunk),
         "scene_fragment" => Ok(AssetKind::SceneFragment),
         "audio" => Ok(AssetKind::Audio),
+        "bsp" => Ok(AssetKind::Bsp),
         other => Err(CliError::Validation(ValidationError::single(
             ValidationDiagnostic::new(
                 "asset.unsupported_kind",

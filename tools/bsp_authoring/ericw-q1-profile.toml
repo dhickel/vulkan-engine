@@ -1,0 +1,32 @@
+# ericw-tools Q1 compiler profile — pinned version for BSP beta.
+#
+# This profile is the single source of truth for compiler identity and
+# invocation when running `engine_pack compile-bsp`.
+#
+# ericw-tools must be user-supplied; not bundled with the engine.
+# Download: https://github.com/ericwa/ericw-tools/releases
+
+name = "ericw-q1"
+compiler_identity = "ericw-tools"
+required_version = "2.0.0-alpha3"
+
+# Executables — resolved via --tool-path or PATH
+qbsp_executable = "qbsp"
+vis_executable = "vis"
+light_executable = "light"
+
+# Default arguments per stage
+default_qbsp_args = []
+default_vis_args = []
+default_light_args = ["-colored", "-lit"]
+
+# Safety limits
+timeout_seconds = 300
+max_output_size = 134217728  # 128 MiB
+
+# Expected compiler hashes (optional)
+# Set these for verified reproducibility:
+# [expected_hashes]
+# qbsp_sha256 = ""
+# vis_sha256 = ""
+# light_sha256 = ""

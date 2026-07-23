@@ -960,6 +960,7 @@ dependencies = [
 name = "engine_pack"
 version = "0.1.0"
 dependencies = [
+ "bsp",
  "launch_shared",
  "libc",
  "renderer",

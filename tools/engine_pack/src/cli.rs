@@ -203,6 +203,78 @@ pub fn pack_schema() -> &'static [CliOption] {
     }]
 }
 
+/// Schema for `validate-bsp <file.bsp> [--palette <file.lmp>] [--strict]`
+pub fn validate_bsp_schema() -> &'static [CliOption] {
+    &[
+        CliOption {
+            name: "--palette",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Palette file (768 bytes) for texture/lightmap validation",
+            value_placeholder: Some("<file.lmp>"),
+        },
+        CliOption {
+            name: "--strict",
+            short: None,
+            value_policy: OptionValuePolicy::Flag,
+            allow_spaced: true,
+            allow_equals: false,
+            repeatable: false,
+            help: "Enforce strict/release validation policy",
+            value_placeholder: None,
+        },
+    ]
+}
+
+/// Schema for `compile-bsp <source.map> --profile <profile.toml> --out <dir> [--palette <file.lmp>] [--tool-path <dir>]`
+pub fn compile_bsp_schema() -> &'static [CliOption] {
+    &[
+        CliOption {
+            name: "--profile",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Compiler profile TOML file",
+            value_placeholder: Some("<profile.toml>"),
+        },
+        CliOption {
+            name: "--out",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Output directory for compiled .bsp and companions",
+            value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--palette",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Palette file (768 bytes)",
+            value_placeholder: Some("<file.lmp>"),
+        },
+        CliOption {
+            name: "--tool-path",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: false,
+            help: "Directory containing qbsp, vis, light executables",
+            value_placeholder: Some("<dir>"),
+        },
+    ]
+}
+
 /// Parse the command, args, and positional args for a given engine_pack subcommand.
 pub fn parse_command(_command: &str, schema: &[CliOption], args: &[String]) -> CliParseResult {
     parse_cli_args(schema, args)
@@ -216,7 +288,7 @@ pub struct CommandSchema {
     pub options: &'static [CliOption],
 }
 
-pub fn command_schemas() -> [CommandSchema; 9] {
+pub fn command_schemas() -> [CommandSchema; 11] {
     [
         CommandSchema {
             name: "validate-package",
@@ -235,6 +307,18 @@ pub fn command_schemas() -> [CommandSchema; 9] {
             usage: "engine_pack validate-scene <scene.engine.scene.json> --project <engine.project.toml>",
             description: "Validate a scene against a project asset set.",
             options: validate_scene_schema(),
+        },
+        CommandSchema {
+            name: "validate-bsp",
+            usage: "engine_pack validate-bsp <file.bsp> [--palette <file.lmp>] [--strict]",
+            description: "Validate a compiled BSP file through the parser.",
+            options: validate_bsp_schema(),
+        },
+        CommandSchema {
+            name: "compile-bsp",
+            usage: "engine_pack compile-bsp <source.map> --profile <profile.toml> --out <dir> [--palette <file.lmp>] [--tool-path <dir>]",
+            description: "Compile a .map source to .bsp using a trusted external compiler.",
+            options: compile_bsp_schema(),
         },
         CommandSchema {
             name: "new-app",
@@ -371,6 +455,8 @@ mod tests {
             "validate-package",
             "validate-project",
             "validate-scene",
+            "validate-bsp",
+            "compile-bsp",
             "new-app",
             "new-project",
             "new-package",
