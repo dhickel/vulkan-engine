@@ -83,9 +83,9 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -p dungeon_dogfood -- \
   --level generated_sprawl \
   --headless \
   --capture_target draw \
-  --capture_frames=3 \
-  --capture_frame_start=5 \
-  --capture_frame_interval=5 \
+  --capture_frames 3 \
+  --capture_frame_start 5 \
+  --capture_frame_interval 5 \
   --capture_dir .internal-dev/captures/sprint-11-dogfood-vertical-slice/dogfood-baseline
 ```
 
