@@ -31,6 +31,17 @@ fn merge_cleanup_error(primary: io::Error, cleanup: io::Result<()>) -> io::Error
     }
 }
 
+fn random_staging_token() -> io::Result<u128> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("failed to generate random staged scene suffix: {err}"),
+        )
+    })?;
+    Ok(u128::from_le_bytes(bytes))
+}
+
 #[cfg(unix)]
 mod platform {
     use super::*;
@@ -83,15 +94,13 @@ mod platform {
             let parent = open_parent_no_follow(parent_path)?;
             let parent_fd = parent.as_raw_fd();
 
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
             let pid = std::process::id();
 
             for attempt in 0..1024u64 {
+                let random = random_staging_token()?;
                 let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let staged_label = format!(".scene-save.{pid}.{nanos}.{counter}.{attempt}.tmp");
+                let staged_label =
+                    format!(".scene-save.{pid}.{random:032x}.{counter}.{attempt}.tmp");
                 let staged_name = CString::new(staged_label.as_bytes()).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidInput, "staged name contains NUL")
                 })?;
@@ -162,6 +171,11 @@ mod platform {
             } else {
                 Err(io::Error::last_os_error())
             }
+        }
+
+        #[cfg(test)]
+        pub(super) fn staged_path(&self) -> &Path {
+            &self.staged_path
         }
 
         fn verify_staged_identity(&self) -> io::Result<()> {
@@ -284,8 +298,11 @@ mod platform {
             })?;
             let pid = std::process::id();
             for attempt in 0..1024u64 {
+                let random = random_staging_token()?;
                 let counter = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let staged = parent.join(format!(".scene-save.{pid}.{counter}.{attempt}.tmp"));
+                let staged = parent.join(format!(
+                    ".scene-save.{pid}.{random:032x}.{counter}.{attempt}.tmp"
+                ));
                 match OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -338,6 +355,11 @@ mod platform {
                 }
             }
         }
+
+        #[cfg(test)]
+        pub(super) fn staged_path(&self) -> &Path {
+            &self.staged
+        }
     }
 
     impl Drop for StagedSceneFile {
@@ -348,3 +370,63 @@ mod platform {
 }
 
 use platform::StagedSceneFile;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn staged_scene_file_uses_randomized_temp_names() {
+        let dir = unique_scene_tx_dir("randomized-temp-names");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("scene.engine.scene.json");
+
+        let mut first = StagedSceneFile::reserve(&target).unwrap();
+        let mut second = StagedSceneFile::reserve(&target).unwrap();
+        let first_name = first
+            .staged_path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let second_name = second
+            .staged_path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_ne!(first_name, second_name);
+        assert_randomized_scene_temp_name(&first_name);
+        assert_randomized_scene_temp_name(&second_name);
+
+        first.cleanup().unwrap();
+        second.cleanup().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn assert_randomized_scene_temp_name(name: &str) {
+        let parts: Vec<_> = name.split('.').collect();
+        assert_eq!(parts.len(), 7, "unexpected staged scene temp name: {name}");
+        assert_eq!(parts[1], "scene-save");
+        assert_eq!(parts[6], "tmp");
+        assert_eq!(parts[3].len(), 32, "random token must be 128-bit hex");
+        assert!(
+            parts[3].bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "random token must be hex: {name}"
+        );
+    }
+
+    fn unique_scene_tx_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "renderer-scene-file-tx-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+}

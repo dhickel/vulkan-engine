@@ -62,19 +62,19 @@ It serves as the canonical cross-reference between:
 | H-A2 | H12 (input actions) | DECISION-20260707-01 | API-20260707-01 |
 | H-A3 | H11 (scripting) | — | — |
 | H-A4 | C4 (fence-aware retirement) | DECISION-20260725-15 | API-20260722-06, ARCH-20260725-10 |
-| H-A5 | C6 (scene persistence) | — | API-20260722-08 |
-| H-A6 | C6 subclaim | DECISION-20260718-01 | API-20260718-03 |
+| H-A5 | C6 (scene persistence) | — | API-20260722-09, ARCH-20260722-06 |
+| H-A6 | C6 subclaim | DECISION-20260718-01 | API-20260718-03, API-20260722-09 |
 | H-A7 | C5, H9 (Assimp safety) | DECISION-20260725-10 | ARCH-20260725-07 |
 | H-A8 | H1, H2 (image/sync) | DECISION-20260718-03 | ARCH-20260718-02 |
 | H-A9 | H3 (pipeline), H4 (cache) | — | ARCH-20260725-04 |
 | H-A10 | M5 (capture/debug) | — | API-20260703-02 |
 | M-A1 | review-identified | DECISION-20260718-01, DECISION-20260725-03 | ARCH-20260718-01 |
-| M-A2 | C6 subclaim | — | — |
-| M-A3 | C8 (symlink escape) | — | — |
-| M-A4 | M6 subclaim | — | — |
+| M-A2 | C6 subclaim | — | API-20260722-09, ARCH-20260722-06 |
+| M-A3 | C8 (symlink escape) | — | API-20260722-11, ARCH-20260722-07 |
+| M-A4 | M6 subclaim | — | API-20260722-11, ARCH-20260722-07 |
 | M-A5 | M1 (CLI parsing) | — | API-20260722-01 |
-| M-A6 | M6 (asset identity) | — | — |
-| M-A7 | C7 (engine_pack) | DECISION-20260722-06 | — |
+| M-A6 | M6 (asset identity) | — | API-20260722-11, ARCH-20260722-07 |
+| M-A7 | C7 (engine_pack) | DECISION-20260722-07 | API-20260722-11, ARCH-20260722-07 |
 | M-A8 | M4 (structured errors) | DECISION-20260722-07 | API-20260722-07 |
 | M-A9 | reviewed-original | DECISION-20260725-13 | ARCH-20260725-08 |
 | M-A10 | C3 (frame indexing) | — | ARCH-20260718-02 |

@@ -3122,6 +3122,7 @@ dependencies = [
  "cfg-if",
  "engine_events",
  "env_logger 0.10.2",
+ "getrandom 0.3.3",
  "glam 0.28.0",
  "gltf",
  "half",
