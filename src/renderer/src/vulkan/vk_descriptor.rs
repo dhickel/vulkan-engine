@@ -1157,6 +1157,42 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
     #[cfg(feature = "instancing")]
     layouts.push((VkDescType::SceneDataInstanced, scene_data_instanced));
 
+    #[cfg(feature = "bsp")]
+    // BSP material set: albedo (b0), fullbright mask (b1), lightmap atlas (b2), surface UBO (b3).
+    let bsp_material = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(1, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(3, vk::DescriptorType::UNIFORM_BUFFER)
+        .build(
+            device,
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .expect("failed to build bsp_material descriptor layout");
+
+    #[cfg(feature = "bsp")]
+    // BSP scene set: UBO b0 (SceneData), UBO b1 (EnvironmentUBO), samplers b2-b5 (env/shadow).
+    // Same binding structure as the PBR SceneData layout so set 0 can be shared.
+    let bsp_scene = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .add_binding(1, vk::DescriptorType::UNIFORM_BUFFER)
+        .add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(3, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(4, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .add_binding(5, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .build(
+            device,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .expect("failed to build bsp_scene descriptor layout");
+
+    #[cfg(feature = "bsp")]
+    layouts.push((VkDescType::BspMaterial, bsp_material));
+    #[cfg(feature = "bsp")]
+    layouts.push((VkDescType::BspScene, bsp_scene));
+
     let cache = data_cache::VkDescLayoutCache::new(layouts);
     cache.debug();
     cache

@@ -1,4 +1,6 @@
 mod assets;
+#[cfg(feature = "bsp")]
+pub mod bsp;
 pub mod config;
 mod errors;
 pub mod event_logging;
@@ -19,11 +21,14 @@ pub use crate::data::asset_manifest::{
 pub use crate::data::asset_registry::{
     normalize_logical_key, parse_package_manifest, try_normalize_logical_key,
     validate_package_manifest_file, validate_package_manifest_str, validate_project_file,
-    validate_project_str, AssetKind,
-    AssetRegistry, AssetRegistryError, DurableAssetRecord, PackageAssetRecord, PackageManifest,
-    PackageValidationOptions, Project, ProjectPackage, ProjectSettings, ProjectValidationOptions,
+    validate_project_str, AssetKind, AssetRegistry, AssetRegistryError, DurableAssetRecord,
+    PackageAssetRecord, PackageManifest, PackageValidationOptions, Project, ProjectPackage,
+    ProjectSettings, ProjectValidationOptions,
 };
 pub use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle, TextureHandle};
+
+#[cfg(feature = "bsp")]
+pub use crate::data::handles::{BspMaterialHandle, BspTextureHandle};
 pub use crate::data::mesh_geometry::{MeshDeformation, MeshGeometryDto, MeshLocalAabb};
 pub use crate::data::retirement::{
     FrameSerial, GpuRetirementQueue, RetirementClass, RetirementError, RetirementRecord,

@@ -56,6 +56,8 @@
 //! - Recreates swapchain with new extent
 //! - Updates viewport/scissor
 
+#[cfg(feature = "bsp")]
+use crate::data::data_cache::BspSurfaceCache;
 use crate::data::data_cache::{
     EnvMaps, EnvironmentCache, MeshCache, TextureCache, VkCache, VkDataCache, VkDescType,
     VkPipelineType, VkSamplerCache, VkShaderCache,
@@ -433,6 +435,8 @@ pub fn init_caches(
         environment_cache: Mutex::new(environment_cache),
         mesh_geometry_store: Mutex::new(MeshGeometryStore::new()),
         supported_image_formats: supported_formats,
+        #[cfg(feature = "bsp")]
+        bsp_surface_cache: Mutex::new(BspSurfaceCache::new()),
     };
 
     let vulkan_cache = VkCache {

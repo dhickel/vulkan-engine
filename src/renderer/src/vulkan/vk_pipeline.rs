@@ -53,6 +53,10 @@ use ash::vk;
 use std::collections::HashSet;
 use std::ffi::CStr;
 
+#[cfg(feature = "bsp")]
+#[path = "vk_bsp.rs"]
+mod vk_bsp;
+
 /// Builder for Vulkan graphics pipelines with dynamic rendering.
 ///
 /// ## Purpose
@@ -558,8 +562,7 @@ impl<D: PipelineDestroyer> PipelineStage<D> {
     /// Add a single owned pipeline to the stage.
     fn push_single(&mut self, typ: VkPipelineType, owned: OwnedPipeline) {
         let (pipeline, layout) = owned.disarm();
-        self.entries
-            .push((typ, VkPipeline::new(pipeline, layout)));
+        self.entries.push((typ, VkPipeline::new(pipeline, layout)));
     }
 
     /// Add a pipeline pair to the stage.
@@ -674,7 +677,11 @@ pub fn init_pipeline_cache(
             draw_color_format,
             draw_depth_format,
         )?;
-        stage.push_pair(VkPipelineType::PbrMetRoughOpaque, VkPipelineType::PbrMetRoughAlpha, pair);
+        stage.push_pair(
+            VkPipelineType::PbrMetRoughOpaque,
+            VkPipelineType::PbrMetRoughAlpha,
+            pair,
+        );
     }
 
     // Unlit material pipelines (opaque + alpha pair)
@@ -686,7 +693,11 @@ pub fn init_pipeline_cache(
             draw_color_format,
             draw_depth_format,
         )?;
-        stage.push_pair(VkPipelineType::UnlitOpaque, VkPipelineType::UnlitAlpha, pair);
+        stage.push_pair(
+            VkPipelineType::UnlitOpaque,
+            VkPipelineType::UnlitAlpha,
+            pair,
+        );
     }
 
     // Single pipelines
@@ -741,6 +752,25 @@ pub fn init_pipeline_cache(
             VkPipelineType::UnlitOpaqueInstanced,
             pair,
         );
+    }
+
+    #[cfg(feature = "bsp")]
+    {
+        let (bsp_pipelines, bsp_layout) = vk_bsp::create_bsp_pipelines(
+            device,
+            &shader_cache.core_shader_cache,
+            desc_layout_cache,
+            draw_color_format,
+            draw_depth_format,
+        )?;
+        for (typ, pipeline) in bsp_pipelines {
+            // All BSP variants share one layout; OwnedPipeline disarm()
+            // skips Drop, and VkPipelineCache destroys deduped layouts.
+            stage.push_single(
+                typ,
+                OwnedPipeline::new(device.clone(), pipeline, bsp_layout),
+            );
+        }
     }
 
     stage.commit()
@@ -1416,10 +1446,15 @@ mod tests {
         };
 
         for index in 0..VkPipelineType::COUNT {
-            let layout = if index % 2 == 0 { shared_layout } else { unique_layout };
-            stage
-                .entries
-                .push((VkPipelineType::PbrMetRoughOpaque, dummy_pipeline(index as u64, layout)));
+            let layout = if index % 2 == 0 {
+                shared_layout
+            } else {
+                unique_layout
+            };
+            stage.entries.push((
+                VkPipelineType::PbrMetRoughOpaque,
+                dummy_pipeline(index as u64, layout),
+            ));
         }
 
         let result = stage.commit();

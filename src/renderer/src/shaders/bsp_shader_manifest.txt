@@ -1,0 +1,12 @@
+# BSP shader manifest used by VkShaderCache initialization when feature="bsp".
+# Format: BspShaderType=path-to-spv
+# BSP scene set 0 (bindings 0-5): shared SceneData UBO, EnvironmentUBO, env samplers, shadow map.
+# BSP material set 1 (bindings 0-3): albedo, fullbright mask, lightmap atlas (sampler2DArray), BspSurfaceParams UBO.
+# Pipeline variants: bsp_opaque, bsp_alpha_mask, bsp_sky, bsp_liquid.
+#
+# Vertex shaders:
+BspLightmappedVert=src/renderer/src/shaders/bsp_lightmapped.vert.spv
+# Fragment shaders:
+BspLightmappedFrag=src/renderer/src/shaders/bsp_lightmapped.frag.spv
+BspSkyFrag=src/renderer/src/shaders/bsp_sky.frag.spv
+BspLiquidFrag=src/renderer/src/shaders/bsp_liquid.frag.spv

@@ -37,3 +37,6 @@ pub use super::{
     ScriptingEvent, SpotLight, SpotLightId, TextureHandle, TextureLoadOptions, ValidationArea,
     ValidationDiagnostic, ValidationError, VisualTuning, WrapMode,
 };
+
+#[cfg(feature = "bsp")]
+pub use super::bsp::BspRendererResources;

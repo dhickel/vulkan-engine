@@ -784,6 +784,51 @@ pub struct RenderObject {
     pub bounds_max: Vec3,
 }
 
+// ── BSP surface material UBO ───────────────────────────────────────────
+
+/// GPU-visible BSP surface material parameters (std140).
+///
+/// Matches the GLSL `BspSurfaceParams` block at BSP material set 1, binding 3.
+#[cfg(feature = "bsp")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BspSurfaceUniform {
+    /// xy = lightmap scale (texture-space → atlas UV), zw = atlas offset bias.
+    pub lightmap_scale_bias: Vec4,
+    /// Active light style index (selects array layer in sampler2DArray).
+    pub style_index: u32,
+    /// First palette index in the fullbright emissive range.
+    pub fullbright_base: u32,
+    /// Number of palette entries in the fullbright range.
+    pub fullbright_count: u32,
+    /// Alpha test threshold (default 0.5 for alpha-mask surfaces).
+    pub alpha_threshold: f32,
+    /// Current animation frame index (texture array layer).
+    pub animation_frame: u32,
+    /// Engine time ticks (monotonic, 0.1s resolution per Quake convention).
+    pub animation_time: f32,
+    /// Padding to std140 vec4 alignment for the final scalar group.
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+#[cfg(feature = "bsp")]
+impl Default for BspSurfaceUniform {
+    fn default() -> Self {
+        Self {
+            lightmap_scale_bias: Vec4::new(1.0, 1.0, 0.0, 0.0),
+            style_index: 0,
+            fullbright_base: 224,
+            fullbright_count: 32,
+            alpha_threshold: 0.5,
+            animation_frame: 0,
+            animation_time: 0.0,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
 // Compile-time layout assertions for UBO std140 alignment
 const _: () = {
     assert!(
@@ -797,6 +842,11 @@ const _: () = {
     assert!(
         std::mem::size_of::<EnvironmentUBO>() == 2048,
         "EnvironmentUBO must match the GLSL std140 block size (CSM extended)"
+    );
+    #[cfg(feature = "bsp")]
+    assert!(
+        std::mem::size_of::<BspSurfaceUniform>() == 48,
+        "BspSurfaceUniform must match the BSP GLSL std140 block size"
     );
 };
 

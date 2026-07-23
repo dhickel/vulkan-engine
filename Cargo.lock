@@ -3126,6 +3126,7 @@ dependencies = [
  "ash",
  "ash-window",
  "backtrace",
+ "bsp",
  "bytemuck",
  "cfg-if",
  "engine_events",

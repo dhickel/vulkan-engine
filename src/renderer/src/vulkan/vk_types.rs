@@ -1689,7 +1689,7 @@ pub struct VkBuffer {
 ///
 /// ## Alignment
 /// Sub-allocator ensures offsets respect min_uniform_buffer_offset_alignment from device limits.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct VkSubAlloc {
     pub alloc_address: vk::DeviceAddress,
     pub offset: u64,

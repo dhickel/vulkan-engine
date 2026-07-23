@@ -5,6 +5,8 @@
 pub mod asset_manifest;
 pub mod asset_registry;
 pub mod assimp_util;
+#[cfg(feature = "bsp")]
+pub mod bsp_material;
 pub mod camera;
 pub mod compression;
 pub mod data_cache;

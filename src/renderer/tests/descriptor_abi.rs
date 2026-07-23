@@ -23,7 +23,10 @@ fn descriptor_abi_live_bindings_and_shader_pairs_match_manifest() {
         "(VkDescType::PbrProperties, pbr_properties)",
         "(VkDescType::EnvEquirect, frag_combined_image)",
     ] {
-        assert!(descriptors.contains(declaration), "missing Rust ABI declaration: {declaration}");
+        assert!(
+            descriptors.contains(declaration),
+            "missing Rust ABI declaration: {declaration}"
+        );
     }
 
     let pipeline = read(root.join("src/vulkan/vk_pipeline.rs"));
@@ -33,7 +36,10 @@ fn descriptor_abi_live_bindings_and_shader_pairs_match_manifest() {
         "desc_layout_cache.get(VkDescType::PbrSamplers)",
     ];
     for set in live_mesh_sets {
-        assert!(pipeline.contains(set), "missing live mesh pipeline set: {set}");
+        assert!(
+            pipeline.contains(set),
+            "missing live mesh pipeline set: {set}"
+        );
     }
     assert!(
         !pipeline.contains("desc_layout_cache.get(VkDescType::PbrProperties),"),
@@ -75,7 +81,10 @@ fn descriptor_abi_live_bindings_and_shader_pairs_match_manifest() {
         "gen_brd_flut.vert.spv",
         "gen_brd_flut.frag.spv",
     ] {
-        assert!(shader_manifest.contains(pair), "shader pair missing: {pair}");
+        assert!(
+            shader_manifest.contains(pair),
+            "shader pair missing: {pair}"
+        );
     }
 }
 
@@ -95,6 +104,110 @@ fn descriptor_abi_document_records_critical_compatibility_points() {
         "`DrawImage`",
         "no dynamic descriptor offset",
     ] {
-        assert!(document.contains(marker), "ABI document marker missing: {marker}");
+        assert!(
+            document.contains(marker),
+            "ABI document marker missing: {marker}"
+        );
     }
+}
+
+#[cfg(feature = "bsp")]
+#[test]
+fn descriptor_abi_bsp_bindings_registered() {
+    let root = renderer_root();
+    let descriptors = read(root.join("src/vulkan/vk_descriptor.rs"));
+    for declaration in [
+        "(VkDescType::BspScene, bsp_scene)",
+        "(VkDescType::BspMaterial, bsp_material)",
+        ".add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)",
+    ] {
+        assert!(
+            descriptors.contains(declaration),
+            "missing BSP Rust ABI declaration: {declaration}"
+        );
+    }
+
+    let pipeline = read(root.join("src/vulkan/vk_pipeline.rs"));
+    // BSP pipeline integration must reference the BSP descriptor types.
+    assert!(
+        pipeline.contains("mod vk_bsp") && pipeline.contains("vk_bsp::create_bsp_pipelines"),
+        "BSP pipeline integration not found in vk_pipeline.rs"
+    );
+
+    let bsp_vk = read(root.join("src/vulkan/vk_bsp.rs"));
+    assert!(
+        bsp_vk.contains("VkDescType::BspScene"),
+        "BspScene descriptor type not referenced in vk_bsp.rs"
+    );
+    assert!(
+        bsp_vk.contains("VkDescType::BspMaterial"),
+        "BspMaterial descriptor type not referenced in vk_bsp.rs"
+    );
+
+    let vertex = read(root.join("src/shaders/bsp_lightmapped.vert"));
+    assert!(
+        vertex.contains("set = 0, binding = 0"),
+        "BSP VS set 0 missing"
+    );
+    assert!(
+        !vertex.contains("set = 1, binding = 3"),
+        "BSP VS must not read the fragment-only material UBO"
+    );
+
+    let frag = read(root.join("src/shaders/bsp_lightmapped.frag"));
+    assert!(
+        frag.contains("set = 1, binding = 0"),
+        "BSP FS albedo binding missing"
+    );
+    assert!(
+        frag.contains("set = 1, binding = 1"),
+        "BSP FS fullbright mask missing"
+    );
+    assert!(
+        frag.contains("set = 1, binding = 2"),
+        "BSP FS lightmap atlas missing"
+    );
+    assert!(
+        frag.contains("set = 1, binding = 3"),
+        "BSP FS surface params UBO missing"
+    );
+    assert!(
+        frag.contains("sampler2DArray lightmapAtlas"),
+        "BSP lightmap array decl missing"
+    );
+
+    let sky_frag = read(root.join("src/shaders/bsp_sky.frag"));
+    assert!(
+        sky_frag.contains("set = 0, binding = 3"),
+        "BSP sky env binding missing"
+    );
+
+    let liquid_frag = read(root.join("src/shaders/bsp_liquid.frag"));
+    assert!(
+        liquid_frag.contains("set = 1, binding = 2"),
+        "BSP liquid lightmap binding missing"
+    );
+    assert!(
+        liquid_frag.contains("sampler2DArray lightmapAtlas"),
+        "BSP liquid lightmap array missing"
+    );
+
+    let bsp_manifest = read(root.join("src/shaders/bsp_shader_manifest.txt"));
+    for pair in [
+        "bsp_lightmapped.vert.spv",
+        "bsp_lightmapped.frag.spv",
+        "bsp_sky.frag.spv",
+        "bsp_liquid.frag.spv",
+    ] {
+        assert!(
+            bsp_manifest.contains(pair),
+            "BSP shader pair missing from manifest: {pair}"
+        );
+    }
+
+    let gpu_data = read(root.join("src/data/gpu_data.rs"));
+    assert!(
+        gpu_data.contains("BspSurfaceUniform"),
+        "BspSurfaceUniform not defined in gpu_data.rs"
+    );
 }

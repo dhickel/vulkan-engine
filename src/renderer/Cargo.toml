@@ -23,6 +23,9 @@ advanced-interop = []
 csm = []
 instancing = []
 scene-bvh = []
+# Lazy, opt-in RGB multi-style BSP material path with dedicated shaders and pipelines.
+# Default renderer builds are behavior-identical without this flag.
+bsp = ["dep:bsp"]
 
 
 [dependencies]
@@ -53,6 +56,7 @@ imgui-winit-support = "0.12.0"
 
 env_logger = "0.10"
 log = "0.4"
+bsp = { path = "../bsp", optional = true }
 input = { path = "../input" }
 engine_events = { path = "../events" }
 glam = { version = "0.28.0", features = ["bytemuck", "serde"] }

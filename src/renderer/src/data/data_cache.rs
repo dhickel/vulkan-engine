@@ -213,6 +213,8 @@ pub struct VkDataCache {
     pub environment_cache: Mutex<EnvironmentCache>,
     pub(crate) mesh_geometry_store: Mutex<MeshGeometryStore>,
     pub supported_image_formats: HashSet<vk::Format>,
+    #[cfg(feature = "bsp")]
+    pub bsp_surface_cache: Mutex<BspSurfaceCache>,
 }
 
 impl VkDataCache {
@@ -2730,13 +2732,25 @@ pub enum CoreShaderType {
     ShadowDepthFrag,
     #[cfg(feature = "instancing")]
     MetRoughInstancedVert,
+    #[cfg(feature = "bsp")]
+    BspLightmappedVert,
+    #[cfg(feature = "bsp")]
+    BspLightmappedFrag,
+    #[cfg(feature = "bsp")]
+    BspSkyFrag,
+    #[cfg(feature = "bsp")]
+    BspLiquidFrag,
 }
 
 impl CoreShaderType {
-    #[cfg(not(feature = "instancing"))]
-    const COUNT: usize = 13;
-    #[cfg(feature = "instancing")]
-    const COUNT: usize = 14;
+    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
+    pub const COUNT: usize = 13;
+    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
+    pub const COUNT: usize = 14;
+    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
+    pub const COUNT: usize = 17;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 18;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -2755,6 +2769,14 @@ impl CoreShaderType {
             "ShadowDepthFrag" => Some(Self::ShadowDepthFrag),
             #[cfg(feature = "instancing")]
             "MetRoughInstancedVert" => Some(Self::MetRoughInstancedVert),
+            #[cfg(feature = "bsp")]
+            "BspLightmappedVert" => Some(Self::BspLightmappedVert),
+            #[cfg(feature = "bsp")]
+            "BspLightmappedFrag" => Some(Self::BspLightmappedFrag),
+            #[cfg(feature = "bsp")]
+            "BspSkyFrag" => Some(Self::BspSkyFrag),
+            #[cfg(feature = "bsp")]
+            "BspLiquidFrag" => Some(Self::BspLiquidFrag),
             _ => None,
         }
     }
@@ -2762,12 +2784,36 @@ impl CoreShaderType {
 
 const CORE_SHADER_MANIFEST: &str = include_str!("../shaders/core_shader_manifest.txt");
 
+#[cfg(feature = "bsp")]
+const BSP_SHADER_MANIFEST: &str = include_str!("../shaders/bsp_shader_manifest.txt");
+
 pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>, String> {
     let mut shader_paths =
         Vec::<(CoreShaderType, &'static str)>::with_capacity(CoreShaderType::COUNT);
     let mut seen = std::collections::HashSet::with_capacity(CoreShaderType::COUNT);
 
-    for (line_index, line) in CORE_SHADER_MANIFEST.lines().enumerate() {
+    parse_shader_manifest_lines(CORE_SHADER_MANIFEST.lines(), &mut shader_paths, &mut seen)?;
+
+    #[cfg(feature = "bsp")]
+    parse_shader_manifest_lines(BSP_SHADER_MANIFEST.lines(), &mut shader_paths, &mut seen)?;
+
+    if shader_paths.len() != CoreShaderType::COUNT {
+        return Err(format!(
+            "Shader manifest size mismatch: expected {}, found {}",
+            CoreShaderType::COUNT,
+            shader_paths.len()
+        ));
+    }
+
+    Ok(shader_paths)
+}
+
+fn parse_shader_manifest_lines<'a>(
+    lines: impl Iterator<Item = &'a str>,
+    shader_paths: &mut Vec<(CoreShaderType, &'a str)>,
+    seen: &mut std::collections::HashSet<CoreShaderType>,
+) -> Result<(), String> {
+    for (line_index, line) in lines.enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -2813,16 +2859,7 @@ pub fn load_core_shader_manifest() -> Result<Vec<(CoreShaderType, &'static str)>
 
         shader_paths.push((shader_type, path));
     }
-
-    if shader_paths.len() != CoreShaderType::COUNT {
-        return Err(format!(
-            "Shader manifest size mismatch: expected {}, found {}",
-            CoreShaderType::COUNT,
-            shader_paths.len()
-        ));
-    }
-
-    Ok(shader_paths)
+    Ok(())
 }
 
 pub struct VkShaderCache {
@@ -2897,13 +2934,27 @@ pub enum VkPipelineType {
     PbrMetRoughOpaqueInstanced,
     #[cfg(feature = "instancing")]
     UnlitOpaqueInstanced,
+    #[cfg(feature = "bsp")]
+    BspOpaque,
+    #[cfg(feature = "bsp")]
+    BspFullbright,
+    #[cfg(feature = "bsp")]
+    BspAlphaMask,
+    #[cfg(feature = "bsp")]
+    BspSky,
+    #[cfg(feature = "bsp")]
+    BspLiquid,
 }
 
 impl VkPipelineType {
-    #[cfg(not(feature = "instancing"))]
+    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
     pub const COUNT: usize = 10;
-    #[cfg(feature = "instancing")]
+    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
     pub const COUNT: usize = 12;
+    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
+    pub const COUNT: usize = 15;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 17;
 }
 
 //#[derive(Clone, Copy)]
@@ -3013,13 +3064,21 @@ pub enum VkDescType {
     Empty,
     #[cfg(feature = "instancing")]
     SceneDataInstanced,
+    #[cfg(feature = "bsp")]
+    BspScene,
+    #[cfg(feature = "bsp")]
+    BspMaterial,
 }
 
 impl VkDescType {
-    #[cfg(not(feature = "instancing"))]
-    const COUNT: usize = 10;
-    #[cfg(feature = "instancing")]
-    const COUNT: usize = 11;
+    #[cfg(all(not(feature = "instancing"), not(feature = "bsp")))]
+    pub const COUNT: usize = 10;
+    #[cfg(all(feature = "instancing", not(feature = "bsp")))]
+    pub const COUNT: usize = 11;
+    #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
+    pub const COUNT: usize = 12;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 13;
 }
 
 pub struct VkDescLayoutCache {
@@ -3062,9 +3121,37 @@ impl VkDescLayoutCache {
                 9 => VkDescType::Empty,
                 #[cfg(feature = "instancing")]
                 10 => VkDescType::SceneDataInstanced,
-                _ => panic!(),
+                #[cfg(feature = "bsp")]
+                n if n == Self::bsp_scene_index() => VkDescType::BspScene,
+                #[cfg(feature = "bsp")]
+                n if n == Self::bsp_material_index() => VkDescType::BspMaterial,
+                _ => panic!("unexpected descriptor layout index {i}"),
             };
             debug!("\t{:?} : {:?}", typ, *set)
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    const fn bsp_scene_index() -> usize {
+        #[cfg(feature = "instancing")]
+        {
+            11
+        }
+        #[cfg(not(feature = "instancing"))]
+        {
+            10
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    const fn bsp_material_index() -> usize {
+        #[cfg(feature = "instancing")]
+        {
+            12
+        }
+        #[cfg(not(feature = "instancing"))]
+        {
+            11
         }
     }
 }
@@ -3078,6 +3165,80 @@ impl VkDestroyable for VkDescLayoutCache {
                 unsafe { device.destroy_descriptor_set_layout(layout, None) };
             }
         }
+    }
+}
+
+#[cfg(feature = "bsp")]
+/// Lazy BSP surface material cache.
+///
+/// Stores GPU-prepared BSP material records (descriptor set, surface UBO allocation,
+/// pipeline variant). Grows on first BSP material registration and is never freed
+/// until cache destruction.
+pub struct BspSurfaceCache {
+    /// Prepared BSP materials indexed by slot.
+    cached_materials: Vec<BspCachedSurface>,
+    /// Per-slot generation counters.
+    generations: Vec<u32>,
+    /// Free slot indices for reuse after retirement.
+    free_slots: Vec<u32>,
+}
+
+#[cfg(feature = "bsp")]
+pub struct BspCachedSurface {
+    /// GPU material descriptor set (set 1: albedo, fullbright, lightmap, UBO).
+    pub material_descriptor: vk::DescriptorSet,
+    /// UBO allocation for BspSurfaceUniform.
+    pub surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc,
+    /// Pipeline variant for this surface.
+    pub pipeline: VkPipelineType,
+    /// Albedo texture handle (for retirement tracking).
+    pub albedo_tex: crate::data::handles::TextureHandle,
+    /// Fullbright mask texture handle (optional).
+    pub fullbright_tex: Option<crate::data::handles::TextureHandle>,
+    /// Lightmap atlas texture handle.
+    pub lightmap_tex: crate::data::handles::TextureHandle,
+}
+
+#[cfg(feature = "bsp")]
+impl BspSurfaceCache {
+    pub fn new() -> Self {
+        Self {
+            cached_materials: Vec::with_capacity(256),
+            generations: Vec::with_capacity(256),
+            free_slots: Vec::new(),
+        }
+    }
+
+    fn handle_for_slot(&self, slot: u32) -> crate::data::handles::BspMaterialHandle {
+        crate::data::handles::BspMaterialHandle::new(slot, self.generations[slot as usize])
+    }
+
+    pub fn add(&mut self, material: BspCachedSurface) -> crate::data::handles::BspMaterialHandle {
+        if let Some(slot) = self.free_slots.pop() {
+            self.cached_materials[slot as usize] = material;
+            self.handle_for_slot(slot)
+        } else {
+            let slot = self.cached_materials.len() as u32;
+            self.cached_materials.push(material);
+            self.generations.push(0);
+            crate::data::handles::BspMaterialHandle::new(slot, 0)
+        }
+    }
+
+    pub fn get(
+        &self,
+        handle: crate::data::handles::BspMaterialHandle,
+    ) -> Result<&BspCachedSurface, crate::data::handles::CacheError> {
+        let slot = handle.slot as usize;
+        let Some(&gen) = self.generations.get(slot) else {
+            return Err(crate::data::handles::CacheError::OutOfBounds);
+        };
+        if gen != handle.generation {
+            return Err(crate::data::handles::CacheError::StaleHandle);
+        }
+        self.cached_materials
+            .get(slot)
+            .ok_or(crate::data::handles::CacheError::InvalidHandle)
     }
 }
 

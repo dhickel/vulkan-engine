@@ -82,3 +82,42 @@ There is no set 3 bind and no dynamic descriptor offset.
 `src/renderer/tests/descriptor_abi.rs` checks the live Rust layout declarations, pipeline set
 order, GLSL declarations, shader manifest pairs, critical Rust sizes, and this document's CSM
 compatibility marker. Any ABI change updates all of those as one compatibility unit.
+
+## BSP descriptor ABI (feature `renderer/bsp`, Phase 04 baseline)
+
+BSP lightmapped surfaces use a dedicated descriptor path **separate** from PBR. BSP set 0
+reuses the `SceneData` six-binding layout so scene data and shadow map are shared. BSP set 1
+is a material-specific layout with four bindings.
+
+| `VkDescType` | Set/binding(s), Vulkan type, stages | Ownership and image/buffer contract | Live pipeline consumers and shader pair |
+|---|---|---|---|
+| `BspScene` | set 0: b0/b1 `UNIFORM_BUFFER`; b2–b5 `COMBINED_IMAGE_SAMPLER`; vertex+fragment | Same binding structure as `SceneData`. b0 `SceneDataUBO`, b1 `EnvironmentUBO`, b2-b3 cube env, b4 BRDF LUT, b5 shadow array. Vertex + fragment visibility. | BSP opaque, fullbright, alpha-mask, sky, liquid pipelines. |
+| `BspMaterial` | set 1: b0/b1/b2 `COMBINED_IMAGE_SAMPLER`, b3 `UNIFORM_BUFFER`; fragment | b0 albedo 2D, b1 fullbright mask 2D, b2 lightmap atlas `sampler2DArray`, b3 `BspSurfaceUniform` UBO. The vertex shader must not read set 1. | All BSP fragment shaders in `bsp_shader_manifest.txt`. |
+
+### BSP surface UBO (set 1, binding 3) — `BspSurfaceUniform`
+
+Rust and GLSL size: 48 bytes (std140 scalar fields packed into two 16-byte groups after `lightmapScaleBias`).
+
+| Field | GLSL type | Rust type | Notes |
+|---|---|---|---|
+| `lightmapScaleBias` | `vec4` | `Vec4` | xy = atlas UV scale, zw = atlas UV offset |
+| `styleIndex` | `uint` | `u32` | active light style layer index (0–63) |
+| `fullbrightBase` | `uint` | `u32` | first palette index in fullbright range |
+| `fullbrightCount` | `uint` | `u32` | number of fullbright entries |
+| `alphaThreshold` | `float` | `f32` | alpha test threshold (default 0.5) |
+| `animationFrame` | `uint` | `u32` | current animation frame layer |
+| `animationTime` | `float` | `f32` | engine time ticks (0.1s resolution) |
+
+### BSP pipeline set order and push constants
+
+| Pipeline | Descriptor set order | Push constants / source pair |
+|---|---|---|
+| BSP opaque | set 0 `BspScene`, set 1 `BspMaterial` | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP fullbright | same as opaque | Same shader pair; fullbright path is inside fragment. |
+| BSP alpha mask | set 0 `BspScene`, set 1 `BspMaterial` | Same push constants. Two-sided (no cull). `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP sky | set 0 `BspScene`, set 1 `BspMaterial` in pipeline layout; shader reads set 0 only | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. |
+| BSP liquid | set 0 `BspScene`, set 1 `BspMaterial` | Same push constants. Two-sided, alpha blend. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |
+
+### BSP ABI exec guard
+
+BSP descriptor bindings are tested in `descriptor_abi_bsp_bindings_registered` (feature-gated behind `#[cfg(feature = "bsp")]`). BSP shader manifest is `src/renderer/src/shaders/bsp_shader_manifest.txt`.
