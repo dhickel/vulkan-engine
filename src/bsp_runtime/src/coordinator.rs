@@ -27,9 +27,7 @@ use crate::cache::CacheIdentity;
 use crate::candidate::{BspCandidate, CandidatePointLight};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
-use crate::source_link::{
-    reconcile_overrides, BspSourceLink, BspSourceReference, OverrideReconciliation,
-};
+use crate::source_link::{reconcile_overrides, BspSourceLink, OverrideReconciliation};
 
 use bsp::extract::{EntityDescriptor, ExtractedBsp};
 use renderer::api::bsp::PreparedBspMount;
@@ -705,7 +703,8 @@ impl BspCoordinator {
             // Update candidate's source link and pre-serialized scene payload.
             if let Some(ref mut c) = self.candidate {
                 c.source_link.overrides = reconciled;
-                let envelope = crate::source_link::BspPersistenceEnvelope::new(c.source_link.clone());
+                let envelope =
+                    crate::source_link::BspPersistenceEnvelope::new(c.source_link.clone());
                 c.source_link_json = serde_json::to_value(&envelope).map_err(|e| {
                     BspRuntimeError::SourceUnavailable {
                         reason: format!("BSP source-link serialization failed: {e}"),
@@ -886,7 +885,7 @@ impl BspCoordinator {
         // 1. Validate schema version
         envelope
             .validate_schema()
-            .map_err(|e| BspRuntimeError::UnsupportedSchema {
+            .map_err(|_| BspRuntimeError::UnsupportedSchema {
                 version: envelope.schema_version as u32,
                 current: crate::source_link::SchemaVersion::CURRENT as u32,
             })?;
@@ -894,45 +893,46 @@ impl BspCoordinator {
         let stored_link = &envelope.bsp_source;
 
         // 2. Validate no runtime handles in the stored payload
-        stored_link
-            .validate_no_runtime_handles()
-            .map_err(|e| BspRuntimeError::InvalidMutableBehavior {
+        stored_link.validate_no_runtime_handles().map_err(|e| {
+            BspRuntimeError::InvalidMutableBehavior {
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
 
-        // 3. Prepare new candidate from raw bytes
+        // 3. Resolve/parse/extract hidden candidate from raw bytes.
         let source_identity = stored_link.asset_id.clone();
         let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
 
-        // 4. Verify content hash matches against staged candidate
+        // 4. Verify content hash matches the restored source before any publication.
         {
-            let candidate = self.candidate.as_ref().ok_or_else(|| {
-                BspRuntimeError::BridgeFailure {
-                    bridge_name: "coordinator".into(),
-                    phase: BridgePhase::Validate,
-                    message: "candidate missing after prepare".into(),
-                }
-            })?;
-            let actual_hash_hex: String = candidate
-                .extracted
-                .content_hash
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            let actual_hash = format!("sha256:{}", actual_hash_hex);
+            let candidate =
+                self.candidate
+                    .as_ref()
+                    .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                        bridge_name: "coordinator".into(),
+                        phase: BridgePhase::Validate,
+                        message: "candidate missing after prepare".into(),
+                    })?;
 
-            if stored_link.content_hash != actual_hash {
+            if stored_link.content_hash != candidate.source_link.content_hash {
                 let err = BspRuntimeError::SourceMismatch {
                     expected: stored_link.content_hash.clone(),
-                    actual: actual_hash,
+                    actual: candidate.source_link.content_hash.clone(),
                 };
-                drop(candidate);
-                self.rollback_staged()?;
-                return Err(err);
+                return self.cancel_restore_candidate(err);
             }
         }
 
-        // 5. Reconcile entity identities
+        // 5. Upload/build renderer mount readiness while still hidden.
+        let mount = {
+            let candidate = self.candidate.as_ref().unwrap();
+            build_mount(&candidate.extracted)
+        };
+        if let Err(err) = self.set_renderer_mount_ready(prepare.token, mount) {
+            return self.cancel_restore_candidate(err);
+        }
+
+        // 6. Reconcile entity identities and fail ambiguous restores before commit.
         let (reconciliation, reconciled_overrides) = {
             let candidate = self.candidate.as_ref().unwrap();
             let previous_overrides = stored_link.overrides.clone();
@@ -942,41 +942,52 @@ impl BspCoordinator {
                 &candidate.extracted.entity_descriptors,
             )
         };
-
-        // 6. Validate mutable behavior state if present
-        if !stored_link.mutable_behavior.is_empty() {
-            stored_link
-                .mutable_behavior
-                .validate()
-                .map_err(|e| BspRuntimeError::InvalidMutableBehavior {
-                    detail: e.to_string(),
-                })?;
+        if reconciliation.ambiguous > 0 {
+            return self.cancel_restore_candidate(BspRuntimeError::IdentityAmbiguous {
+                entity_count: reconciliation.ambiguous,
+                context: "restore source-link overrides".to_string(),
+            });
         }
 
-        // 7. Build mount from staged extraction
-        let mount = {
+        // 7. Validate companion/model mapping identities against the candidate.
+        {
             let candidate = self.candidate.as_ref().unwrap();
-            build_mount(&candidate.extracted)
-        };
-        self.set_renderer_mount_ready(prepare.token, mount)?;
+            if let Err(err) =
+                Self::validate_restore_source_link(stored_link, &candidate.source_link)
+            {
+                return self.cancel_restore_candidate(err);
+            }
+        }
 
-        // 8. Validate for scene publication
-        self.validate_for_scene(prepare.token, scene)?;
+        // 8. Validate mutable behavior state after readiness but before publication.
+        if let Err(e) = stored_link.mutable_behavior.validate() {
+            return self.cancel_restore_candidate(BspRuntimeError::InvalidMutableBehavior {
+                detail: e.to_string(),
+            });
+        }
 
-        // 9. Update candidate's source link with reconciled overrides + stored mutable behavior
+        // 9. Validate scene publication preflight.
+        if let Err(err) = self.validate_for_scene(prepare.token, scene) {
+            return Err(err);
+        }
+
+        // 10. Update candidate's source link with reconciled overrides + stored mutable behavior.
         if let Some(ref mut c) = self.candidate {
             c.source_link.overrides = reconciled_overrides;
             c.source_link.mutable_behavior = stored_link.mutable_behavior.clone();
-            c.source_link_json =
-                serde_json::to_value(crate::source_link::BspPersistenceEnvelope::new(
-                    c.source_link.clone(),
-                ))
-                .map_err(|e| BspRuntimeError::SourceUnavailable {
-                    reason: format!("source-link serialization failed: {e}"),
-                })?;
+            match serde_json::to_value(crate::source_link::BspPersistenceEnvelope::new(
+                c.source_link.clone(),
+            )) {
+                Ok(json) => c.source_link_json = json,
+                Err(e) => {
+                    return self.cancel_restore_candidate(BspRuntimeError::SourceUnavailable {
+                        reason: format!("source-link serialization failed: {e}"),
+                    });
+                }
+            }
         }
 
-        // 10. Commit (pure publish)
+        // 11. Commit (pure publish)
         let commit = self.commit(prepare.token, scene)?;
 
         Ok(ReloadResult {
@@ -1224,6 +1235,64 @@ impl BspCoordinator {
             Default::default(),
             Default::default(),
         )
+    }
+
+    fn validate_restore_source_link(
+        stored: &BspSourceLink,
+        current: &BspSourceLink,
+    ) -> Result<(), BspRuntimeError> {
+        if stored.companion_hashes != current.companion_hashes {
+            if stored.companion_hashes.palette != current.companion_hashes.palette {
+                return Err(BspRuntimeError::CompanionMismatch {
+                    kind: "palette".into(),
+                    expected: stored
+                        .companion_hashes
+                        .palette
+                        .clone()
+                        .unwrap_or_else(|| "<none>".into()),
+                    actual: current
+                        .companion_hashes
+                        .palette
+                        .clone()
+                        .unwrap_or_else(|| "<none>".into()),
+                });
+            }
+            if stored.companion_hashes.lit != current.companion_hashes.lit {
+                return Err(BspRuntimeError::CompanionMismatch {
+                    kind: "lit".into(),
+                    expected: stored
+                        .companion_hashes
+                        .lit
+                        .clone()
+                        .unwrap_or_else(|| "<none>".into()),
+                    actual: current
+                        .companion_hashes
+                        .lit
+                        .clone()
+                        .unwrap_or_else(|| "<none>".into()),
+                });
+            }
+            return Err(BspRuntimeError::CompanionMismatch {
+                kind: "wad".into(),
+                expected: format!("{:?}", stored.companion_hashes.wads),
+                actual: format!("{:?}", current.companion_hashes.wads),
+            });
+        }
+
+        if stored.model_mapping_identity != current.model_mapping_identity {
+            return Err(BspRuntimeError::MappingMismatch {
+                reason: "stored model-mapping identity does not match current import".into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn cancel_restore_candidate<T>(&mut self, err: BspRuntimeError) -> Result<T, BspRuntimeError> {
+        match self.rollback_staged() {
+            Ok(()) => Err(err),
+            Err(rollback_err) => Err(rollback_err),
+        }
     }
 
     fn preflight_light_publication(

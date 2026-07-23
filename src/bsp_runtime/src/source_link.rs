@@ -172,16 +172,30 @@ impl BspSourceLink {
     /// Banned fields: GPU handles, descriptors, allocations, cache slots,
     /// transient generation handles, generated geometry.
     pub fn validate_no_runtime_handles(&self) -> Result<(), SourceLinkError> {
-        // Entity identity records must not contain transient handles.
+        let mut stable_handles = std::collections::BTreeSet::new();
         for record in &self.entity_identity_records {
             if record.stable_handle.is_empty() {
                 return Err(SourceLinkError::InvalidPayload {
                     reason: "entity identity record has empty stable handle".into(),
                 });
             }
+            if !stable_handles.insert(record.stable_handle.as_str()) {
+                return Err(SourceLinkError::InvalidPayload {
+                    reason: format!(
+                        "entity identity record has duplicate stable handle '{}'",
+                        record.stable_handle
+                    ),
+                });
+            }
+            if record.origin.iter().any(|v| !v.is_finite()) {
+                return Err(SourceLinkError::InvalidPayload {
+                    reason: format!(
+                        "entity identity record '{}' has non-finite origin",
+                        record.stable_handle
+                    ),
+                });
+            }
         }
-        // Mutable behavior must not contain GPU or transient handles.
-        self.mutable_behavior.validate()?;
         Ok(())
     }
 }
@@ -206,7 +220,7 @@ pub struct CompilerProvenance {
 // ── Companion Hashes ─────────────────────────────────────────────────
 
 /// Hashes of companion resources loaded with the BSP.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompanionHashes {
     /// Palette content hash (hex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -275,7 +289,13 @@ impl Serialize for CanonicalFloat {
 impl<'de> Deserialize<'de> for CanonicalFloat {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = f64::deserialize(d)?;
-        Ok(CanonicalFloat(v as f32))
+        let f = v as f32;
+        if !v.is_finite() || !f.is_finite() {
+            return Err(serde::de::Error::custom(
+                "canonical float must be finite f32",
+            ));
+        }
+        Ok(CanonicalFloat(if f == 0.0 { 0.0 } else { f }))
     }
 }
 
@@ -329,7 +349,7 @@ impl Default for AtlasPolicy {
 /// Changing the model-mappings table changes which external models are
 /// instantiated for entities; this identity is stored in the source-link
 /// so reload can detect drift.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelMappingIdentity {
     /// Content hash of the model-mappings file.
     pub content_hash: String,
@@ -469,30 +489,103 @@ impl MutableBehaviorState {
 
     /// Validate that no runtime handles or banned fields are present.
     pub fn validate(&self) -> Result<(), SourceLinkError> {
-        // Check that all entity indices are valid (not sentinel).
         for door in &self.doors {
-            if door.entity_index == u32::MAX {
-                return Err(SourceLinkError::InvalidPayload {
-                    reason: "door state has sentinel entity index".into(),
-                });
-            }
+            validate_entity_index("door state", door.entity_index)?;
+            validate_phase("door state", door.phase, 3)?;
+            validate_unit_interval("door travel", door.travel)?;
+            validate_non_negative("door wait_timer", door.wait_timer)?;
         }
         for button in &self.buttons {
-            if button.entity_index == u32::MAX {
-                return Err(SourceLinkError::InvalidPayload {
-                    reason: "button state has sentinel entity index".into(),
-                });
-            }
+            validate_entity_index("button state", button.entity_index)?;
+            validate_phase("button state", button.phase, 3)?;
+            validate_unit_interval("button travel", button.travel)?;
+            validate_non_negative("button wait_timer", button.wait_timer)?;
         }
         for plat in &self.platforms {
-            if plat.entity_index == u32::MAX {
+            validate_entity_index("platform state", plat.entity_index)?;
+            validate_phase("platform state", plat.phase, 3)?;
+            validate_unit_interval("platform travel", plat.travel)?;
+            validate_non_negative("platform wait_timer", plat.wait_timer)?;
+        }
+        for trigger in &self.triggers {
+            validate_entity_index("trigger state", trigger.entity_index)?;
+        }
+        for (style_id, intensity) in &self.light_styles {
+            if *style_id > 63 {
                 return Err(SourceLinkError::InvalidPayload {
-                    reason: "platform state has sentinel entity index".into(),
+                    reason: format!("light style id {style_id} exceeds supported range 0..63"),
                 });
             }
+            validate_non_negative("light style intensity", *intensity)?;
+        }
+        for timer in &self.timers {
+            if timer.name.trim().is_empty() {
+                return Err(SourceLinkError::InvalidPayload {
+                    reason: "timer has empty name".into(),
+                });
+            }
+            validate_non_negative("timer remaining", timer.remaining)?;
+            validate_non_negative("timer elapsed", timer.elapsed)?;
+        }
+        for model in &self.external_model_overrides {
+            validate_entity_index("external model override", model.entity_index)?;
+            validate_asset_path("external model override", &model.asset_path)?;
         }
         Ok(())
     }
+}
+
+fn validate_entity_index(context: &str, entity_index: u32) -> Result<(), SourceLinkError> {
+    if entity_index == u32::MAX {
+        return Err(SourceLinkError::InvalidPayload {
+            reason: format!("{context} has sentinel entity index"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_phase(context: &str, phase: u8, max: u8) -> Result<(), SourceLinkError> {
+    if phase > max {
+        return Err(SourceLinkError::InvalidPayload {
+            reason: format!("{context} has invalid phase {phase}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_unit_interval(context: &str, value: CanonicalFloat) -> Result<(), SourceLinkError> {
+    if !value.0.is_finite() || !(0.0..=1.0).contains(&value.0) {
+        return Err(SourceLinkError::InvalidPayload {
+            reason: format!("{context} must be finite and in 0..=1"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_non_negative(context: &str, value: CanonicalFloat) -> Result<(), SourceLinkError> {
+    if !value.0.is_finite() || value.0 < 0.0 {
+        return Err(SourceLinkError::InvalidPayload {
+            reason: format!("{context} must be finite and non-negative"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_asset_path(context: &str, asset_path: &str) -> Result<(), SourceLinkError> {
+    if asset_path.trim().is_empty()
+        || asset_path.starts_with('/')
+        || asset_path.starts_with('\\')
+        || asset_path.contains('*')
+        || asset_path.contains('?')
+        || asset_path
+            .split(|c| c == '/' || c == '\\')
+            .any(|part| part == ".." || part.is_empty())
+    {
+        return Err(SourceLinkError::InvalidPayload {
+            reason: format!("{context} has invalid asset path '{asset_path}'"),
+        });
+    }
+    Ok(())
 }
 
 /// Serialized door state for persistence.
@@ -615,7 +708,11 @@ pub enum SourceLinkError {
     /// Source content hash does not match the expected value.
     SourceMismatch { expected: String, actual: String },
     /// Companion file hash mismatch.
-    CompanionMismatch { kind: String, expected: String, actual: String },
+    CompanionMismatch {
+        kind: String,
+        expected: String,
+        actual: String,
+    },
     /// Model-mapping identity has changed.
     MappingMismatch { reason: String },
 }
@@ -633,10 +730,7 @@ impl std::fmt::Display for SourceLinkError {
                 from_version,
                 reason,
             } => {
-                write!(
-                    f,
-                    "invalid migration from version {from_version}: {reason}"
-                )
+                write!(f, "invalid migration from version {from_version}: {reason}")
             }
             SourceLinkError::InvalidPayload { reason } => {
                 write!(f, "invalid source-link payload: {reason}")
@@ -709,8 +803,20 @@ pub fn canonical_hash(link: &BspSourceLink) -> [u8; 32] {
 
     // Import policy
     data.extend_from_slice(&link.import_policy.scale.to_canonical_bytes());
-    data.extend_from_slice(&link.import_policy.light_calibration.intensity_scale.to_canonical_bytes());
-    data.extend_from_slice(&link.import_policy.light_calibration.overbright.to_canonical_bytes());
+    data.extend_from_slice(
+        &link
+            .import_policy
+            .light_calibration
+            .intensity_scale
+            .to_canonical_bytes(),
+    );
+    data.extend_from_slice(
+        &link
+            .import_policy
+            .light_calibration
+            .overbright
+            .to_canonical_bytes(),
+    );
     data.extend_from_slice(&link.import_policy.atlas_policy.page_size.to_le_bytes());
     data.extend_from_slice(&link.import_policy.atlas_policy.padding.to_le_bytes());
     data.extend_from_slice(&link.import_policy.atlas_policy.style_count.to_le_bytes());
@@ -728,7 +834,8 @@ pub fn canonical_hash(link: &BspSourceLink) -> [u8; 32] {
     }
 
     // Entity identity records (by entity_index ascending)
-    let mut sorted_records: Vec<&EntityIdentityRecord> = link.entity_identity_records.iter().collect();
+    let mut sorted_records: Vec<&EntityIdentityRecord> =
+        link.entity_identity_records.iter().collect();
     sorted_records.sort_by_key(|r| r.entity_index);
     for rec in &sorted_records {
         data.extend_from_slice(rec.stable_handle.as_bytes());
@@ -757,7 +864,8 @@ pub fn canonical_hash(link: &BspSourceLink) -> [u8; 32] {
         data.extend_from_slice(&d.wait_timer.to_canonical_bytes());
     }
 
-    let mut button_records: Vec<&SerializedButtonState> = link.mutable_behavior.buttons.iter().collect();
+    let mut button_records: Vec<&SerializedButtonState> =
+        link.mutable_behavior.buttons.iter().collect();
     button_records.sort_by_key(|b| b.entity_index);
     for b in &button_records {
         data.extend_from_slice(&b.entity_index.to_le_bytes());
@@ -766,7 +874,8 @@ pub fn canonical_hash(link: &BspSourceLink) -> [u8; 32] {
         data.extend_from_slice(&b.wait_timer.to_canonical_bytes());
     }
 
-    let mut plat_records: Vec<&SerializedPlatformState> = link.mutable_behavior.platforms.iter().collect();
+    let mut plat_records: Vec<&SerializedPlatformState> =
+        link.mutable_behavior.platforms.iter().collect();
     plat_records.sort_by_key(|p| p.entity_index);
     for p in &plat_records {
         data.extend_from_slice(&p.entity_index.to_le_bytes());
@@ -775,7 +884,8 @@ pub fn canonical_hash(link: &BspSourceLink) -> [u8; 32] {
         data.extend_from_slice(&p.wait_timer.to_canonical_bytes());
     }
 
-    let mut trigger_records: Vec<&SerializedTriggerState> = link.mutable_behavior.triggers.iter().collect();
+    let mut trigger_records: Vec<&SerializedTriggerState> =
+        link.mutable_behavior.triggers.iter().collect();
     trigger_records.sort_by_key(|t| t.entity_index);
     for t in &trigger_records {
         data.extend_from_slice(&t.entity_index.to_le_bytes());
@@ -932,7 +1042,7 @@ pub fn reconcile_overrides(
         map
     };
 
-    let identity_by_fp: std::collections::HashMap<String, Vec<&bsp::identity::EntityIdentity>> = {
+    let identity_by_handle: std::collections::HashMap<String, Vec<&bsp::identity::EntityIdentity>> = {
         let mut map: std::collections::HashMap<String, Vec<&bsp::identity::EntityIdentity>> =
             std::collections::HashMap::new();
         for id in current_identities {
@@ -960,7 +1070,7 @@ pub fn reconcile_overrides(
                     candidates: candidates.iter().map(|id| id.entity_index).collect(),
                 });
             }
-        } else if let Some(candidates) = identity_by_fp.get(handle) {
+        } else if let Some(candidates) = identity_by_handle.get(handle) {
             if candidates.len() == 1 {
                 report.applied += 1;
                 report.events.push(ReconciliationEvent::Applied {
@@ -986,7 +1096,10 @@ pub fn reconcile_overrides(
 
     for light_override in &previous.light_overrides {
         let handle = &light_override.stable_handle;
-        if let Some(candidates) = identity_by_uuid.get(handle.as_str()) {
+        if let Some(candidates) = identity_by_uuid
+            .get(handle.as_str())
+            .or_else(|| identity_by_handle.get(handle))
+        {
             if candidates.len() == 1 {
                 report.applied += 1;
                 report.events.push(ReconciliationEvent::Applied {
@@ -1035,21 +1148,29 @@ pub fn reconcile_overrides(
     (report, next_overrides)
 }
 
-/// Produce a stable fingerprint key from an EntityIdentity for override matching.
+/// Produce a stable identity handle from an EntityIdentity for override matching.
+///
+/// UUID handles remain the raw UUID. Fingerprint handles include the duplicate
+/// ordinal so multiple entities with identical fingerprints are distinguishable
+/// in source-link persistence.
 pub fn fingerprint_key(id: &bsp::identity::EntityIdentity) -> String {
     use bsp::identity::IdentitySource;
     match &id.source {
         IdentitySource::TrenchbroomUuid(uuid) => uuid.clone(),
         IdentitySource::Fingerprint(fp) => {
-            format!(
-                "{}|{}|{}|{}",
-                fp.classname,
-                fp.origin.as_deref().unwrap_or(""),
-                fp.targetname.as_deref().unwrap_or(""),
-                fp.target.as_deref().unwrap_or("")
-            )
+            format!("{}#{}", fingerprint_base_key(fp), id.duplicate_ordinal)
         }
     }
+}
+
+fn fingerprint_base_key(fp: &bsp::identity::EntityFingerprint) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        fp.classname,
+        fp.origin.as_deref().unwrap_or(""),
+        fp.targetname.as_deref().unwrap_or(""),
+        fp.target.as_deref().unwrap_or("")
+    )
 }
 
 /// Build `EntityIdentityRecord` entries from extracted BSP identity data.
@@ -1072,23 +1193,10 @@ pub fn build_identity_records(
                 .map(|v| [v.x, v.y, v.z])
                 .unwrap_or([0.0; 3]);
             let (compiler_uuid, fingerprint, resolved_by_uuid) = match &id.source {
-                IdentitySource::TrenchbroomUuid(uuid) => {
-                    (Some(uuid.clone()), None, true)
-                }
-                IdentitySource::Fingerprint(fp) => {
-                    let fp_str = format!(
-                        "{}|{}|{}|{}",
-                        fp.classname,
-                        fp.origin.as_deref().unwrap_or(""),
-                        fp.targetname.as_deref().unwrap_or(""),
-                        fp.target.as_deref().unwrap_or("")
-                    );
-                    (None, Some(fp_str), false)
-                }
+                IdentitySource::TrenchbroomUuid(uuid) => (Some(uuid.clone()), None, true),
+                IdentitySource::Fingerprint(fp) => (None, Some(fingerprint_base_key(fp)), false),
             };
-            let stable_handle = compiler_uuid
-                .clone()
-                .unwrap_or_else(|| fingerprint.clone().unwrap_or_default());
+            let stable_handle = fingerprint_key(id);
 
             EntityIdentityRecord {
                 stable_handle,
@@ -1229,7 +1337,10 @@ mod tests {
         let deserialized: BspSourceLink = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.asset_id, link.asset_id);
-        assert_eq!(deserialized.compiler_provenance.as_ref().unwrap().identity, "ericw-tools");
+        assert_eq!(
+            deserialized.compiler_provenance.as_ref().unwrap().identity,
+            "ericw-tools"
+        );
         assert_eq!(
             deserialized.companion_hashes.palette.as_deref(),
             Some("sha256:pal")
@@ -1272,6 +1383,32 @@ mod tests {
             wait_timer: CanonicalFloat(0.0),
         }];
         assert!(behavior.validate().is_err());
+    }
+
+    #[test]
+    fn mutable_behavior_validate_rejects_invalid_ranges() {
+        let mut behavior = MutableBehaviorState::default();
+        behavior.platforms = vec![SerializedPlatformState {
+            entity_index: 7,
+            phase: 4,
+            travel: CanonicalFloat(0.5),
+            wait_timer: CanonicalFloat(0.0),
+        }];
+        assert!(behavior.validate().is_err());
+
+        behavior.platforms[0].phase = 1;
+        behavior.platforms[0].travel = CanonicalFloat(f32::NAN);
+        assert!(behavior.validate().is_err());
+
+        behavior.platforms[0].travel = CanonicalFloat(0.5);
+        behavior.light_styles.insert(64, CanonicalFloat(1.0));
+        assert!(behavior.validate().is_err());
+    }
+
+    #[test]
+    fn canonical_float_deserialize_rejects_out_of_range_f32() {
+        let result: Result<CanonicalFloat, _> = serde_json::from_str("1e39");
+        assert!(result.is_err());
     }
 
     // ── Canonical Hashing ───────────────────────────────────────────
@@ -1324,6 +1461,67 @@ mod tests {
     fn build_identity_records_from_empty() {
         let records = build_identity_records(&[], &[]);
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn build_identity_records_include_duplicate_ordinal_in_stable_handle() {
+        let fp = bsp::identity::EntityFingerprint {
+            classname: "light".into(),
+            origin: Some("1 2 3".into()),
+            targetname: None,
+            target: None,
+        };
+        let identities = vec![
+            bsp::identity::EntityIdentity {
+                entity_index: 0,
+                source: bsp::identity::IdentitySource::Fingerprint(fp.clone()),
+                has_stable_uuid: false,
+                duplicate_ordinal: 0,
+            },
+            bsp::identity::EntityIdentity {
+                entity_index: 1,
+                source: bsp::identity::IdentitySource::Fingerprint(fp),
+                has_stable_uuid: false,
+                duplicate_ordinal: 1,
+            },
+        ];
+
+        let records = build_identity_records(&identities, &[]);
+
+        assert_eq!(records[0].fingerprint.as_deref(), Some("light|1 2 3||"));
+        assert_eq!(records[0].stable_handle, "light|1 2 3||#0");
+        assert_eq!(records[1].stable_handle, "light|1 2 3||#1");
+    }
+
+    #[test]
+    fn reconcile_light_overrides_by_fingerprint_ordinal_handle() {
+        let fp = bsp::identity::EntityFingerprint {
+            classname: "light".into(),
+            origin: Some("1 2 3".into()),
+            targetname: None,
+            target: None,
+        };
+        let identities = vec![bsp::identity::EntityIdentity {
+            entity_index: 4,
+            source: bsp::identity::IdentitySource::Fingerprint(fp),
+            has_stable_uuid: false,
+            duplicate_ordinal: 0,
+        }];
+        let previous = BspOverrideLayer {
+            entity_overrides: vec![],
+            light_overrides: vec![LightOverride {
+                stable_handle: "light|1 2 3||#0".into(),
+                intensity: Some(CanonicalFloat(2.0)),
+                color: None,
+                radius: None,
+            }],
+        };
+
+        let (report, reconciled) = reconcile_overrides(&previous, &identities, &[]);
+
+        assert_eq!(report.applied, 1);
+        assert_eq!(report.orphaned, 0);
+        assert_eq!(reconciled.light_overrides.len(), 1);
     }
 
     // ── Envelope Round-Trip ─────────────────────────────────────────

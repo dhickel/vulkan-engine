@@ -5,8 +5,8 @@ use bsp_runtime::{
     coordinator::BspCoordinator,
     source_link::{
         reconcile_overrides, BspOverrideLayer, BspPersistenceEnvelope, BspSourceLink,
-        CanonicalFloat, EntityOverride, MutableBehaviorState, SerializedDoorState,
-        SerializedTriggerState,
+        CanonicalFloat, CompanionHashes, EntityOverride, ModelMappingIdentity,
+        MutableBehaviorState, SerializedDoorState, SerializedTriggerState,
     },
 };
 
@@ -70,10 +70,7 @@ fn empty_mount() -> PreparedBspMount {
 
 #[test]
 fn source_link_serialization_round_trip() {
-    let mut link = BspSourceLink::new(
-        "maps/test_map".into(),
-        "sha256:abcdef1234567890".into(),
-    );
+    let mut link = BspSourceLink::new("maps/test_map".into(), "sha256:abcdef1234567890".into());
     link.overrides = BspOverrideLayer {
         entity_overrides: vec![EntityOverride {
             stable_handle: "uuid-001".to_string(),
@@ -101,7 +98,11 @@ fn empty_override_layer_is_serializable() {
 
     let json = serde_json::to_string(&envelope).unwrap();
     let deserialized: BspPersistenceEnvelope = serde_json::from_str(&json).unwrap();
-    assert!(deserialized.bsp_source.overrides.entity_overrides.is_empty());
+    assert!(deserialized
+        .bsp_source
+        .overrides
+        .entity_overrides
+        .is_empty());
     assert!(deserialized.bsp_source.overrides.light_overrides.is_empty());
 }
 
@@ -385,9 +386,7 @@ fn restore_from_persistence_succeeds() {
 
     // Restore from persistence
     let restored = coordinator
-        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
-            empty_mount()
-        })
+        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount())
         .unwrap();
 
     assert!(coordinator.is_active());
@@ -418,9 +417,7 @@ fn restore_from_persistence_with_mutable_state() {
     // Unload then restore
     coordinator.unload(&mut scene).unwrap();
     let restored = coordinator
-        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
-            empty_mount()
-        })
+        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount())
         .unwrap();
 
     assert!(coordinator.is_active());
@@ -452,13 +449,9 @@ fn restore_with_content_hash_mismatch_fails() {
     coordinator.unload(&mut scene).unwrap();
 
     // Restore should fail
-    let result = coordinator.restore_from_persistence(
-        &envelope,
-        &bsp_bytes,
-        None,
-        &mut scene,
-        |_| empty_mount(),
-    );
+    let result =
+        coordinator
+            .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount());
     assert!(result.is_err());
     // Active generation should be unchanged
     assert!(!coordinator.is_active());
@@ -471,7 +464,8 @@ fn restore_with_invalid_schema_version_fails() {
     let mut scene = Scene::new();
 
     // Manually construct an envelope with bad schema version
-    let json = r#"{"schema_version":99,"bsp_source":{"asset_id":"maps/bad","content_hash":"sha256:aa"}}"#;
+    let json =
+        r#"{"schema_version":99,"bsp_source":{"asset_id":"maps/bad","content_hash":"sha256:aa"}}"#;
     let result: Result<BspPersistenceEnvelope, _> = serde_json::from_str(json);
     // Should fail on deserialization because version 99 is not an approved value
     assert!(result.is_err());
@@ -494,25 +488,139 @@ fn restore_with_invalid_mutable_behavior_fails() {
         .unwrap();
 
     // Inject invalid behavior (sentinel entity index)
-    envelope.bsp_source.mutable_behavior.doors.push(SerializedDoorState {
-        entity_index: u32::MAX,
-        phase: 0,
-        travel: CanonicalFloat(0.0),
-        wait_timer: CanonicalFloat(0.0),
-    });
+    envelope
+        .bsp_source
+        .mutable_behavior
+        .doors
+        .push(SerializedDoorState {
+            entity_index: u32::MAX,
+            phase: 0,
+            travel: CanonicalFloat(0.0),
+            wait_timer: CanonicalFloat(0.0),
+        });
 
     // Unload
     coordinator.unload(&mut scene).unwrap();
 
     // Restore should fail
+    let result =
+        coordinator
+            .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount());
+    assert!(result.is_err());
+}
+
+#[test]
+fn restore_rolls_back_after_renderer_ready_when_behavior_invalid() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| {
+            empty_mount()
+        })
+        .unwrap();
+    let active_link_before = coordinator.source_link().unwrap().clone();
+    let scene_link_before = scene.bsp_source_link().unwrap().clone();
+
+    let mut envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+    envelope
+        .bsp_source
+        .mutable_behavior
+        .doors
+        .push(SerializedDoorState {
+            entity_index: 0,
+            phase: 9,
+            travel: CanonicalFloat(0.0),
+            wait_timer: CanonicalFloat(0.0),
+        });
+
+    let mut mount_built = false;
+    let result =
+        coordinator.restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
+            mount_built = true;
+            empty_mount()
+        });
+
+    assert!(result.is_err());
+    assert!(
+        mount_built,
+        "restore must build upload-ready mount before behavior validation"
+    );
+    assert!(coordinator.is_active());
+    assert_eq!(
+        coordinator.source_link().unwrap().asset_id,
+        active_link_before.asset_id
+    );
+    assert_eq!(
+        coordinator.source_link().unwrap().content_hash,
+        active_link_before.content_hash
+    );
+    assert_eq!(scene.bsp_source_link().unwrap(), &scene_link_before);
+    assert!(coordinator.staged_extraction().is_none());
+}
+
+#[test]
+fn restore_rejects_companion_and_mapping_mismatch_before_commit() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| {
+            empty_mount()
+        })
+        .unwrap();
+    let active_link_before = scene.bsp_source_link().unwrap().clone();
+
+    let mut companion_envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+    companion_envelope.bsp_source.companion_hashes = CompanionHashes {
+        palette: Some("sha256:missing-palette".into()),
+        lit: None,
+        wads: BTreeMap::new(),
+    };
+    let mut mount_built = false;
     let result = coordinator.restore_from_persistence(
-        &envelope,
+        &companion_envelope,
+        &bsp_bytes,
+        None,
+        &mut scene,
+        |_| {
+            mount_built = true;
+            empty_mount()
+        },
+    );
+    assert!(result.is_err());
+    assert!(
+        mount_built,
+        "mapping validation happens after upload readiness"
+    );
+    assert_eq!(scene.bsp_source_link().unwrap(), &active_link_before);
+    assert!(coordinator.staged_extraction().is_none());
+
+    let mut mapping_envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+    mapping_envelope.bsp_source.model_mapping_identity = Some(ModelMappingIdentity {
+        content_hash: "sha256:model-map".into(),
+        entity_overrides: 1,
+        source_models: 1,
+        classname_mappings: 0,
+    });
+    let result = coordinator.restore_from_persistence(
+        &mapping_envelope,
         &bsp_bytes,
         None,
         &mut scene,
         |_| empty_mount(),
     );
     assert!(result.is_err());
+    assert_eq!(scene.bsp_source_link().unwrap(), &active_link_before);
+    assert!(coordinator.staged_extraction().is_none());
 }
 
 #[test]
@@ -536,9 +644,7 @@ fn restore_restore_order_is_correct() {
 
     // Restore — should succeed, proving all steps pass
     let restored = coordinator
-        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
-            empty_mount()
-        })
+        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| empty_mount())
         .unwrap();
 
     assert!(coordinator.is_active());
