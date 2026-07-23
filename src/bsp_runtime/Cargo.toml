@@ -5,6 +5,7 @@ edition = "2021"
 description = "Transactional source-linked BSP runtime integration coordinator"
 
 [dependencies]
+package_io = { path = "../package_io" }
 bsp = { path = "../bsp" }
 renderer = { path = "../renderer", features = ["bsp"] }
 engine_events = { path = "../events" }

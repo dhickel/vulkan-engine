@@ -29,6 +29,7 @@ pub mod cache;
 pub mod coordinator;
 pub mod error;
 pub mod generation;
+pub mod package;
 pub mod source_link;
 
 // Re-export key types for convenience

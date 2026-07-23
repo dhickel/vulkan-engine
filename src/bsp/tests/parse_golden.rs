@@ -1,10 +1,15 @@
 //! Golden tests for approved lumps, extensions, companions, entities, and resources.
 //!
 //! Tests assert stable diagnostic codes/severity and deterministic ordering.
-//! Uses programmatically-constructed BSP data since real compiled BSPs are
-//! pending ericw-tools compilation (see fixture-manifest.toml placeholder status).
+//! Uses both programmatically-constructed BSP data and checked-in ericw-tools
+//! compiled fixtures from `tests/fixtures/compiled/`.
 
 use bsp::*;
+
+const FIXTURE_PALETTE: &[u8] = include_bytes!("fixtures/palettes/project_palette.lmp");
+const FIXTURE_BSP29_CORE: &[u8] = include_bytes!("fixtures/compiled/q1-bsp29-core.bsp");
+const FIXTURE_BSP2_COLORED: &[u8] = include_bytes!("fixtures/compiled/ericw-bsp2-colored.bsp");
+const FIXTURE_BSP2_LIT: &[u8] = include_bytes!("fixtures/compiled/ericw-bsp2-colored.lit");
 
 /// Construct a minimal valid BSP29 binary with configurable content.
 fn make_bsp29_header(lump_entries: &[(usize, u32, u32)]) -> Vec<u8> {
@@ -28,6 +33,43 @@ fn append_lump(data: &mut Vec<u8>, content: &[u8]) -> (u32, u32) {
     let size = content.len() as u32;
     data.extend_from_slice(content);
     (offset, size)
+}
+
+#[test]
+fn compiled_fixture_bsp29_core_parses() {
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(FIXTURE_PALETTE.to_vec()),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(FIXTURE_BSP29_CORE, &options).unwrap();
+    assert_eq!(world.profile, profile::BspProfile::Bsp29);
+    assert!(world.worldspawn().is_some());
+    assert!(!world.entities.is_empty());
+    assert_eq!(world.palette.as_ref().map(|p| p.len()), Some(256));
+}
+
+#[test]
+fn compiled_fixture_bsp2_colored_parses_with_lit_companion() {
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(FIXTURE_PALETTE.to_vec()),
+        lit_data: Some(FIXTURE_BSP2_LIT.to_vec()),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(FIXTURE_BSP2_COLORED, &options).unwrap();
+    assert_eq!(world.profile, profile::BspProfile::Bsp2);
+    assert!(world.worldspawn().is_some());
+    assert!(!world.entities.is_empty());
+}
+
+#[test]
+fn compiled_fixture_lit_is_qlit_v1() {
+    assert_eq!(&FIXTURE_BSP2_LIT[0..4], b"QLIT");
+    assert_eq!(
+        u32::from_le_bytes(FIXTURE_BSP2_LIT[4..8].try_into().unwrap()),
+        1
+    );
 }
 
 #[test]

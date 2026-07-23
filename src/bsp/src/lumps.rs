@@ -96,6 +96,10 @@ fn read_non_negative_i32_as_u32(
     Ok(value as u32)
 }
 
+fn i16x3_to_i32(value: [i16; 3]) -> [i32; 3] {
+    [value[0] as i32, value[1] as i32, value[2] as i32]
+}
+
 // ── Parsed BSP types ──
 
 #[derive(Debug, Clone)]
@@ -109,8 +113,8 @@ pub struct Plane {
 pub struct Node {
     pub plane_id: u32,
     pub children: [i32; 2],
-    pub mins: [i16; 3],
-    pub maxs: [i16; 3],
+    pub mins: [i32; 3],
+    pub maxs: [i32; 3],
     pub face_id: u32,
     pub face_num: u32,
 }
@@ -119,8 +123,8 @@ pub struct Node {
 pub struct Leaf {
     pub contents: i32,
     pub visofs: i32,
-    pub mins: [i16; 3],
-    pub maxs: [i16; 3],
+    pub mins: [i32; 3],
+    pub maxs: [i32; 3],
     pub mark_id: u32,
     pub mark_num: u32,
     pub ambient: [u8; 4],
@@ -400,16 +404,16 @@ pub fn parse_vertices(
     Ok(vertices)
 }
 
-/// Parse nodes lump (lump 5): 28 bytes in BSP29, 32 bytes in BSP2.
+/// Parse nodes lump (lump 5): 24 bytes in BSP29, 44 bytes in ericw-tools BSP2.
 pub fn parse_nodes(
     data: &[u8],
     lump: &LumpRange,
     profile: BspProfile,
 ) -> Result<Vec<Node>, BspReport> {
     let stride = if profile.uses_32bit_indices() {
-        32u32
+        44u32
     } else {
-        28u32
+        24u32
     };
     let count = lump.size / stride;
     if lump.size % stride != 0 {
@@ -432,24 +436,33 @@ pub fn parse_nodes(
     for i in 0..count {
         let off = offset + (i as usize) * stride as usize;
         let plane_id = decode::read_u32_le(data, off)?;
-        let child0 = decode::read_i32_le(data, off + 4)?;
-        let child1 = decode::read_i32_le(data, off + 8)?;
-        let mins = decode::read_i16x3(data, off + 12)?;
-        let maxs = decode::read_i16x3(data, off + 18)?;
-        let face_id = if profile.uses_32bit_indices() {
-            decode::read_u32_le(data, off + 24)?
+        let (children, mins, maxs, face_id, face_num) = if profile.uses_32bit_indices() {
+            (
+                [
+                    decode::read_i32_le(data, off + 4)?,
+                    decode::read_i32_le(data, off + 8)?,
+                ],
+                decode::read_i32x3(data, off + 12)?,
+                decode::read_i32x3(data, off + 24)?,
+                decode::read_u32_le(data, off + 36)?,
+                decode::read_u32_le(data, off + 40)?,
+            )
         } else {
-            decode::read_u16_le(data, off + 24)? as u32
-        };
-        let face_num = if profile.uses_32bit_indices() {
-            decode::read_u32_le(data, off + 28)?
-        } else {
-            decode::read_u16_le(data, off + 26)? as u32
+            (
+                [
+                    decode::read_i16_le(data, off + 4)? as i32,
+                    decode::read_i16_le(data, off + 6)? as i32,
+                ],
+                i16x3_to_i32(decode::read_i16x3(data, off + 8)?),
+                i16x3_to_i32(decode::read_i16x3(data, off + 14)?),
+                decode::read_u16_le(data, off + 20)? as u32,
+                decode::read_u16_le(data, off + 22)? as u32,
+            )
         };
 
         nodes.push(Node {
             plane_id,
-            children: [child0, child1],
+            children,
             mins,
             maxs,
             face_id,
@@ -459,14 +472,14 @@ pub fn parse_nodes(
     Ok(nodes)
 }
 
-/// Parse leaves lump (lump 10): 28 bytes in BSP29, 32 bytes in BSP2.
+/// Parse leaves lump (lump 10): 28 bytes in BSP29, 44 bytes in ericw-tools BSP2.
 pub fn parse_leaves(
     data: &[u8],
     lump: &LumpRange,
     profile: BspProfile,
 ) -> Result<Vec<Leaf>, BspReport> {
     let stride = if profile.uses_32bit_indices() {
-        32u32
+        44u32
     } else {
         28u32
     };
@@ -493,17 +506,17 @@ pub fn parse_leaves(
         let visofs = decode::read_i32_le(data, off + 4)?;
 
         let (mins_arr, maxs_arr, mark_id, mark_num, ambient_off) = if profile.uses_32bit_indices() {
-            // ericw-tools BSP2 leaves keep BSP29 i16 bounds and expand mark ranges to u32.
-            // Layout: contents i32, visofs i32, mins i16x3, maxs i16x3, mark u32, markleaf u32, ambient u8[4].
-            let mins_arr = decode::read_i16x3(data, off + 8)?;
-            let maxs_arr = decode::read_i16x3(data, off + 14)?;
-            let mark_id = decode::read_u32_le(data, off + 20)?;
-            let mark_num = decode::read_u32_le(data, off + 24)?;
-            let ambient_off = off + 28;
+            // ericw-tools BSP2 widens bounds and markface ranges to i32/u32.
+            // Layout: contents i32, visofs i32, mins i32x3, maxs i32x3, mark u32, markleaf u32, ambient u8[4].
+            let mins_arr = decode::read_i32x3(data, off + 8)?;
+            let maxs_arr = decode::read_i32x3(data, off + 20)?;
+            let mark_id = decode::read_u32_le(data, off + 32)?;
+            let mark_num = decode::read_u32_le(data, off + 36)?;
+            let ambient_off = off + 40;
             (mins_arr, maxs_arr, mark_id, mark_num, ambient_off)
         } else {
-            let mins_arr = decode::read_i16x3(data, off + 8)?;
-            let maxs_arr = decode::read_i16x3(data, off + 14)?;
+            let mins_arr = i16x3_to_i32(decode::read_i16x3(data, off + 8)?);
+            let maxs_arr = i16x3_to_i32(decode::read_i16x3(data, off + 14)?);
             let mark_id = decode::read_u16_le(data, off + 20)? as u32;
             let mark_num = decode::read_u16_le(data, off + 22)? as u32;
             let ambient_off = off + 24;

@@ -160,19 +160,19 @@ fn adversarial_node_cycle() {
     let n_off = data.len() as u32;
     // Node 0: plane=0, child[0]=1 (node 1), child[1]=-1 (leaf 0)
     data.extend_from_slice(&0u32.to_le_bytes()); // plane
-    data.extend_from_slice(&1i32.to_le_bytes()); // child[0] = node 1
-    data.extend_from_slice(&(-1i32).to_le_bytes()); // child[1] = leaf 0
+    data.extend_from_slice(&1i16.to_le_bytes()); // child[0] = node 1
+    data.extend_from_slice(&(-1i16).to_le_bytes()); // child[1] = leaf 0
     data.extend_from_slice(&[0u8; 12]); // mins/maxs (i16×6)
     data.extend_from_slice(&0u16.to_le_bytes()); // face_id
     data.extend_from_slice(&0u16.to_le_bytes()); // face_num
                                                  // Node 1: plane=1, child[0]=0 (node 0 -> cycle!), child[1]=-1 (leaf 0)
     data.extend_from_slice(&1u32.to_le_bytes()); // plane
-    data.extend_from_slice(&0i32.to_le_bytes()); // child[0] = node 0 (CYCLE)
-    data.extend_from_slice(&(-1i32).to_le_bytes()); // child[1] = leaf 0
+    data.extend_from_slice(&0i16.to_le_bytes()); // child[0] = node 0 (CYCLE)
+    data.extend_from_slice(&(-1i16).to_le_bytes()); // child[1] = leaf 0
     data.extend_from_slice(&[0u8; 12]); // mins/maxs
     data.extend_from_slice(&0u16.to_le_bytes()); // face_id
     data.extend_from_slice(&0u16.to_le_bytes()); // face_num
-    let n_sz = 56u32;
+    let n_sz = 48u32;
     set_lump(&mut data, 5, n_off, n_sz);
 
     // Leaves: 1 leaf

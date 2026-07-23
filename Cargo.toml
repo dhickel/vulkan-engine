@@ -1,4 +1,4 @@
-workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "src/launch_shared", "src/bsp", "src/bsp_runtime", "apps/dungeon_dogfood", "apps/voxel_demo", "apps/bsp_beta", "tools/engine_pack"], exclude = [".internal-dev/spikes/voxel-cave"] }
+workspace = { members = ["src/input", "src/renderer", "src/audio", "src/physics", "src/scripting", "src/events", "src/launch_shared", "src/bsp", "src/bsp_runtime", "src/package_io", "apps/dungeon_dogfood", "apps/voxel_demo", "apps/bsp_beta", "tools/engine_pack"], exclude = [".internal-dev/spikes/voxel-cave"] }
 
 [package]
 name = "engine"

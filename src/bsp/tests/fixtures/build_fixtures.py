@@ -36,6 +36,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 MAPS_DIR = SCRIPT_DIR / "maps"
 PALETTE_PATH = SCRIPT_DIR / "palettes" / "project_palette.lmp"
 EXPECTED_COMPILER_VERSION = "2.0.0-alpha3"
+EXPECTED_COMPILER_HASHES = {
+    "qbsp": "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17",
+    "vis": "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea",
+    "light": "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5",
+}
+EMPTY_QLIT_V1 = b"QLIT\x01\x00\x00\x00"
 
 # ── Fixture definitions ──────────────────────────────────────────────────
 
@@ -174,11 +180,23 @@ def find_executable(name: str, tool_path: Path) -> Path:
     )
 
 
-def verify_compiler_version(executable: Path, expected_name: str) -> str:
+def verify_compiler_hash(executable: Path, expected_name: str) -> str:
+    """Verify a compiler executable SHA-256 before it is executed."""
+    actual = sha256_file(executable)
+    expected = EXPECTED_COMPILER_HASHES[expected_name]
+    if actual.lower() != expected.lower():
+        raise RuntimeError(
+            f"{expected_name} hash mismatch: expected {expected}, got {actual}"
+        )
+    return actual
+
+
+def verify_compiler_version(executable: Path, expected_name: str) -> None:
     """Run compiler with --version/--help and capture version string."""
     try:
         result = subprocess.run(
             [str(executable), "--version"],
+            env=ALLOWED_ENV,
             capture_output=True,
             text=True,
             timeout=10,
@@ -188,6 +206,7 @@ def verify_compiler_version(executable: Path, expected_name: str) -> str:
         # Some tools only support -help
         result = subprocess.run(
             [str(executable), "-help"],
+            env=ALLOWED_ENV,
             capture_output=True,
             text=True,
             timeout=10,
@@ -204,7 +223,6 @@ def verify_compiler_version(executable: Path, expected_name: str) -> str:
             f"{expected_name} version mismatch: expected "
             f"{EXPECTED_COMPILER_VERSION!r} in version output, got {first_line!r}"
         )
-    return sha256_file(executable)
 
 
 def run_compiler(
@@ -226,6 +244,10 @@ def run_compiler(
             capture_output=True,
             timeout=timeout,
         )
+        if len(result.stdout) > MAX_LOG_SIZE or len(result.stderr) > MAX_LOG_SIZE:
+            raise RuntimeError(
+                f"compiler log output exceeded {MAX_LOG_SIZE} byte bound"
+            )
         return result
     except subprocess.TimeoutExpired:
         print(f"  ERROR: compiler timed out after {timeout}s")
@@ -251,11 +273,15 @@ def compile_fixture(
     vis_exe = find_executable("vis", ericw_tools_path)
     light_exe = find_executable("light", ericw_tools_path)
 
-    # Verify versions
+    # Verify executable hashes before running any compiler code, then check versions.
+    qbsp_hash = verify_compiler_hash(qbsp_exe, "qbsp")
+    vis_hash = verify_compiler_hash(vis_exe, "vis")
+    light_hash = verify_compiler_hash(light_exe, "light")
+
     print("  Compiler versions:")
-    qbsp_hash = verify_compiler_version(qbsp_exe, "qbsp")
-    vis_hash = verify_compiler_version(vis_exe, "vis")
-    light_hash = verify_compiler_version(light_exe, "light")
+    verify_compiler_version(qbsp_exe, "qbsp")
+    verify_compiler_version(vis_exe, "vis")
+    verify_compiler_version(light_exe, "light")
 
     # Verify palette
     palette_hash = sha256_file(PALETTE_PATH)
@@ -316,6 +342,11 @@ def compile_fixture(
     lit_path = work_dir / bsp_name.replace(".bsp", ".lit")
     lit_hash = None
     lit_size = 0
+    if fixture["colored"] and not lit_path.exists():
+        # ericw-tools may skip writing a .lit when a tiny fixture has no luxels.
+        # Publish a deterministic empty QLIT v1 companion so package-loading tests
+        # exercise the companion path without depending on copyrighted content.
+        lit_path.write_bytes(EMPTY_QLIT_V1)
     if lit_path.exists():
         lit_size = lit_path.stat().st_size
         assert lit_size < MAX_LIT_SIZE, f".lit too large: {lit_size} > {MAX_LIT_SIZE}"
