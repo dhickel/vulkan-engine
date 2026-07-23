@@ -1364,6 +1364,20 @@ impl Renderer {
             .map_err(|err| RendererError::InvalidState(err.message().to_string()))
     }
 
+    /// Prepare a BSP mount from extracted BSP data, uploading GPU resources.
+    ///
+    /// Available only with the `bsp` feature. Runs synchronously on the calling
+    /// thread. Returns a mount ready for [`Scene::set_bsp_mount`].
+    #[cfg(feature = "bsp")]
+    pub fn prepare_bsp_mount(
+        &mut self,
+        extracted: &bsp::extract::ExtractedBsp,
+    ) -> Result<crate::api::bsp::PreparedBspMount, RendererError> {
+        self.raw_core_mut()
+            .prepare_bsp_mount(extracted)
+            .map_err(|e| RendererError::InvalidState(format!("BSP upload failed: {e}")))
+    }
+
     /// Emit a lifecycle event into the bus. Does NOT drain — the caller must
     /// explicitly drain at the correct boundary via `drain_events` or
     /// `dispatch_events_for_stage`.

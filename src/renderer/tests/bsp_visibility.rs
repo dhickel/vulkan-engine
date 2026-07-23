@@ -14,8 +14,8 @@ fn make_test_leaf(contents: i32, visofs: i32) -> lumps::Leaf {
     lumps::Leaf {
         contents,
         visofs,
-        mins: [0i16; 3],
-        maxs: [0i16; 3],
+        mins: [0i32; 3],
+        maxs: [0i32; 3],
         mark_id: 0,
         mark_num: 0,
         ambient: [0u8; 4],
@@ -26,8 +26,8 @@ fn make_test_node(plane_id: u32, front: i32, back: i32) -> lumps::Node {
     lumps::Node {
         plane_id,
         children: [front, back],
-        mins: [0i16; 3],
-        maxs: [0i16; 3],
+        mins: [0i32; 3],
+        maxs: [0i32; 3],
         face_id: 0,
         face_num: 0,
     }

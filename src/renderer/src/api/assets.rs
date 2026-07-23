@@ -1181,6 +1181,41 @@ impl<'a> AssetManager<'a> {
         })
     }
 
+    /// Prepare a BSP mount from an extracted BSP, uploading face meshes,
+    /// lightmap atlas, and material descriptors to the GPU.
+    ///
+    /// This runs synchronously on the calling thread and performs all GPU
+    /// uploads inline. The returned [`super::bsp::PreparedBspMount`] is ready
+    /// for attachment to a scene via [`super::scene::Scene::set_bsp_mount`].
+    ///
+    /// Available only with the `bsp` feature.
+    #[cfg(feature = "bsp")]
+    pub fn prepare_bsp_mount(
+        &mut self,
+        extracted: &bsp::extract::ExtractedBsp,
+    ) -> Result<super::bsp::PreparedBspMount, AssetError> {
+        use crate::vulkan::vk_types::VkQueueType;
+
+        let transfer_queue = self
+            .core
+            .vulkan_cache
+            .queues
+            .get_queue(VkQueueType::Transfer);
+        let transfer_pool = self.core.transfer.get_local_transfer_pool().pool;
+
+        let result = super::bsp::PreparedBspMount::upload_from_extracted(
+            extracted,
+            &self.core.device,
+            &self.core.allocator,
+            transfer_pool,
+            transfer_queue,
+            &self.core.vulkan_cache.desc_layouts,
+            &self.core.data_cache,
+        );
+
+        result.map_err(|msg| AssetError::Sync(msg))
+    }
+
     fn run_sync_upload_task<T, F>(&mut self, task: F) -> Result<T, AssetError>
     where
         T: Send + 'static,

@@ -3168,6 +3168,44 @@ impl VkDestroyable for VkDescLayoutCache {
     }
 }
 
+/// GPU resources for a BSP lightmap atlas.
+#[cfg(feature = "bsp")]
+pub struct BspLightmapAtlasGpu {
+    /// RGBA8 2D-array image.
+    pub image: vk::Image,
+    /// 2D-array image view.
+    pub view: vk::ImageView,
+    /// VMA allocation for the image.
+    pub allocation: vk_mem::Allocation,
+    /// Linear/clamp sampler.
+    pub sampler: vk::Sampler,
+    /// Atlas dimensions.
+    pub width: u32,
+    pub height: u32,
+    pub layer_count: u32,
+}
+
+#[cfg(feature = "bsp")]
+impl BspLightmapAtlasGpu {
+    /// Destroy the atlas GPU resources.
+    pub fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        unsafe {
+            if self.sampler != vk::Sampler::null() {
+                device.destroy_sampler(self.sampler, None);
+                self.sampler = vk::Sampler::null();
+            }
+            if self.view != vk::ImageView::null() {
+                device.destroy_image_view(self.view, None);
+                self.view = vk::ImageView::null();
+            }
+            if self.image != vk::Image::null() {
+                allocator.destroy_image(self.image, &mut self.allocation);
+                self.image = vk::Image::null();
+            }
+        }
+    }
+}
+
 #[cfg(feature = "bsp")]
 /// Lazy BSP surface material cache.
 ///
@@ -3181,6 +3219,16 @@ pub struct BspSurfaceCache {
     generations: Vec<u32>,
     /// Free slot indices for reuse after retirement.
     free_slots: Vec<u32>,
+    /// Descriptor pool for material descriptor sets (set 1).
+    material_desc_pool: Option<vk::DescriptorPool>,
+    /// Cached material descriptor set layout.
+    material_set_layout: Option<vk::DescriptorSetLayout>,
+    /// Device handle for pool destruction.
+    device: Option<ash::Device>,
+    /// Allocator handle for atlas destruction.
+    allocator: Option<std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>>,
+    /// GPU resources for the active lightmap atlas.
+    pub lightmap_atlas: Option<BspLightmapAtlasGpu>,
 }
 
 #[cfg(feature = "bsp")]
@@ -3206,7 +3254,81 @@ impl BspSurfaceCache {
             cached_materials: Vec::with_capacity(256),
             generations: Vec::with_capacity(256),
             free_slots: Vec::new(),
+            material_desc_pool: None,
+            material_set_layout: None,
+            device: None,
+            allocator: None,
+            lightmap_atlas: None,
         }
+    }
+
+    /// Initialize the BSP material descriptor pool.
+    ///
+    /// Must be called once before any descriptor allocation. The pool and
+    /// layout are destroyed when the cache is dropped.
+    pub fn init_material_descriptor_pool(
+        &mut self,
+        device: ash::Device,
+        allocator: std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+        material_set_layout: vk::DescriptorSetLayout,
+        pool: vk::DescriptorPool,
+    ) {
+        self.device = Some(device);
+        self.allocator = Some(allocator);
+        self.material_set_layout = Some(material_set_layout);
+        self.material_desc_pool = Some(pool);
+    }
+
+    /// True if the material descriptor pool has been initialized.
+    pub fn has_material_pool(&self) -> bool {
+        self.material_desc_pool.is_some()
+    }
+
+    /// Allocate a single BSP material descriptor set (set 1).
+    pub fn allocate_material_set(
+        &self,
+        device: &ash::Device,
+    ) -> Result<vk::DescriptorSet, String> {
+        let layout = self
+            .material_set_layout
+            .ok_or_else(|| "BSP material descriptor layout not initialized".to_string())?;
+        let pool = self
+            .material_desc_pool
+            .ok_or_else(|| "BSP material descriptor pool not initialized".to_string())?;
+
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(std::slice::from_ref(&layout));
+
+        let sets = unsafe {
+            device
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(|err| format!("failed to allocate BSP material set: {err:?}"))?
+        };
+        Ok(sets[0])
+    }
+
+    /// Destroy the descriptor pool and lightmap atlas (called during cache teardown).
+    pub fn destroy_descriptor_pool(&mut self) {
+        if let Some(ref mut atlas) = self.lightmap_atlas {
+            if let (Some(device), Some(allocator)) =
+                (self.device.as_ref(), self.allocator.as_ref())
+            {
+                if let Ok(alloc) = allocator.lock() {
+                    atlas.destroy(device, &alloc);
+                }
+            }
+            self.lightmap_atlas = None;
+        }
+        if let (Some(device), Some(pool)) = (self.device.as_ref(), self.material_desc_pool.take())
+        {
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
+        }
+        self.material_set_layout = None;
+        self.device = None;
+        self.allocator = None;
     }
 
     fn handle_for_slot(&self, slot: u32) -> crate::data::handles::BspMaterialHandle {

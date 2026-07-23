@@ -2253,6 +2253,31 @@ impl VkRenderCore {
         std::mem::take(&mut self.frame_capture_statuses)
     }
 
+    /// Prepare a BSP mount from extracted BSP data, uploading GPU resources.
+    #[cfg(feature = "bsp")]
+    pub fn prepare_bsp_mount(
+        &mut self,
+        extracted: &bsp::extract::ExtractedBsp,
+    ) -> Result<crate::api::bsp::PreparedBspMount, String> {
+        use crate::vulkan::vk_types::VkQueueType;
+
+        let transfer_queue = self
+            .vulkan_cache
+            .queues
+            .get_queue(VkQueueType::Transfer);
+        let transfer_pool = self.transfer.get_local_transfer_pool().pool;
+
+        crate::api::bsp::PreparedBspMount::upload_from_extracted(
+            extracted,
+            &self.device,
+            &self.allocator,
+            transfer_pool,
+            transfer_queue,
+            &self.vulkan_cache.desc_layouts,
+            &self.data_cache,
+        )
+    }
+
     fn fail_due_frame_captures(&mut self, frame_number: u32, message: impl Into<String>) {
         let message = message.into();
         for capture in self.due_frame_captures.drain(..) {

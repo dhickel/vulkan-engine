@@ -173,7 +173,15 @@ fn run_headless_capture_test(
     );
 
     let mut scene = Scene::new();
-    scene.set_bsp_mount(PreparedBspMount::from_extraction_stub(&extracted));
+    let bsp_mount = match renderer.prepare_bsp_mount(&extracted) {
+        Ok(mount) => mount,
+        Err(err) => {
+            log::error!("BSP GPU upload failed: {err}");
+            log::warn!("Falling back to extraction stub (no GPU resources)");
+            PreparedBspMount::from_extraction_stub(&extracted)
+        }
+    };
+    scene.set_bsp_mount(bsp_mount);
 
     // ── Camera ─────────────────────────────────────────────────────────
     renderer
