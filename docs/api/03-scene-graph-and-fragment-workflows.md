@@ -327,6 +327,8 @@ scene.update_point_light(light_id, PointLight {
 })?;
 ```
 
+`Scene::reserve_point_light_storage(total_slots)` is available for transaction coordinators that validate all light payloads before a later publication-only commit. Ordinary apps usually do not need it; use `create_point_light` directly.
+
 A scene may also own one directional light. Its direction points from a shaded surface toward the light (positive Y means the light is above the scene). PBR materials receive direct lighting and a per-frame 2048² D32 shadow map; unlit materials remain lighting-independent. The alpha facade intentionally exposes no shadow-resolution, filtering, cascade, or per-light shadow toggle yet: one live directional light selects the fixed 3×3-PCF shadow path.
 
 Snippet Type: Real

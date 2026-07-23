@@ -3,23 +3,32 @@
 //! and app bridge orchestration.
 //!
 //! The coordinator owns the integration transaction, the active mount state,
-//! and the source-link lifecycle. It coordinates resources owned by the
-//! renderer and app bridges, never creating GPU or physics objects directly.
+//! the source-link lifecycle, and the current preparation candidate. It
+//! coordinates resources owned by the renderer and app bridges, never
+//! creating GPU or physics objects directly.
 //!
-//! The caller is responsible for building a [`PreparedBspMount`] from the
-//! staged extraction DTOs (using renderer APIs), then passing it to
-//! [`commit_with_mount`].
+//! # Architecture (Phase 05)
+//!
+//! A [`BspCandidate`] holds all staged state for one generation. The
+//! coordinator holds at most one candidate at a time. A new prepare
+//! atomically replaces the previous candidate (cancellation).
+//!
+//! The commit step is a pure publish: it moves the candidate's ready
+//! resources into the active world without performing any new parsing,
+//! package resolution, external asset loading, allocation, upload,
+//! lookup, serialization, bridge validation, restored-state validation,
+//! or app-world capacity reservation. All of those are done before commit.
 
 use crate::bridge::{
     AppBridge, BehaviorEntityRecipe, BridgeAggregator, EntityCollisionRecipe, LightEntityRecipe,
     WorldCollisionRecipe,
 };
 use crate::cache::CacheIdentity;
+use crate::candidate::{BspCandidate, CandidatePointLight};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
 use crate::source_link::{
-    reconcile_overrides, BspOverrideLayer, BspSourceLink, BspSourceReference,
-    OverrideReconciliation,
+    reconcile_overrides, BspSourceLink, BspSourceReference, OverrideReconciliation,
 };
 
 use bsp::extract::{EntityDescriptor, ExtractedBsp};
@@ -75,20 +84,26 @@ pub struct ReloadResult {
 ///
 /// The coordinator implements the two-step prepare → validate → commit
 /// transaction with generation-token guards, idempotent rollback, and
-/// unload/reload/reimport semantics. It owns the active mount state and
-/// orchestrates renderer and app bridge participants.
+/// unload/reload/reimport semantics. It owns the active mount state,
+/// the current preparation candidate, and the source-link lifecycle.
 ///
-/// # Usage
+/// # Usage (Phase 05)
 ///
 /// ```ignore
 /// let mut coordinator = BspCoordinator::new();
+///
+/// // Step 1: Prepare from raw bytes (or use prepare_from_package)
 /// let prepare = coordinator.prepare(&bsp_bytes, None, "maps/e1m1")?;
+///
+/// // Step 2: Upload renderer resources
+/// let mount = renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap())?;
+/// coordinator.set_renderer_mount_ready(prepare.token, mount)?;
+///
+/// // Step 3: Validate
 /// coordinator.validate(prepare.token)?;
 ///
-/// // Build PreparedBspMount from extraction using renderer APIs
-/// let mount = build_mount_from_extraction(coordinator.staged_extraction());
-///
-/// let commit = coordinator.commit_with_mount(prepare.token, &mut scene, mount)?;
+/// // Step 4: Commit (pure publish — no new work)
+/// let commit = coordinator.commit(prepare.token, &mut scene)?;
 /// ```
 pub struct BspCoordinator {
     /// Monotonic generation counter for serialize-and-stale detection.
@@ -100,18 +115,11 @@ pub struct BspCoordinator {
     active_source_link: Option<BspSourceLink>,
     /// Active mount identity for cache separation.
     active_cache_identity: Option<CacheIdentity>,
-
-    /// Staged DTOs from the current prepare (hidden until commit).
-    staged_extracted: Option<ExtractedBsp>,
-    /// Staged source link from prepare.
-    staged_source_link: Option<BspSourceLink>,
-    /// Staged cache identity from prepare.
-    staged_cache_identity: Option<CacheIdentity>,
     /// Active point-light IDs created for the published BSP mount.
     active_lights: Vec<PointLightId>,
 
-    /// Generation that has completed validation and is allowed to commit.
-    validated_generation: Option<u64>,
+    /// Current preparation candidate (hidden until commit).
+    candidate: Option<BspCandidate>,
 
     /// App bridge aggregator.
     bridges: BridgeAggregator,
@@ -128,11 +136,8 @@ impl BspCoordinator {
             active_extracted: None,
             active_source_link: None,
             active_cache_identity: None,
-            staged_extracted: None,
-            staged_source_link: None,
-            staged_cache_identity: None,
             active_lights: Vec::new(),
-            validated_generation: None,
+            candidate: None,
             bridges: BridgeAggregator::new(),
             poisoned: false,
         }
@@ -165,18 +170,19 @@ impl BspCoordinator {
         self.active_cache_identity.as_ref()
     }
 
-    /// Returns a reference to the staged extraction, if any.
+    /// Returns a reference to the staged extraction from the current
+    /// candidate, if any.
     ///
     /// The caller uses this to build a [`PreparedBspMount`] before commit.
     pub fn staged_extraction(&self) -> Option<&ExtractedBsp> {
-        self.staged_extracted.as_ref()
+        self.candidate.as_ref().map(|c| &c.extracted)
     }
 
-    /// Returns staged entity descriptors.
+    /// Returns staged entity descriptors from the current candidate.
     pub fn staged_entity_descriptors(&self) -> Option<&[EntityDescriptor]> {
-        self.staged_extracted
+        self.candidate
             .as_ref()
-            .map(|e| e.entity_descriptors.as_slice())
+            .map(|c| c.extracted.entity_descriptors.as_slice())
     }
 
     // ── Bridge Registration ───────────────────────────────────────────
@@ -195,15 +201,16 @@ impl BspCoordinator {
     /// Prepare a BSP from raw bytes for subsequent commit.
     ///
     /// This is the first step of the two-step transaction. It:
-    /// 1. Increments the generation counter (cancelling any in-flight prepare)
+    /// 1. Increments the generation counter (cancelling any previous candidate)
     /// 2. Parses and validates the BSP bytes
     /// 3. Extracts neutral DTOs (geometry, entities, lights)
     /// 4. Calls app bridge prepare hooks
-    /// 5. Stages all extracted data for subsequent commit
+    /// 5. Creates a [`BspCandidate`] holding all staged state
     ///
-    /// The prepared state is hidden; nothing is visible in the scene yet.
-    /// After prepare, call [`validate`](BspCoordinator::validate) then
-    /// [`commit_with_mount`](BspCoordinator::commit_with_mount).
+    /// The candidate state is hidden; nothing is visible in the scene yet.
+    /// After prepare, call [`set_renderer_mount_ready`](BspCoordinator::set_renderer_mount_ready)
+    /// then [`validate`](BspCoordinator::validate) then
+    /// [`commit`](BspCoordinator::commit).
     pub fn prepare(
         &mut self,
         bsp_bytes: &[u8],
@@ -214,12 +221,11 @@ impl BspCoordinator {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
-        // Increment generation (cancels any previous in-flight prepare)
+        // Increment generation (cancels any previous in-flight candidate)
         let _gen = self
             .generation
             .increment()
             .ok_or(BspRuntimeError::GenerationExhausted)?;
-        self.validated_generation = None;
         self.rollback_staged()?;
         log::info!(
             "BSP coordinator: generation {} — starting prepare",
@@ -245,17 +251,59 @@ impl BspCoordinator {
             }
         })?;
 
+        self.build_candidate(world, scale, source_identity, token)
+    }
+
+    /// Prepare a BSP from a package resolver using strict package_io trust
+    /// boundaries. This is the preferred entrypoint for production loads.
+    ///
+    /// The caller provides a pre-loaded [`bsp::world::BspWorld`] and
+    /// authorized companion bytes. All parsing and extraction uses the
+    /// same candidate path as [`prepare`](BspCoordinator::prepare).
+    pub fn prepare_from_world(
+        &mut self,
+        world: bsp::world::BspWorld,
+        scale: Option<f32>,
+        source_identity: impl Into<String>,
+    ) -> Result<PrepareResult, BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        let _gen = self
+            .generation
+            .increment()
+            .ok_or(BspRuntimeError::GenerationExhausted)?;
+        self.rollback_staged()?;
+        log::info!(
+            "BSP coordinator: generation {} — starting prepare from world",
+            self.generation.current()
+        );
+        let token = self.generation.token();
+
+        self.build_candidate(world, scale, source_identity.into(), token)
+    }
+
+    /// Common candidate construction from a parsed BspWorld.
+    fn build_candidate(
+        &mut self,
+        world: bsp::world::BspWorld,
+        scale: Option<f32>,
+        source_identity: String,
+        token: BspGenerationToken,
+    ) -> Result<PrepareResult, BspRuntimeError> {
         let was_occupied = self.is_active();
+
+        let resolved_scale = scale.unwrap_or(0.0254);
 
         // Extract DTOs
         let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
             world,
-            scale: scale.unwrap_or(0.0254),
+            scale: resolved_scale,
             ..Default::default()
-        }).map_err(|e| {
-            BspRuntimeError::SourceUnavailable {
-                reason: format!("BSP extraction failed: {} (code {:?})", e.message, e.code),
-            }
+        })
+        .map_err(|e| BspRuntimeError::SourceUnavailable {
+            reason: format!("BSP extraction failed: {} (code {:?})", e.message, e.code),
         })?;
 
         let face_count = extracted.face_geometries.len();
@@ -264,20 +312,673 @@ impl BspCoordinator {
         let batch_count = extracted.render_batches.len();
         let has_pvs = extracted.has_pvs;
 
+        // Build all fallible coordinator-owned candidate payloads before
+        // bridge prepare so later local validation cannot leak bridge resources.
+        let source_link = self.build_source_link(&extracted, &source_identity, resolved_scale);
+        let source_link_json =
+            serde_json::to_value(&source_link).map_err(|e| BspRuntimeError::SourceUnavailable {
+                reason: format!("BSP source-link serialization failed: {e}"),
+            })?;
+        let cache_identity = self.build_cache_identity(&extracted);
+        let point_lights = Self::build_candidate_point_lights(&extracted)?;
+
         // Build bridge DTOs
+        let bridge_dtos = self.build_bridge_dtos(&extracted);
+
+        // Call app bridge prepare
+        let bridge_tokens = if self.bridges.has_bridges() {
+            self.bridges.prepare_with_tokens(
+                &bridge_dtos.world_collision,
+                &bridge_dtos.entity_colliders,
+                &bridge_dtos.lights,
+                &bridge_dtos.behaviors,
+            )?
+        } else {
+            Vec::new()
+        };
+
+        // Create candidate
+        let candidate = BspCandidate::new(
+            token.generation,
+            source_identity.clone(),
+            extracted,
+            cache_identity,
+            source_link,
+            source_link_json,
+            point_lights,
+            bridge_tokens,
+            was_occupied,
+        );
+
+        self.candidate = Some(candidate);
+
+        Ok(PrepareResult {
+            token,
+            source_identity,
+            face_count,
+            entity_count,
+            light_count,
+            batch_count,
+            has_pvs,
+            was_occupied,
+        })
+    }
+
+    // ── Renderer Mount Integration ─────────────────────────────────────
+
+    /// Signal that the renderer upload has started for the current candidate.
+    ///
+    /// This transitions the candidate's renderer lease from `NotStarted` to
+    /// `Pending`. Call after issuing an async upload.
+    pub fn start_renderer_upload(
+        &mut self,
+        token: BspGenerationToken,
+    ) -> Result<(), BspRuntimeError> {
+        self.generation.validate(token)?;
+        self.require_candidate()?;
+        let candidate = self.candidate.as_mut().unwrap();
+        candidate.start_renderer_upload()
+    }
+
+    /// Transition the candidate's renderer lease to [`Ready`](RendererLease::Ready).
+    ///
+    /// The caller provides the completed [`PreparedBspMount`] from the renderer.
+    /// After this, the candidate is eligible for commit (once validated).
+    pub fn set_renderer_mount_ready(
+        &mut self,
+        token: BspGenerationToken,
+        mount: PreparedBspMount,
+    ) -> Result<(), BspRuntimeError> {
+        self.generation.validate(token)?;
+        self.require_candidate()?;
+        let candidate = self.candidate.as_mut().unwrap();
+        candidate.set_renderer_ready(mount)
+    }
+
+    /// Mark the renderer upload as failed for the current candidate.
+    pub fn fail_renderer_upload(
+        &mut self,
+        token: BspGenerationToken,
+        reason: String,
+    ) -> Result<(), BspRuntimeError> {
+        self.generation.validate(token)?;
+        self.require_candidate()?;
+        self.candidate
+            .as_mut()
+            .unwrap()
+            .fail_renderer_upload(reason);
+        Ok(())
+    }
+
+    // ── Validate ───────────────────────────────────────────────────────
+
+    /// Validate the current staged candidate.
+    ///
+    /// Checks:
+    /// 1. Generation token matches
+    /// 2. Candidate is present
+    /// 3. App bridges confirm readiness
+    ///
+    /// Candidates with no scene point lights are fully publication-ready after
+    /// this call. Candidates that publish lights must use
+    /// [`validate_for_scene`](BspCoordinator::validate_for_scene) so scene
+    /// capacity is checked before commit.
+    pub fn validate(&mut self, token: BspGenerationToken) -> Result<(), BspRuntimeError> {
+        self.validate_candidate(token, None)
+    }
+
+    /// Validate the current staged candidate against a target scene.
+    ///
+    /// This performs all fallible scene-publication checks (currently BSP
+    /// point-light capacity) before commit. Use this path for any production
+    /// commit; commit is then publication-only.
+    pub fn validate_for_scene(
+        &mut self,
+        token: BspGenerationToken,
+        scene: &mut Scene,
+    ) -> Result<(), BspRuntimeError> {
+        self.validate_candidate(token, Some(scene))
+    }
+
+    // ── Commit (Pure Publish) ──────────────────────────────────────────
+
+    /// Commit the prepared candidate, atomically publishing it to the scene.
+    ///
+    /// **This is a pure publish operation.** It performs no parsing, package
+    /// resolution, external asset loading, allocation, upload, lookup,
+    /// serialization, bridge validation, restored-state validation, or
+    /// app-world capacity reservation. All preparation work must be complete
+    /// before calling commit.
+    ///
+    /// Requirements:
+    /// - Candidate must be validated ([`validate`](BspCoordinator::validate))
+    /// - Renderer mount must be ready ([`set_renderer_mount_ready`](BspCoordinator::set_renderer_mount_ready))
+    /// - Generation token must match
+    ///
+    /// On success, the previous active mount is unloaded and its resources
+    /// retired. The new mount, lights, bridge state, and source link become
+    /// the active generation.
+    ///
+    /// # Panic Safety
+    ///
+    /// Bridge commit panics poison the coordinator. Renderer publication is
+    /// non-fallible after validation.
+    pub fn commit(
+        &mut self,
+        token: BspGenerationToken,
+        scene: &mut Scene,
+    ) -> Result<CommitResult, BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        // Check generation
+        self.generation.validate(token)?;
+
+        // Candidate must be fully validated before commit.
+        let candidate = self.require_candidate_mut()?;
+        if !candidate.is_validated() {
+            return Err(BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Commit,
+                message: "candidate has not completed validation".to_string(),
+            });
+        }
+        if !candidate.is_publication_validated() {
+            return Err(BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Commit,
+                message: "candidate publication has not completed validation".to_string(),
+            });
+        }
+
+        // Renderer mount must be ready
+        if !candidate.is_renderer_ready() {
+            return Err(BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Commit,
+                message: "renderer mount not ready".to_string(),
+            });
+        }
+
+        // Commit bridges (non-fallible activation)
+        let bridge_count = if self.bridges.has_bridges() {
+            match self
+                .bridges
+                .commit_candidate(self.candidate.as_mut().unwrap())
+            {
+                Ok(()) => self.bridges.len(),
+                Err(BspRuntimeError::CoordinatorPoisoned) => {
+                    self.poisoned = true;
+                    return Err(BspRuntimeError::CoordinatorPoisoned);
+                }
+                Err(err) => {
+                    self.poisoned = true;
+                    return Err(err);
+                }
+            }
+        } else {
+            0
+        };
+
+        // Take ownership from the candidate
+        let mut candidate = self.candidate.take().unwrap();
+        let mount = match candidate.take_ready_mount() {
+            Ok(m) => m,
+            Err(e) => {
+                self.poisoned = true;
+                return Err(e);
+            }
+        };
+
+        // Unload previous active mount if present
+        if self.is_active() {
+            self.unload_active_from_scene(scene);
+        }
+
+        // Publish to scene
+        scene.set_bsp_mount(mount);
+        scene.set_bsp_source_link(candidate.source_link_json);
+
+        // Publish lights from prevalidated payloads.
+        let point_lights = std::mem::take(&mut candidate.point_lights);
+        let mut new_light_ids = std::mem::take(&mut self.active_lights);
+        new_light_ids.clear();
+        debug_assert!(new_light_ids.capacity() >= point_lights.len());
+        for candidate_light in &point_lights {
+            match scene.create_point_light(candidate_light.light) {
+                Ok(id) => new_light_ids.push(id),
+                Err(e) => {
+                    // This is an invariant breach after validate_for_scene: leave no
+                    // partially published new BSP state and poison the coordinator.
+                    for id in new_light_ids.drain(..) {
+                        let _ = scene.remove_point_light(id);
+                    }
+                    scene.clear_bsp_mount();
+                    scene.clear_bsp_source_link();
+                    self.poisoned = true;
+                    return Err(BspRuntimeError::SourceUnavailable {
+                        reason: format!(
+                            "prevalidated BSP light publication failed for entity {}: {:?}",
+                            candidate_light.entity_index, e
+                        ),
+                    });
+                }
+            }
+        }
+
+        let light_count = new_light_ids.len();
+        self.active_lights = new_light_ids;
+        self.active_extracted = Some(candidate.extracted);
+        self.active_source_link = Some(candidate.source_link);
+        self.active_cache_identity = Some(candidate.cache_identity);
+
+        // Depleted the candidate; the bridge tokens were consumed during commit_candidate.
+        Ok(CommitResult {
+            node_count: 0,
+            light_count,
+            bridge_count,
+            cache_identity: self.active_cache_identity.clone().unwrap(),
+        })
+    }
+
+    /// Legacy compatibility wrapper. Equivalent to setting the mount ready
+    /// then calling commit.
+    #[doc(hidden)]
+    pub fn commit_with_mount(
+        &mut self,
+        token: BspGenerationToken,
+        scene: &mut Scene,
+        mount: PreparedBspMount,
+    ) -> Result<CommitResult, BspRuntimeError> {
+        self.set_renderer_mount_ready(token, mount)?;
+        self.commit(token, scene)
+    }
+
+    // ── Rollback ───────────────────────────────────────────────────────
+
+    /// Roll back the current staged candidate or active preparation.
+    ///
+    /// Idempotent: can be called multiple times. Removes staged resources,
+    /// calls app bridge rollback hooks, and returns the coordinator to a
+    /// clean pre-prepare state. Does not affect the active published mount.
+    ///
+    /// Returns `CoordinatorPoisoned` if the coordinator is poisoned.
+    pub fn rollback(&mut self) -> Result<(), BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+        self.rollback_staged()
+    }
+
+    // ── Unload ─────────────────────────────────────────────────────────
+
+    /// Unload the active BSP mount, removing all associated resources from
+    /// the scene.
+    ///
+    /// 1. Increments generation (cancels any in-flight prepare)
+    /// 2. Removes BSP scene nodes, lights, materials
+    /// 3. Calls app bridge rollback hooks
+    /// 4. Clears coordinator state
+    pub fn unload(&mut self, scene: &mut Scene) -> Result<(), BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        // Cancel any in-flight candidate
+        self.generation
+            .increment()
+            .ok_or(BspRuntimeError::GenerationExhausted)?;
+
+        // Roll back any staged candidate
+        self.rollback_staged()?;
+
+        // Remove active mount from scene
+        self.unload_active_from_scene(scene);
+
+        // Clear active state
+        self.active_extracted = None;
+        self.active_source_link = None;
+        self.active_cache_identity = None;
+
+        Ok(())
+    }
+
+    // ── Reload ─────────────────────────────────────────────────────────
+
+    /// Reload the BSP from the same source bytes.
+    ///
+    /// Prepares a new candidate beside the active world. The old world remains
+    /// visible until the new candidate is fully prepared, validated, and
+    /// committed. On failure, the old world is unchanged.
+    pub fn reload(
+        &mut self,
+        bsp_bytes: &[u8],
+        scale: Option<f32>,
+        source_identity: impl Into<String>,
+        scene: &mut Scene,
+        build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
+    ) -> Result<ReloadResult, BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        let source_identity = source_identity.into();
+        let previous_overrides = self
+            .active_source_link
+            .as_ref()
+            .map(|link| link.bsp_overrides.clone())
+            .unwrap_or_default();
+
+        // Prepare new candidate (hidden, beside active world)
+        let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
+
+        // Build mount from extraction
+        let extracted = self
+            .candidate
+            .as_ref()
+            .map(|c| &c.extracted)
+            .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Commit,
+                message: "candidate missing after prepare".to_string(),
+            })?;
+        let mount = build_mount(extracted);
+
+        // Set mount ready
+        self.set_renderer_mount_ready(prepare.token, mount)?;
+
+        // Validate all fallible publication checks before commit.
+        self.validate_for_scene(prepare.token, scene)?;
+
+        // Reconcile overrides against staged extraction
+        let reconciliation = if !previous_overrides.entity_overrides.is_empty()
+            || !previous_overrides.light_overrides.is_empty()
+        {
+            let candidate = self.candidate.as_ref().unwrap();
+            let (report, reconciled) = reconcile_overrides(
+                &previous_overrides,
+                &candidate.extracted.entity_identities,
+                &candidate.extracted.entity_descriptors,
+            );
+            // Update candidate's source link and pre-serialized scene payload.
+            if let Some(ref mut c) = self.candidate {
+                c.source_link.bsp_overrides = reconciled;
+                c.source_link_json = serde_json::to_value(&c.source_link).map_err(|e| {
+                    BspRuntimeError::SourceUnavailable {
+                        reason: format!("BSP source-link serialization failed: {e}"),
+                    }
+                })?;
+            }
+            Some(report)
+        } else {
+            None
+        };
+
+        // Commit (publishes new, retires old)
+        let commit = self.commit(prepare.token, scene)?;
+
+        Ok(ReloadResult {
+            prepare,
+            commit,
+            reconciliation,
+        })
+    }
+
+    // ── Reimport ───────────────────────────────────────────────────────
+
+    /// Reimport a BSP from different source bytes (same logical map,
+    /// different compilation).
+    ///
+    /// Prepares a new candidate (hidden), computes source-link reconciliation,
+    /// then atomically swaps old → new on commit. The old world is unchanged
+    /// until the new candidate is committed.
+    pub fn reimport(
+        &mut self,
+        bsp_bytes: &[u8],
+        scale: Option<f32>,
+        source_identity: impl Into<String>,
+        scene: &mut Scene,
+        build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
+    ) -> Result<(ReloadResult, OverrideReconciliation), BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        let source_identity = source_identity.into();
+
+        // Prepare new
+        let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
+
+        // Capture previous overrides for reconciliation
+        let previous_overrides = self
+            .active_source_link
+            .as_ref()
+            .map(|link| link.bsp_overrides.clone())
+            .unwrap_or_default();
+
+        // Reconcile overrides against candidate extraction
+        let (reconciliation, reconciled) = {
+            let candidate =
+                self.candidate
+                    .as_ref()
+                    .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                        bridge_name: "coordinator".to_string(),
+                        phase: BridgePhase::Commit,
+                        message: "candidate missing after prepare".to_string(),
+                    })?;
+            reconcile_overrides(
+                &previous_overrides,
+                &candidate.extracted.entity_identities,
+                &candidate.extracted.entity_descriptors,
+            )
+        };
+
+        // Update candidate's source link with reconciled overrides and refresh
+        // the pre-serialized scene payload before commit.
+        if let Some(ref mut c) = self.candidate {
+            c.source_link.bsp_overrides = reconciled;
+            c.source_link_json = serde_json::to_value(&c.source_link).map_err(|e| {
+                BspRuntimeError::SourceUnavailable {
+                    reason: format!("BSP source-link serialization failed: {e}"),
+                }
+            })?;
+        }
+
+        // Build mount from extraction
+        let extracted = self
+            .candidate
+            .as_ref()
+            .map(|c| &c.extracted)
+            .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Commit,
+                message: "candidate missing after prepare".to_string(),
+            })?;
+        let mount = build_mount(extracted);
+
+        // Set mount ready
+        self.set_renderer_mount_ready(prepare.token, mount)?;
+
+        // Validate all fallible publication checks before commit.
+        self.validate_for_scene(prepare.token, scene)?;
+
+        // Commit (atomic swap)
+        let commit = self.commit(prepare.token, scene)?;
+
+        Ok((
+            ReloadResult {
+                prepare,
+                commit,
+                reconciliation: Some(reconciliation.clone()),
+            },
+            reconciliation,
+        ))
+    }
+
+    // ── Terminal Shutdown ──────────────────────────────────────────────
+
+    /// Tear down all BSP resources for renderer shutdown or device loss.
+    ///
+    /// Releases the active mount and any staged candidate. After calling this,
+    /// the coordinator is clean but still usable for future prepares.
+    /// Callers must ensure the scene has already been cleared externally.
+    pub fn teardown(&mut self, scene: &mut Scene) {
+        // Release candidate first
+        self.rollback_staged().ok();
+        // Release active mount
+        self.unload_active_from_scene(scene);
+        self.active_extracted = None;
+        self.active_source_link = None;
+        self.active_cache_identity = None;
+    }
+
+    // ── Internal Helpers ───────────────────────────────────────────────
+
+    fn require_candidate(&self) -> Result<(), BspRuntimeError> {
+        if self.candidate.is_none() {
+            return Err(BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Validate,
+                message: "no prepared candidate".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn require_candidate_mut(&mut self) -> Result<&mut BspCandidate, BspRuntimeError> {
+        self.candidate
+            .as_mut()
+            .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                bridge_name: "coordinator".to_string(),
+                phase: BridgePhase::Validate,
+                message: "no prepared candidate".to_string(),
+            })
+    }
+
+    fn validate_candidate(
+        &mut self,
+        token: BspGenerationToken,
+        scene: Option<&mut Scene>,
+    ) -> Result<(), BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        self.generation.validate(token)?;
+        let mut scene = scene;
+
+        let result = (|| {
+            let candidate_ref =
+                self.candidate
+                    .as_ref()
+                    .ok_or_else(|| BspRuntimeError::BridgeFailure {
+                        bridge_name: "coordinator".to_string(),
+                        phase: BridgePhase::Validate,
+                        message: "no prepared candidate".to_string(),
+                    })?;
+
+            if self.bridges.has_bridges() && !candidate_ref.is_validated() {
+                self.bridges.validate_candidate(candidate_ref)?;
+            }
+
+            if let Some(scene) = scene.as_deref() {
+                self.preflight_light_publication(candidate_ref, scene)?;
+            } else if !candidate_ref.point_lights.is_empty() {
+                return Err(BspRuntimeError::BridgeFailure {
+                    bridge_name: "coordinator".to_string(),
+                    phase: BridgePhase::Validate,
+                    message: "BSP point-light publication requires validate_for_scene".to_string(),
+                });
+            }
+
+            Ok(())
+        })();
+
+        if let Err(err) = result {
+            match self.rollback_staged() {
+                Ok(()) => return Err(err),
+                Err(rollback_err) => return Err(rollback_err),
+            }
+        }
+
+        let point_light_count = self
+            .candidate
+            .as_ref()
+            .map(|c| c.point_lights.len())
+            .unwrap_or(0);
+        let reserve_additional = point_light_count.saturating_sub(self.active_lights.len());
+        self.active_lights.reserve(reserve_additional);
+        if let Some(scene) = scene.as_deref_mut() {
+            let replacing_active_lights = if self.is_active() {
+                self.active_lights.len()
+            } else {
+                0
+            };
+            let total_slots = scene
+                .available_point_light_slots()
+                .saturating_add(replacing_active_lights);
+            scene.reserve_point_light_storage(total_slots);
+        }
+
+        if let Some(ref mut c) = self.candidate {
+            c.mark_validated();
+            c.mark_publication_validated();
+        }
+        Ok(())
+    }
+
+    fn build_candidate_point_lights(
+        extracted: &ExtractedBsp,
+    ) -> Result<Vec<CandidatePointLight>, BspRuntimeError> {
+        let mut point_lights = Vec::with_capacity(extracted.light_descriptors.len());
+        for light in &extracted.light_descriptors {
+            let color = glam::Vec3::from_array(light.color);
+            if !light.origin.is_finite()
+                || !color.is_finite()
+                || !light.intensity.is_finite()
+                || light.intensity < 0.0
+                || !light.radius.is_finite()
+            {
+                return Err(BspRuntimeError::BridgeFailure {
+                    bridge_name: "coordinator".to_string(),
+                    phase: BridgePhase::Prepare,
+                    message: format!(
+                        "BSP light descriptor for entity {} is not publishable",
+                        light.entity_index
+                    ),
+                });
+            }
+
+            point_lights.push(CandidatePointLight {
+                entity_index: light.entity_index,
+                light: PointLight {
+                    position: light.origin,
+                    color: color.max(glam::Vec3::ZERO),
+                    intensity: light.intensity,
+                    range: light.radius.max(1.0),
+                },
+            });
+        }
+        Ok(point_lights)
+    }
+
+    /// Build bridge DTOs from an extracted BSP.
+    fn build_bridge_dtos(&self, extracted: &ExtractedBsp) -> BridgeDtos {
         let world_collision = WorldCollisionRecipe {
             planes: extracted.world_collision_planes.clone(),
         };
 
-        let collision_by_entity: std::collections::HashMap<u32, Vec<bsp::collision::CollisionRecipe>> =
-            extracted
-                .collision_recipes
-                .iter()
-                .cloned()
-                .fold(std::collections::HashMap::new(), |mut map, recipe| {
-                    map.entry(recipe.entity_index).or_default().push(recipe);
-                    map
-                });
+        let collision_by_entity: std::collections::HashMap<
+            u32,
+            Vec<bsp::collision::CollisionRecipe>,
+        > = extracted.collision_recipes.iter().cloned().fold(
+            std::collections::HashMap::new(),
+            |mut map, recipe| {
+                map.entry(recipe.entity_index).or_default().push(recipe);
+                map
+            },
+        );
         let entity_colliders: Vec<EntityCollisionRecipe> = extracted
             .inline_models
             .iter()
@@ -319,34 +1020,32 @@ impl BspCoordinator {
             })
             .collect();
 
-        // Call app bridge prepare
-        if self.bridges.has_bridges() {
-            if let Err(err) = self.bridges.prepare(
-                &world_collision,
-                &entity_colliders,
-                &light_recipes,
-                &behavior_recipes,
-            ) {
-                if matches!(err, BspRuntimeError::CoordinatorPoisoned) {
-                    self.poisoned = true;
-                }
-                self.clear_staged_state();
-                return Err(err);
-            }
+        BridgeDtos {
+            world_collision,
+            entity_colliders,
+            lights: light_recipes,
+            behaviors: behavior_recipes,
         }
+    }
 
-        // Build source link from extraction metadata
+    /// Build a source link from extracted DTOs.
+    fn build_source_link(
+        &self,
+        extracted: &ExtractedBsp,
+        source_identity: &str,
+        scale: f32,
+    ) -> BspSourceLink {
         let content_hash_hex: String = extracted
             .content_hash
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
         let source_ref = BspSourceReference {
-            asset_id: source_identity.clone(),
+            asset_id: source_identity.to_string(),
             content_hash: format!("sha256:{}", content_hash_hex),
             compiler_provenance: None,
             import_settings: Some(crate::source_link::BspImportSettings {
-                scale: scale.unwrap_or(0.0254),
+                scale,
                 palette_hash: String::new(),
                 texture_roots: vec![],
                 light_calibration: Default::default(),
@@ -356,12 +1055,17 @@ impl BspCoordinator {
                 .iter()
                 .filter_map(|id| {
                     if let bsp::identity::IdentitySource::TrenchbroomUuid(ref uuid) = id.source {
-                        let ed = extracted.entity_descriptors.get(id.entity_index as usize);
                         Some(crate::source_link::EntityIdentityEntry {
                             uuid: uuid.clone(),
                             stable_handle: uuid.clone(),
-                            classname: ed.map(|d| d.classname.clone()).unwrap_or_default(),
-                            origin: ed
+                            classname: extracted
+                                .entity_descriptors
+                                .get(id.entity_index as usize)
+                                .map(|d| d.classname.clone())
+                                .unwrap_or_default(),
+                            origin: extracted
+                                .entity_descriptors
+                                .get(id.entity_index as usize)
                                 .and_then(|d| d.origin)
                                 .map(|v| [v.x, v.y, v.z])
                                 .unwrap_or([0.0; 3]),
@@ -373,400 +1077,16 @@ impl BspCoordinator {
                 .collect(),
         };
 
-        let source_link = BspSourceLink::new(source_ref);
-
-        let cache_identity = self.build_cache_identity(&extracted);
-
-        // Stage everything
-        self.staged_extracted = Some(extracted);
-        self.staged_source_link = Some(source_link);
-        self.staged_cache_identity = Some(cache_identity);
-
-        Ok(PrepareResult {
-            token,
-            source_identity,
-            face_count,
-            entity_count,
-            light_count,
-            batch_count,
-            has_pvs,
-            was_occupied,
-        })
+        BspSourceLink::new(source_ref)
     }
-
-    // ── Validate ───────────────────────────────────────────────────────
-
-    /// Validate the current staged preparation.
-    ///
-    /// Checks:
-    /// 1. Generation token matches
-    /// 2. Staged extraction is present
-    /// 3. App bridges confirm readiness
-    ///
-    /// All-or-nothing: any failure → caller must call `rollback`.
-    pub fn validate(&mut self, token: BspGenerationToken) -> Result<(), BspRuntimeError> {
-        if self.poisoned {
-            return Err(BspRuntimeError::CoordinatorPoisoned);
-        }
-
-        // Check generation
-        self.generation.validate(token)?;
-
-        // Check staged extraction exists
-        if self.staged_extracted.is_none() {
-            return Err(BspRuntimeError::BridgeFailure {
-                bridge_name: "coordinator".to_string(),
-                phase: BridgePhase::Validate,
-                message: "no staged preparation to validate".to_string(),
-            });
-        }
-
-        // Validate app bridges
-        if self.bridges.has_bridges() {
-            self.bridges.validate()?;
-        }
-
-        self.validated_generation = Some(token.generation);
-        Ok(())
-    }
-
-    // ── Commit ─────────────────────────────────────────────────────────
-
-    /// Commit the staged preparation with a caller-built [`PreparedBspMount`].
-    ///
-    /// The caller is responsible for building the mount from the staged
-    /// extraction (accessible via [`staged_extraction`]). This separates
-    /// GPU upload concerns from transaction coordination.
-    ///
-    /// On success, the mount is published to the scene, lights are created,
-    /// and app bridges are committed. On failure, the coordinator may be
-    /// poisoned.
-    pub fn commit_with_mount(
-        &mut self,
-        token: BspGenerationToken,
-        scene: &mut Scene,
-        mount: PreparedBspMount,
-    ) -> Result<CommitResult, BspRuntimeError> {
-        if self.poisoned {
-            return Err(BspRuntimeError::CoordinatorPoisoned);
-        }
-
-        // Check generation and enforce the explicit prepare → validate → commit sequence.
-        self.generation.validate(token)?;
-        if self.validated_generation != Some(token.generation) {
-            return Err(BspRuntimeError::BridgeFailure {
-                bridge_name: "coordinator".to_string(),
-                phase: BridgePhase::Commit,
-                message: "generation has not completed validation".to_string(),
-            });
-        }
-
-        let extracted_ref = self.staged_extracted.as_ref().ok_or_else(|| {
-            self.poisoned = true;
-            BspRuntimeError::CoordinatorPoisoned
-        })?;
-        let source_link_ref = self.staged_source_link.as_ref().ok_or_else(|| {
-            self.poisoned = true;
-            BspRuntimeError::CoordinatorPoisoned
-        })?;
-
-        self.preflight_light_publication(extracted_ref, scene)?;
-        let source_link_json = serde_json::to_value(source_link_ref).map_err(|e| {
-            BspRuntimeError::SourceUnavailable {
-                reason: format!("BSP source-link serialization failed: {e}"),
-            }
-        })?;
-
-        let bridge_count = if self.bridges.has_bridges() {
-            match self.bridges.commit() {
-                Ok(()) => self.bridges.len(),
-                Err(BspRuntimeError::CoordinatorPoisoned) => {
-                    self.poisoned = true;
-                    return Err(BspRuntimeError::CoordinatorPoisoned);
-                }
-                Err(err) => {
-                    self.poisoned = true;
-                    return Err(err);
-                }
-            }
-        } else {
-            0
-        };
-
-        let extracted = self.staged_extracted.take().ok_or_else(|| {
-            self.poisoned = true;
-            BspRuntimeError::CoordinatorPoisoned
-        })?;
-        let source_link = self.staged_source_link.take().ok_or_else(|| {
-            self.staged_extracted = Some(extracted.clone());
-            self.poisoned = true;
-            BspRuntimeError::CoordinatorPoisoned
-        })?;
-        let cache_identity = self
-            .staged_cache_identity
-            .take()
-            .unwrap_or_else(|| self.build_cache_identity(&extracted));
-
-        if self.is_active() {
-            self.unload_active_from_scene(scene);
-        }
-
-        scene.set_bsp_mount(mount);
-        scene.set_bsp_source_link(source_link_json);
-
-        let mut new_light_ids = Vec::with_capacity(extracted.light_descriptors.len());
-        for light_desc in &extracted.light_descriptors {
-            let light = PointLight {
-                position: light_desc.origin,
-                color: glam::Vec3::from_array(light_desc.color),
-                intensity: light_desc.intensity,
-                range: light_desc.radius.max(1.0),
-            };
-            match scene.create_point_light(light) {
-                Ok(id) => new_light_ids.push(id),
-                Err(e) => {
-                    for id in new_light_ids.drain(..) {
-                        let _ = scene.remove_point_light(id);
-                    }
-                    scene.clear_bsp_mount();
-                    scene.clear_bsp_source_link();
-                    self.poisoned = true;
-                    return Err(BspRuntimeError::SourceUnavailable {
-                        reason: format!(
-                            "BSP light publication failed after preflight for entity {}: {:?}",
-                            light_desc.entity_index, e
-                        ),
-                    });
-                }
-            }
-        }
-
-        let node_count = 0;
-        let light_count = new_light_ids.len();
-        self.active_lights = new_light_ids;
-        self.active_extracted = Some(extracted);
-        self.active_source_link = Some(source_link);
-        self.active_cache_identity = Some(cache_identity.clone());
-        self.validated_generation = None;
-
-        Ok(CommitResult {
-            node_count,
-            light_count,
-            bridge_count,
-            cache_identity,
-        })
-    }
-
-    // ── Rollback ───────────────────────────────────────────────────────
-
-    /// Roll back the current staged or active preparation.
-    ///
-    /// Idempotent: can be called multiple times. Removes staged resources,
-    /// calls app bridge rollback hooks, and returns the coordinator to a
-    /// clean pre-prepare state.
-    pub fn rollback(&mut self) -> Result<(), BspRuntimeError> {
-        self.rollback_staged()
-    }
-
-    // ── Unload ─────────────────────────────────────────────────────────
-
-    /// Unload the active BSP mount, removing all associated resources from
-    /// the scene.
-    ///
-    /// 1. Increments generation (cancels any in-flight prepare)
-    /// 2. Removes BSP scene nodes, lights, materials
-    /// 3. Calls app bridge rollback hooks
-    /// 4. Clears coordinator state
-    pub fn unload(&mut self, scene: &mut Scene) -> Result<(), BspRuntimeError> {
-        if self.poisoned {
-            return Err(BspRuntimeError::CoordinatorPoisoned);
-        }
-
-        // Cancel any in-flight prepare
-        self.generation
-            .increment()
-            .ok_or(BspRuntimeError::GenerationExhausted)?;
-        self.validated_generation = None;
-
-        // Roll back any staged state
-        self.rollback_staged()?;
-
-        // Remove active mount from scene
-        self.unload_active_from_scene(scene);
-
-        // Clear active state
-        self.active_extracted = None;
-        self.active_source_link = None;
-        self.active_cache_identity = None;
-
-        Ok(())
-    }
-
-    // ── Reload ─────────────────────────────────────────────────────────
-
-    /// Reload the BSP from the same source bytes.
-    ///
-    /// Equivalent to `unload` followed by `prepare` → `validate` → `commit`
-    /// with override reconciliation. The caller must provide a function to
-    /// build the PreparedBspMount from the staged extraction.
-    pub fn reload(
-        &mut self,
-        bsp_bytes: &[u8],
-        scale: Option<f32>,
-        source_identity: impl Into<String>,
-        scene: &mut Scene,
-        build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
-    ) -> Result<ReloadResult, BspRuntimeError> {
-        if self.poisoned {
-            return Err(BspRuntimeError::CoordinatorPoisoned);
-        }
-
-        // Capture previous overrides for reconciliation
-        let previous_overrides = self
-            .active_source_link
-            .as_ref()
-            .map(|link| link.bsp_overrides.clone())
-            .unwrap_or_default();
-
-        // Prepare new
-        let prepare = self.prepare(bsp_bytes, scale, source_identity)?;
-
-        // Validate
-        self.validate(prepare.token)?;
-
-        // Build mount from extraction
-        let extracted =
-            self.staged_extracted
-                .as_ref()
-                .ok_or_else(|| BspRuntimeError::BridgeFailure {
-                    bridge_name: "coordinator".to_string(),
-                    phase: BridgePhase::Commit,
-                    message: "staged extraction missing after validate".to_string(),
-                })?;
-        let mount = build_mount(extracted);
-
-        // Commit (this unloads the old mount)
-        let commit = self.commit_with_mount(prepare.token, scene, mount)?;
-
-        // Reconcile overrides if we had previous overrides
-        let reconciliation = if !previous_overrides.entity_overrides.is_empty()
-            || !previous_overrides.light_overrides.is_empty()
-        {
-            if let Some(ref active_extracted) = self.active_extracted {
-                let (report, reconciled) = reconcile_overrides(
-                    &previous_overrides,
-                    &active_extracted.entity_identities,
-                    &active_extracted.entity_descriptors,
-                );
-
-                if let Some(ref mut link) = self.active_source_link {
-                    link.bsp_overrides = reconciled;
-                    let source_link_json = serde_json::to_value(link).map_err(|e| {
-                        BspRuntimeError::SourceUnavailable {
-                            reason: format!("BSP source-link serialization failed: {e}"),
-                        }
-                    })?;
-                    scene.set_bsp_source_link(source_link_json);
-                }
-
-                Some(report)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        Ok(ReloadResult {
-            prepare,
-            commit,
-            reconciliation,
-        })
-    }
-
-    // ── Reimport ───────────────────────────────────────────────────────
-
-    /// Reimport a BSP from different source bytes (same logical map,
-    /// different compilation).
-    ///
-    /// Prepares a new mount (hidden), computes source-link reconciliation,
-    /// then atomically swaps old → new on commit.
-    pub fn reimport(
-        &mut self,
-        bsp_bytes: &[u8],
-        scale: Option<f32>,
-        source_identity: impl Into<String>,
-        scene: &mut Scene,
-        build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
-    ) -> Result<(ReloadResult, OverrideReconciliation), BspRuntimeError> {
-        if self.poisoned {
-            return Err(BspRuntimeError::CoordinatorPoisoned);
-        }
-
-        let source_identity = source_identity.into();
-
-        // Prepare new
-        let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
-
-        // Validate
-        self.validate(prepare.token)?;
-
-        // Capture previous overrides for reconciliation
-        let previous_overrides = self
-            .active_source_link
-            .as_ref()
-            .map(|link| link.bsp_overrides.clone())
-            .unwrap_or_default();
-
-        // Reconcile overrides against staged extraction
-        let (reconciliation, reconciled) = if let Some(ref extracted) = self.staged_extracted {
-            reconcile_overrides(
-                &previous_overrides,
-                &extracted.entity_identities,
-                &extracted.entity_descriptors,
-            )
-        } else {
-            (OverrideReconciliation::new(), BspOverrideLayer::default())
-        };
-
-        // Update staged source link with reconciled overrides
-        if let Some(ref mut link) = self.staged_source_link {
-            link.bsp_overrides = reconciled;
-        }
-
-        // Build mount from extraction
-        let extracted =
-            self.staged_extracted
-                .as_ref()
-                .ok_or_else(|| BspRuntimeError::BridgeFailure {
-                    bridge_name: "coordinator".to_string(),
-                    phase: BridgePhase::Commit,
-                    message: "staged extraction missing after validate".to_string(),
-                })?;
-        let mount = build_mount(extracted);
-
-        // Commit (atomic swap)
-        let commit = self.commit_with_mount(prepare.token, scene, mount)?;
-
-        Ok((
-            ReloadResult {
-                prepare,
-                commit,
-                reconciliation: Some(reconciliation.clone()),
-            },
-            reconciliation,
-        ))
-    }
-
-    // ── Internal Helpers ───────────────────────────────────────────────
 
     /// Build a cache identity from extracted DTOs.
     fn build_cache_identity(&self, extracted: &ExtractedBsp) -> CacheIdentity {
         CacheIdentity::compute(
             extracted.content_hash,
             extracted.profile_tag,
-            0.0254,  // default scale
-            [0; 32], // palette not tracked yet
+            0.0254,
+            [0; 32],
             vec![],
             vec![],
             vec![],
@@ -778,7 +1098,7 @@ impl BspCoordinator {
 
     fn preflight_light_publication(
         &self,
-        extracted: &ExtractedBsp,
+        candidate: &BspCandidate,
         scene: &Scene,
     ) -> Result<(), BspRuntimeError> {
         let replacing_active_lights = if self.is_active() {
@@ -789,54 +1109,31 @@ impl BspCoordinator {
         let available_slots = scene
             .available_point_light_slots()
             .saturating_add(replacing_active_lights);
-        if extracted.light_descriptors.len() > available_slots {
+        if candidate.point_lights.len() > available_slots {
             return Err(BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
                 phase: BridgePhase::Validate,
                 message: format!(
                     "BSP point-light publication would exceed capacity: need {}, available {}",
-                    extracted.light_descriptors.len(),
+                    candidate.point_lights.len(),
                     available_slots
                 ),
             });
-        }
-
-        for light in &extracted.light_descriptors {
-            let color = glam::Vec3::from_array(light.color);
-            if !light.origin.is_finite()
-                || !color.is_finite()
-                || !light.intensity.is_finite()
-                || light.intensity < 0.0
-                || !light.radius.is_finite()
-            {
-                return Err(BspRuntimeError::BridgeFailure {
-                    bridge_name: "coordinator".to_string(),
-                    phase: BridgePhase::Validate,
-                    message: format!(
-                        "BSP light descriptor for entity {} is not publishable",
-                        light.entity_index
-                    ),
-                });
-            }
         }
         Ok(())
     }
 
     fn rollback_staged(&mut self) -> Result<(), BspRuntimeError> {
-        let failures = self.bridges.rollback();
-        self.clear_staged_state();
-        if !failures.is_empty() {
-            self.poisoned = true;
-            return Err(BspRuntimeError::RollbackFailure { failures });
+        // Roll back bridge tokens from candidate
+        if let Some(mut candidate) = self.candidate.take() {
+            let tokens = std::mem::take(&mut candidate.bridge_tokens);
+            let failures = self.bridges.rollback_tokens(tokens);
+            if !failures.is_empty() {
+                self.poisoned = true;
+                return Err(BspRuntimeError::RollbackFailure { failures });
+            }
         }
         Ok(())
-    }
-
-    fn clear_staged_state(&mut self) {
-        self.staged_extracted = None;
-        self.staged_source_link = None;
-        self.staged_cache_identity = None;
-        self.validated_generation = None;
     }
 
     /// Remove the active BSP mount from a scene.
@@ -858,4 +1155,12 @@ impl Default for BspCoordinator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Container for bridge DTOs built from extraction.
+struct BridgeDtos {
+    world_collision: WorldCollisionRecipe,
+    entity_colliders: Vec<EntityCollisionRecipe>,
+    lights: Vec<LightEntityRecipe>,
+    behaviors: Vec<BehaviorEntityRecipe>,
 }

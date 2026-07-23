@@ -701,6 +701,15 @@ impl Scene {
         MAX_POINT_LIGHTS_GPU.saturating_sub(self.world.active_point_light_count())
     }
 
+    /// Reserve storage so a later prevalidated point-light publication can add
+    /// `total_slots` point lights without growing the scene light slot table.
+    ///
+    /// Thread: Any
+    /// May Stall: Yes
+    pub fn reserve_point_light_storage(&mut self, total_slots: usize) {
+        self.world.reserve_point_light_slots(total_slots);
+    }
+
     /// Returns a reference to the editor metadata blob.
     pub fn editor_metadata(&self) -> &serde_json::Value {
         #[allow(deprecated)]

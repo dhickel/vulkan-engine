@@ -1219,6 +1219,13 @@ impl SceneWorld {
             .count()
     }
 
+    pub(crate) fn reserve_point_light_slots(&mut self, total_slots: usize) {
+        if total_slots > self.point_lights.capacity() {
+            self.point_lights
+                .reserve(total_slots - self.point_lights.len());
+        }
+    }
+
     pub(crate) fn active_spot_light_count(&self) -> usize {
         self.spot_lights
             .iter()

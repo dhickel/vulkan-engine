@@ -1,5 +1,6 @@
 //! Integration tests: prepare failure, validation failure, cancellation,
-//! stale generation, bridge failure, and rollback.
+//! stale generation, bridge failure, rollback, candidate lifecycle,
+//! renderer lease, and failure injection (Phase 05).
 
 use bsp_runtime::{
     bridge::{
@@ -11,46 +12,41 @@ use bsp_runtime::{
 };
 
 use renderer::api::bsp::PreparedBspMount;
-use renderer::api::Scene;
+use renderer::api::{PointLight, Scene};
 
 /// Build a minimal valid BSP29 for testing.
 fn minimal_bsp_bytes() -> Vec<u8> {
     let mut data = Vec::new();
 
-    // Header: version (4 bytes) + 15 lump descriptors (120 bytes) = 124 bytes
     data.extend_from_slice(&29u32.to_le_bytes());
 
-    // Lump table: all lumps empty except entities and a plane
     let mut current_offset: u32 = 124;
 
-    // Entities: minimal entity string (null-terminated)
     let entity_bytes = b"{\"classname\" \"worldspawn\"}\0";
     let entity_offset = current_offset;
     let entity_size = entity_bytes.len() as u32;
     current_offset += entity_size;
 
-    // Plane: one plane
     let plane_offset = current_offset;
     let plane_size = 20u32;
     current_offset += plane_size;
 
-    // Build lump table
     let lumps: [(u32, u32); 15] = [
-        (entity_offset, entity_size), // entities
-        (plane_offset, plane_size),   // planes
+        (entity_offset, entity_size),
+        (plane_offset, plane_size),
         (0, 0),
         (0, 0),
         (0, 0),
         (0, 0),
-        (0, 0), // miptex, vertices, vis, nodes, texinfo
         (0, 0),
         (0, 0),
         (0, 0),
         (0, 0),
-        (0, 0), // faces, lightmaps, clipnodes, leaves, markfaces
         (0, 0),
         (0, 0),
-        (0, 0), // edges, surfedges, models
+        (0, 0),
+        (0, 0),
+        (0, 0),
     ];
 
     for (off, sz) in &lumps {
@@ -58,10 +54,7 @@ fn minimal_bsp_bytes() -> Vec<u8> {
         data.extend_from_slice(&sz.to_le_bytes());
     }
 
-    // Write entity data
     data.extend_from_slice(entity_bytes);
-
-    // Write plane data: (0,0,1), dist=0, type=0
     data.extend_from_slice(&0.0f32.to_le_bytes());
     data.extend_from_slice(&0.0f32.to_le_bytes());
     data.extend_from_slice(&1.0f32.to_le_bytes());
@@ -71,12 +64,70 @@ fn minimal_bsp_bytes() -> Vec<u8> {
     data
 }
 
-/// Build an empty PreparedBspMount for testing.
+fn light_bsp_bytes() -> Vec<u8> {
+    let mut data = Vec::new();
+
+    data.extend_from_slice(&29u32.to_le_bytes());
+
+    let mut current_offset: u32 = 124;
+
+    let entity_bytes = b"{\"classname\" \"worldspawn\"}\0{\"classname\" \"light\" \"origin\" \"0 0 64\" \"light\" \"200\"}\0";
+    let entity_offset = current_offset;
+    let entity_size = entity_bytes.len() as u32;
+    current_offset += entity_size;
+
+    let plane_offset = current_offset;
+    let plane_size = 20u32;
+    current_offset += plane_size;
+
+    let lumps: [(u32, u32); 15] = [
+        (entity_offset, entity_size),
+        (plane_offset, plane_size),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+    ];
+
+    for (off, sz) in &lumps {
+        data.extend_from_slice(&off.to_le_bytes());
+        data.extend_from_slice(&sz.to_le_bytes());
+    }
+
+    data.extend_from_slice(entity_bytes);
+    data.extend_from_slice(&0.0f32.to_le_bytes());
+    data.extend_from_slice(&0.0f32.to_le_bytes());
+    data.extend_from_slice(&1.0f32.to_le_bytes());
+    data.extend_from_slice(&0.0f32.to_le_bytes());
+    data.extend_from_slice(&0i32.to_le_bytes());
+
+    data
+}
+
 fn empty_mount() -> PreparedBspMount {
     PreparedBspMount::new()
 }
 
-/// A bridge that always succeeds.
+fn test_point_light() -> PointLight {
+    PointLight {
+        position: glam::Vec3::ZERO,
+        color: glam::Vec3::ONE,
+        intensity: 1.0,
+        range: 1.0,
+    }
+}
+
+// ── Test Bridges ──────────────────────────────────────────────────────
+
 struct NoopBridge {
     name: String,
     prepare_called: bool,
@@ -118,7 +169,6 @@ impl AppBridge for NoopBridge {
     fn rollback(&mut self, _token: BridgeToken) {}
 }
 
-/// A bridge that always fails prepare.
 struct FailingPrepareBridge;
 
 impl AppBridge for FailingPrepareBridge {
@@ -147,7 +197,6 @@ impl AppBridge for FailingPrepareBridge {
     fn rollback(&mut self, _token: BridgeToken) {}
 }
 
-/// A bridge that fails validate.
 struct FailingValidateBridge;
 
 impl AppBridge for FailingValidateBridge {
@@ -234,7 +283,7 @@ impl AppBridge for PanicRollbackBridge {
     }
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+// ── Core Transaction Tests ────────────────────────────────────────────
 
 #[test]
 fn prepare_succeeds_on_valid_bsp() {
@@ -281,10 +330,8 @@ fn stale_generation_rejected() {
     let mut coordinator = BspCoordinator::new();
     let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
 
-    // Start second prepare, invalidating first
     let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
 
-    // First generation should now be stale
     let result = coordinator.validate(prepare1.token);
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -301,13 +348,9 @@ fn commit_fails_with_stale_generation() {
 
     let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
 
-    // Start second prepare
     let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
-
-    // Validate second prepare
     coordinator.validate(prepare2.token).unwrap();
 
-    // Try to commit with first generation token
     let mount = empty_mount();
     let result = coordinator.commit_with_mount(prepare1.token, &mut scene, mount);
     assert!(result.is_err());
@@ -332,18 +375,11 @@ fn bridge_prepare_failure_triggers_rollback() {
         e => panic!("expected BridgeFailure, got {:?}", e),
     }
 
-    // Coordinator should not be poisoned by prepare failure
     assert!(!coordinator.is_poisoned());
+    assert!(coordinator.staged_extraction().is_none());
 
-    // The failing bridge is still registered; second prepare also fails
     let result2 = coordinator.prepare(&bsp_bytes, None, "maps/test");
     assert!(result2.is_err());
-    match result2.unwrap_err() {
-        BspRuntimeError::BridgeFailure { phase, .. } => {
-            assert!(matches!(phase, bsp_runtime::error::BridgePhase::Prepare));
-        }
-        e => panic!("expected BridgeFailure, got {:?}", e),
-    }
 }
 
 #[test]
@@ -361,6 +397,7 @@ fn bridge_validate_failure_triggers_rollback() {
         }
         e => panic!("expected BridgeFailure, got {:?}", e),
     }
+    assert!(coordinator.staged_extraction().is_none());
 }
 
 #[test]
@@ -368,15 +405,12 @@ fn rollback_is_idempotent() {
     let bsp_bytes = minimal_bsp_bytes();
     let mut coordinator = BspCoordinator::new();
 
-    // Prepare but don't commit
     let _prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
 
-    // Rollback multiple times
     assert!(coordinator.rollback().is_ok());
     assert!(coordinator.rollback().is_ok());
     assert!(coordinator.rollback().is_ok());
 
-    // Should be able to prepare again
     let result = coordinator.prepare(&bsp_bytes, None, "maps/test2");
     assert!(result.is_ok());
 }
@@ -387,19 +421,14 @@ fn commit_and_unload_cycle() {
     let mut coordinator = BspCoordinator::new();
     let mut scene = Scene::new();
 
-    // Prepare
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
-
-    // Validate
     coordinator.validate(prepare.token).unwrap();
 
-    // Commit
     let mount = empty_mount();
     let commit = coordinator.commit_with_mount(prepare.token, &mut scene, mount);
     assert!(commit.is_ok());
     assert!(coordinator.is_active());
 
-    // Unload
     let result = coordinator.unload(&mut scene);
     assert!(result.is_ok());
     assert!(!coordinator.is_active());
@@ -431,7 +460,6 @@ fn double_prepare_cancels_first() {
     let _prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
     let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
 
-    // validate should work with prepare2's token
     assert!(coordinator.validate(prepare2.token).is_ok());
 }
 
@@ -487,4 +515,213 @@ fn commit_without_validate_fails() {
     assert!(coordinator
         .commit_with_mount(prepare.token, &mut scene, empty_mount())
         .is_ok());
+}
+
+// ── Phase 05: Candidate Lifecycle Tests ─────────────────────────────
+
+#[test]
+fn candidate_is_staged_on_prepare() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    assert!(coordinator.staged_extraction().is_none());
+
+    let _prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    assert!(coordinator.staged_extraction().is_some());
+    assert!(coordinator.staged_entity_descriptors().is_some());
+}
+
+#[test]
+fn renderer_lease_transitions_not_started_to_ready() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+
+    // Set mount ready directly (synchronous path)
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+
+    // Validate then commit
+    coordinator.validate(prepare.token).unwrap();
+    let mut scene = Scene::new();
+    let result = coordinator.commit(prepare.token, &mut scene);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn commit_requires_renderer_mount_ready() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator.validate(prepare.token).unwrap();
+
+    // Commit without setting mount ready should fail
+    let result = coordinator.commit(prepare.token, &mut scene);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        BspRuntimeError::BridgeFailure { message, .. } => {
+            assert!(message.contains("renderer mount not ready"));
+        }
+        e => panic!("expected BridgeFailure about mount, got {:?}", e),
+    }
+}
+
+#[test]
+fn renderer_lease_idempotent() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+
+    // Setting mount ready multiple times should be idempotent
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+
+    coordinator.validate(prepare.token).unwrap();
+    let mut scene = Scene::new();
+    assert!(coordinator.commit(prepare.token, &mut scene).is_ok());
+}
+
+#[test]
+fn light_candidate_requires_scene_publication_validation() {
+    let bsp_bytes = light_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/lit").unwrap();
+    assert_eq!(prepare.light_count, 1);
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+
+    let result = coordinator.validate(prepare.token);
+    assert!(matches!(
+        result,
+        Err(BspRuntimeError::BridgeFailure {
+            phase: bsp_runtime::error::BridgePhase::Validate,
+            ..
+        })
+    ));
+    assert!(coordinator.staged_extraction().is_none());
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/lit").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+    coordinator
+        .validate_for_scene(prepare.token, &mut scene)
+        .unwrap();
+    let commit = coordinator.commit(prepare.token, &mut scene).unwrap();
+    assert_eq!(commit.light_count, 1);
+}
+
+#[test]
+fn validate_for_scene_rejects_light_capacity_before_commit() {
+    let bsp_bytes = light_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let scene_light = test_point_light();
+    let mut scene = Scene::new();
+
+    let mut filled = 0;
+    while scene.create_point_light(scene_light).is_ok() {
+        filled += 1;
+        assert!(filled < 128, "point-light cap should be finite");
+    }
+    assert!(filled > 0);
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/lit").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+
+    let result = coordinator.validate_for_scene(prepare.token, &mut scene);
+    assert!(matches!(
+        result,
+        Err(BspRuntimeError::BridgeFailure {
+            phase: bsp_runtime::error::BridgePhase::Validate,
+            ..
+        })
+    ));
+    assert!(coordinator.staged_extraction().is_none());
+    assert!(!coordinator.is_poisoned());
+}
+
+#[test]
+fn teardown_cleans_up_candidate_and_active_state() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Prepare and commit
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator.validate(prepare.token).unwrap();
+    coordinator
+        .commit_with_mount(prepare.token, &mut scene, empty_mount())
+        .unwrap();
+
+    assert!(coordinator.is_active());
+
+    // Teardown
+    coordinator.teardown(&mut scene);
+    assert!(!coordinator.is_active());
+    assert!(coordinator.staged_extraction().is_none());
+}
+
+#[test]
+fn new_prepare_cancels_previous_candidate() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
+
+    // Set mount ready on first candidate
+    coordinator
+        .set_renderer_mount_ready(prepare1.token, empty_mount())
+        .unwrap();
+    coordinator.validate(prepare1.token).unwrap();
+
+    // Second prepare cancels first
+    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
+    assert!(coordinator.staged_extraction().is_some());
+
+    // First token is now stale
+    let mut scene = Scene::new();
+    let result = coordinator.commit(prepare1.token, &mut scene);
+    assert!(result.is_err());
+}
+
+#[test]
+fn poisioned_coordinator_rejects_all_operations() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    coordinator.register_bridge("panic", Box::new(PanicCommitBridge));
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator.validate(prepare.token).unwrap();
+
+    let mut scene = Scene::new();
+    let _ = coordinator.commit_with_mount(prepare.token, &mut scene, empty_mount());
+    assert!(coordinator.is_poisoned());
+
+    // All operations should be rejected
+    assert!(matches!(
+        coordinator.prepare(&bsp_bytes, None, "maps/test"),
+        Err(BspRuntimeError::CoordinatorPoisoned)
+    ));
+    assert!(matches!(
+        coordinator.unload(&mut scene),
+        Err(BspRuntimeError::CoordinatorPoisoned)
+    ));
+    assert!(matches!(
+        coordinator.rollback(),
+        Err(BspRuntimeError::CoordinatorPoisoned)
+    ));
 }

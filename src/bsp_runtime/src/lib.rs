@@ -26,6 +26,7 @@
 pub mod behavior;
 pub mod bridge;
 pub mod cache;
+pub(crate) mod candidate;
 pub mod coordinator;
 pub mod error;
 pub mod generation;
@@ -40,6 +41,7 @@ pub use behavior::{
 };
 pub use bridge::AppBridge;
 pub use cache::CacheIdentity;
+pub use candidate::BspCandidate;
 pub use coordinator::BspCoordinator;
 pub use error::{BridgePhase, BspRuntimeError};
 pub use generation::BspGenerationToken;
