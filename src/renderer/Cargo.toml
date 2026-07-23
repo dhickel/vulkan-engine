@@ -118,3 +118,7 @@ path = "examples/capture_tests/capture_shadow_persistence.rs"
 name = "capture_lod_instancing"
 path = "examples/capture_tests/capture_lod_instancing.rs"
 
+[[example]]
+name = "capture_bsp_beta"
+path = "examples/capture_tests/capture_bsp_beta.rs"
+
