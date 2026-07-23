@@ -12,5 +12,9 @@ apps/*
 !apps/voxel_demo/Cargo.toml
 !apps/voxel_demo/src/
 !apps/voxel_demo/src/**
+!apps/bsp_beta/
+!apps/bsp_beta/**
+!apps/bsp_beta/assets/
+!apps/bsp_beta/assets/**
 CLAUDE.md
 *.jsonl

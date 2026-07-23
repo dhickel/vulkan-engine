@@ -1,0 +1,22 @@
+[package]
+name = "bsp_beta"
+version = "0.1.0"
+edition = "2021"
+description = "BSP beta dogfood application: app-owned event loop, renderer integration, BSP mount lifecycle, physics bridge, behavior bridge, and headless capture proof"
+
+[dependencies]
+bsp = { path = "../../src/bsp" }
+bsp_runtime = { path = "../../src/bsp_runtime" }
+renderer = { path = "../../src/renderer", features = ["bsp"] }
+physics = { path = "../../src/physics" }
+input = { path = "../../src/input" }
+engine_events = { path = "../../src/events" }
+engine = { path = "../.." }
+glam = "0.28"
+log = "0.4"
+env_logger = "0.11"
+thiserror = "1"
+winit = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
