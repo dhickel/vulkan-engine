@@ -160,6 +160,33 @@ Debug-record smoke pattern (agent should use this for runtime diagnosis by defau
 - `--record_debug_path /tmp/engine_timing.jsonl`
 - Tune `--record_debug` seconds and `--record_debug_interval` ms when investigating longer or denser captures.
 
+## Live Startup Validation for Large Edit Sets
+
+Any time a phase, sprint, or non-trivial patch touches renderer, scene, Vulkan, input, scripting, lifecycle, asset loading, or application code, agents must run live startup smoke tests for every affected application and monitor their output — not rely on headless captures alone. Headless captures prove pixel correctness; live startups prove the event loop, swapchain, input, windowing, and real-GPU paths don't panic, hang, or spew errors.
+
+**Required live startup commands:**
+
+```bash
+# Dungeon dogfood — timeout-bound, monitor stderr for panics/errors
+RUST_LOG=warn timeout --signal=INT 15s cargo run -p dungeon_dogfood 2>&1 | head -100
+
+# Voxel demo — each preset that compiles
+RUST_LOG=warn timeout --signal=INT 15s cargo run -p voxel_demo -- --config presets/default.toml 2>&1 | head -100
+
+# Renderer examples — any whose code paths were touched
+RUST_LOG=warn timeout --signal=INT 15s cargo run -p renderer --example api_test 2>&1 | head -100
+```
+
+**Pass criteria:**
+- Process exits without panic, segfault, or Vulkan validation-layer error (when layers are active).
+- No `ERROR`-level log lines from the engine or renderer in stderr.
+- Swapchain acquired at least once (look for `Present` or frame-complete log lines).
+- If a live GPU or WSI environment is unavailable, record the gap explicitly with the blocked environment and do not silently substitute a headless claim.
+
+**When live startup is not possible** (headless CI, no GPU):
+- Record the unexecuted check with environment evidence.
+- Headless captures remain valid for pixel-correctness claims but do not replace live-startup evidence.
+
 ## External Baseline
 
 When behavior is ambiguous in glTF/PBR/IBL flows, use:
