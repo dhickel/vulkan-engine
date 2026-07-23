@@ -174,6 +174,9 @@ pub struct SceneWorld {
     /// from `build_submission`. Descendants are tested independently. Enabled
     /// by default.
     pub enable_frustum_culling: bool,
+    /// BSP mount state for PVS-aware culling, light selection, and depth-sorting.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_mount: crate::scene::bsp_visibility::BspMountState,
 }
 
 impl Default for SceneWorld {
@@ -198,6 +201,8 @@ impl SceneWorld {
             free_spot_light_slots: Vec::new(),
             shadow_casting_directional: None,
             enable_frustum_culling: true,
+            #[cfg(feature = "bsp")]
+            bsp_mount: crate::scene::bsp_visibility::BspMountState::new(),
         }
     }
 
@@ -611,8 +616,19 @@ impl SceneWorld {
         }
         submission.directional_light = submission.directional_lights.first().copied();
 
-        // Collect first N active lights (not first N slots) so sparse slot churn
-        // does not accidentally submit zero lights.
+        #[cfg(feature = "bsp")]
+        if self.bsp_mount.active {
+            self.update_bsp_pvs();
+            let bsp_lights = self
+                .bsp_mount
+                .select_frame_lights_for_camera(self.camera.cam_pos, MAX_POINT_LIGHTS_GPU);
+            submission.bsp_selected_lights = bsp_lights.clone();
+            submission.point_lights.extend(bsp_lights);
+        }
+
+        // Collect first N active app lights (not first N slots) after BSP-imported
+        // lights so the shared GPU cap is deterministic: PVS-selected BSP first,
+        // then app-added dynamics in insertion/slot order.
         for entry in self.point_lights.iter() {
             if submission.point_lights.len() >= MAX_POINT_LIGHTS_GPU {
                 break;
@@ -648,6 +664,11 @@ impl SceneWorld {
             }
         }
 
+        #[cfg(feature = "bsp")]
+        if self.bsp_mount.active {
+            self.collect_bsp_draw_items(&mut submission);
+        }
+
         let Some(root_id) = self.root else {
             return submission;
         };
@@ -672,6 +693,40 @@ impl SceneWorld {
         self.collect_draw_items_culled(root_id, &mut submission, frustum.as_ref());
 
         submission
+    }
+
+    #[cfg(feature = "bsp")]
+    fn collect_bsp_draw_items(&self, submission: &mut RenderSubmission) {
+        let visible_batches = crate::scene::bsp_visibility::filter_batches_by_pvs(
+            &self.bsp_mount.render_batches,
+            &self.bsp_mount.leaf_membership,
+            &self.bsp_mount,
+        );
+
+        for batch in visible_batches {
+            for face_index in batch.face_indices {
+                let face_index = face_index as usize;
+                let Some(mesh_id) = self.bsp_mount.face_meshes.get(face_index).copied() else {
+                    continue;
+                };
+                let Some(Some(bsp_material_id)) =
+                    self.bsp_mount.face_materials.get(face_index).copied()
+                else {
+                    continue;
+                };
+                if mesh_id == MeshHandle::new(0, 0) {
+                    continue;
+                }
+                submission
+                    .bsp_draw_items
+                    .push(crate::scene::render_submission::BspFrameDrawItem {
+                        mesh_id,
+                        bsp_material_id,
+                        transform: Mat4::IDENTITY,
+                    });
+                submission.culling_stats.submitted_draw_items += 1;
+            }
+        }
     }
 
     fn allocate_node_slot(&mut self, node: SceneNode) -> SceneNodeId {
@@ -1244,6 +1299,34 @@ impl SceneWorld {
             .iter()
             .filter_map(|entry| entry.light)
             .collect()
+    }
+
+    // ── BSP mount management ────────────────────────────────────────
+
+    /// Set the BSP mount state for PVS-aware culling and light selection.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn set_bsp_mount(&mut self, mount: crate::scene::bsp_visibility::BspMountState) {
+        self.bsp_mount = mount;
+    }
+
+    /// Clear the BSP mount, disabling PVS culling and BSP light selection.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn clear_bsp_mount(&mut self) {
+        self.bsp_mount.deactivate();
+    }
+
+    /// Return whether a BSP mount is currently active.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn has_bsp_mount(&self) -> bool {
+        self.bsp_mount.active
+    }
+
+    /// Update BSP PVS for the current camera position.
+    /// Called before `build_submission` when a BSP mount is active.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn update_bsp_pvs(&mut self) {
+        let cam_pos = self.camera.cam_pos;
+        self.bsp_mount.update_pvs(cam_pos);
     }
 }
 
@@ -2390,5 +2473,45 @@ mod tests {
             scene.validate_point_light_ref(id0),
             Err(PointLightRefError::GenerationMismatch)
         ));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_submits_draws_and_lights_without_scene_root() {
+        let mut scene = SceneWorld::new();
+        let mut mount = crate::scene::bsp_visibility::BspMountState::new();
+        mount.activate();
+        mount.set_render_assets(
+            vec![MeshHandle::new(7, 0)],
+            vec![Some(crate::data::handles::BspMaterialHandle::new(3, 0))],
+            vec![bsp::geometry::RenderBatch {
+                key: bsp::geometry::BatchKey {
+                    leaf_signature: Vec::new(),
+                    render_class: 0,
+                    material_identity: 0,
+                    lightmap_page: 0,
+                },
+                face_indices: vec![0],
+                pvs_eligible: true,
+                is_inline_model: false,
+                model_index: 0,
+            }],
+            vec![bsp::extract::LightDescriptor {
+                entity_index: 0,
+                origin: Vec3::new(1.0, 0.0, 0.0),
+                intensity: 64.0,
+                color: [1.0, 0.5, 0.25],
+                radius: 128.0,
+                style: None,
+            }],
+        );
+        scene.set_bsp_mount(mount);
+
+        let submission = scene.build_submission();
+
+        assert_eq!(submission.bsp_draw_items.len(), 1);
+        assert_eq!(submission.bsp_draw_items[0].mesh_id, MeshHandle::new(7, 0));
+        assert_eq!(submission.point_lights.len(), 1);
+        assert_eq!(submission.point_lights[0].color, Vec3::new(1.0, 0.5, 0.25));
     }
 }

@@ -65,6 +65,16 @@ pub struct FrameSpotLight {
     pub outer_cos: f32,
 }
 
+/// A single BSP frame draw item.
+/// For BSP geometry, we need the BSP material handle and transform.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Copy, Clone)]
+pub struct BspFrameDrawItem {
+    pub mesh_id: MeshHandle,
+    pub bsp_material_id: crate::data::handles::BspMaterialHandle,
+    pub transform: Mat4,
+}
+
 pub struct RenderSubmission {
     pub camera: SceneDataUBO,
     pub draw_items: Vec<FrameDrawItem>,
@@ -79,6 +89,13 @@ pub struct RenderSubmission {
     pub spot_lights: Vec<FrameSpotLight>,
     pub culling_stats: CullingStats,
     pub bounds_references: Vec<MeshHandle>,
+    /// BSP draw items for BSP-specific pipeline dispatch.
+    /// Present only when `feature = "bsp"` and a BSP mount is active.
+    #[cfg(feature = "bsp")]
+    pub bsp_draw_items: Vec<BspFrameDrawItem>,
+    /// BSP light selection: PVS-filtered + scored lights for this frame.
+    #[cfg(feature = "bsp")]
+    pub bsp_selected_lights: Vec<FramePointLight>,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -105,6 +122,10 @@ impl RenderSubmission {
             spot_lights: Vec::with_capacity(MAX_SPOT_LIGHTS_GPU),
             culling_stats: CullingStats::default(),
             bounds_references: Vec::with_capacity(draw_capacity),
+            #[cfg(feature = "bsp")]
+            bsp_draw_items: Vec::new(),
+            #[cfg(feature = "bsp")]
+            bsp_selected_lights: Vec::new(),
         }
     }
 

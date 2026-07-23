@@ -1156,6 +1156,39 @@ impl Scene {
         Ok(())
     }
 
+    // ── BSP mount ────────────────────────────────────────────────────
+
+    /// Mount a prepared BSP into the scene for PVS-aware rendering.
+    ///
+    /// While a BSP mount is active, imported BSP lights are selected via
+    /// PVS-filtered deterministic scoring, and BSP static geometry is
+    /// PVS-culled before frustum culling.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn set_bsp_mount(&mut self, mount: crate::api::bsp::PreparedBspMount) {
+        let mut state = mount.mount_state;
+        state.activate();
+        state.set_leaf_membership(mount.leaf_membership);
+        state.set_render_assets(
+            mount.face_meshes,
+            mount.face_materials,
+            mount.render_batches,
+            mount.light_descriptors,
+        );
+        self.world.set_bsp_mount(state);
+    }
+
+    /// Clear the BSP mount, returning to non-BSP rendering.
+    ///
+    /// Thread: Any
+    /// May Stall: No
+    #[cfg(feature = "bsp")]
+    pub fn clear_bsp_mount(&mut self) {
+        self.world.clear_bsp_mount();
+    }
+
     /// Thread: Any
     /// May Stall: No
     pub fn create_point_light(&mut self, light: PointLight) -> Result<PointLightId, SceneError> {

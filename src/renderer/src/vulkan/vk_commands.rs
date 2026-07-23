@@ -729,6 +729,11 @@ fn draw_geometry_from_submission_impl(
             &draw_lists,
             default_joint_desc,
             frame_env_ubo,
+            next_submit_serial,
+            #[cfg(feature = "bsp")]
+            data_cache,
+            #[cfg(feature = "bsp")]
+            &submission.bsp_draw_items,
         );
     }
     Ok(())
@@ -1353,6 +1358,9 @@ unsafe fn record_geometry_draw_sequence_impl(
     draw_lists: &GeometryDrawLists,
     default_joint_desc: vk::DescriptorSet,
     env_ubo: EnvironmentUBO,
+    #[cfg_attr(not(feature = "bsp"), allow(unused_variables))] next_submit_serial: u64,
+    #[cfg(feature = "bsp")] data_cache: &Arc<VkDataCache>,
+    #[cfg(feature = "bsp")] bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
 ) {
     device.cmd_begin_rendering(cmd_buffer, rendering_info);
 
@@ -1458,7 +1466,141 @@ unsafe fn record_geometry_draw_sequence_impl(
         draw_bucket(objects, pipeline)
     });
 
+    #[cfg(feature = "bsp")]
+    if !bsp_draw_items.is_empty() {
+        record_bsp_draw_sequence_impl(
+            device,
+            vulkan_cache,
+            data_cache,
+            scene_desc,
+            cmd_buffer,
+            next_submit_serial,
+            bsp_draw_items,
+        );
+    }
+
     device.cmd_end_rendering(cmd_buffer);
+}
+
+// ── BSP draw dispatch ──────────────────────────────────────────────────
+
+#[cfg(feature = "bsp")]
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants.
+unsafe fn record_bsp_draw_sequence_impl(
+    device: &ash::Device,
+    vulkan_cache: &VkCache,
+    data_cache: &Arc<VkDataCache>,
+    scene_desc: vk::DescriptorSet,
+    cmd_buffer: vk::CommandBuffer,
+    next_submit_serial: u64,
+    bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
+) {
+    let mut mesh_cache = data_cache
+        .mesh_cache
+        .lock()
+        .expect("mesh_cache lock poisoned");
+    let mut texture_cache = data_cache
+        .texture_cache
+        .lock()
+        .expect("texture_cache lock poisoned");
+    let bsp_surface_cache = data_cache
+        .bsp_surface_cache
+        .lock()
+        .expect("bsp_surface_cache lock poisoned");
+
+    let mut curr_pipeline_type: Option<VkPipelineType> = None;
+    let mut curr_pipeline_layout = vk::PipelineLayout::null();
+    let mut curr_material_descriptor = vk::DescriptorSet::null();
+
+    for item in bsp_draw_items.iter() {
+        let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
+            continue;
+        };
+        if bsp_mat.material_descriptor == vk::DescriptorSet::null() {
+            continue;
+        }
+        if mesh_cache
+            .mark_referenced(item.mesh_id, next_submit_serial)
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(mesh) = mesh_cache.get_loaded_id(item.mesh_id) else {
+            continue;
+        };
+
+        let _ = texture_cache.mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial);
+        if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
+            let _ = texture_cache.mark_texture_referenced(fullbright_tex, next_submit_serial);
+        }
+        let _ = texture_cache.mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial);
+
+        let pipeline_type = bsp_mat.pipeline;
+        if curr_pipeline_type != Some(pipeline_type) {
+            let next_pipeline = *vulkan_cache.pipelines.get_pipeline(pipeline_type);
+            curr_pipeline_type = Some(pipeline_type);
+            curr_pipeline_layout = next_pipeline.layout;
+            curr_material_descriptor = vk::DescriptorSet::null();
+
+            device.cmd_bind_pipeline(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                next_pipeline.pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                curr_pipeline_layout,
+                0,
+                &[scene_desc],
+                &[],
+            );
+        }
+
+        if curr_material_descriptor != bsp_mat.material_descriptor {
+            device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                curr_pipeline_layout,
+                1,
+                &[bsp_mat.material_descriptor],
+                &[],
+            );
+            curr_material_descriptor = bsp_mat.material_descriptor;
+        }
+
+        device.cmd_bind_index_buffer(
+            cmd_buffer,
+            mesh.index_buffer.buffer,
+            0,
+            vk::IndexType::UINT32,
+        );
+
+        let push_consts = VkModelPushConsts::new(
+            item.transform,
+            mesh.vertex_buffer.alloc_address,
+            bsp_mat.surf_ubo_alloc.alloc_address,
+            mesh.has_uv1,
+        );
+
+        device.cmd_push_constants(
+            cmd_buffer,
+            curr_pipeline_layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            push_consts.as_byte_slice(),
+        );
+
+        device.cmd_draw_indexed(
+            cmd_buffer,
+            mesh.index_count,
+            1,
+            mesh.get_first_index(),
+            0,
+            0,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -5,9 +5,14 @@
 //! surface lives here and is only available when the `bsp` feature is active.
 
 // Internal module-use imports.
-use crate::data::handles::{BspMaterialHandle, TextureHandle};
+#[cfg(feature = "bsp")]
+use crate::data::handles::{BspMaterialHandle, MeshHandle, TextureHandle};
 
 // Re-exports for external consumers (tests, extraction pipeline).
+pub use crate::data::bsp_import::{
+    build_bsp_material_descs, build_face_meshes, face_to_procedural_mesh, BspLightmapAtlasPage,
+    BspMeshUploadResult, BspRenderSubmissionData,
+};
 pub use crate::data::bsp_material::{
     BspMaterialDesc, BspMaterialPipeline, BspSurfaceClass, BspTextureSet,
 };
@@ -16,6 +21,7 @@ pub use crate::data::data_cache::{
     VkPipelineType,
 };
 pub use crate::data::gpu_data::BspSurfaceUniform;
+pub use crate::scene::bsp_visibility::{filter_batches_by_pvs, pvs_should_disable, BspMountState};
 
 /// Resources prepared but not yet published to the BSP surface cache.
 ///
@@ -77,6 +83,71 @@ impl BspRendererResources {
 
 #[cfg(feature = "bsp")]
 impl Default for BspRendererResources {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── BSP Mount State ────────────────────────────────────────────────────
+
+/// Prepared BSP mount ready to be attached to a scene.
+///
+/// Contains GPU-uploaded meshes, materials, lightmap atlas handles,
+/// leaf membership data, and PVS state. Constructed by the asset
+/// loading pipeline and consumed by [`crate::api::scene::Scene::set_bsp_mount`].
+#[cfg(feature = "bsp")]
+#[derive(Clone)]
+pub struct PreparedBspMount {
+    /// BSP visibility state (nodes, leaves, PVS data).
+    pub mount_state: BspMountState,
+    /// Mesh handles per face (0,0 for nodraw).
+    pub face_meshes: Vec<MeshHandle>,
+    /// BSP material handles per face.
+    pub face_materials: Vec<Option<BspMaterialHandle>>,
+    /// Leaf membership per face.
+    pub leaf_membership: Vec<Vec<u32>>,
+    /// Render batches from extraction (for PVS filtering).
+    pub render_batches: Vec<bsp::geometry::RenderBatch>,
+    /// BSP light descriptors extracted from light entities.
+    pub light_descriptors: Vec<bsp::extract::LightDescriptor>,
+}
+
+#[cfg(feature = "bsp")]
+impl PreparedBspMount {
+    /// Create a new empty prepared mount.
+    pub fn new() -> Self {
+        Self {
+            mount_state: BspMountState::new(),
+            face_meshes: Vec::new(),
+            face_materials: Vec::new(),
+            leaf_membership: Vec::new(),
+            render_batches: Vec::new(),
+            light_descriptors: Vec::new(),
+        }
+    }
+
+    /// Create a prepared mount from an extracted BSP and uploaded resources.
+    pub fn from_extracted(
+        mount_state: BspMountState,
+        face_meshes: Vec<MeshHandle>,
+        face_materials: Vec<Option<BspMaterialHandle>>,
+        leaf_membership: Vec<Vec<u32>>,
+        render_batches: Vec<bsp::geometry::RenderBatch>,
+        light_descriptors: Vec<bsp::extract::LightDescriptor>,
+    ) -> Self {
+        Self {
+            mount_state,
+            face_meshes,
+            face_materials,
+            leaf_membership,
+            render_batches,
+            light_descriptors,
+        }
+    }
+}
+
+#[cfg(feature = "bsp")]
+impl Default for PreparedBspMount {
     fn default() -> Self {
         Self::new()
     }
