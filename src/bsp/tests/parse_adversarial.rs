@@ -437,3 +437,46 @@ fn adversarial_face_style_out_of_range() {
     assert!(r.is_err());
     assert_eq!(r.unwrap_err().code, DiagnosticCode::UnsupportedStyleSlot);
 }
+
+// ── Extraction API tests ──
+
+#[test]
+fn adversarial_extraction_fails_without_world() {
+    let request = BspExtractionRequest::default();
+    let result = extract(request);
+    assert!(result.is_ok());
+    let ext = result.unwrap();
+    assert!(ext.face_geometries.is_empty());
+    assert!(ext.face_materials.is_empty());
+    assert!(ext.render_batches.is_empty());
+}
+
+#[test]
+fn adversarial_extraction_custom_scale() {
+    let request = BspExtractionRequest {
+        scale: 0.05,
+        ..Default::default()
+    };
+    let ext = extract(request).unwrap();
+    assert!((ext.transform.scale - 0.05).abs() < 1e-8);
+}
+
+#[test]
+fn adversarial_extraction_zero_scale_still_works() {
+    let request = BspExtractionRequest {
+        scale: 0.001,
+        ..Default::default()
+    };
+    let ext = extract(request).unwrap();
+    assert!((ext.transform.scale - 0.001).abs() < 1e-8);
+}
+
+#[test]
+fn adversarial_extraction_preserves_content_hash() {
+    let request = BspExtractionRequest {
+        world: BspWorld::empty(),
+        ..Default::default()
+    };
+    let ext = extract(request).unwrap();
+    assert_eq!(ext.content_hash, [0u8; 32]);
+}

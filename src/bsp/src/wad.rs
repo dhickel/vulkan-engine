@@ -238,6 +238,154 @@ pub fn read_wad_lump<'a>(archive: &'a WadArchive, name: &str) -> Option<&'a [u8]
     None
 }
 
+/// Decoded miptex mip-0 pixels: RGBA albedo + separate fullbright mask.
+#[derive(Debug, Clone)]
+pub struct MiptexPixels {
+    /// Raw palette indices for mip level 0 (width × height bytes).
+    pub palette_indices: Vec<u8>,
+    /// RGBA8 albedo pixels (width × height × 4 bytes).
+    pub albedo: Vec<u8>,
+    /// Fullbright emissive mask (width × height bytes, 0 = lit, 255 = fullbright).
+    pub fullbright_mask: Vec<u8>,
+    /// Texture width.
+    pub width: u32,
+    /// Texture height.
+    pub height: u32,
+}
+
+impl MiptexPixels {
+    /// Number of pixels.
+    pub fn pixel_count(&self) -> usize {
+        self.width as usize * self.height as usize
+    }
+}
+
+/// Decode mip-0 palette indices from a miptex entry into RGBA albedo and fullbright mask.
+///
+/// `palette` is 256 RGB triples. `fullbright_start..=fullbright_end` defines the
+/// emission range. Palette index 255 is NOT globally transparent — alpha is determined
+/// by surface classification, not pixel data.
+///
+/// Returns `MiptexPixels` if the entry is valid, or a `MiptexCorrupt` diagnostic.
+pub fn decode_miptex_pixels(
+    data: &[u8],
+    palette: &[[u8; 3]; 256],
+    fullbright_start: u8,
+    fullbright_end: u8,
+) -> Result<MiptexPixels, BspReport> {
+    let info = parse_miptex_header(data)?;
+    let w = info.width as usize;
+    let h = info.height as usize;
+    let pixel_count = w.checked_mul(h).ok_or_else(|| {
+        BspReport::fatal(
+            DiagnosticCode::MiptexCorrupt,
+            format!("miptex '{}' dimensions {}x{} overflow", info.name, w, h),
+        )
+    })?;
+
+    // Validate texture dimensions
+    crate::resources::validate_texture_dimension(info.width, &info.name)?;
+    crate::resources::validate_texture_dimension(info.height, &info.name)?;
+
+    // Mip 0 offset
+    let mip0_off = info.mip_offsets[0] as usize;
+    let mip0_end = mip0_off.checked_add(pixel_count).ok_or_else(|| {
+        BspReport::fatal(
+            DiagnosticCode::MiptexCorrupt,
+            format!("miptex '{}' mip-0 offset+size overflow", info.name),
+        )
+    })?;
+    if mip0_end > data.len() {
+        return Err(BspReport::fatal(
+            DiagnosticCode::MiptexCorrupt,
+            format!(
+                "miptex '{}' mip-0 data [{}, {}) exceeds entry length {}",
+                info.name, mip0_off, mip0_end, data.len()
+            ),
+        ));
+    }
+
+    let indices = &data[mip0_off..mip0_end];
+    let mut albedo = vec![0u8; pixel_count * 4];
+    let mut fullbright_mask = vec![0u8; pixel_count];
+
+    for (i, &idx) in indices.iter().enumerate() {
+        let rgb = palette[idx as usize];
+        let dst = i * 4;
+        albedo[dst] = rgb[0];
+        albedo[dst + 1] = rgb[1];
+        albedo[dst + 2] = rgb[2];
+        albedo[dst + 3] = 255; // opaque by default; alpha-mask handled by surface class
+
+        if idx >= fullbright_start && idx <= fullbright_end {
+            fullbright_mask[i] = 255;
+        }
+    }
+
+    Ok(MiptexPixels {
+        palette_indices: indices.to_vec(),
+        albedo,
+        fullbright_mask,
+        width: info.width,
+        height: info.height,
+    })
+}
+
+/// Decode mip-0 palette indices from an embedded miptex lump header.
+///
+/// The embedded miptex lump starts with a count (i32 LE), then an offset table
+/// (count × i32 LE), then each miptex entry at its offset.
+pub fn read_embedded_miptex_entry(
+    lump_data: &[u8],
+    entry_index: u32,
+) -> Option<&[u8]> {
+    if lump_data.len() < 4 {
+        return None;
+    }
+    let count = i32::from_le_bytes([lump_data[0], lump_data[1], lump_data[2], lump_data[3]]);
+    if count <= 0 || entry_index >= count as u32 {
+        return None;
+    }
+    let count = count as usize;
+    let ei = entry_index as usize;
+    let off_table_end = 4 + count * 4;
+    if off_table_end > lump_data.len() || (ei + 1) * 4 + 4 > lump_data.len() {
+        return None;
+    }
+
+    let entry_off = i32::from_le_bytes([
+        lump_data[4 + ei * 4],
+        lump_data[4 + ei * 4 + 1],
+        lump_data[4 + ei * 4 + 2],
+        lump_data[4 + ei * 4 + 3],
+    ]);
+    if entry_off < 0 {
+        return None;
+    }
+    let start = entry_off as usize;
+    // Read width/height from header to determine entry size
+    if start + 40 > lump_data.len() {
+        return None;
+    }
+    let width = u32::from_le_bytes([
+        lump_data[start + 16],
+        lump_data[start + 17],
+        lump_data[start + 18],
+        lump_data[start + 19],
+    ]);
+    let height = u32::from_le_bytes([
+        lump_data[start + 20],
+        lump_data[start + 21],
+        lump_data[start + 22],
+        lump_data[start + 23],
+    ]);
+    // Mip 0 pixel count + header + optional mips; read enough bytes for at least mip 0
+    let pixel_count = (width as usize).checked_mul(height as usize)?;
+    let entry_end = start.checked_add(40 + pixel_count)?;
+    let entry_end = entry_end.min(lump_data.len());
+    Some(&lump_data[start..entry_end])
+}
+
 /// Parse a miptex header to get dimensions and mip offsets.
 /// Miptex header: name[16] + width:u32 + height:u32 + offsets[4]:u32
 pub fn parse_miptex_header(data: &[u8]) -> Result<MiptexInfo, BspReport> {

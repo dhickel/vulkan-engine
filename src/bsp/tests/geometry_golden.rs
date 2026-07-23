@@ -270,7 +270,7 @@ fn golden_batch_inline_models_do_not_merge() {
 }
 
 #[test]
-fn golden_batch_emits_each_face_once_with_sorted_leaf_set() {
+fn golden_batch_emits_each_valid_renderable_face_once_with_sorted_leaf_set() {
     let face = |face_index, is_valid| geometry::FaceGeometry {
         face_index,
         vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
@@ -291,9 +291,9 @@ fn golden_batch_emits_each_face_once_with_sorted_leaf_set() {
     );
 
     let emitted: Vec<u32> = batches.iter().flat_map(|b| b.face_indices.iter().copied()).collect();
-    assert_eq!(emitted, vec![3, 7]);
+    assert_eq!(emitted, vec![3]);
     assert!(batches.iter().any(|b| b.key.leaf_signature == vec![1, 5]));
-    assert!(batches.iter().any(|b| b.key.leaf_signature == vec![1, 2]));
+    assert!(!batches.iter().any(|b| b.key.leaf_signature == vec![1, 2]));
 }
 
 #[test]

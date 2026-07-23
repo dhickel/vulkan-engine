@@ -197,6 +197,210 @@ pub fn decode_palette(data: &[u8]) -> Palette {
 pub const FULLBRIGHT_DEFAULT_START: usize = 224;
 pub const FULLBRIGHT_DEFAULT_END: usize = 255;
 
+/// Maximum texture dimension (power of two).
+pub const MAX_TEXTURE_DIMENSION: u32 = 4096;
+
+/// An extracted texture ready for renderer consumption.
+#[derive(Debug, Clone)]
+pub struct ExtractedTexture {
+    /// Texture identity name (deterministic, source-order based).
+    pub identity: String,
+    /// Raw mip-0 palette indices (width × height bytes).
+    pub palette_indices: Vec<u8>,
+    /// RGBA8 albedo pixel data.
+    pub albedo: Vec<u8>,
+    /// Fullbright emissive mask (0 = lit, 255 = fullbright).
+    pub fullbright_mask: Vec<u8>,
+    /// Texture width.
+    pub width: u32,
+    /// Texture height.
+    pub height: u32,
+    /// Source of this texture.
+    pub source: TextureSource,
+    /// Whether this texture is the base of an animation cycle.
+    pub is_animated_base: bool,
+    /// Animation frame textures (deterministic order), empty if static.
+    pub animation_frames: Vec<String>,
+    /// Whether all animation frames share the same dimensions.
+    pub animation_dimensions_uniform: bool,
+}
+
+impl Default for ExtractedTexture {
+    fn default() -> Self {
+        ExtractedTexture {
+            identity: String::new(),
+            palette_indices: Vec::new(),
+            albedo: Vec::new(),
+            fullbright_mask: Vec::new(),
+            width: 0,
+            height: 0,
+            source: TextureSource::FallbackDiagnostic,
+            is_animated_base: false,
+            animation_frames: Vec::new(),
+            animation_dimensions_uniform: false,
+        }
+    }
+}
+
+/// Where a resolved texture came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextureSource {
+    /// Explicit package override.
+    PackageOverride { resolved_name: String },
+    /// Loose replacement from package roots.
+    LooseReplacement { name: String },
+    /// Embedded miptex in the BSP.
+    EmbeddedMiptex { index: u32 },
+    /// WAD archive lookup.
+    WadLookup { wad_name: String, texture_name: String },
+    /// Diagnostic fallback (checkerboard).
+    FallbackDiagnostic,
+}
+
+/// Resolve a texture name to an ExtractedTexture using the approved precedence order.
+pub fn resolve_extracted_texture(
+    tex_name: &str,
+    miptex_data: &[u8],
+    wad_archives: &[(String, crate::wad::WadArchive)],
+    palette: &Palette,
+    fullbright_start: u8,
+    fullbright_end: u8,
+    strict: bool,
+) -> (ExtractedTexture, Vec<BspReport>) {
+    let mut reports = Vec::new();
+
+    // 1. Try embedded miptex first
+    if crate::wad::read_embedded_miptex_entry(miptex_data, 0).is_some() {
+        // Find the matching entry by name
+        let actual_idx = find_miptex_by_name(miptex_data, tex_name);
+        if let Some(idx) = actual_idx {
+            if let Some(data) = crate::wad::read_embedded_miptex_entry(miptex_data, idx) {
+                match crate::wad::decode_miptex_pixels(data, palette, fullbright_start, fullbright_end) {
+                    Ok(pixels) => {
+                        return (ExtractedTexture {
+                            identity: tex_name.to_string(),
+                            palette_indices: pixels.palette_indices,
+                            albedo: pixels.albedo,
+                            fullbright_mask: pixels.fullbright_mask,
+                            width: pixels.width,
+                            height: pixels.height,
+                            source: TextureSource::EmbeddedMiptex { index: idx },
+                            is_animated_base: false,
+                            animation_frames: Vec::new(),
+                            animation_dimensions_uniform: false,
+                        }, reports);
+                    }
+                    Err(e) => {
+                        reports.push(e);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Try WAD lookup
+    for (wad_name, archive) in wad_archives {
+        if let Some(entry_data) = crate::wad::read_wad_lump(archive, tex_name) {
+            match crate::wad::decode_miptex_pixels(entry_data, palette, fullbright_start, fullbright_end) {
+                Ok(pixels) => {
+                    return (ExtractedTexture {
+                        identity: tex_name.to_string(),
+                        palette_indices: pixels.palette_indices,
+                        albedo: pixels.albedo,
+                        fullbright_mask: pixels.fullbright_mask,
+                        width: pixels.width,
+                        height: pixels.height,
+                        source: TextureSource::WadLookup {
+                            wad_name: wad_name.clone(),
+                            texture_name: tex_name.to_string(),
+                        },
+                        is_animated_base: false,
+                        animation_frames: Vec::new(),
+                        animation_dimensions_uniform: false,
+                    }, reports);
+                }
+                Err(e) => {
+                    reports.push(e);
+                }
+            }
+        }
+    }
+
+    // 3. Fallback
+    let code = if strict {
+        DiagnosticCode::MissingRequiredWad
+    } else {
+        DiagnosticCode::FallbackDiagnosticTexture
+    };
+    reports.push(BspReport::new(
+        code,
+        strict,
+        format!("texture '{}' not found; using diagnostic fallback", tex_name),
+    ));
+
+    (ExtractedTexture {
+        identity: tex_name.to_string(),
+        source: TextureSource::FallbackDiagnostic,
+        ..Default::default()
+    }, reports)
+}
+
+/// Find a miptex entry by name in the embedded miptex lump.
+fn find_miptex_by_name(miptex_data: &[u8], name: &str) -> Option<u32> {
+    if miptex_data.len() < 4 {
+        return None;
+    }
+    let count = i32::from_le_bytes([
+        miptex_data[0], miptex_data[1], miptex_data[2], miptex_data[3],
+    ]);
+    if count <= 0 {
+        return None;
+    }
+    let count = count as usize;
+    for i in 0..count {
+        if let Some(entry) = crate::wad::read_embedded_miptex_entry(miptex_data, i as u32) {
+            if entry.len() >= 16 {
+                let name_bytes = &entry[0..16];
+                let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+                if &name_bytes[..name_len] == name.as_bytes() {
+                    return Some(i as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get all miptex names from the embedded miptex lump.
+pub fn collect_miptex_names(miptex_data: &[u8]) -> Vec<String> {
+    if miptex_data.len() < 4 {
+        return Vec::new();
+    }
+    let count = i32::from_le_bytes([
+        miptex_data[0], miptex_data[1], miptex_data[2], miptex_data[3],
+    ]);
+    if count <= 0 {
+        return Vec::new();
+    }
+    let count = count as usize;
+    let mut names = Vec::with_capacity(count);
+    for i in 0..count {
+        if let Some(entry) = crate::wad::read_embedded_miptex_entry(miptex_data, i as u32) {
+            if entry.len() >= 16 {
+                let name_bytes = &entry[0..16];
+                let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+                if let Ok(s) = std::str::from_utf8(&name_bytes[..name_len]) {
+                    names.push(s.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Re-exports for convenience.
+pub use crate::wad::MiptexPixels;
+
 #[cfg(test)]
 mod tests {
     use super::*;

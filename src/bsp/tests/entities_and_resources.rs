@@ -368,3 +368,183 @@ fn texture_dimension_validation() {
     // Too large
     assert!(resources::validate_texture_dimension(8192, "test").is_err());
 }
+
+// ── Extraction entity model bounds checks ──
+
+#[test]
+fn entity_model_ref_bounds_check() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&29u32.to_le_bytes());
+    let lumps = [(0u32, 0u32); 15];
+    for &(off, sz) in &lumps {
+        data.extend_from_slice(&off.to_le_bytes());
+        data.extend_from_slice(&sz.to_le_bytes());
+    }
+
+    // Entities with *99 model reference (invalid - only model 0 exists)
+    let entities = b"{\"classname\" \"worldspawn\"}\0{\"classname\" \"func_door\" \"model\" \"*99\"}\0";
+    let e_off = data.len() as u32;
+    data.extend_from_slice(entities);
+    let base = 4 + 0 * 8;
+    data[base..base + 4].copy_from_slice(&e_off.to_le_bytes());
+    data[base + 4..base + 8].copy_from_slice(&(entities.len() as u32).to_le_bytes());
+
+    // Add 2 models (worldspawn + door) at 64 bytes each
+    let m_off = data.len() as u32;
+    // Model 0 (worldspawn): all zeros
+    data.extend_from_slice(&[0u8; 64]);
+    // Model 1 (door): headnode[1] = -1 (no collision)
+    let mut model1 = [0u8; 64];
+    // origin at 128,256,64 (bytes 24-36)
+    model1[24..28].copy_from_slice(&128.0f32.to_le_bytes());
+    model1[28..32].copy_from_slice(&256.0f32.to_le_bytes());
+    model1[32..36].copy_from_slice(&64.0f32.to_le_bytes());
+    // face_id=0, face_num=0
+    model1[36..40].copy_from_slice(&(-1i32).to_le_bytes()); // headnode[0]
+    model1[40..44].copy_from_slice(&(-1i32).to_le_bytes()); // headnode[1]
+    model1[44..48].copy_from_slice(&(-1i32).to_le_bytes()); // headnode[2]
+    model1[48..52].copy_from_slice(&(-1i32).to_le_bytes()); // headnode[3]
+    data.extend_from_slice(&model1);
+    let base = 4 + 14 * 8;
+    data[base..base + 4].copy_from_slice(&m_off.to_le_bytes());
+    data[base + 4..base + 8].copy_from_slice(&128u32.to_le_bytes());
+
+    let world = BspLoader::load(&data, &LoadOptions::default()).unwrap();
+    assert_eq!(world.models.len(), 2);
+
+    // Extraction rejects the malformed *99 reference instead of hiding it as None.
+    let request = BspExtractionRequest {
+        world,
+        ..Default::default()
+    };
+    let report = extract(request).unwrap_err();
+    assert_eq!(report.code, DiagnosticCode::EntityModelOutOfBounds);
+    assert_eq!(report.severity, Severity::Error);
+}
+
+// ── Identity duplicate ordinal tests ──
+
+#[test]
+fn identity_duplicate_ordinals_assigned() {
+    let mut data = Vec::new();
+    data.extend_from_slice(&29u32.to_le_bytes());
+    let lumps = [(0u32, 0u32); 15];
+    for &(off, sz) in &lumps {
+        data.extend_from_slice(&off.to_le_bytes());
+        data.extend_from_slice(&sz.to_le_bytes());
+    }
+
+    // Two identical light entities
+    let entities = b"{\"classname\" \"worldspawn\"}\0{\"classname\" \"light\" \"origin\" \"0 0 0\"}\0{\"classname\" \"light\" \"origin\" \"0 0 0\"}\0";
+    let e_off = data.len() as u32;
+    data.extend_from_slice(entities);
+    let base = 4 + 0 * 8;
+    data[base..base + 4].copy_from_slice(&e_off.to_le_bytes());
+    data[base + 4..base + 8].copy_from_slice(&(entities.len() as u32).to_le_bytes());
+
+    let world = BspLoader::load(&data, &LoadOptions::default()).unwrap();
+    assert_eq!(world.entities.len(), 3);
+
+    let request = BspExtractionRequest {
+        world,
+        ..Default::default()
+    };
+    let extracted = extract(request).unwrap();
+    assert_eq!(extracted.entity_identities.len(), 3);
+
+    // Worldspawn should have duplicate_ordinal 0
+    assert_eq!(extracted.entity_identities[0].duplicate_ordinal, 0);
+    // First light should have duplicate_ordinal 0
+    assert_eq!(extracted.entity_identities[1].duplicate_ordinal, 0);
+    // Second light (same fingerprint) should have duplicate_ordinal 1
+    assert_eq!(extracted.entity_identities[2].duplicate_ordinal, 1);
+}
+
+// ── Texture extraction from miptex ──
+
+#[test]
+fn extraction_miptex_texture_resolution() {
+    let palette: [[u8; 3]; 256] = {
+        let mut p = [[0u8; 3]; 256];
+        for i in 0..=255u8 {
+            p[i as usize] = [i, i, i];
+        }
+        p
+    };
+
+    // Build a minimal BSP with an embedded miptex lump containing one texture
+    let mut data = Vec::new();
+    data.extend_from_slice(&29u32.to_le_bytes());
+    let lumps = [(0u32, 0u32); 15];
+    for &(off, sz) in &lumps {
+        data.extend_from_slice(&off.to_le_bytes());
+        data.extend_from_slice(&sz.to_le_bytes());
+    }
+
+    let entities = b"{\"classname\" \"worldspawn\"}\0";
+    let e_off = data.len() as u32;
+    data.extend_from_slice(entities);
+    let base = 4 + 0 * 8;
+    data[base..base + 4].copy_from_slice(&e_off.to_le_bytes());
+    data[base + 4..base + 8].copy_from_slice(&(entities.len() as u32).to_le_bytes());
+
+    // Build a miptex lump with one texture named "WALL01"
+    let mt_off = data.len() as u32;
+    let mut miptex = Vec::new();
+    miptex.extend_from_slice(&1i32.to_le_bytes()); // count = 1
+    let entry_offset: i32 = 8; // after count(4) + offset_table(4) = 8 bytes from start of lump
+    miptex.extend_from_slice(&entry_offset.to_le_bytes());
+
+    // Miptex entry
+    let mut name = [0u8; 16];
+    name[..6].copy_from_slice(b"WALL01");
+    miptex.extend_from_slice(&name);
+    miptex.extend_from_slice(&16u32.to_le_bytes()); // width = 16
+    miptex.extend_from_slice(&16u32.to_le_bytes()); // height = 16
+    // mip offsets: mip0=40, others=0 (no mips)
+    let mip0_offset = 40u32;
+    miptex.extend_from_slice(&mip0_offset.to_le_bytes());
+    miptex.extend_from_slice(&0u32.to_le_bytes()); // mip1
+    miptex.extend_from_slice(&0u32.to_le_bytes()); // mip2
+    miptex.extend_from_slice(&0u32.to_le_bytes()); // mip3
+    // Mip 0 pixel data: 256 bytes of index 0
+    miptex.extend_from_slice(&vec![0u8; 256]);
+
+    let mt_sz = miptex.len() as u32;
+    data.extend_from_slice(&miptex);
+    let base = 4 + 2 * 8;
+    data[base..base + 4].copy_from_slice(&mt_off.to_le_bytes());
+    data[base + 4..base + 8].copy_from_slice(&mt_sz.to_le_bytes());
+
+    // Add a texinfo referencing texture 0
+    let ti_off = data.len() as u32;
+    let mut texinfo = [0u8; 40];
+    // miptex index = 0 at offset 32
+    texinfo[32..36].copy_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&texinfo);
+    let base = 4 + 6 * 8;
+    data[base..base + 4].copy_from_slice(&ti_off.to_le_bytes());
+    data[base + 4..base + 8].copy_from_slice(&40u32.to_le_bytes());
+
+    let options = LoadOptions {
+        palette: Some(vec![0u8; 768]),
+        ..Default::default()
+    };
+    let world = BspLoader::load(&data, &options).unwrap();
+
+    let request = BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        ..Default::default()
+    };
+    let extracted = extract(request).unwrap();
+    // Should have extracted at least the WALL01 texture
+    let wall_tex = extracted.textures.iter().find(|t| t.identity == "WALL01");
+    assert!(wall_tex.is_some());
+    let tex = wall_tex.unwrap();
+    assert_eq!(tex.width, 16);
+    assert_eq!(tex.height, 16);
+    assert!(tex.palette_indices.len() >= 16 * 16);
+    assert!(tex.albedo.len() >= 16 * 16 * 4);
+    assert!(tex.fullbright_mask.len() >= 16 * 16);
+}

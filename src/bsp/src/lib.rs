@@ -36,7 +36,7 @@ pub mod visibility;
 pub mod wad;
 pub mod world;
 
-use world::BspWorld;
+pub use world::BspWorld;
 
 /// Options for loading a BSP.
 #[derive(Debug, Clone)]
@@ -290,7 +290,8 @@ pub use coords::QuakeToEngine;
 pub use diagnostic::{BspReport, DiagnosticCode, Severity};
 pub use entities::{Entity, EntityClass, KeyValue};
 pub use extract::{
-    extract, EntityDescriptor, ExtractedBsp, InlineModelDescriptor, LightDescriptor,
+    extract, BspExtractionRequest, EntityDescriptor, ExtractedBsp, InlineModelDescriptor,
+    LightDescriptor,
 };
 pub use geometry::{
     batch_faces, build_face_geometry, BatchKey, FaceGeometry, RenderBatch, RenderClass,
@@ -301,11 +302,11 @@ pub use identity::{
 };
 pub use lightmaps::{
     decode_lightmaps_monochrome, decode_lightmaps_rgb, AtlasPage, FaceLightmapLayout,
-    LightmapAtlas, Luxel,
+    LightmapAtlas, Luxel, StyleLightmapLayout,
 };
 pub use materials::{
     classify_surface, detect_animation, material_identity, AnimatedTexture, AnimationCycleType,
-    SurfaceClass,
+    BspMaterial, SurfaceClass,
 };
 pub use package::{
     validate_bsp_package_manifest, BspLightingCalibration, BspPackageDiagnostic,
@@ -319,6 +320,10 @@ pub use queries::{
 pub use visibility::{
     build_leaf_membership, camera_leaf_index, camera_pvs, camera_pvs_with_scale, CameraLeafResult,
     PvsSet, PvsState,
+};
+pub use wad::MiptexPixels;
+pub use resources::{
+    ExtractedTexture, TextureSource,
 };
 
 #[cfg(test)]

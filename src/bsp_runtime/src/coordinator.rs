@@ -248,7 +248,15 @@ impl BspCoordinator {
         let was_occupied = self.is_active();
 
         // Extract DTOs
-        let extracted = bsp::extract::extract(&world, scale);
+        let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
+            world,
+            scale: scale.unwrap_or(0.0254),
+            ..Default::default()
+        }).map_err(|e| {
+            BspRuntimeError::SourceUnavailable {
+                reason: format!("BSP extraction failed: {} (code {:?})", e.message, e.code),
+            }
+        })?;
 
         let face_count = extracted.face_geometries.len();
         let entity_count = extracted.entity_descriptors.len();
@@ -261,6 +269,15 @@ impl BspCoordinator {
             planes: extracted.world_collision_planes.clone(),
         };
 
+        let collision_by_entity: std::collections::HashMap<u32, Vec<bsp::collision::CollisionRecipe>> =
+            extracted
+                .collision_recipes
+                .iter()
+                .cloned()
+                .fold(std::collections::HashMap::new(), |mut map, recipe| {
+                    map.entry(recipe.entity_index).or_default().push(recipe);
+                    map
+                });
         let entity_colliders: Vec<EntityCollisionRecipe> = extracted
             .inline_models
             .iter()
@@ -269,7 +286,10 @@ impl BspCoordinator {
                 classname: im.classname.clone(),
                 origin: im.origin,
                 is_trigger: im.classname.starts_with("trigger_"),
-                recipes: Vec::new(),
+                recipes: collision_by_entity
+                    .get(&im.entity_index)
+                    .cloned()
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -294,8 +314,8 @@ impl BspCoordinator {
                 entity_index: ed.entity_index,
                 classname: ed.classname.clone(),
                 origin: ed.origin.unwrap_or(glam::Vec3::ZERO),
-                targetname: None,
-                target: None,
+                targetname: ed.targetname.clone(),
+                target: ed.target.clone(),
             })
             .collect();
 

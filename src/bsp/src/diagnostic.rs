@@ -158,6 +158,32 @@ pub enum DiagnosticCode {
     BspxDuplicateName,
     /// Conflicting colored light sources.
     ColoredLightConflict,
+
+    // ── Extraction diagnostics ──
+    /// Miptex data corrupt: offset/size/dimensions invalid.
+    MiptexCorrupt,
+    /// Texture pixel allocation exceeds budget.
+    TextureAllocationExceeded,
+    /// Animation frame sequence has a gap.
+    AnimationSequenceGap,
+    /// Animation frames have inconsistent dimensions.
+    AnimationDimensionMismatch,
+    /// Animation frames have colliding names under case-insensitive comparison.
+    AnimationCaseCollision,
+    /// Atlas page overflow: luxel block cannot be placed.
+    AtlasPageOverflow,
+    /// Lightmap style data is truncated or missing.
+    LightmapStyleTruncated,
+    /// Extraction invariant violated: parallel arrays with mismatched lengths.
+    ExtractionInvariantViolation,
+    /// Entity model reference (*N) is out of bounds.
+    EntityModelOutOfBounds,
+    /// Convex reconstruction failed for a brush entity hull.
+    ConvexReconstructionFailed,
+    /// World collision data is missing; whole-asset rejection.
+    MissingCollisionData,
+    /// Identity ambiguity: multiple entities share the same fingerprint.
+    IdentityAmbiguous,
 }
 
 impl DiagnosticCode {
@@ -211,6 +237,14 @@ impl DiagnosticCode {
             | WadEntryCountExceeded => StructuralCorruption,
             BspxLumpOverlap | BspxDuplicateName => StructuralCorruption,
             ColoredLightConflict => UnsupportedCompatibility,
+
+            MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
+            | LightmapStyleTruncated | ExtractionInvariantViolation
+            | EntityModelOutOfBounds | ConvexReconstructionFailed
+            | MissingCollisionData => StructuralCorruption,
+            AnimationSequenceGap | AnimationDimensionMismatch
+            | AnimationCaseCollision => AuthoringQuality,
+            IdentityAmbiguous => AuthoringQuality,
         }
     }
 
@@ -244,7 +278,11 @@ impl DiagnosticCode {
             | AllocationExceeded
             | EntityCountExceeded
             | TextureCountExceeded
-            | WadEntryCountExceeded => Error,
+            | WadEntryCountExceeded
+            | MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
+            | LightmapStyleTruncated | ExtractionInvariantViolation
+            | EntityModelOutOfBounds | ConvexReconstructionFailed
+            | MissingCollisionData => Error,
 
             // Security — always Error
             SecurityPathTraversal | SecuritySymlinkEscape | SecurityDeviceFile => Error,
@@ -279,6 +317,9 @@ impl DiagnosticCode {
             // Authoring quality
             EntityClasslessWithKeys => Warning,
             EntityDuplicateKey | EntityEmpty => Info,
+            AnimationSequenceGap | AnimationDimensionMismatch
+            | AnimationCaseCollision => Warning,
+            IdentityAmbiguous => Info,
         }
     }
 
@@ -311,7 +352,11 @@ impl DiagnosticCode {
             | AllocationExceeded
             | EntityCountExceeded
             | TextureCountExceeded
-            | WadEntryCountExceeded => Error,
+            | WadEntryCountExceeded
+            | MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
+            | LightmapStyleTruncated | ExtractionInvariantViolation
+            | EntityModelOutOfBounds | ConvexReconstructionFailed
+            | MissingCollisionData => Error,
 
             SecurityPathTraversal | SecuritySymlinkEscape | SecurityDeviceFile => Error,
 
@@ -346,6 +391,9 @@ impl DiagnosticCode {
 
             // Authoring quality — Warning in strict
             EntityDuplicateKey | EntityEmpty | EntityClasslessWithKeys => Warning,
+            AnimationSequenceGap | AnimationDimensionMismatch
+            | AnimationCaseCollision => Warning,
+            IdentityAmbiguous => Warning,
         }
     }
 
@@ -418,6 +466,18 @@ impl DiagnosticCode {
             TextureCountExceeded => "BSP-STRUCT-TEXTURE-COUNT",
             WadEntryCountExceeded => "BSP-STRUCT-WAD-ENTRY-COUNT",
             ColoredLightConflict => "BSP-COMPAT-COLORED-LIGHT-CONFLICT",
+            MiptexCorrupt => "BSP-STRUCT-MIPTEX-CORRUPT",
+            TextureAllocationExceeded => "BSP-STRUCT-TEXTURE-ALLOC",
+            AnimationSequenceGap => "BSP-ANIM-SEQUENCE-GAP",
+            AnimationDimensionMismatch => "BSP-ANIM-DIM-MISMATCH",
+            AnimationCaseCollision => "BSP-ANIM-CASE-COLLISION",
+            AtlasPageOverflow => "BSP-STRUCT-ATLAS-OVERFLOW",
+            LightmapStyleTruncated => "BSP-STRUCT-STYLE-TRUNCATED",
+            ExtractionInvariantViolation => "BSP-STRUCT-INVARIANT",
+            EntityModelOutOfBounds => "BSP-STRUCT-ENTITY-MODEL-OOB",
+            ConvexReconstructionFailed => "BSP-STRUCT-CONVEX-FAILED",
+            MissingCollisionData => "BSP-STRUCT-MISSING-COLLISION",
+            IdentityAmbiguous => "BSP-IDENTITY-AMBIGUOUS",
         }
     }
 }

@@ -86,6 +86,38 @@ pub struct BspWorld {
 }
 
 impl BspWorld {
+    /// Create an empty world (for testing).
+    pub fn empty() -> Self {
+        BspWorld {
+            profile: crate::profile::BspProfile::Bsp29,
+            entity_raw: Vec::new(),
+            entities: Vec::new(),
+            planes: Vec::new(),
+            vertices: Vec::new(),
+            nodes: Vec::new(),
+            leaves: Vec::new(),
+            faces: Vec::new(),
+            models: Vec::new(),
+            texinfos: Vec::new(),
+            edges: Vec::new(),
+            surfedges: Vec::new(),
+            markfaces: Vec::new(),
+            clipnodes: Vec::new(),
+            miptex_data: Vec::new(),
+            lightmap_data: Vec::new(),
+            vis_data: Vec::new(),
+            bspx: None,
+            bspx_rgb_lighting: None,
+            palette: None,
+            colored_light_source: crate::companions::ColoredLightSource::Monochrome,
+            lit_data: None,
+            wad_archives: Vec::new(),
+            content_hash: [0; 32],
+            source_identity: String::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
     /// Accessor for the number of models.
     pub fn num_models(&self) -> u32 {
         self.models.len() as u32

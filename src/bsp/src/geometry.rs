@@ -359,7 +359,13 @@ pub fn batch_faces(
             Vec::new()
         };
 
+        if !geo.is_valid {
+            continue;
+        }
         let rc = render_classes.get(fi).copied().unwrap_or(RenderClass::Opaque);
+        if rc == RenderClass::Hidden {
+            continue;
+        }
         let mat_id = material_identities.get(fi).copied().unwrap_or(0);
         let lm_page = lightmap_pages.get(fi).copied().unwrap_or(0);
 
@@ -413,6 +419,8 @@ pub enum RenderClass {
     Sky = 2,
     /// Liquid/warp surface (blended).
     Liquid = 3,
+    /// Non-renderable surface.
+    Hidden = 255,
 }
 
 impl RenderClass {
@@ -422,6 +430,7 @@ impl RenderClass {
             1 => Some(RenderClass::AlphaMask),
             2 => Some(RenderClass::Sky),
             3 => Some(RenderClass::Liquid),
+            255 => Some(RenderClass::Hidden),
             _ => None,
         }
     }

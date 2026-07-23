@@ -43,17 +43,49 @@ impl Luxel {
     }
 }
 
-/// Layout of a face's lightmap luxels within an atlas page.
+/// Layout of one style layer for a face's lightmap luxels.
 #[derive(Debug, Clone)]
-pub struct FaceLightmapLayout {
-    /// Which atlas page this face's lightmap lives on.
+pub struct StyleLightmapLayout {
+    /// BSP light style identifier.
+    pub style_id: u8,
+    /// Zero-based layer index within this face's style list.
+    pub layer_index: u32,
+    /// Which atlas page this style's luxels live on.
     pub page_index: u32,
     /// Pixel coordinates of the bottom-left luxel in the atlas.
     pub atlas_offset: (u32, u32),
     /// Luxel count (width, height).
     pub luxel_extents: (u32, u32),
+    /// Whether this style has decoded lightmap data.
+    pub has_data: bool,
+}
+
+/// Layout of a face's lightmap luxels within atlas pages.
+#[derive(Debug, Clone)]
+pub struct FaceLightmapLayout {
+    /// Which atlas page the first style layer lives on.
+    pub page_index: u32,
+    /// Pixel coordinates of the bottom-left luxel for the first style layer.
+    pub atlas_offset: (u32, u32),
+    /// Luxel count (width, height).
+    pub luxel_extents: (u32, u32),
     /// Whether this face has any lightmap data.
     pub has_data: bool,
+    /// All decoded style layers for this face, in BSP style-slot order.
+    pub style_layers: Vec<StyleLightmapLayout>,
+}
+
+impl FaceLightmapLayout {
+    /// Empty no-data layout.
+    pub fn empty() -> Self {
+        FaceLightmapLayout {
+            page_index: 0,
+            atlas_offset: (0, 0),
+            luxel_extents: (0, 0),
+            has_data: false,
+            style_layers: Vec::new(),
+        }
+    }
 }
 
 /// A single atlas page as a flat RGB8 array.
@@ -175,7 +207,7 @@ impl LightmapAtlas {
         }
     }
 
-    /// Allocate and write lightmap data for a face.
+    /// Allocate and write style-0 lightmap data for a face.
     pub fn allocate_face(
         &mut self,
         face_index: u32,
@@ -183,58 +215,73 @@ impl LightmapAtlas {
         luxel_width: u32,
         luxel_height: u32,
     ) -> Result<FaceLightmapLayout, BspReport> {
+        let style_layout = self.allocate_face_style_with_limit(
+            face_index,
+            0,
+            0,
+            luxel_data,
+            luxel_width,
+            luxel_height,
+            MAX_ATLAS_PAGES,
+        )?;
+        let mut layout = FaceLightmapLayout::empty();
+        layout.page_index = style_layout.page_index;
+        layout.atlas_offset = style_layout.atlas_offset;
+        layout.luxel_extents = style_layout.luxel_extents;
+        layout.has_data = style_layout.has_data;
+        if style_layout.has_data {
+            layout.style_layers.push(style_layout);
+        }
+        while self.face_layouts.len() <= face_index as usize {
+            self.face_layouts.push(FaceLightmapLayout::empty());
+        }
+        self.face_layouts[face_index as usize] = layout.clone();
+        Ok(layout)
+    }
+
+    /// Allocate and write one style layer for a face, honoring a page budget.
+    pub fn allocate_face_style_with_limit(
+        &mut self,
+        _face_index: u32,
+        style_id: u8,
+        layer_index: u32,
+        luxel_data: &[Luxel],
+        luxel_width: u32,
+        luxel_height: u32,
+        max_pages: usize,
+    ) -> Result<StyleLightmapLayout, BspReport> {
         if luxel_data.is_empty() || luxel_width == 0 || luxel_height == 0 {
-            let layout = FaceLightmapLayout {
+            return Ok(StyleLightmapLayout {
+                style_id,
+                layer_index,
                 page_index: 0,
                 atlas_offset: (0, 0),
                 luxel_extents: (0, 0),
                 has_data: false,
-            };
-            // Extend face_layouts up to face_index
-            while self.face_layouts.len() <= face_index as usize {
-                self.face_layouts.push(FaceLightmapLayout {
-                    page_index: 0,
-                    atlas_offset: (0, 0),
-                    luxel_extents: (0, 0),
-                    has_data: false,
-                });
-            }
-            self.face_layouts[face_index as usize] = layout.clone();
-            return Ok(layout);
+            });
         }
 
-        // Clamp luxel dimensions
         let w = luxel_width.min(ATLAS_PAGE_SIZE - ATLAS_PADDING * 2);
         let h = luxel_height.min(ATLAS_PAGE_SIZE - ATLAS_PADDING * 2);
 
-        // Try to allocate into existing pages
         for page_idx in 0..self.pages.len() {
             if let Some(offset) = self.pages[page_idx].allocate(w, h) {
                 self.pages[page_idx].write_luxels(offset, luxel_data, w, h);
-                let layout = FaceLightmapLayout {
+                return Ok(StyleLightmapLayout {
+                    style_id,
+                    layer_index,
                     page_index: page_idx as u32,
                     atlas_offset: offset,
                     luxel_extents: (w, h),
                     has_data: true,
-                };
-                while self.face_layouts.len() <= face_index as usize {
-                    self.face_layouts.push(FaceLightmapLayout {
-                        page_index: 0,
-                        atlas_offset: (0, 0),
-                        luxel_extents: (0, 0),
-                        has_data: false,
-                    });
-                }
-                self.face_layouts[face_index as usize] = layout.clone();
-                return Ok(layout);
+                });
             }
         }
 
-        // Create new page if within budget
-        if self.pages.len() >= MAX_ATLAS_PAGES {
+        if self.pages.len() >= max_pages.min(MAX_ATLAS_PAGES) {
             return Err(BspReport::fatal(
-                DiagnosticCode::AllocationExceeded,
-                format!("lightmap atlas page budget {} exceeded", MAX_ATLAS_PAGES),
+                DiagnosticCode::AtlasPageOverflow,
+                format!("lightmap atlas page budget {} exceeded", max_pages),
             ));
         }
 
@@ -242,29 +289,21 @@ impl LightmapAtlas {
         let mut page = AtlasPage::new(page_index, ATLAS_PAGE_SIZE, ATLAS_PAGE_SIZE);
         let offset = page.allocate(w, h).ok_or_else(|| {
             BspReport::fatal(
-                DiagnosticCode::AllocationExceeded,
+                DiagnosticCode::AtlasPageOverflow,
                 "cannot fit luxel block even on new atlas page",
             )
         })?;
         page.write_luxels(offset, luxel_data, w, h);
         self.pages.push(page);
 
-        let layout = FaceLightmapLayout {
+        Ok(StyleLightmapLayout {
+            style_id,
+            layer_index,
             page_index,
             atlas_offset: offset,
             luxel_extents: (w, h),
             has_data: true,
-        };
-        while self.face_layouts.len() <= face_index as usize {
-            self.face_layouts.push(FaceLightmapLayout {
-                page_index: 0,
-                atlas_offset: (0, 0),
-                luxel_extents: (0, 0),
-                has_data: false,
-            });
-        }
-        self.face_layouts[face_index as usize] = layout.clone();
-        Ok(layout)
+        })
     }
 
     /// Get the face layout for a given face index.

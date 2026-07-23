@@ -16,12 +16,13 @@ pub mod tex_flags {
 }
 
 /// Classification of a BSP surface for rendering and collision.
+///
+/// Fullbright is per-pixel via the emissive mask, not a separate surface class.
+/// All lightmapped surfaces (Opaque) carry a fullbright mask overlaying the lightmap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SurfaceClass {
-    /// Standard opaque surface — rendered with lightmap.
+    /// Standard opaque surface — rendered with lightmap + fullbright mask overlay.
     Opaque,
-    /// Fullbright surface — emission regardless of lightmap.
-    Fullbright,
     /// Alpha-mask surface — alpha-tested (fences, grates).
     AlphaMask,
     /// Sky surface — depth-preserving, no lightmap.
@@ -46,7 +47,7 @@ impl SurfaceClass {
 
     /// Whether this surface class generates a collider.
     pub fn contributes_collision(self) -> bool {
-        matches!(self, SurfaceClass::Opaque | SurfaceClass::Fullbright | SurfaceClass::AlphaMask)
+        matches!(self, SurfaceClass::Opaque | SurfaceClass::AlphaMask)
     }
 
     /// Whether this surface class is a trigger sensor.
@@ -57,12 +58,12 @@ impl SurfaceClass {
     /// Get the render class for batch grouping.
     pub fn render_class(self) -> crate::geometry::RenderClass {
         match self {
-            SurfaceClass::Opaque | SurfaceClass::Fullbright => crate::geometry::RenderClass::Opaque,
+            SurfaceClass::Opaque => crate::geometry::RenderClass::Opaque,
             SurfaceClass::AlphaMask => crate::geometry::RenderClass::AlphaMask,
             SurfaceClass::Sky => crate::geometry::RenderClass::Sky,
             SurfaceClass::Liquid => crate::geometry::RenderClass::Liquid,
             SurfaceClass::NoDraw | SurfaceClass::Clip | SurfaceClass::Trigger | SurfaceClass::Skip => {
-                crate::geometry::RenderClass::Opaque // not rendered; class is unused
+                crate::geometry::RenderClass::Hidden
             }
         }
     }
@@ -245,6 +246,69 @@ pub fn material_identity(texture_index: u32, surface_class: SurfaceClass) -> u64
     ((texture_index as u64) << 8) | class_bits
 }
 
+/// BSP material descriptor — the neutral ABI between extraction and renderer.
+///
+/// Each material associates a resolved texture, fullbright mask, lightmap page,
+/// surface classification, animation data, and rendering metadata.
+#[derive(Debug, Clone)]
+pub struct BspMaterial {
+    /// Material index (stable within an extraction).
+    pub material_index: u32,
+    /// Resolved texture identity (name + source).
+    pub texture_identity: String,
+    /// Whether this material has an associated fullbright mask.
+    pub has_fullbright_mask: bool,
+    /// Fullbright mask dimensions (width, height), same as texture dimensions.
+    pub fullbright_mask_dims: (u32, u32),
+    /// Lightmap atlas page for this material (u32::MAX = no lightmap).
+    pub lightmap_page: u32,
+    /// Surface classification.
+    pub surface_class: SurfaceClass,
+    /// Whether this surface is alpha-masked (palette index 255 treated as alpha).
+    pub has_alpha_mask: bool,
+    /// Whether this surface uses warp animation (liquid).
+    pub has_warp: bool,
+    /// Whether this surface uses flowing animation.
+    pub has_flow: bool,
+    /// Transparency flags from texinfo.
+    pub trans33: bool,
+    pub trans66: bool,
+    /// Associated animation cycle (if any).
+    pub animation: Option<AnimatedTexture>,
+    /// Overbright factor from calibration.
+    pub overbright: f32,
+    /// Linear light scale from calibration.
+    pub light_scale: f32,
+    /// Receive mask defaults.
+    pub receive_ibl: bool,
+    pub receive_csm: bool,
+    pub receive_dynamic: bool,
+}
+
+impl Default for BspMaterial {
+    fn default() -> Self {
+        BspMaterial {
+            material_index: 0,
+            texture_identity: String::new(),
+            has_fullbright_mask: false,
+            fullbright_mask_dims: (0, 0),
+            lightmap_page: u32::MAX,
+            surface_class: SurfaceClass::Opaque,
+            has_alpha_mask: false,
+            has_warp: false,
+            has_flow: false,
+            trans33: false,
+            trans66: false,
+            animation: None,
+            overbright: 2.0,
+            light_scale: 1.0,
+            receive_ibl: false,
+            receive_csm: false,
+            receive_dynamic: true,
+        }
+    }
+}
+
 /// Collect unique surface classes from a set of faces.
 pub fn classify_faces(
     texinfos: &[lumps::Texinfo],
@@ -392,6 +456,7 @@ mod tests {
     #[test]
     fn surface_class_collision() {
         assert!(SurfaceClass::Opaque.contributes_collision());
+        assert!(SurfaceClass::AlphaMask.contributes_collision());
         assert!(!SurfaceClass::Sky.contributes_collision());
         assert!(!SurfaceClass::Liquid.contributes_collision());
         assert!(!SurfaceClass::NoDraw.contributes_collision());

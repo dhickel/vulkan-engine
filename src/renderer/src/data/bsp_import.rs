@@ -156,7 +156,7 @@ pub fn build_face_meshes(extracted: &ExtractedBsp) -> Vec<Option<ProceduralMeshD
     let mut meshes: Vec<Option<ProceduralMeshData>> = Vec::with_capacity(num_faces);
 
     for (fi, face_geo) in extracted.face_geometries.iter().enumerate() {
-        let sc = extracted.surface_classes.get(fi).copied();
+        let sc = extracted.face_materials.get(fi).map(|m| m.surface_class);
         let is_hidden = sc.map(|class| !class.is_visible()).unwrap_or(false);
 
         if is_hidden || !face_geo.is_valid {
@@ -305,7 +305,7 @@ pub fn build_bsp_material_descs(
     let mut descs: Vec<Option<BspMaterialDesc>> = Vec::with_capacity(num_faces);
 
     for fi in 0..num_faces {
-        let sc = extracted.surface_classes.get(fi).copied();
+        let sc = extracted.face_materials.get(fi).map(|m| m.surface_class);
         let is_hidden = sc.map(|class| !class.is_visible()).unwrap_or(false);
         let face_geo = &extracted.face_geometries[fi];
 
@@ -315,11 +315,10 @@ pub fn build_bsp_material_descs(
         }
 
         let bsp_class = match sc {
-            Some(bsp::materials::SurfaceClass::Fullbright) => BspSurfaceClass::Fullbright,
             Some(bsp::materials::SurfaceClass::AlphaMask) => BspSurfaceClass::AlphaMask,
             Some(bsp::materials::SurfaceClass::Sky) => BspSurfaceClass::Sky,
             Some(bsp::materials::SurfaceClass::Liquid) => BspSurfaceClass::Liquid,
-            // Opaque surfaces (standard lightmapped)
+            // Opaque surfaces (standard lightmapped with fullbright mask)
             _ => BspSurfaceClass::Lightmapped,
         };
 

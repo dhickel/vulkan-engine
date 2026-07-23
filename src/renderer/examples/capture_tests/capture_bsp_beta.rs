@@ -67,6 +67,29 @@ fn find_bsp_arg() -> std::path::PathBuf {
 }
 
 #[cfg(feature = "bsp")]
+fn load_palette_for_bsp(bsp_path: &std::path::Path) -> Result<bsp::resources::Palette, String> {
+    let candidates = [
+        bsp_path.with_file_name("project_palette.lmp"),
+        std::path::PathBuf::from("src/bsp/tests/fixtures/palettes/project_palette.lmp"),
+    ];
+    let path = candidates
+        .iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            format!(
+                "BSP extraction requires a palette; tried '{}' and '{}'",
+                candidates[0].display(),
+                candidates[1].display()
+            )
+        })?;
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("failed to read palette '{}': {err}", path.display()))?;
+    bsp::companions::validate_palette(&bytes, false)
+        .map_err(|report| format!("invalid palette '{}': {}", path.display(), report.message))?;
+    Ok(bsp::resources::decode_palette(&bytes))
+}
+
+#[cfg(feature = "bsp")]
 fn run_headless_capture_test(
     bsp_bytes: &[u8],
     bsp_path: &std::path::PathBuf,
@@ -115,7 +138,30 @@ fn run_headless_capture_test(
             return;
         }
     };
-    let extracted = bsp::extract::extract(&world, None);
+    let palette = match load_palette_for_bsp(bsp_path) {
+        Ok(palette) => palette,
+        Err(message) => {
+            log::error!("{message}");
+            return;
+        }
+    };
+    let extracted = match bsp::extract::extract(bsp::BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        strict: false,
+        ..Default::default()
+    }) {
+        Ok(extracted) => extracted,
+        Err(report) => {
+            log::error!(
+                "BSP extraction failed for '{}': {:?} — {}",
+                bsp_path.display(),
+                report.code,
+                report.message
+            );
+            return;
+        }
+    };
 
     log::info!(
         "BSP prepared: {} faces, {} entities, {} lights, {} batches, PVS={}",

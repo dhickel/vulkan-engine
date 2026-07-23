@@ -4,7 +4,7 @@
 
 use bsp::geometry::FaceGeometry;
 use bsp::lightmaps::{AtlasPage, FaceLightmapLayout, LightmapAtlas};
-use bsp::materials::SurfaceClass;
+use bsp::materials::{BspMaterial, SurfaceClass};
 use glam::{Vec2, Vec3};
 use renderer::api::bsp::{
     build_bsp_material_descs, build_face_meshes, face_to_procedural_mesh, BspLightmapAtlasPage,
@@ -150,13 +150,12 @@ fn make_extracted_with_atlas(atlas: LightmapAtlas) -> bsp::extract::ExtractedBsp
     bsp::extract::ExtractedBsp {
         transform: bsp::coords::QuakeToEngine::new(0.0254),
         profile_tag: "bsp29",
+        textures: vec![],
         face_geometries: vec![],
+        face_materials: vec![],
         render_batches: vec![],
         lightmap_atlas: atlas,
         face_lightmap_layouts: vec![],
-        surface_classes: vec![],
-        material_identities: vec![],
-        animated_textures: vec![],
         has_pvs: false,
         camera_pvs: None,
         leaf_membership: vec![],
@@ -168,7 +167,7 @@ fn make_extracted_with_atlas(atlas: LightmapAtlas) -> bsp::extract::ExtractedBsp
         collision_recipes: vec![],
         content_hash: [0u8; 32],
         source_identity: String::new(),
-        diagnostic_count: 0,
+        diagnostics: vec![],
     }
 }
 
@@ -189,13 +188,16 @@ fn nodraw_faces_produce_no_material_desc() {
         atlas_offset: (0, 0),
         luxel_extents: (16, 16),
         has_data: false,
+        style_layers: vec![],
     };
 
     let extracted = bsp::extract::ExtractedBsp {
         face_geometries: vec![face_geo],
+        face_materials: vec![BspMaterial {
+            surface_class: SurfaceClass::NoDraw,
+            ..BspMaterial::default()
+        }],
         face_lightmap_layouts: vec![layout],
-        surface_classes: vec![SurfaceClass::NoDraw],
-        material_identities: vec![0],
         lightmap_atlas: atlas,
         ..make_extracted_with_atlas(LightmapAtlas::new())
     };
@@ -227,13 +229,16 @@ fn opaque_face_produces_lightmapped_desc() {
         atlas_offset: (0, 0),
         luxel_extents: (16, 16),
         has_data: true,
+        style_layers: vec![],
     };
 
     let extracted = bsp::extract::ExtractedBsp {
         face_geometries: vec![face_geo],
+        face_materials: vec![BspMaterial {
+            surface_class: SurfaceClass::Opaque,
+            ..BspMaterial::default()
+        }],
         face_lightmap_layouts: vec![layout],
-        surface_classes: vec![SurfaceClass::Opaque],
-        material_identities: vec![0],
         lightmap_atlas: atlas,
         ..make_extracted_with_atlas(LightmapAtlas::new())
     };
@@ -276,12 +281,20 @@ fn build_face_meshes_skips_invalid_faces() {
 
     let extracted = bsp::extract::ExtractedBsp {
         face_geometries: vec![valid_face, invalid_face, nodraw_face],
-        surface_classes: vec![
-            SurfaceClass::Opaque,
-            SurfaceClass::Opaque,
-            SurfaceClass::NoDraw,
+        face_materials: vec![
+            BspMaterial {
+                surface_class: SurfaceClass::Opaque,
+                ..BspMaterial::default()
+            },
+            BspMaterial {
+                surface_class: SurfaceClass::Opaque,
+                ..BspMaterial::default()
+            },
+            BspMaterial {
+                surface_class: SurfaceClass::NoDraw,
+                ..BspMaterial::default()
+            },
         ],
-        material_identities: vec![0, 0, 0],
         ..make_extracted_with_atlas(LightmapAtlas::new())
     };
 
