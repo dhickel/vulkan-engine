@@ -15,14 +15,23 @@
 //! ```
 
 pub mod bspx;
+pub mod collision;
 pub mod companions;
+pub mod coords;
 pub mod decode;
 pub mod diagnostic;
 pub mod entities;
+pub mod extract;
+pub mod geometry;
+pub mod identity;
+pub mod lightmaps;
 pub mod limits;
 pub mod lumps;
+pub mod materials;
 pub mod profile;
+pub mod queries;
 pub mod resources;
+pub mod visibility;
 pub mod wad;
 pub mod world;
 
@@ -273,8 +282,17 @@ fn compute_content_hash(data: &[u8]) -> [u8; 32] {
 }
 
 // Re-export key types for convenience
+pub use coords::QuakeToEngine;
 pub use diagnostic::{BspReport, DiagnosticCode, Severity};
 pub use entities::{Entity, EntityClass, KeyValue};
+pub use extract::{ExtractedBsp, EntityDescriptor, InlineModelDescriptor, LightDescriptor, extract};
+pub use geometry::{FaceGeometry, BatchKey, RenderBatch, RenderClass, batch_faces, build_face_geometry};
+pub use lightmaps::{LightmapAtlas, AtlasPage, FaceLightmapLayout, Luxel, decode_lightmaps_monochrome, decode_lightmaps_rgb};
+pub use materials::{SurfaceClass, AnimatedTexture, AnimationCycleType, classify_surface, detect_animation, material_identity};
+pub use visibility::{PvsSet, PvsState, CameraLeafResult, camera_leaf_index, camera_pvs, camera_pvs_with_scale, build_leaf_membership};
+pub use queries::{PointContents, StoredHull, TraceResult, point_contents, point_contents_with_transform, trace_stored_hull};
+pub use collision::{ConvexPiece, CollisionRecipe, ConvexError, collect_clip_planes, convex_from_planes};
+pub use identity::{EntityIdentity, EntityFingerprint, IdentitySource, IdentityEvent, build_entity_identity, reconcile_identities};
 
 #[cfg(test)]
 mod tests {
