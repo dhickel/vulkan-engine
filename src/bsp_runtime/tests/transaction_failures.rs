@@ -725,3 +725,231 @@ fn poisioned_coordinator_rejects_all_operations() {
         Err(BspRuntimeError::CoordinatorPoisoned)
     ));
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Lifecycle Fault Injection — Rapid Replacement
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn rapid_replacement_three_times_no_leak() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    for i in 0..3 {
+        let result = coordinator.reload(
+            &bsp_bytes,
+            None,
+            &format!("maps/test{i}"),
+            &mut scene,
+            |_| empty_mount(),
+        );
+        assert!(result.is_ok(), "reload {i} failed");
+        assert!(coordinator.is_active());
+    }
+    // Should still be valid after three rapid replacements
+    let link = scene.bsp_source_link().unwrap();
+    assert_eq!(link["bsp_source"]["asset_id"], "maps/test2");
+}
+
+#[test]
+fn unload_then_reload_works() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/a", &mut scene, |_| empty_mount())
+        .unwrap();
+    coordinator.unload(&mut scene).unwrap();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/b", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+}
+
+#[test]
+fn stale_generation_mid_pipeline_rejected() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
+    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
+
+    // prepare1 token is stale — validate should fail
+    let result = coordinator.validate(prepare1.token);
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        BspRuntimeError::StaleGeneration { .. }
+    ));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Lifecycle Fault Injection — Readiness Failure
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn commit_without_set_renderer_ready_fails() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator.validate(prepare.token).unwrap();
+
+    // Commit without setting renderer mount ready
+    let result = coordinator.commit(prepare.token, &mut scene);
+    assert!(result.is_err());
+    assert!(!coordinator.is_poisoned());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Lifecycle Fault Injection — Hidden Install Interruption
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn prepare_then_rollback_then_prepare_again() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let _prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator.rollback().unwrap();
+
+    // After rollback, prepare again
+    let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
+    assert!(coordinator.staged_extraction().is_some());
+
+    coordinator
+        .set_renderer_mount_ready(prepare2.token, empty_mount())
+        .unwrap();
+    coordinator.validate(prepare2.token).unwrap();
+    let mut scene = Scene::new();
+    assert!(coordinator.commit(prepare2.token, &mut scene).is_ok());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Lifecycle Fault Injection — Shared Resources
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn shared_bridge_across_multiple_prepares() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator.register_bridge("shared", Box::new(NoopBridge::new("shared")));
+
+    // First prepare + commit
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare1.token, empty_mount())
+        .unwrap();
+    coordinator.validate(prepare1.token).unwrap();
+    coordinator.commit(prepare1.token, &mut scene).unwrap();
+
+    // Reload with same bridge
+    let result = coordinator.reload(&bsp_bytes, None, "maps/test2", &mut scene, |_| {
+        empty_mount()
+    });
+    assert!(result.is_ok());
+    assert!(coordinator.is_active());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Lifecycle Fault Injection — Shutdown Cleanup
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn teardown_on_clean_coordinator_is_idempotent() {
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+    coordinator.teardown(&mut scene);
+    coordinator.teardown(&mut scene); // second call should not panic
+    assert!(!coordinator.is_active());
+}
+
+#[test]
+fn teardown_on_active_coordinator_cleans_up() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    coordinator.teardown(&mut scene);
+    assert!(!coordinator.is_active());
+    assert!(scene.bsp_source_link().is_none());
+}
+
+#[test]
+fn teardown_on_poisoned_coordinator_does_not_panic() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    coordinator.register_bridge("panic", Box::new(PanicCommitBridge));
+    let mut scene = Scene::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator.validate(prepare.token).unwrap();
+    let _ = coordinator.commit_with_mount(prepare.token, &mut scene, empty_mount());
+    assert!(coordinator.is_poisoned());
+
+    // Teardown should NOT check poisoned flag
+    coordinator.teardown(&mut scene);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Frames-in-Flight Retirement
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn mount_commit_and_immediate_reload_retires_old_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Commit a mount
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/v1").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+    coordinator.validate(prepare.token).unwrap();
+    coordinator.commit(prepare.token, &mut scene).unwrap();
+
+    // Immediately reload — old mount should be retired
+    let result = coordinator.reload(&bsp_bytes, None, "maps/v2", &mut scene, |_| empty_mount());
+    assert!(result.is_ok());
+    let link = scene.bsp_source_link().unwrap();
+    assert_eq!(link["bsp_source"]["asset_id"], "maps/v2");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: Unsubmitted Cancellation
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn cancel_unsubmitted_candidate_via_new_prepare() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    // Prepare a candidate but never submit
+    let _prepare1 = coordinator
+        .prepare(&bsp_bytes, None, "maps/abandoned")
+        .unwrap();
+
+    // New prepare cancels the unsubmitted one
+    let prepare2 = coordinator
+        .prepare(&bsp_bytes, None, "maps/replacement")
+        .unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare2.token, empty_mount())
+        .unwrap();
+    coordinator.validate(prepare2.token).unwrap();
+
+    let mut scene = Scene::new();
+    assert!(coordinator.commit(prepare2.token, &mut scene).is_ok());
+}

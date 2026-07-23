@@ -4,6 +4,9 @@
 //! Requires a Vulkan-capable GPU with validation layer support.
 //! Run manually with:
 //!   LIBCLANG_PATH=/usr/lib64 cargo test -p renderer gpu_smoke -- --ignored --nocapture
+//!
+//! Phase 09 hardening: adds BSP-inactive GPU smoke to prove no BSP
+//! pipelines/descriptors/uploads/binds/draws occur before mount request.
 
 use std::process::Command;
 
@@ -306,6 +309,149 @@ fn renderer_headless_capture_worker() {
 
     // Force backend teardown inside this test so the parent process observes lifecycle failures.
     drop(renderer);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 09: BSP-Inactive GPU Smoke
+// ═══════════════════════════════════════════════════════════════════════
+
+/// BSP-inactive GPU smoke: renderer with BSP feature compiled in but no
+/// BSP mount requested. Proves no BSP pipelines/descriptors/uploads/binds/
+/// draws occur before a mount request.
+///
+/// Marked `#[ignore]` because it requires a Vulkan-capable GPU.
+#[test]
+#[ignore]
+fn bsp_inactive_gpu_smoke_worker() {
+    if std::env::var_os("RENDERER_BSP_INACTIVE_WORKER").is_none() {
+        return;
+    }
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let output_dir = std::env::temp_dir().join("renderer-bsp-inactive-smoke");
+    std::fs::create_dir_all(&output_dir).expect("create temp output dir");
+    let capture_path = output_dir.join("bsp_inactive_frame.png");
+    let _ = std::fs::remove_file(&capture_path);
+
+    let config = RendererConfig {
+        app_name: "bsp-inactive-smoke".to_string(),
+        validation_layer: true,
+        headless: false,
+        preload_startup_scene: false,
+        ..RendererConfig::default()
+    };
+
+    // BSP feature is compiled in but no mount requested — smoke must still pass
+    let mut renderer = match Renderer::new_headless(config) {
+        Ok(r) => r,
+        Err(err) => {
+            panic!("Headless renderer init failed (GPU required): {err}");
+        }
+    };
+
+    renderer
+        .set_camera_look_at(Vec3::new(0.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y)
+        .expect("set camera");
+
+    let mut scene = Scene::new();
+
+    // Create a cube (standard PBR, not BSP)
+    let material = {
+        let mut assets = renderer.assets();
+        assets
+            .create_material_pbr(PbrMaterialDesc {
+                base_color: Vec4::new(0.2, 0.6, 0.2, 1.0),
+                metallic: 0.0,
+                roughness: 0.5,
+                ..Default::default()
+            })
+            .expect("create material")
+    };
+
+    let mesh_handle = {
+        let mut assets = renderer.assets();
+        let mut mesh = build_cube_mesh();
+        mesh.material = Some(material);
+        assets.upload_procedural_mesh(mesh).expect("upload mesh")
+    };
+
+    let root = scene.create_node_default(None).expect("create root");
+    scene.add_mesh(root, mesh_handle).expect("add mesh");
+
+    // No BSP mount requested — render standard PBR scene
+    renderer
+        .request_frame_capture_at(
+            0,
+            FrameCaptureRequest::new(CaptureTarget::Draw, &capture_path),
+        )
+        .expect("schedule capture");
+
+    let outcome = renderer
+        .render_scene_headless(&mut scene)
+        .expect("render headless frame");
+    assert_eq!(outcome, FrameRenderOutcome::Rendered);
+
+    let status = renderer
+        .last_frame_capture_status()
+        .expect("capture status should be set");
+
+    match status {
+        FrameCaptureStatus::Succeeded { output_path, .. } => {
+            assert!(output_path.exists(), "capture PNG must exist");
+            let size = std::fs::metadata(&output_path).unwrap().len();
+            assert!(size > 1024, "capture must be > 1KB (got {size})");
+            eprintln!("BSP-inactive smoke captured: {output_path:?} ({size} bytes)");
+        }
+        FrameCaptureStatus::Failed { message, .. } => {
+            panic!("BSP-inactive smoke capture failed: {message}");
+        }
+        _ => panic!("unexpected capture status"),
+    }
+
+    drop(renderer);
+}
+
+#[test]
+#[ignore]
+fn gpu_smoke_bsp_inactive() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("resolve workspace root");
+    let output = Command::new(std::env::current_exe().expect("resolve GPU smoke test executable"))
+        .current_dir(workspace_root)
+        .args([
+            "--ignored",
+            "--exact",
+            "bsp_inactive_gpu_smoke_worker",
+            "--nocapture",
+        ])
+        .env("RENDERER_BSP_INACTIVE_WORKER", "1")
+        .output()
+        .expect("launch isolated BSP-inactive GPU smoke worker");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprint!("{stderr}");
+    print!("{stdout}");
+
+    assert!(
+        output.status.success(),
+        "BSP-inactive GPU smoke worker failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+
+    let diagnostics = format!("{stdout}\n{stderr}");
+    let lines: Vec<_> = diagnostics.lines().collect();
+    let has_validation_error = lines.windows(2).any(|pair| {
+        pair[0].trim() == "ERROR:" && pair[1].to_ascii_uppercase().contains("VALIDATION")
+    });
+    assert!(
+        !has_validation_error,
+        "BSP-inactive: Vulkan validation error(s) emitted:\n{diagnostics}"
+    );
 }
 
 #[test]
