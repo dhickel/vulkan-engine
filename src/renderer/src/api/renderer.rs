@@ -206,6 +206,7 @@ impl Renderer {
             config.compile_shaders,
             vk_debug_mode,
             config.preload_startup_scene,
+            config.startup_model_path.clone(),
             config.visual_tuning,
         )
         .map_err(|err| map_vk_init_err(err, config.compile_shaders))?;
@@ -251,6 +252,7 @@ impl Renderer {
             config.compile_shaders,
             vk_debug_mode,
             config.preload_startup_scene,
+            config.startup_model_path.clone(),
             config.visual_tuning,
         )
         .map_err(|err| map_vk_init_err(err, config.compile_shaders))?;

@@ -132,6 +132,14 @@ pub struct RendererConfig {
     /// When true, renderer preloads the built-in startup/debug scene during initialization.
     /// Disable this for app-driven scenes to reduce startup latency.
     pub preload_startup_scene: bool,
+    /// Optional path to a model file to load during startup.
+    ///
+    /// When `preload_startup_scene` is true and this is `None`, the renderer loads
+    /// the built-in default model (`DEFAULT_STARTUP_MODEL_PATH`). When `Some(path)`,
+    /// the given model is loaded instead. This is a renderer-owned startup/debug preload
+    /// intended for diagnostic and early-visualization scenarios; it is not a root project
+    /// scene selection mechanism.
+    pub startup_model_path: Option<PathBuf>,
     /// App-owned visual tuning applied consistently across skybox and IBL lighting.
     pub visual_tuning: VisualTuning,
     /// Reserved in v1. `true` currently returns `RendererError::Unsupported`.
@@ -149,6 +157,7 @@ impl Default for RendererConfig {
             shader_debug_mode: DebugRuntimeMode::Default,
             compile_shaders: false,
             preload_startup_scene: true,
+            startup_model_path: None,
             visual_tuning: VisualTuning::default(),
             headless: false,
             asset_policy: AssetPolicyConfig::default(),

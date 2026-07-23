@@ -1268,11 +1268,15 @@ impl VkRenderCore {
         render: &mut VkRenderCore,
         default_env_id: EnvironmentHandle,
         debug_runtime_mode: DebugRuntimeMode,
+        startup_model_path: Option<&std::path::Path>,
     ) -> Result<SceneWorld, String> {
+        let model_path = startup_model_path
+            .unwrap_or_else(|| std::path::Path::new(debug_scenarios::DEFAULT_STARTUP_MODEL_PATH));
         let force_unlit_materials = debug_runtime_mode == DebugRuntimeMode::TestUnlit;
         let mut loaded_scene = debug_scenarios::load_startup_scene(
             Arc::clone(&render.data_cache),
             force_unlit_materials,
+            model_path,
         )
         .map_err(|e| e.to_string())?;
 
@@ -1310,6 +1314,7 @@ impl VkRenderCore {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         Self::compile_shaders_if_requested(compile_shaders)?;
@@ -1488,7 +1493,12 @@ impl VkRenderCore {
         render.register_all_core_images();
 
         let scene_world = if preload_startup_scene {
-            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
+            Self::load_startup_scene(
+                &mut render,
+                default_env_id,
+                debug_runtime_mode,
+                startup_model_path.as_deref(),
+            )?
         } else {
             let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
             render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
@@ -1512,6 +1522,7 @@ impl VkRenderCore {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         Self::compile_shaders_if_requested(compile_shaders)?;
@@ -1687,7 +1698,12 @@ impl VkRenderCore {
         render.register_all_core_images();
 
         let scene_world = if preload_startup_scene {
-            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
+            Self::load_startup_scene(
+                &mut render,
+                default_env_id,
+                debug_runtime_mode,
+                startup_model_path.as_deref(),
+            )?
         } else {
             let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
             render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
@@ -1923,6 +1939,7 @@ impl VkRender {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         let (core, scene_world) = VkRenderCore::new(
@@ -1933,6 +1950,7 @@ impl VkRender {
             compile_shaders,
             debug_runtime_mode,
             preload_startup_scene,
+            startup_model_path,
             visual_tuning,
         )?;
 
@@ -1953,6 +1971,7 @@ impl VkRender {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         let (core, scene_world) = VkRenderCore::new_headless(
@@ -1962,6 +1981,7 @@ impl VkRender {
             compile_shaders,
             debug_runtime_mode,
             preload_startup_scene,
+            startup_model_path,
             visual_tuning,
         )?;
 

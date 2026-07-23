@@ -274,6 +274,7 @@ fn run() -> Result<(), AppError> {
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         preload_startup_scene: false,
+        startup_model_path: None,
         visual_tuning: renderer_visual_tuning(),
         headless: false,
         asset_policy: AssetPolicyConfig {
@@ -1058,6 +1059,7 @@ fn run_headless(
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         preload_startup_scene: false,
+        startup_model_path: None,
         visual_tuning: renderer_visual_tuning(),
         headless: true,
         asset_policy: AssetPolicyConfig {

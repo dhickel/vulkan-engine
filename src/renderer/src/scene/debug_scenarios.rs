@@ -6,6 +6,7 @@ use crate::api::AssetPolicyConfig;
 use crate::data::assimp_util::{self, AssimpImportError, ModelMeta};
 use crate::data::data_cache::VkDataCache;
 use crate::data::gpu_data::MaterialShadingModel;
+use std::path::Path;
 use std::sync::Arc;
 
 pub const DEFAULT_STARTUP_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHelmet.glb";
@@ -13,9 +14,16 @@ pub const DEFAULT_STARTUP_MODEL_PATH: &str = "src/renderer/src/assets/DamagedHel
 pub fn load_startup_scene(
     data_cache: Arc<VkDataCache>,
     force_unlit_materials: bool,
+    model_path: &Path,
 ) -> Result<ModelMeta, AssimpImportError> {
+    let path_str = model_path.to_str().ok_or_else(|| {
+        AssimpImportError::InvalidPath(format!(
+            "startup model path is not valid UTF-8: {}",
+            model_path.display()
+        ))
+    })?;
     let loaded_scene = assimp_util::load_model(
-        DEFAULT_STARTUP_MODEL_PATH,
+        path_str,
         data_cache.clone(),
         false,
         &AssetPolicyConfig::default(),
