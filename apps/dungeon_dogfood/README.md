@@ -83,9 +83,9 @@ RUST_LOG=info timeout --signal=INT 60s cargo run -p dungeon_dogfood -- \
   --level generated_sprawl \
   --headless \
   --capture_target draw \
-  --capture_frames=3 \
-  --capture_frame_start=5 \
-  --capture_frame_interval=5 \
+  --capture_frames 3 \
+  --capture_frame_start 5 \
+  --capture_frame_interval 5 \
   --capture_dir .internal-dev/captures/sprint-11-dogfood-vertical-slice/dogfood-baseline
 ```
 
@@ -97,7 +97,7 @@ Headless capture options:
 - `--capture_frame_interval <n>` -- frames between captures (default: 1)
 - `--capture_dir <dir>` -- output directory for captures
 
-Known/quarantined capture flag drift: dogfood's local parser currently accepts the space-form capture flags shown above (for example `--capture_frames 3`), while the example command still shows equals-form for sequence/count flags. This is documented debt and was not changed by the app-owned loop helper adoption.
+Known/quarantined capture flag drift: dogfood's local parser currently accepts the space-form capture flags shown above (for example `--capture_frames 3`) and does not accept equals-form sequence/count flags. This parser debt was not changed by the app-owned loop helper adoption.
 
 ## Audio Smoke
 

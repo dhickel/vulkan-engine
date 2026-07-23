@@ -1268,11 +1268,15 @@ impl VkRenderCore {
         render: &mut VkRenderCore,
         default_env_id: EnvironmentHandle,
         debug_runtime_mode: DebugRuntimeMode,
+        startup_model_path: Option<&std::path::Path>,
     ) -> Result<SceneWorld, String> {
+        let model_path = startup_model_path
+            .unwrap_or_else(|| std::path::Path::new(debug_scenarios::DEFAULT_STARTUP_MODEL_PATH));
         let force_unlit_materials = debug_runtime_mode == DebugRuntimeMode::TestUnlit;
         let mut loaded_scene = debug_scenarios::load_startup_scene(
             Arc::clone(&render.data_cache),
             force_unlit_materials,
+            model_path,
         )
         .map_err(|e| e.to_string())?;
 
@@ -1310,6 +1314,7 @@ impl VkRenderCore {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         Self::compile_shaders_if_requested(compile_shaders)?;
@@ -1488,7 +1493,12 @@ impl VkRenderCore {
         render.register_all_core_images();
 
         let scene_world = if preload_startup_scene {
-            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
+            Self::load_startup_scene(
+                &mut render,
+                default_env_id,
+                debug_runtime_mode,
+                startup_model_path.as_deref(),
+            )?
         } else {
             let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
             render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
@@ -1512,6 +1522,7 @@ impl VkRenderCore {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         Self::compile_shaders_if_requested(compile_shaders)?;
@@ -1687,7 +1698,12 @@ impl VkRenderCore {
         render.register_all_core_images();
 
         let scene_world = if preload_startup_scene {
-            Self::load_startup_scene(&mut render, default_env_id, debug_runtime_mode)?
+            Self::load_startup_scene(
+                &mut render,
+                default_env_id,
+                debug_runtime_mode,
+                startup_model_path.as_deref(),
+            )?
         } else {
             let startup_loader = Self::run_startup_load_worker(Arc::clone(&render.data_cache));
             render.pump_transfer_until_startup_done(&startup_loader, Duration::from_secs(30))?;
@@ -1923,6 +1939,7 @@ impl VkRender {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         let (core, scene_world) = VkRenderCore::new(
@@ -1933,6 +1950,7 @@ impl VkRender {
             compile_shaders,
             debug_runtime_mode,
             preload_startup_scene,
+            startup_model_path,
             visual_tuning,
         )?;
 
@@ -1953,6 +1971,7 @@ impl VkRender {
         compile_shaders: bool,
         debug_runtime_mode: DebugRuntimeMode,
         preload_startup_scene: bool,
+        startup_model_path: Option<std::path::PathBuf>,
         visual_tuning: VisualTuning,
     ) -> Result<(Self, SceneWorld), String> {
         let (core, scene_world) = VkRenderCore::new_headless(
@@ -1962,6 +1981,7 @@ impl VkRender {
             compile_shaders,
             debug_runtime_mode,
             preload_startup_scene,
+            startup_model_path,
             visual_tuning,
         )?;
 
@@ -2849,7 +2869,7 @@ impl VkRenderCore {
                 .data_cache
                 .environment_cache
                 .lock()
-                .expect("environment_cache lock poisoned");
+                .map_err(|e| format!("env cache lock poisoned during skybox upload: {}", e))?;
             env_cache.take_unloaded_source(env_id).map_err(|err| {
                 format!(
                     "Failed to query skybox cubemap state for env {:?}: {:?}",
@@ -2871,7 +2891,7 @@ impl VkRenderCore {
                     bytes,
                 } => vk_util::upload_cubemap_faces(
                     &self.device,
-                    &self.allocator.lock().expect("allocator lock poisoned"),
+                    &self.allocator,
                     face_size,
                     format,
                     bytes,
@@ -2884,10 +2904,11 @@ impl VkRenderCore {
                     format,
                     bytes,
                 } => {
-                    // Upload equirect source as 2D texture
+                    // Upload equirect source as 2D texture. The helper locks the allocator only
+                    // around VMA calls so the upload wait does not hold the allocator mutex.
                     let (src_image, src_sampler) = vk_util::upload_texture_2d(
                         &self.device,
-                        &self.allocator.lock().expect("allocator lock poisoned"),
+                        &self.allocator,
                         width,
                         height,
                         format,
@@ -2911,18 +2932,36 @@ impl VkRenderCore {
                     // A lost device invalidates every subsequent driver/VMA teardown call.
                     // Leak these temporary handles in that terminal state; the OS/driver will
                     // reclaim them with the process.
-                    if !self.device_is_lost() {
+                    let cleanup_result = if self.device_is_lost() {
+                        Ok(())
+                    } else {
                         unsafe {
                             self.device.destroy_sampler(src_sampler, None);
                         }
                         let mut src_img = src_image;
-                        src_img.destroy(
-                            &self.device,
-                            &self.allocator.lock().expect("allocator lock poisoned"),
-                        );
-                    }
+                        self.allocator
+                            .lock()
+                            .map_err(|e| {
+                                format!(
+                                    "allocator lock poisoned during equirect source cleanup: {}",
+                                    e
+                                )
+                            })
+                            .map(|alloc_guard| src_img.destroy(&self.device, &*alloc_guard))
+                    };
 
-                    result.map_err(|e| format!("Equirect-to-cubemap conversion failed: {}", e))
+                    match (result, cleanup_result) {
+                        (Ok(cube_map), Ok(())) => Ok(cube_map),
+                        (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+                        (Err(upload_err), Ok(())) => Err(format!(
+                            "Equirect-to-cubemap conversion failed: {}",
+                            upload_err
+                        )),
+                        (Err(upload_err), Err(cleanup_err)) => Err(format!(
+                            "Equirect-to-cubemap conversion failed: {}; cleanup failed: {}",
+                            upload_err, cleanup_err
+                        )),
+                    }
                 }
             }
         })();
@@ -2934,12 +2973,21 @@ impl VkRenderCore {
                     .data_cache
                     .environment_cache
                     .lock()
-                    .expect("environment_cache lock poisoned")
-                    .restore_unloaded_source(env_id, rollback_source);
+                    .map_err(|e| {
+                        format!(
+                            "env cache lock poisoned during skybox source restore: {}",
+                            e
+                        )
+                    })
+                    .and_then(|mut env_cache| {
+                        env_cache
+                            .restore_unloaded_source(env_id, rollback_source)
+                            .map_err(|restore_err| format!("{restore_err:?}"))
+                    });
                 return match restore_result {
                     Ok(()) => Err(upload_err),
                     Err(restore_err) => Err(format!(
-                        "{upload_err}; additionally failed to restore skybox source for retry: {restore_err:?}"
+                        "{upload_err}; additionally failed to restore skybox source for retry: {restore_err}"
                     )),
                 };
             }
@@ -2948,7 +2996,7 @@ impl VkRenderCore {
         self.data_cache
             .environment_cache
             .lock()
-            .expect("environment_cache lock poisoned")
+            .map_err(|e| format!("env cache lock poisoned during skybox store: {}", e))?
             .store_loaded_cube_map(env_id, cube_map)
             .map_err(|err| {
                 format!(
@@ -2967,7 +3015,7 @@ impl VkRenderCore {
                 .data_cache
                 .environment_cache
                 .lock()
-                .expect("environment_cache lock poisoned");
+                .map_err(|e| format!("env cache lock poisoned during env map check: {}", e))?;
             env_cache
                 .get_env_map(env_id)
                 .map_err(|err| format!("Failed to query env maps for {:?}: {:?}", env_id, err))?
@@ -2979,11 +3027,9 @@ impl VkRenderCore {
         }
 
         let (skybox_view, skybox_sampler) = {
-            let env_cache = self
-                .data_cache
-                .environment_cache
-                .lock()
-                .expect("environment_cache lock poisoned");
+            let env_cache = self.data_cache.environment_cache.lock().map_err(|e| {
+                format!("env cache lock poisoned during skybox handle query: {}", e)
+            })?;
             env_cache
                 .get_loaded_cube_map_handles(env_id)
                 .map_err(|err| format!("Failed to query skybox env {:?}: {:?}", env_id, err))?
@@ -2994,7 +3040,7 @@ impl VkRenderCore {
         self.data_cache
             .environment_cache
             .lock()
-            .expect("environment_cache lock poisoned")
+            .map_err(|e| format!("env cache lock poisoned during env map storage: {}", e))?
             .add_env_maps(env_id, generated_maps)
             .map_err(|err| format!("Failed to store generated env maps: {:?}", err))?;
         Ok(())
@@ -3007,11 +3053,12 @@ impl VkRenderCore {
         }
 
         let (image_view, sampler) = {
-            let env_cache = self
-                .data_cache
-                .environment_cache
-                .lock()
-                .expect("environment_cache lock poisoned");
+            let env_cache = self.data_cache.environment_cache.lock().map_err(|e| {
+                format!(
+                    "env cache lock poisoned during skybox descriptor setup: {}",
+                    e
+                )
+            })?;
             env_cache
                 .get_loaded_cube_map_handles(env_id)
                 .map_err(|err| format!("Failed to fetch skybox env {:?}: {:?}", env_id, err))?
@@ -3059,11 +3106,12 @@ impl VkRenderCore {
         }
 
         let scene_descriptors = {
-            let env_cache = self
-                .data_cache
-                .environment_cache
-                .lock()
-                .expect("environment_cache lock poisoned");
+            let env_cache = self.data_cache.environment_cache.lock().map_err(|e| {
+                format!(
+                    "env cache lock poisoned during scene descriptor setup: {}",
+                    e
+                )
+            })?;
             let env_maps = env_cache
                 .get_env_map(env_id)
                 .map_err(|err| format!("Failed to fetch env maps for {:?}: {:?}", env_id, err))?
@@ -3104,7 +3152,12 @@ impl VkRenderCore {
 
             VkSceneDescriptors::new(
                 &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
+                &*self.allocator.lock().map_err(|e| {
+                    format!(
+                        "allocator lock poisoned during scene descriptor allocation: {}",
+                        e
+                    )
+                })?,
                 self.buffer_and_desc_limits
                     .min_uniform_buffer_offset_alignment,
                 self.vulkan_cache.desc_layouts.get(VkDescType::SceneData),
@@ -3129,7 +3182,12 @@ impl VkRenderCore {
             .data_cache
             .mesh_cache
             .lock()
-            .expect("mesh_cache lock poisoned")
+            .map_err(|e| {
+                format!(
+                    "mesh cache lock poisoned during skybox vertex address caching: {}",
+                    e
+                )
+            })?
             .get_loaded_id(MeshCache::SKYBOX_MESH)
             .map_err(|err| format!("Failed to fetch skybox mesh: {:?}", err))?;
         self.sky_box.skybox_consts.vertex_buffer_addr =
@@ -3208,7 +3266,12 @@ impl VkRenderCore {
             .data_cache
             .mesh_cache
             .lock()
-            .expect("mesh_cache lock poisoned")
+            .map_err(|e| {
+                format!(
+                    "mesh cache lock poisoned during skybox mesh draw info: {}",
+                    e
+                )
+            })?
             .get_loaded_id(MeshCache::SKYBOX_MESH)
             .map_err(|err| {
                 format!(
@@ -3368,14 +3431,21 @@ impl VkRenderCore {
             height: dim,
         };
 
+        let alloc_guard = self.allocator.lock().map_err(|e| {
+            format!(
+                "allocator lock poisoned during env target offscreen image creation: {}",
+                e
+            )
+        })?;
         let mut offscreen_image = vk_util::create_image(
             &self.device,
-            &self.allocator.lock().expect("allocator lock poisoned"),
+            &*alloc_guard,
             vk::Extent3D::from(dim_extent).depth(1),
             format,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
             1,
         )?;
+        drop(alloc_guard);
 
         let generation_result = (|| -> Result<(VkCubeMap, f32), String> {
             let mut viewport = [vk::Viewport {
@@ -3404,13 +3474,15 @@ impl VkRenderCore {
                 1.0
             };
 
-            let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-                format,
-                dim,
-                mips_count,
-            )?;
+            let alloc_guard = self.allocator.lock().map_err(|e| {
+                format!(
+                    "allocator lock poisoned during env target cubemap creation: {}",
+                    e
+                )
+            })?;
+            let (cubemap_image, cubemap_sampler) =
+                vk_util::create_cubemap(&self.device, &*alloc_guard, format, dim, mips_count)?;
+            drop(alloc_guard);
 
             let matrices = Self::cubemap_capture_matrices();
 
@@ -3603,12 +3675,19 @@ impl VkRenderCore {
         if let Err(message) = &generation_result {
             self.mark_device_lost_from_message(message);
         }
-        if !self.device_is_lost() {
-            offscreen_image.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
-        }
+        let cleanup_result = if self.device_is_lost() {
+            Ok(())
+        } else {
+            self.allocator
+                .lock()
+                .map_err(|e| {
+                    format!(
+                        "allocator lock poisoned during env target offscreen cleanup: {}",
+                        e
+                    )
+                })
+                .map(|alloc_guard| offscreen_image.destroy(&self.device, &*alloc_guard))
+        };
 
         let target_end = SystemTime::now()
             .duration_since(target_start)
@@ -3619,7 +3698,14 @@ impl VkRenderCore {
             target, target_end
         );
 
-        generation_result
+        match (generation_result, cleanup_result) {
+            (Ok(generated), Ok(())) => Ok(generated),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+            (Err(primary_err), Ok(())) => Err(primary_err),
+            (Err(primary_err), Err(cleanup_err)) => {
+                Err(format!("{primary_err}; cleanup failed: {cleanup_err}"))
+            }
+        }
     }
 
     /// Convert an equirectangular 2D source image to a cubemap via GPU rendering.
@@ -3674,23 +3760,37 @@ impl VkRenderCore {
             width: cube_dim,
             height: cube_dim,
         };
+        let alloc_guard = self.allocator.lock().map_err(|e| {
+            format!(
+                "allocator lock poisoned during equirect convert offscreen creation: {}",
+                e
+            )
+        })?;
         let mut offscreen_image = vk_util::create_image(
             &self.device,
-            &self.allocator.lock().expect("allocator lock poisoned"),
+            &*alloc_guard,
             vk::Extent3D::from(dim_extent).depth(1),
             cube_format,
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
             1,
         )?;
+        drop(alloc_guard);
 
         let generation_result = (|| -> Result<VkCubeMap, String> {
+            let alloc_guard = self.allocator.lock().map_err(|e| {
+                format!(
+                    "allocator lock poisoned during equirect convert cubemap creation: {}",
+                    e
+                )
+            })?;
             let (cubemap_image, cubemap_sampler) = vk_util::create_cubemap(
                 &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
+                &*alloc_guard,
                 cube_format,
                 cube_dim,
                 1, // single mip level for skybox source
             )?;
+            drop(alloc_guard);
 
             let viewport = [vk::Viewport {
                 x: 0.0,
@@ -3861,15 +3961,31 @@ impl VkRenderCore {
         if let Err(message) = &generation_result {
             self.mark_device_lost_from_message(message);
         }
-        if !self.device_is_lost() {
-            offscreen_image.destroy(
-                &self.device,
-                &self.allocator.lock().expect("allocator lock poisoned"),
-            );
+        let cleanup_result = if self.device_is_lost() {
+            Ok(())
+        } else {
+            let result = self
+                .allocator
+                .lock()
+                .map_err(|e| {
+                    format!(
+                        "allocator lock poisoned during equirect convert offscreen cleanup: {}",
+                        e
+                    )
+                })
+                .map(|alloc_guard| offscreen_image.destroy(&self.device, &*alloc_guard));
             desc_pool.destroy(&self.device);
-        }
+            result
+        };
 
-        generation_result
+        match (generation_result, cleanup_result) {
+            (Ok(generated), Ok(())) => Ok(generated),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+            (Err(primary_err), Ok(())) => Err(primary_err),
+            (Err(primary_err), Err(cleanup_err)) => {
+                Err(format!("{primary_err}; cleanup failed: {cleanup_err}"))
+            }
+        }
     }
 
     pub fn generate_environment(

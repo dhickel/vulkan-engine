@@ -786,6 +786,7 @@ fn run_windowed(
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         preload_startup_scene: false,
+        startup_model_path: None,
         visual_tuning: VisualTuning {
             exposure: 4.0,
             gamma: 2.2,
@@ -1092,6 +1093,7 @@ fn run_headless(
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         preload_startup_scene: false,
+        startup_model_path: None,
         visual_tuning: VisualTuning {
             exposure: 4.0,
             gamma: 2.2,
@@ -1457,6 +1459,7 @@ fn run_windowed_v2(
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         preload_startup_scene: false,
+        startup_model_path: None,
         visual_tuning: VisualTuning {
             exposure: 4.0,
             gamma: 2.2,
@@ -1798,6 +1801,7 @@ fn run_headless_v2(
         compile_shaders: false,
         shader_debug_mode: renderer::DebugRuntimeMode::Default,
         preload_startup_scene: false,
+        startup_model_path: None,
         visual_tuning: VisualTuning {
             exposure: 4.0,
             gamma: 2.2,

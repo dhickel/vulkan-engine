@@ -250,6 +250,9 @@ pub(crate) struct SwapchainOwner {
     pending_resize: Option<ResizeRequest>,
     /// Sequence of the last successfully installed request.
     installed_sequence: u64,
+    /// Tracks consecutive frames where swapchain acquire exhausted its retry budget.
+    /// Used to suppress duplicate warning spam under sustained acquire starvation (MAILBOX).
+    pub(crate) acquire_retry_exhausted: bool,
 }
 
 impl SwapchainOwner {
@@ -269,6 +272,7 @@ impl SwapchainOwner {
             state: SwapchainState::Current { generation: gen },
             pending_resize: None,
             installed_sequence: 0,
+            acquire_retry_exhausted: false,
         }
     }
 
@@ -280,6 +284,7 @@ impl SwapchainOwner {
             state: SwapchainState::Absent,
             pending_resize: None,
             installed_sequence: 0,
+            acquire_retry_exhausted: false,
         }
     }
 

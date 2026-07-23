@@ -174,7 +174,7 @@ Metallic is fixed to zero. ARM, metallic, and height files are excluded. KB3D re
 CpuScenePackage
 ├── Option<CpuMesh> wall_mesh
 ├── Option<CpuMesh> floor_mesh
-├── Vec<CpuLightDescriptor> (five mandatory site + up to four midpoint lights)
+├── Vec<CpuLightDescriptor> (nine mandatory generator anchors: five CoreLight + four BackboneLight)
 ├── Vec<CpuViewpoint> (five core roles)
 ├── GeometryIdentity / SceneConfigIdentity
 ├── asset digest map

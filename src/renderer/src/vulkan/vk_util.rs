@@ -631,6 +631,56 @@ pub fn blit_copy_image_to_image(
     unsafe { device.cmd_blit_image2(cmd, &blit_info) }
 }
 
+/// Derive narrow stage and access masks for a layout transition barrier.
+///
+/// Uses the same layout-to-state policy as [`tracked_state_for_layout`]
+/// so that source and destination pipeline stages and memory access scopes
+/// are the narrowest valid combination. Falls back to `ALL_COMMANDS` +
+/// `MEMORY_READ | MEMORY_WRITE` for [`ImageLayout::GENERAL`] and unknown
+/// layouts.
+fn layout_transition_masks(
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> (
+    vk::PipelineStageFlags2,
+    vk::AccessFlags2,
+    vk::PipelineStageFlags2,
+    vk::AccessFlags2,
+) {
+    // queue_family = 0 is fine — the caller does not set ownership fields.
+    let old = tracked_state_for_layout(old_layout, 0);
+    let new = tracked_state_for_layout(new_layout, 0);
+    (old.stage, old.access, new.stage, new.access)
+}
+
+/// Select an [`ImageAspectFlags`] appropriate for the transition.
+///
+/// Consults both old and new layouts so that depth / depth-stencil images
+/// are not misidentified as colour just because the destination layout is
+/// shader-read or transfer.
+fn aspect_mask_for_transition(
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> vk::ImageAspectFlags {
+    let is_depth_stencil =
+        |l: vk::ImageLayout| matches!(l, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let is_depth = |l: vk::ImageLayout| {
+        matches!(
+            l,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
+                | vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        )
+    };
+
+    if is_depth_stencil(old_layout) || is_depth_stencil(new_layout) {
+        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+    } else if is_depth(old_layout) || is_depth(new_layout) {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
+    }
+}
+
 pub fn transition_image(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -638,17 +688,15 @@ pub fn transition_image(
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
 ) {
-    let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
-        vk::ImageAspectFlags::DEPTH
-    } else {
-        vk::ImageAspectFlags::COLOR
-    };
+    let aspect_mask = aspect_mask_for_transition(old_layout, new_layout);
+    let (src_stage, src_access, dst_stage, dst_access) =
+        layout_transition_masks(old_layout, new_layout);
 
     let image_barrier = [vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
         .old_layout(old_layout)
         .new_layout(new_layout)
         .subresource_range(image_subresource_range(aspect_mask))
@@ -669,17 +717,15 @@ pub fn transition_image_layered(
     layer_count: u32,
     mips_level: u32,
 ) {
-    let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
-        vk::ImageAspectFlags::DEPTH
-    } else {
-        vk::ImageAspectFlags::COLOR
-    };
+    let aspect_mask = aspect_mask_for_transition(old_layout, new_layout);
+    let (src_stage, src_access, dst_stage, dst_access) =
+        layout_transition_masks(old_layout, new_layout);
 
     let image_barrier = [vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
         .old_layout(old_layout)
         .new_layout(new_layout)
         .subresource_range(vk::ImageSubresourceRange {
@@ -1085,7 +1131,7 @@ pub fn get_format_size(format: vk::Format) -> u32 {
 
 pub fn upload_skybox(
     device: &ash::Device,
-    allocator: &Allocator,
+    allocator: &Arc<Mutex<Allocator>>,
     tex_meta: TextureMeta,
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
@@ -1093,11 +1139,16 @@ pub fn upload_skybox(
     let face_width = tex_meta.payload.width() / 6;
     let format_size = get_format_size(tex_meta.payload.format());
 
-    let staging_buffer = allocate_and_write_buffer(
-        allocator,
-        tex_meta.payload.bytes(),
-        vk::BufferUsageFlags::TRANSFER_SRC,
-    )?;
+    let staging_buffer = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during skybox staging upload allocation: {e}")
+        })?;
+        allocate_and_write_buffer(
+            &allocator,
+            tex_meta.payload.bytes(),
+            vk::BufferUsageFlags::TRANSFER_SRC,
+        )?
+    };
 
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
@@ -1128,22 +1179,27 @@ pub fn upload_skybox(
         ..Default::default()
     };
 
-    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
-    let (allocation, _device_memory, _alloc_offset) = unsafe {
-        let alloc = allocator
-            .allocate_memory_for_image(image, &alloc_info)
-            .map_err(|err| format!("failed to allocate skybox image memory: {err:?}"))?;
+    let (allocation, device_memory, alloc_offset) = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during skybox image memory allocation: {e}")
+        })?;
+        // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
+        unsafe {
+            let alloc = allocator
+                .allocate_memory_for_image(image, &alloc_info)
+                .map_err(|err| format!("failed to allocate skybox image memory: {err:?}"))?;
 
-        let alloc_info = allocator.get_allocation_info(&alloc);
-        let device_memory = alloc_info.device_memory;
-        let offset = alloc_info.offset;
-
-        device
-            .bind_image_memory(image, device_memory, offset)
-            .map_err(|err| format!("failed to bind skybox image memory: {err:?}"))?;
-
-        (alloc, device_memory, offset)
+            let alloc_info = allocator.get_allocation_info(&alloc);
+            (alloc, alloc_info.device_memory, alloc_info.offset)
+        }
     };
+
+    // SAFETY: Vulkan image and allocation metadata were created above and are valid for binding.
+    unsafe {
+        device
+            .bind_image_memory(image, device_memory, alloc_offset)
+            .map_err(|err| format!("failed to bind skybox image memory: {err:?}"))?;
+    }
 
     let cmd_buffer = transfer_pool
         .primary("transfer_skybox_upload")
@@ -1264,7 +1320,12 @@ pub fn upload_skybox(
             .create_image_view(&view_create_info, None)
             .map_err(|err| format!("failed to create skybox image view: {err:?}"))?;
 
-        destroy_buffer(allocator, staging_buffer);
+        {
+            let allocator = allocator.lock().map_err(|e| {
+                format!("allocator lock poisoned during skybox staging upload cleanup: {e}")
+            })?;
+            destroy_buffer(&allocator, staging_buffer);
+        }
 
         Ok(VkCubeMap {
             allocation,
@@ -1281,7 +1342,7 @@ pub fn upload_skybox(
 /// each face being `face_size x face_size` pixels in the specified format.
 pub fn upload_cubemap_faces(
     device: &ash::Device,
-    allocator: &Allocator,
+    allocator: &Arc<Mutex<Allocator>>,
     face_size: u32,
     format: vk::Format,
     bytes: Vec<u8>,
@@ -1308,7 +1369,7 @@ pub fn upload_cubemap_faces(
 /// Used for staging equirectangular source images before GPU conversion.
 pub fn upload_texture_2d(
     device: &ash::Device,
-    allocator: &Allocator,
+    allocator: &Arc<Mutex<Allocator>>,
     width: u32,
     height: u32,
     format: vk::Format,
@@ -1316,8 +1377,12 @@ pub fn upload_texture_2d(
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
 ) -> Result<(VkImageAlloc, vk::Sampler), String> {
-    let staging_buffer =
-        allocate_and_write_buffer(allocator, bytes, vk::BufferUsageFlags::TRANSFER_SRC)?;
+    let staging_buffer = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during 2D texture staging allocation: {e}")
+        })?;
+        allocate_and_write_buffer(&allocator, bytes, vk::BufferUsageFlags::TRANSFER_SRC)?
+    };
 
     let extent = vk::Extent3D {
         width,
@@ -1325,14 +1390,19 @@ pub fn upload_texture_2d(
         depth: 1,
     };
 
-    let image = create_image(
-        device,
-        allocator,
-        extent,
-        format,
-        vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-        1,
-    )?;
+    let image = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during 2D texture image allocation: {e}")
+        })?;
+        create_image(
+            device,
+            &allocator,
+            extent,
+            format,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            1,
+        )?
+    };
 
     let cmd_buffer = transfer_pool
         .primary("transfer_texture_2d_upload")
@@ -1395,7 +1465,12 @@ pub fn upload_texture_2d(
             .device_wait_idle()
             .map_err(|err| format!("2D texture upload device_wait_idle failed: {err:?}"))?;
 
-        destroy_buffer(allocator, staging_buffer);
+        {
+            let allocator = allocator.lock().map_err(|e| {
+                format!("allocator lock poisoned during 2D texture staging cleanup: {e}")
+            })?;
+            destroy_buffer(&allocator, staging_buffer);
+        }
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
@@ -2439,7 +2514,8 @@ pub fn record_image_barrier(
 #[cfg(test)]
 mod tests {
     use super::{
-        queue_family_indices_for_barrier, resolve_upload_mip_levels, FrameTransitionOverlay,
+        aspect_mask_for_transition, layout_transition_masks, queue_family_indices_for_barrier,
+        resolve_upload_mip_levels, FrameTransitionOverlay,
     };
     use crate::vulkan::vk_types::{
         ImageStateTracker, ImageSubresourceKey, TrackedSubresourceState,
@@ -2543,6 +2619,126 @@ mod tests {
         assert_eq!(range.level_count, 4);
         assert_eq!(range.base_array_layer, 0);
         assert_eq!(range.layer_count, 6);
+    }
+
+    #[test]
+    fn layout_transition_masks_use_narrow_known_layout_pairs() {
+        let cases = [
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+            (
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_READ,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            ),
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
+            (
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            (
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+            ),
+            (
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+        ];
+
+        for (layout, expected_stage, expected_access) in cases {
+            let (src_stage, src_access, dst_stage, dst_access) =
+                layout_transition_masks(layout, layout);
+            assert_eq!(src_stage, expected_stage, "source stage for {layout:?}");
+            assert_eq!(src_access, expected_access, "source access for {layout:?}");
+            assert_eq!(
+                dst_stage, expected_stage,
+                "destination stage for {layout:?}"
+            );
+            assert_eq!(
+                dst_access, expected_access,
+                "destination access for {layout:?}"
+            );
+            assert_ne!(
+                expected_stage,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                "known layout should not use ALL_COMMANDS: {layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_transition_masks_fall_back_for_general_and_unknown_layouts() {
+        for layout in [vk::ImageLayout::GENERAL, vk::ImageLayout::from_raw(0x4d2)] {
+            let (src_stage, src_access, dst_stage, dst_access) =
+                layout_transition_masks(layout, layout);
+            assert_eq!(src_stage, vk::PipelineStageFlags2::ALL_COMMANDS);
+            assert_eq!(dst_stage, vk::PipelineStageFlags2::ALL_COMMANDS);
+            assert_eq!(
+                src_access,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+            );
+            assert_eq!(
+                dst_access,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+            );
+        }
+    }
+
+    #[test]
+    fn aspect_mask_for_transition_uses_depth_stencil_depth_then_color_precedence() {
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::COLOR
+        );
     }
 
     #[test]
