@@ -23,6 +23,12 @@ pub struct CliArgs {
     pub capture_frames: u32,
     /// Whether to log imported light descriptors at startup.
     pub show_lights: bool,
+    /// Path to a 768-byte palette .lmp file.
+    pub palette_path: Option<PathBuf>,
+    /// Path to a .lit colored-light companion file.
+    pub lit_path: Option<PathBuf>,
+    /// Directory to auto-discover .lit and palette companions next to the .bsp.
+    pub companion_dir: Option<PathBuf>,
 }
 
 /// CLI parse failure with usage-facing wording.
@@ -33,6 +39,7 @@ pub enum CliError {
     NonFiniteScale(String),
     InvalidCaptureFrames(String),
     UnknownArgument(String),
+    PaletteNotFound(String),
 }
 
 impl fmt::Display for CliError {
@@ -58,6 +65,7 @@ impl fmt::Display for CliError {
                 )
             }
             CliError::UnknownArgument(arg) => write!(f, "unknown argument: {arg}"),
+            CliError::PaletteNotFound(path) => write!(f, "palette file not found: {path}"),
         }
     }
 }
@@ -76,6 +84,66 @@ impl CliArgs {
             }
         }
     }
+
+    /// Resolve the effective palette path from explicit arg, companion dir, or default search.
+    pub fn resolve_palette_path(&self) -> Result<PathBuf, CliError> {
+        if let Some(ref p) = self.palette_path {
+            if p.is_file() {
+                return Ok(p.clone());
+            }
+            return Err(CliError::PaletteNotFound(p.display().to_string()));
+        }
+        if let Some(ref dir) = self.companion_dir {
+            let candidate = dir.join("palette.lmp");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+        // Auto-discover next to the .bsp
+        if let Some(ref bsp) = self.bsp_path {
+            for name in &["palette.lmp", "project_palette.lmp"] {
+                let candidate = bsp.with_file_name(name);
+                if candidate.is_file() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        // Fallback to the test fixture
+        let fixture = PathBuf::from("src/bsp/tests/fixtures/palettes/project_palette.lmp");
+        if fixture.is_file() {
+            return Ok(fixture);
+        }
+        Err(CliError::PaletteNotFound("no palette found".into()))
+    }
+
+    /// Resolve the effective .lit path from explicit arg, companion dir, or auto-discovery.
+    pub fn resolve_lit_path(&self) -> Option<PathBuf> {
+        if let Some(ref p) = self.lit_path {
+            if p.is_file() {
+                return Some(p.clone());
+            }
+        }
+        if let Some(ref dir) = self.companion_dir {
+            let candidate = dir.join(
+                self.bsp_path
+                    .as_ref()
+                    .and_then(|b| b.file_stem())
+                    .map(|s| format!("{}.lit", s.to_string_lossy()))
+                    .unwrap_or_default(),
+            );
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        // Auto-discover next to the .bsp (same stem, .lit extension)
+        if let Some(ref bsp) = self.bsp_path {
+            let candidate = bsp.with_extension("lit");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
 }
 
 impl Default for CliArgs {
@@ -86,6 +154,9 @@ impl Default for CliArgs {
             headless: false,
             capture_frames: 0,
             show_lights: false,
+            palette_path: None,
+            lit_path: None,
+            companion_dir: None,
         }
     }
 }
@@ -129,6 +200,21 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.show_lights = true;
                 i += 1;
             }
+            "--palette" => {
+                let value = next_value(&args, i, "--palette")?;
+                opts.palette_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--lit" => {
+                let value = next_value(&args, i, "--lit")?;
+                opts.lit_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--companion-dir" => {
+                let value = next_value(&args, i, "--companion-dir")?;
+                opts.companion_dir = Some(PathBuf::from(value));
+                i += 2;
+            }
             other => return Err(CliError::UnknownArgument(other.to_string())),
         }
     }
@@ -162,6 +248,9 @@ fn print_usage() {
     eprintln!("  --headless             Run headless (no window, renders N frames)");
     eprintln!("  --capture-frames <n>   Frame count for headless capture (default: 0)");
     eprintln!("  --lights               Log all imported light descriptors at startup");
+    eprintln!("  --palette <path>       Path to 768-byte palette .lmp file");
+    eprintln!("  --lit <path>           Path to .lit colored-light companion file");
+    eprintln!("  --companion-dir <path> Directory to auto-discover .lit and palette");
     eprintln!();
 }
 
@@ -176,6 +265,9 @@ mod tests {
         assert!(!args.headless);
         assert_eq!(args.capture_frames, 0);
         assert!(!args.show_lights);
+        assert!(args.palette_path.is_none());
+        assert!(args.lit_path.is_none());
+        assert!(args.companion_dir.is_none());
         assert!((args.scale - 0.0254).abs() < 1e-6);
     }
 
@@ -215,6 +307,12 @@ mod tests {
             "--capture-frames",
             "5",
             "--lights",
+            "--palette",
+            "gfx/palette.lmp",
+            "--lit",
+            "maps/e1m1.lit",
+            "--companion-dir",
+            "maps/",
         ])
         .unwrap();
         assert_eq!(args.bsp_path, Some(PathBuf::from("maps/e1m1.bsp")));
@@ -222,6 +320,9 @@ mod tests {
         assert!(args.headless);
         assert_eq!(args.capture_frames, 5);
         assert!(args.show_lights);
+        assert_eq!(args.palette_path, Some(PathBuf::from("gfx/palette.lmp")));
+        assert_eq!(args.lit_path, Some(PathBuf::from("maps/e1m1.lit")));
+        assert_eq!(args.companion_dir, Some(PathBuf::from("maps/")));
     }
 
     #[test]
@@ -233,6 +334,22 @@ mod tests {
         assert_eq!(
             parse_from(["--unknown"]).unwrap_err(),
             CliError::UnknownArgument("--unknown".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_palette_and_lit_flags() {
+        let args = parse_from(["--palette", "gfx/pal.lmp", "--lit", "maps/test.lit"]).unwrap();
+        assert_eq!(args.palette_path, Some(PathBuf::from("gfx/pal.lmp")));
+        assert_eq!(args.lit_path, Some(PathBuf::from("maps/test.lit")));
+    }
+
+    #[test]
+    fn parse_companion_dir() {
+        let args = parse_from(["--companion-dir", "assets/companions"]).unwrap();
+        assert_eq!(
+            args.companion_dir,
+            Some(PathBuf::from("assets/companions"))
         );
     }
 

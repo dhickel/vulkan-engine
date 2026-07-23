@@ -361,8 +361,9 @@ fn texture_dimension_validation() {
     assert!(resources::validate_texture_dimension(4096, "test").is_ok());
     assert!(resources::validate_texture_dimension(1, "test").is_ok());
 
-    // Non-power-of-two
-    assert!(resources::validate_texture_dimension(100, "test").is_err());
+    // Non-power-of-two textures are accepted (community maps use them)
+    assert!(resources::validate_texture_dimension(100, "test").is_ok());
+    assert!(resources::validate_texture_dimension(320, "test").is_ok());
     // Zero
     assert!(resources::validate_texture_dimension(0, "test").is_err());
     // Too large

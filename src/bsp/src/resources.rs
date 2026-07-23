@@ -123,12 +123,7 @@ pub fn validate_texture_dimension(dim: u32, name: &str) -> Result<(), BspReport>
             format!("texture '{}' has zero dimension", name),
         ));
     }
-    if !dim.is_power_of_two() {
-        return Err(BspReport::fatal(
-            DiagnosticCode::StructuralCorruptLump,
-            format!("texture '{}' dimension {} is not a power of two", name, dim),
-        ));
-    }
+    // Community maps often use non-power-of-two textures; modern Vulkan handles them.
     // Max texture dimension: 4096
     if dim > 4096 {
         return Err(BspReport::fatal(
@@ -438,9 +433,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_texture_dim_non_pot() {
-        let r = validate_texture_dimension(100, "test");
-        assert!(r.is_err());
+    fn validate_texture_dim_non_pot_accepted() {
+        // Non-power-of-two textures are accepted (community maps use them).
+        assert!(validate_texture_dimension(100, "test").is_ok());
+        assert!(validate_texture_dimension(320, "test").is_ok());
     }
 
     #[test]

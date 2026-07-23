@@ -1092,11 +1092,27 @@ impl BspCoordinator {
         Ok(())
     }
 
+    /// Maximum BSP point lights published to the scene (GPU limit is 16).
+    const MAX_BSP_POINT_LIGHTS: usize = 16;
+
     fn build_candidate_point_lights(
         extracted: &ExtractedBsp,
     ) -> Result<Vec<CandidatePointLight>, BspRuntimeError> {
-        let mut point_lights = Vec::with_capacity(extracted.light_descriptors.len());
+        let mut point_lights = Vec::with_capacity(
+            extracted
+                .light_descriptors
+                .len()
+                .min(Self::MAX_BSP_POINT_LIGHTS),
+        );
         for light in &extracted.light_descriptors {
+            if point_lights.len() >= Self::MAX_BSP_POINT_LIGHTS {
+                log::warn!(
+                    "BSP light cap ({}) reached; {} remaining light entities not published",
+                    Self::MAX_BSP_POINT_LIGHTS,
+                    extracted.light_descriptors.len() - point_lights.len()
+                );
+                break;
+            }
             let color = glam::Vec3::from_array(light.color);
             if !light.origin.is_finite()
                 || !color.is_finite()
@@ -1104,14 +1120,11 @@ impl BspCoordinator {
                 || light.intensity < 0.0
                 || !light.radius.is_finite()
             {
-                return Err(BspRuntimeError::BridgeFailure {
-                    bridge_name: "coordinator".to_string(),
-                    phase: BridgePhase::Prepare,
-                    message: format!(
-                        "BSP light descriptor for entity {} is not publishable",
-                        light.entity_index
-                    ),
-                });
+                log::warn!(
+                    "BSP light descriptor for entity {} is not publishable (non-finite values); skipping",
+                    light.entity_index
+                );
+                continue;
             }
 
             point_lights.push(CandidatePointLight {

@@ -50,6 +50,9 @@ fn cli_preserves_struct_values() {
         headless: true,
         capture_frames: 120,
         show_lights: false,
+        palette_path: None,
+        lit_path: None,
+        companion_dir: None,
     };
 
     let cloned = original.clone();

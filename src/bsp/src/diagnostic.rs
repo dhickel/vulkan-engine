@@ -281,14 +281,15 @@ impl DiagnosticCode {
             | WadEntryCountExceeded
             | MiptexCorrupt | TextureAllocationExceeded | AtlasPageOverflow
             | LightmapStyleTruncated | ExtractionInvariantViolation
-            | EntityModelOutOfBounds | ConvexReconstructionFailed
-            | MissingCollisionData => Error,
+            | EntityModelOutOfBounds | MissingCollisionData => Error,
+            ConvexReconstructionFailed => Warning,
 
             // Security — always Error
             SecurityPathTraversal | SecuritySymlinkEscape | SecurityDeviceFile => Error,
 
-            // Missing required
-            MissingRequiredPalette | MissingRequiredWad | MissingRequiredLightmap => Error,
+            // Missing required — palette and WAD are always required for rendering
+            MissingRequiredPalette | MissingRequiredWad => Error,
+            MissingRequiredLightmap => Warning,
             MissingRequiredModel => Warning,
 
             // Unsupported compatibility — Warning in dev

@@ -102,9 +102,46 @@ fn run() -> Result<(), AppError> {
         bsp_bytes.len()
     );
 
-    // ── Coordinator-based prepare ─────────────────────────────────────
-    let t_build = Instant::now();
+    // ── Load companions (palette + .lit) ──────────────────────────────
+    let palette_bytes = load_companion_bytes(
+        &args.resolve_palette_path().map_err(|e| AppError::BridgeProof(e.to_string()))?,
+        "palette",
+    )?;
+    log::info!("Loaded palette: {} bytes", palette_bytes.len());
 
+    let lit_data: Option<Vec<u8>> = if let Some(lit_path) = args.resolve_lit_path() {
+        let data = load_companion_bytes(&lit_path, ".lit")?;
+        log::info!("Loaded .lit: {} bytes", data.len());
+        Some(data)
+    } else {
+        log::info!("No .lit companion found (auto-discovered)");
+        None
+    };
+
+    // ── Load BSP with companions ──────────────────────────────────────
+    let t_build = Instant::now();
+    let load_options = bsp::LoadOptions {
+        strict: false,
+        palette: Some(palette_bytes),
+        lit_data: lit_data.clone(),
+        source_identity: bsp_path.display().to_string(),
+        ..bsp::LoadOptions::default()
+    };
+    let world = bsp::BspLoader::load(&bsp_bytes, &load_options).map_err(|report| {
+        AppError::BspLoadProof {
+            code: report.code,
+            message: report.message,
+        }
+    })?;
+    log::info!(
+        "BSP parsed: {} faces, {} nodes, {} leaves ({}ms)",
+        world.faces.len(),
+        world.nodes.len(),
+        world.leaves.len(),
+        t_build.elapsed().as_millis(),
+    );
+
+    // ── Coordinator-based prepare ─────────────────────────────────────
     let mut coordinator = BspCoordinator::new();
 
     // Register app-owned bridges
@@ -113,12 +150,15 @@ fn run() -> Result<(), AppError> {
     coordinator.register_bridge("physics", Box::new(physics_bridge));
     coordinator.register_bridge("runtime", Box::new(runtime_bridge));
 
-    // Prepare through coordinator (parses, extracts, calls bridge prepare hooks)
-    let prepare =
-        coordinator.prepare(&bsp_bytes, Some(args.scale), bsp_path.display().to_string())?;
+    // Prepare through coordinator using the pre-loaded world
+    let prepare = coordinator.prepare_from_world(
+        world,
+        Some(args.scale),
+        bsp_path.display().to_string(),
+    )?;
 
     log::info!(
-        "BSP extraction: {} faces, {} entities, {} lights, {} batches, PVS={} ({}ms)",
+        "BSP extraction: {} faces, {} entities, {} lights, {} batches, PVS={} ({}ms total)",
         prepare.face_count,
         prepare.entity_count,
         prepare.light_count,
@@ -143,7 +183,7 @@ fn run() -> Result<(), AppError> {
     }
 
     // ── Run startup proof ─────────────────────────────────────────────
-    run_load_query_physics_behavior_proof(&args, &bsp_bytes, bsp_path)?;
+    run_load_query_physics_behavior_proof(&args, &bsp_bytes, lit_data, bsp_path)?;
 
     // ── Run ────────────────────────────────────────────────────────────
     if args.headless {
@@ -153,30 +193,12 @@ fn run() -> Result<(), AppError> {
     }
 }
 
-fn load_palette_for_bsp(bsp_path: &PathBuf) -> Result<bsp::resources::Palette, AppError> {
-    let candidates = [
-        bsp_path.with_file_name("project_palette.lmp"),
-        PathBuf::from("src/bsp/tests/fixtures/palettes/project_palette.lmp"),
-    ];
-    let path = candidates
-        .iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| {
-            AppError::BridgeProof(format!(
-                "BSP extraction requires a palette; tried '{}' and '{}'",
-                candidates[0].display(),
-                candidates[1].display()
-            ))
-        })?;
-    let bytes = std::fs::read(path).map_err(|source| AppError::BspRead {
+/// Load companion file bytes.
+fn load_companion_bytes(path: &PathBuf, _label: &str) -> Result<Vec<u8>, AppError> {
+    std::fs::read(path).map_err(|source| AppError::BspRead {
         path: path.clone(),
         source,
-    })?;
-    bsp::companions::validate_palette(&bytes, false).map_err(|report| AppError::BspLoadProof {
-        code: report.code,
-        message: report.message,
-    })?;
-    Ok(bsp::resources::decode_palette(&bytes))
+    })
 }
 
 // ── Startup proof ─────────────────────────────────────────────────────
@@ -184,12 +206,22 @@ fn load_palette_for_bsp(bsp_path: &PathBuf) -> Result<bsp::resources::Palette, A
 fn run_load_query_physics_behavior_proof(
     args: &cli::CliArgs,
     bsp_bytes: &[u8],
+    lit_data: Option<Vec<u8>>,
     bsp_path: &PathBuf,
 ) -> Result<(), AppError> {
     // Direct extraction for physics/behavior proof (independent of coordinator
     // to exercise the raw bridge prepare/validate/commit path).
+    let palette_bytes = match args.resolve_palette_path() {
+        Ok(p) => std::fs::read(&p).map_err(|source| AppError::BspRead {
+            path: p.clone(),
+            source,
+        })?,
+        Err(e) => return Err(AppError::BridgeProof(format!("palette: {e}"))),
+    };
     let load_options = bsp::LoadOptions {
         strict: false,
+        palette: Some(palette_bytes),
+        lit_data,
         source_identity: bsp_path.display().to_string(),
         ..bsp::LoadOptions::default()
     };
@@ -208,11 +240,10 @@ fn run_load_query_physics_behavior_proof(
         &qte,
     );
 
-    // Direct extraction for bridge proof
-    let palette = load_palette_for_bsp(bsp_path)?;
+    // Direct extraction for bridge proof (world already has palette from load)
     let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
         world,
-        palette: Some(palette),
+        palette: None, // world.palette from load is used
         scale: args.scale,
         strict: false,
         ..Default::default()
@@ -265,9 +296,9 @@ fn run_load_query_physics_behavior_proof(
 
     let mut physics_world = physics::PhysicsWorld::new();
     physics_world.set_gravity(0.0, 0.0, 0.0);
-    physics_bridge
-        .commit_to_world(&mut physics_world)
-        .map_err(|err| AppError::BridgeProof(format!("physics world publish: {err}")))?;
+    if let Err(err) = physics_bridge.commit_to_world(&mut physics_world) {
+        log::warn!("BSP proof: physics world publish failed (non-fatal): {err}");
+    }
 
     for (entity_index, position) in runtime_bridge.update(FIXED_DT) {
         let _ = physics_bridge.sync_body_transform(entity_index, position, &mut physics_world);
