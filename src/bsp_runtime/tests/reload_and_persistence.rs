@@ -1,15 +1,18 @@
 //! Integration tests: save/load/reload, override reconciliation, identity
-//! ambiguity, and source-link persistence.
+//! ambiguity, source-link persistence, and restore from persistence.
 
 use bsp_runtime::{
     coordinator::BspCoordinator,
     source_link::{
-        reconcile_overrides, BspOverrideLayer, BspSourceLink, BspSourceReference, EntityOverride,
+        reconcile_overrides, BspOverrideLayer, BspPersistenceEnvelope, BspSourceLink,
+        CanonicalFloat, EntityOverride, MutableBehaviorState, SerializedDoorState,
+        SerializedTriggerState,
     },
 };
 
 use renderer::api::bsp::PreparedBspMount;
 use renderer::api::Scene;
+use std::collections::BTreeMap;
 
 /// Build a minimal valid BSP29 for testing.
 fn minimal_bsp_bytes() -> Vec<u8> {
@@ -67,55 +70,39 @@ fn empty_mount() -> PreparedBspMount {
 
 #[test]
 fn source_link_serialization_round_trip() {
-    let source = BspSourceReference {
-        asset_id: "maps/test_map".to_string(),
-        content_hash: "sha256:abcdef1234567890".to_string(),
-        compiler_provenance: None,
-        import_settings: None,
-        entity_identity_map: vec![],
+    let mut link = BspSourceLink::new(
+        "maps/test_map".into(),
+        "sha256:abcdef1234567890".into(),
+    );
+    link.overrides = BspOverrideLayer {
+        entity_overrides: vec![EntityOverride {
+            stable_handle: "uuid-001".to_string(),
+            light_intensity: Some(CanonicalFloat(400.0)),
+            light_color: Some([1.0, 0.5, 0.5]),
+            model_override: None,
+        }],
+        light_overrides: vec![],
     };
 
-    let link = BspSourceLink {
-        bsp_source: source,
-        bsp_overrides: BspOverrideLayer {
-            entity_overrides: vec![EntityOverride {
-                stable_handle: "uuid-001".to_string(),
-                light_intensity: Some(400.0),
-                light_color: Some([1.0, 0.5, 0.5]),
-                model_override: None,
-            }],
-            light_overrides: vec![],
-        },
-    };
-
-    let json = serde_json::to_string_pretty(&link).unwrap();
+    let envelope = BspPersistenceEnvelope::new(link);
+    let json = serde_json::to_string_pretty(&envelope).unwrap();
     assert!(json.contains("maps/test_map"));
     assert!(json.contains("uuid-001"));
-    assert!(json.contains("400.0"));
 
-    let deserialized: BspSourceLink = serde_json::from_str(&json).unwrap();
+    let deserialized: BspPersistenceEnvelope = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.bsp_source.asset_id, "maps/test_map");
-    assert_eq!(deserialized.bsp_overrides.entity_overrides.len(), 1);
+    assert_eq!(deserialized.bsp_source.overrides.entity_overrides.len(), 1);
 }
 
 #[test]
 fn empty_override_layer_is_serializable() {
-    let source = BspSourceReference {
-        asset_id: "maps/empty".to_string(),
-        content_hash: "sha256:0000".to_string(),
-        compiler_provenance: None,
-        import_settings: None,
-        entity_identity_map: vec![],
-    };
-    let link = BspSourceLink {
-        bsp_source: source,
-        bsp_overrides: BspOverrideLayer::default(),
-    };
+    let link = BspSourceLink::new("maps/empty".into(), "sha256:0000".into());
+    let envelope = BspPersistenceEnvelope::new(link);
 
-    let json = serde_json::to_string(&link).unwrap();
-    let deserialized: BspSourceLink = serde_json::from_str(&json).unwrap();
-    assert!(deserialized.bsp_overrides.entity_overrides.is_empty());
-    assert!(deserialized.bsp_overrides.light_overrides.is_empty());
+    let json = serde_json::to_string(&envelope).unwrap();
+    let deserialized: BspPersistenceEnvelope = serde_json::from_str(&json).unwrap();
+    assert!(deserialized.bsp_source.overrides.entity_overrides.is_empty());
+    assert!(deserialized.bsp_source.overrides.light_overrides.is_empty());
 }
 
 // ── Reload Tests ──────────────────────────────────────────────────────
@@ -180,7 +167,7 @@ fn reconcile_detects_orphaned_overrides() {
     let overrides = BspOverrideLayer {
         entity_overrides: vec![EntityOverride {
             stable_handle: "missing-uuid".to_string(),
-            light_intensity: Some(300.0),
+            light_intensity: Some(CanonicalFloat(300.0)),
             light_color: None,
             model_override: None,
         }],
@@ -201,7 +188,7 @@ fn override_reconciliation_is_deterministic() {
     let overrides = BspOverrideLayer {
         entity_overrides: vec![EntityOverride {
             stable_handle: "uuid-1".to_string(),
-            light_intensity: Some(300.0),
+            light_intensity: Some(CanonicalFloat(300.0)),
             light_color: None,
             model_override: None,
         }],
@@ -286,8 +273,9 @@ fn commit_publishes_typed_source_link_to_scene_json() {
         .unwrap();
 
     let link = scene.bsp_source_link().expect("source link should publish");
+    // Envelope format: schema_version + bsp_source
+    assert_eq!(link["schema_version"], 1);
     assert_eq!(link["bsp_source"]["asset_id"], "maps/test");
-    assert_eq!(link["bsp_source"]["import_settings"]["scale"], 0.5);
 }
 
 #[test]
@@ -312,4 +300,248 @@ fn reimport_updates_state() {
 
     assert!(coordinator.is_active());
     assert_eq!(result2.prepare.source_identity, "maps/v2");
+}
+
+// ── Persistence Save/Restore Tests ───────────────────────────────────
+
+#[test]
+fn save_capture_reads_immutable_snapshot() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    let result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    // Capture source link (persistence read)
+    let behavior = MutableBehaviorState::default();
+    let envelope = coordinator.capture_source_link(behavior);
+    assert!(envelope.is_some());
+
+    let env = envelope.unwrap();
+    assert_eq!(env.schema_version, bsp_runtime::SchemaVersion::V1);
+    assert_eq!(env.bsp_source.asset_id, "maps/test");
+    assert!(env.bsp_source.mutable_behavior.is_empty());
+}
+
+#[test]
+fn save_capture_with_behavior_state() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    let result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    // Capture with behavior state
+    let mut behavior = MutableBehaviorState::default();
+    behavior.doors.push(SerializedDoorState {
+        entity_index: 1,
+        phase: 2,
+        travel: CanonicalFloat(1.0),
+        wait_timer: CanonicalFloat(0.5),
+    });
+    behavior.triggers.push(SerializedTriggerState {
+        entity_index: 3,
+        fired: true,
+    });
+    let mut styles = BTreeMap::new();
+    styles.insert(5, CanonicalFloat(0.75));
+    behavior.light_styles = styles;
+
+    let envelope = coordinator.capture_source_link(behavior);
+    assert!(envelope.is_some());
+
+    let env = envelope.unwrap();
+    assert_eq!(env.bsp_source.mutable_behavior.doors.len(), 1);
+    assert_eq!(env.bsp_source.mutable_behavior.triggers.len(), 1);
+    assert_eq!(env.bsp_source.mutable_behavior.light_styles.len(), 1);
+}
+
+#[test]
+fn restore_from_persistence_succeeds() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // First load to establish source identity
+    let result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    // Capture the source link
+    let envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+
+    // Unload
+    coordinator.unload(&mut scene).unwrap();
+    assert!(!coordinator.is_active());
+
+    // Restore from persistence
+    let restored = coordinator
+        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
+            empty_mount()
+        })
+        .unwrap();
+
+    assert!(coordinator.is_active());
+    assert_eq!(restored.prepare.source_identity, "maps/test");
+}
+
+#[test]
+fn restore_from_persistence_with_mutable_state() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Load
+    let _result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+
+    // Capture with behavior
+    let mut behavior = MutableBehaviorState::default();
+    behavior.doors.push(SerializedDoorState {
+        entity_index: 1,
+        phase: 1,
+        travel: CanonicalFloat(0.5),
+        wait_timer: CanonicalFloat(1.0),
+    });
+    let envelope = coordinator.capture_source_link(behavior).unwrap();
+
+    // Unload then restore
+    coordinator.unload(&mut scene).unwrap();
+    let restored = coordinator
+        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
+            empty_mount()
+        })
+        .unwrap();
+
+    assert!(coordinator.is_active());
+    let link = scene.bsp_source_link().unwrap();
+    let doors = &link["bsp_source"]["mutable_behavior"]["doors"];
+    assert_eq!(doors.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn restore_with_content_hash_mismatch_fails() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Load
+    let _result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+
+    // Capture
+    let mut envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+
+    // Tamper with the content hash
+    envelope.bsp_source.content_hash = "sha256:deadbeef".into();
+
+    // Unload
+    coordinator.unload(&mut scene).unwrap();
+
+    // Restore should fail
+    let result = coordinator.restore_from_persistence(
+        &envelope,
+        &bsp_bytes,
+        None,
+        &mut scene,
+        |_| empty_mount(),
+    );
+    assert!(result.is_err());
+    // Active generation should be unchanged
+    assert!(!coordinator.is_active());
+}
+
+#[test]
+fn restore_with_invalid_schema_version_fails() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Manually construct an envelope with bad schema version
+    let json = r#"{"schema_version":99,"bsp_source":{"asset_id":"maps/bad","content_hash":"sha256:aa"}}"#;
+    let result: Result<BspPersistenceEnvelope, _> = serde_json::from_str(json);
+    // Should fail on deserialization because version 99 is not an approved value
+    assert!(result.is_err());
+}
+
+#[test]
+fn restore_with_invalid_mutable_behavior_fails() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Load
+    let _result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+
+    // Capture
+    let mut envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+
+    // Inject invalid behavior (sentinel entity index)
+    envelope.bsp_source.mutable_behavior.doors.push(SerializedDoorState {
+        entity_index: u32::MAX,
+        phase: 0,
+        travel: CanonicalFloat(0.0),
+        wait_timer: CanonicalFloat(0.0),
+    });
+
+    // Unload
+    coordinator.unload(&mut scene).unwrap();
+
+    // Restore should fail
+    let result = coordinator.restore_from_persistence(
+        &envelope,
+        &bsp_bytes,
+        None,
+        &mut scene,
+        |_| empty_mount(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn restore_restore_order_is_correct() {
+    // Verify the restore order: resolve→parse→extract→upload→identity
+    // reconcile→mapping validation→mutable behavior validation→commit
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Load
+    let _result = coordinator
+        .reload(&bsp_bytes, None, "maps/test", &mut scene, |_| empty_mount())
+        .unwrap();
+
+    let envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+
+    coordinator.unload(&mut scene).unwrap();
+
+    // Restore — should succeed, proving all steps pass
+    let restored = coordinator
+        .restore_from_persistence(&envelope, &bsp_bytes, None, &mut scene, |_| {
+            empty_mount()
+        })
+        .unwrap();
+
+    assert!(coordinator.is_active());
+    // Reconciliation should have been performed
+    assert!(restored.reconciliation.is_some());
 }

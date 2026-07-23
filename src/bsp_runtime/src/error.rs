@@ -32,6 +32,49 @@ pub enum BspRuntimeError {
         entity_count: usize,
         context: String,
     },
+    /// Source content hash mismatch between persistence record and loaded bytes.
+    SourceMismatch {
+        expected: String,
+        actual: String,
+    },
+    /// Unsupported persistence schema version.
+    UnsupportedSchema {
+        version: u32,
+        current: u32,
+    },
+    /// Migration from a prior schema version is not supported.
+    InvalidMigration {
+        from_version: u32,
+        reason: String,
+    },
+    /// Companion file hash mismatch during restore validation.
+    CompanionMismatch {
+        kind: String,
+        expected: String,
+        actual: String,
+    },
+    /// Model-mapping identity mismatch during restore validation.
+    MappingMismatch {
+        reason: String,
+    },
+    /// Required state is missing from the restored persistence payload.
+    MissingRequiredState {
+        detail: String,
+    },
+    /// External asset reference in persistence does not match current package state.
+    InvalidExternalAsset {
+        asset_path: String,
+        reason: String,
+    },
+    /// Mutable behavior state in persistence is invalid or corrupt.
+    InvalidMutableBehavior {
+        detail: String,
+    },
+    /// The restore candidate failed validation and the active generation is unchanged.
+    RestoreCancelled {
+        active_asset_id: String,
+        reason: String,
+    },
 }
 
 /// Which phase of the two-step transaction a bridge failure occurred in.
@@ -132,6 +175,61 @@ impl fmt::Display for BspRuntimeError {
                     f,
                     "identity ambiguous: {} entities in context '{}'",
                     entity_count, context
+                )
+            }
+            BspRuntimeError::SourceMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "source content hash mismatch: expected {expected}, got {actual}"
+                )
+            }
+            BspRuntimeError::UnsupportedSchema { version, current } => {
+                write!(
+                    f,
+                    "unsupported persistence schema version {version} (current: {current})"
+                )
+            }
+            BspRuntimeError::InvalidMigration {
+                from_version,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "invalid migration from schema version {from_version}: {reason}"
+                )
+            }
+            BspRuntimeError::CompanionMismatch {
+                kind,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "companion {kind} hash mismatch: expected {expected}, got {actual}"
+                )
+            }
+            BspRuntimeError::MappingMismatch { reason } => {
+                write!(f, "model-mapping mismatch: {reason}")
+            }
+            BspRuntimeError::MissingRequiredState { detail } => {
+                write!(f, "missing required state: {detail}")
+            }
+            BspRuntimeError::InvalidExternalAsset { asset_path, reason } => {
+                write!(
+                    f,
+                    "invalid external asset '{asset_path}': {reason}"
+                )
+            }
+            BspRuntimeError::InvalidMutableBehavior { detail } => {
+                write!(f, "invalid mutable behavior state: {detail}")
+            }
+            BspRuntimeError::RestoreCancelled {
+                active_asset_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "restore cancelled (active: '{active_asset_id}'): {reason}"
                 )
             }
         }

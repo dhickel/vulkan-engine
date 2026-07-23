@@ -315,8 +315,9 @@ impl BspCoordinator {
         // Build all fallible coordinator-owned candidate payloads before
         // bridge prepare so later local validation cannot leak bridge resources.
         let source_link = self.build_source_link(&extracted, &source_identity, resolved_scale);
+        let envelope = crate::source_link::BspPersistenceEnvelope::new(source_link.clone());
         let source_link_json =
-            serde_json::to_value(&source_link).map_err(|e| BspRuntimeError::SourceUnavailable {
+            serde_json::to_value(&envelope).map_err(|e| BspRuntimeError::SourceUnavailable {
                 reason: format!("BSP source-link serialization failed: {e}"),
             })?;
         let cache_identity = self.build_cache_identity(&extracted);
@@ -667,7 +668,7 @@ impl BspCoordinator {
         let previous_overrides = self
             .active_source_link
             .as_ref()
-            .map(|link| link.bsp_overrides.clone())
+            .map(|link| link.overrides.clone())
             .unwrap_or_default();
 
         // Prepare new candidate (hidden, beside active world)
@@ -703,8 +704,9 @@ impl BspCoordinator {
             );
             // Update candidate's source link and pre-serialized scene payload.
             if let Some(ref mut c) = self.candidate {
-                c.source_link.bsp_overrides = reconciled;
-                c.source_link_json = serde_json::to_value(&c.source_link).map_err(|e| {
+                c.source_link.overrides = reconciled;
+                let envelope = crate::source_link::BspPersistenceEnvelope::new(c.source_link.clone());
+                c.source_link_json = serde_json::to_value(&envelope).map_err(|e| {
                     BspRuntimeError::SourceUnavailable {
                         reason: format!("BSP source-link serialization failed: {e}"),
                     }
@@ -754,7 +756,7 @@ impl BspCoordinator {
         let previous_overrides = self
             .active_source_link
             .as_ref()
-            .map(|link| link.bsp_overrides.clone())
+            .map(|link| link.overrides.clone())
             .unwrap_or_default();
 
         // Reconcile overrides against candidate extraction
@@ -777,8 +779,9 @@ impl BspCoordinator {
         // Update candidate's source link with reconciled overrides and refresh
         // the pre-serialized scene payload before commit.
         if let Some(ref mut c) = self.candidate {
-            c.source_link.bsp_overrides = reconciled;
-            c.source_link_json = serde_json::to_value(&c.source_link).map_err(|e| {
+            c.source_link.overrides = reconciled;
+            let envelope = crate::source_link::BspPersistenceEnvelope::new(c.source_link.clone());
+            c.source_link_json = serde_json::to_value(&envelope).map_err(|e| {
                 BspRuntimeError::SourceUnavailable {
                     reason: format!("BSP source-link serialization failed: {e}"),
                 }
@@ -831,6 +834,156 @@ impl BspCoordinator {
         self.active_extracted = None;
         self.active_source_link = None;
         self.active_cache_identity = None;
+    }
+
+    // ── Persistence: Save ───────────────────────────────────────────
+
+    /// Capture the current source-link payload for persistence.
+    ///
+    /// Only source-linked reconstruction data is stored: identity records,
+    /// overrides, mutable behavior state. GPU handles, descriptors,
+    /// allocations, cache slots, transient generation handles, and
+    /// generated geometry are NEVER included.
+    pub fn capture_source_link(
+        &self,
+        mutable_behavior: crate::source_link::MutableBehaviorState,
+    ) -> Option<crate::source_link::BspPersistenceEnvelope> {
+        let source_link = self.active_source_link.as_ref()?;
+        let mut link = source_link.clone();
+        link.mutable_behavior = mutable_behavior;
+        Some(crate::source_link::BspPersistenceEnvelope::new(link))
+    }
+
+    /// Capture mutable behavior state from the current active mount.
+    ///
+    /// This reads one immutable snapshot of the active behavior state.
+    /// Only reconstruction data (door/button/platform pose+state, trigger
+    /// activation, light-style table, timers/counters) is returned.
+    pub fn capture_mutable_behavior(&self) -> crate::source_link::MutableBehaviorState {
+        // Default: empty mutable behavior state.
+        // The app bridge populates this from its live state machines.
+        crate::source_link::MutableBehaviorState::default()
+    }
+
+    // ── Persistence: Restore ────────────────────────────────────────
+
+    /// Restore a BSP mount from a persistence payload.
+    ///
+    /// Builds a hidden candidate from the same identity model, applies
+    /// all validation checks, then commits. On failure, the candidate is
+    /// cancelled and the active generation is proven unchanged.
+    ///
+    /// Restore order: resolve→parse→extract→upload→identity reconcile→
+    /// mapping validation→mutable behavior validation→generation commit.
+    pub fn restore_from_persistence(
+        &mut self,
+        envelope: &crate::source_link::BspPersistenceEnvelope,
+        bsp_bytes: &[u8],
+        scale: Option<f32>,
+        scene: &mut Scene,
+        build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
+    ) -> Result<ReloadResult, BspRuntimeError> {
+        // 1. Validate schema version
+        envelope
+            .validate_schema()
+            .map_err(|e| BspRuntimeError::UnsupportedSchema {
+                version: envelope.schema_version as u32,
+                current: crate::source_link::SchemaVersion::CURRENT as u32,
+            })?;
+
+        let stored_link = &envelope.bsp_source;
+
+        // 2. Validate no runtime handles in the stored payload
+        stored_link
+            .validate_no_runtime_handles()
+            .map_err(|e| BspRuntimeError::InvalidMutableBehavior {
+                detail: e.to_string(),
+            })?;
+
+        // 3. Prepare new candidate from raw bytes
+        let source_identity = stored_link.asset_id.clone();
+        let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
+
+        // 4. Verify content hash matches against staged candidate
+        {
+            let candidate = self.candidate.as_ref().ok_or_else(|| {
+                BspRuntimeError::BridgeFailure {
+                    bridge_name: "coordinator".into(),
+                    phase: BridgePhase::Validate,
+                    message: "candidate missing after prepare".into(),
+                }
+            })?;
+            let actual_hash_hex: String = candidate
+                .extracted
+                .content_hash
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            let actual_hash = format!("sha256:{}", actual_hash_hex);
+
+            if stored_link.content_hash != actual_hash {
+                let err = BspRuntimeError::SourceMismatch {
+                    expected: stored_link.content_hash.clone(),
+                    actual: actual_hash,
+                };
+                drop(candidate);
+                self.rollback_staged()?;
+                return Err(err);
+            }
+        }
+
+        // 5. Reconcile entity identities
+        let (reconciliation, reconciled_overrides) = {
+            let candidate = self.candidate.as_ref().unwrap();
+            let previous_overrides = stored_link.overrides.clone();
+            reconcile_overrides(
+                &previous_overrides,
+                &candidate.extracted.entity_identities,
+                &candidate.extracted.entity_descriptors,
+            )
+        };
+
+        // 6. Validate mutable behavior state if present
+        if !stored_link.mutable_behavior.is_empty() {
+            stored_link
+                .mutable_behavior
+                .validate()
+                .map_err(|e| BspRuntimeError::InvalidMutableBehavior {
+                    detail: e.to_string(),
+                })?;
+        }
+
+        // 7. Build mount from staged extraction
+        let mount = {
+            let candidate = self.candidate.as_ref().unwrap();
+            build_mount(&candidate.extracted)
+        };
+        self.set_renderer_mount_ready(prepare.token, mount)?;
+
+        // 8. Validate for scene publication
+        self.validate_for_scene(prepare.token, scene)?;
+
+        // 9. Update candidate's source link with reconciled overrides + stored mutable behavior
+        if let Some(ref mut c) = self.candidate {
+            c.source_link.overrides = reconciled_overrides;
+            c.source_link.mutable_behavior = stored_link.mutable_behavior.clone();
+            c.source_link_json =
+                serde_json::to_value(crate::source_link::BspPersistenceEnvelope::new(
+                    c.source_link.clone(),
+                ))
+                .map_err(|e| BspRuntimeError::SourceUnavailable {
+                    reason: format!("source-link serialization failed: {e}"),
+                })?;
+        }
+
+        // 10. Commit (pure publish)
+        let commit = self.commit(prepare.token, scene)?;
+
+        Ok(ReloadResult {
+            prepare,
+            commit,
+            reconciliation: Some(reconciliation),
+        })
     }
 
     // ── Internal Helpers ───────────────────────────────────────────────
@@ -1028,7 +1181,7 @@ impl BspCoordinator {
         }
     }
 
-    /// Build a source link from extracted DTOs.
+    /// Build a source link from extracted DTOs using the versioned schema.
     fn build_source_link(
         &self,
         extracted: &ExtractedBsp,
@@ -1040,44 +1193,21 @@ impl BspCoordinator {
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
-        let source_ref = BspSourceReference {
-            asset_id: source_identity.to_string(),
-            content_hash: format!("sha256:{}", content_hash_hex),
-            compiler_provenance: None,
-            import_settings: Some(crate::source_link::BspImportSettings {
-                scale,
-                palette_hash: String::new(),
-                texture_roots: vec![],
-                light_calibration: Default::default(),
-            }),
-            entity_identity_map: extracted
-                .entity_identities
-                .iter()
-                .filter_map(|id| {
-                    if let bsp::identity::IdentitySource::TrenchbroomUuid(ref uuid) = id.source {
-                        Some(crate::source_link::EntityIdentityEntry {
-                            uuid: uuid.clone(),
-                            stable_handle: uuid.clone(),
-                            classname: extracted
-                                .entity_descriptors
-                                .get(id.entity_index as usize)
-                                .map(|d| d.classname.clone())
-                                .unwrap_or_default(),
-                            origin: extracted
-                                .entity_descriptors
-                                .get(id.entity_index as usize)
-                                .and_then(|d| d.origin)
-                                .map(|v| [v.x, v.y, v.z])
-                                .unwrap_or([0.0; 3]),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        };
+        let content_hash = format!("sha256:{}", content_hash_hex);
 
-        BspSourceLink::new(source_ref)
+        let entity_identity_records = crate::source_link::build_identity_records(
+            &extracted.entity_identities,
+            &extracted.entity_descriptors,
+        );
+
+        let mut link = BspSourceLink::new(source_identity.to_string(), content_hash);
+        link.import_policy = crate::source_link::ImportPolicy {
+            scale: crate::source_link::CanonicalFloat(scale),
+            ..Default::default()
+        };
+        link.entity_identity_records = entity_identity_records;
+
+        link
     }
 
     /// Build a cache identity from extracted DTOs.

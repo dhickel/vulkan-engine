@@ -51,6 +51,11 @@ pub use snapshot::{
     SnapshotEntityPose, SnapshotEpoch, SnapshotGeneration, SnapshotLightStyles,
 };
 pub use source_link::{
-    BspOverrideLayer, BspSourceLink, BspSourceReference, EntityOverride, LightOverride,
-    OverrideReconciliation,
+    build_identity_records, canonical_hash, fingerprint_key, reconcile_overrides,
+    AtlasPolicy, BspOverrideLayer, BspPersistenceEnvelope, BspSourceLink, BspSourceReference,
+    CanonicalFloat, CompanionHashes, CompilerProvenance, EntityIdentityEntry, EntityIdentityRecord,
+    EntityOverride, ExternalModelOverride, ImportLightCalibration, ImportPolicy, LightOverride,
+    ModelMappingIdentity, MutableBehaviorState, OverrideReconciliation, ReconciliationEvent,
+    SchemaVersion, SerializedButtonState, SerializedDoorState, SerializedPlatformState,
+    SerializedTimer, SerializedTriggerState, SourceLinkError,
 };
