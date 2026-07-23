@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::cave_gen::generators::topology_first::generate_v2;
+use crate::cave_gen::generators::{topology_first::generate_v2, AnchorKind, SerializableAnchor};
 use crate::cave_gen::lattice::VoxelWorld;
 use crate::cave_gen::metrics::Site;
 use crate::config::{GeometryIdentity, ResolvedAppConfig, ResolvedAssetRef, SceneConfigIdentity};
@@ -86,7 +86,7 @@ pub struct CpuScenePackage {
 /// 3. Validate MC33 output
 /// 4. Partition mesh by face normal
 /// 5. Convert each partition to `CpuMesh`
-/// 6. Derive 9 lights from core role positions
+/// 6. Consume 9 generator-anchor lights directly
 /// 7. Derive 5 viewpoints from core role positions + targets
 /// 8. Record measurements and identities
 pub fn build_scene_package(resolved: &ResolvedAppConfig) -> Result<CpuScenePackage, PackageError> {
@@ -162,8 +162,8 @@ pub fn build_scene_package(resolved: &ResolvedAppConfig) -> Result<CpuScenePacka
         })?;
     }
 
-    // 6. Derive 9 lights from core role positions
-    let lights = derive_lights(&gen_result.sites, &world)?;
+    // 6. Consume 9 generator-anchor lights directly
+    let lights = consume_light_anchors(&gen_result.light_anchors, &world)?;
 
     // 7. Derive 5 viewpoints
     let viewpoints = derive_viewpoints(&gen_result.sites, &world);
@@ -186,7 +186,7 @@ pub fn build_scene_package(resolved: &ResolvedAppConfig) -> Result<CpuScenePacka
     })
 }
 
-// ─── Light derivation ──────────────────────────────────────────────────────
+// ─── Light consumption from generator anchors ──────────────────────────────
 
 /// Fixed site light colors in core role order (spawn, junction, grand_cavern, shaft, destination).
 const SITE_LIGHT_COLORS: [[f32; 3]; 5] = [
@@ -200,7 +200,8 @@ const SITE_LIGHT_COLORS: [[f32; 3]; 5] = [
 const SITE_LIGHT_INTENSITIES: [f32; 5] = [25.0, 18.0, 40.0, 18.0, 25.0];
 const SITE_LIGHT_RANGE: f32 = 20.0;
 
-/// Fixed edge light colors and intensities.
+/// Fixed edge light colors and intensities for the four backbone edges
+/// in canonical order: (0→1), (1→2), (2→4), (1→3).
 const EDGE_LIGHT_COLORS: [[f32; 3]; 4] = [
     [1.0, 0.3, 0.15],
     [0.5, 0.5, 0.8],
@@ -210,23 +211,49 @@ const EDGE_LIGHT_COLORS: [[f32; 3]; 4] = [
 const EDGE_LIGHT_INTENSITIES: [f32; 4] = [12.0, 10.0, 10.0, 8.0];
 const EDGE_LIGHT_RANGE: f32 = 15.0;
 
-/// Derive exactly 9 point lights: 5 site lights + 4 edge lights.
-/// Edge lights are skipped if their midpoint falls in solid rock.
-fn derive_lights(
-    sites: &[Site],
+/// The canonical backbone edge pairs in declaration order.
+const BACKBONE_EDGES: [(u8, u8); 4] = [(0, 1), (1, 2), (2, 4), (1, 3)];
+
+/// Consume the generator's pre-validated light anchors into CPU light descriptors.
+///
+/// The generator v2 produces exactly 9 anchors: 5 `CoreLight` (one per core site)
+/// followed by 4 `BackboneLight` (one at the midpoint of each backbone spline
+/// route). This function validates that contract at the package boundary and
+/// converts each anchor to a `CpuLightDescriptor` with its assigned color,
+/// intensity, and range. No anchors are skipped; any violation is a hard error.
+fn consume_light_anchors(
+    anchors: &[SerializableAnchor],
     world: &VoxelWorld,
 ) -> Result<Vec<CpuLightDescriptor>, PackageError> {
-    let mut lights: Vec<CpuLightDescriptor> = Vec::with_capacity(9);
-    let max_idx = sites.len().saturating_sub(1);
+    if anchors.len() != 9 {
+        return Err(PackageError::Validation(format!(
+            "expected exactly 9 light anchors, got {}",
+            anchors.len()
+        )));
+    }
 
-    // 5 site lights — must all be in air
+    let mut lights: Vec<CpuLightDescriptor> = Vec::with_capacity(9);
+
+    // First 5 anchors must be CoreLight with site_id 0..4 in order.
     for i in 0..5usize {
-        if i >= sites.len() {
-            break;
+        let anchor = &anchors[i];
+        let expected_id = i as u8;
+        match &anchor.kind {
+            AnchorKind::CoreLight { site_id } => {
+                if *site_id != expected_id {
+                    return Err(PackageError::Validation(format!(
+                        "light anchor {i}: expected CoreLight site_id {expected_id}, got {site_id}"
+                    )));
+                }
+            }
+            other => {
+                return Err(PackageError::Validation(format!(
+                    "light anchor {i}: expected CoreLight, got {other:?}"
+                )));
+            }
         }
-        let site = &sites[i];
-        let pos = [site.x as f32, site.y as f32 + 2.0, site.z as f32];
-        validate_in_air(&pos, world, &format!("site light '{}'", site.label))?;
+        let pos = [anchor.x as f32, anchor.y as f32, anchor.z as f32];
+        validate_anchor_position(anchor.id, &anchor.kind, &pos, world)?;
         lights.push(CpuLightDescriptor {
             position: pos,
             color: SITE_LIGHT_COLORS[i],
@@ -235,36 +262,30 @@ fn derive_lights(
         });
     }
 
-    // 4 edge lights at midpoints: spawn→junction, junction→grand_cavern,
-    // grand_cavern→destination, junction→shaft.
-    // These are best-effort: skip if the midpoint is in solid rock.
-    let edge_pairs: [(usize, usize); 4] = [
-        (0, 1),              // spawn→junction
-        (1, 2),              // junction→grand_cavern
-        (2, 4.min(max_idx)), // grand_cavern→destination
-        (1, 3.min(max_idx)), // junction→shaft
-    ];
-
-    for (j, &(from, to)) in edge_pairs.iter().enumerate() {
-        if from >= sites.len() || to >= sites.len() {
-            continue;
+    // Last 4 anchors must be BackboneLight in canonical edge order.
+    for (j, &(expected_from, expected_to)) in BACKBONE_EDGES.iter().enumerate() {
+        let anchor = &anchors[5 + j];
+        match &anchor.kind {
+            AnchorKind::BackboneLight {
+                from_site_id,
+                to_site_id,
+            } => {
+                if *from_site_id != expected_from || *to_site_id != expected_to {
+                    return Err(PackageError::Validation(format!(
+                        "light anchor {}: expected BackboneLight ({expected_from}→{expected_to}), got ({from_site_id}→{to_site_id})",
+                        5 + j
+                    )));
+                }
+            }
+            other => {
+                return Err(PackageError::Validation(format!(
+                    "light anchor {}: expected BackboneLight, got {other:?}",
+                    5 + j
+                )));
+            }
         }
-        let a = &sites[from];
-        let b = &sites[to];
-        let pos = [
-            (a.x as f32 + b.x as f32) * 0.5,
-            (a.y as f32 + b.y as f32) * 0.5 + 1.5,
-            (a.z as f32 + b.z as f32) * 0.5,
-        ];
-        if !is_in_air(&pos, world) {
-            log::warn!(
-                "Edge light {j} at ({:.1}, {:.1}, {:.1}) is inside solid; skipping",
-                pos[0],
-                pos[1],
-                pos[2]
-            );
-            continue;
-        }
+        let pos = [anchor.x as f32, anchor.y as f32, anchor.z as f32];
+        validate_anchor_position(anchor.id, &anchor.kind, &pos, world)?;
         lights.push(CpuLightDescriptor {
             position: pos,
             color: EDGE_LIGHT_COLORS[j],
@@ -274,6 +295,39 @@ fn derive_lights(
     }
 
     Ok(lights)
+}
+
+fn validate_anchor_position(
+    anchor_id: u8,
+    kind: &AnchorKind,
+    pos: &[f32; 3],
+    world: &VoxelWorld,
+) -> Result<(), PackageError> {
+    if !pos[0].is_finite() || !pos[1].is_finite() || !pos[2].is_finite() {
+        return Err(PackageError::Validation(format!(
+            "light anchor {anchor_id} ({kind:?}) has non-finite position ({}, {}, {})",
+            pos[0], pos[1], pos[2]
+        )));
+    }
+
+    let x = pos[0].round() as i32;
+    let y = pos[1].round() as i32;
+    let z = pos[2].round() as i32;
+    let (w, h, d) = world.dims();
+    if x < 0 || y < 0 || z < 0 || x >= w as i32 || y >= h as i32 || z >= d as i32 {
+        return Err(PackageError::Validation(format!(
+            "light anchor {anchor_id} ({kind:?}) at ({:.1}, {:.1}, {:.1}) is out of range for world dimensions {w}x{h}x{d}",
+            pos[0], pos[1], pos[2]
+        )));
+    }
+
+    if *world.density().read(x as u32, y as u32, z as u32) < 0 {
+        return Err(PackageError::Validation(format!(
+            "light anchor {anchor_id} ({kind:?}) at ({:.1}, {:.1}, {:.1}) is inside solid rock",
+            pos[0], pos[1], pos[2]
+        )));
+    }
+    Ok(())
 }
 
 // ─── Viewpoint derivation ──────────────────────────────────────────────────
@@ -307,19 +361,9 @@ fn is_in_air(pos: &[f32; 3], world: &VoxelWorld) -> bool {
     let z = pos[2].round() as i32;
     let (w, h, d) = world.dims();
     if x < 0 || y < 0 || z < 0 || x >= w as i32 || y >= h as i32 || z >= d as i32 {
-        return true;
+        return false;
     }
     *world.density().read(x as u32, y as u32, z as u32) >= 0
-}
-
-fn validate_in_air(pos: &[f32; 3], world: &VoxelWorld, label: &str) -> Result<(), PackageError> {
-    if !is_in_air(pos, world) {
-        return Err(PackageError::Validation(format!(
-            "{label} at ({:.1}, {:.1}, {:.1}) is inside solid rock",
-            pos[0], pos[1], pos[2]
-        )));
-    }
-    Ok(())
 }
 
 // ─── Error type ────────────────────────────────────────────────────────────
@@ -413,15 +457,48 @@ mod tests {
         }
     }
 
+    fn air_world() -> VoxelWorld {
+        let mut world = VoxelWorld::new(16, 16, 16);
+        world.fill_air();
+        world
+    }
+
+    fn valid_light_anchors() -> Vec<SerializableAnchor> {
+        let mut anchors = (0..5u8)
+            .map(|site_id| SerializableAnchor {
+                id: site_id,
+                kind: AnchorKind::CoreLight { site_id },
+                x: site_id as u32 + 1,
+                y: 1,
+                z: 1,
+            })
+            .collect::<Vec<_>>();
+
+        for (offset, (from_site_id, to_site_id)) in BACKBONE_EDGES.into_iter().enumerate() {
+            anchors.push(SerializableAnchor {
+                id: (5 + offset) as u8,
+                kind: AnchorKind::BackboneLight {
+                    from_site_id,
+                    to_site_id,
+                },
+                x: offset as u32 + 1,
+                y: 2,
+                z: 2,
+            });
+        }
+        anchors
+    }
+
     #[test]
     fn build_scene_package_succeeds() {
         let config = make_test_resolved_config();
         let pkg = build_scene_package(&config).unwrap();
         assert!(pkg.total_voxels > 0);
-        // At least 5 site lights must always be present
-        assert!(
-            pkg.lights.len() >= 5,
-            "expected at least 5 site lights, got {}",
+        // Exactly 9 generator-anchor lights: 5 CoreLight + 4 BackboneLight
+        assert_eq!(
+            pkg.lights.len(),
+            9,
+            "expected exactly 9 lights, got {}",
             pkg.lights.len()
         );
         assert_eq!(pkg.viewpoints.len(), 5);
@@ -433,6 +510,65 @@ mod tests {
         assert!(pkg.generation_time_ms > 0);
         assert!(pkg.mesh_time_ms > 0);
         assert!(pkg.partition_time_ms > 0);
+    }
+
+    #[test]
+    fn light_anchor_validation_accepts_canonical_nine_anchors() {
+        let world = air_world();
+        let lights = consume_light_anchors(&valid_light_anchors(), &world).unwrap();
+        assert_eq!(lights.len(), 9);
+    }
+
+    #[test]
+    fn light_anchor_validation_rejects_malformed_count() {
+        let world = air_world();
+        let mut anchors = valid_light_anchors();
+        anchors.pop();
+        let err = consume_light_anchors(&anchors, &world).unwrap_err();
+        assert!(err.to_string().contains("expected exactly 9 light anchors"));
+    }
+
+    #[test]
+    fn light_anchor_validation_rejects_malformed_kind() {
+        let world = air_world();
+        let mut anchors = valid_light_anchors();
+        anchors[0].kind = AnchorKind::BackboneLight {
+            from_site_id: 0,
+            to_site_id: 1,
+        };
+        let err = consume_light_anchors(&anchors, &world).unwrap_err();
+        assert!(err.to_string().contains("expected CoreLight"));
+    }
+
+    #[test]
+    fn light_anchor_validation_rejects_malformed_order() {
+        let world = air_world();
+        let mut anchors = valid_light_anchors();
+        anchors.swap(5, 6);
+        let err = consume_light_anchors(&anchors, &world).unwrap_err();
+        assert!(err.to_string().contains("expected BackboneLight (0→1)"));
+    }
+
+    #[test]
+    fn light_anchor_validation_rejects_non_finite_position() {
+        let world = air_world();
+        let err = validate_anchor_position(
+            0,
+            &AnchorKind::CoreLight { site_id: 0 },
+            &[f32::NAN, 1.0, 1.0],
+            &world,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("non-finite position"));
+    }
+
+    #[test]
+    fn light_anchor_validation_rejects_out_of_range_position() {
+        let world = air_world();
+        let mut anchors = valid_light_anchors();
+        anchors[8].x = 99;
+        let err = consume_light_anchors(&anchors, &world).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
     }
 
     #[test]

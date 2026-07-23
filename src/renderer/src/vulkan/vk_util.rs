@@ -631,6 +631,56 @@ pub fn blit_copy_image_to_image(
     unsafe { device.cmd_blit_image2(cmd, &blit_info) }
 }
 
+/// Derive narrow stage and access masks for a layout transition barrier.
+///
+/// Uses the same layout-to-state policy as [`tracked_state_for_layout`]
+/// so that source and destination pipeline stages and memory access scopes
+/// are the narrowest valid combination. Falls back to `ALL_COMMANDS` +
+/// `MEMORY_READ | MEMORY_WRITE` for [`ImageLayout::GENERAL`] and unknown
+/// layouts.
+fn layout_transition_masks(
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> (
+    vk::PipelineStageFlags2,
+    vk::AccessFlags2,
+    vk::PipelineStageFlags2,
+    vk::AccessFlags2,
+) {
+    // queue_family = 0 is fine — the caller does not set ownership fields.
+    let old = tracked_state_for_layout(old_layout, 0);
+    let new = tracked_state_for_layout(new_layout, 0);
+    (old.stage, old.access, new.stage, new.access)
+}
+
+/// Select an [`ImageAspectFlags`] appropriate for the transition.
+///
+/// Consults both old and new layouts so that depth / depth-stencil images
+/// are not misidentified as colour just because the destination layout is
+/// shader-read or transfer.
+fn aspect_mask_for_transition(
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> vk::ImageAspectFlags {
+    let is_depth_stencil =
+        |l: vk::ImageLayout| matches!(l, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let is_depth = |l: vk::ImageLayout| {
+        matches!(
+            l,
+            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL
+                | vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        )
+    };
+
+    if is_depth_stencil(old_layout) || is_depth_stencil(new_layout) {
+        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+    } else if is_depth(old_layout) || is_depth(new_layout) {
+        vk::ImageAspectFlags::DEPTH
+    } else {
+        vk::ImageAspectFlags::COLOR
+    }
+}
+
 pub fn transition_image(
     device: &ash::Device,
     cmd_buffer: vk::CommandBuffer,
@@ -638,17 +688,15 @@ pub fn transition_image(
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
 ) {
-    let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
-        vk::ImageAspectFlags::DEPTH
-    } else {
-        vk::ImageAspectFlags::COLOR
-    };
+    let aspect_mask = aspect_mask_for_transition(old_layout, new_layout);
+    let (src_stage, src_access, dst_stage, dst_access) =
+        layout_transition_masks(old_layout, new_layout);
 
     let image_barrier = [vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
         .old_layout(old_layout)
         .new_layout(new_layout)
         .subresource_range(image_subresource_range(aspect_mask))
@@ -669,17 +717,15 @@ pub fn transition_image_layered(
     layer_count: u32,
     mips_level: u32,
 ) {
-    let aspect_mask = if new_layout == vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL {
-        vk::ImageAspectFlags::DEPTH
-    } else {
-        vk::ImageAspectFlags::COLOR
-    };
+    let aspect_mask = aspect_mask_for_transition(old_layout, new_layout);
+    let (src_stage, src_access, dst_stage, dst_access) =
+        layout_transition_masks(old_layout, new_layout);
 
     let image_barrier = [vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-        .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
         .old_layout(old_layout)
         .new_layout(new_layout)
         .subresource_range(vk::ImageSubresourceRange {
@@ -2439,7 +2485,8 @@ pub fn record_image_barrier(
 #[cfg(test)]
 mod tests {
     use super::{
-        queue_family_indices_for_barrier, resolve_upload_mip_levels, FrameTransitionOverlay,
+        aspect_mask_for_transition, layout_transition_masks, queue_family_indices_for_barrier,
+        resolve_upload_mip_levels, FrameTransitionOverlay,
     };
     use crate::vulkan::vk_types::{
         ImageStateTracker, ImageSubresourceKey, TrackedSubresourceState,
@@ -2543,6 +2590,126 @@ mod tests {
         assert_eq!(range.level_count, 4);
         assert_eq!(range.base_array_layer, 0);
         assert_eq!(range.layer_count, 6);
+    }
+
+    #[test]
+    fn layout_transition_masks_use_narrow_known_layout_pairs() {
+        let cases = [
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+            (
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_READ,
+            ),
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            ),
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            ),
+            (
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            (
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+            (
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+            ),
+            (
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
+                vk::AccessFlags2::empty(),
+            ),
+        ];
+
+        for (layout, expected_stage, expected_access) in cases {
+            let (src_stage, src_access, dst_stage, dst_access) =
+                layout_transition_masks(layout, layout);
+            assert_eq!(src_stage, expected_stage, "source stage for {layout:?}");
+            assert_eq!(src_access, expected_access, "source access for {layout:?}");
+            assert_eq!(
+                dst_stage, expected_stage,
+                "destination stage for {layout:?}"
+            );
+            assert_eq!(
+                dst_access, expected_access,
+                "destination access for {layout:?}"
+            );
+            assert_ne!(
+                expected_stage,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                "known layout should not use ALL_COMMANDS: {layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_transition_masks_fall_back_for_general_and_unknown_layouts() {
+        for layout in [vk::ImageLayout::GENERAL, vk::ImageLayout::from_raw(0x4d2)] {
+            let (src_stage, src_access, dst_stage, dst_access) =
+                layout_transition_masks(layout, layout);
+            assert_eq!(src_stage, vk::PipelineStageFlags2::ALL_COMMANDS);
+            assert_eq!(dst_stage, vk::PipelineStageFlags2::ALL_COMMANDS);
+            assert_eq!(
+                src_access,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+            );
+            assert_eq!(
+                dst_access,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE
+            );
+        }
+    }
+
+    #[test]
+    fn aspect_mask_for_transition_uses_depth_stencil_depth_then_color_precedence() {
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        );
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::DEPTH
+        );
+        assert_eq!(
+            aspect_mask_for_transition(
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            vk::ImageAspectFlags::COLOR
+        );
     }
 
     #[test]

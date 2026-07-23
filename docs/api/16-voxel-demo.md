@@ -82,7 +82,7 @@ All floating-point inputs must be finite. Validation also checks version combina
 
 | Flag | Default | Behavior |
 | --- | --- | --- |
-| `--light-budget <N>` | `9` | Validate a runtime budget in `9..=16`. It is excluded from documents, saves, and identities. The current package derives five mandatory site lights and up to four best-effort midpoint lights. |
+| `--light-budget <N>` | `9` | Validate a runtime budget in `9..=16`. It is excluded from documents, saves, and identities. The current package consumes exactly nine mandatory generator-anchor lights: five `CoreLight` anchors and four `BackboneLight` anchors. |
 | `--headless` | off | Use one-shot headless generation/upload/capture. Headless v2 creates no editor or regeneration controller. |
 | `--capture-dir <PATH>` / `--capture_dir <PATH>` | generated run directory | Select the v1/v2 headless capture root. Both spellings are equivalent. |
 | `--env <PATH>` | `apps/dungeon_dogfood/assets/sky_maps/indoor_4k.exr` | Select an IBL environment. A missing or failed environment falls back to the renderer default environment. |

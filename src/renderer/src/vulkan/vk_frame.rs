@@ -545,16 +545,24 @@ pub(crate) fn acquire_frame_slot(
         let swapchain_acquire_ms = elapsed_ms(swapchain_acquire_start);
         warn_if_acquire_stage_spike("swapchain_acquire", swapchain_acquire_ms);
 
+        // Reset the acquire retry-exhaustion warning streak on any non-Retry outcome.
+        if acquire_class != AcquireClass::Retry {
+            ctx.swapchain_owner.acquire_retry_exhausted = false;
+        }
+
         let (image_index, acquire_suboptimal) = match acquire_class {
             AcquireClass::Acquired {
                 image_index,
                 suboptimal,
             } => (image_index, suboptimal),
             AcquireClass::Retry => {
-                warn!(
-                    "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); skipping this frame without rebuilding",
-                    acquire_retries, swapchain_acquire_ms
-                );
+                if !ctx.swapchain_owner.acquire_retry_exhausted {
+                    warn!(
+                        "Swapchain acquire exhausted retry budget ({} retries, {:.3} ms total); skipping this frame without rebuilding",
+                        acquire_retries, swapchain_acquire_ms
+                    );
+                    ctx.swapchain_owner.acquire_retry_exhausted = true;
+                }
                 let _ = ctx.presentation.rewind_frame();
                 return Ok(FrameSlotAcquireOutcome::TransientUnavailable);
             }

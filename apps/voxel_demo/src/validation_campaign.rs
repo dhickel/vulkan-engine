@@ -647,8 +647,8 @@ mod tests {
                     assert!(t.total_voxels > 0, "{preset_name}: zero voxels");
                     assert!(t.site_count >= 5, "{preset_name}: fewer than 5 sites");
                     assert!(t.viewpoint_count >= 5, "{preset_name}: fewer than 5 viewpoints");
-                    // At least 5 lights (site lights); edge lights best-effort
-                    assert!(t.light_count >= 5, "{preset_name}: fewer than 5 lights");
+                    // Exactly 9 generator-anchor lights: 5 CoreLight + 4 BackboneLight.
+                    assert_eq!(t.light_count, 9, "{preset_name}: expected exactly 9 lights");
                 }
             } else {
                 failed.push(format!(

@@ -1024,7 +1024,7 @@ mod tests {
         assert!(result.error.is_none(), "unexpected error: {:?}", result.error);
         let pkg = result.package.unwrap();
         assert!(pkg.total_voxels > 0);
-        assert!(pkg.lights.len() >= 5);
+        assert_eq!(pkg.lights.len(), 9);
         assert_eq!(pkg.viewpoints.len(), 5);
         assert!(pkg.wall_mesh.is_some() || pkg.floor_mesh.is_some());
     }
