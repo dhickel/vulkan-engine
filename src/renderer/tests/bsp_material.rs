@@ -5,13 +5,13 @@
 
 #[cfg(feature = "bsp")]
 mod bsp_tests {
+    use ash::vk::Handle;
     use renderer::api::bsp::{
-        BspCachedSurfaceRepr, BspMaterialDesc, BspSurfaceCacheRepr, BspSurfaceClass,
-        BspSurfaceUniform, BspTextureSet, VkPipelineType,
+        bsp_surface_flags, BspCachedSurfaceRepr, BspFrameValuesUniform, BspMaterialDesc,
+        BspSurfaceCacheRepr, BspSurfaceClass, BspSurfaceUniform, BspTextureSet, VkPipelineType,
     };
     use renderer::api::BspMaterialHandle;
     use renderer::api::BspTextureHandle;
-    use ash::vk::Handle;
     use renderer::TextureHandle;
 
     /// Verify that BspSurfaceClass variants map to the correct VkPipelineType.
@@ -41,12 +41,37 @@ mod bsp_tests {
     #[test]
     fn bsp_surface_uniform_defaults() {
         let uniform = BspSurfaceUniform::default();
-        assert_eq!(uniform.style_index, 0);
+        assert_eq!(uniform.style_ids, glam::UVec4::new(0, 255, 255, 255));
         assert_eq!(uniform.fullbright_base, 224);
         assert_eq!(uniform.fullbright_count, 32);
         assert_eq!(uniform.alpha_threshold, 0.5);
         assert_eq!(uniform.animation_frame, 0);
         assert_eq!(uniform.animation_time, 0.0);
+        assert_eq!(uniform.surface_flags, 0);
+        assert_eq!(uniform.receive_mask, bsp_surface_flags::SEALED_DEFAULT);
+    }
+
+    /// Verify BspSurfaceUniform size matches std140 GLSL layout (80 bytes).
+    #[test]
+    fn bsp_surface_uniform_size() {
+        assert_eq!(std::mem::size_of::<BspSurfaceUniform>(), 80);
+    }
+
+    /// Verify BspFrameValuesUniform size matches spec (288 bytes).
+    #[test]
+    fn bsp_frame_values_uniform_size() {
+        assert_eq!(std::mem::size_of::<BspFrameValuesUniform>(), 288);
+    }
+
+    /// Verify BspFrameValuesUniform default: style 0 = 1.0, others = 0.0.
+    #[test]
+    fn bsp_frame_values_uniform_defaults() {
+        let fv = BspFrameValuesUniform::default();
+        assert_eq!(fv.style_intensities[0], 1.0);
+        assert!(fv.style_intensities[1..].iter().all(|&v| v == 0.0));
+        assert_eq!(fv.liquid_warp_time, 0.0);
+        assert_eq!(fv.liquid_flow_time, 0.0);
+        assert_eq!(fv.global_animation_time, 0.0);
     }
 
     /// Verify BspSurfaceCache add and get works with generation tracking.
@@ -57,6 +82,7 @@ mod bsp_tests {
             material_descriptor: ash::vk::DescriptorSet::from_raw(0xBEEF),
             surf_ubo_alloc: Default::default(),
             pipeline: VkPipelineType::BspOpaque,
+            surface_flags: 0,
             albedo_tex: TextureHandle::new(10, 0),
             fullbright_tex: None,
             lightmap_tex: TextureHandle::new(11, 0),
@@ -116,6 +142,7 @@ mod bsp_tests {
             material_descriptor: descriptor,
             surf_ubo_alloc: Default::default(),
             pipeline: VkPipelineType::BspOpaque,
+            surface_flags: 0,
             albedo_tex: TextureHandle::new(10, 1),
             fullbright_tex: Some(TextureHandle::new(11, 2)),
             lightmap_tex: TextureHandle::new(20, 3),

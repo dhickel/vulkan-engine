@@ -6,9 +6,9 @@
 
 // Internal module-use imports.
 #[cfg(feature = "bsp")]
-use crate::data::handles::{BspMaterialHandle, MeshHandle, TextureHandle};
-#[cfg(feature = "bsp")]
 use crate::data::data_cache::VkDescType;
+#[cfg(feature = "bsp")]
+use crate::data::handles::{BspMaterialHandle, MeshHandle, TextureHandle};
 
 // Re-exports for external consumers (tests, extraction pipeline).
 pub use crate::data::bsp_import::{
@@ -22,6 +22,8 @@ pub use crate::data::data_cache::{
     BspCachedSurface as BspCachedSurfaceRepr, BspLightmapAtlasGpu,
     BspSurfaceCache as BspSurfaceCacheRepr, VkPipelineType,
 };
+pub use crate::data::gpu_data::bsp_surface_flags;
+pub use crate::data::gpu_data::BspFrameValuesUniform;
 pub use crate::data::gpu_data::BspSurfaceUniform;
 pub use crate::scene::bsp_visibility::{filter_batches_by_pvs, pvs_should_disable, BspMountState};
 
@@ -62,15 +64,15 @@ fn build_lightmap_array_pixels(
     if width == 0 || height == 0 {
         return Err("BSP lightmap atlas has zero-sized page".to_string());
     }
-    let styles = if atlas.styles.is_empty() {
-        vec![0]
-    } else {
-        atlas.styles.clone()
-    };
-    if styles.len() > 64 {
-        return Err(format!("BSP lightmap atlas has {} styles; max is 64", styles.len()));
+    if atlas.styles.len() > 64 {
+        return Err(format!(
+            "BSP lightmap atlas has {} styles; max is 64",
+            atlas.styles.len()
+        ));
     }
-    let layer_count = styles.len() as u32;
+    // Layers are face-slot-local: layer 0..3 correspond to BSP face style slots.
+    // The per-surface UBO carries the style IDs used to weight each slot.
+    let layer_count = 4u32;
     let layer_bytes = (width as usize)
         .checked_mul(height as usize)
         .and_then(|px| px.checked_mul(4))
@@ -82,13 +84,6 @@ fn build_lightmap_array_pixels(
         }
     }
 
-    let style_layer = |style: u8| -> Result<usize, String> {
-        styles
-            .iter()
-            .position(|&candidate| candidate == style)
-            .ok_or_else(|| format!("BSP lightmap style {style} missing from atlas style table"))
-    };
-
     let copy_rect = |dst: &mut [u8],
                      dst_layer: usize,
                      dst_offset: (u32, u32),
@@ -96,12 +91,13 @@ fn build_lightmap_array_pixels(
                      src_offset: (u32, u32),
                      extent: (u32, u32)|
      -> Result<(), String> {
-        let src_page = atlas
-            .pages
-            .get(src_page_index as usize)
-            .ok_or_else(|| format!("BSP lightmap references missing atlas page {src_page_index}"))?;
+        let src_page = atlas.pages.get(src_page_index as usize).ok_or_else(|| {
+            format!("BSP lightmap references missing atlas page {src_page_index}")
+        })?;
         if src_page.width != width || src_page.height != height {
-            return Err("BSP lightmap atlas pages must share dimensions for array upload".to_string());
+            return Err(
+                "BSP lightmap atlas pages must share dimensions for array upload".to_string(),
+            );
         }
         for y in 0..extent.1 {
             for x in 0..extent.0 {
@@ -110,10 +106,13 @@ fn build_lightmap_array_pixels(
                 let dx = dst_offset.0 + x;
                 let dy = dst_offset.1 + y;
                 if sx >= width || sy >= height || dx >= width || dy >= height {
-                    return Err("BSP lightmap style layer rectangle exceeds atlas bounds".to_string());
+                    return Err(
+                        "BSP lightmap style layer rectangle exceeds atlas bounds".to_string()
+                    );
                 }
                 let src_idx = ((sy as usize * width as usize) + sx as usize) * 3;
-                let dst_idx = dst_layer * layer_bytes + ((dy as usize * width as usize) + dx as usize) * 4;
+                let dst_idx =
+                    dst_layer * layer_bytes + ((dy as usize * width as usize) + dx as usize) * 4;
                 dst[dst_idx] = src_page.data[src_idx];
                 dst[dst_idx + 1] = src_page.data[src_idx + 1];
                 dst[dst_idx + 2] = src_page.data[src_idx + 2];
@@ -125,15 +124,20 @@ fn build_lightmap_array_pixels(
 
     let mut copied_any_style_layout = false;
     for layout in &extracted.face_lightmap_layouts {
-        for style_layout in &layout.style_layers {
+        for (slot, style_layout) in layout.style_layers.iter().take(4).enumerate() {
             if !style_layout.has_data {
                 continue;
             }
+            if style_layout.style_id > 63 {
+                return Err(format!(
+                    "BSP lightmap style {} exceeds max 63",
+                    style_layout.style_id
+                ));
+            }
             copied_any_style_layout = true;
-            let dst_layer = style_layer(style_layout.style_id)?;
             copy_rect(
                 &mut rgba,
-                dst_layer,
+                slot,
                 layout.atlas_offset,
                 style_layout.page_index,
                 style_layout.atlas_offset,
@@ -158,6 +162,40 @@ fn build_lightmap_array_pixels(
     }
 
     Ok((width, height, layer_count, rgba))
+}
+
+#[cfg(feature = "bsp")]
+fn face_style_ids(layout: Option<&bsp::lightmaps::FaceLightmapLayout>) -> glam::UVec4 {
+    let mut ids = [255u32; 4];
+    if let Some(layout) = layout {
+        for (slot, style_layout) in layout.style_layers.iter().take(4).enumerate() {
+            if style_layout.has_data && style_layout.style_id <= 63 {
+                ids[slot] = style_layout.style_id as u32;
+            }
+        }
+    }
+    if ids.iter().all(|&id| id == 255) {
+        ids[0] = 0;
+    }
+    glam::UVec4::new(ids[0], ids[1], ids[2], ids[3])
+}
+
+#[cfg(feature = "bsp")]
+fn surface_flags_for(class: Option<bsp::materials::SurfaceClass>) -> u32 {
+    match class {
+        Some(bsp::materials::SurfaceClass::AlphaMask) => bsp_surface_flags::SURF_ALPHA_MASK,
+        Some(bsp::materials::SurfaceClass::Sky) => bsp_surface_flags::SURF_SKY,
+        Some(bsp::materials::SurfaceClass::Liquid) => bsp_surface_flags::SURF_LIQUID,
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn receive_mask_for(class: Option<bsp::materials::SurfaceClass>) -> u32 {
+    match class {
+        Some(bsp::materials::SurfaceClass::Sky) => bsp_surface_flags::OUTDOOR_DEFAULT,
+        _ => bsp_surface_flags::SEALED_DEFAULT,
+    }
 }
 
 #[cfg(feature = "bsp")]
@@ -220,16 +258,16 @@ impl PreparedBspMount {
         desc_layout_cache: &crate::data::data_cache::VkDescLayoutCache,
         data_cache: &crate::data::data_cache::VkDataCache,
     ) -> Result<Self, String> {
-        use crate::data::gpu_data::{MeshMeta, Vertex};
         use crate::data::bsp_import::face_to_procedural_mesh;
+        use crate::data::data_cache::{BspLightmapAtlasGpu, BspSurfaceUboGpu, TextureCache};
+        use crate::data::gpu_data::{MeshMeta, Vertex};
         use crate::vulkan::vk_bsp::{
             create_bsp_material_descriptor_pool, create_lightmap_atlas_image,
             create_lightmap_sampler, upload_lightmap_atlas_data, write_bsp_material_descriptor,
         };
-        use crate::data::data_cache::{BspLightmapAtlasGpu, BspSurfaceUboGpu, TextureCache};
         use crate::vulkan::vk_storage::BufferPlacement;
-        use vk_mem::Alloc;
         use log::info;
+        use vk_mem::Alloc;
 
         let face_count = extracted.face_geometries.len();
         let renderable_face_count = (0..face_count)
@@ -321,7 +359,11 @@ impl PreparedBspMount {
             for fi in 0..face_count {
                 if let Some(meta) = face_mesh_metas[fi].take() {
                     let handle = mesh_cache.add(meta);
-                    match mesh_cache.allocate_id(handle, BufferPlacement::ContiguousPreferred, false) {
+                    match mesh_cache.allocate_id(
+                        handle,
+                        BufferPlacement::ContiguousPreferred,
+                        false,
+                    ) {
                         crate::data::data_cache::LoadResult::Success(_) => {
                             face_meshes[fi] = handle;
                         }
@@ -333,7 +375,10 @@ impl PreparedBspMount {
             }
         }
 
-        let uploaded_count = face_meshes.iter().filter(|h| h.slot != 0 || h.generation != 0).count();
+        let uploaded_count = face_meshes
+            .iter()
+            .filter(|h| h.slot != 0 || h.generation != 0)
+            .count();
         info!("BSP upload: {uploaded_count} / {face_count} faces uploaded to GPU");
 
         if renderable_face_count == 0 {
@@ -359,24 +404,35 @@ impl PreparedBspMount {
         // ── 2. Upload lightmap atlas to GPU ──────────────────────
         let atlas = &extracted.lightmap_atlas;
         if renderable_face_count > 0 && atlas.pages.is_empty() {
-            return Err("BSP upload requires a real lightmap atlas for renderable faces".to_string());
+            return Err(
+                "BSP upload requires a real lightmap atlas for renderable faces".to_string(),
+            );
         }
-        let (atlas_width, atlas_height, layer_count, rgba) = build_lightmap_array_pixels(extracted)?;
+        let (atlas_width, atlas_height, layer_count, rgba) =
+            build_lightmap_array_pixels(extracted)?;
 
         let alloc_guard = allocator
             .lock()
             .map_err(|_| "allocator lock poisoned".to_string())?;
 
         let lightmap_image = create_lightmap_atlas_image(
-            device, &alloc_guard, atlas_width, atlas_height, layer_count,
+            device,
+            &alloc_guard,
+            atlas_width,
+            atlas_height,
+            layer_count,
         )?;
         let lightmap_sampler_val = create_lightmap_sampler(device)?;
 
         upload_lightmap_atlas_data(
-            device, &alloc_guard,
-            transfer_command_pool, transfer_queue,
+            device,
+            &alloc_guard,
+            transfer_command_pool,
+            transfer_queue,
             lightmap_image.image,
-            atlas_width, atlas_height, layer_count,
+            atlas_width,
+            atlas_height,
+            layer_count,
             &rgba,
         )?;
 
@@ -442,7 +498,7 @@ impl PreparedBspMount {
 
         // ── 4. Prepare UBO buffer ────────────────────────────────
         let ubo_size = std::mem::size_of::<BspSurfaceUniform>() as u64;
-        let ubo_stride = 64u64; // std140: align each UBO to 64 bytes for safety
+        let ubo_stride = 96u64; // std140: align each UBO to 96 bytes for safety (80 B rounded up)
         let total_ubo_size = ubo_stride * face_count as u64;
 
         let material_set_layout = desc_layout_cache.get(VkDescType::BspMaterial);
@@ -478,9 +534,8 @@ impl PreparedBspMount {
             let alloc_info = vk_mem::AllocationCreateInfo {
                 usage: vk_mem::MemoryUsage::AutoPreferHost,
                 flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                required_flags:
-                    ash::vk::MemoryPropertyFlags::HOST_VISIBLE
-                        | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
+                required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
                 ..Default::default()
             };
 
@@ -547,8 +602,20 @@ impl PreparedBspMount {
 
             let luxel_w = layout.luxel_extents.0.max(1) as f32;
             let luxel_h = layout.luxel_extents.1.max(1) as f32;
-            let atlas_w = atlas.pages.first().map(|p| p.width.max(1) as f32).unwrap_or(4096.0);
-            let atlas_h = atlas.pages.first().map(|p| p.height.max(1) as f32).unwrap_or(4096.0);
+            let atlas_w = atlas
+                .pages
+                .first()
+                .map(|p| p.width.max(1) as f32)
+                .unwrap_or(4096.0);
+            let atlas_h = atlas
+                .pages
+                .first()
+                .map(|p| p.height.max(1) as f32)
+                .unwrap_or(4096.0);
+
+            let sc = extracted.face_materials.get(fi).map(|m| m.surface_class);
+            let surface_flags = surface_flags_for(sc);
+            let receive_mask = receive_mask_for(sc);
 
             let surf_uniform = BspSurfaceUniform {
                 lightmap_scale_bias: glam::Vec4::new(
@@ -557,14 +624,18 @@ impl PreparedBspMount {
                     layout.atlas_offset.0 as f32 / atlas_w,
                     layout.atlas_offset.1 as f32 / atlas_h,
                 ),
-                style_index: 0,
+                style_ids: face_style_ids(Some(layout)),
                 fullbright_base: 224,
                 fullbright_count: 32,
                 alpha_threshold: 0.5,
                 animation_frame: 0,
                 animation_time: 0.0,
+                surface_flags,
+                receive_mask,
                 _pad0: 0,
-                _pad1: 0,
+                liquid_warp_scale: 0.02,
+                liquid_flow_speed: 1.0,
+                _pad1: [0, 0],
             };
 
             // Write UBO data.
@@ -635,6 +706,8 @@ impl PreparedBspMount {
                     _ => VkPipelineType::BspOpaque,
                 };
 
+                let surface_flags = surface_flags_for(sc);
+
                 let ubo_offset = fi as u64 * ubo_stride;
                 let surf_ubo_alloc = crate::vulkan::vk_types::VkSubAlloc {
                     alloc_address: ubo_ptr as u64 + ubo_offset,
@@ -652,6 +725,7 @@ impl PreparedBspMount {
                     material_descriptor: material_set,
                     surf_ubo_alloc,
                     pipeline,
+                    surface_flags,
                     albedo_tex: default_white_handle,
                     fullbright_tex: Some(default_black_handle),
                     lightmap_tex: default_white_handle,
@@ -664,7 +738,118 @@ impl PreparedBspMount {
         let material_count = face_materials.iter().filter(|m| m.is_some()).count();
         info!("BSP upload: {material_count} materials registered in surface cache");
 
-        // ── 6. Build mount ──────────────────────────────────────
+        // ── 6. Initialize frame-values UBO and descriptor sets (set 2) ─
+        {
+            let alloc_guard = allocator
+                .lock()
+                .map_err(|_| "allocator lock poisoned".to_string())?;
+            let frame_values_layout = desc_layout_cache.get(VkDescType::BspFrameValues);
+
+            let ubo_size = std::mem::size_of::<BspFrameValuesUniform>() as u64;
+            let stride = ubo_size.next_multiple_of(64);
+            let frame_slot_count = 3u32; // triple-buffered for in-flight safety
+            let total = stride * frame_slot_count as u64;
+
+            let buffer_info = ash::vk::BufferCreateInfo::default()
+                .size(total)
+                .usage(ash::vk::BufferUsageFlags::UNIFORM_BUFFER)
+                .sharing_mode(ash::vk::SharingMode::EXCLUSIVE);
+
+            let fv_alloc_info = vk_mem::AllocationCreateInfo {
+                usage: vk_mem::MemoryUsage::AutoPreferHost,
+                flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
+                required_flags: ash::vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
+                ..Default::default()
+            };
+
+            let (fv_buffer, mut fv_allocation) = unsafe {
+                alloc_guard
+                    .create_buffer(&buffer_info, &fv_alloc_info)
+                    .map_err(|e| format!("failed to create BSP frame-values UBO: {e:?}"))?
+            };
+
+            // Write default frame values to all slots.
+            let fv_ptr = unsafe {
+                alloc_guard
+                    .map_memory(&mut fv_allocation)
+                    .map_err(|e| format!("failed to map BSP frame-values memory: {e:?}"))?
+            };
+            let default_values = BspFrameValuesUniform::default();
+            for slot in 0..frame_slot_count {
+                unsafe {
+                    let dst = (fv_ptr as *mut u8).add((stride * slot as u64) as usize);
+                    std::ptr::copy_nonoverlapping(
+                        &default_values as *const _ as *const u8,
+                        dst,
+                        ubo_size as usize,
+                    );
+                }
+            }
+            unsafe {
+                alloc_guard.unmap_memory(&mut fv_allocation);
+            }
+
+            // Create descriptor pool and allocate frame-values descriptor sets.
+            let pool_sizes = [ash::vk::DescriptorPoolSize::default()
+                .ty(ash::vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(frame_slot_count)];
+            let pool_info = ash::vk::DescriptorPoolCreateInfo::default()
+                .max_sets(frame_slot_count)
+                .pool_sizes(&pool_sizes);
+
+            let fv_pool = unsafe {
+                device
+                    .create_descriptor_pool(&pool_info, None)
+                    .map_err(|e| format!("failed to create BSP frame-values pool: {e:?}"))?
+            };
+
+            let mut fv_descriptors = Vec::with_capacity(frame_slot_count as usize);
+            for slot in 0..frame_slot_count {
+                let alloc_info = ash::vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(fv_pool)
+                    .set_layouts(std::slice::from_ref(&frame_values_layout));
+                let sets = unsafe {
+                    device
+                        .allocate_descriptor_sets(&alloc_info)
+                        .map_err(|e| format!("failed to allocate BSP frame-values set: {e:?}"))?
+                };
+
+                let ubo_info = ash::vk::DescriptorBufferInfo::default()
+                    .buffer(fv_buffer)
+                    .offset(stride * slot as u64)
+                    .range(ubo_size);
+
+                let write = ash::vk::WriteDescriptorSet::default()
+                    .dst_set(sets[0])
+                    .dst_binding(0)
+                    .descriptor_type(ash::vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(std::slice::from_ref(&ubo_info));
+
+                unsafe {
+                    device.update_descriptor_sets(&[write], &[]);
+                }
+
+                fv_descriptors.push(sets[0]);
+            }
+
+            let mut surface_cache = data_cache
+                .bsp_surface_cache
+                .lock()
+                .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+            surface_cache.install_frame_values(
+                BspSurfaceUboGpu {
+                    buffer: fv_buffer,
+                    allocation: fv_allocation,
+                },
+                fv_pool,
+                fv_descriptors,
+                frame_values_layout,
+                frame_slot_count,
+            )?;
+        }
+
+        // ── 7. Build mount ──────────────────────────────────────
         let mut mount_state = BspMountState::new();
         mount_state.activate();
         mount_state.set_leaf_membership(extracted.leaf_membership.clone());
@@ -684,7 +869,6 @@ impl PreparedBspMount {
             light_descriptors: extracted.light_descriptors.clone(),
         })
     }
-
 }
 
 #[cfg(feature = "bsp")]

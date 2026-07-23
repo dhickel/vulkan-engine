@@ -1189,9 +1189,22 @@ pub fn init_descriptor_cache(device: &ash::Device) -> data_cache::VkDescLayoutCa
         .expect("failed to build bsp_scene descriptor layout");
 
     #[cfg(feature = "bsp")]
+    // BSP frame values set: b0 style intensities + frame-varying params UBO.
+    let bsp_frame_values = DescriptorLayoutBuilder::default()
+        .add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)
+        .build(
+            device,
+            vk::ShaderStageFlags::FRAGMENT,
+            vk::DescriptorSetLayoutCreateFlags::empty(),
+        )
+        .expect("failed to build bsp_frame_values descriptor layout");
+
+    #[cfg(feature = "bsp")]
     layouts.push((VkDescType::BspMaterial, bsp_material));
     #[cfg(feature = "bsp")]
     layouts.push((VkDescType::BspScene, bsp_scene));
+    #[cfg(feature = "bsp")]
+    layouts.push((VkDescType::BspFrameValues, bsp_frame_values));
 
     let cache = data_cache::VkDescLayoutCache::new(layouts);
     cache.debug();

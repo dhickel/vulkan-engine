@@ -3,7 +3,14 @@
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_buffer_reference2 : enable
 
-// BSP liquid/warp fragment shader — animated UV, two-sided, transparency.
+// BSP liquid/warp fragment shader — animated UV, two-sided, translucent.
+//
+// Computes:
+//   warped uv = inUV0 + sin/cos warp from liquidFrame.warpTime
+//   albedo = texture(albedoTex, warpedUv).rgb
+//   lightmap = 4-style weighted sum (same as opaque)
+//   diffuse = lightmap * overbright * albedo / PI
+//   outColor = vec4(diffuse, liquidAlpha)
 
 layout (location = 0) in vec3 inWorldPos;
 layout (location = 1) in vec2 inUV0;
@@ -19,40 +26,95 @@ layout (set = 0, binding = 0) uniform UBO {
 
 // Material bindings (set 1).
 layout (set = 1, binding = 0) uniform sampler2D albedoTex;
+layout (set = 1, binding = 1) uniform sampler2D fullbrightMask;
 layout (set = 1, binding = 2) uniform sampler2DArray lightmapAtlas;
 
 layout (set = 1, binding = 3) uniform BspSurfaceParams {
     vec4 lightmapScaleBias;
-    uint styleIndex;
+    uvec4 styleIds;
     uint fullbrightBase;
     uint fullbrightCount;
     float alphaThreshold;
     uint animationFrame;
     float animationTime;
+    uint surfaceFlags;
+    uint receiveMask;
     uint _pad0;
-    uint _pad1;
+    float liquidWarpScale;
+    float liquidFlowSpeed;
+    uvec2 _pad1;
 } surf;
+
+// Frame-varying values (set 2).
+layout (set = 2, binding = 0) uniform BspFrameValues {
+    vec4 styleIntensityPacked[16];
+    float liquidWarpTime;
+    float liquidFlowTime;
+    float globalAnimationTime;
+} frameValues;
 
 layout (location = 0) out vec4 outColor;
 
 const float OVERBRIGHT = 2.0;
-const float PI_INV = 1.0 / 3.14159265359;
+const float PI_INV     = 1.0 / 3.14159265359;
+const float LIQUID_ALPHA = 0.6;
+
+float styleIntensity(uint styleId)
+{
+    if (styleId == 255u || styleId >= 64u) {
+        return 0.0;
+    }
+    uint vectorIndex = styleId >> 2;
+    uint componentIndex = styleId & 3u;
+    return frameValues.styleIntensityPacked[vectorIndex][int(componentIndex)];
+}
 
 void main()
 {
-    // Warped UV coordinate driven by time.
-    float warp = sin(inUV1.x * 4.0 + surf.animationTime * 2.0) * 0.02 +
-                 cos(inUV1.y * 4.0 + surf.animationTime * 1.7) * 0.02;
-    vec2 warpedUV0 = inUV0 + vec2(warp);
+    // ── Warped UV coordinate driven by frame-local time ─────────────
 
-    vec3 albedo = texture(albedoTex, warpedUV0).rgb;
+    float warpScale = surf.liquidWarpScale;
+    float flowSpeed = surf.liquidFlowSpeed;
 
-    // Lightmap irradiance from style-indexed array layer.
-    vec3 lightmapIrradiance = texture(lightmapAtlas, vec3(inUV1, float(surf.styleIndex))).rgb;
+    float warpX = sin(inUV1.y * 4.0 + frameValues.liquidWarpTime * 2.3) * warpScale
+                + cos(inUV1.x * 5.0 + frameValues.liquidWarpTime * 1.7) * warpScale;
+    float warpY = cos(inUV1.x * 4.0 + frameValues.liquidWarpTime * 2.1) * warpScale
+                + sin(inUV1.y * 5.0 + frameValues.liquidWarpTime * 1.9) * warpScale;
+
+    // Flow scroll along UV
+    float flowU = frameValues.liquidFlowTime * flowSpeed * 0.1;
+    float flowV = frameValues.liquidFlowTime * flowSpeed * 0.07;
+
+    vec2 warpedUV = inUV0 + vec2(warpX + flowU, warpY + flowV);
+
+    vec3 albedo = texture(albedoTex, warpedUV).rgb;
+
+    // ── Lightmap 4-style weighted sum ───────────────────────────────
+
+    vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
+    vec3 lightmapIrradiance = vec3(0.0);
+
+    if (surf.styleIds.x != 255u) {
+        float intensity = styleIntensity(surf.styleIds.x);
+        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, 0.0)).rgb * intensity;
+    }
+    if (surf.styleIds.y != 255u) {
+        float intensity = styleIntensity(surf.styleIds.y);
+        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, 1.0)).rgb * intensity;
+    }
+    if (surf.styleIds.z != 255u) {
+        float intensity = styleIntensity(surf.styleIds.z);
+        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, 2.0)).rgb * intensity;
+    }
+    if (surf.styleIds.w != 255u) {
+        float intensity = styleIntensity(surf.styleIds.w);
+        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, 3.0)).rgb * intensity;
+    }
+
     vec3 irradiance = lightmapIrradiance * OVERBRIGHT;
-
     vec3 diffuse = irradiance * albedo * PI_INV;
 
-    // Liquid surfaces are always partially transparent for post-blend depth sort.
-    outColor = vec4(diffuse, 0.6);
+    // ── Output with alpha for post-blend depth sort ─────────────────
+
+    outColor = vec4(diffuse, LIQUID_ALPHA);
 }

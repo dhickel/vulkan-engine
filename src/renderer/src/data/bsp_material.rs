@@ -15,13 +15,13 @@ use crate::data::handles::BspTextureHandle;
 pub enum BspMaterialPipeline {
     /// Opaque lightmapped surfaces; depth write, back-face cull.
     Opaque,
-    /// Fullbright/emissive surfaces; same depth/blend as Opaque but skips lightmap.
+    /// Fullbright/emissive surfaces; same depth/blend as Opaque but adds emission.
     Fullbright,
     /// Alpha-masked surfaces (fences, grates); alpha test, depth write, two-sided.
     AlphaMask,
-    /// Sky surfaces; depth write max, back-face cull, environment sampling.
+    /// Sky surfaces; depth test no-write, back-face cull, environment sampling.
     Sky,
-    /// Liquid/warp surfaces; alpha blend, depth write off, two-sided.
+    /// Liquid/warp surfaces; alpha blend, depth test on, write off, two-sided.
     Liquid,
 }
 

@@ -3074,6 +3074,8 @@ pub enum VkDescType {
     BspScene,
     #[cfg(feature = "bsp")]
     BspMaterial,
+    #[cfg(feature = "bsp")]
+    BspFrameValues,
 }
 
 impl VkDescType {
@@ -3082,9 +3084,9 @@ impl VkDescType {
     #[cfg(all(feature = "instancing", not(feature = "bsp")))]
     pub const COUNT: usize = 11;
     #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
-    pub const COUNT: usize = 12;
-    #[cfg(all(feature = "instancing", feature = "bsp"))]
     pub const COUNT: usize = 13;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 14;
 }
 
 #[derive(Clone)]
@@ -3132,6 +3134,8 @@ impl VkDescLayoutCache {
                 n if n == Self::bsp_scene_index() => VkDescType::BspScene,
                 #[cfg(feature = "bsp")]
                 n if n == Self::bsp_material_index() => VkDescType::BspMaterial,
+                #[cfg(feature = "bsp")]
+                n if n == Self::bsp_frame_values_index() => VkDescType::BspFrameValues,
                 _ => panic!("unexpected descriptor layout index {i}"),
             };
             debug!("\t{:?} : {:?}", typ, *set)
@@ -3159,6 +3163,18 @@ impl VkDescLayoutCache {
         #[cfg(not(feature = "instancing"))]
         {
             11
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    const fn bsp_frame_values_index() -> usize {
+        #[cfg(feature = "instancing")]
+        {
+            13
+        }
+        #[cfg(not(feature = "instancing"))]
+        {
+            12
         }
     }
 }
@@ -3256,6 +3272,16 @@ pub struct BspSurfaceCache {
     pub lightmap_atlas: Option<BspLightmapAtlasGpu>,
     /// Shared BSP surface-parameter UBO backing all active material descriptors.
     surface_ubo: Option<BspSurfaceUboGpu>,
+    /// Frame-values UBO buffer (per-frame-slot double-buffered for in-flight safety).
+    frame_values_ubo: Option<BspSurfaceUboGpu>,
+    /// Descriptor pool for frame-values descriptor sets (set 2).
+    frame_values_desc_pool: Option<vk::DescriptorPool>,
+    /// Per-frame-slot frame-values descriptor sets (set 2).
+    frame_values_descriptors: Vec<vk::DescriptorSet>,
+    /// Frame-values descriptor set layout (cached from VkDescLayoutCache).
+    frame_values_set_layout: Option<vk::DescriptorSetLayout>,
+    /// Number of frame slots for frame-values double-buffering.
+    frame_slot_count: u32,
 }
 
 #[cfg(feature = "bsp")]
@@ -3266,6 +3292,8 @@ pub struct BspCachedSurface {
     pub surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc,
     /// Pipeline variant for this surface.
     pub pipeline: VkPipelineType,
+    /// Surface flags for shader classification.
+    pub surface_flags: u32,
     /// Albedo texture handle (for retirement tracking).
     pub albedo_tex: crate::data::handles::TextureHandle,
     /// Fullbright mask texture handle (optional).
@@ -3287,6 +3315,11 @@ impl BspSurfaceCache {
             allocator: None,
             lightmap_atlas: None,
             surface_ubo: None,
+            frame_values_ubo: None,
+            frame_values_desc_pool: None,
+            frame_values_descriptors: Vec::new(),
+            frame_values_set_layout: None,
+            frame_slot_count: 0,
         }
     }
 
@@ -3316,7 +3349,10 @@ impl BspSurfaceCache {
     /// single-mount: callers must retire the existing mount before replacing it.
     pub fn install_lightmap_atlas(&mut self, atlas: BspLightmapAtlasGpu) -> Result<(), String> {
         if self.lightmap_atlas.is_some() {
-            return Err("BSP lightmap atlas already active; retire it before uploading another mount".to_string());
+            return Err(
+                "BSP lightmap atlas already active; retire it before uploading another mount"
+                    .to_string(),
+            );
         }
         self.lightmap_atlas = Some(atlas);
         Ok(())
@@ -3325,7 +3361,10 @@ impl BspSurfaceCache {
     /// Install the shared surface-parameter UBO for the active BSP mount.
     pub fn install_surface_ubo(&mut self, ubo: BspSurfaceUboGpu) -> Result<(), String> {
         if self.surface_ubo.is_some() {
-            return Err("BSP surface UBO already active; retire it before uploading another mount".to_string());
+            return Err(
+                "BSP surface UBO already active; retire it before uploading another mount"
+                    .to_string(),
+            );
         }
         self.surface_ubo = Some(ubo);
         Ok(())
@@ -3333,14 +3372,13 @@ impl BspSurfaceCache {
 
     /// True when an uploaded BSP mount still owns cache payloads.
     pub fn has_active_payloads(&self) -> bool {
-        self.lightmap_atlas.is_some() || self.surface_ubo.is_some() || !self.cached_materials.is_empty()
+        self.lightmap_atlas.is_some()
+            || self.surface_ubo.is_some()
+            || !self.cached_materials.is_empty()
     }
 
     /// Allocate a single BSP material descriptor set (set 1).
-    pub fn allocate_material_set(
-        &self,
-        device: &ash::Device,
-    ) -> Result<vk::DescriptorSet, String> {
+    pub fn allocate_material_set(&self, device: &ash::Device) -> Result<vk::DescriptorSet, String> {
         let layout = self
             .material_set_layout
             .ok_or_else(|| "BSP material descriptor layout not initialized".to_string())?;
@@ -3370,14 +3408,105 @@ impl BspSurfaceCache {
             ubo.destroy(allocator);
             self.surface_ubo = None;
         }
+        if let Some(ref mut ubo) = self.frame_values_ubo {
+            ubo.destroy(allocator);
+            self.frame_values_ubo = None;
+        }
         if let Some(pool) = self.material_desc_pool.take() {
             unsafe {
                 device.destroy_descriptor_pool(pool, None);
             }
         }
+        if let Some(pool) = self.frame_values_desc_pool.take() {
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
+        }
+        self.frame_values_descriptors.clear();
+        self.frame_values_set_layout = None;
         self.material_set_layout = None;
         self.device = None;
         self.allocator = None;
+    }
+
+    /// Install the frame-values UBO and per-frame-slot descriptor sets (set 2).
+    ///
+    /// `frame_values_ubo` is the GPU buffer, `descriptors` are pre-written
+    /// descriptor sets (one per frame slot), and `pool` owns the sets.
+    /// The cache takes ownership of the pool for teardown.
+    pub fn install_frame_values(
+        &mut self,
+        ubo: BspSurfaceUboGpu,
+        pool: vk::DescriptorPool,
+        descriptors: Vec<vk::DescriptorSet>,
+        set_layout: vk::DescriptorSetLayout,
+        frame_slot_count: u32,
+    ) -> Result<(), String> {
+        if self.frame_values_desc_pool.is_some() {
+            return Err("BSP frame-values already installed".to_string());
+        }
+        self.frame_values_ubo = Some(ubo);
+        self.frame_values_desc_pool = Some(pool);
+        self.frame_values_descriptors = descriptors;
+        self.frame_values_set_layout = Some(set_layout);
+        self.frame_slot_count = frame_slot_count;
+        Ok(())
+    }
+
+    /// Get the frame-values descriptor set for the current frame slot.
+    pub fn frame_values_descriptor_for_slot(&self, slot_index: u32) -> vk::DescriptorSet {
+        self.frame_values_descriptors
+            .get(slot_index as usize)
+            .copied()
+            .unwrap_or(vk::DescriptorSet::null())
+    }
+
+    /// Return true if frame-values have been installed.
+    pub fn has_frame_values(&self) -> bool {
+        self.frame_values_ubo.is_some()
+    }
+
+    /// Write one immutable frame-local copy of BSP frame-varying values.
+    ///
+    /// The caller must only write a frame slot after that slot's fence has been
+    /// waited. Descriptors are not rewritten; each set permanently points at a
+    /// distinct slot in this buffer.
+    pub fn write_frame_values_for_slot(
+        &mut self,
+        slot_index: u32,
+        values: &crate::data::gpu_data::BspFrameValuesUniform,
+    ) -> Result<(), String> {
+        if self.frame_slot_count == 0 {
+            return Err("BSP frame-values slot count is zero".to_string());
+        }
+        let slot = slot_index % self.frame_slot_count;
+        let ubo_size = std::mem::size_of::<crate::data::gpu_data::BspFrameValuesUniform>() as u64;
+        let stride = ubo_size.next_multiple_of(64);
+        let offset = stride * slot as u64;
+        let allocator = self
+            .allocator
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "BSP allocator not initialized".to_string())?;
+        let alloc_guard = allocator
+            .lock()
+            .map_err(|_| "BSP allocator lock poisoned".to_string())?;
+        let ubo = self
+            .frame_values_ubo
+            .as_mut()
+            .ok_or_else(|| "BSP frame-values UBO not installed".to_string())?;
+        unsafe {
+            let mapped = alloc_guard
+                .map_memory(&mut ubo.allocation)
+                .map_err(|e| format!("failed to map BSP frame-values memory: {e:?}"))?;
+            std::ptr::copy_nonoverlapping(
+                values as *const _ as *const u8,
+                (mapped as *mut u8).add(offset as usize),
+                ubo_size as usize,
+            );
+            alloc_guard.unmap_memory(&mut ubo.allocation);
+        }
+        Ok(())
     }
 
     fn handle_for_slot(&self, slot: u32) -> crate::data::handles::BspMaterialHandle {

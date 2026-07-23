@@ -10,7 +10,7 @@ use crate::api::ProceduralVertex;
 #[cfg(feature = "bsp")]
 use crate::data::bsp_material::{BspMaterialDesc, BspSurfaceClass, BspTextureSet};
 #[cfg(feature = "bsp")]
-use crate::data::gpu_data::BspSurfaceUniform;
+use crate::data::gpu_data::{bsp_surface_flags, BspSurfaceUniform};
 #[cfg(feature = "bsp")]
 use crate::data::handles::{BspTextureHandle, MaterialHandle, MeshHandle};
 #[cfg(feature = "bsp")]
@@ -20,7 +20,7 @@ use bsp::geometry::{FaceGeometry, RenderBatch};
 #[cfg(feature = "bsp")]
 use bsp::lightmaps::FaceLightmapLayout;
 #[cfg(feature = "bsp")]
-use glam::{Vec2, Vec3, Vec4};
+use glam::{UVec4, Vec2, Vec3, Vec4};
 
 // ── Mesh upload ────────────────────────────────────────────────────────
 
@@ -215,7 +215,8 @@ impl BspLightmapAtlasPage {
                     for y in 0..page.height as usize {
                         for x in 0..page.width as usize {
                             let src_idx = (y * page.width as usize + x) * 3;
-                            let dst_idx = layer * pixel_count * 4 + (y * page.width as usize + x) * 4;
+                            let dst_idx =
+                                layer * pixel_count * 4 + (y * page.width as usize + x) * 4;
                             if src_idx + 2 < page.data.len() {
                                 rgba[dst_idx] = page.data[src_idx];
                                 rgba[dst_idx + 1] = page.data[src_idx + 1];
@@ -292,6 +293,38 @@ fn write_face_luxels_to_layer(
 // ── BSP surface material builder ────────────────────────────────────────
 
 #[cfg(feature = "bsp")]
+fn style_ids_for_layout(layout: &FaceLightmapLayout) -> UVec4 {
+    let mut ids = [255u32; 4];
+    for (slot, style_layout) in layout.style_layers.iter().take(4).enumerate() {
+        if style_layout.has_data && style_layout.style_id <= 63 {
+            ids[slot] = style_layout.style_id as u32;
+        }
+    }
+    if ids.iter().all(|&id| id == 255) {
+        ids[0] = 0;
+    }
+    UVec4::new(ids[0], ids[1], ids[2], ids[3])
+}
+
+#[cfg(feature = "bsp")]
+fn surface_flags_for(class: Option<bsp::materials::SurfaceClass>) -> u32 {
+    match class {
+        Some(bsp::materials::SurfaceClass::AlphaMask) => bsp_surface_flags::SURF_ALPHA_MASK,
+        Some(bsp::materials::SurfaceClass::Sky) => bsp_surface_flags::SURF_SKY,
+        Some(bsp::materials::SurfaceClass::Liquid) => bsp_surface_flags::SURF_LIQUID,
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn receive_mask_for(class: Option<bsp::materials::SurfaceClass>) -> u32 {
+    match class {
+        Some(bsp::materials::SurfaceClass::Sky) => bsp_surface_flags::OUTDOOR_DEFAULT,
+        _ => bsp_surface_flags::SEALED_DEFAULT,
+    }
+}
+
+#[cfg(feature = "bsp")]
 /// Build `BspMaterialDesc` entries for each unique material in the extracted BSP.
 ///
 /// Returns a mapping from face index → `BspMaterialDesc` (excluding nodraw faces).
@@ -364,14 +397,18 @@ pub fn build_bsp_material_descs(
                 layout.atlas_offset.0 as f32 / atlas_w,
                 layout.atlas_offset.1 as f32 / atlas_h,
             ),
-            style_index: 0,
+            style_ids: style_ids_for_layout(layout),
             fullbright_base: 224,
             fullbright_count: 32,
             alpha_threshold: 0.5,
             animation_frame: 0,
             animation_time: 0.0,
+            surface_flags: surface_flags_for(sc),
+            receive_mask: receive_mask_for(sc),
             _pad0: 0,
-            _pad1: 0,
+            liquid_warp_scale: 0.02,
+            liquid_flow_speed: 1.0,
+            _pad1: [0, 0],
         };
 
         let textures = BspTextureSet {

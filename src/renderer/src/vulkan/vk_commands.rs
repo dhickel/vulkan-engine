@@ -17,7 +17,7 @@ use crate::data::gpu_data::{
     VkModelPushConsts,
 };
 #[cfg(feature = "bsp")]
-use crate::data::gpu_data::BspModelPushConsts;
+use crate::data::gpu_data::{BspFrameValuesUniform, BspModelPushConsts};
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
@@ -617,8 +617,7 @@ fn draw_geometry_from_submission_impl(
         next_submit_serial,
         submission,
     );
-    let mut draw_lists = partition_geometry_draw_lists(draw_buckets);
-    sort_geometry_blended_lists(&mut draw_lists, scene_data.cam_pos);
+    let draw_lists = partition_geometry_draw_lists(draw_buckets);
 
     let default_joint_desc = data_cache
         .mesh_cache
@@ -1286,30 +1285,15 @@ fn partition_geometry_draw_lists(
     }
 }
 
-fn sort_geometry_blended_lists(draw_lists: &mut GeometryDrawLists, cam_pos: glam::Vec3) {
-    let blend_sort = |a: &RenderObject, b: &RenderObject| {
-        let a_dist = a.transform.w_axis.truncate().distance_squared(cam_pos);
-        let b_dist = b.transform.w_axis.truncate().distance_squared(cam_pos);
-        b_dist
-            .partial_cmp(&a_dist)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    };
-
-    draw_lists.pbr_blend.sort_by(blend_sort);
-    draw_lists.unlit_blend.sort_by(blend_sort);
-}
-
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum GeometryPhase {
     PbrOpaque,
     UnlitOpaque,
     PbrMask,
     UnlitMask,
-    PbrBlend,
-    UnlitBlend,
 }
 
-fn visit_geometry_phases(
+fn visit_opaque_geometry_phases(
     draw_lists: &GeometryDrawLists,
     mut sink: impl FnMut(GeometryPhase, &[RenderObject], VkPipelineType),
 ) {
@@ -1333,16 +1317,128 @@ fn visit_geometry_phases(
         &draw_lists.unlit_mask,
         VkPipelineType::UnlitOpaque,
     );
-    sink(
-        GeometryPhase::PbrBlend,
-        &draw_lists.pbr_blend,
-        VkPipelineType::PbrMetRoughAlpha,
+}
+
+#[derive(Copy, Clone)]
+enum TransparentDrawRef<'a> {
+    Pbr {
+        object: &'a RenderObject,
+        pipeline: VkPipelineType,
+    },
+    #[cfg(feature = "bsp")]
+    BspLiquid {
+        item: &'a crate::scene::render_submission::BspFrameDrawItem,
+    },
+}
+
+#[derive(Copy, Clone)]
+struct QueuedTransparentDraw<'a> {
+    sort_position: glam::Vec3,
+    sort_key: u64,
+    draw: TransparentDrawRef<'a>,
+}
+
+fn pbr_sort_position(object: &RenderObject) -> glam::Vec3 {
+    object.transform.w_axis.truncate()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_transparent_draws<'a>(
+    draw_lists: &'a GeometryDrawLists,
+    #[cfg(feature = "bsp")] data_cache: &Arc<VkDataCache>,
+    #[cfg(feature = "bsp")]
+    bsp_draw_items: &'a [crate::scene::render_submission::BspFrameDrawItem],
+) -> Vec<QueuedTransparentDraw<'a>> {
+    let mut draws = Vec::with_capacity(
+        draw_lists.pbr_blend.len() + draw_lists.unlit_blend.len() + {
+            #[cfg(feature = "bsp")]
+            {
+                bsp_draw_items.len()
+            }
+            #[cfg(not(feature = "bsp"))]
+            {
+                0
+            }
+        },
     );
-    sink(
-        GeometryPhase::UnlitBlend,
-        &draw_lists.unlit_blend,
-        VkPipelineType::UnlitAlpha,
-    );
+
+    for (ordinal, object) in draw_lists.pbr_blend.iter().enumerate() {
+        draws.push(QueuedTransparentDraw {
+            sort_position: pbr_sort_position(object),
+            sort_key: crate::data::gpu_data::TransparentDrawRecord::make_sort_key(
+                0,
+                0,
+                ordinal as u32,
+            ),
+            draw: TransparentDrawRef::Pbr {
+                object,
+                pipeline: VkPipelineType::PbrMetRoughAlpha,
+            },
+        });
+    }
+    for (ordinal, object) in draw_lists.unlit_blend.iter().enumerate() {
+        draws.push(QueuedTransparentDraw {
+            sort_position: pbr_sort_position(object),
+            sort_key: crate::data::gpu_data::TransparentDrawRecord::make_sort_key(
+                0,
+                1,
+                ordinal as u32,
+            ),
+            draw: TransparentDrawRef::Pbr {
+                object,
+                pipeline: VkPipelineType::UnlitAlpha,
+            },
+        });
+    }
+
+    #[cfg(feature = "bsp")]
+    {
+        let surface_cache = data_cache
+            .bsp_surface_cache
+            .lock()
+            .expect("bsp_surface_cache lock poisoned");
+        let mesh_cache = data_cache
+            .mesh_cache
+            .lock()
+            .expect("mesh_cache lock poisoned");
+        for (ordinal, item) in bsp_draw_items.iter().enumerate() {
+            let Ok(bsp_mat) = surface_cache.get(item.bsp_material_id) else {
+                continue;
+            };
+            if bsp_mat.pipeline != VkPipelineType::BspLiquid {
+                continue;
+            }
+            let sort_position = mesh_cache
+                .get_loaded_id(item.mesh_id)
+                .map(|mesh| {
+                    let center = (mesh.bounds_min + mesh.bounds_max) * 0.5;
+                    item.transform.transform_point3(center)
+                })
+                .unwrap_or_else(|_| item.transform.w_axis.truncate());
+            draws.push(QueuedTransparentDraw {
+                sort_position,
+                sort_key: crate::data::gpu_data::TransparentDrawRecord::make_sort_key(
+                    0,
+                    2,
+                    ordinal as u32,
+                ),
+                draw: TransparentDrawRef::BspLiquid { item },
+            });
+        }
+    }
+
+    draws
+}
+
+fn sort_transparent_draws(draws: &mut [QueuedTransparentDraw<'_>], cam_pos: glam::Vec3) {
+    draws.sort_by(|a, b| {
+        let a_dist = a.sort_position.distance_squared(cam_pos);
+        let b_dist = b.sort_position.distance_squared(cam_pos);
+        b_dist
+            .partial_cmp(&a_dist)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.sort_key.cmp(&b.sort_key))
+    });
 }
 
 /// # Safety
@@ -1463,14 +1559,15 @@ unsafe fn record_geometry_draw_sequence_impl(
         }
     };
 
-    // Draw order: opaque -> masked -> blended. The callback is also the private fake-sink seam.
-    visit_geometry_phases(draw_lists, |_, objects, pipeline| {
+    // Draw opaque and alpha-mask geometry before any blended surface.
+    visit_opaque_geometry_phases(&draw_lists, |_, objects, pipeline| {
         draw_bucket(objects, pipeline)
     });
 
     #[cfg(feature = "bsp")]
     if !bsp_draw_items.is_empty() {
-        record_bsp_draw_sequence_impl(
+        update_bsp_frame_values_for_slot(data_cache, frame_index, next_submit_serial);
+        record_bsp_opaque_draw_sequence_impl(
             device,
             vulkan_cache,
             data_cache,
@@ -1478,25 +1575,145 @@ unsafe fn record_geometry_draw_sequence_impl(
             cmd_buffer,
             next_submit_serial,
             bsp_draw_items,
+            frame_index,
         );
     }
+
+    #[cfg(feature = "bsp")]
+    let mut transparent_draws = collect_transparent_draws(&draw_lists, data_cache, bsp_draw_items);
+    #[cfg(not(feature = "bsp"))]
+    let mut transparent_draws = collect_transparent_draws(&draw_lists);
+    sort_transparent_draws(&mut transparent_draws, scene_data.cam_pos);
+    #[cfg(feature = "bsp")]
+    record_transparent_draw_sequence_impl(
+        device,
+        vulkan_cache,
+        data_cache,
+        scene_desc,
+        cmd_buffer,
+        next_submit_serial,
+        frame_index,
+        default_joint_desc,
+        &transparent_draws,
+    );
+    #[cfg(not(feature = "bsp"))]
+    record_transparent_draw_sequence_impl(
+        device,
+        vulkan_cache,
+        scene_desc,
+        cmd_buffer,
+        default_joint_desc,
+        &transparent_draws,
+    );
 
     device.cmd_end_rendering(cmd_buffer);
 }
 
-// ── BSP draw dispatch ──────────────────────────────────────────────────
+// ── Transparent draw dispatch ──────────────────────────────────────────
+
+/// # Safety
+/// Caller must uphold command-buffer recording preconditions.
+unsafe fn draw_pbr_transparent_object_impl(
+    device: &ash::Device,
+    vulkan_cache: &VkCache,
+    scene_desc: vk::DescriptorSet,
+    cmd_buffer: vk::CommandBuffer,
+    default_joint_desc: vk::DescriptorSet,
+    object: &RenderObject,
+    pipeline_type: VkPipelineType,
+) {
+    let pipeline = *vulkan_cache.pipelines.get_pipeline(pipeline_type);
+    let joint_desc = if object.joint_desc == vk::DescriptorSet::null() {
+        default_joint_desc
+    } else {
+        object.joint_desc
+    };
+
+    device.cmd_bind_pipeline(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.pipeline,
+    );
+    device.cmd_bind_descriptor_sets(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.layout,
+        0,
+        &[scene_desc],
+        &[],
+    );
+    device.cmd_bind_descriptor_sets(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.layout,
+        1,
+        &[joint_desc],
+        &[],
+    );
+    device.cmd_bind_descriptor_sets(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.layout,
+        2,
+        &[object.material.image_descriptor],
+        &[],
+    );
+    device.cmd_bind_index_buffer(cmd_buffer, object.index_buffer, 0, vk::IndexType::UINT32);
+
+    let push_consts = VkModelPushConsts::new(
+        object.transform,
+        object.vertex_buffer_addr,
+        object.material.meta_alloc.alloc_address,
+        object.has_uv1,
+    );
+    device.cmd_push_constants(
+        cmd_buffer,
+        pipeline.layout,
+        vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+        0,
+        push_consts.as_byte_slice(),
+    );
+    device.cmd_draw_indexed(cmd_buffer, object.index_count, 1, object.first_index, 0, 0);
+}
+
+#[cfg(feature = "bsp")]
+fn update_bsp_frame_values_for_slot(
+    data_cache: &Arc<VkDataCache>,
+    frame_slot_index: u32,
+    next_submit_serial: u64,
+) {
+    let seconds = next_submit_serial as f32 / 60.0;
+    let mut values = BspFrameValuesUniform::default();
+    // Until authored lightstyle animation curves are plumbed in, every valid
+    // style contributes at neutral weight so all four BSP style slots compose.
+    values.style_intensities.fill(1.0);
+    values.liquid_warp_time = seconds;
+    values.liquid_flow_time = seconds;
+    values.global_animation_time = seconds * 10.0;
+
+    let mut surface_cache = data_cache
+        .bsp_surface_cache
+        .lock()
+        .expect("bsp_surface_cache lock poisoned");
+    if surface_cache.has_frame_values() {
+        if let Err(err) = surface_cache.write_frame_values_for_slot(frame_slot_index, &values) {
+            log::warn!("failed to update BSP frame-values UBO: {err}");
+        }
+    }
+}
 
 #[cfg(feature = "bsp")]
 /// # Safety
-/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants.
-unsafe fn record_bsp_draw_sequence_impl(
+/// Caller must uphold command-buffer recording preconditions.
+unsafe fn draw_bsp_item_impl(
     device: &ash::Device,
     vulkan_cache: &VkCache,
     data_cache: &Arc<VkDataCache>,
     scene_desc: vk::DescriptorSet,
     cmd_buffer: vk::CommandBuffer,
     next_submit_serial: u64,
-    bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
+    frame_slot_index: u32,
+    item: &crate::scene::render_submission::BspFrameDrawItem,
 ) {
     let mut mesh_cache = data_cache
         .mesh_cache
@@ -1511,90 +1728,272 @@ unsafe fn record_bsp_draw_sequence_impl(
         .lock()
         .expect("bsp_surface_cache lock poisoned");
 
+    let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
+        return;
+    };
+    if mesh_cache
+        .mark_referenced(item.mesh_id, next_submit_serial)
+        .is_err()
+    {
+        return;
+    }
+    let Ok(mesh) = mesh_cache.get_loaded_id(item.mesh_id) else {
+        return;
+    };
+
+    let _ = texture_cache.mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial);
+    if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
+        let _ = texture_cache.mark_texture_referenced(fullbright_tex, next_submit_serial);
+    }
+    let _ = texture_cache.mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial);
+
+    let pipeline = *vulkan_cache.pipelines.get_pipeline(bsp_mat.pipeline);
+    let frame_values_desc = bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index);
+
+    device.cmd_bind_pipeline(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.pipeline,
+    );
+    device.cmd_bind_descriptor_sets(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.layout,
+        0,
+        &[scene_desc],
+        &[],
+    );
+    device.cmd_bind_descriptor_sets(
+        cmd_buffer,
+        vk::PipelineBindPoint::GRAPHICS,
+        pipeline.layout,
+        1,
+        &[bsp_mat.material_descriptor],
+        &[],
+    );
+    if frame_values_desc != vk::DescriptorSet::null() {
+        device.cmd_bind_descriptor_sets(
+            cmd_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            pipeline.layout,
+            2,
+            &[frame_values_desc],
+            &[],
+        );
+    }
+    device.cmd_bind_index_buffer(
+        cmd_buffer,
+        mesh.index_buffer.buffer,
+        0,
+        vk::IndexType::UINT32,
+    );
+
+    let push_consts = BspModelPushConsts::new(item.transform, mesh.vertex_buffer.alloc_address);
+    device.cmd_push_constants(
+        cmd_buffer,
+        pipeline.layout,
+        vk::ShaderStageFlags::VERTEX,
+        0,
+        push_consts.as_byte_slice(),
+    );
+    device.cmd_draw_indexed(
+        cmd_buffer,
+        mesh.index_count,
+        1,
+        mesh.get_first_index(),
+        0,
+        0,
+    );
+}
+
+/// # Safety
+/// Caller must uphold command-buffer recording preconditions.
+unsafe fn record_transparent_draw_sequence_impl(
+    device: &ash::Device,
+    vulkan_cache: &VkCache,
+    #[cfg(feature = "bsp")] data_cache: &Arc<VkDataCache>,
+    scene_desc: vk::DescriptorSet,
+    cmd_buffer: vk::CommandBuffer,
+    #[cfg(feature = "bsp")] next_submit_serial: u64,
+    #[cfg(feature = "bsp")] frame_slot_index: u32,
+    default_joint_desc: vk::DescriptorSet,
+    transparent_draws: &[QueuedTransparentDraw<'_>],
+) {
+    for queued in transparent_draws {
+        match queued.draw {
+            TransparentDrawRef::Pbr { object, pipeline } => draw_pbr_transparent_object_impl(
+                device,
+                vulkan_cache,
+                scene_desc,
+                cmd_buffer,
+                default_joint_desc,
+                object,
+                pipeline,
+            ),
+            #[cfg(feature = "bsp")]
+            TransparentDrawRef::BspLiquid { item } => draw_bsp_item_impl(
+                device,
+                vulkan_cache,
+                data_cache,
+                scene_desc,
+                cmd_buffer,
+                next_submit_serial,
+                frame_slot_index,
+                item,
+            ),
+        }
+    }
+}
+
+// ── BSP draw dispatch ──────────────────────────────────────────────────
+
+#[cfg(feature = "bsp")]
+/// # Safety
+/// Caller must uphold this module's documented ownership, lifetime, and precondition invariants.
+unsafe fn record_bsp_opaque_draw_sequence_impl(
+    device: &ash::Device,
+    vulkan_cache: &VkCache,
+    data_cache: &Arc<VkDataCache>,
+    scene_desc: vk::DescriptorSet,
+    cmd_buffer: vk::CommandBuffer,
+    next_submit_serial: u64,
+    bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
+    frame_slot_index: u32,
+) {
+    let mut mesh_cache = data_cache
+        .mesh_cache
+        .lock()
+        .expect("mesh_cache lock poisoned");
+    let mut texture_cache = data_cache
+        .texture_cache
+        .lock()
+        .expect("texture_cache lock poisoned");
+    let bsp_surface_cache = data_cache
+        .bsp_surface_cache
+        .lock()
+        .expect("bsp_surface_cache lock poisoned");
+
+    let frame_values_desc = if bsp_surface_cache.has_frame_values() {
+        bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index)
+    } else {
+        vk::DescriptorSet::null()
+    };
+
     let mut curr_pipeline_type: Option<VkPipelineType> = None;
     let mut curr_pipeline_layout = vk::PipelineLayout::null();
     let mut curr_material_descriptor: Option<vk::DescriptorSet> = None;
+    let mut curr_frame_values_bound: bool = false;
+
+    let mut opaque_draws: Vec<&crate::scene::render_submission::BspFrameDrawItem> = Vec::new();
 
     for item in bsp_draw_items.iter() {
         let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
             continue;
         };
-        if mesh_cache
-            .mark_referenced(item.mesh_id, next_submit_serial)
-            .is_err()
-        {
-            continue;
+        if bsp_mat.pipeline != VkPipelineType::BspLiquid {
+            opaque_draws.push(item);
         }
-        let Ok(mesh) = mesh_cache.get_loaded_id(item.mesh_id) else {
-            continue;
-        };
-
-        let _ = texture_cache.mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial);
-        if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
-            let _ = texture_cache.mark_texture_referenced(fullbright_tex, next_submit_serial);
-        }
-        let _ = texture_cache.mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial);
-
-        let pipeline_type = bsp_mat.pipeline;
-        if curr_pipeline_type != Some(pipeline_type) {
-            let next_pipeline = *vulkan_cache.pipelines.get_pipeline(pipeline_type);
-            curr_pipeline_type = Some(pipeline_type);
-            curr_pipeline_layout = next_pipeline.layout;
-            curr_material_descriptor = None;
-
-            device.cmd_bind_pipeline(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                next_pipeline.pipeline,
-            );
-            device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                curr_pipeline_layout,
-                0,
-                &[scene_desc],
-                &[],
-            );
-        }
-
-        if curr_material_descriptor != Some(bsp_mat.material_descriptor) {
-            device.cmd_bind_descriptor_sets(
-                cmd_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                curr_pipeline_layout,
-                1,
-                &[bsp_mat.material_descriptor],
-                &[],
-            );
-            curr_material_descriptor = Some(bsp_mat.material_descriptor);
-        }
-
-        device.cmd_bind_index_buffer(
-            cmd_buffer,
-            mesh.index_buffer.buffer,
-            0,
-            vk::IndexType::UINT32,
-        );
-
-        let push_consts = BspModelPushConsts::new(item.transform, mesh.vertex_buffer.alloc_address);
-
-        device.cmd_push_constants(
-            cmd_buffer,
-            curr_pipeline_layout,
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            push_consts.as_byte_slice(),
-        );
-
-        device.cmd_draw_indexed(
-            cmd_buffer,
-            mesh.index_count,
-            1,
-            mesh.get_first_index(),
-            0,
-            0,
-        );
     }
+
+    let mut draw_items = |items: &[&crate::scene::render_submission::BspFrameDrawItem]| {
+        for item in items.iter() {
+            let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
+                continue;
+            };
+            if mesh_cache
+                .mark_referenced(item.mesh_id, next_submit_serial)
+                .is_err()
+            {
+                continue;
+            }
+            let Ok(mesh) = mesh_cache.get_loaded_id(item.mesh_id) else {
+                continue;
+            };
+
+            let _ = texture_cache.mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial);
+            if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
+                let _ = texture_cache.mark_texture_referenced(fullbright_tex, next_submit_serial);
+            }
+            let _ = texture_cache.mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial);
+
+            let pipeline_type = bsp_mat.pipeline;
+            if curr_pipeline_type != Some(pipeline_type) {
+                let next_pipeline = *vulkan_cache.pipelines.get_pipeline(pipeline_type);
+                curr_pipeline_type = Some(pipeline_type);
+                curr_pipeline_layout = next_pipeline.layout;
+                curr_material_descriptor = None;
+                curr_frame_values_bound = false;
+
+                device.cmd_bind_pipeline(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    next_pipeline.pipeline,
+                );
+                device.cmd_bind_descriptor_sets(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    curr_pipeline_layout,
+                    0,
+                    &[scene_desc],
+                    &[],
+                );
+            }
+
+            // Bind frame values (set 2) once per pipeline/descriptor group.
+            if !curr_frame_values_bound && frame_values_desc != vk::DescriptorSet::null() {
+                device.cmd_bind_descriptor_sets(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    curr_pipeline_layout,
+                    2,
+                    &[frame_values_desc],
+                    &[],
+                );
+                curr_frame_values_bound = true;
+            }
+
+            if curr_material_descriptor != Some(bsp_mat.material_descriptor) {
+                device.cmd_bind_descriptor_sets(
+                    cmd_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    curr_pipeline_layout,
+                    1,
+                    &[bsp_mat.material_descriptor],
+                    &[],
+                );
+                curr_material_descriptor = Some(bsp_mat.material_descriptor);
+            }
+
+            device.cmd_bind_index_buffer(
+                cmd_buffer,
+                mesh.index_buffer.buffer,
+                0,
+                vk::IndexType::UINT32,
+            );
+
+            let push_consts =
+                BspModelPushConsts::new(item.transform, mesh.vertex_buffer.alloc_address);
+
+            device.cmd_push_constants(
+                cmd_buffer,
+                curr_pipeline_layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                push_consts.as_byte_slice(),
+            );
+
+            device.cmd_draw_indexed(
+                cmd_buffer,
+                mesh.index_count,
+                1,
+                mesh.get_first_index(),
+                0,
+                0,
+            );
+        }
+    };
+
+    draw_items(&opaque_draws);
 }
 
 // ---------------------------------------------------------------------------
@@ -2040,7 +2439,7 @@ mod tests {
     }
 
     #[test]
-    fn fake_command_sink_observes_opaque_mask_blend_phase_order() {
+    fn fake_command_sink_observes_opaque_mask_phase_order() {
         let lists = GeometryDrawLists {
             pbr_opaque: vec![],
             unlit_opaque: vec![],
@@ -2050,7 +2449,7 @@ mod tests {
             unlit_blend: vec![],
         };
         let mut operations = Vec::new();
-        visit_geometry_phases(&lists, |phase, _, _| operations.push(phase));
+        visit_opaque_geometry_phases(&lists, |phase, _, _| operations.push(phase));
         assert_eq!(
             operations,
             vec![
@@ -2058,14 +2457,12 @@ mod tests {
                 GeometryPhase::UnlitOpaque,
                 GeometryPhase::PbrMask,
                 GeometryPhase::UnlitMask,
-                GeometryPhase::PbrBlend,
-                GeometryPhase::UnlitBlend,
             ]
         );
     }
 
     #[test]
-    fn partition_and_blended_sort_policy_are_preserved() {
+    fn partition_and_unified_blended_sort_policy_are_preserved() {
         use crate::data::gpu_data::AlphaMode;
         let mut buckets: [Vec<RenderObject>; VkPipelineType::COUNT] =
             std::array::from_fn(|_| Vec::new());
@@ -2090,12 +2487,29 @@ mod tests {
             5.0,
         ));
 
-        let mut lists = partition_geometry_draw_lists(buckets);
+        let lists = partition_geometry_draw_lists(buckets);
         assert_eq!(lists.pbr_opaque.len(), 1);
         assert_eq!(lists.pbr_mask.len(), 1);
-        sort_geometry_blended_lists(&mut lists, glam::Vec3::ZERO);
-        assert_eq!(lists.pbr_blend[0].transform.w_axis.z, 5.0);
-        assert_eq!(lists.pbr_blend[1].transform.w_axis.z, 2.0);
+        let mut transparent: Vec<QueuedTransparentDraw<'_>> = lists
+            .pbr_blend
+            .iter()
+            .enumerate()
+            .map(|(ordinal, object)| QueuedTransparentDraw {
+                sort_position: pbr_sort_position(object),
+                sort_key: crate::data::gpu_data::TransparentDrawRecord::make_sort_key(
+                    0,
+                    0,
+                    ordinal as u32,
+                ),
+                draw: TransparentDrawRef::Pbr {
+                    object,
+                    pipeline: VkPipelineType::PbrMetRoughAlpha,
+                },
+            })
+            .collect();
+        sort_transparent_draws(&mut transparent, glam::Vec3::ZERO);
+        assert_eq!(transparent[0].sort_position.z, 5.0);
+        assert_eq!(transparent[1].sort_position.z, 2.0);
     }
 
     #[test]

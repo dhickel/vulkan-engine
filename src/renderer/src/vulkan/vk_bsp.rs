@@ -15,7 +15,7 @@ use vk_mem::{Alloc, Allocator};
 
 // ── BSP pipeline layout helper ─────────────────────────────────────────
 
-/// Build a BSP pipeline layout with set 0 (scene) and set 1 (material).
+/// Build a BSP pipeline layout with set 0 (scene), set 1 (material), and set 2 (frame values).
 #[cfg(feature = "bsp")]
 pub(crate) fn create_bsp_pipeline_layout(
     device: &ash::Device,
@@ -24,6 +24,7 @@ pub(crate) fn create_bsp_pipeline_layout(
     let set_layouts = [
         desc_layout_cache.get(VkDescType::BspScene),
         desc_layout_cache.get(VkDescType::BspMaterial),
+        desc_layout_cache.get(VkDescType::BspFrameValues),
     ];
 
     // BSP push constants: mat4 model (64 bytes) + vertex_buffer_addr (8 bytes),
@@ -54,7 +55,7 @@ pub(crate) fn create_bsp_pipeline_layout(
 /// - b0: albedo texture (combined image sampler)
 /// - b1: fullbright mask (combined image sampler)
 /// - b2: lightmap atlas (combined image sampler, 2D array)
-/// - b3: surface UBO (BspSurfaceUniform, 48 bytes)
+/// - b3: surface UBO (BspSurfaceUniform, 80 bytes)
 #[cfg(feature = "bsp")]
 pub(crate) fn write_bsp_material_descriptor(
     device: &ash::Device,
@@ -193,10 +194,7 @@ pub(crate) fn create_lightmap_atlas_image(
         .array_layers(layer_count)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(
-            vk::ImageUsageFlags::TRANSFER_DST
-                | vk::ImageUsageFlags::SAMPLED,
-        )
+        .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -306,9 +304,8 @@ pub(crate) fn upload_lightmap_atlas_data(
     let staging_alloc_info = vk_mem::AllocationCreateInfo {
         usage: vk_mem::MemoryUsage::AutoPreferHost,
         flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-        required_flags:
-            vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT,
+        required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT,
         ..Default::default()
     };
 
@@ -323,11 +320,7 @@ pub(crate) fn upload_lightmap_atlas_data(
         let mapped = allocator
             .map_memory(&mut staging_allocation)
             .map_err(|e| format!("failed to map lightmap staging memory: {e:?}"))?;
-        std::ptr::copy_nonoverlapping(
-            rgba_data.as_ptr(),
-            mapped as *mut u8,
-            expected_size,
-        );
+        std::ptr::copy_nonoverlapping(rgba_data.as_ptr(), mapped as *mut u8, expected_size);
         allocator.unmap_memory(&mut staging_allocation);
     }
 
@@ -343,8 +336,8 @@ pub(crate) fn upload_lightmap_atlas_data(
             .map_err(|e| format!("failed to allocate lightmap upload cmd: {e:?}"))?[0]
     };
 
-    let begin_info = vk::CommandBufferBeginInfo::default()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+    let begin_info =
+        vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
     unsafe {
         device
@@ -408,14 +401,13 @@ pub(crate) fn upload_lightmap_atlas_data(
     );
 
     unsafe {
-        device.end_command_buffer(cmd).map_err(|e| {
-            format!("failed to end lightmap upload cmd: {e:?}")
-        })?;
+        device
+            .end_command_buffer(cmd)
+            .map_err(|e| format!("failed to end lightmap upload cmd: {e:?}"))?;
     }
 
     // Submit.
-    let submit_info =
-        vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
+    let submit_info = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&cmd));
 
     let fence_info = vk::FenceCreateInfo::default();
     let fence = unsafe {
@@ -496,7 +488,7 @@ pub fn create_bsp_pipelines(
         BspPipelineSpec {
             pipeline_type: VkPipelineType::BspSky,
             frag_module: bsp_sky_fs,
-            depth_test: (true, vk::CompareOp::ALWAYS),
+            depth_test: (false, vk::CompareOp::LESS),
             cull_mode: vk::CullModeFlags::BACK,
             blend: BlendingMode::Disabled,
         },

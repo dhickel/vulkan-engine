@@ -119,7 +119,9 @@ fn descriptor_abi_bsp_bindings_registered() {
     for declaration in [
         "(VkDescType::BspScene, bsp_scene)",
         "(VkDescType::BspMaterial, bsp_material)",
+        "(VkDescType::BspFrameValues, bsp_frame_values)",
         ".add_binding(2, vk::DescriptorType::COMBINED_IMAGE_SAMPLER)",
+        ".add_binding(0, vk::DescriptorType::UNIFORM_BUFFER)",
     ] {
         assert!(
             descriptors.contains(declaration),
@@ -172,14 +174,26 @@ fn descriptor_abi_bsp_bindings_registered() {
         "BSP FS surface params UBO missing"
     );
     assert!(
+        frag.contains("set = 2, binding = 0"),
+        "BSP FS frame values UBO missing"
+    );
+    assert!(
         frag.contains("sampler2DArray lightmapAtlas"),
         "BSP lightmap array decl missing"
+    );
+    assert!(
+        frag.contains("styleIntensityPacked[16]"),
+        "BSP packed style intensity array missing"
     );
 
     let sky_frag = read(root.join("src/shaders/bsp_sky.frag"));
     assert!(
         sky_frag.contains("set = 0, binding = 3"),
         "BSP sky env binding missing"
+    );
+    assert!(
+        sky_frag.contains("set = 2, binding = 0"),
+        "BSP sky frame values binding missing for layout compat"
     );
 
     let liquid_frag = read(root.join("src/shaders/bsp_liquid.frag"));
@@ -209,5 +223,17 @@ fn descriptor_abi_bsp_bindings_registered() {
     assert!(
         gpu_data.contains("BspSurfaceUniform"),
         "BspSurfaceUniform not defined in gpu_data.rs"
+    );
+    assert!(
+        gpu_data.contains("BspFrameValuesUniform"),
+        "BspFrameValuesUniform not defined in gpu_data.rs"
+    );
+    assert!(
+        gpu_data.contains("size_of::<BspSurfaceUniform>() == 80"),
+        "BspSurfaceUniform size assertion missing or wrong"
+    );
+    assert!(
+        gpu_data.contains("size_of::<BspFrameValuesUniform>() == 288"),
+        "BspFrameValuesUniform size assertion missing or wrong"
     );
 }

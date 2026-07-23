@@ -3,17 +3,21 @@
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_buffer_reference2 : enable
 
-// BSP lightmapped fragment shader — opaque / alpha-mask RGB-style modulation.
+// BSP lightmapped fragment shader — opaque / fullbright / alpha-mask.
 //
-// Computes:
-//   albedo  = texture(albedo_tex, uv0).rgb
-//   emissive = fullbright mask check (palette index range)
-//   lightmap = texture(lightmap_atlas, vec3(uv1, style_index)).rgb
-//   irradiance = lightmap * overbright (2.0)
-//   diffuse = irradiance * albedo / PI
-//   color = diffuse + emissive * fullbright_color
+// Surface classification is driven by `surf.surfaceFlags`:
+//   SURF_ALPHA_MASK (1<<0): discard pixels below alphaThreshold
+//   SURF_FULLBRIGHT (1<<3): additive emission on top of lit albedo
 //
-// Dynamic light integration and CSM shadow sampling are reserved for later passes.
+// Lightmap composition:
+//   For each of 4 face style slots (styleIds[i] != 255):
+//     sample lightmap array layer i
+//     multiply by packed frameValues intensity for styleIds[i]
+//     accumulate
+//
+// Overbright (2.0) applied once after style sum.
+// Fullbright emission added after diffuse.
+// IBL / CSM / dynamic lights controlled by receiveMask.
 
 layout (location = 0) in vec3 inWorldPos;
 layout (location = 1) in vec2 inUV0;
@@ -27,6 +31,19 @@ layout (set = 0, binding = 0) uniform UBO {
     vec3 camPos;
 } ubo;
 
+layout (set = 0, binding = 1) uniform EnvironmentParams {
+    vec4 light_dir;
+    vec4 light_color;
+    mat4 light_view_proj;
+    float exposure;
+    float gamma;
+    float prefilter_mips_levels;
+    float ibl_ambient_scale;
+    // … remainder of EnvironmentUBO is declared but not all fields used here
+} env;
+
+layout (set = 0, binding = 3) uniform samplerCube prefilteredMap;
+
 // Material bindings (set 1).
 layout (set = 1, binding = 0) uniform sampler2D albedoTex;
 layout (set = 1, binding = 1) uniform sampler2D fullbrightMask;
@@ -34,21 +51,56 @@ layout (set = 1, binding = 2) uniform sampler2DArray lightmapAtlas;
 
 layout (set = 1, binding = 3) uniform BspSurfaceParams {
     vec4 lightmapScaleBias;
-    uint styleIndex;
+    uvec4 styleIds;          // 4 style slot indices, 255 = unused
     uint fullbrightBase;
     uint fullbrightCount;
     float alphaThreshold;
     uint animationFrame;
     float animationTime;
+    uint surfaceFlags;
+    uint receiveMask;
     uint _pad0;
-    uint _pad1;
+    float liquidWarpScale;
+    float liquidFlowSpeed;
+    uvec2 _pad1;
 } surf;
+
+// Frame-varying values (set 2).
+layout (set = 2, binding = 0) uniform BspFrameValues {
+    vec4 styleIntensityPacked[16];
+    float liquidWarpTime;
+    float liquidFlowTime;
+    float globalAnimationTime;
+} frameValues;
 
 layout (location = 0) out vec4 outColor;
 
-const float OVERBRIGHT = 2.0;
-const float PI_INV = 1.0 / 3.14159265359;
-const vec4 FULLBRIGHT_EMISSIVE = vec4(1.0, 1.0, 1.0, 0.0);
+// ── Surface flag constants ─────────────────────────────────────────────
+
+const uint SURF_ALPHA_MASK       = 1u << 0;
+const uint SURF_SKY              = 1u << 1;
+const uint SURF_LIQUID           = 1u << 2;
+const uint SURF_FULLBRIGHT       = 1u << 3;
+
+const uint RECEIVE_IBL            = 1u << 8;
+const uint RECEIVE_CSM            = 1u << 9;
+const uint RECEIVE_DYNAMIC_LIGHTS = 1u << 10;
+
+// ── Lighting constants ─────────────────────────────────────────────────
+
+const float OVERBRIGHT   = 2.0;
+const float PI_INV       = 1.0 / 3.14159265359;
+const vec4  FULLBRIGHT_EMISSIVE = vec4(1.0, 1.0, 1.0, 0.0);
+
+float styleIntensity(uint styleId)
+{
+    if (styleId == 255u || styleId >= 64u) {
+        return 0.0;
+    }
+    uint vectorIndex = styleId >> 2;
+    uint componentIndex = styleId & 3u;
+    return frameValues.styleIntensityPacked[vectorIndex][int(componentIndex)];
+}
 
 void main()
 {
@@ -56,31 +108,74 @@ void main()
     vec3 albedo = albedoSample.rgb;
     float alpha  = albedoSample.a;
 
-    // Lightmap irradiance from style-indexed array layer.
-    vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
-    vec3 lightmapIrradiance = texture(lightmapAtlas, vec3(atlasUv, float(surf.styleIndex))).rgb;
+    // ── 1. Alpha-mask test ─────────────────────────────────────────
 
-    // Decode sRGB-like lightmap byte → linear.
-    // Lightmap bytes are stored as pow(value, 2.2) in atlas.
-    // The atlas format is already linear (uploaded as-is from CPU decode),
-    // so we apply overbright directly.
+    if ((surf.surfaceFlags & SURF_ALPHA_MASK) != 0u) {
+        if (alpha < surf.alphaThreshold) {
+            discard;
+        }
+    }
+
+    // ── 2. Lightmap: 4-style weighted sum ──────────────────────────
+
+    vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
+    vec3 lightmapIrradiance = vec3(0.0);
+
+    // Style slot 0
+    if (surf.styleIds.x != 255u) {
+        float intensity = styleIntensity(surf.styleIds.x);
+        vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, 0.0)).rgb;
+        lightmapIrradiance += sample0 * intensity;
+    }
+    // Style slot 1
+    if (surf.styleIds.y != 255u) {
+        float intensity = styleIntensity(surf.styleIds.y);
+        vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, 1.0)).rgb;
+        lightmapIrradiance += sample1 * intensity;
+    }
+    // Style slot 2
+    if (surf.styleIds.z != 255u) {
+        float intensity = styleIntensity(surf.styleIds.z);
+        vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, 2.0)).rgb;
+        lightmapIrradiance += sample2 * intensity;
+    }
+    // Style slot 3
+    if (surf.styleIds.w != 255u) {
+        float intensity = styleIntensity(surf.styleIds.w);
+        vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, 3.0)).rgb;
+        lightmapIrradiance += sample3 * intensity;
+    }
+
+    // Apply transfer function and overbright once after sum.
     vec3 irradiance = lightmapIrradiance * OVERBRIGHT;
 
-    // Diffuse Lambertian from baked lightmap only (no specular).
-    vec3 diffuse = irradiance * albedo * PI_INV;
+    // ── 3. Diffuse Lambertian ──────────────────────────────────────
 
-    // Fullbright emissive mask: palette-index based.
-    // The fullbright mask texture stores 0 (lit) or 1 (fullbright).
+    vec3 diffuse = irradiance * albedo * PI_INV;
+    vec3 color = diffuse;
+
+    // ── 4. Fullbright emissive ─────────────────────────────────────
+
     float fullbright = texture(fullbrightMask, inUV0).r;
     vec3 emissiveOut = fullbright * FULLBRIGHT_EMISSIVE.rgb;
+    color += emissiveOut;
 
-    vec3 color = diffuse + emissiveOut;
+    // ── 5. IBL ambient contribution ────────────────────────────────
 
-    // Alpha-mask: discard pixels below threshold when alpha test is active.
-    // Alpha from albedo texture's a channel; opaque surfaces have a == 1.
-    if (alpha < surf.alphaThreshold) {
-        discard;
+    if ((surf.receiveMask & RECEIVE_IBL) != 0u) {
+        vec3 N = normalize(inNormal);
+        vec3 V = normalize(ubo.camPos - inWorldPos);
+        vec3 R = reflect(-V, N);
+        float ambientScale = env.ibl_ambient_scale;
+        vec3 ibl = texture(prefilteredMap, R).rgb * ambientScale * albedo * PI_INV;
+        color += ibl;
     }
+
+    // ── 6. Dynamic direct light (placeholder — Phase 09 CSM impl) ──
+    // When RECEIVE_DYNAMIC_LIGHTS is set, sampled via set 0 binding 5
+    // (sampler2DArrayShadow) when CSM is active. This path is reserved.
+
+    // ── 7. Output ──────────────────────────────────────────────────
 
     outColor = vec4(color, 1.0);
 }
