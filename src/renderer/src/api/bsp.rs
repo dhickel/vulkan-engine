@@ -25,73 +25,6 @@ pub use crate::data::data_cache::{
 pub use crate::data::gpu_data::BspSurfaceUniform;
 pub use crate::scene::bsp_visibility::{filter_batches_by_pvs, pvs_should_disable, BspMountState};
 
-// ── Prepared BSP Resources (pre-commit staging) ───────────────────────
-
-/// Resources prepared but not yet published to the BSP surface cache.
-///
-/// Created by the BSP extraction pipeline before commit. Call
-/// [`publish`](BspRendererResources::publish) to atomically insert into the cache.
-#[cfg(feature = "bsp")]
-pub struct BspRendererResources {
-    /// Prepared surface records keyed by arbitrary extraction-side keys.
-    materials: Vec<BspMaterialDesc>,
-}
-
-#[cfg(feature = "bsp")]
-impl BspRendererResources {
-    /// Create an empty prepared-resources container.
-    pub fn new() -> Self {
-        Self {
-            materials: Vec::new(),
-        }
-    }
-
-    /// Stage a BSP material for later commit.
-    pub fn add_material(&mut self, desc: BspMaterialDesc) {
-        self.materials.push(desc);
-    }
-
-    /// Publish all staged materials to the BSP surface cache.
-    ///
-    /// Returns material handles in staging order, excluding nodraw surfaces.
-    /// The cache lock must be held by the caller.
-    pub fn publish(self, cache: &mut BspSurfaceCacheRepr) -> Vec<BspMaterialHandle> {
-        self.materials
-            .into_iter()
-            .filter_map(|desc| {
-                let pipeline = match desc.surface_class {
-                    BspSurfaceClass::Lightmapped => VkPipelineType::BspOpaque,
-                    BspSurfaceClass::Fullbright => VkPipelineType::BspFullbright,
-                    BspSurfaceClass::AlphaMask => VkPipelineType::BspAlphaMask,
-                    BspSurfaceClass::Sky => VkPipelineType::BspSky,
-                    BspSurfaceClass::Liquid => VkPipelineType::BspLiquid,
-                    BspSurfaceClass::Nodraw => return None,
-                };
-
-                let to_texture_handle = |handle: crate::data::handles::BspTextureHandle| {
-                    TextureHandle::new(handle.slot, handle.generation)
-                };
-
-                Some(cache.add(BspCachedSurfaceRepr {
-                    material_descriptor: ash::vk::DescriptorSet::null(),
-                    surf_ubo_alloc: Default::default(),
-                    pipeline,
-                    albedo_tex: to_texture_handle(desc.textures.albedo),
-                    fullbright_tex: desc.textures.fullbright_mask.map(to_texture_handle),
-                    lightmap_tex: to_texture_handle(desc.textures.lightmap_atlas),
-                }))
-            })
-            .collect()
-    }
-}
-
-#[cfg(feature = "bsp")]
-impl Default for BspRendererResources {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ── BSP Mount State ────────────────────────────────────────────────────
 
 /// Prepared BSP mount ready to be attached to a scene.
@@ -114,6 +47,117 @@ pub struct PreparedBspMount {
     pub render_batches: Vec<bsp::geometry::RenderBatch>,
     /// BSP light descriptors extracted from light entities.
     pub light_descriptors: Vec<bsp::extract::LightDescriptor>,
+}
+
+#[cfg(feature = "bsp")]
+fn build_lightmap_array_pixels(
+    extracted: &bsp::extract::ExtractedBsp,
+) -> Result<(u32, u32, u32, Vec<u8>), String> {
+    let atlas = &extracted.lightmap_atlas;
+    let Some(first_page) = atlas.pages.first() else {
+        return Err("BSP lightmap atlas has no pages".to_string());
+    };
+    let width = first_page.width;
+    let height = first_page.height;
+    if width == 0 || height == 0 {
+        return Err("BSP lightmap atlas has zero-sized page".to_string());
+    }
+    let styles = if atlas.styles.is_empty() {
+        vec![0]
+    } else {
+        atlas.styles.clone()
+    };
+    if styles.len() > 64 {
+        return Err(format!("BSP lightmap atlas has {} styles; max is 64", styles.len()));
+    }
+    let layer_count = styles.len() as u32;
+    let layer_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "BSP lightmap atlas dimensions overflow".to_string())?;
+    let mut rgba = vec![0u8; layer_bytes * layer_count as usize];
+    for layer in 0..layer_count as usize {
+        for pixel in rgba[layer * layer_bytes..(layer + 1) * layer_bytes].chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+    }
+
+    let style_layer = |style: u8| -> Result<usize, String> {
+        styles
+            .iter()
+            .position(|&candidate| candidate == style)
+            .ok_or_else(|| format!("BSP lightmap style {style} missing from atlas style table"))
+    };
+
+    let copy_rect = |dst: &mut [u8],
+                     dst_layer: usize,
+                     dst_offset: (u32, u32),
+                     src_page_index: u32,
+                     src_offset: (u32, u32),
+                     extent: (u32, u32)|
+     -> Result<(), String> {
+        let src_page = atlas
+            .pages
+            .get(src_page_index as usize)
+            .ok_or_else(|| format!("BSP lightmap references missing atlas page {src_page_index}"))?;
+        if src_page.width != width || src_page.height != height {
+            return Err("BSP lightmap atlas pages must share dimensions for array upload".to_string());
+        }
+        for y in 0..extent.1 {
+            for x in 0..extent.0 {
+                let sx = src_offset.0 + x;
+                let sy = src_offset.1 + y;
+                let dx = dst_offset.0 + x;
+                let dy = dst_offset.1 + y;
+                if sx >= width || sy >= height || dx >= width || dy >= height {
+                    return Err("BSP lightmap style layer rectangle exceeds atlas bounds".to_string());
+                }
+                let src_idx = ((sy as usize * width as usize) + sx as usize) * 3;
+                let dst_idx = dst_layer * layer_bytes + ((dy as usize * width as usize) + dx as usize) * 4;
+                dst[dst_idx] = src_page.data[src_idx];
+                dst[dst_idx + 1] = src_page.data[src_idx + 1];
+                dst[dst_idx + 2] = src_page.data[src_idx + 2];
+                dst[dst_idx + 3] = 255;
+            }
+        }
+        Ok(())
+    };
+
+    let mut copied_any_style_layout = false;
+    for layout in &extracted.face_lightmap_layouts {
+        for style_layout in &layout.style_layers {
+            if !style_layout.has_data {
+                continue;
+            }
+            copied_any_style_layout = true;
+            let dst_layer = style_layer(style_layout.style_id)?;
+            copy_rect(
+                &mut rgba,
+                dst_layer,
+                layout.atlas_offset,
+                style_layout.page_index,
+                style_layout.atlas_offset,
+                style_layout.luxel_extents,
+            )?;
+        }
+    }
+
+    if !copied_any_style_layout {
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let src_idx = (y * width as usize + x) * 3;
+                let dst_idx = (y * width as usize + x) * 4;
+                if src_idx + 2 < first_page.data.len() {
+                    rgba[dst_idx] = first_page.data[src_idx];
+                    rgba[dst_idx + 1] = first_page.data[src_idx + 1];
+                    rgba[dst_idx + 2] = first_page.data[src_idx + 2];
+                    rgba[dst_idx + 3] = 255;
+                }
+            }
+        }
+    }
+
+    Ok((width, height, layer_count, rgba))
 }
 
 #[cfg(feature = "bsp")]
@@ -151,7 +195,7 @@ impl PreparedBspMount {
 
     /// Build a PreparedBspMount from an extracted BSP with full GPU upload.
     ///
-    /// This is the real upload pipeline (replacing `from_extraction_stub`).
+    /// This is the real upload pipeline; it does not fabricate handles or descriptors.
     /// It uploads face meshes, creates the lightmap atlas, allocates material
     /// descriptor sets, and registers everything in the surface cache.
     ///
@@ -179,16 +223,35 @@ impl PreparedBspMount {
         use crate::data::gpu_data::{MeshMeta, Vertex};
         use crate::data::bsp_import::face_to_procedural_mesh;
         use crate::vulkan::vk_bsp::{
-            create_lightmap_atlas_image, create_lightmap_sampler,
-            upload_lightmap_atlas_data, write_bsp_material_descriptor,
-            create_bsp_material_descriptor_pool,
+            create_bsp_material_descriptor_pool, create_lightmap_atlas_image,
+            create_lightmap_sampler, upload_lightmap_atlas_data, write_bsp_material_descriptor,
         };
-        use crate::data::data_cache::{TextureCache, BspLightmapAtlasGpu};
+        use crate::data::data_cache::{BspLightmapAtlasGpu, BspSurfaceUboGpu, TextureCache};
         use crate::vulkan::vk_storage::BufferPlacement;
         use vk_mem::Alloc;
         use log::info;
 
         let face_count = extracted.face_geometries.len();
+        let renderable_face_count = (0..face_count)
+            .filter(|&fi| {
+                extracted.face_geometries[fi].is_valid
+                    && extracted
+                        .face_materials
+                        .get(fi)
+                        .map(|m| m.surface_class.is_visible())
+                        .unwrap_or(true)
+            })
+            .count();
+
+        {
+            let surface_cache = data_cache
+                .bsp_surface_cache
+                .lock()
+                .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+            if surface_cache.has_active_payloads() {
+                return Err("BSP surface cache already has active payloads; retire the existing mount before uploading another".to_string());
+            }
+        }
 
         // ── 1. Upload face meshes to GPU ───────────────────────────
         info!("BSP upload: uploading {} faces to mesh cache", face_count);
@@ -273,74 +336,72 @@ impl PreparedBspMount {
         let uploaded_count = face_meshes.iter().filter(|h| h.slot != 0 || h.generation != 0).count();
         info!("BSP upload: {uploaded_count} / {face_count} faces uploaded to GPU");
 
+        if renderable_face_count == 0 {
+            let mut mount_state = BspMountState::new();
+            mount_state.activate();
+            mount_state.set_leaf_membership(extracted.leaf_membership.clone());
+            mount_state.set_render_assets(
+                face_meshes.clone(),
+                vec![None; face_count],
+                extracted.render_batches.clone(),
+                extracted.light_descriptors.clone(),
+            );
+            return Ok(Self {
+                mount_state,
+                face_meshes,
+                face_materials: vec![None; face_count],
+                leaf_membership: extracted.leaf_membership.clone(),
+                render_batches: extracted.render_batches.clone(),
+                light_descriptors: extracted.light_descriptors.clone(),
+            });
+        }
+
         // ── 2. Upload lightmap atlas to GPU ──────────────────────
         let atlas = &extracted.lightmap_atlas;
-        let (lightmap_view, lightmap_sampler) = if atlas.pages.is_empty() {
-            info!("BSP upload: no lightmap atlas data, using placeholder");
-            (ash::vk::ImageView::null(), ash::vk::Sampler::null())
-        } else {
-            let page = &atlas.pages[0];
-            let layer_count: u32 = 1; // Phase 04: single style layer
-            let pixel_count = (page.width * page.height) as usize;
-            let mut rgba = vec![0u8; pixel_count * 4];
-            for y in 0..page.height as usize {
-                for x in 0..page.width as usize {
-                    let src_idx = (y * page.width as usize + x) * 3;
-                    let dst_idx = (y * page.width as usize + x) * 4;
-                    if src_idx + 2 < page.data.len() {
-                        rgba[dst_idx] = page.data[src_idx];
-                        rgba[dst_idx + 1] = page.data[src_idx + 1];
-                        rgba[dst_idx + 2] = page.data[src_idx + 2];
-                        rgba[dst_idx + 3] = 255;
-                    }
-                }
-            }
+        if renderable_face_count > 0 && atlas.pages.is_empty() {
+            return Err("BSP upload requires a real lightmap atlas for renderable faces".to_string());
+        }
+        let (atlas_width, atlas_height, layer_count, rgba) = build_lightmap_array_pixels(extracted)?;
 
-            let alloc_guard = allocator
-                .lock()
-                .map_err(|_| "allocator lock poisoned".to_string())?;
+        let alloc_guard = allocator
+            .lock()
+            .map_err(|_| "allocator lock poisoned".to_string())?;
 
-            let lightmap_image = create_lightmap_atlas_image(
-                device, &alloc_guard, page.width, page.height, layer_count,
-            )?;
-            let lightmap_sampler_val = create_lightmap_sampler(device)?;
+        let lightmap_image = create_lightmap_atlas_image(
+            device, &alloc_guard, atlas_width, atlas_height, layer_count,
+        )?;
+        let lightmap_sampler_val = create_lightmap_sampler(device)?;
 
-            upload_lightmap_atlas_data(
-                device, &alloc_guard,
-                transfer_command_pool, transfer_queue,
-                lightmap_image.image,
-                page.width, page.height, layer_count,
-                &rgba,
-            )?;
+        upload_lightmap_atlas_data(
+            device, &alloc_guard,
+            transfer_command_pool, transfer_queue,
+            lightmap_image.image,
+            atlas_width, atlas_height, layer_count,
+            &rgba,
+        )?;
 
-            let view = lightmap_image.image_view;
-            let sampler = lightmap_sampler_val;
+        let lightmap_view = lightmap_image.image_view;
+        let lightmap_sampler = lightmap_sampler_val;
 
-            let atlas_gpu = BspLightmapAtlasGpu {
-                image: lightmap_image.image,
-                view: lightmap_image.image_view,
-                allocation: lightmap_image.allocation,
-                sampler: lightmap_sampler_val,
-                width: page.width,
-                height: page.height,
-                layer_count,
-            };
-
-            // Store atlas in surface cache for lifetime management.
-            {
-                let mut surface_cache = data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
-                if let Some(ref mut old) = surface_cache.lightmap_atlas {
-                    old.destroy(device, &alloc_guard);
-                }
-                surface_cache.lightmap_atlas = Some(atlas_gpu);
-            }
-            drop(alloc_guard);
-
-            (view, sampler)
+        let atlas_gpu = BspLightmapAtlasGpu {
+            image: lightmap_image.image,
+            view: lightmap_image.image_view,
+            allocation: lightmap_image.allocation,
+            sampler: lightmap_sampler_val,
+            width: atlas_width,
+            height: atlas_height,
+            layer_count,
         };
+
+        // Store atlas in surface cache for lifetime management.
+        {
+            let mut surface_cache = data_cache
+                .bsp_surface_cache
+                .lock()
+                .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+            surface_cache.install_lightmap_atlas(atlas_gpu)?;
+        }
+        drop(alloc_guard);
 
         // ── 3. Get default textures for albedo/fullbright ─────────
         let default_white_handle = TextureHandle::new(
@@ -404,7 +465,7 @@ impl PreparedBspMount {
         }
 
         // Create shared UBO buffer for all face surface params.
-        let (ubo_buffer, _ubo_allocation, ubo_ptr) = {
+        let (ubo_buffer, mut ubo_allocation, ubo_ptr) = {
             let alloc_guard = allocator
                 .lock()
                 .map_err(|_| "allocator lock poisoned".to_string())?;
@@ -416,6 +477,7 @@ impl PreparedBspMount {
 
             let alloc_info = vk_mem::AllocationCreateInfo {
                 usage: vk_mem::MemoryUsage::AutoPreferHost,
+                flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
                 required_flags:
                     ash::vk::MemoryPropertyFlags::HOST_VISIBLE
                         | ash::vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -459,6 +521,9 @@ impl PreparedBspMount {
                 let sc = extracted.face_materials.get(fi).map(|m| m.surface_class);
                 if sc.map(|c| !c.is_visible()).unwrap_or(false) {
                     continue;
+                }
+                if extracted.face_lightmap_layouts.get(fi).is_none() {
+                    return Err(format!("renderable BSP face {fi} has no lightmap layout"));
                 }
                 match surface_cache.allocate_material_set(device) {
                     Ok(set) => allocated_sets[fi] = Some(set),
@@ -525,6 +590,25 @@ impl PreparedBspMount {
             );
         }
 
+        {
+            let alloc_guard = allocator
+                .lock()
+                .map_err(|_| "allocator lock poisoned".to_string())?;
+            unsafe {
+                alloc_guard.unmap_memory(&mut ubo_allocation);
+            }
+        }
+        {
+            let mut surface_cache = data_cache
+                .bsp_surface_cache
+                .lock()
+                .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
+            surface_cache.install_surface_ubo(BspSurfaceUboGpu {
+                buffer: ubo_buffer,
+                allocation: ubo_allocation,
+            })?;
+        }
+
         // Phase C: register in surface cache.
         let mut face_materials: Vec<Option<BspMaterialHandle>> = vec![None; face_count];
         {
@@ -560,7 +644,9 @@ impl PreparedBspMount {
                     sub_buffer_index: 0,
                 };
 
-                let material_set = allocated_sets[fi].unwrap_or(ash::vk::DescriptorSet::null());
+                let Some(material_set) = allocated_sets[fi] else {
+                    continue;
+                };
 
                 let handle = surface_cache.add(BspCachedSurfaceRepr {
                     material_descriptor: material_set,
@@ -599,37 +685,6 @@ impl PreparedBspMount {
         })
     }
 
-    /// Build a PreparedBspMount from an extracted BSP without GPU upload.
-    ///
-    /// **Deprecated**: Use [`upload_from_extracted`] for real GPU uploads.
-    ///
-    /// This stub creates zero-initialized mesh handles and empty material arrays.
-    /// It is retained for tests that don't require GPU resources.
-    pub fn from_extraction_stub(extracted: &bsp::extract::ExtractedBsp) -> Self {
-        let mut mount_state = BspMountState::new();
-        mount_state.activate();
-        mount_state.set_leaf_membership(extracted.leaf_membership.clone());
-
-        let face_count = extracted.face_geometries.len();
-        let stub_meshes = vec![MeshHandle::new(0, 0); face_count];
-        let stub_materials = vec![None; face_count];
-
-        mount_state.set_render_assets(
-            stub_meshes.clone(),
-            stub_materials,
-            extracted.render_batches.clone(),
-            extracted.light_descriptors.clone(),
-        );
-
-        Self {
-            mount_state,
-            face_meshes: stub_meshes,
-            face_materials: vec![None; face_count],
-            leaf_membership: extracted.leaf_membership.clone(),
-            render_batches: extracted.render_batches.clone(),
-            light_descriptors: extracted.light_descriptors.clone(),
-        }
-    }
 }
 
 #[cfg(feature = "bsp")]

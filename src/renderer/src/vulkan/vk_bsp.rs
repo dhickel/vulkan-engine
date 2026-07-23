@@ -31,7 +31,7 @@ pub(crate) fn create_bsp_pipeline_layout(
     let push_const_range = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX)
         .offset(0)
-        .size(80);
+        .size(std::mem::size_of::<crate::data::gpu_data::BspModelPushConsts>() as u32);
 
     let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
@@ -305,6 +305,7 @@ pub(crate) fn upload_lightmap_atlas_data(
 
     let staging_alloc_info = vk_mem::AllocationCreateInfo {
         usage: vk_mem::MemoryUsage::AutoPreferHost,
+        flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
         required_flags:
             vk::MemoryPropertyFlags::HOST_VISIBLE
                 | vk::MemoryPropertyFlags::HOST_COHERENT,

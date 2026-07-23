@@ -16,6 +16,8 @@ use crate::data::gpu_data::{
     AsByteSlice, CopiedMaterialDrawRecord, EnvironmentUBO, RenderObject, SceneDataUBO,
     VkModelPushConsts,
 };
+#[cfg(feature = "bsp")]
+use crate::data::gpu_data::BspModelPushConsts;
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
@@ -1511,15 +1513,12 @@ unsafe fn record_bsp_draw_sequence_impl(
 
     let mut curr_pipeline_type: Option<VkPipelineType> = None;
     let mut curr_pipeline_layout = vk::PipelineLayout::null();
-    let mut curr_material_descriptor = vk::DescriptorSet::null();
+    let mut curr_material_descriptor: Option<vk::DescriptorSet> = None;
 
     for item in bsp_draw_items.iter() {
         let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
             continue;
         };
-        if bsp_mat.material_descriptor == vk::DescriptorSet::null() {
-            continue;
-        }
         if mesh_cache
             .mark_referenced(item.mesh_id, next_submit_serial)
             .is_err()
@@ -1541,7 +1540,7 @@ unsafe fn record_bsp_draw_sequence_impl(
             let next_pipeline = *vulkan_cache.pipelines.get_pipeline(pipeline_type);
             curr_pipeline_type = Some(pipeline_type);
             curr_pipeline_layout = next_pipeline.layout;
-            curr_material_descriptor = vk::DescriptorSet::null();
+            curr_material_descriptor = None;
 
             device.cmd_bind_pipeline(
                 cmd_buffer,
@@ -1558,7 +1557,7 @@ unsafe fn record_bsp_draw_sequence_impl(
             );
         }
 
-        if curr_material_descriptor != bsp_mat.material_descriptor {
+        if curr_material_descriptor != Some(bsp_mat.material_descriptor) {
             device.cmd_bind_descriptor_sets(
                 cmd_buffer,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -1567,7 +1566,7 @@ unsafe fn record_bsp_draw_sequence_impl(
                 &[bsp_mat.material_descriptor],
                 &[],
             );
-            curr_material_descriptor = bsp_mat.material_descriptor;
+            curr_material_descriptor = Some(bsp_mat.material_descriptor);
         }
 
         device.cmd_bind_index_buffer(
@@ -1577,17 +1576,12 @@ unsafe fn record_bsp_draw_sequence_impl(
             vk::IndexType::UINT32,
         );
 
-        let push_consts = VkModelPushConsts::new(
-            item.transform,
-            mesh.vertex_buffer.alloc_address,
-            bsp_mat.surf_ubo_alloc.alloc_address,
-            mesh.has_uv1,
-        );
+        let push_consts = BspModelPushConsts::new(item.transform, mesh.vertex_buffer.alloc_address);
 
         device.cmd_push_constants(
             cmd_buffer,
             curr_pipeline_layout,
-            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            vk::ShaderStageFlags::VERTEX,
             0,
             push_consts.as_byte_slice(),
         );

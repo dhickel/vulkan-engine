@@ -57,6 +57,19 @@ FIXTURES = [
         "args_vis": [],
         "args_light": [],
     },
+
+    {
+        "name": "q1-bsp29-visible",
+        "source": "q1_profile_visible.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp29",
+        "bsp2": False,
+        "colored": False,
+        "args_qbsp": [],
+        "args_vis": [],
+        "args_light": [],
+        "force_lightdata": True,
+    },
     {
         "name": "ericw-bsp2-colored",
         "source": "q1_profile_core.map",
@@ -102,6 +115,7 @@ def write_wad2(path: Path) -> None:
     """Write a minimal project-authored WAD2 with palette-indexed test textures."""
     texture_specs = {
         "__TB_empty": 16,
+        "wall": 24,
         "sky": 32,
         "*water1": 48,
         "*slime1": 64,
@@ -254,6 +268,45 @@ def run_compiler(
         raise
 
 
+def force_lightdata_for_visible_fixture(path: Path) -> None:
+    """Patch the project-authored visible fixture with deterministic style-0 lightdata.
+
+    ericw-tools 2.0.0-alpha3 marks these synthetic TrenchBroom test texinfos as
+    TEX_SPECIAL and emits no luxel data. The renderer Phase 04 fixture needs
+    opaque style-0 lightmap bytes, so this post-process clears the wall texinfo
+    flag and appends deterministic grayscale lightdata. The original map and WAD
+    remain project-authored; the patch is byte-stable and recorded in the manifest hash.
+    """
+    data = bytearray(path.read_bytes())
+    if len(data) < 124:
+        raise RuntimeError(f"cannot patch malformed BSP: {path}")
+    lumps = [list(struct.unpack_from("<ii", data, 4 + i * 8)) for i in range(15)]
+    texinfo_ofs, texinfo_size = lumps[6]
+    face_ofs, face_size = lumps[7]
+    face_count = face_size // 20
+    if face_count == 0 or texinfo_size < 40:
+        raise RuntimeError(f"visible fixture did not compile renderable faces: {path}")
+
+    # Clear TEX_SPECIAL on texinfo 0 (the wall texture) so extraction treats it as opaque.
+    struct.pack_into("<i", data, texinfo_ofs + 36, 0)
+
+    bytes_per_face = 4096
+    light_offset = len(data)
+    lightdata = bytes([192]) * (face_count * bytes_per_face)
+    data.extend(lightdata)
+    struct.pack_into("<ii", data, 4 + 8 * 8, light_offset, len(lightdata))
+
+    for face_index in range(face_count):
+        base = face_ofs + face_index * 20
+        data[base + 12] = 0
+        data[base + 13] = 255
+        data[base + 14] = 255
+        data[base + 15] = 255
+        struct.pack_into("<i", data, base + 16, face_index * bytes_per_face)
+
+    path.write_bytes(data)
+
+
 def compile_fixture(
     fixture: dict,
     ericw_tools_path: Path,
@@ -333,6 +386,8 @@ def compile_fixture(
     # Collect output files
     output_bsp = output_dir / f"{name}.bsp"
     output_bsp.write_bytes(work_bsp.read_bytes())
+    if fixture.get("force_lightdata"):
+        force_lightdata_for_visible_fixture(output_bsp)
 
     bsp_hash = sha256_file(output_bsp)
     bsp_size = output_bsp.stat().st_size

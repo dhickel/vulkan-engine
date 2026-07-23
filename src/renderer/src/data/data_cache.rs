@@ -255,6 +255,12 @@ impl VkDataCache {
         } else {
             error!("environment_cache lock poisoned during destroy");
         }
+        #[cfg(feature = "bsp")]
+        if let Ok(mut bsp_surface_cache) = self.bsp_surface_cache.lock() {
+            bsp_surface_cache.destroy_descriptor_pool(device, allocator);
+        } else {
+            error!("bsp_surface_cache lock poisoned during destroy");
+        }
     }
 
     /// Atomically commit a fully validated staged import plan to the caches.
@@ -3081,6 +3087,7 @@ impl VkDescType {
     pub const COUNT: usize = 13;
 }
 
+#[derive(Clone)]
 pub struct VkDescLayoutCache {
     layouts: [vk::DescriptorSetLayout; VkDescType::COUNT],
 }
@@ -3207,6 +3214,24 @@ impl BspLightmapAtlasGpu {
 }
 
 #[cfg(feature = "bsp")]
+pub struct BspSurfaceUboGpu {
+    pub buffer: vk::Buffer,
+    pub allocation: vk_mem::Allocation,
+}
+
+#[cfg(feature = "bsp")]
+impl BspSurfaceUboGpu {
+    pub fn destroy(&mut self, allocator: &vk_mem::Allocator) {
+        if self.buffer != vk::Buffer::null() {
+            unsafe {
+                allocator.destroy_buffer(self.buffer, &mut self.allocation);
+            }
+            self.buffer = vk::Buffer::null();
+        }
+    }
+}
+
+#[cfg(feature = "bsp")]
 /// Lazy BSP surface material cache.
 ///
 /// Stores GPU-prepared BSP material records (descriptor set, surface UBO allocation,
@@ -3229,6 +3254,8 @@ pub struct BspSurfaceCache {
     allocator: Option<std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>>,
     /// GPU resources for the active lightmap atlas.
     pub lightmap_atlas: Option<BspLightmapAtlasGpu>,
+    /// Shared BSP surface-parameter UBO backing all active material descriptors.
+    surface_ubo: Option<BspSurfaceUboGpu>,
 }
 
 #[cfg(feature = "bsp")]
@@ -3259,6 +3286,7 @@ impl BspSurfaceCache {
             device: None,
             allocator: None,
             lightmap_atlas: None,
+            surface_ubo: None,
         }
     }
 
@@ -3282,6 +3310,30 @@ impl BspSurfaceCache {
     /// True if the material descriptor pool has been initialized.
     pub fn has_material_pool(&self) -> bool {
         self.material_desc_pool.is_some()
+    }
+
+    /// Install the active lightmap atlas. The current Phase 04 upload path is
+    /// single-mount: callers must retire the existing mount before replacing it.
+    pub fn install_lightmap_atlas(&mut self, atlas: BspLightmapAtlasGpu) -> Result<(), String> {
+        if self.lightmap_atlas.is_some() {
+            return Err("BSP lightmap atlas already active; retire it before uploading another mount".to_string());
+        }
+        self.lightmap_atlas = Some(atlas);
+        Ok(())
+    }
+
+    /// Install the shared surface-parameter UBO for the active BSP mount.
+    pub fn install_surface_ubo(&mut self, ubo: BspSurfaceUboGpu) -> Result<(), String> {
+        if self.surface_ubo.is_some() {
+            return Err("BSP surface UBO already active; retire it before uploading another mount".to_string());
+        }
+        self.surface_ubo = Some(ubo);
+        Ok(())
+    }
+
+    /// True when an uploaded BSP mount still owns cache payloads.
+    pub fn has_active_payloads(&self) -> bool {
+        self.lightmap_atlas.is_some() || self.surface_ubo.is_some() || !self.cached_materials.is_empty()
     }
 
     /// Allocate a single BSP material descriptor set (set 1).
@@ -3309,19 +3361,16 @@ impl BspSurfaceCache {
     }
 
     /// Destroy the descriptor pool and lightmap atlas (called during cache teardown).
-    pub fn destroy_descriptor_pool(&mut self) {
+    pub fn destroy_descriptor_pool(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
         if let Some(ref mut atlas) = self.lightmap_atlas {
-            if let (Some(device), Some(allocator)) =
-                (self.device.as_ref(), self.allocator.as_ref())
-            {
-                if let Ok(alloc) = allocator.lock() {
-                    atlas.destroy(device, &alloc);
-                }
-            }
+            atlas.destroy(device, allocator);
             self.lightmap_atlas = None;
         }
-        if let (Some(device), Some(pool)) = (self.device.as_ref(), self.material_desc_pool.take())
-        {
+        if let Some(ref mut ubo) = self.surface_ubo {
+            ubo.destroy(allocator);
+            self.surface_ubo = None;
+        }
+        if let Some(pool) = self.material_desc_pool.take() {
             unsafe {
                 device.destroy_descriptor_pool(pool, None);
             }
@@ -3336,6 +3385,10 @@ impl BspSurfaceCache {
     }
 
     pub fn add(&mut self, material: BspCachedSurface) -> crate::data::handles::BspMaterialHandle {
+        assert!(
+            material.material_descriptor != vk::DescriptorSet::null(),
+            "BSP material cache requires a real descriptor set"
+        );
         if let Some(slot) = self.free_slots.pop() {
             self.cached_materials[slot as usize] = material;
             self.handle_for_slot(slot)

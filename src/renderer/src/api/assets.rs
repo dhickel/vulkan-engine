@@ -1203,17 +1203,39 @@ impl<'a> AssetManager<'a> {
             .get_queue(VkQueueType::Transfer);
         let transfer_pool = self.core.transfer.get_local_transfer_pool().pool;
 
-        let result = super::bsp::PreparedBspMount::upload_from_extracted(
-            extracted,
-            &self.core.device,
-            &self.core.allocator,
-            transfer_pool,
-            transfer_queue,
-            &self.core.vulkan_cache.desc_layouts,
-            &self.core.data_cache,
-        );
+        let extracted = extracted.clone();
+        let device = self.core.device.clone();
+        let allocator = Arc::clone(&self.core.allocator);
+        let desc_layout_cache = self.core.vulkan_cache.desc_layouts.clone();
+        let data_cache = Arc::clone(&self.core.data_cache);
+        let (sender, receiver) = mpsc::channel();
 
-        result.map_err(|msg| AssetError::Sync(msg))
+        self.load_tracker.thread_pool.execute(move || {
+            let result = super::bsp::PreparedBspMount::upload_from_extracted(
+                &extracted,
+                &device,
+                &allocator,
+                transfer_pool,
+                transfer_queue,
+                &desc_layout_cache,
+                &data_cache,
+            )
+            .map_err(AssetError::Sync);
+            let _ = sender.send(result);
+        });
+
+        loop {
+            self.pump_transfer_submissions()?;
+            match receiver.try_recv() {
+                Ok(result) => return result,
+                Err(TryRecvError::Empty) => std::thread::yield_now(),
+                Err(TryRecvError::Disconnected) => {
+                    return Err(AssetError::Sync(
+                        "BSP upload worker disconnected before returning a result".to_string(),
+                    ));
+                }
+            }
+        }
     }
 
     fn run_sync_upload_task<T, F>(&mut self, task: F) -> Result<T, AssetError>

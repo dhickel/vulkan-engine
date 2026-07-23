@@ -96,7 +96,6 @@ fn run_headless_capture_test(
     args: &common::CaptureTestArgs,
 ) {
     use glam::Vec3;
-    use renderer::api::bsp::PreparedBspMount;
     use renderer::api::config::RendererConfig;
     use renderer::api::{CaptureTarget, FrameCaptureRequest, FrameCaptureStatus};
     use renderer::prelude::*;
@@ -177,8 +176,7 @@ fn run_headless_capture_test(
         Ok(mount) => mount,
         Err(err) => {
             log::error!("BSP GPU upload failed: {err}");
-            log::warn!("Falling back to extraction stub (no GPU resources)");
-            PreparedBspMount::from_extraction_stub(&extracted)
+            return;
         }
     };
     scene.set_bsp_mount(bsp_mount);

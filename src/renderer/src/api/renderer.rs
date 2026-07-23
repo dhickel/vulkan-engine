@@ -1373,7 +1373,7 @@ impl Renderer {
         &mut self,
         extracted: &bsp::extract::ExtractedBsp,
     ) -> Result<crate::api::bsp::PreparedBspMount, RendererError> {
-        self.raw_core_mut()
+        self.assets()
             .prepare_bsp_mount(extracted)
             .map_err(|e| RendererError::InvalidState(format!("BSP upload failed: {e}")))
     }

@@ -57,7 +57,8 @@ void main()
     float alpha  = albedoSample.a;
 
     // Lightmap irradiance from style-indexed array layer.
-    vec3 lightmapIrradiance = texture(lightmapAtlas, vec3(inUV1, float(surf.styleIndex))).rgb;
+    vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
+    vec3 lightmapIrradiance = texture(lightmapAtlas, vec3(atlasUv, float(surf.styleIndex))).rgb;
 
     // Decode sRGB-like lightmap byte → linear.
     // Lightmap bytes are stored as pow(value, 2.2) in atlas.

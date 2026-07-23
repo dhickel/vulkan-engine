@@ -482,6 +482,26 @@ impl VkModelPushConsts {
     }
 }
 
+#[cfg(feature = "bsp")]
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct BspModelPushConsts {
+    pub model_matrix: Mat4,
+    pub vertex_buffer_addr: vk::DeviceAddress,
+    _pad: [u32; 2],
+}
+
+#[cfg(feature = "bsp")]
+impl BspModelPushConsts {
+    pub fn new(model_matrix: Mat4, vertex_buffer_addr: vk::DeviceAddress) -> Self {
+        Self {
+            model_matrix,
+            vertex_buffer_addr,
+            _pad: [0; 2],
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Default, Copy, Clone, Pod, Zeroable)]
 pub struct GPUSceneData {
@@ -847,6 +867,11 @@ const _: () = {
     assert!(
         std::mem::size_of::<BspSurfaceUniform>() == 48,
         "BspSurfaceUniform must match the BSP GLSL std140 block size"
+    );
+    #[cfg(feature = "bsp")]
+    assert!(
+        std::mem::size_of::<BspModelPushConsts>() == 80,
+        "BspModelPushConsts must match the BSP pipeline push-constant range"
     );
 };
 

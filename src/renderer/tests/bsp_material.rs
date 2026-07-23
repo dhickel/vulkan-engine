@@ -6,11 +6,12 @@
 #[cfg(feature = "bsp")]
 mod bsp_tests {
     use renderer::api::bsp::{
-        BspCachedSurfaceRepr, BspMaterialDesc, BspRendererResources, BspSurfaceCacheRepr,
-        BspSurfaceClass, BspSurfaceUniform, BspTextureSet, VkPipelineType,
+        BspCachedSurfaceRepr, BspMaterialDesc, BspSurfaceCacheRepr, BspSurfaceClass,
+        BspSurfaceUniform, BspTextureSet, VkPipelineType,
     };
     use renderer::api::BspMaterialHandle;
     use renderer::api::BspTextureHandle;
+    use ash::vk::Handle;
     use renderer::TextureHandle;
 
     /// Verify that BspSurfaceClass variants map to the correct VkPipelineType.
@@ -53,7 +54,7 @@ mod bsp_tests {
     fn bsp_surface_cache_add_and_get() {
         let mut cache = BspSurfaceCacheRepr::new();
         let cached = BspCachedSurfaceRepr {
-            material_descriptor: ash::vk::DescriptorSet::null(),
+            material_descriptor: ash::vk::DescriptorSet::from_raw(0xBEEF),
             surf_ubo_alloc: Default::default(),
             pipeline: VkPipelineType::BspOpaque,
             albedo_tex: TextureHandle::new(10, 0),
@@ -107,49 +108,25 @@ mod bsp_tests {
         assert!(desc.textures.fullbright_mask.is_some());
     }
 
-    /// Verify BspRendererResources can be constructed and staged.
     #[test]
-    fn bsp_renderer_resources_publish_stages_materials() {
-        let mut resources = BspRendererResources::new();
-        let desc = BspMaterialDesc {
-            surface_class: BspSurfaceClass::Lightmapped,
-            textures: BspTextureSet {
-                albedo: BspTextureHandle::new(10, 1),
-                fullbright_mask: Some(BspTextureHandle::new(11, 2)),
-                lightmap_atlas: BspTextureHandle::new(20, 3),
-            },
-            surface_params: BspSurfaceUniform::default(),
-        };
-        resources.add_material(desc);
-
+    fn bsp_surface_cache_records_only_real_descriptor_payloads() {
         let mut cache = BspSurfaceCacheRepr::new();
-        let handles = resources.publish(&mut cache);
-        assert_eq!(handles.len(), 1);
-        assert_eq!(handles[0].slot, 0);
+        let descriptor = ash::vk::DescriptorSet::from_raw(0xCAFE);
+        let handle = cache.add(BspCachedSurfaceRepr {
+            material_descriptor: descriptor,
+            surf_ubo_alloc: Default::default(),
+            pipeline: VkPipelineType::BspOpaque,
+            albedo_tex: TextureHandle::new(10, 1),
+            fullbright_tex: Some(TextureHandle::new(11, 2)),
+            lightmap_tex: TextureHandle::new(20, 3),
+        });
 
         let cached = cache
-            .get(handles[0])
+            .get(handle)
             .expect("published material should be cached");
+        assert_eq!(cached.material_descriptor, descriptor);
         assert_eq!(cached.albedo_tex, TextureHandle::new(10, 1));
         assert_eq!(cached.fullbright_tex, Some(TextureHandle::new(11, 2)));
         assert_eq!(cached.lightmap_tex, TextureHandle::new(20, 3));
-    }
-
-    #[test]
-    fn bsp_renderer_resources_publish_skips_nodraw_surfaces() {
-        let mut resources = BspRendererResources::new();
-        resources.add_material(BspMaterialDesc {
-            surface_class: BspSurfaceClass::Nodraw,
-            textures: BspTextureSet {
-                albedo: BspTextureHandle::new(10, 0),
-                fullbright_mask: None,
-                lightmap_atlas: BspTextureHandle::new(20, 0),
-            },
-            surface_params: BspSurfaceUniform::default(),
-        });
-
-        let mut cache = BspSurfaceCacheRepr::new();
-        let handles = resources.publish(&mut cache);
-        assert!(handles.is_empty());
     }
 }

@@ -36,6 +36,12 @@ sha256 = "2146fb0f4b0fdaa19fb98f67010d14dd7d2ffb0d22ebabd7038a2f1115e21494"
 license = "CC0-1.0"
 provenance = "project-authored Phase 01 BSP beta source fixture"
 
+[source."q1_profile_visible.map"]
+path = "maps/q1_profile_visible.map"
+sha256 = "5c46e35a86d727ab035f597eaf608847d44b7ede304ed098ad7c6b4ff3cbb436"
+license = "CC0-1.0"
+provenance = "project-authored Phase 01 BSP beta source fixture"
+
 [fixture."q1-bsp29-core"]
 source = "q1_profile_core.map"
 output = "compiled/q1-bsp29-core.bsp"
@@ -48,6 +54,25 @@ source_sha256 = "2d65d0381fe6f4e03929b751340e1208c3d382e5a06cfa9a6150072d8fcde96
 palette_sha256 = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
 bsp_sha256 = "10f4bcade9b4e6f2afccaca8cd40be5ac5d380a2e41982f5e41dfcccb9d8e268"
 bsp_size = 23500
+qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
+vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"
+qbsp_args = []
+vis_args = []
+light_args = []
+
+[fixture."q1-bsp29-visible"]
+source = "q1_profile_visible.map"
+output = "compiled/q1-bsp29-visible.bsp"
+placeholder = false
+profile = "q1-portable-ericw"
+dialect = "bsp29"
+bsp2 = false
+colored = false
+source_sha256 = "5c46e35a86d727ab035f597eaf608847d44b7ede304ed098ad7c6b4ff3cbb436"
+palette_sha256 = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
+bsp_sha256 = "07249e4fd28d4108128f8be37b48510da69444bcbc6a8c6ea3bc5270d3d2483e"
+bsp_size = 123424
 qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
 vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
 light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"

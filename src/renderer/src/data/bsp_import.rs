@@ -209,17 +209,19 @@ impl BspLightmapAtlasPage {
             .iter()
             .map(|page| {
                 let pixel_count = (page.width * page.height) as usize;
-                // Convert from RGB8 to RGBA8
-                let mut rgba = vec![0u8; pixel_count * 4];
-                for y in 0..page.height as usize {
-                    for x in 0..page.width as usize {
-                        let src_idx = (y * page.width as usize + x) * 3;
-                        let dst_idx = (y * page.width as usize + x) * 4;
-                        if src_idx + 2 < page.data.len() {
-                            rgba[dst_idx] = page.data[src_idx];
-                            rgba[dst_idx + 1] = page.data[src_idx + 1];
-                            rgba[dst_idx + 2] = page.data[src_idx + 2];
-                            rgba[dst_idx + 3] = 255;
+                let layer_count = atlas.styles.len().max(1) as u32;
+                let mut rgba = vec![0u8; pixel_count * 4 * layer_count as usize];
+                for layer in 0..layer_count as usize {
+                    for y in 0..page.height as usize {
+                        for x in 0..page.width as usize {
+                            let src_idx = (y * page.width as usize + x) * 3;
+                            let dst_idx = layer * pixel_count * 4 + (y * page.width as usize + x) * 4;
+                            if src_idx + 2 < page.data.len() {
+                                rgba[dst_idx] = page.data[src_idx];
+                                rgba[dst_idx + 1] = page.data[src_idx + 1];
+                                rgba[dst_idx + 2] = page.data[src_idx + 2];
+                                rgba[dst_idx + 3] = 255;
+                            }
                         }
                     }
                 }
@@ -227,10 +229,7 @@ impl BspLightmapAtlasPage {
                 BspLightmapAtlasPage {
                     width: page.width,
                     height: page.height,
-                    // The current neutral atlas stores one packed RGB8 layer. Style-indexed
-                    // arrays are represented by the BSP material ABI but are not duplicated
-                    // in `AtlasPage::data` yet, so expose the uploaded layer count honestly.
-                    layer_count: 1,
+                    layer_count,
                     pixels: rgba,
                 }
             })

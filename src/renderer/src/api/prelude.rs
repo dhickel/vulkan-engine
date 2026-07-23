@@ -38,5 +38,3 @@ pub use super::{
     ValidationDiagnostic, ValidationError, VisualTuning, WrapMode,
 };
 
-#[cfg(feature = "bsp")]
-pub use super::bsp::BspRendererResources;
