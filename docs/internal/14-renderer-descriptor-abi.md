@@ -83,16 +83,19 @@ There is no set 3 bind and no dynamic descriptor offset.
 order, GLSL declarations, shader manifest pairs, critical Rust sizes, and this document's CSM
 compatibility marker. Any ABI change updates all of those as one compatibility unit.
 
-## BSP descriptor ABI (feature `renderer/bsp`, Phase 04 baseline)
+## BSP descriptor ABI (feature `renderer/bsp`, Phase 01 frozen baseline)
+
+**Frozen**: 2026-07-23. Set 0 remains compatible with shared scene bindings. In-flight descriptors are never mutated for frame-varying state. Static textures use one array layer.
 
 BSP lightmapped surfaces use a dedicated descriptor path **separate** from PBR. BSP set 0
 reuses the `SceneData` six-binding layout so scene data and shadow map are shared. BSP set 1
-is a material-specific layout with four bindings.
+is a material-specific layout with four bindings. BSP set 2 carries frame-local values.
 
 | `VkDescType` | Set/binding(s), Vulkan type, stages | Ownership and image/buffer contract | Live pipeline consumers and shader pair |
 |---|---|---|---|
-| `BspScene` | set 0: b0/b1 `UNIFORM_BUFFER`; b2–b5 `COMBINED_IMAGE_SAMPLER`; vertex+fragment | Same binding structure as `SceneData`. b0 `SceneDataUBO`, b1 `EnvironmentUBO`, b2-b3 cube env, b4 BRDF LUT, b5 shadow array. Vertex + fragment visibility. | BSP opaque, fullbright, alpha-mask, sky, liquid pipelines. |
-| `BspMaterial` | set 1: b0/b1/b2 `COMBINED_IMAGE_SAMPLER`, b3 `UNIFORM_BUFFER`; fragment | b0 albedo 2D, b1 fullbright mask 2D, b2 lightmap atlas `sampler2DArray`, b3 `BspSurfaceUniform` UBO. The vertex shader must not read set 1. | All BSP fragment shaders in `bsp_shader_manifest.txt`. |
+| `BspScene` | set 0: b0/b1 `UNIFORM_BUFFER`; b2–b5 `COMBINED_IMAGE_SAMPLER`; vertex+fragment | Same binding structure as `SceneData`. b0 `SceneDataUBO`, b1 `EnvironmentUBO`, b2-b3 cube env, b4 BRDF LUT, b5 shadow array. Vertex + fragment visibility. Compatible with shared scene bindings — BSP and PBR can share the same set 0 descriptor set at bind time. | BSP opaque, fullbright, alpha-mask, sky, liquid pipelines. |
+| `BspMaterial` | set 1: b0/b1/b2 `COMBINED_IMAGE_SAMPLER`, b3 `UNIFORM_BUFFER`; fragment | b0 albedo 2D (one array layer for static textures), b1 fullbright mask 2D, b2 lightmap atlas `sampler2DArray` (one layer per populated style), b3 `BspSurfaceUniform` UBO (48 bytes). The vertex shader must not read set 1. | All BSP fragment shaders in `bsp_shader_manifest.txt`. |
+| `BspFrameValues` | set 2: b0 `UNIFORM_BUFFER`; fragment | Frame-local BSP values: style intensities (vec4 × 64), animation frame indices, liquid simulation parameters, deterministic simulation values. Written once per frame max. In-flight descriptors are never mutated. | All BSP fragment shaders. |
 
 ### BSP surface UBO (set 1, binding 3) — `BspSurfaceUniform`
 
@@ -112,11 +115,13 @@ Rust and GLSL size: 48 bytes (std140 scalar fields packed into two 16-byte group
 
 | Pipeline | Descriptor set order | Push constants / source pair |
 |---|---|---|
-| BSP opaque | set 0 `BspScene`, set 1 `BspMaterial` | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP opaque | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
 | BSP fullbright | same as opaque | Same shader pair; fullbright path is inside fragment. |
-| BSP alpha mask | set 0 `BspScene`, set 1 `BspMaterial` | Same push constants. Two-sided (no cull). `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
-| BSP sky | set 0 `BspScene`, set 1 `BspMaterial` in pipeline layout; shader reads set 0 only | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. |
-| BSP liquid | set 0 `BspScene`, set 1 `BspMaterial` | Same push constants. Two-sided, alpha blend. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |
+| BSP alpha mask | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | Same push constants. Two-sided (no cull). `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP sky | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` in the shared BSP pipeline layout; shader reads set 0 only. Set 1/2 remain layout-compatible and may be bound for uniform bind order. | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. |
+| BSP liquid | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | Same push constants. Two-sided, alpha blend. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |
+
+**Frame-varying update rule (frozen)**: In-flight descriptors are never mutated. Frame-local BSP values (style intensities, animation indices, liquid parameters) are written through fresh or frame-rotated set 2 descriptors each frame, not by mutating descriptors that may still be in flight. Static textures (albedo, fullbright mask) use one array layer — per-frame animation changes are communicated via the animationFrame/animationTime uniforms, not by rewriting texture bindings.
 
 ### BSP ABI exec guard
 
