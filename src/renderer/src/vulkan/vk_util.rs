@@ -1131,7 +1131,7 @@ pub fn get_format_size(format: vk::Format) -> u32 {
 
 pub fn upload_skybox(
     device: &ash::Device,
-    allocator: &Allocator,
+    allocator: &Arc<Mutex<Allocator>>,
     tex_meta: TextureMeta,
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
@@ -1139,11 +1139,16 @@ pub fn upload_skybox(
     let face_width = tex_meta.payload.width() / 6;
     let format_size = get_format_size(tex_meta.payload.format());
 
-    let staging_buffer = allocate_and_write_buffer(
-        allocator,
-        tex_meta.payload.bytes(),
-        vk::BufferUsageFlags::TRANSFER_SRC,
-    )?;
+    let staging_buffer = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during skybox staging upload allocation: {e}")
+        })?;
+        allocate_and_write_buffer(
+            &allocator,
+            tex_meta.payload.bytes(),
+            vk::BufferUsageFlags::TRANSFER_SRC,
+        )?
+    };
 
     let image_create_info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
@@ -1174,22 +1179,27 @@ pub fn upload_skybox(
         ..Default::default()
     };
 
-    // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
-    let (allocation, _device_memory, _alloc_offset) = unsafe {
-        let alloc = allocator
-            .allocate_memory_for_image(image, &alloc_info)
-            .map_err(|err| format!("failed to allocate skybox image memory: {err:?}"))?;
+    let (allocation, device_memory, alloc_offset) = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during skybox image memory allocation: {e}")
+        })?;
+        // SAFETY: Vulkan/VMA owner objects are borrowed from the caller; handles and create/record parameters are built by this function and checked before the FFI call.
+        unsafe {
+            let alloc = allocator
+                .allocate_memory_for_image(image, &alloc_info)
+                .map_err(|err| format!("failed to allocate skybox image memory: {err:?}"))?;
 
-        let alloc_info = allocator.get_allocation_info(&alloc);
-        let device_memory = alloc_info.device_memory;
-        let offset = alloc_info.offset;
-
-        device
-            .bind_image_memory(image, device_memory, offset)
-            .map_err(|err| format!("failed to bind skybox image memory: {err:?}"))?;
-
-        (alloc, device_memory, offset)
+            let alloc_info = allocator.get_allocation_info(&alloc);
+            (alloc, alloc_info.device_memory, alloc_info.offset)
+        }
     };
+
+    // SAFETY: Vulkan image and allocation metadata were created above and are valid for binding.
+    unsafe {
+        device
+            .bind_image_memory(image, device_memory, alloc_offset)
+            .map_err(|err| format!("failed to bind skybox image memory: {err:?}"))?;
+    }
 
     let cmd_buffer = transfer_pool
         .primary("transfer_skybox_upload")
@@ -1310,7 +1320,12 @@ pub fn upload_skybox(
             .create_image_view(&view_create_info, None)
             .map_err(|err| format!("failed to create skybox image view: {err:?}"))?;
 
-        destroy_buffer(allocator, staging_buffer);
+        {
+            let allocator = allocator.lock().map_err(|e| {
+                format!("allocator lock poisoned during skybox staging upload cleanup: {e}")
+            })?;
+            destroy_buffer(&allocator, staging_buffer);
+        }
 
         Ok(VkCubeMap {
             allocation,
@@ -1327,7 +1342,7 @@ pub fn upload_skybox(
 /// each face being `face_size x face_size` pixels in the specified format.
 pub fn upload_cubemap_faces(
     device: &ash::Device,
-    allocator: &Allocator,
+    allocator: &Arc<Mutex<Allocator>>,
     face_size: u32,
     format: vk::Format,
     bytes: Vec<u8>,
@@ -1354,7 +1369,7 @@ pub fn upload_cubemap_faces(
 /// Used for staging equirectangular source images before GPU conversion.
 pub fn upload_texture_2d(
     device: &ash::Device,
-    allocator: &Allocator,
+    allocator: &Arc<Mutex<Allocator>>,
     width: u32,
     height: u32,
     format: vk::Format,
@@ -1362,8 +1377,12 @@ pub fn upload_texture_2d(
     transfer_pool: &VkCommandPool,
     transfer_queue: vk::Queue,
 ) -> Result<(VkImageAlloc, vk::Sampler), String> {
-    let staging_buffer =
-        allocate_and_write_buffer(allocator, bytes, vk::BufferUsageFlags::TRANSFER_SRC)?;
+    let staging_buffer = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during 2D texture staging allocation: {e}")
+        })?;
+        allocate_and_write_buffer(&allocator, bytes, vk::BufferUsageFlags::TRANSFER_SRC)?
+    };
 
     let extent = vk::Extent3D {
         width,
@@ -1371,14 +1390,19 @@ pub fn upload_texture_2d(
         depth: 1,
     };
 
-    let image = create_image(
-        device,
-        allocator,
-        extent,
-        format,
-        vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-        1,
-    )?;
+    let image = {
+        let allocator = allocator.lock().map_err(|e| {
+            format!("allocator lock poisoned during 2D texture image allocation: {e}")
+        })?;
+        create_image(
+            device,
+            &allocator,
+            extent,
+            format,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            1,
+        )?
+    };
 
     let cmd_buffer = transfer_pool
         .primary("transfer_texture_2d_upload")
@@ -1441,7 +1465,12 @@ pub fn upload_texture_2d(
             .device_wait_idle()
             .map_err(|err| format!("2D texture upload device_wait_idle failed: {err:?}"))?;
 
-        destroy_buffer(allocator, staging_buffer);
+        {
+            let allocator = allocator.lock().map_err(|e| {
+                format!("allocator lock poisoned during 2D texture staging cleanup: {e}")
+            })?;
+            destroy_buffer(&allocator, staging_buffer);
+        }
 
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
