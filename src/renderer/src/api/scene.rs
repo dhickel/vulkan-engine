@@ -630,6 +630,11 @@ pub struct Scene {
     spot_light_parents: HashMap<SpotLightId, String>,
     directional_shadow_configs: HashMap<DirectionalLightId, DirectionalShadowConfig>,
     audio: Vec<SerializedAudioReference>,
+    /// BSP source-link metadata (if a BSP mount provides it).
+    ///
+    /// Stored as a raw JSON value so the renderer does not depend on
+    /// the `bsp_runtime` crate. The coordinator owns the typed form.
+    bsp_source_link: Option<serde_json::Value>,
     /// Editor-specific metadata blob.
     ///
     /// This field is preserved for serialization compatibility but is not
@@ -670,8 +675,30 @@ impl Scene {
             spot_light_parents: HashMap::new(),
             directional_shadow_configs: HashMap::new(),
             audio: Vec::new(),
+            bsp_source_link: None,
             editor: serde_json::json!({}),
         }
+    }
+
+    /// Returns the BSP source-link metadata, if set by the coordinator.
+    pub fn bsp_source_link(&self) -> Option<&serde_json::Value> {
+        self.bsp_source_link.as_ref()
+    }
+
+    /// Set the BSP source-link metadata from the coordinator.
+    pub fn set_bsp_source_link(&mut self, link: serde_json::Value) {
+        self.bsp_source_link = Some(link);
+    }
+
+    /// Clear the BSP source-link metadata.
+    pub fn clear_bsp_source_link(&mut self) {
+        self.bsp_source_link = None;
+    }
+
+    /// Return the number of point lights that can still be created before the
+    /// renderer's fixed GPU point-light cap is reached.
+    pub fn available_point_light_slots(&self) -> usize {
+        MAX_POINT_LIGHTS_GPU.saturating_sub(self.world.active_point_light_count())
     }
 
     /// Returns a reference to the editor metadata blob.
@@ -1646,6 +1673,7 @@ impl Scene {
             spot_light_parents: HashMap::new(),
             directional_shadow_configs: HashMap::new(),
             audio: Vec::new(),
+            bsp_source_link: None,
             editor: serde_json::json!({}),
         }
     }
@@ -2201,6 +2229,9 @@ struct SerializedScene {
     audio: Vec<SerializedAudioReference>,
     #[serde(default = "default_editor_metadata")]
     editor: serde_json::Value,
+    /// BSP source-link metadata (persisted for coordinator reload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bsp_source: Option<serde_json::Value>,
 }
 
 impl SerializedScene {
@@ -2334,6 +2365,7 @@ impl SerializedScene {
             materials: scene.materials.clone(),
             audio: scene.audio.clone(),
             editor: scene.editor_metadata().clone(),
+            bsp_source: scene.bsp_source_link.clone(),
         }
     }
 
@@ -2355,6 +2387,7 @@ impl SerializedScene {
         scene.materials = self.materials.clone();
         scene.audio = self.audio.clone();
         scene.set_editor_metadata(self.editor.clone());
+        scene.bsp_source_link = self.bsp_source.clone();
 
         let mut id_map: HashMap<String, SceneNodeId> = HashMap::new();
 

@@ -403,6 +403,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsp_runtime"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "engine_events",
+ "glam 0.28.0",
+ "log",
+ "renderer",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "built"
 version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

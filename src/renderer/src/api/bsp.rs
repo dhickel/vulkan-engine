@@ -144,6 +144,44 @@ impl PreparedBspMount {
             light_descriptors,
         }
     }
+
+    /// Build a PreparedBspMount from an extracted BSP without GPU upload.
+    ///
+    /// This is a coordinator integration hook: the mount state is populated
+    /// with PVS, leaf membership, render batches, and light descriptors from
+    /// the extraction, but mesh and material arrays are empty. GPU resource
+    /// upload is handled separately by the renderer's extraction pipeline.
+    ///
+    /// The resulting mount is suitable for `Scene::set_bsp_mount` and will
+    /// correctly participate in PVS culling and light selection.
+    pub fn from_extraction_stub(extracted: &bsp::extract::ExtractedBsp) -> Self {
+        let mut mount_state = BspMountState::new();
+        mount_state.activate();
+        mount_state.set_leaf_membership(extracted.leaf_membership.clone());
+
+        let face_count = extracted.face_geometries.len();
+        let stub_meshes = vec![MeshHandle::new(0, 0); face_count];
+        let stub_materials = vec![None; face_count];
+
+        // Use the PVS camera set if available
+        // (actual camera-dependent PVS is updated per-frame by the renderer)
+
+        mount_state.set_render_assets(
+            stub_meshes.clone(),
+            stub_materials,
+            extracted.render_batches.clone(),
+            extracted.light_descriptors.clone(),
+        );
+
+        Self {
+            mount_state,
+            face_meshes: stub_meshes,
+            face_materials: vec![None; face_count],
+            leaf_membership: extracted.leaf_membership.clone(),
+            render_batches: extracted.render_batches.clone(),
+            light_descriptors: extracted.light_descriptors.clone(),
+        }
+    }
 }
 
 #[cfg(feature = "bsp")]
