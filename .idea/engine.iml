@@ -30,6 +30,7 @@
       <sourceFolder url="file://$MODULE_DIR$/src/bsp_runtime/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/src/package_io/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/package_io/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp/examples" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
