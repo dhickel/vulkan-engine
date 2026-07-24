@@ -146,10 +146,16 @@ pub(crate) fn create_bsp_material_descriptor_pool(
     device: &ash::Device,
     max_sets: u32,
 ) -> Result<vk::DescriptorPool, String> {
+    if max_sets == 0 {
+        return Err("BSP material descriptor pool requires at least one set".to_string());
+    }
+    let sampler_descriptors = max_sets
+        .checked_mul(3)
+        .ok_or_else(|| "BSP material sampler descriptor count overflow".to_string())?;
     let pool_sizes = [
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(max_sets * 3),
+            .descriptor_count(sampler_descriptors),
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::UNIFORM_BUFFER)
             .descriptor_count(max_sets),
@@ -204,7 +210,7 @@ pub(crate) fn create_lightmap_atlas_image(
         ..Default::default()
     };
 
-    let (image, allocation) = unsafe {
+    let (image, mut allocation) = unsafe {
         allocator
             .create_image(&image_info, &alloc_info)
             .map_err(|e| format!("failed to allocate lightmap atlas image: {e:?}"))?
@@ -223,15 +229,17 @@ pub(crate) fn create_lightmap_atlas_image(
                 .layer_count(layer_count),
         );
 
-    let image_view = unsafe {
-        device
-            .create_image_view(&view_info, None)
-            .map_err(|e| format!("failed to create lightmap atlas image view: {e:?}"))?
+    let image_view = match unsafe { device.create_image_view(&view_info, None) } {
+        Ok(view) => view,
+        Err(error) => {
+            unsafe {
+                allocator.destroy_image(image, &mut allocation);
+            }
+            return Err(format!(
+                "failed to create lightmap atlas image view: {error:?}"
+            ));
+        }
     };
-
-    // NOTE: if image_view creation failed above, we leak the image allocation.
-    // This is acceptable because the error will propagate and the caller will
-    // drop the allocator (which owns the image via VMA).
 
     Ok(VkImageAlloc {
         image,
@@ -284,16 +292,49 @@ pub(crate) fn upload_lightmap_atlas_data(
     height: u32,
     layer_count: u32,
     rgba_data: &[u8],
+    copy_regions: &[vk::BufferImageCopy],
 ) -> Result<(), String> {
-    let expected_size = (width * height * layer_count * 4) as usize;
-    if rgba_data.len() < expected_size {
-        return Err(format!(
-            "lightmap atlas data too small: have {} bytes, need {expected_size}",
-            rgba_data.len()
-        ));
+    if width == 0 || height == 0 || layer_count == 0 {
+        return Err("lightmap atlas dimensions and layer count must be non-zero".to_string());
+    }
+    if rgba_data.is_empty() || copy_regions.is_empty() {
+        return Err("lightmap atlas upload requires non-empty compact data and regions".to_string());
+    }
+    for (index, region) in copy_regions.iter().enumerate() {
+        if region.image_subresource.layer_count != 1
+            || region.image_subresource.base_array_layer >= layer_count
+            || region.image_extent.depth != 1
+            || region.image_extent.width == 0
+            || region.image_extent.height == 0
+            || region.image_offset.x < 0
+            || region.image_offset.y < 0
+        {
+            return Err(format!("lightmap copy region {index} is invalid"));
+        }
+        let end_x = (region.image_offset.x as u32)
+            .checked_add(region.image_extent.width)
+            .ok_or_else(|| format!("lightmap copy region {index} x overflow"))?;
+        let end_y = (region.image_offset.y as u32)
+            .checked_add(region.image_extent.height)
+            .ok_or_else(|| format!("lightmap copy region {index} y overflow"))?;
+        if end_x > width || end_y > height {
+            return Err(format!("lightmap copy region {index} exceeds image bounds"));
+        }
+        let bytes = u64::from(region.image_extent.width)
+            .checked_mul(u64::from(region.image_extent.height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| format!("lightmap copy region {index} byte count overflow"))?;
+        let end = region
+            .buffer_offset
+            .checked_add(bytes)
+            .ok_or_else(|| format!("lightmap copy region {index} buffer range overflow"))?;
+        if end > rgba_data.len() as u64 {
+            return Err(format!("lightmap copy region {index} exceeds compact staging data"));
+        }
     }
 
-    let total_bytes = expected_size as u64;
+    let total_bytes = u64::try_from(rgba_data.len())
+        .map_err(|_| "lightmap staging byte count exceeds u64".to_string())?;
 
     // Create staging buffer.
     let staging_info = vk::BufferCreateInfo::default()
@@ -320,7 +361,7 @@ pub(crate) fn upload_lightmap_atlas_data(
         let mapped = allocator
             .map_memory(&mut staging_allocation)
             .map_err(|e| format!("failed to map lightmap staging memory: {e:?}"))?;
-        std::ptr::copy_nonoverlapping(rgba_data.as_ptr(), mapped as *mut u8, expected_size);
+        std::ptr::copy_nonoverlapping(rgba_data.as_ptr(), mapped as *mut u8, rgba_data.len());
         allocator.unmap_memory(&mut staging_allocation);
     }
 
@@ -356,36 +397,30 @@ pub(crate) fn upload_lightmap_atlas_data(
         1,
     );
 
-    // Buffer image copy for each layer.
-    let buffer_copy_regions: Vec<vk::BufferImageCopy> = (0..layer_count)
-        .map(|layer| {
-            vk::BufferImageCopy::default()
-                .buffer_offset((layer * width * height * 4) as u64)
-                .buffer_row_length(0)
-                .buffer_image_height(0)
-                .image_subresource(
-                    vk::ImageSubresourceLayers::default()
-                        .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(0)
-                        .base_array_layer(layer)
-                        .layer_count(1),
-                )
-                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                .image_extent(vk::Extent3D {
-                    width,
-                    height,
-                    depth: 1,
-                })
-        })
-        .collect();
-
+    // Initialize unpopulated atlas texels to black with opaque alpha, then copy
+    // only meaningful face rectangles from the compact staging buffer.
+    let clear_range = vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(layer_count);
     unsafe {
+        device.cmd_clear_color_image(
+            cmd,
+            image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0],
+            },
+            std::slice::from_ref(&clear_range),
+        );
         device.cmd_copy_buffer_to_image(
             cmd,
             staging_buffer,
             image,
             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &buffer_copy_regions,
+            copy_regions,
         );
     }
 

@@ -2274,6 +2274,9 @@ impl VkRenderCore {
             transfer_pool,
             transfer_queue,
             &self.vulkan_cache.desc_layouts,
+            self.buffer_and_desc_limits
+                .min_uniform_buffer_offset_alignment,
+            self.frame_slot_count,
             &self.data_cache,
         )
     }

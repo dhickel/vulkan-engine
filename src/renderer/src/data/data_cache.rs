@@ -3280,8 +3280,10 @@ pub struct BspSurfaceCache {
     frame_values_descriptors: Vec<vk::DescriptorSet>,
     /// Frame-values descriptor set layout (cached from VkDescLayoutCache).
     frame_values_set_layout: Option<vk::DescriptorSetLayout>,
-    /// Number of frame slots for frame-values double-buffering.
+    /// Number of frame slots for frame-values buffering.
     frame_slot_count: u32,
+    /// Device-aligned byte stride between frame-value slots.
+    frame_values_stride: u64,
 }
 
 #[cfg(feature = "bsp")]
@@ -3320,6 +3322,7 @@ impl BspSurfaceCache {
             frame_values_descriptors: Vec::new(),
             frame_values_set_layout: None,
             frame_slot_count: 0,
+            frame_values_stride: 0,
         }
     }
 
@@ -3424,7 +3427,12 @@ impl BspSurfaceCache {
         }
         self.frame_values_descriptors.clear();
         self.frame_values_set_layout = None;
+        self.frame_slot_count = 0;
+        self.frame_values_stride = 0;
         self.material_set_layout = None;
+        self.cached_materials.clear();
+        self.generations.clear();
+        self.free_slots.clear();
         self.device = None;
         self.allocator = None;
     }
@@ -3441,6 +3449,7 @@ impl BspSurfaceCache {
         descriptors: Vec<vk::DescriptorSet>,
         set_layout: vk::DescriptorSetLayout,
         frame_slot_count: u32,
+        frame_values_stride: u64,
     ) -> Result<(), String> {
         if self.frame_values_desc_pool.is_some() {
             return Err("BSP frame-values already installed".to_string());
@@ -3450,6 +3459,7 @@ impl BspSurfaceCache {
         self.frame_values_descriptors = descriptors;
         self.frame_values_set_layout = Some(set_layout);
         self.frame_slot_count = frame_slot_count;
+        self.frame_values_stride = frame_values_stride;
         Ok(())
     }
 
@@ -3481,8 +3491,10 @@ impl BspSurfaceCache {
         }
         let slot = slot_index % self.frame_slot_count;
         let ubo_size = std::mem::size_of::<crate::data::gpu_data::BspFrameValuesUniform>() as u64;
-        let stride = ubo_size.next_multiple_of(64);
-        let offset = stride * slot as u64;
+        let offset = self
+            .frame_values_stride
+            .checked_mul(slot as u64)
+            .ok_or_else(|| "BSP frame-values slot offset overflow".to_string())?;
         let allocator = self
             .allocator
             .as_ref()

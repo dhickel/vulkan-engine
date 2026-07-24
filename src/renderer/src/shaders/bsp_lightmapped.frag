@@ -59,7 +59,7 @@ layout (set = 1, binding = 3) uniform BspSurfaceParams {
     float animationTime;
     uint surfaceFlags;
     uint receiveMask;
-    uint _pad0;
+    uint lightmapLayerBase;
     float liquidWarpScale;
     float liquidFlowSpeed;
     uvec2 _pad1;
@@ -124,25 +124,25 @@ void main()
     // Style slot 0
     if (surf.styleIds.x != 255u) {
         float intensity = styleIntensity(surf.styleIds.x);
-        vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, 0.0)).rgb;
+        vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb;
         lightmapIrradiance += sample0 * intensity;
     }
     // Style slot 1
     if (surf.styleIds.y != 255u) {
         float intensity = styleIntensity(surf.styleIds.y);
-        vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, 1.0)).rgb;
+        vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb;
         lightmapIrradiance += sample1 * intensity;
     }
     // Style slot 2
     if (surf.styleIds.z != 255u) {
         float intensity = styleIntensity(surf.styleIds.z);
-        vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, 2.0)).rgb;
+        vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb;
         lightmapIrradiance += sample2 * intensity;
     }
     // Style slot 3
     if (surf.styleIds.w != 255u) {
         float intensity = styleIntensity(surf.styleIds.w);
-        vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, 3.0)).rgb;
+        vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb;
         lightmapIrradiance += sample3 * intensity;
     }
 

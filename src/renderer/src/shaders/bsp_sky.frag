@@ -32,7 +32,7 @@ layout (set = 1, binding = 3) uniform BspSurfaceParams {
     float animationTime;
     uint surfaceFlags;
     uint receiveMask;
-    uint _pad0;
+    uint lightmapLayerBase;
     float liquidWarpScale;
     float liquidFlowSpeed;
     uvec2 _pad1;

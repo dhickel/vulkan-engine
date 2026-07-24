@@ -1207,6 +1207,11 @@ impl<'a> AssetManager<'a> {
         let device = self.core.device.clone();
         let allocator = Arc::clone(&self.core.allocator);
         let desc_layout_cache = self.core.vulkan_cache.desc_layouts.clone();
+        let uniform_offset_alignment = self
+            .core
+            .buffer_and_desc_limits
+            .min_uniform_buffer_offset_alignment;
+        let frame_slot_count = self.core.frame_slot_count;
         let data_cache = Arc::clone(&self.core.data_cache);
         let (sender, receiver) = mpsc::channel();
 
@@ -1218,6 +1223,8 @@ impl<'a> AssetManager<'a> {
                 transfer_pool,
                 transfer_queue,
                 &desc_layout_cache,
+                uniform_offset_alignment,
+                frame_slot_count,
                 &data_cache,
             )
             .map_err(AssetError::Sync);

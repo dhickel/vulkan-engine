@@ -885,7 +885,7 @@ pub mod bsp_surface_flags {
 ///   offset 48: animationTime        float (4 B)
 ///   offset 52: surfaceFlags         uint  (4 B)
 ///   offset 56: receiveMask          uint  (4 B)
-///   offset 60: _pad0                uint  (4 B)
+///   offset 60: lightmapLayerBase    uint  (4 B)
 ///   offset 64: liquidWarpScale      float (4 B)
 ///   offset 68: liquidFlowSpeed      float (4 B)
 ///   offset 72: _pad1                uvec2 (8 B)
@@ -912,7 +912,8 @@ pub struct BspSurfaceUniform {
     pub surface_flags: u32,
     /// Receive mask controlling which light sources contribute.
     pub receive_mask: u32,
-    pub _pad0: u32,
+    /// First array layer for this material's four face-local style slots.
+    pub lightmap_layer_base: u32,
     /// Scale factor for liquid warp displacement.
     pub liquid_warp_scale: f32,
     /// Flow speed multiplier for liquid UV animation.
@@ -933,7 +934,7 @@ impl Default for BspSurfaceUniform {
             animation_time: 0.0,
             surface_flags: 0,
             receive_mask: bsp_surface_flags::SEALED_DEFAULT,
-            _pad0: 0,
+            lightmap_layer_base: 0,
             liquid_warp_scale: 0.02,
             liquid_flow_speed: 1.0,
             _pad1: [0, 0],

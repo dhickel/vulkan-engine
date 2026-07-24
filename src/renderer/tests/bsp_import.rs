@@ -158,6 +158,7 @@ fn make_extracted_with_atlas(atlas: LightmapAtlas) -> bsp::extract::ExtractedBsp
         face_lightmap_layouts: vec![],
         has_pvs: false,
         camera_pvs: None,
+        visibility: bsp::extract::ExtractedVisibility::default(),
         leaf_membership: vec![],
         entity_descriptors: vec![],
         entity_identities: vec![],

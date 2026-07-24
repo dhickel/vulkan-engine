@@ -386,6 +386,23 @@ fn bridge_inputs_from_extraction(extracted: &bsp::extract::ExtractedBsp) -> Brid
     }
 }
 
+fn bsp_player_start(extracted: &bsp::extract::ExtractedBsp, fallback: Vec3) -> Vec3 {
+    let start = extracted
+        .entity_descriptors
+        .iter()
+        .find(|entity| {
+            matches!(
+                entity.classname.as_str(),
+                "info_player_start" | "info_player_deathmatch"
+            )
+        })
+        .and_then(|entity| entity.origin)
+        .filter(|origin| origin.is_finite())
+        .unwrap_or(fallback);
+    log::info!("BSP camera start: {start:?}");
+    start
+}
+
 // ─── Windowed mode ─────────────────────────────────────────────────────
 
 fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
@@ -409,6 +426,7 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
     let extracted = coordinator
         .staged_extraction()
         .ok_or_else(|| AppError::BridgeProof("no staged extraction".to_string()))?;
+    let player_start = bsp_player_start(extracted, Vec3::new(0.0, 2.0, 5.0));
 
     // ── Capture inline model info before commit consumes extraction ────
     let inline_model_infos: Vec<InlineModelInfo> = extracted
@@ -461,8 +479,7 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
     let model_mappings = ModelMappings::default();
 
     // ── Camera + Input + Snapshot ──────────────────────────────────────
-    let start_pos = Vec3::new(0.0, 2.0, 5.0);
-    let mut loop_state = AppLoopState::new(start_pos, model_mappings);
+    let mut loop_state = AppLoopState::new(player_start, model_mappings);
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
@@ -558,6 +575,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     let extracted = coordinator
         .staged_extraction()
         .ok_or_else(|| AppError::BridgeProof("no staged extraction".to_string()))?;
+    let player_start = bsp_player_start(extracted, Vec3::new(0.0, 3.0, 10.0));
 
     // ── Capture inline model info before commit consumes extraction ────
     let inline_model_infos: Vec<InlineModelInfo> = extracted
@@ -605,7 +623,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     coordinator.commit(token, &mut scene)?;
 
     // ── Camera + app-owned loop state ─────────────────────────────────
-    let mut loop_state = AppLoopState::new(Vec3::new(0.0, 3.0, 10.0), ModelMappings::default());
+    let mut loop_state = AppLoopState::new(player_start, ModelMappings::default());
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
@@ -645,8 +663,33 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                     )))
                 })?;
 
-            render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
-                .map_err(AppError::Renderer)?;
+            // Readback completion is asynchronous. Pump a bounded number of
+            // additional frames instead of exiting while the capture is pending.
+            for _ in 0..8 {
+                render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
+                    .map_err(AppError::Renderer)?;
+                if png_path.is_file() {
+                    break;
+                }
+            }
+
+            if !png_path.is_file() {
+                let message = match renderer.last_frame_capture_status() {
+                    Some(FrameCaptureStatus::Failed { message, .. }) => message.clone(),
+                    Some(FrameCaptureStatus::BackendNotImplemented { .. }) => {
+                        "capture backend not implemented".to_string()
+                    }
+                    Some(FrameCaptureStatus::Pending { .. }) => {
+                        "capture remained pending after bounded frame pumping".to_string()
+                    }
+                    _ => "capture status not reported".to_string(),
+                };
+                return Err(AppError::RendererInit(
+                    renderer::RendererError::InvalidState(format!(
+                        "frame {frame_num} capture failed: {message}"
+                    )),
+                ));
+            }
 
             match renderer.last_frame_capture_status() {
                 Some(FrameCaptureStatus::Succeeded {
@@ -654,7 +697,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                     width,
                     height,
                     ..
-                }) => {
+                }) if *output_path == png_path => {
                     log::info!(
                         "✓ Frame {frame_num}: {} ({}×{})",
                         output_path.display(),
@@ -662,12 +705,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                         height
                     );
                 }
-                Some(FrameCaptureStatus::Failed { message, .. }) => {
-                    log::error!("✗ Frame {frame_num}: {message}");
-                }
-                _ => {
-                    log::warn!("Frame {frame_num}: capture status not reported");
-                }
+                _ => log::info!("✓ Frame {frame_num}: {}", png_path.display()),
             }
         }
     } else {

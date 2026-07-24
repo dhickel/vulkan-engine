@@ -172,6 +172,620 @@ pub fn build_face_meshes(extracted: &ExtractedBsp) -> Vec<Option<ProceduralMeshD
     meshes
 }
 
+/// Hard upper bound for one mounted BSP's static render batches.
+///
+/// The accepted M3 submission budget is below 2,000 draws. A power-of-two
+/// reservation cap leaves a small amount of diagnostic headroom while still
+/// preventing descriptor/draw amplification on pathological maps.
+#[cfg(feature = "bsp")]
+pub const MAX_BSP_RENDER_BATCHES: usize = 2_048;
+/// Maximum unique BSP material descriptor sets per mount.
+#[cfg(feature = "bsp")]
+pub const MAX_BSP_MATERIALS: usize = 4_096;
+#[cfg(feature = "bsp")]
+const MAX_BSP_GEOMETRY_BYTES: u64 = 256 * 1024 * 1024;
+#[cfg(feature = "bsp")]
+const MAX_BSP_STAGING_BYTES: u64 = 256 * 1024 * 1024;
+#[cfg(feature = "bsp")]
+const MAX_BSP_TOTAL_GPU_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Checked resource demand produced before the first Vulkan allocation.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BspUploadDemand {
+    pub source_face_count: usize,
+    pub renderable_face_count: usize,
+    pub batch_count: usize,
+    pub material_count: usize,
+    pub texture_count: usize,
+    pub vertex_count: usize,
+    pub index_count: usize,
+    pub geometry_bytes: u64,
+    pub texture_bytes: u64,
+    pub lightmap_image_bytes: u64,
+    pub lightmap_staging_bytes: u64,
+    pub surface_uniform_bytes: u64,
+    pub estimated_gpu_bytes: u64,
+    pub leaf_bucket_span: u32,
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub(crate) struct BspPlannedMaterial {
+    pub texture_index: Option<usize>,
+    pub surface_class: bsp::materials::SurfaceClass,
+    pub surface_uniform: BspSurfaceUniform,
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub(crate) struct BspPlannedBatch {
+    pub mesh: ProceduralMeshData,
+    pub material_plan_index: usize,
+    pub render_batch: RenderBatch,
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub(crate) struct BspUploadPlan {
+    pub materials: Vec<BspPlannedMaterial>,
+    pub batches: Vec<BspPlannedBatch>,
+    pub face_to_batch: Vec<Option<usize>>,
+    pub face_to_material: Vec<Option<usize>>,
+    pub demand: BspUploadDemand,
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PlannedMaterialKey {
+    render_class: u8,
+    texture_index: u32,
+    lightmap_page: u32,
+    style_ids: [u32; 4],
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct PlannedBatchKey {
+    material_plan_index: usize,
+    model_index: u32,
+    leaf_bucket: u32,
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Copy)]
+struct PlannedFace {
+    face_index: usize,
+    source_face_index: u32,
+    material_plan_index: usize,
+    model_index: u32,
+    primary_leaf: Option<u32>,
+}
+
+#[cfg(feature = "bsp")]
+fn checked_add(a: u64, b: u64, label: &str) -> Result<u64, String> {
+    a.checked_add(b)
+        .ok_or_else(|| format!("BSP {label} byte count overflow"))
+}
+
+#[cfg(feature = "bsp")]
+fn checked_mul(a: u64, b: u64, label: &str) -> Result<u64, String> {
+    a.checked_mul(b)
+        .ok_or_else(|| format!("BSP {label} byte count overflow"))
+}
+
+#[cfg(feature = "bsp")]
+fn render_class_index(class: bsp::materials::SurfaceClass) -> u8 {
+    class.render_class() as u8
+}
+
+#[cfg(feature = "bsp")]
+fn style_id_array(layout: &FaceLightmapLayout) -> [u32; 4] {
+    style_ids_for_layout(layout).to_array()
+}
+
+#[cfg(feature = "bsp")]
+fn material_key_for_face(extracted: &ExtractedBsp, face_index: usize) -> Result<PlannedMaterialKey, String> {
+    let material = extracted
+        .face_materials
+        .get(face_index)
+        .ok_or_else(|| format!("BSP face {face_index} has no material"))?;
+    let layout = extracted
+        .face_lightmap_layouts
+        .get(face_index)
+        .ok_or_else(|| format!("BSP face {face_index} has no lightmap layout"))?;
+    Ok(PlannedMaterialKey {
+        render_class: render_class_index(material.surface_class),
+        texture_index: material.material_index,
+        lightmap_page: layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX),
+        style_ids: style_id_array(layout),
+    })
+}
+
+#[cfg(feature = "bsp")]
+fn surface_class_from_render_class(render_class: u8) -> Result<bsp::materials::SurfaceClass, String> {
+    use bsp::materials::SurfaceClass;
+    match render_class {
+        0 => Ok(SurfaceClass::Opaque),
+        1 => Ok(SurfaceClass::AlphaMask),
+        2 => Ok(SurfaceClass::Sky),
+        3 => Ok(SurfaceClass::Liquid),
+        other => Err(format!("unsupported BSP render class {other}")),
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn build_material_plan(
+    extracted: &ExtractedBsp,
+    key: PlannedMaterialKey,
+) -> Result<BspPlannedMaterial, String> {
+    let surface_class = surface_class_from_render_class(key.render_class)?;
+    let texture_index = usize::try_from(key.texture_index)
+        .ok()
+        .filter(|&index| index < extracted.textures.len());
+    let lightmap_layer_base = if key.lightmap_page == u32::MAX {
+        0
+    } else {
+        key.lightmap_page
+            .checked_mul(4)
+            .ok_or_else(|| "BSP lightmap layer base overflow".to_string())?
+    };
+
+    Ok(BspPlannedMaterial {
+        texture_index,
+        surface_class,
+        surface_uniform: BspSurfaceUniform {
+            // Merged vertices carry final atlas UVs, so material scale/bias is identity.
+            lightmap_scale_bias: Vec4::new(1.0, 1.0, 0.0, 0.0),
+            style_ids: UVec4::from_array(key.style_ids),
+            fullbright_base: 224,
+            fullbright_count: 32,
+            alpha_threshold: 0.5,
+            animation_frame: 0,
+            animation_time: 0.0,
+            surface_flags: surface_flags_for(Some(surface_class)),
+            receive_mask: receive_mask_for(Some(surface_class)),
+            lightmap_layer_base,
+            liquid_warp_scale: 0.02,
+            liquid_flow_speed: 1.0,
+            _pad1: [0, 0],
+        },
+    })
+}
+
+#[cfg(feature = "bsp")]
+fn collect_planned_faces(
+    extracted: &ExtractedBsp,
+    material_indices: &std::collections::BTreeMap<PlannedMaterialKey, usize>,
+) -> Result<Vec<PlannedFace>, String> {
+    let face_count = extracted.face_geometries.len();
+    if extracted.face_materials.len() != face_count
+        || extracted.face_lightmap_layouts.len() != face_count
+        || extracted.leaf_membership.len() != face_count
+    {
+        return Err(format!(
+            "BSP face arrays differ in length: geometry={face_count}, materials={}, lightmaps={}, leaves={}",
+            extracted.face_materials.len(),
+            extracted.face_lightmap_layouts.len(),
+            extracted.leaf_membership.len()
+        ));
+    }
+
+    let mut inline_models = std::collections::HashMap::<u32, u32>::new();
+    for model in &extracted.inline_models {
+        for &source_face_index in &model.face_indices {
+            if inline_models.insert(source_face_index, model.model_index).is_some() {
+                return Err(format!(
+                    "BSP source face {source_face_index} belongs to multiple inline models"
+                ));
+            }
+        }
+    }
+
+    let mut faces = Vec::new();
+    for (face_index, geometry) in extracted.face_geometries.iter().enumerate() {
+        let material = &extracted.face_materials[face_index];
+        if !geometry.is_valid || !material.surface_class.is_visible() {
+            continue;
+        }
+        if geometry.face_index as usize != face_index {
+            return Err(format!(
+                "BSP face identity mismatch: slot {face_index} contains source face {}",
+                geometry.face_index
+            ));
+        }
+        let key = material_key_for_face(extracted, face_index)?;
+        let material_plan_index = *material_indices
+            .get(&key)
+            .ok_or_else(|| format!("BSP face {face_index} material was not planned"))?;
+        let model_index = inline_models.get(&geometry.face_index).copied().unwrap_or(0);
+        let primary_leaf = (model_index == 0)
+            .then(|| extracted.leaf_membership[face_index].iter().copied().min())
+            .flatten();
+        faces.push(PlannedFace {
+            face_index,
+            source_face_index: geometry.face_index,
+            material_plan_index,
+            model_index,
+            primary_leaf,
+        });
+    }
+    Ok(faces)
+}
+
+#[cfg(feature = "bsp")]
+fn batch_key(face: PlannedFace, leaf_bucket_span: u32) -> PlannedBatchKey {
+    let leaf_bucket = if face.model_index != 0 {
+        u32::MAX
+    } else if leaf_bucket_span == u32::MAX {
+        0
+    } else {
+        face.primary_leaf
+            .map(|leaf| leaf / leaf_bucket_span.max(1))
+            .unwrap_or(u32::MAX - 1)
+    };
+    PlannedBatchKey {
+        material_plan_index: face.material_plan_index,
+        model_index: face.model_index,
+        leaf_bucket,
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn grouped_faces(
+    faces: &[PlannedFace],
+    leaf_bucket_span: u32,
+) -> std::collections::BTreeMap<PlannedBatchKey, Vec<PlannedFace>> {
+    let mut groups = std::collections::BTreeMap::new();
+    for &face in faces {
+        groups
+            .entry(batch_key(face, leaf_bucket_span))
+            .or_insert_with(Vec::new)
+            .push(face);
+    }
+    groups
+}
+
+#[cfg(feature = "bsp")]
+fn choose_leaf_bucket_span(faces: &[PlannedFace]) -> Result<u32, String> {
+    let mut span = 1u32;
+    loop {
+        let count = grouped_faces(faces, span).len();
+        if count <= MAX_BSP_RENDER_BATCHES {
+            return Ok(span);
+        }
+        if span == u32::MAX {
+            return Err(format!(
+                "BSP requires {count} render batches even with global spatial grouping; maximum is {MAX_BSP_RENDER_BATCHES}"
+            ));
+        }
+        span = span.checked_mul(2).unwrap_or(u32::MAX);
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn bake_lightmap_uv(
+    extracted: &ExtractedBsp,
+    face_index: usize,
+    uv: Vec2,
+) -> Result<Vec2, String> {
+    let layout = &extracted.face_lightmap_layouts[face_index];
+    if !layout.has_data {
+        let (width, height) = extracted
+            .lightmap_atlas
+            .pages
+            .first()
+            .map(|page| (page.width.max(1), page.height.max(1)))
+            .unwrap_or((1, 1));
+        return Ok(Vec2::new(0.5 / width as f32, 0.5 / height as f32));
+    }
+    let page = extracted
+        .lightmap_atlas
+        .pages
+        .get(layout.page_index as usize)
+        .ok_or_else(|| {
+            format!(
+                "BSP face {face_index} references missing lightmap page {}",
+                layout.page_index
+            )
+        })?;
+    if page.width == 0 || page.height == 0 {
+        return Err(format!(
+            "BSP face {face_index} references zero-sized lightmap page {}",
+            layout.page_index
+        ));
+    }
+    let texel = Vec2::new(
+        layout.atlas_offset.0 as f32 + uv.x * layout.luxel_extents.0.max(1) as f32,
+        layout.atlas_offset.1 as f32 + uv.y * layout.luxel_extents.1.max(1) as f32,
+    );
+    let atlas_uv = texel / Vec2::new(page.width as f32, page.height as f32);
+    if !atlas_uv.is_finite() {
+        return Err(format!("BSP face {face_index} produced non-finite atlas UV"));
+    }
+    Ok(atlas_uv)
+}
+
+#[cfg(feature = "bsp")]
+fn merge_batch_mesh(
+    extracted: &ExtractedBsp,
+    batch_index: usize,
+    faces: &[PlannedFace],
+) -> Result<ProceduralMeshData, String> {
+    let vertex_count: usize = faces
+        .iter()
+        .map(|face| extracted.face_geometries[face.face_index].vertices.len())
+        .sum();
+    let index_count: usize = faces
+        .iter()
+        .map(|face| {
+            extracted.face_geometries[face.face_index]
+                .vertices
+                .len()
+                .saturating_sub(2)
+                .saturating_mul(3)
+        })
+        .sum();
+    let mut vertices = Vec::with_capacity(vertex_count);
+    let mut indices = Vec::with_capacity(index_count);
+
+    for face in faces {
+        let mut mesh = face_to_procedural_mesh(
+            &extracted.face_geometries[face.face_index],
+            1.0,
+            1.0,
+            None,
+        )
+        .ok_or_else(|| format!("renderable BSP face {} is not triangulable", face.face_index))?;
+        let base_vertex = u32::try_from(vertices.len())
+            .map_err(|_| format!("BSP batch {batch_index} vertex offset exceeds u32"))?;
+        let texture_extent = extracted
+            .face_materials
+            .get(face.face_index)
+            .and_then(|material| usize::try_from(material.material_index).ok())
+            .and_then(|texture_index| extracted.textures.get(texture_index))
+            .filter(|texture| texture.width > 0 && texture.height > 0)
+            .map(|texture| Vec2::new(texture.width as f32, texture.height as f32))
+            .unwrap_or(Vec2::ONE);
+        for vertex in &mut mesh.vertices {
+            // Quake texinfo projections are expressed in source texels. Vulkan
+            // normalized samplers require division by the resolved mip-0 extent.
+            vertex.uv0 /= texture_extent;
+            vertex.uv1 = bake_lightmap_uv(extracted, face.face_index, vertex.uv1)?;
+        }
+        for index in mesh.indices {
+            indices.push(
+                base_vertex
+                    .checked_add(index)
+                    .ok_or_else(|| format!("BSP batch {batch_index} index overflow"))?,
+            );
+        }
+        vertices.extend(mesh.vertices);
+    }
+
+    if vertices.is_empty() || indices.is_empty() {
+        return Err(format!("BSP batch {batch_index} has no renderable geometry"));
+    }
+    Ok(ProceduralMeshData {
+        name: format!("bsp_batch_{batch_index}"),
+        vertices,
+        indices,
+        material: None,
+    })
+}
+
+#[cfg(feature = "bsp")]
+fn compute_upload_demand(
+    extracted: &ExtractedBsp,
+    batches: &[BspPlannedBatch],
+    material_count: usize,
+    renderable_face_count: usize,
+    leaf_bucket_span: u32,
+) -> Result<BspUploadDemand, String> {
+    let vertex_count = batches.iter().try_fold(0usize, |total, batch| {
+        total
+            .checked_add(batch.mesh.vertices.len())
+            .ok_or_else(|| "BSP vertex count overflow".to_string())
+    })?;
+    let index_count = batches.iter().try_fold(0usize, |total, batch| {
+        total
+            .checked_add(batch.mesh.indices.len())
+            .ok_or_else(|| "BSP index count overflow".to_string())
+    })?;
+    let vertex_bytes = checked_mul(
+        vertex_count as u64,
+        std::mem::size_of::<crate::data::gpu_data::Vertex>() as u64,
+        "vertex",
+    )?;
+    let index_bytes = checked_mul(index_count as u64, 4, "index")?;
+    let geometry_bytes = checked_add(vertex_bytes, index_bytes, "geometry")?;
+
+    let texture_bytes = extracted.textures.iter().try_fold(0u64, |total, texture| {
+        let albedo = u64::try_from(texture.albedo.len())
+            .map_err(|_| "BSP albedo byte count exceeds u64".to_string())?;
+        let mask = checked_mul(
+            u64::try_from(texture.fullbright_mask.len())
+                .map_err(|_| "BSP fullbright byte count exceeds u64".to_string())?,
+            4,
+            "fullbright expansion",
+        )?;
+        checked_add(total, checked_add(albedo, mask, "texture")?, "texture total")
+    })?;
+
+    let (atlas_width, atlas_height, atlas_pages) = if let Some(first) = extracted.lightmap_atlas.pages.first() {
+        if first.width == 0 || first.height == 0 {
+            return Err("BSP lightmap atlas has a zero-sized page".to_string());
+        }
+        for page in &extracted.lightmap_atlas.pages {
+            if page.width != first.width || page.height != first.height {
+                return Err("BSP lightmap atlas pages must have identical dimensions".to_string());
+            }
+        }
+        (first.width as u64, first.height as u64, extracted.lightmap_atlas.pages.len() as u64)
+    } else {
+        (1, 1, 1)
+    };
+    let atlas_layers = checked_mul(atlas_pages, 4, "lightmap layer")?;
+    let lightmap_image_bytes = checked_mul(
+        checked_mul(checked_mul(atlas_width, atlas_height, "lightmap pixels")?, atlas_layers, "lightmap layers")?,
+        4,
+        "lightmap image",
+    )?;
+    let style_pixels = extracted.face_lightmap_layouts.iter().try_fold(1u64, |total, layout| {
+        layout.style_layers.iter().take(4).filter(|layer| layer.has_data).try_fold(total, |sum, layer| {
+            let pixels = checked_mul(layer.luxel_extents.0 as u64, layer.luxel_extents.1 as u64, "lightmap rectangle")?;
+            checked_add(sum, pixels, "lightmap staging pixels")
+        })
+    })?;
+    let lightmap_staging_bytes = checked_mul(style_pixels, 4, "lightmap staging")?;
+    let surface_uniform_bytes = checked_mul(
+        material_count as u64,
+        std::mem::size_of::<BspSurfaceUniform>() as u64,
+        "surface uniform",
+    )?;
+    let estimated_gpu_bytes = [geometry_bytes, texture_bytes, lightmap_image_bytes, surface_uniform_bytes]
+        .into_iter()
+        .try_fold(0u64, |sum, bytes| checked_add(sum, bytes, "estimated GPU"))?;
+
+    if batches.len() > MAX_BSP_RENDER_BATCHES {
+        return Err(format!(
+            "BSP planned {} batches; maximum is {MAX_BSP_RENDER_BATCHES}",
+            batches.len()
+        ));
+    }
+    if material_count > MAX_BSP_MATERIALS {
+        return Err(format!(
+            "BSP planned {material_count} materials; maximum is {MAX_BSP_MATERIALS}"
+        ));
+    }
+    if extracted.textures.len() > MAX_BSP_MATERIALS {
+        return Err(format!(
+            "BSP has {} textures; maximum is {MAX_BSP_MATERIALS}",
+            extracted.textures.len()
+        ));
+    }
+    if geometry_bytes > MAX_BSP_GEOMETRY_BYTES {
+        return Err(format!(
+            "BSP geometry demand {geometry_bytes} bytes exceeds {MAX_BSP_GEOMETRY_BYTES}"
+        ));
+    }
+    if lightmap_staging_bytes > MAX_BSP_STAGING_BYTES {
+        return Err(format!(
+            "BSP lightmap staging demand {lightmap_staging_bytes} bytes exceeds {MAX_BSP_STAGING_BYTES}"
+        ));
+    }
+    if estimated_gpu_bytes > MAX_BSP_TOTAL_GPU_BYTES {
+        return Err(format!(
+            "BSP estimated GPU demand {estimated_gpu_bytes} bytes exceeds {MAX_BSP_TOTAL_GPU_BYTES}"
+        ));
+    }
+
+    Ok(BspUploadDemand {
+        source_face_count: extracted.face_geometries.len(),
+        renderable_face_count,
+        batch_count: batches.len(),
+        material_count,
+        texture_count: extracted.textures.len(),
+        vertex_count,
+        index_count,
+        geometry_bytes,
+        texture_bytes,
+        lightmap_image_bytes,
+        lightmap_staging_bytes,
+        surface_uniform_bytes,
+        estimated_gpu_bytes,
+        leaf_bucket_span,
+    })
+}
+
+/// Build bounded renderer batches and merged meshes before allocating GPU resources.
+#[cfg(feature = "bsp")]
+pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan, String> {
+    let mut material_keys = std::collections::BTreeMap::<PlannedMaterialKey, usize>::new();
+    for (face_index, geometry) in extracted.face_geometries.iter().enumerate() {
+        let Some(material) = extracted.face_materials.get(face_index) else {
+            return Err(format!("BSP face {face_index} has no material"));
+        };
+        if geometry.is_valid && material.surface_class.is_visible() {
+            material_keys.entry(material_key_for_face(extracted, face_index)?).or_insert(0);
+        }
+    }
+    if material_keys.len() > MAX_BSP_MATERIALS {
+        return Err(format!(
+            "BSP requires {} unique materials; maximum is {MAX_BSP_MATERIALS}",
+            material_keys.len()
+        ));
+    }
+    for (index, value) in material_keys.values_mut().enumerate() {
+        *value = index;
+    }
+    let materials = material_keys
+        .keys()
+        .copied()
+        .map(|key| build_material_plan(extracted, key))
+        .collect::<Result<Vec<_>, _>>()?;
+    let faces = collect_planned_faces(extracted, &material_keys)?;
+    let leaf_bucket_span = choose_leaf_bucket_span(&faces)?;
+    let groups = grouped_faces(&faces, leaf_bucket_span);
+    let mut face_to_batch = vec![None; extracted.face_geometries.len()];
+    let mut face_to_material = vec![None; extracted.face_geometries.len()];
+    let mut batches = Vec::with_capacity(groups.len());
+
+    for (batch_index, (key, mut group_faces)) in groups.into_iter().enumerate() {
+        group_faces.sort_by_key(|face| face.source_face_index);
+        let mut leaf_signature = group_faces
+            .iter()
+            .flat_map(|face| extracted.leaf_membership[face.face_index].iter().copied())
+            .collect::<Vec<_>>();
+        leaf_signature.sort_unstable();
+        leaf_signature.dedup();
+        let source_faces = group_faces
+            .iter()
+            .map(|face| face.source_face_index)
+            .collect::<Vec<_>>();
+        for face in &group_faces {
+            if face_to_batch[face.face_index].replace(batch_index).is_some() {
+                return Err(format!("BSP face {} was assigned to multiple batches", face.face_index));
+            }
+            face_to_material[face.face_index] = Some(key.material_plan_index);
+        }
+        let material = &materials[key.material_plan_index];
+        let lightmap_page = material.surface_uniform.lightmap_layer_base / 4;
+        let render_batch = RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature,
+                render_class: render_class_index(material.surface_class),
+                material_identity: key.material_plan_index as u64,
+                lightmap_page,
+            },
+            face_indices: source_faces,
+            pvs_eligible: key.model_index == 0,
+            is_inline_model: key.model_index != 0,
+            model_index: key.model_index,
+        };
+        batches.push(BspPlannedBatch {
+            mesh: merge_batch_mesh(extracted, batch_index, &group_faces)?,
+            material_plan_index: key.material_plan_index,
+            render_batch,
+        });
+    }
+
+    let demand = compute_upload_demand(
+        extracted,
+        &batches,
+        materials.len(),
+        faces.len(),
+        leaf_bucket_span,
+    )?;
+    Ok(BspUploadPlan {
+        materials,
+        batches,
+        face_to_batch,
+        face_to_material,
+        demand,
+    })
+}
+
 // ── Lightmap atlas upload ───────────────────────────────────────────────
 
 #[cfg(feature = "bsp")]
@@ -405,7 +1019,7 @@ pub fn build_bsp_material_descs(
             animation_time: 0.0,
             surface_flags: surface_flags_for(sc),
             receive_mask: receive_mask_for(sc),
-            _pad0: 0,
+            lightmap_layer_base: layout.page_index.saturating_mul(4),
             liquid_warp_scale: 0.02,
             liquid_flow_speed: 1.0,
             _pad1: [0, 0],
@@ -502,5 +1116,122 @@ mod tests {
 
         let result = face_to_procedural_mesh(&face_geo, 1.0, 1.0, None);
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "bsp")]
+    fn stress_extracted(face_count: usize, texture_count: usize) -> ExtractedBsp {
+        use bsp::lightmaps::{AtlasPage, LightmapAtlas, StyleLightmapLayout};
+        use bsp::materials::{BspMaterial, SurfaceClass};
+        use bsp::resources::ExtractedTexture;
+
+        let textures = (0..texture_count)
+            .map(|index| ExtractedTexture {
+                identity: format!("texture_{index}"),
+                palette_indices: vec![0],
+                albedo: vec![255, 255, 255, 255],
+                fullbright_mask: vec![0],
+                width: 1,
+                height: 1,
+                ..ExtractedTexture::default()
+            })
+            .collect::<Vec<_>>();
+        let mut lightmap_atlas = LightmapAtlas::new();
+        lightmap_atlas.pages.push(AtlasPage::new(0, 64, 64));
+
+        let mut face_geometries = Vec::with_capacity(face_count);
+        let mut face_materials = Vec::with_capacity(face_count);
+        let mut face_lightmap_layouts = Vec::with_capacity(face_count);
+        let mut leaf_membership = Vec::with_capacity(face_count);
+        for index in 0..face_count {
+            face_geometries.push(FaceGeometry {
+                face_index: index as u32,
+                vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+                uv0: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+                uv1: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+                normal: Vec3::Z,
+                bounds: (Vec3::ZERO, Vec3::ONE),
+                luxel_extents: (1, 1),
+                is_valid: true,
+            });
+            let texture_index = (index % texture_count) as u32;
+            face_materials.push(BspMaterial {
+                material_index: texture_index,
+                texture_identity: format!("texture_{texture_index}"),
+                surface_class: SurfaceClass::Opaque,
+                ..BspMaterial::default()
+            });
+            let style_id = ((index / texture_count.max(1)) % 6) as u8;
+            let offset = ((index % 60) as u32 + 2, ((index / 60) % 60) as u32 + 2);
+            face_lightmap_layouts.push(FaceLightmapLayout {
+                page_index: 0,
+                atlas_offset: offset,
+                luxel_extents: (1, 1),
+                has_data: true,
+                style_layers: vec![StyleLightmapLayout {
+                    style_id,
+                    layer_index: 0,
+                    page_index: 0,
+                    atlas_offset: offset,
+                    luxel_extents: (1, 1),
+                    has_data: true,
+                }],
+            });
+            leaf_membership.push(vec![(index % 18_587) as u32]);
+        }
+
+        ExtractedBsp {
+            transform: bsp::coords::QuakeToEngine::default(),
+            profile_tag: "stress",
+            textures,
+            face_geometries,
+            face_materials,
+            render_batches: Vec::new(),
+            lightmap_atlas,
+            face_lightmap_layouts,
+            has_pvs: true,
+            camera_pvs: None,
+            visibility: bsp::extract::ExtractedVisibility::default(),
+            leaf_membership,
+            entity_descriptors: Vec::new(),
+            entity_identities: Vec::new(),
+            light_descriptors: Vec::new(),
+            inline_models: Vec::new(),
+            world_collision_planes: Vec::new(),
+            collision_recipes: Vec::new(),
+            content_hash: [0; 32],
+            source_identity: "stress".to_string(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn large_map_plan_is_bounded_and_covers_every_face_once() {
+        let extracted = stress_extracted(57_595, 118);
+        let plan = plan_bsp_upload(&extracted).expect("large BSP should batch safely");
+
+        assert!(plan.demand.batch_count <= MAX_BSP_RENDER_BATCHES);
+        assert!(plan.demand.material_count <= MAX_BSP_MATERIALS);
+        assert_eq!(plan.demand.renderable_face_count, 57_595);
+        assert!(plan.demand.batch_count < plan.demand.renderable_face_count / 10);
+        assert!(plan.demand.leaf_bucket_span > 1);
+        assert!(plan.face_to_batch.iter().all(Option::is_some));
+        assert!(plan.face_to_material.iter().all(Option::is_some));
+
+        let mut seen = vec![0u8; 57_595];
+        for batch in &plan.batches {
+            for &source_face in &batch.render_batch.face_indices {
+                seen[source_face as usize] += 1;
+            }
+        }
+        assert!(seen.into_iter().all(|count| count == 1));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn material_demand_over_cap_is_rejected_before_upload() {
+        let extracted = stress_extracted(MAX_BSP_MATERIALS + 1, MAX_BSP_MATERIALS + 1);
+        let error = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(error.contains("unique materials") || error.contains("textures"));
     }
 }

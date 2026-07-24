@@ -1211,6 +1211,8 @@ impl Scene {
             mount.face_meshes,
             mount.face_materials,
             mount.render_batches,
+            mount.batch_meshes,
+            mount.batch_materials,
             mount.light_descriptors,
         );
         self.world.set_bsp_mount(state);

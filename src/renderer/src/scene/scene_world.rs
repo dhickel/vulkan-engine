@@ -699,20 +699,27 @@ impl SceneWorld {
 
     #[cfg(feature = "bsp")]
     fn collect_bsp_draw_items(&self, submission: &mut RenderSubmission, frustum: Option<&Frustum>) {
-        let visible_batches = crate::scene::bsp_visibility::filter_batches_by_pvs(
+        let visible_batch_indices = crate::scene::bsp_visibility::visible_batch_indices(
             &self.bsp_mount.render_batches,
-            &self.bsp_mount.leaf_membership,
             &self.bsp_mount,
         );
+        log::debug!(
+            "BSP submission: {} / {} batches visible (PVS={})",
+            visible_batch_indices.len(),
+            self.bsp_mount.render_batches.len(),
+            self.bsp_mount.current_pvs.is_some()
+        );
 
-        for batch in visible_batches {
-            // Determine the transform for this batch.
+        for batch_index in visible_batch_indices {
+            let Some(batch) = self.bsp_mount.render_batches.get(batch_index) else {
+                continue;
+            };
             // Inline model batches use the snapshot-provided transform;
             // static world batches use identity.
             let batch_transform = if batch.is_inline_model {
                 self.bsp_mount
                     .inline_model_transforms
-                    .get(&(batch.model_index as u32))
+                    .get(&batch.model_index)
                     .copied()
                     .unwrap_or(Mat4::IDENTITY)
             } else {
@@ -723,7 +730,7 @@ impl SceneWorld {
                 if let Some((world_min, world_max)) = self
                     .bsp_mount
                     .inline_model_bounds
-                    .get(&(batch.model_index as u32))
+                    .get(&batch.model_index)
                     .copied()
                 {
                     if !crate::scene::bsp_visibility::aabb_intersects_frustum(
@@ -734,28 +741,25 @@ impl SceneWorld {
                 }
             }
 
-            for face_index in batch.face_indices {
-                let face_index = face_index as usize;
-                let Some(mesh_id) = self.bsp_mount.face_meshes.get(face_index).copied() else {
-                    continue;
-                };
-                let Some(Some(bsp_material_id)) =
-                    self.bsp_mount.face_materials.get(face_index).copied()
-                else {
-                    continue;
-                };
-                if mesh_id == MeshHandle::new(0, 0) {
-                    continue;
-                }
-                submission
-                    .bsp_draw_items
-                    .push(crate::scene::render_submission::BspFrameDrawItem {
-                        mesh_id,
-                        bsp_material_id,
-                        transform: batch_transform,
-                    });
-                submission.culling_stats.submitted_draw_items += 1;
+            let Some(mesh_id) = self.bsp_mount.batch_meshes.get(batch_index).copied() else {
+                continue;
+            };
+            let Some(bsp_material_id) =
+                self.bsp_mount.batch_materials.get(batch_index).copied()
+            else {
+                continue;
+            };
+            if mesh_id == MeshHandle::new(0, 0) {
+                continue;
             }
+            submission
+                .bsp_draw_items
+                .push(crate::scene::render_submission::BspFrameDrawItem {
+                    mesh_id,
+                    bsp_material_id,
+                    transform: batch_transform,
+                });
+            submission.culling_stats.submitted_draw_items += 1;
         }
     }
 
@@ -2563,6 +2567,8 @@ mod tests {
                 is_inline_model: false,
                 model_index: 0,
             }],
+            vec![MeshHandle::new(7, 0)],
+            vec![crate::data::handles::BspMaterialHandle::new(3, 0)],
             vec![bsp::extract::LightDescriptor {
                 entity_index: 0,
                 origin: Vec3::new(1.0, 0.0, 0.0),

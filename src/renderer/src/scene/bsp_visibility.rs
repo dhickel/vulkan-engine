@@ -10,6 +10,8 @@ use crate::data::handles::{BspMaterialHandle, MeshHandle};
 #[cfg(feature = "bsp")]
 use crate::scene::render_submission::{FramePointLight, MAX_POINT_LIGHTS_GPU};
 #[cfg(feature = "bsp")]
+use bsp::extract::ExtractedBsp;
+#[cfg(feature = "bsp")]
 use bsp::visibility::{camera_leaf_index, CameraLeafResult, PvsSet};
 #[cfg(feature = "bsp")]
 use bsp::world::BspWorld;
@@ -57,8 +59,12 @@ pub struct BspMountState {
     pub face_meshes: Vec<MeshHandle>,
     /// BSP material handles per source face index.
     pub face_materials: Vec<Option<BspMaterialHandle>>,
-    /// Render batches emitted by extraction.
+    /// Render batches emitted by the bounded renderer upload plan.
     pub render_batches: Vec<bsp::geometry::RenderBatch>,
+    /// GPU mesh handle aligned one-to-one with `render_batches`.
+    pub batch_meshes: Vec<MeshHandle>,
+    /// GPU material handle aligned one-to-one with `render_batches`.
+    pub batch_materials: Vec<BspMaterialHandle>,
     /// BSP imported lights in deterministic source order.
     pub light_descriptors: Vec<bsp::extract::LightDescriptor>,
     /// Cached origin leaf for each imported light; `None` is treated as non-PVS fallback.
@@ -122,6 +128,8 @@ impl BspMountState {
             face_meshes: Vec::new(),
             face_materials: Vec::new(),
             render_batches: Vec::new(),
+            batch_meshes: Vec::new(),
+            batch_materials: Vec::new(),
             light_descriptors: Vec::new(),
             light_leafs: Vec::new(),
             light_selection: BspLightSelectionState::default(),
@@ -153,6 +161,43 @@ impl BspMountState {
             face_meshes: Vec::new(),
             face_materials: Vec::new(),
             render_batches: Vec::new(),
+            batch_meshes: Vec::new(),
+            batch_materials: Vec::new(),
+            light_descriptors: Vec::new(),
+            light_leafs: Vec::new(),
+            light_selection: BspLightSelectionState::default(),
+            inline_model_transforms: std::collections::HashMap::new(),
+            inline_model_bounds: std::collections::HashMap::new(),
+            frame_style_intensities: [1.0_f32; 64],
+            frame_liquid_time: 0.0,
+        }
+    }
+
+    /// Initialize mount state from the neutral extraction visibility payload.
+    pub fn from_extracted(extracted: &ExtractedBsp) -> Self {
+        let visibility = &extracted.visibility;
+        let has_pvs = extracted.has_pvs
+            && !visibility.vis_data.is_empty()
+            && !visibility.nodes.is_empty()
+            && !visibility.leaves.is_empty()
+            && !visibility.planes.is_empty();
+        Self {
+            num_leaves: visibility.leaves.len() as u32,
+            vis_data: visibility.vis_data.clone(),
+            has_pvs,
+            current_pvs: None,
+            camera_leaf: None,
+            nodes: visibility.nodes.clone(),
+            leaves: visibility.leaves.clone(),
+            planes: visibility.planes.clone(),
+            scale: extracted.transform.scale,
+            leaf_membership: extracted.leaf_membership.clone(),
+            active: true,
+            face_meshes: Vec::new(),
+            face_materials: Vec::new(),
+            render_batches: Vec::new(),
+            batch_meshes: Vec::new(),
+            batch_materials: Vec::new(),
             light_descriptors: Vec::new(),
             light_leafs: Vec::new(),
             light_selection: BspLightSelectionState::default(),
@@ -174,11 +219,17 @@ impl BspMountState {
         face_meshes: Vec<MeshHandle>,
         face_materials: Vec<Option<BspMaterialHandle>>,
         render_batches: Vec<bsp::geometry::RenderBatch>,
+        batch_meshes: Vec<MeshHandle>,
+        batch_materials: Vec<BspMaterialHandle>,
         light_descriptors: Vec<bsp::extract::LightDescriptor>,
     ) {
+        debug_assert_eq!(render_batches.len(), batch_meshes.len());
+        debug_assert_eq!(render_batches.len(), batch_materials.len());
         self.face_meshes = face_meshes;
         self.face_materials = face_materials;
         self.render_batches = render_batches;
+        self.batch_meshes = batch_meshes;
+        self.batch_materials = batch_materials;
         self.light_descriptors = light_descriptors;
         self.refresh_light_leafs();
         self.reset_light_selection();
@@ -214,8 +265,12 @@ impl BspMountState {
             return None;
         }
 
+        let Some(leaf) = self.leaves.get(cam_leaf.leaf_index as usize) else {
+            self.current_pvs = None;
+            self.camera_leaf = None;
+            return None;
+        };
         let state = bsp::visibility::PvsState::new(self.num_leaves, &self.vis_data);
-        let leaf = &self.leaves[cam_leaf.leaf_index as usize];
         let pvs = state.decompress_for_leaf(cam_leaf.leaf_index, leaf, &self.vis_data);
 
         if !pvs.valid {
@@ -511,42 +566,42 @@ fn light_descriptor_to_frame_light(light: &bsp::extract::LightDescriptor) -> Fra
 /// static-world PVS. They are always passed through for conservative
 /// frustum culling. Moving inline models must not be culled by the
 /// static PVS of their original leaf membership.
+pub fn visible_batch_indices(
+    batches: &[bsp::geometry::RenderBatch],
+    mount_state: &BspMountState,
+) -> Vec<usize> {
+    let Some(pvs) = mount_state.current_pvs.as_ref() else {
+        return (0..batches.len()).collect();
+    };
+    if !mount_state.active || !pvs.valid {
+        return (0..batches.len()).collect();
+    }
+
+    batches
+        .iter()
+        .enumerate()
+        .filter_map(|(index, batch)| {
+            let visible = !batch.pvs_eligible
+                || batch.is_inline_model
+                || batch.key.leaf_signature.is_empty()
+                || batch
+                    .key
+                    .leaf_signature
+                    .iter()
+                    .any(|&leaf| pvs.is_visible(leaf));
+            visible.then_some(index)
+        })
+        .collect()
+}
+
 pub fn filter_batches_by_pvs(
     batches: &[bsp::geometry::RenderBatch],
     _leaf_membership: &[Vec<u32>],
     mount_state: &BspMountState,
 ) -> Vec<bsp::geometry::RenderBatch> {
-    if !mount_state.active || mount_state.current_pvs.is_none() {
-        // No PVS data: return all batches (conservative).
-        return batches.to_vec();
-    }
-
-    let pvs = mount_state.current_pvs.as_ref().unwrap();
-    if !pvs.valid {
-        return batches.to_vec();
-    }
-
-    batches
-        .iter()
-        .filter(|batch| {
-            // Inline models and moving batches are not PVS-eligible (always frustum-tested).
-            if !batch.pvs_eligible || batch.is_inline_model {
-                return true;
-            }
-
-            // Missing/empty leaf membership is conservative: do not false-cull.
-            if batch.key.leaf_signature.is_empty() {
-                return true;
-            }
-
-            // Check if any leaf in this batch's memberships is in the PVS.
-            batch
-                .key
-                .leaf_signature
-                .iter()
-                .any(|&leaf| pvs.is_visible(leaf))
-        })
-        .cloned()
+    visible_batch_indices(batches, mount_state)
+        .into_iter()
+        .filter_map(|index| batches.get(index).cloned())
         .collect()
 }
 

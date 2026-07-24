@@ -21,7 +21,14 @@ fn light(entity_index: u32, x: f32, intensity: f32) -> LightDescriptor {
 fn mount_with_lights(lights: Vec<LightDescriptor>, light_leafs: Vec<Option<u32>>) -> BspMountState {
     let mut mount = BspMountState::new();
     mount.activate();
-    mount.set_render_assets(Vec::new(), Vec::new(), Vec::new(), lights);
+    mount.set_render_assets(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        lights,
+    );
     mount.light_leafs = light_leafs;
     mount
 }

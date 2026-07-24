@@ -258,6 +258,8 @@ fn bsp_mount_inline_transforms_stored() {
         vec![MeshHandle::new(7, 0)],
         vec![Some(BspMaterialHandle::new(3, 0))],
         vec![batch],
+        vec![MeshHandle::new(7, 0)],
+        vec![BspMaterialHandle::new(3, 0)],
         vec![],
     );
 

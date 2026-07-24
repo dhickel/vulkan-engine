@@ -102,6 +102,8 @@ pub struct ExtractedBsp {
     pub has_pvs: bool,
     /// Camera PVS set at world origin (if available).
     pub camera_pvs: Option<visibility::PvsSet>,
+    /// BSP tree and compressed VIS payload required for runtime camera PVS.
+    pub visibility: ExtractedVisibility,
     /// Leaf membership per face (sorted non-solid leaf indices).
     pub leaf_membership: Vec<Vec<u32>>,
 
@@ -132,6 +134,23 @@ pub struct ExtractedBsp {
     pub source_identity: String,
     /// Extraction diagnostics.
     pub diagnostics: Vec<BspReport>,
+}
+
+/// Neutral runtime-visibility payload retained after extraction.
+///
+/// These are source-format records rather than renderer handles. Keeping them in
+/// the extraction DTO lets the renderer locate the camera leaf and decode PVS
+/// without retaining or reparsing the full [`BspWorld`].
+#[derive(Debug, Clone, Default)]
+pub struct ExtractedVisibility {
+    /// Raw compressed VIS lump bytes.
+    pub vis_data: Vec<u8>,
+    /// BSP traversal nodes in Quake space.
+    pub nodes: Vec<lumps::Node>,
+    /// BSP leaves referenced by node children and VIS offsets.
+    pub leaves: Vec<lumps::Leaf>,
+    /// BSP splitting planes in Quake space.
+    pub planes: Vec<lumps::Plane>,
 }
 
 // ── Entity / Light / Inline Model Descriptors ──
@@ -313,10 +332,8 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
                 .map(|s| s.as_str())
                 .unwrap_or("");
 
-            let tex_identity = texture_index_map
-                .get(tex_name)
-                .map(|_| tex_name.to_string())
-                .unwrap_or_else(|| tex_name.to_string());
+            let texture_index = texture_index_map.get(tex_name).copied().unwrap_or(u32::MAX);
+            let tex_identity = tex_name.to_string();
 
             let anim = anim_by_name.get(tex_name).cloned();
 
@@ -331,7 +348,9 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
             let trans66 = texinfo.flags & crate::materials::tex_flags::SURF_TRANS66 != 0;
 
             BspMaterial {
-                material_index: fi as u32,
+                // Material identity is texture-based. Using the source face index here
+                // defeats batching by making every face appear unique.
+                material_index: texture_index,
                 texture_identity: tex_identity,
                 has_fullbright_mask: false,
                 fullbright_mask_dims: (0, 0),
@@ -507,6 +526,12 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         face_lightmap_layouts,
         has_pvs,
         camera_pvs,
+        visibility: ExtractedVisibility {
+            vis_data: world.vis_data.clone(),
+            nodes: world.nodes.clone(),
+            leaves: world.leaves.clone(),
+            planes: world.planes.clone(),
+        },
         leaf_membership,
         entity_descriptors,
         entity_identities,
