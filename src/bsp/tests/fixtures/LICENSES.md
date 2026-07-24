@@ -42,13 +42,50 @@
 - **License**: CC0 1.0 Universal (derived from CC0 sources)
 - **Rights**: Free to use, modify, distribute
 
-## Build Script
+## PBR Companion Textures
+
+### `textures/WALL01_basecolor.png`
+
+- **Author**: vulkan-engine project contributors
+- **License**: CC0 1.0 Universal (Public Domain Dedication)
+- **Derivation**: Procedurally generated brick-like albedo using Python random with fixed seed 42; no photographic or third-party source
+- **Dimensions**: 64×64 RGB PNG, 8 bits per channel
+
+### `textures/WALL01_roughness.png`
+
+- **Author**: vulkan-engine project contributors
+- **License**: CC0 1.0 Universal (Public Domain Dedication)
+- **Derivation**: Procedurally generated uniform medium-roughness grayscale (128/255); no photographic or third-party source
+- **Dimensions**: 64×64 grayscale PNG, 8 bits per channel
+
+### `textures/WALL01_norm.png`
+
+- **Author**: vulkan-engine project contributors
+- **License**: CC0 1.0 Universal (Public Domain Dedication)
+- **Derivation**: Flat tangent-space normal map (128, 128, 255) for every pixel; no photographic or third-party source
+- **Dimensions**: 64×64 RGB PNG, 8 bits per channel
+
+### `textures/WALL01_gloss.png`
+
+- **Author**: vulkan-engine project contributors
+- **License**: CC0 1.0 Universal (Public Domain Dedication)
+- **Derivation**: Procedurally generated uniform medium-gloss (128/255); inverse of roughness; no photographic or third-party source
+- **Dimensions**: 64×64 RGB PNG, 8 bits per channel
+
+## Build Scripts
 
 ### `build_fixtures.py`
 
 - **Author**: vulkan-engine project contributors
 - **License**: CC0 1.0 Universal (Public Domain Dedication)
 - **Rights**: Free to use, modify, distribute
+
+### `build_material_fixtures.py`
+
+- **Author**: vulkan-engine project contributors
+- **License**: CC0 1.0 Universal (Public Domain Dedication)
+- **Rights**: Free to use, modify, distribute
+- **Derivation**: Generates CC0 procedural PBR companion PNGs; no third-party textures or photographs
 
 ## Manifest and Documentation
 

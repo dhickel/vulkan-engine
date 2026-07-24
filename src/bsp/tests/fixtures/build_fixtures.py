@@ -95,6 +95,18 @@ FIXTURES = [
         "require_nonempty_lit": True,
         "wad": "dungeon_evidence.wad",
     },
+    {
+        "name": "dungeon-materials-bsp2",
+        "source": "dungeon_materials_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
 ]
 
 # ── Size limits ──────────────────────────────────────────────────────────
@@ -138,6 +150,7 @@ def write_wad2(path: Path) -> None:
         "skip": 112,
         "hint": 128,
         "origin": 144,
+        "WALL01": 200,
     }
     width = 64
     height = 64

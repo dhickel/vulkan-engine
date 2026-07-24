@@ -567,3 +567,150 @@ fn extraction_miptex_texture_resolution() {
         Some(&[4, 5, 6][..])
     );
 }
+
+// ── Phase 03: material evidence fixture tests ─────────────────────────────
+
+/// Load the compiled dungeon-materials-bsp2 fixture with its .lit companion.
+fn load_materials_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let bsp_data = std::fs::read(fixtures.join("compiled/dungeon-materials-bsp2.bsp")).unwrap();
+    let lit_data = std::fs::read(fixtures.join("compiled/dungeon-materials-bsp2.lit")).unwrap();
+    let palette_data = std::fs::read(fixtures.join("palettes/project_palette.lmp")).unwrap();
+    (bsp_data, lit_data, palette_data)
+}
+
+#[test]
+fn phase03_miptex_decode_from_compiled_fixture() {
+    let (bsp_data, _lit_data, palette_data) = load_materials_fixture();
+    let options = LoadOptions {
+        palette: Some(palette_data),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(&bsp_data, &options)
+        .expect("load dungeon-materials-bsp2");
+
+    let miptex_names = resources::collect_miptex_names(&world.miptex_data);
+    assert!(
+        miptex_names.contains(&"WALL01".to_string()),
+        "embedded miptex must include WALL01; found {miptex_names:?}"
+    );
+
+    let palette = resources::decode_palette(&options.palette.unwrap());
+    let (_extracted, reports) = resources::resolve_extracted_texture(
+        "WALL01",
+        &world.miptex_data,
+        &[],
+        &palette,
+        224,
+        255,
+        false,
+    );
+    assert!(
+        !reports.iter().any(|r| r.severity == Severity::Error),
+        "no errors from miptex decode"
+    );
+}
+
+#[test]
+fn phase03_colored_light_lit_binding() {
+    let (bsp_data, lit_data, palette_data) = load_materials_fixture();
+    let options = LoadOptions {
+        palette: Some(palette_data),
+        lit_data: Some(lit_data.clone()),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(&bsp_data, &options)
+        .expect("load with .lit");
+
+    // Fixture has _color on its light entities, compiled with -lit
+    assert!(lit_data.len() > 8, ".lit must have real RGB data");
+    assert_eq!(
+        world.colored_light_source,
+        companions::ColoredLightSource::LitFile
+    );
+    assert!(!world.lightmap_data.is_empty());
+
+    // The BSP entities should contain the two colored-light entities
+    let lights: Vec<_> = world
+        .entities
+        .iter()
+        .filter(|e| e.class == entities::EntityClass::Light)
+        .collect();
+    assert_eq!(lights.len(), 2, "two light entities expected");
+}
+
+#[test]
+fn phase03_texture_companion_discovery_from_disk() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let tex_dir = fixtures.join("textures");
+
+    let norm_bytes = std::fs::read(tex_dir.join("WALL01_norm.png")).unwrap();
+    let gloss_bytes = std::fs::read(tex_dir.join("WALL01_gloss.png")).unwrap();
+
+    let companions = vec![
+        TextureCompanion::new("textures/WALL01_norm.png", norm_bytes),
+        TextureCompanion::new("textures/WALL01_gloss.png", gloss_bytes),
+    ];
+    let found = resources::discover_pbr_texture_companions("WALL01", &companions);
+    assert!(found.normal.is_some());
+    assert!(found.gloss.is_some());
+}
+
+#[test]
+fn phase03_pbr_companion_names_safe_for_wall01() {
+    let names = resources::pbr_companion_file_names("WALL01")
+        .expect("WALL01 is a safe texture name");
+    assert_eq!(names.normal, "WALL01_norm.png");
+    assert_eq!(names.gloss, "WALL01_gloss.png");
+}
+
+#[test]
+fn phase03_colored_light_source_fallback_to_monochrome_when_no_lit() {
+    let (bsp_data, _lit_data, palette_data) = load_materials_fixture();
+    let options = LoadOptions {
+        palette: Some(palette_data),
+        // no lit_data
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(&bsp_data, &options)
+        .expect("load without .lit");
+
+    assert_eq!(
+        world.colored_light_source,
+        companions::ColoredLightSource::Monochrome
+    );
+}
+
+#[test]
+fn phase03_fullbright_indices_preserved_in_decode() {
+    // Build a minimal miptex with known palette indices, including fullbright
+    let palette: [[u8; 3]; 256] = {
+        let mut p = [[0u8; 3]; 256];
+        for i in 0..=255u8 {
+            p[i as usize] = [i, i, i];
+        }
+        p
+    };
+
+    let mut miptex = vec![0u8; 40 + 4]; // header + 4 pixels
+    miptex[..6].copy_from_slice(b"TESTFB");
+    miptex[16..20].copy_from_slice(&2u32.to_le_bytes()); // width = 2
+    miptex[20..24].copy_from_slice(&2u32.to_le_bytes()); // height = 2
+    miptex[24..28].copy_from_slice(&40u32.to_le_bytes()); // mip0 offset
+    // mip0 pixels: two non-fullbright (0, 100), two fullbright (224, 255)
+    miptex[40..44].copy_from_slice(&[0u8, 100u8, 224u8, 255u8]);
+
+    let pixels = wad::decode_miptex_pixels(&miptex, &palette, 224, 255)
+        .expect("decode miptex");
+
+    assert_eq!(pixels.width, 2);
+    assert_eq!(pixels.height, 2);
+    // Pixel 0 (index 0): not fullbright
+    assert_eq!(pixels.fullbright_mask[0], 0);
+    // Pixel 1 (index 100): not fullbright
+    assert_eq!(pixels.fullbright_mask[1], 0);
+    // Pixel 2 (index 224): fullbright
+    assert_eq!(pixels.fullbright_mask[2], 255);
+    // Pixel 3 (index 255): fullbright
+    assert_eq!(pixels.fullbright_mask[3], 255);
+}

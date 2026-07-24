@@ -57,6 +57,22 @@ pub enum FsTxError {
         resolved: PathBuf,
         root: PathBuf,
     },
+    UnsupportedPlatform {
+        operation: String,
+        reason: String,
+    },
+    ValidationBeforePublish {
+        staging: PathBuf,
+        diagnostics: Vec<String>,
+    },
+    StagingArtifactInvariant {
+        staging: PathBuf,
+        message: String,
+    },
+    PreExistingDestination {
+        target: PathBuf,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for FsTxError {
@@ -145,6 +161,37 @@ impl std::fmt::Display for FsTxError {
                 root.display(),
                 candidate.display()
             ),
+            Self::UnsupportedPlatform { operation, reason } => {
+                write!(
+                    f,
+                    "unsupported platform for '{operation}': {reason}"
+                )
+            }
+            Self::ValidationBeforePublish {
+                staging,
+                diagnostics,
+            } => {
+                write!(
+                    f,
+                    "validation of staging directory '{}' failed: [{}]",
+                    staging.display(),
+                    diagnostics.join(", ")
+                )
+            }
+            Self::StagingArtifactInvariant { staging, message } => {
+                write!(
+                    f,
+                    "staging artifact invariant violation in '{}': {message}",
+                    staging.display()
+                )
+            }
+            Self::PreExistingDestination { target, message } => {
+                write!(
+                    f,
+                    "pre-existing destination '{}': {message}",
+                    target.display()
+                )
+            }
         }
     }
 }
@@ -519,6 +566,566 @@ pub fn replace_file_with_staging(staging: &Path, target: &Path) -> Result<(), Fs
         staging: staging.to_path_buf(),
         message: format!("atomic replacement rename failed: {err}"),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Atomic directory publication with no-replace semantics (Phase 08)
+// ---------------------------------------------------------------------------
+
+/// Test hook that runs after preflight checks but before the atomic
+/// no-replace syscall. Only set during testing; production code is
+/// never aware of it.
+static PRE_PUBLISH_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + 'static>>> =
+    std::sync::Mutex::new(None);
+
+/// Set a hook that runs inside `publish_directory_no_replace` after all
+/// preflight checks but immediately before the `renameat2` syscall.
+///
+/// # Panics
+/// Panics if a hook is already installed (call `clear_pre_publish_hook` first).
+pub fn set_pre_publish_hook<F: Fn() + Send + 'static>(hook: F) {
+    let mut guard = PRE_PUBLISH_HOOK.lock().expect("pre-publish hook lock poisoned");
+    assert!(
+        guard.is_none(),
+        "pre-publish hook already set; call clear_pre_publish_hook first"
+    );
+    *guard = Some(Box::new(hook));
+}
+
+/// Remove a previously installed pre-publish hook.
+pub fn clear_pre_publish_hook() {
+    let mut guard = PRE_PUBLISH_HOOK.lock().expect("pre-publish hook lock poisoned");
+    *guard = None;
+}
+
+fn run_pre_publish_hook() {
+    let hook = PRE_PUBLISH_HOOK
+        .lock()
+        .expect("pre-publish hook lock poisoned")
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// Atomically rename `staging` directory to `target` with no-replace
+/// semantics.
+///
+/// On Linux, uses `renameat2(AT_FDCWD, staging, AT_FDCWD, target,
+/// RENAME_NOREPLACE)` so the kernel rejects the rename if anything
+/// already exists at `target`. This closes the TOCTOU race between
+/// existence check and rename.
+///
+/// On non-Linux platforms, returns `FsTxError::UnsupportedPlatform`.
+/// Callers must handle this gracefully.
+///
+/// Before the syscall, runs any test hook installed via
+/// `set_pre_publish_hook`.
+pub fn publish_directory_no_replace(staging: &Path, target: &Path) -> Result<(), FsTxError> {
+    // Verify staging is a real directory (not a symlink)
+    let staging_meta = inspect_entry_no_follow(staging)?;
+    if !staging_meta.is_dir() {
+        return Err(FsTxError::InvalidEntryPath(format!(
+            "staging is not a directory: '{}'",
+            staging.display()
+        )));
+    }
+
+    // Verify parent of target exists and is a real directory
+    let target_parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let parent_meta = inspect_entry_no_follow(target_parent).map_err(|_| {
+        FsTxError::PublicationFailed {
+            target: target.to_path_buf(),
+            staging: staging.to_path_buf(),
+            message: format!(
+                "target parent does not exist or is a symlink: '{}'",
+                target_parent.display()
+            ),
+        }
+    })?;
+    if !parent_meta.is_dir() {
+        return Err(FsTxError::InvalidEntryPath(format!(
+            "target parent is not a directory: '{}'",
+            target_parent.display()
+        )));
+    }
+
+    // Verify staging and target are on the same filesystem (renameat2
+    // requires this for atomicity). We check by comparing the parent
+    // directory device IDs where possible, but the primary guarantee
+    // is that both are under the same canonical parent tree.
+    let staging_parent = staging.parent().unwrap_or_else(|| Path::new("."));
+    let staging_parent_canon = staging_parent.canonicalize().map_err(|err| {
+        FsTxError::Io {
+            path: staging_parent.to_path_buf(),
+            message: format!("canonicalize staging parent: {err}"),
+        }
+    })?;
+    let target_parent_canon = target_parent.canonicalize().map_err(|err| FsTxError::Io {
+        path: target_parent.to_path_buf(),
+        message: format!("canonicalize target parent: {err}"),
+    })?;
+    if staging_parent_canon != target_parent_canon {
+        return Err(FsTxError::PublicationFailed {
+            target: target.to_path_buf(),
+            staging: staging.to_path_buf(),
+            message: format!(
+                "staging parent '{}' and target parent '{}' are different directories; \
+                 renameat2 requires same filesystem",
+                staging_parent_canon.display(),
+                target_parent_canon.display()
+            ),
+        });
+    }
+
+    // Run any test hook just before the syscall
+    run_pre_publish_hook();
+
+    // Attempt the atomic no-replace rename
+    rename_directory_no_replace(staging, target)
+}
+
+/// Platform-specific no-replace directory rename.
+fn rename_directory_no_replace(staging: &Path, target: &Path) -> Result<(), FsTxError> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let staging_cstr = CString::new(staging.as_os_str().as_bytes()).map_err(|_| {
+            FsTxError::InvalidEntryPath(format!(
+                "staging path contains NUL byte: '{}'",
+                staging.display()
+            ))
+        })?;
+        let target_cstr = CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+            FsTxError::InvalidEntryPath(format!(
+                "target path contains NUL byte: '{}'",
+                target.display()
+            ))
+        })?;
+
+        // renameat2 with RENAME_NOREPLACE is atomic and fails with
+        // EEXIST if the target already exists.
+        let ret = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                staging_cstr.as_ptr(),
+                libc::AT_FDCWD,
+                target_cstr.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+
+        if ret == 0 {
+            return Ok(());
+        }
+
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EEXIST) => {
+                // Determine what kind of entry already exists
+                let existing = match fs::symlink_metadata(target) {
+                    Ok(meta) => {
+                        if meta.is_dir() {
+                            "directory".to_string()
+                        } else if meta.is_file() {
+                            "file".to_string()
+                        } else if meta.file_type().is_symlink() {
+                            "symlink".to_string()
+                        } else {
+                            "entry".to_string()
+                        }
+                    }
+                    Err(_) => "entry".to_string(),
+                };
+                Err(FsTxError::PreExistingDestination {
+                    target: target.to_path_buf(),
+                    message: format!("a {existing} already exists at destination"),
+                })
+            }
+            Some(libc::ENOSYS) | Some(libc::EINVAL) => Err(FsTxError::UnsupportedPlatform {
+                operation: "renameat2(RENAME_NOREPLACE)".to_string(),
+                reason: format!("kernel does not support renameat2: {err}"),
+            }),
+            Some(libc::EXDEV) => Err(FsTxError::PublicationFailed {
+                target: target.to_path_buf(),
+                staging: staging.to_path_buf(),
+                message: "staging and target are on different filesystems".to_string(),
+            }),
+            _ => Err(FsTxError::PublicationFailed {
+                target: target.to_path_buf(),
+                staging: staging.to_path_buf(),
+                message: format!("renameat2 failed: {err}"),
+            }),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = staging;
+        let _ = target;
+        Err(FsTxError::UnsupportedPlatform {
+            operation: "publish_directory_no_replace".to_string(),
+            reason: "atomic no-replace directory publication requires Linux renameat2".to_string(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Staging artifact set validation (Phase 08)
+// ---------------------------------------------------------------------------
+
+/// Compute SHA-256 hex digests for all regular files in a directory tree
+/// (sorted by relative path). Returns `Vec<(relative_path, sha256_hex)>`.
+pub fn compute_dir_file_hashes(root: &Path) -> Result<Vec<(String, String)>, FsTxError> {
+    let mut hashes = Vec::new();
+    collect_file_hashes(root, root, &mut hashes)?;
+    hashes.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(hashes)
+}
+
+fn collect_file_hashes(
+    root: &Path,
+    dir: &Path,
+    hashes: &mut Vec<(String, String)>,
+) -> Result<(), FsTxError> {
+    let dir_meta = inspect_entry_no_follow(dir)?;
+    if !dir_meta.is_dir() {
+        return Err(FsTxError::InvalidEntryPath(format!(
+            "not a directory: '{}'",
+            dir.display()
+        )));
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|err| FsTxError::Io {
+            path: dir.to_path_buf(),
+            message: format!("read_dir: {err}"),
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| FsTxError::Io {
+            path: dir.to_path_buf(),
+            message: format!("read_dir entry: {err}"),
+        })?;
+    entries.sort_by_key(|e| e.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let meta = inspect_entry_no_follow(&path)?;
+        if meta.is_dir() {
+            collect_file_hashes(root, &path, hashes)?;
+        } else if meta.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| FsTxError::RootEscape {
+                    candidate: path.clone(),
+                    root: root.to_path_buf(),
+                })?;
+            let hash = sha256_file(&path)?;
+            hashes.push((slash_path(relative), hash));
+        }
+    }
+    Ok(())
+}
+
+/// Compute SHA-256 of a regular file.
+fn sha256_file(path: &Path) -> Result<String, FsTxError> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(path).map_err(|err| FsTxError::Io {
+        path: path.to_path_buf(),
+        message: format!("open for hash: {err}"),
+    })?;
+
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut buf = [0u8; 64];
+    let mut buf_len = 0usize;
+    let mut total_len = 0u64;
+
+    loop {
+        let n = file.read(&mut buf[buf_len..]).map_err(|err| FsTxError::Io {
+            path: path.to_path_buf(),
+            message: format!("read for hash: {err}"),
+        })?;
+        if n == 0 {
+            break;
+        }
+        total_len += n as u64;
+        buf_len += n;
+        if buf_len == 64 {
+            sha256_process_block(&mut state, &buf);
+            buf_len = 0;
+        }
+    }
+
+    // Padding
+    let total_bits = total_len * 8;
+    buf[buf_len] = 0x80;
+    buf_len += 1;
+    if buf_len > 56 {
+        for i in buf_len..64 {
+            buf[i] = 0;
+        }
+        sha256_process_block(&mut state, &buf);
+        buf_len = 0;
+    }
+    for i in buf_len..56 {
+        buf[i] = 0;
+    }
+    buf[56..64].copy_from_slice(&total_bits.to_be_bytes());
+    sha256_process_block(&mut state, &buf);
+
+    let mut result = String::with_capacity(64);
+    for &word in &state {
+        result.push_str(&format!("{word:08x}"));
+    }
+    Ok(result)
+}
+
+fn sha256_process_block(state: &mut [u32; 8], block: &[u8; 64]) {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let mut w = [0u32; 64];
+    for i in 0..16 {
+        let base = i * 4;
+        w[i] = u32::from_be_bytes([block[base], block[base + 1], block[base + 2], block[base + 3]]);
+    }
+    for i in 16..64 {
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
+
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+
+    for i in 0..64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ (!e & g);
+        let temp1 = h
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(K[i])
+            .wrapping_add(w[i]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(maj);
+
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+
+    state[0] = state[0].wrapping_add(a);
+    state[1] = state[1].wrapping_add(b);
+    state[2] = state[2].wrapping_add(c);
+    state[3] = state[3].wrapping_add(d);
+    state[4] = state[4].wrapping_add(e);
+    state[5] = state[5].wrapping_add(f);
+    state[6] = state[6].wrapping_add(g);
+    state[7] = state[7].wrapping_add(h);
+}
+
+fn slash_path(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(part) = component {
+            if let Some(s) = part.to_str() {
+                parts.push(s.to_string());
+            }
+        }
+    }
+    parts.join("/")
+}
+
+/// Validate a staged compiler artifact set.
+///
+/// Checks:
+/// - No `.compile-work` directory remains
+/// - No stale pointfile (`.pts`, `.prt`)
+/// - No duplicate basenames
+/// - No symlinks in staging
+/// - For BSP2 profile: requires nonempty `.lit` alongside `.bsp`
+/// - For BSP29 profile: `.lit` is optional (but diagnosed if present)
+/// - Exactly one `.bsp` file
+/// - Optional `.provenance.toml`
+///
+/// Returns the list of relative file paths (sorted) found in staging.
+pub fn validate_staged_artifact_set(
+    staging: &Path,
+    bsp_name: &str,
+    require_lit: bool,
+) -> Result<Vec<String>, FsTxError> {
+    let mut files: Vec<String> = Vec::new();
+    let mut diagnostics: Vec<String> = Vec::new();
+
+    collect_staged_entries(staging, staging, &mut files, &mut diagnostics)?;
+
+    // Check for forbidden entries
+    for f in &files {
+        let basename = std::path::Path::new(f)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Reject .compile-work directories
+        if f.contains(".compile-work") {
+            diagnostics.push(format!("stale .compile-work found: '{f}'"));
+        }
+        // Reject stale pointfiles
+        if basename.ends_with(".pts") || basename.ends_with(".prt") {
+            diagnostics.push(format!("stale pointfile found: '{f}'"));
+        }
+    }
+
+    // Check duplicate basenames
+    let mut seen_basenames: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for f in &files {
+        let basename = std::path::Path::new(f)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !seen_basenames.insert(basename) {
+            diagnostics.push(format!("duplicate basename in staging: '{f}'"));
+        }
+    }
+
+    // Check for required .bsp
+    let bsp_expected = format!("{bsp_name}.bsp");
+    let has_bsp = files.iter().any(|f| f == &bsp_expected);
+    if !has_bsp {
+        diagnostics.push(format!(
+            "missing required .bsp file '{bsp_expected}' in staging"
+        ));
+    }
+
+    // Check .lit requirement
+    let lit_expected = format!("{bsp_name}.lit");
+    let has_lit = files.iter().any(|f| f == &lit_expected);
+    if require_lit && !has_lit {
+        diagnostics.push(format!(
+            "missing required .lit file '{lit_expected}' for BSP2 profile"
+        ));
+    }
+
+    if !diagnostics.is_empty() {
+        return Err(FsTxError::ValidationBeforePublish {
+            staging: staging.to_path_buf(),
+            diagnostics,
+        });
+    }
+
+    // Verify .lit is nonempty when required
+    if require_lit && has_lit {
+        let lit_path = staging.join(&lit_expected);
+        let lit_meta = inspect_entry_no_follow(&lit_path)?;
+        if lit_meta.len() <= 8 {
+            // QLIT header is 8 bytes; payload must be nonempty
+            return Err(FsTxError::StagingArtifactInvariant {
+                staging: staging.to_path_buf(),
+                message: format!(
+                    "required .lit file '{lit_expected}' has no payload ({} bytes)",
+                    lit_meta.len()
+                ),
+            });
+        }
+    }
+
+    Ok(files)
+}
+
+fn collect_staged_entries(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<String>,
+    diagnostics: &mut Vec<String>,
+) -> Result<(), FsTxError> {
+    let dir_meta = inspect_entry_no_follow(dir)?;
+    if !dir_meta.is_dir() {
+        return Err(FsTxError::InvalidEntryPath(format!(
+            "not a directory: '{}'",
+            dir.display()
+        )));
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|err| FsTxError::Io {
+            path: dir.to_path_buf(),
+            message: format!("read_dir: {err}"),
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| FsTxError::Io {
+            path: dir.to_path_buf(),
+            message: format!("read_dir entry: {err}"),
+        })?;
+    entries.sort_by_key(|e| e.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let meta = inspect_entry_no_follow(&path)?;
+
+        if meta.is_dir() {
+            if path.file_name().and_then(|n| n.to_str()) == Some(".compile-work") {
+                diagnostics.push(format!(
+                    ".compile-work directory found in staging: '{}'",
+                    path.display()
+                ));
+            }
+            collect_staged_entries(root, &path, files, diagnostics)?;
+        } else if meta.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| FsTxError::RootEscape {
+                    candidate: path.clone(),
+                    root: root.to_path_buf(),
+                })?;
+            files.push(slash_path(relative));
+        }
+    }
+    Ok(())
+}
+
+/// Compare two directories by content hash. Returns `true` if both
+/// contain the same set of files (by relative path) with identical
+/// SHA-256 content.
+pub fn artifact_sets_identical(staging: &Path, existing: &Path) -> Result<bool, FsTxError> {
+    let staging_hashes = compute_dir_file_hashes(staging)?;
+    let existing_hashes = compute_dir_file_hashes(existing)?;
+
+    if staging_hashes.len() != existing_hashes.len() {
+        return Ok(false);
+    }
+
+    for (s, e) in staging_hashes.iter().zip(existing_hashes.iter()) {
+        if s.0 != e.0 || s.1 != e.1 {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

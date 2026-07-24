@@ -18,8 +18,10 @@ use engine_pack::compiler;
 use engine_pack::fs_tx;
 use engine_pack::fs_tx::{
     build_publication_plan, cleanup_staging, contained_child_no_symlinks,
-    create_staging_file_sibling, create_staging_sibling, publish_staging,
-    replace_file_with_staging, stage_entry, EntryType, PlanEntry, RollbackJournal,
+    create_staging_file_sibling, create_staging_sibling,
+    publish_directory_no_replace, publish_staging,
+    replace_file_with_staging, stage_entry, validate_staged_artifact_set,
+    EntryType, PlanEntry, RollbackJournal,
 };
 
 type CliResult<T> = Result<T, CliError>;
@@ -318,11 +320,7 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
     };
 
     let out_dir = PathBuf::from(&out_dir);
-    if out_dir.exists() {
-        return Err(CliError::FsTx(fs_tx::FsTxError::ExistingTarget(
-            out_dir.clone(),
-        )));
-    }
+    let destination_exists = path_exists_no_follow(&out_dir);
 
     // Use fs_tx staging for output
     let staging = create_staging_sibling(&out_dir).map_err(CliError::FsTx)?;
@@ -504,8 +502,78 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         std::fs::write(&provenance_path, provenance_str)
             .map_err(|err| io_error("compile-bsp.write", &provenance_path, err))?;
 
-        // Publish
-        publish_staging(&staging, &out_dir).map_err(CliError::FsTx)?;
+        // Validate staged artifact set before publication (Phase 08)
+        let uses_bsp2 = profile.default_qbsp_args.iter().any(|a| a == "-bsp2")
+            || profile.default_light_args.iter().any(|a| a == "-bsp2");
+        let _staged_files = validate_staged_artifact_set(&staging, bsp_name, uses_bsp2)
+            .map_err(CliError::FsTx)?;
+
+        // Compute file hashes for provenance verification
+        let staged_hashes = engine_pack::fs_tx::compute_dir_file_hashes(&staging)
+            .map_err(CliError::FsTx)?;
+
+        // Verify provenance output hashes match staged bytes
+        if !compile_result.provenance.output_hashes.is_empty() {
+            let hash_map: std::collections::HashMap<&str, &str> = staged_hashes
+                .iter()
+                .map(|(rel, h)| (rel.as_str(), h.as_str()))
+                .collect();
+            for output_hash in &compile_result.provenance.output_hashes {
+                let key = output_hash.path.to_string_lossy().replace('\\', "/");
+                match hash_map.get(key.as_str()) {
+                    Some(actual_hash) if actual_hash == &output_hash.sha256 => {}
+                    Some(actual_hash) => {
+                        return Err(CliError::FsTx(
+                            engine_pack::fs_tx::FsTxError::StagingArtifactInvariant {
+                                staging: staging.clone(),
+                                message: format!(
+                                    "provenance hash mismatch for '{}': expected {}, got {}",
+                                    key, output_hash.sha256, actual_hash
+                                ),
+                            },
+                        ));
+                    }
+                    None => {
+                        return Err(CliError::FsTx(
+                            engine_pack::fs_tx::FsTxError::StagingArtifactInvariant {
+                                staging: staging.clone(),
+                                message: format!(
+                                    "provenance references missing file '{}'",
+                                    key
+                                ),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Atomic no-replace publication (Phase 08)
+        // If destination already exists, compare content hashes for idempotent skip
+        if destination_exists {
+            if engine_pack::fs_tx::artifact_sets_identical(&staging, &out_dir)
+                .map_err(CliError::FsTx)?
+            {
+                // Idempotent: staging matches existing destination — skip
+                return Ok(format!(
+                    "compiled[bsp]: {} -> {}/{}.bsp (unchanged, skipped)",
+                    source_map.display(),
+                    out_dir.display(),
+                    bsp_name
+                ));
+            } else {
+                return Err(CliError::FsTx(
+                    engine_pack::fs_tx::FsTxError::PreExistingDestination {
+                        target: out_dir.clone(),
+                        message: "destination exists with different content; \
+                                  publication blocked to prevent clobber"
+                            .to_string(),
+                    },
+                ));
+            }
+        }
+
+        publish_directory_no_replace(&staging, &out_dir).map_err(CliError::FsTx)?;
 
         Ok(format!(
             "compiled[bsp]: {} -> {}/{}.bsp",

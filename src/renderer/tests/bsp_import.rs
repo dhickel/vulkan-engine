@@ -362,3 +362,77 @@ fn build_face_meshes_skips_invalid_faces() {
     assert!(meshes[1].is_none()); // invalid
     assert!(meshes[2].is_none()); // nodraw
 }
+
+// ── Phase 03: material evidence from compiled fixture ──────────────────
+
+#[test]
+fn phase03_material_fixture_load_and_describe() {
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bsp/tests/fixtures");
+    let bsp_data = std::fs::read(fixture_path.join("compiled/dungeon-materials-bsp2.bsp"))
+        .expect("read dungeon-materials-bsp2.bsp");
+    let palette_data = std::fs::read(fixture_path.join("palettes/project_palette.lmp"))
+        .expect("read palette");
+
+    let options = bsp::LoadOptions {
+        palette: Some(palette_data),
+        ..Default::default()
+    };
+    let world = bsp::BspLoader::load(&bsp_data, &options)
+        .expect("load dungeon-materials-bsp2");
+
+    let palette = bsp::resources::decode_palette(
+        &std::fs::read(fixture_path.join("palettes/project_palette.lmp")).unwrap(),
+    );
+
+    // Load PBR companions from disk
+    let textures_dir = fixture_path.join("textures");
+    let norm_bytes = std::fs::read(textures_dir.join("WALL01_norm.png")).unwrap();
+    let gloss_bytes = std::fs::read(textures_dir.join("WALL01_gloss.png")).unwrap();
+
+    let request = bsp::BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        texture_companions: vec![
+            bsp::resources::TextureCompanion::new("textures/WALL01_norm.png", norm_bytes),
+            bsp::resources::TextureCompanion::new("textures/WALL01_gloss.png", gloss_bytes),
+        ],
+        ..Default::default()
+    };
+    let extracted = bsp::extract::extract(request).expect("extract");
+
+    // Verify WALL01 has PBR companions attached
+    let wall_tex = extracted
+        .textures
+        .iter()
+        .find(|t| t.identity == "WALL01")
+        .expect("WALL01 texture extracted");
+    assert!(wall_tex.pbr_companions.normal.is_some());
+    assert!(wall_tex.pbr_companions.gloss.is_some());
+
+    // Build material descriptors and verify PBR surfaces get SURF_PBR flag
+    let albedo_handles: Vec<BspTextureHandle> = extracted
+        .textures
+        .iter()
+        .enumerate()
+        .map(|(i, _)| BspTextureHandle::new(i as u32, 0))
+        .collect();
+    let lightmap_handle = BspTextureHandle::new(0, 0);
+    let descs = build_bsp_material_descs(&extracted, &albedo_handles, lightmap_handle);
+
+    let pbr_count = descs
+        .iter()
+        .filter(|d| {
+            d.as_ref().is_some_and(|desc| {
+                desc.surface_params.surface_flags
+                    & renderer::api::bsp::bsp_surface_flags::SURF_PBR
+                    != 0
+            })
+        })
+        .count();
+    assert!(pbr_count > 0, "at least one PBR surface expected, got {pbr_count}");
+
+    // Verify faces and light descriptors exist
+    assert!(!extracted.face_geometries.is_empty());
+    assert!(!extracted.light_descriptors.is_empty());
+}

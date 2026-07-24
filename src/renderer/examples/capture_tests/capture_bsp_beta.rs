@@ -10,6 +10,10 @@
 //!
 //! This example is part of the BSP beta Phase 09 acceptance evidence matrix.
 //! It demonstrates the full load→mount→render→capture pipeline for BSP data.
+//!
+//! Phase 03 material evidence: pass `--bsp` pointing to
+//! `src/bsp/tests/fixtures/compiled/dungeon-materials-bsp2.bsp` to capture
+//! PBR material rendering with colored lights for acceptance validation.
 
 #[cfg(feature = "bsp")]
 #[path = "common.rs"]
