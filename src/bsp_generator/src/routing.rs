@@ -246,16 +246,30 @@ fn snap_to_grid(v: i32, quantum: i32) -> i32 {
     }
 }
 
-/// Clear a small entry/exit zone around the start and end portal centerlines
-/// so the corridor can approach the endpoint rooms through their own expanded
-/// margins. This only clears cells near the portals, not the full path between
-/// them, to avoid inadvertently clearing cells belonging to other rooms.
-fn clear_approach_path(start: (i32, i32), end: (i32, i32), grid: &mut OccupancyGrid) {
-    // Clear a 3×3 zone around each portal centerline to allow entry/exit
-    for &(px, py) in &[start, end] {
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                grid.set_blocked(px + dx, py + dy, false);
+/// Clear the endpoint approach corridors from each room portal to its routed
+/// centerline. Endpoint rooms are still marked in the occupancy grid so other
+/// routes keep away from them, but the connecting edge must carve a local arch
+/// through its two endpoint margins. Clearing only a 3×3 blob around each
+/// centerline leaves one blocked margin row between close room pairs; clear the
+/// full portal-to-centerline tube instead, with the same half-width as the
+/// corridor centerline footprint.
+fn clear_endpoint_approach(
+    portal: (i32, i32),
+    centerline: (i32, i32),
+    grid: &mut OccupancyGrid,
+) {
+    let dx = (centerline.0 - portal.0).signum();
+    let dy = (centerline.1 - portal.1).signum();
+    let steps = (centerline.0 - portal.0)
+        .abs()
+        .max((centerline.1 - portal.1).abs());
+
+    for i in 0..=steps {
+        let x = portal.0 + dx * i;
+        let y = portal.1 + dy * i;
+        for oy in -CORRIDOR_HALF_CELLS..=CORRIDOR_HALF_CELLS {
+            for ox in -CORRIDOR_HALF_CELLS..=CORRIDOR_HALF_CELLS {
+                grid.clear(x + ox, y + oy);
             }
         }
     }
@@ -617,15 +631,15 @@ pub fn route_edge(
         }]);
     }
 
-    // Unblock start and end cells (they're inside their rooms' expanded margins)
+    // Unblock start/end and carve local approach tubes through the endpoint
+    // room margins. These openings are limited to the two endpoint rooms, not
+    // the full inter-room route, so unrelated room margins remain solid.
     grid.clear(start.0, start.1);
     grid.clear(end.0, end.1);
-
-    // Clear the approach path: cells between the portal centerlines that the
-    // corridor needs to traverse. This allows the corridor to enter/exit the
-    // expanded margins of the endpoint rooms (which exist to keep other
-    // corridors away, not the one connecting these rooms).
-    clear_approach_path(start, end, &mut grid);
+    let portal_a_grid = world_to_grid((portal_a.0, portal_a.1, 0));
+    let portal_b_grid = world_to_grid((portal_b.0, portal_b.1, 0));
+    clear_endpoint_approach(portal_a_grid, start, &mut grid);
+    clear_endpoint_approach(portal_b_grid, end, &mut grid);
 
     // Try direct orthogonal path first
     if let Some(path) = direct_orthogonal_path(start, end, &grid) {

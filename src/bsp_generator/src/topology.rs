@@ -159,15 +159,51 @@ pub fn build_topology(
 
     // Partially shuffle the full non-MST candidate set so the selected loop
     // edge set is derived from the corridor-routing RNG, not just the nearest
-    // `needed` candidates.
-    for i in 0..needed {
+    // candidates. Loop edges must also be routeable under the occupancy grid;
+    // otherwise late pipeline routing can fail even though the abstract graph
+    // is connected. Feasibility probes use a cloned RNG so this selection step
+    // remains deterministic without consuming the route stage's path-choice
+    // stream.
+    const SIMPLE_LOOP_SEGMENT_LIMIT: usize = 2;
+
+    let mut selected_loops: Vec<(usize, usize)> = Vec::with_capacity(needed);
+    let mut routeable_fallbacks: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while selected_loops.len() < needed && i < remaining.len() {
         let tail_len = remaining.len() - i;
         let j = i + rng.range_u32(tail_len as u32) as usize;
         remaining.swap(i, j);
+
+        let candidate = remaining[i];
+        let mut probe_rng = rng.clone();
+        if let Ok(probe) =
+            crate::routing::route_edge(candidate.0, candidate.1, &rooms, config, &mut probe_rng)
+        {
+            if probe.len() <= SIMPLE_LOOP_SEGMENT_LIMIT {
+                selected_loops.push(candidate);
+            } else {
+                routeable_fallbacks.push(candidate);
+            }
+        }
+        i += 1;
+    }
+
+    if selected_loops.len() < needed {
+        selected_loops.extend(
+            routeable_fallbacks
+                .into_iter()
+                .take(needed - selected_loops.len()),
+        );
+    }
+
+    if selected_loops.len() < needed {
+        return Err(GeneratorError::RouteExhausted {
+            expansions: config.max_astar_expansions,
+        });
     }
 
     let mut edges = mst_edges;
-    edges.extend_from_slice(&remaining[..needed]);
+    edges.extend_from_slice(&selected_loops);
 
     // Validation
     if !geometry::validate_connectedness(&edges, n) {

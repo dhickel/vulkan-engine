@@ -110,6 +110,7 @@ impl StageSeed {
 /// This is the canonical RNG for dungeon generator stages — every placement
 /// candidate, corridor route decision, and entity position derives from this
 /// single source.
+#[derive(Clone)]
 pub struct StageRng {
     state: [u8; 32],
     buf: [u64; 4],

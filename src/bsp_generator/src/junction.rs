@@ -624,11 +624,13 @@ pub enum JunctionKind {
     Straight,
 }
 
-/// Build all closure brushes for a set of corridors meeting at a junction.
+/// Build all closure brushes for explicit endpoint junctions in a routed
+/// corridor set.
 ///
-/// This function classifies the junction and delegates to the appropriate
-/// builder. Call this after routing all edges to produce the full closure
-/// geometry set.
+/// This function classifies corridors that share endpoints and delegates to
+/// the appropriate builder. Incidental mid-span crossings are left to normal
+/// CSG overlap instead of receiving pairwise X-closure brushes; otherwise dense
+/// generated maps emit O(n²) source brushes and can exceed the M1 face budget.
 pub fn build_junction_closures(corridors: &[Corridor]) -> Vec<Brush> {
     if corridors.len() < 2 {
         return Vec::new();
@@ -669,8 +671,9 @@ pub fn build_junction_closures(corridors: &[Corridor]) -> Vec<Brush> {
                     brushes.extend(build_l_junction(a, b));
                 }
             } else {
-                // Crossing corridors: X-junction
-                brushes.extend(build_x_junction(a, b));
+                // Incidental crossing, not an explicit routed endpoint
+                // junction. Do not emit pairwise X closures in generated maps;
+                // explicit X fixtures can still call `build_x_junction`.
             }
         }
     }
