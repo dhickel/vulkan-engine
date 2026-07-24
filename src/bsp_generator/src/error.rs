@@ -43,11 +43,7 @@ impl fmt::Display for GeneratorError {
                 write!(f, "invalid configuration: {}", msg)
             }
             GeneratorError::PlacementExhausted { attempts } => {
-                write!(
-                    f,
-                    "room placement exhausted after {} attempts",
-                    attempts
-                )
+                write!(f, "room placement exhausted after {} attempts", attempts)
             }
             GeneratorError::RouteExhausted { expansions } => {
                 write!(

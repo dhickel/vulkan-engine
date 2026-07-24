@@ -83,6 +83,83 @@ impl StageSeed {
             .expect("digest slice");
         u64::from_le_bytes(bytes)
     }
+
+    /// Create a deterministic random number generator from this stage seed.
+    ///
+    /// The RNG is a SHA-256-chained counter stream: the initial state is the
+    /// 32-byte digest. Each time the internal 4×u64 buffer is exhausted, the
+    /// state is replaced by `SHA-256(state)` and the buffer index resets.
+    pub fn rng(&self) -> StageRng {
+        StageRng {
+            state: self.digest,
+            buf: [
+                u64::from_le_bytes(self.digest[0..8].try_into().unwrap()),
+                u64::from_le_bytes(self.digest[8..16].try_into().unwrap()),
+                u64::from_le_bytes(self.digest[16..24].try_into().unwrap()),
+                u64::from_le_bytes(self.digest[24..32].try_into().unwrap()),
+            ],
+            pos: 0,
+        }
+    }
+}
+
+/// A deterministic random-number generator backed by SHA-256-chained 32-byte
+/// state. Produces an infinite stream of `u64` values derived from a
+/// [`StageSeed`].
+///
+/// This is the canonical RNG for dungeon generator stages — every placement
+/// candidate, corridor route decision, and entity position derives from this
+/// single source.
+pub struct StageRng {
+    state: [u8; 32],
+    buf: [u64; 4],
+    pos: usize,
+}
+
+impl StageRng {
+    /// Return the next `u64` from the stream.
+    pub fn next_u64(&mut self) -> u64 {
+        if self.pos >= 4 {
+            // Exhausted buffer: chain forward with SHA-256.
+            let mut hasher = Sha256::new();
+            hasher.update(self.state);
+            let digest: [u8; 32] = hasher.finalize().into();
+            self.state = digest;
+            self.buf = [
+                u64::from_le_bytes(digest[0..8].try_into().unwrap()),
+                u64::from_le_bytes(digest[8..16].try_into().unwrap()),
+                u64::from_le_bytes(digest[16..24].try_into().unwrap()),
+                u64::from_le_bytes(digest[24..32].try_into().unwrap()),
+            ];
+            self.pos = 0;
+        }
+        let v = self.buf[self.pos];
+        self.pos += 1;
+        v
+    }
+
+    /// Return a `u32` in `[0, range)` using rejection sampling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `range == 0`.
+    pub fn range_u32(&mut self, range: u32) -> u32 {
+        assert!(range > 0, "range must be non-zero");
+        // Use standard rejection sampling with a 32-bit mask.
+        let mask = range.next_power_of_two() - 1;
+        loop {
+            let v = self.next_u64() as u32 & mask;
+            if v < range {
+                return v;
+            }
+        }
+    }
+
+    /// Return a `u32` in `[lo, hi)`.
+    pub fn range_inclusive(&mut self, lo: u32, hi: u32) -> u32 {
+        assert!(hi > lo, "range must be non-empty");
+        lo + self.range_u32(hi - lo)
+    }
 }
 
 #[cfg(test)]

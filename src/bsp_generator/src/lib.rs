@@ -28,15 +28,20 @@
 
 pub mod config;
 pub mod error;
+pub mod geometry;
 pub mod intent;
+pub mod placement;
 pub mod seed;
+pub mod topology;
 
 // ── Re-exports ────────────────────────────────────────────────────────────
 
 pub use config::{DungeonConfig, MapClass, ValidatedConfig, CONSTRUCTION_QUANTUM};
 pub use error::GeneratorError;
 pub use intent::{
-    Brush, BrushFace, Corridor, EmissionIntent, EntityIntent, Junction, LayoutIntent,
-    RoomIntent, RoutedIntent,
+    Brush, BrushFace, Corridor, EmissionIntent, EntityIntent, Junction, LayoutIntent, RoomIntent,
+    RoutedIntent,
 };
-pub use seed::{Seed, StageSeed};
+pub use placement::place_rooms;
+pub use seed::{Seed, StageRng, StageSeed};
+pub use topology::build_topology;

@@ -1,7 +1,4 @@
-use bsp_generator::{
-    config::MapClass,
-    DungeonConfig, GeneratorError,
-};
+use bsp_generator::{config::MapClass, DungeonConfig, GeneratorError};
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -243,11 +240,7 @@ fn placement_candidates_zero() {
     };
     let err = cfg.validate().unwrap_err();
     assert!(matches!(err, GeneratorError::InvalidConfig(_)));
-    assert!(
-        err.to_string().contains("placement_candidates"),
-        "{}",
-        err
-    );
+    assert!(err.to_string().contains("placement_candidates"), "{}", err);
 }
 
 #[test]
@@ -258,11 +251,7 @@ fn placement_candidates_exceeds_m1_max() {
     };
     let err = cfg.validate().unwrap_err();
     assert!(matches!(err, GeneratorError::InvalidConfig(_)));
-    assert!(
-        err.to_string().contains("placement_candidates"),
-        "{}",
-        err
-    );
+    assert!(err.to_string().contains("placement_candidates"), "{}", err);
 }
 
 #[test]
@@ -303,11 +292,7 @@ fn max_astar_expansions_zero() {
     };
     let err = cfg.validate().unwrap_err();
     assert!(matches!(err, GeneratorError::InvalidConfig(_)));
-    assert!(
-        err.to_string().contains("max_astar_expansions"),
-        "{}",
-        err
-    );
+    assert!(err.to_string().contains("max_astar_expansions"), "{}", err);
 }
 
 #[test]
@@ -318,11 +303,7 @@ fn max_astar_expansions_exceeds_m2_max() {
     };
     let err = cfg.validate().unwrap_err();
     assert!(matches!(err, GeneratorError::InvalidConfig(_)));
-    assert!(
-        err.to_string().contains("max_astar_expansions"),
-        "{}",
-        err
-    );
+    assert!(err.to_string().contains("max_astar_expansions"), "{}", err);
 }
 
 // ── Overflow guard tests ──────────────────────────────────────────────────
