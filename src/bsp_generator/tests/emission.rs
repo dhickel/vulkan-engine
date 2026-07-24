@@ -54,10 +54,7 @@ fn single_room_produces_spawn_and_light() {
 
 #[test]
 fn spawn_is_at_first_room_centre() {
-    let rooms = vec![
-        room(0, 0, 0, 64, 64, 128),
-        room(160, 160, 0, 64, 64, 128),
-    ];
+    let rooms = vec![room(0, 0, 0, 64, 64, 128), room(160, 160, 0, 64, 64, 128)];
     let layout = LayoutIntent {
         rooms,
         edges: Vec::new(),
@@ -94,10 +91,7 @@ fn light_has_intensity_property() {
 
 #[test]
 fn lights_are_at_room_centres() {
-    let rooms = vec![
-        room(0, 0, 0, 64, 64, 128),
-        room(160, 0, 0, 64, 64, 128),
-    ];
+    let rooms = vec![room(0, 0, 0, 64, 64, 128), room(160, 0, 0, 64, 64, 128)];
     let layout = LayoutIntent {
         rooms,
         edges: Vec::new(),
@@ -116,9 +110,7 @@ fn lights_are_at_room_centres() {
 
 #[test]
 fn room_count_times_six_brushes() {
-    let rooms: Vec<RoomIntent> = (0..4)
-        .map(|i| room(i * 160, 0, 0, 64, 64, 128))
-        .collect();
+    let rooms: Vec<RoomIntent> = (0..4).map(|i| room(i * 160, 0, 0, 64, 64, 128)).collect();
     let layout = LayoutIntent {
         rooms,
         edges: Vec::new(),
@@ -194,7 +186,7 @@ fn wad_is_set_to_theme_basename() {
         junctions: Vec::new(),
     };
     let emission = build_emission(&layout, &routed);
-    assert_eq!(emission.wad, "dungeon_theme.wad");
+    assert_eq!(emission.wad, "cc0_stone_beta.wad");
 }
 
 // ── No empty brushes ───────────────────────────────────────────────────
@@ -325,10 +317,7 @@ fn light_entities_have_origin() {
         .filter(|b| b.contains("\"classname\" \"light\""))
         .collect();
     for block in &light_blocks {
-        assert!(
-            block.contains("\"origin\""),
-            "light entity missing origin"
-        );
+        assert!(block.contains("\"origin\""), "light entity missing origin");
     }
 }
 
@@ -347,10 +336,7 @@ fn entities_are_ordered_spawn_then_lights() {
 
 #[test]
 fn no_face_has_identical_plane_points() {
-    let rooms = vec![
-        room(0, 0, 0, 64, 64, 128),
-        room(160, 0, 0, 64, 64, 128),
-    ];
+    let rooms = vec![room(0, 0, 0, 64, 64, 128), room(160, 0, 0, 64, 64, 128)];
     let layout = LayoutIntent {
         rooms,
         edges: vec![(0, 1)],

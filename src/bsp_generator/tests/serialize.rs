@@ -335,7 +335,7 @@ fn same_emission_produces_identical_bytes() {
             ],
             brushes: Vec::new(),
         }],
-        wad: "dungeon_theme.wad".to_string(),
+        wad: "test.wad".to_string(),
     };
 
     let a = serialize(&emission);
@@ -380,6 +380,6 @@ fn generated_map_contains_wad_key() {
     };
     if let Ok((map_text, _meta)) = generate(44, cfg) {
         assert!(map_text.contains("\"wad\""));
-        assert!(map_text.contains("dungeon_theme.wad"));
+        assert!(map_text.contains("cc0_stone_beta.wad"));
     }
 }

@@ -430,6 +430,8 @@ dependencies = [
  "bsp",
  "serde",
  "sha2",
+ "tempfile",
+ "walkdir",
 ]
 
 [[package]]

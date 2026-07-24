@@ -9,6 +9,10 @@ bsp = { path = "../bsp" }
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"], optional = true }
 
+[dev-dependencies]
+tempfile = "3"
+walkdir = "2"
+
 [features]
 default = []
 serde = ["dep:serde"]

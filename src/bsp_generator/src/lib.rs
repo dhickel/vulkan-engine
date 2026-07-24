@@ -16,6 +16,12 @@
 //!
 //! Each stage is a validated data structure with typed construction.
 //!
+//! # Themes
+//!
+//! The CC0 Stone Beta theme at [`CC0_STONE_BETA_THEME_DIR`] provides
+//! deterministic, license-clean textures and a WAD2 archive. Run
+//! `build.py` in that directory to regenerate all theme assets.
+//!
 //! # Entry Point
 //!
 //! ```
@@ -43,6 +49,13 @@ pub mod serialize;
 pub mod topology;
 
 // ── Re-exports ────────────────────────────────────────────────────────────
+
+/// Relative path (from crate root) to the CC0 Stone Beta theme directory.
+///
+/// The theme directory contains `build.py` (deterministic asset generator),
+/// `theme.toml` (texture role bindings), `palette.lmp`, `cc0_stone_beta.wad`,
+/// `textures/` (PNG companions), and `LICENSE` (CC0 dedication).
+pub const CC0_STONE_BETA_THEME_DIR: &str = "themes/cc0_stone_beta";
 
 pub use config::{DungeonConfig, MapClass, ValidatedConfig, CONSTRUCTION_QUANTUM};
 pub use emission::build_emission;

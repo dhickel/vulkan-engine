@@ -107,7 +107,7 @@ fn wad_key_is_present_in_worldspawn() {
     let cfg = DungeonConfig::nominal_m1();
     let (map_text, _meta) = gen_or_skip!(0, cfg);
     assert!(map_text.contains("\"wad\""));
-    assert!(map_text.contains("dungeon_theme.wad"));
+    assert!(map_text.contains("cc0_stone_beta.wad"));
 }
 
 // ── No empty brushes ───────────────────────────────────────────────────
@@ -200,8 +200,20 @@ fn frozen_support_corpus_generates_deterministically_within_budgets() {
         ("M1 nominal 1", 1, DungeonConfig::nominal_m1(), 2_000, 50),
         ("M1 nominal 2", 2, DungeonConfig::nominal_m1(), 2_000, 50),
         ("M1 nominal 3", 3, DungeonConfig::nominal_m1(), 2_000, 50),
-        ("M2 nominal 17", 17, DungeonConfig::nominal_m2(), 10_000, 300),
-        ("M2 nominal 255", 255, DungeonConfig::nominal_m2(), 10_000, 300),
+        (
+            "M2 nominal 17",
+            17,
+            DungeonConfig::nominal_m2(),
+            10_000,
+            300,
+        ),
+        (
+            "M2 nominal 255",
+            255,
+            DungeonConfig::nominal_m2(),
+            10_000,
+            300,
+        ),
         (
             "M2 nominal patterned",
             0x5555_5555_5555_5555,
@@ -209,7 +221,13 @@ fn frozen_support_corpus_generates_deterministically_within_budgets() {
             10_000,
             300,
         ),
-        ("M2 nominal max", u64::MAX, DungeonConfig::nominal_m2(), 10_000, 300),
+        (
+            "M2 nominal max",
+            u64::MAX,
+            DungeonConfig::nominal_m2(),
+            10_000,
+            300,
+        ),
         (
             "Boundary A",
             42,
@@ -268,8 +286,11 @@ fn frozen_support_corpus_generates_deterministically_within_budgets() {
         assert_eq!(meta_a, meta_b, "{name} metadata is not deterministic");
         assert!(map_a.starts_with("{\n\"classname\" \"worldspawn\"\n"));
         assert!(map_a.contains("\"classname\" \"info_player_start\""));
-        assert!(map_a.contains("\"wad\" \"dungeon_theme.wad\""));
-        assert!(meta_a.face_count_estimate < face_budget, "{name} face budget");
+        assert!(map_a.contains("\"wad\" \"cc0_stone_beta.wad\""));
+        assert!(
+            meta_a.face_count_estimate < face_budget,
+            "{name} face budget"
+        );
         assert!(meta_a.entity_count < entity_budget, "{name} entity budget");
     }
 }

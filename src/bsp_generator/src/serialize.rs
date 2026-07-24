@@ -101,10 +101,10 @@ fn emit_face(out: &mut String, face: &BrushFace) {
     );
 
     // Plane points: ( x y z ) ( x y z ) ( x y z )
-    write!(out, "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) ",
-        p0.0, p0.1, p0.2,
-        p1.0, p1.1, p1.2,
-        p2.0, p2.1, p2.2,
+    write!(
+        out,
+        "( {} {} {} ) ( {} {} {} ) ( {} {} {} ) ",
+        p0.0, p0.1, p0.2, p1.0, p1.1, p1.2, p2.0, p2.1, p2.2,
     )
     .unwrap();
 
@@ -123,12 +123,7 @@ fn emit_face(out: &mut String, face: &BrushFace) {
 }
 
 fn emit_axis(out: &mut String, axis: &[i32; 4]) {
-    write!(
-        out,
-        "[ {} {} {} {} ]",
-        axis[0], axis[1], axis[2], axis[3]
-    )
-    .unwrap();
+    write!(out, "[ {} {} {} {} ]", axis[0], axis[1], axis[2], axis[3]).unwrap();
 }
 
 fn emit_key_value(out: &mut String, key: &str, value: &str) {
@@ -177,7 +172,7 @@ mod tests {
                     brushes: Vec::new(),
                 },
             ],
-            wad: "dungeon_theme.wad".to_string(),
+            wad: "test.wad".to_string(),
         }
     }
 
@@ -187,23 +182,33 @@ mod tests {
     fn output_starts_with_worldspawn() {
         let emission = make_test_emission();
         let s = serialize(&emission);
-        assert!(s.starts_with("{\n\"classname\" \"worldspawn\"\n"), "got: {:?}", s);
+        assert!(
+            s.starts_with("{\n\"classname\" \"worldspawn\"\n"),
+            "got: {:?}",
+            s
+        );
     }
 
     #[test]
     fn output_ends_with_terminal_newline() {
         let emission = make_test_emission();
         let s = serialize(&emission);
-        assert!(s.ends_with('\n'), "must end with exactly one terminal newline");
+        assert!(
+            s.ends_with('\n'),
+            "must end with exactly one terminal newline"
+        );
         // Only one trailing \n (the last `}\n` should be the only one)
-        assert!(!s.ends_with("\n\n"), "must not have double trailing newline");
+        assert!(
+            !s.ends_with("\n\n"),
+            "must not have double trailing newline"
+        );
     }
 
     #[test]
     fn contains_wad_reference() {
         let emission = make_test_emission();
         let s = serialize(&emission);
-        assert!(s.contains("\"wad\" \"dungeon_theme.wad\""));
+        assert!(s.contains("\"wad\" \"test.wad\""));
     }
 
     #[test]
@@ -266,7 +271,11 @@ mod tests {
         assert!(!face_lines.is_empty(), "no face lines found");
         for line in &face_lines {
             assert!(line.contains("[ "), "missing bracket space in: {}", line);
-            assert!(line.contains(" ]"), "missing bracket close space in: {}", line);
+            assert!(
+                line.contains(" ]"),
+                "missing bracket close space in: {}",
+                line
+            );
         }
     }
 
@@ -278,8 +287,10 @@ mod tests {
         let s = serialize(&emission);
         let first_entity_start = s.find("{\n\"classname\"").unwrap();
         let after_worldspawn: &str = &s[first_entity_start..];
-        assert!(after_worldspawn.starts_with("{\n\"classname\" \"worldspawn\""),
-            "first entity must be worldspawn");
+        assert!(
+            after_worldspawn.starts_with("{\n\"classname\" \"worldspawn\""),
+            "first entity must be worldspawn"
+        );
     }
 
     #[test]

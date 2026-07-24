@@ -13,17 +13,19 @@ use crate::intent::{
 use crate::junction;
 
 // ── Texture role names ────────────────────────────────────────────────────
+//
+// Bound from the CC0 Stone Beta theme (themes/cc0_stone_beta/theme.toml).
 
-/// Texture for room floors.
-const FLOOR_TEXTURE: &str = "generator_floor";
-/// Texture for room and corridor ceilings.
-const CEILING_TEXTURE: &str = "generator_ceiling";
-/// Texture for room walls.
-const WALL_TEXTURE: &str = "generator_wall";
-/// Texture for corridor walls.
-const CORRIDOR_WALL_TEXTURE: &str = "generator_wall";
-/// Texture for corridor floors.
-const CORRIDOR_FLOOR_TEXTURE: &str = "generator_floor";
+/// Texture for room floors.  Theme role: `floor`.
+const FLOOR_TEXTURE: &str = "stone_floor";
+/// Texture for room and corridor ceilings.  Theme role: `ceiling`.
+const CEILING_TEXTURE: &str = "stone_ceiling";
+/// Texture for room walls.  Theme role: `wall`.
+const WALL_TEXTURE: &str = "stone_wall";
+/// Texture for corridor walls.  Theme role: `wall`.
+const CORRIDOR_WALL_TEXTURE: &str = "stone_wall";
+/// Texture for corridor floors.  Theme role: `floor`.
+const CORRIDOR_FLOOR_TEXTURE: &str = "stone_floor";
 
 // ── Construction parameters ───────────────────────────────────────────────
 
@@ -119,7 +121,7 @@ pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionI
     EmissionIntent {
         brushes,
         entities,
-        wad: "dungeon_theme.wad".to_string(),
+        wad: "cc0_stone_beta.wad".to_string(),
     }
 }
 
@@ -185,8 +187,7 @@ fn build_corridor_brushes(corr: &Corridor) -> Vec<Brush> {
         (corr.end.1, corr.start.1)
     };
 
-    let is_horizontal =
-        (corr.end.0 - corr.start.0).abs() >= (corr.end.1 - corr.start.1).abs();
+    let is_horizontal = (corr.end.0 - corr.start.0).abs() >= (corr.end.1 - corr.start.1).abs();
 
     if is_horizontal {
         // East-West: walls are north and south
@@ -303,7 +304,7 @@ mod tests {
         // Floor brush has 6 faces; bottom face has z = room.position.2 = 0
         let floor = &brushes[0];
         let bottom_face = &floor.faces[0]; // first face is bottom
-        // All 3 points of bottom face have same Z = 0
+                                           // All 3 points of bottom face have same Z = 0
         for p in &bottom_face.plane_points {
             assert_eq!(p.2, 0);
         }
@@ -356,7 +357,7 @@ mod tests {
             junctions: Vec::new(),
         };
         let emission = build_emission(&layout, &routed);
-        assert_eq!(emission.wad, "dungeon_theme.wad");
+        assert_eq!(emission.wad, "cc0_stone_beta.wad");
     }
 
     #[test]
@@ -385,10 +386,7 @@ mod tests {
 
     #[test]
     fn emission_counts_match_layout() {
-        let rooms = vec![
-            room(0, 0, 0, 64, 64, 128),
-            room(160, 0, 0, 64, 64, 128),
-        ];
+        let rooms = vec![room(0, 0, 0, 64, 64, 128), room(160, 0, 0, 64, 64, 128)];
         let corr = corridor_h(64, 0, 0, 96);
         let layout = LayoutIntent {
             rooms,
