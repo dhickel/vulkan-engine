@@ -35,66 +35,66 @@ pub fn make_brush(
 
     Brush {
         faces: vec![
-            // Bottom face: plane at z = min.2
+            // Bottom face (z = min.2)
             BrushFace {
                 plane_points: [
+                    (min.0, max.1, min.2),
                     (min.0, min.1, min.2),
                     (max.0, min.1, min.2),
-                    (min.0, max.1, min.2),
                 ],
                 texture: tex.clone(),
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // Top face: plane at z = max.2
+            // Top face (z = max.2)
             BrushFace {
                 plane_points: [
                     (min.0, max.1, max.2),
                     (max.0, max.1, max.2),
-                    (min.0, min.1, max.2),
+                    (max.0, min.1, max.2),
                 ],
                 texture: tex.clone(),
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // North face: plane at y = max.1
+            // North face (y = max.1)
             BrushFace {
                 plane_points: [
+                    (min.0, max.1, max.2),
                     (min.0, max.1, min.2),
                     (max.0, max.1, min.2),
-                    (min.0, max.1, max.2),
                 ],
                 texture: tex.clone(),
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // South face: plane at y = min.1
+            // South face (y = min.1)
             BrushFace {
                 plane_points: [
                     (min.0, min.1, max.2),
                     (max.0, min.1, max.2),
-                    (min.0, min.1, min.2),
-                ],
-                texture: tex.clone(),
-                u_axis: default_axis,
-                v_axis: default_axis,
-            },
-            // West face: plane at x = min.0
-            BrushFace {
-                plane_points: [
-                    (min.0, min.1, max.2),
-                    (min.0, max.1, max.2),
-                    (min.0, min.1, min.2),
-                ],
-                texture: tex.clone(),
-                u_axis: default_axis,
-                v_axis: default_axis,
-            },
-            // East face: plane at x = max.0
-            BrushFace {
-                plane_points: [
                     (max.0, min.1, min.2),
+                ],
+                texture: tex.clone(),
+                u_axis: default_axis,
+                v_axis: default_axis,
+            },
+            // West face (x = min.0)
+            BrushFace {
+                plane_points: [
+                    (min.0, max.1, max.2),
+                    (min.0, min.1, max.2),
+                    (min.0, min.1, min.2),
+                ],
+                texture: tex.clone(),
+                u_axis: default_axis,
+                v_axis: default_axis,
+            },
+            // East face (x = max.0)
+            BrushFace {
+                plane_points: [
                     (max.0, max.1, min.2),
+                    (max.0, min.1, min.2),
                     (max.0, min.1, max.2),
                 ],
                 texture: tex,

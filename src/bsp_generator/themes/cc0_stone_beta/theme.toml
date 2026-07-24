@@ -1,0 +1,5 @@
+[roles]
+floor = "stone_floor"
+wall = "stone_wall"
+ceiling = "stone_ceiling"
+accent = "stone_accent"

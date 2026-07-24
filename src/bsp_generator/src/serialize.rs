@@ -108,22 +108,9 @@ fn emit_face(out: &mut String, face: &BrushFace) {
     )
     .unwrap();
 
-    // Texture name
-    write!(out, "\"{}\" ", face.texture).unwrap();
-
-    // U axis: [ ux uy uz uoff ]
-    emit_axis(out, &face.u_axis);
-    out.push(' ');
-
-    // V axis: [ vx vy vz voff ]
-    emit_axis(out, &face.v_axis);
-
-    // Rotation, scale_x, scale_y (fixed canonical values)
-    out.push_str(" 0 1 1\n");
-}
-
-fn emit_axis(out: &mut String, axis: &[i32; 4]) {
-    write!(out, "[ {} {} {} {} ]", axis[0], axis[1], axis[2], axis[3]).unwrap();
+    // Texture name + standard offset/rotation/scale (no explicit axis vectors)
+    // Format: "name" x_off y_off rotation x_scale y_scale
+    write!(out, "\"{}\" 0 0 0 1.0 1.0\n", face.texture).unwrap();
 }
 
 fn emit_key_value(out: &mut String, key: &str, value: &str) {
@@ -261,22 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn texture_axes_use_bracket_format() {
+    fn texture_axes_use_standard_format() {
         let emission = make_test_emission();
         let s = serialize(&emission);
-        // Every face line should contain "[ 1 0 0 0 ]" pattern
-        assert!(s.contains("[ 1 0 0 0 ]"), "missing texture axis format");
-        // Verify bracket spacing: exactly "[ 1 0 0 0 ]" with single spaces
+        // Every face line should contain standard offset/rotation/scale pattern
+        assert!(s.contains("0 0 0 1.0 1.0"), "missing texture coordinate format");
+        // Verify no bracket format remains
         let face_lines: Vec<&str> = s.lines().filter(|l| l.contains('[')).collect();
-        assert!(!face_lines.is_empty(), "no face lines found");
-        for line in &face_lines {
-            assert!(line.contains("[ "), "missing bracket space in: {}", line);
-            assert!(
-                line.contains(" ]"),
-                "missing bracket close space in: {}",
-                line
-            );
-        }
+        assert!(face_lines.is_empty(), "no bracket format expected");
     }
 
     // ── Entity ordering ───────────────────────────────────────────────

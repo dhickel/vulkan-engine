@@ -17,9 +17,9 @@ light_executable = "light"
 
 # BSP2 arguments: -bsp2 on qbsp; light auto-detects BSP2 from magic.
 # ericw-tools 2.0.0-alpha3 light does not accept -bsp2 or -colored flags.
-# Pin light to one thread so generated .bsp/.lit bytes are reproducible.
-default_qbsp_args = ["-bsp2"]
-default_vis_args = []
+# Pin all stages to one thread so generated .bsp/.lit bytes are reproducible.
+default_qbsp_args = ["-bsp2", "-threads", "1"]
+default_vis_args = ["-threads", "1"]
 default_light_args = ["-threads", "1", "-lit"]
 
 # Safety limits

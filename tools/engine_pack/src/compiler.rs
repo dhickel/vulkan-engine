@@ -742,7 +742,7 @@ fn verify_compiler_version(
 }
 
 /// Compute SHA-256 of a file.
-fn sha256_file(path: &Path) -> Result<String, CompilerError> {
+pub fn sha256_file(path: &Path) -> Result<String, CompilerError> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = [0u8; 65536];
@@ -777,7 +777,7 @@ fn verify_expected_hash(
 }
 
 // Simple SHA-256 implementation to avoid adding a dependency.
-mod sha2 {
+pub mod sha2 {
     pub struct Sha256 {
         state: [u32; 8],
         buf: [u8; 64],

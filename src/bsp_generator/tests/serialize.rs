@@ -257,7 +257,7 @@ fn face_line_has_exact_format() {
 // ── Texture axis format ─────────────────────────────────────────────────
 
 #[test]
-fn texture_axis_bracket_format_with_single_spaces() {
+fn texture_axis_standard_format() {
     let brush = Brush {
         faces: vec![BrushFace {
             plane_points: [(0, 0, 0), (64, 0, 0), (0, 64, 0)],
@@ -273,16 +273,13 @@ fn texture_axis_bracket_format_with_single_spaces() {
     };
     let s = serialize(&emission);
 
-    // Must contain "[ 1 0 0 0 ] [ 0 1 0 0 ]"
-    assert!(s.contains("[ 1 0 0 0 ]"));
-    assert!(s.contains("[ 0 1 0 0 ]"));
+    // Standard format: texture_name x_off y_off rot x_scale y_scale
+    assert!(s.contains("0 0 0 1.0 1.0"), "must use standard offset/scale format");
 
-    // Verify exact format: single spaces, no double spaces
+    // Verify no Valve 220 bracket format remains
     let face_line = s.lines().find(|l| l.contains("wall")).unwrap();
-    assert!(face_line.contains("[ 1 0 0 0 ]"));
-    // No double spaces in brackets
-    assert!(!face_line.contains("[  "));
-    assert!(!face_line.contains("  ]"));
+    assert!(!face_line.contains('['), "no bracket texture axes expected");
+    assert!(!face_line.contains(']'), "no bracket texture axes expected");
 }
 
 // ── Line endings ────────────────────────────────────────────────────────

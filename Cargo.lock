@@ -407,9 +407,11 @@ name = "bsp_beta"
 version = "0.1.0"
 dependencies = [
  "bsp",
+ "bsp_generator",
  "bsp_runtime",
  "engine",
  "engine_events",
+ "engine_pack",
  "env_logger 0.11.9",
  "glam 0.28.0",
  "input",
@@ -1007,6 +1009,7 @@ name = "engine_pack"
 version = "0.1.0"
 dependencies = [
  "bsp",
+ "bsp_generator",
  "launch_shared",
  "libc",
  "package_io",
