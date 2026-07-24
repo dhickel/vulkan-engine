@@ -55,7 +55,7 @@ The `package_io::PackageResolver` boundary used by BSP package loading enforces:
 | Symlink escape | Non-regular file rejection |
 | Content hash verification | `ContentIdentity` vs manifest `expected_hashes` |
 
-`package_io::AuthorizedBytes::new` is `pub(crate)` — external crates must go through `PackageResolver::resolve` before passing companion/source bytes into BSP parsing or extraction.
+`package_io::AuthorizedBytes::new` is `pub(crate)` — external crates must go through `PackageResolver::resolve` before passing companion/source bytes into BSP parsing or extraction. `load_bsp_package` derives `<texture>_norm.png` and `<texture>_gloss.png` candidates from sanitized miptex identities, resolves them only under confined package roots, and stores the resulting `ConfinedResource`s on `LoadedBspPackage`. `prepare_from_loaded_package` converts those resources to neutral owned bytes at the coordinator boundary.
 
 ## 4. Neutral Extraction ABI
 
@@ -66,6 +66,7 @@ The `bsp::extract` module produces renderer-agnostic DTOs:
 | `ExtractedBsp` | top-level container | `bsp_runtime` |
 | `FaceGeometry` | indexed triangle geometry in engine space | `renderer::build_face_meshes` |
 | `BspMaterial` | resolved texture + lightmap + surface class | `renderer::build_bsp_material_descs` |
+| `ExtractedTexture::pbr_companions` | optional authorized normal/gloss PNG bytes and diagnostic logical paths | renderer upload preflight |
 | `FaceLightmapLayout` | atlas offset, Quake-grid-snapped luxel extents, half-luxel-centered UVs, per-style layers | `renderer` atlas upload |
 | `ExtractedVisibility` | VIS bytes, world model 0 `visleaf_count`, nodes/leaves/planes; PVS bit `i` maps raw leaf `i + 1` | renderer PVS submission and light selection |
 | `LightDescriptor` | point light position, color, intensity | `renderer` light publication |
@@ -86,6 +87,7 @@ BspExtractionRequest
 renderer::prepare_bsp_mount()
        │
        ├─► plan_bsp_upload()          → bounded merged batches (≤2,048), shared material plans
+       │                              → validated/packed material data (R mask, GB normal, A gloss)
        ├─► merged batch upload        → MeshHandle[]         (VkMeshBuffers, VkSubAlloc)
        ├─► shared material register   → BspMaterialHandle[]   (descriptor sets 1+2)
        ├─► BspSurfaceCache            → VkImage (lightmap atlas, 4-layer array)
@@ -128,7 +130,7 @@ Identical six-binding layout as `SceneData`. BSP and PBR paths can share the sam
 | binding | type | content |
 |---------|------|---------|
 | 0 | sampler2D | albedo texture (one array layer) |
-| 1 | sampler2D | fullbright mask |
+| 1 | sampler2D | packed material data: R fullbright mask, G/B normal X/Y, A gloss |
 | 2 | sampler2DArray | lightmap atlas (4 face-slot-local layers) |
 | 3 | UBO | `BspSurfaceUniform` (80 B) |
 
@@ -150,17 +152,21 @@ Identical six-binding layout as `SceneData`. BSP and PBR paths can share the sam
 - Lightmap images are `R8G8B8A8_UNORM`; fragment shaders decode sampled bytes with `pow(encoded, 2.2)` before applying the 2× overbright factor.
 - Opaque, liquid, and sky output all use the shared renderer exposure/tone-map/gamma path.
 - Fullbright masks multiply sampled albedo RGB. A white scalar is not a valid emissive color because it destroys palette-authored lava/trim hues.
+- External PBR companions opt opaque/alpha-mask materials into `bsp_pbr.frag`: baked lightmaps remain diffuse irradiance, `roughness = 1 - gloss`, and set 0 prefiltered environment + BRDF LUT provide dielectric specular. Missing normal/gloss channels use flat/fully-rough defaults.
 - `{...}` alpha-mask textures clear alpha and fullbright emission only where palette index 255 occurs; index 255 stays opaque on other texture classes.
+- With no PBR companion, packed material-data bytes reproduce the prior fullbright RGBA upload and the surface stays on `bsp_lightmapped.frag`.
 
 ### Pipeline Variants
 
-All five BSP pipeline variants share one `vk::PipelineLayout`:
+All seven BSP pipeline variants share one `vk::PipelineLayout`:
 
 | variant | blend | depth write | cull | fragment shader |
 |---------|-------|-------------|------|-----------------|
 | `bsp_opaque` | off | write | back | `bsp_lightmapped.frag` |
 | `bsp_fullbright` | off | write | back | `bsp_lightmapped.frag` (fullbright path) |
 | `bsp_alpha_mask` | off (alpha test) | write | none (two-sided) | `bsp_lightmapped.frag` |
+| `bsp_pbr_opaque` | off | write | back | `bsp_pbr.frag` |
+| `bsp_pbr_alpha_mask` | off (alpha test) | write | none (two-sided) | `bsp_pbr.frag` |
 | `bsp_sky` | off | no write | back | `bsp_sky.frag` |
 | `bsp_liquid` | alpha blend | no write | none (two-sided) | `bsp_liquid.frag` |
 
@@ -180,6 +186,7 @@ The coordinator must pump transfer submissions (done automatically by `Renderer:
 
 ```
 prepare(bytes, scale, source_id) / prepare_from_world(world, scale, source_id)
+/ prepare_from_loaded_package(package, scale)
   │
   ├─► BspLoader::load() or caller-provided world → BspWorld (validated, immutable)
   ├─► extract(request)          → ExtractedBsp (neutral DTOs)
@@ -244,7 +251,7 @@ cache_identity = SHA-256(
 )
 ```
 
-This identity is stored in the source-link and used to detect when cached GPU resources need invalidation.
+This identity is stored in the source-link and used to detect when cached GPU resources need invalidation. Normal and gloss companion bytes are independently hashed into sorted `CompanionId` entries, so adding, removing, or editing either map invalidates the candidate cache identity.
 
 ## 11. Fence Retirement
 
@@ -320,6 +327,7 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 | Bridge commit panics | coordinator poisoned |
 | Stale generation at commit | `StaleGeneration` error |
 | Renderer upload fails | mount not created, coordinator rollback |
+| Malformed or dimension-mismatched PBR PNG | rejected during upload planning before GPU allocation |
 | Content hash mismatch on restore | restore cancelled, active state preserved |
 | Source hash mismatch on restore | `ContentHashMismatch` error |
 
@@ -331,7 +339,7 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 - Source-link: `src/bsp_runtime/src/source_link.rs`, `src/bsp_runtime/src/cache.rs`
 - Renderer BSP: `src/renderer/src/api/bsp.rs`, `src/renderer/src/data/bsp_import.rs`, `src/renderer/src/data/bsp_material.rs`
 - Vulkan BSP: `src/renderer/src/vulkan/vk_bsp.rs`
-- BSP shaders: `src/renderer/src/shaders/bsp_lightmapped.*`, `src/renderer/src/shaders/bsp_sky.*`, `src/renderer/src/shaders/bsp_liquid.*`
+- BSP shaders: `src/renderer/src/shaders/bsp_lightmapped.*`, `src/renderer/src/shaders/bsp_pbr.*`, `src/renderer/src/shaders/bsp_sky.*`, `src/renderer/src/shaders/bsp_liquid.*`
 - Scene BSP: `src/renderer/src/scene/bsp_visibility.rs`
 - Descriptor ABI guards: `src/renderer/tests/descriptor_abi.rs`
 - App entrypoint: `apps/bsp_beta/src/main.rs`

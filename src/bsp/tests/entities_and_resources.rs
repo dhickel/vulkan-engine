@@ -536,6 +536,10 @@ fn extraction_miptex_texture_resolution() {
     let request = BspExtractionRequest {
         world,
         palette: Some(palette),
+        texture_companions: vec![
+            TextureCompanion::new("textures/WALL01_norm.png", vec![1, 2, 3]),
+            TextureCompanion::new("textures/WALL01_gloss.png", vec![4, 5, 6]),
+        ],
         ..Default::default()
     };
     let extracted = extract(request).unwrap();
@@ -548,4 +552,18 @@ fn extraction_miptex_texture_resolution() {
     assert!(tex.palette_indices.len() >= 16 * 16);
     assert!(tex.albedo.len() >= 16 * 16 * 4);
     assert!(tex.fullbright_mask.len() >= 16 * 16);
+    assert_eq!(
+        tex.pbr_companions
+            .normal
+            .as_ref()
+            .map(|companion| companion.logical_path.as_str()),
+        Some("textures/WALL01_norm.png")
+    );
+    assert_eq!(
+        tex.pbr_companions
+            .gloss
+            .as_ref()
+            .map(|companion| companion.bytes.as_slice()),
+        Some(&[4, 5, 6][..])
+    );
 }

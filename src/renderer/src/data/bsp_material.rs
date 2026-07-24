@@ -17,6 +17,10 @@ pub enum BspMaterialPipeline {
     Opaque,
     /// Fullbright/emissive surfaces; same depth/blend as Opaque but adds emission.
     Fullbright,
+    /// Opaque lightmapped surface with external normal/gloss PBR companions.
+    PbrOpaque,
+    /// Alpha-masked surface with external normal/gloss PBR companions.
+    PbrAlphaMask,
     /// Alpha-masked surfaces (fences, grates); alpha test, depth write, two-sided.
     AlphaMask,
     /// Sky surfaces; depth test no-write, back-face cull, environment sampling.
@@ -36,6 +40,10 @@ pub enum BspSurfaceClass {
     Lightmapped,
     /// Fullbright/emissive surface (skip lightmap sampling).
     Fullbright,
+    /// Standard lightmapped surface shaded with external PBR companions.
+    PbrLightmapped,
+    /// Alpha-masked surface shaded with external PBR companions.
+    PbrAlphaMask,
     /// Alpha-masked surface (fences, grates, etc.).
     AlphaMask,
     /// Sky surface (depth-preserving, environment behind).
@@ -50,14 +58,15 @@ pub enum BspSurfaceClass {
 ///
 /// BSP materials bind three samplers plus a UBO in their own descriptor set:
 /// - Albedo (base color / diffuse)
-/// - Fullbright emissive mask (optional; default white if not used)
+/// - Packed material data: R=fullbright, G/B=normal X/Y, A=gloss
 /// - Lightmap atlas (sampler2DArray, style-indexed)
 #[cfg(feature = "bsp")]
 #[derive(Debug, Clone)]
 pub struct BspTextureSet {
     /// Albedo texture handle (base color).
     pub albedo: BspTextureHandle,
-    /// Fullbright emissive mask handle (optional).
+    /// Packed material-data handle. Its R channel remains the fullbright mask;
+    /// optional PBR companions occupy G/B/A without changing the descriptor ABI.
     pub fullbright_mask: Option<BspTextureHandle>,
     /// Lightmap atlas texture handle (sampler2DArray).
     pub lightmap_atlas: BspTextureHandle,

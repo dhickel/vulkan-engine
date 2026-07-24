@@ -23,7 +23,7 @@ use crate::bridge::{
     AppBridge, BehaviorEntityRecipe, BridgeAggregator, EntityCollisionRecipe, LightEntityRecipe,
     WorldCollisionRecipe,
 };
-use crate::cache::CacheIdentity;
+use crate::cache::{compute_identity_hash, CacheIdentity, CompanionId};
 use crate::candidate::{BspCandidate, CandidatePointLight};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
@@ -249,18 +249,59 @@ impl BspCoordinator {
             }
         })?;
 
-        self.build_candidate(world, scale, source_identity, token)
+        self.build_candidate(world, Vec::new(), scale, source_identity, token)
     }
 
-    /// Prepare a BSP from a package resolver using strict package_io trust
-    /// boundaries. This is the preferred entrypoint for production loads.
+    /// Prepare a package-loaded BSP and its auto-discovered PBR companions.
+    pub fn prepare_from_loaded_package(
+        &mut self,
+        package: crate::package::LoadedBspPackage,
+        scale: Option<f32>,
+    ) -> Result<PrepareResult, BspRuntimeError> {
+        let crate::package::LoadedBspPackage {
+            world,
+            bsp_resource,
+            pbr_texture_resources,
+            ..
+        } = package;
+        let source_identity = bsp_resource.id.as_str().to_string();
+        drop(bsp_resource);
+        let texture_companions = pbr_texture_resources
+            .into_iter()
+            .map(|resource| {
+                let logical_path = resource.id.as_str().to_string();
+                bsp::resources::TextureCompanion::new(logical_path, resource.bytes.into_bytes())
+            })
+            .collect();
+        self.prepare_from_world_with_texture_companions(
+            world,
+            texture_companions,
+            scale,
+            source_identity,
+        )
+    }
+
+    /// Prepare a pre-parsed BSP world.
     ///
-    /// The caller provides a pre-loaded [`bsp::world::BspWorld`] and
-    /// authorized companion bytes. All parsing and extraction uses the
-    /// same candidate path as [`prepare`](BspCoordinator::prepare).
+    /// Use [`prepare_from_world_with_texture_companions`](Self::prepare_from_world_with_texture_companions)
+    /// when the caller has authorized external PBR texture bytes.
     pub fn prepare_from_world(
         &mut self,
         world: bsp::world::BspWorld,
+        scale: Option<f32>,
+        source_identity: impl Into<String>,
+    ) -> Result<PrepareResult, BspRuntimeError> {
+        self.prepare_from_world_with_texture_companions(world, Vec::new(), scale, source_identity)
+    }
+
+    /// Prepare a pre-parsed world with authorized external PBR texture companions.
+    ///
+    /// Companion bytes are matched during neutral extraction by the exact
+    /// `<texture>_norm.png` / `<texture>_gloss.png` filename convention.
+    pub fn prepare_from_world_with_texture_companions(
+        &mut self,
+        world: bsp::world::BspWorld,
+        texture_companions: Vec<bsp::resources::TextureCompanion>,
         scale: Option<f32>,
         source_identity: impl Into<String>,
     ) -> Result<PrepareResult, BspRuntimeError> {
@@ -279,13 +320,20 @@ impl BspCoordinator {
         );
         let token = self.generation.token();
 
-        self.build_candidate(world, scale, source_identity.into(), token)
+        self.build_candidate(
+            world,
+            texture_companions,
+            scale,
+            source_identity.into(),
+            token,
+        )
     }
 
     /// Common candidate construction from a parsed BspWorld.
     fn build_candidate(
         &mut self,
         world: bsp::world::BspWorld,
+        texture_companions: Vec<bsp::resources::TextureCompanion>,
         scale: Option<f32>,
         source_identity: String,
         token: BspGenerationToken,
@@ -297,6 +345,7 @@ impl BspCoordinator {
         // Extract DTOs
         let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
             world,
+            texture_companions,
             scale: resolved_scale,
             ..Default::default()
         })
@@ -1236,12 +1285,40 @@ impl BspCoordinator {
 
     /// Build a cache identity from extracted DTOs.
     fn build_cache_identity(&self, extracted: &ExtractedBsp) -> CacheIdentity {
+        let mut companion_identities = extracted
+            .textures
+            .iter()
+            .flat_map(|texture| {
+                [
+                    texture
+                        .pbr_companions
+                        .normal
+                        .as_ref()
+                        .map(|companion| CompanionId {
+                            kind: format!("pbr-normal:{}", texture.identity),
+                            content_hash: compute_identity_hash(&companion.bytes),
+                        }),
+                    texture
+                        .pbr_companions
+                        .gloss
+                        .as_ref()
+                        .map(|companion| CompanionId {
+                            kind: format!("pbr-gloss:{}", texture.identity),
+                            content_hash: compute_identity_hash(&companion.bytes),
+                        }),
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .collect::<Vec<_>>();
+        companion_identities.sort();
+
         CacheIdentity::compute(
             extracted.content_hash,
             extracted.profile_tag,
             0.0254,
             [0; 32],
-            vec![],
+            companion_identities,
             vec![],
             vec![],
             Default::default(),

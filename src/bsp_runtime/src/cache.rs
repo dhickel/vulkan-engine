@@ -175,7 +175,7 @@ impl CacheIdentity {
 
 /// Compute a 32-byte identity hash from arbitrary input bytes using a
 /// simple multi-lane hash (same algorithm as `bsp::compute_content_hash`).
-fn compute_identity_hash(data: &[u8]) -> [u8; 32] {
+pub(crate) fn compute_identity_hash(data: &[u8]) -> [u8; 32] {
     let mut lanes = [
         0xcbf2_9ce4_8422_2325u64,
         0x9e37_79b9_7f4a_7c15u64,

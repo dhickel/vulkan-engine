@@ -14,7 +14,7 @@ use crate::identity::{self, EntityIdentity};
 use crate::lightmaps::{self, FaceLightmapLayout, LightmapAtlas, Luxel};
 use crate::lumps;
 use crate::materials::{self, AnimatedTexture, BspMaterial, SurfaceClass};
-use crate::resources::{self, ExtractedTexture, Palette};
+use crate::resources::{self, ExtractedTexture, Palette, TextureCompanion};
 use crate::visibility;
 use crate::wad;
 use crate::world::BspWorld;
@@ -34,6 +34,9 @@ pub struct BspExtractionRequest {
     pub palette: Option<Palette>,
     /// Authorized WAD archive bytes for texture resolution, by sanitized basename.
     pub wad_archives: Vec<(String, Vec<u8>)>,
+    /// Authorized loose texture files searched for `<texture>_norm.png` and
+    /// `<texture>_gloss.png` companions in request order.
+    pub texture_companions: Vec<TextureCompanion>,
     /// Whether to use strict/release severity policy.
     pub strict: bool,
     /// Coordinate scale factor (default 0.0254).
@@ -55,6 +58,7 @@ impl Default for BspExtractionRequest {
             world: BspWorld::empty(),
             palette: None,
             wad_archives: Vec::new(),
+            texture_companions: Vec::new(),
             strict: false,
             scale: 0.0254,
             fullbright_start: 224,
@@ -240,6 +244,7 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         world,
         palette,
         wad_archives,
+        texture_companions,
         strict,
         scale,
         fullbright_start,
@@ -259,6 +264,7 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         &world,
         effective_palette.as_ref(),
         &wad_archives,
+        &texture_companions,
         fullbright_start,
         fullbright_end,
         strict,
@@ -560,6 +566,7 @@ fn extract_textures(
     world: &BspWorld,
     palette: Option<&Palette>,
     wad_archives: &[(String, Vec<u8>)],
+    texture_companions: &[TextureCompanion],
     fullbright_start: u8,
     fullbright_end: u8,
     strict: bool,
@@ -602,7 +609,7 @@ fn extract_textures(
         if !seen.insert(tex_name.clone()) {
             continue;
         }
-        let (texture, diags) = resources::resolve_extracted_texture(
+        let (mut texture, diags) = resources::resolve_extracted_texture(
             tex_name,
             &world.miptex_data,
             &parsed_wads,
@@ -611,6 +618,8 @@ fn extract_textures(
             fullbright_end,
             strict,
         );
+        texture.pbr_companions =
+            resources::discover_pbr_texture_companions(tex_name, texture_companions);
         textures.push(texture);
         diagnostics.extend(diags);
     }

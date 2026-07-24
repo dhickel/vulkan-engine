@@ -87,14 +87,12 @@ compatibility marker. Any ABI change updates all of those as one compatibility u
 
 **Frozen**: 2026-07-23. Set 0 remains compatible with shared scene bindings. In-flight descriptors are never mutated for frame-varying state. Static textures use one array layer.
 
-BSP lightmapped surfaces use a dedicated descriptor path **separate** from PBR. BSP set 0
-reuses the `SceneData` six-binding layout so scene data and shadow map are shared. BSP set 1
-is a material-specific layout with four bindings. BSP set 2 carries frame-local values.
+BSP lightmapped surfaces use a dedicated descriptor path **separate from the general mesh PBR sampler ABI**. External BSP normal/gloss companions use a BSP-specific PBR fragment shader without changing this descriptor layout. BSP set 0 reuses the `SceneData` six-binding layout so scene data, prefiltered environment, BRDF LUT, and shadow map are shared. BSP set 1 is a material-specific layout with four bindings. BSP set 2 carries frame-local values.
 
 | `VkDescType` | Set/binding(s), Vulkan type, stages | Ownership and image/buffer contract | Live pipeline consumers and shader pair |
 |---|---|---|---|
-| `BspScene` | set 0: b0/b1 `UNIFORM_BUFFER`; b2–b5 `COMBINED_IMAGE_SAMPLER`; vertex+fragment | Same binding structure as `SceneData`. b0 `SceneDataUBO`, b1 `EnvironmentUBO`, b2-b3 cube env, b4 BRDF LUT, b5 shadow array. Vertex + fragment visibility. Compatible with shared scene bindings — BSP and PBR can share the same set 0 descriptor set at bind time. | BSP opaque, fullbright, alpha-mask, sky, liquid pipelines. |
-| `BspMaterial` | set 1: b0/b1/b2 `COMBINED_IMAGE_SAMPLER`, b3 `UNIFORM_BUFFER`; fragment | b0 albedo 2D (one array layer for static textures), b1 fullbright mask 2D, b2 lightmap atlas `sampler2DArray` (four face-slot-local lightmap layers), b3 `BspSurfaceUniform` UBO (80 bytes Phase 06). The vertex shader must not read set 1. | All BSP fragment shaders in `bsp_shader_manifest.txt`. |
+| `BspScene` | set 0: b0/b1 `UNIFORM_BUFFER`; b2–b5 `COMBINED_IMAGE_SAMPLER`; vertex+fragment | Same binding structure as `SceneData`. b0 `SceneDataUBO`, b1 `EnvironmentUBO`, b2-b3 cube env, b4 BRDF LUT, b5 shadow array. Vertex + fragment visibility. Compatible with shared scene bindings — BSP and PBR can share the same set 0 descriptor set at bind time. | BSP opaque, fullbright, alpha-mask, PBR opaque, PBR alpha-mask, sky, liquid pipelines. |
+| `BspMaterial` | set 1: b0/b1/b2 `COMBINED_IMAGE_SAMPLER`, b3 `UNIFORM_BUFFER`; fragment | b0 albedo 2D (one array layer for static textures), b1 packed material-data 2D (`R=fullbright`, `G/B=normal X/Y`, `A=gloss`; legacy uploads retain replicated mask RGB + A=255), b2 lightmap atlas `sampler2DArray` (four face-slot-local lightmap layers), b3 `BspSurfaceUniform` UBO (80 bytes Phase 06). The vertex shader must not read set 1. | All BSP fragment shaders in `bsp_shader_manifest.txt`. |
 | `BspFrameValues` | set 2: b0 `UNIFORM_BUFFER`; fragment | Frame-local BSP values: `styleIntensityPacked[16]` (64 float values packed as 16 std140 vec4s), `liquidWarpTime`, `liquidFlowTime`, `globalAnimationTime`. 288 bytes total. Written once per frame max. Per-frame-slot descriptors, never mutated in flight. | All BSP fragment shaders. |
 
 ### BSP surface UBO (set 1, binding 3) — `BspSurfaceUniform`
@@ -139,10 +137,12 @@ std140 layout:
 | BSP opaque | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write ON, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
 | BSP fullbright | same as opaque | same as opaque | off | back | Same shader pair; fullbright path is inside fragment. |
 | BSP alpha mask | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write ON, LESS | off | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
+| BSP PBR opaque | same BSP sets/layout | write ON, LESS | off | back | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_pbr.frag(.spv)`. Baked lightmap is diffuse irradiance; set 0 b3/b4 provide specular IBL. |
+| BSP PBR alpha mask | same BSP sets/layout | write ON, LESS | off | none (two-sided) | Same PBR shader pair with alpha test controlled by `SURF_ALPHA_MASK`. |
 | BSP sky | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` (layout-compatible) | write OFF, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. No `gl_FragDepth`. |
 | BSP liquid | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write OFF, LESS | alpha blend | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |
 
-**Frame-varying update rule (frozen)**: In-flight descriptors are never mutated. Frame-local BSP values (style intensities, animation indices, liquid parameters) are written through fresh or frame-rotated set 2 descriptors each frame, not by mutating descriptors that may still be in flight. Static textures (albedo, fullbright mask) use one array layer — per-frame animation changes are communicated via the animationFrame/animationTime uniforms, not by rewriting texture bindings.
+**Frame-varying update rule (frozen)**: In-flight descriptors are never mutated. Frame-local BSP values (style intensities, animation indices, liquid parameters) are written through fresh or frame-rotated set 2 descriptors each frame, not by mutating descriptors that may still be in flight. Static albedo and packed material-data textures use one array layer — per-frame animation changes are communicated via the animationFrame/animationTime uniforms, not by rewriting texture bindings. External PBR companions are decoded and packed before allocation; they add no descriptor binding.
 
 ### BSP ABI exec guard
 

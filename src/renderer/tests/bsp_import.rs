@@ -5,6 +5,7 @@
 use bsp::geometry::FaceGeometry;
 use bsp::lightmaps::{AtlasPage, FaceLightmapLayout, LightmapAtlas};
 use bsp::materials::{BspMaterial, SurfaceClass};
+use bsp::resources::{ExtractedTexture, PbrTextureCompanions, TextureCompanion};
 use glam::{Vec2, Vec3};
 use renderer::api::bsp::{
     build_bsp_material_descs, build_face_meshes, face_to_procedural_mesh, BspLightmapAtlasPage,
@@ -255,6 +256,62 @@ fn opaque_face_produces_lightmapped_desc() {
 }
 
 // ── Face mesh build for extracted BSP ───────────────────────────────────
+
+#[test]
+fn pbr_companion_face_produces_pbr_lightmapped_desc() {
+    let face_geo = make_face(
+        vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+        vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+    );
+    let mut atlas = LightmapAtlas::new();
+    atlas.pages.push(AtlasPage::new(0, 16, 16));
+    let extracted = bsp::extract::ExtractedBsp {
+        textures: vec![ExtractedTexture {
+            identity: "brick1_2".into(),
+            width: 1,
+            height: 1,
+            albedo: vec![255; 4],
+            fullbright_mask: vec![0],
+            pbr_companions: PbrTextureCompanions {
+                normal: Some(TextureCompanion::new("brick1_2_norm.png", vec![1])),
+                gloss: Some(TextureCompanion::new("brick1_2_gloss.png", vec![2])),
+            },
+            ..ExtractedTexture::default()
+        }],
+        face_geometries: vec![face_geo],
+        face_materials: vec![BspMaterial {
+            material_index: 0,
+            texture_identity: "brick1_2".into(),
+            surface_class: SurfaceClass::Opaque,
+            ..BspMaterial::default()
+        }],
+        face_lightmap_layouts: vec![FaceLightmapLayout {
+            page_index: 0,
+            atlas_offset: (0, 0),
+            luxel_extents: (1, 1),
+            has_data: true,
+            style_layers: vec![],
+        }],
+        lightmap_atlas: atlas,
+        ..make_extracted_with_atlas(LightmapAtlas::new())
+    };
+
+    let descs = build_bsp_material_descs(
+        &extracted,
+        &[BspTextureHandle::new(0, 0)],
+        BspTextureHandle::new(1, 0),
+    );
+    let desc = descs[0].as_ref().unwrap();
+    assert_eq!(desc.surface_class, BspSurfaceClass::PbrLightmapped);
+    assert_ne!(
+        desc.surface_params.surface_flags & renderer::api::bsp::bsp_surface_flags::SURF_PBR,
+        0
+    );
+    assert_ne!(
+        desc.surface_params.receive_mask & renderer::api::bsp::bsp_surface_flags::RECEIVE_IBL,
+        0
+    );
+}
 
 #[test]
 fn build_face_meshes_skips_invalid_faces() {

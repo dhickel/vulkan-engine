@@ -81,6 +81,104 @@ pub struct LoadedBspPackage {
     pub lit_resource: Option<ConfinedResource>,
     /// Loaded WAD archive bytes, keyed by archive name.
     pub wad_resources: Vec<(String, ConfinedResource)>,
+    /// Auto-discovered `<texture>_norm.png` / `<texture>_gloss.png` resources.
+    pub pbr_texture_resources: Vec<ConfinedResource>,
+}
+
+impl LoadedBspPackage {
+    /// Convert confined PBR resources into the neutral extraction inputs.
+    pub fn pbr_texture_companions(&self) -> Vec<bsp::resources::TextureCompanion> {
+        self.pbr_texture_resources
+            .iter()
+            .map(|resource| {
+                bsp::resources::TextureCompanion::new(
+                    resource.id.as_str(),
+                    resource.bytes.as_bytes().to_vec(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Discover supported external PBR companions under package-confined roots.
+///
+/// Candidate root precedence is: the BSP's directory, the game-root `textures/`
+/// directory, package `textures/`, then the package root. Missing files are optional;
+/// every non-missing resolver error remains fail-closed.
+pub fn discover_package_pbr_texture_companions(
+    resolver: &mut PackageResolver,
+    bsp_path: &str,
+    texture_names: &[String],
+) -> Result<Vec<ConfinedResource>, PackageLoadError> {
+    use package_io::DiagnosticCode;
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    let bsp_parent = Path::new(bsp_path)
+        .parent()
+        .and_then(Path::to_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+    let game_root = Path::new(bsp_path)
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::to_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+
+    let mut roots = Vec::new();
+    if let Some(parent) = bsp_parent {
+        roots.push(parent);
+    }
+    if let Some(root) = game_root {
+        roots.push(format!("{root}/textures"));
+    }
+    roots.push("textures".to_string());
+    roots.push(String::new());
+    roots.dedup();
+
+    let mut names = texture_names.to_vec();
+    names.sort();
+    names.dedup();
+    let mut loaded_paths = HashSet::new();
+    let mut resources = Vec::new();
+
+    for texture_name in names {
+        let Some(companion_names) = bsp::resources::pbr_companion_file_names(&texture_name) else {
+            continue;
+        };
+        for filename in [companion_names.normal, companion_names.gloss] {
+            let mut filename_variants = vec![filename.clone()];
+            let lowercase = filename.to_ascii_lowercase();
+            if lowercase != filename {
+                filename_variants.push(lowercase);
+            }
+
+            'roots: for root in &roots {
+                for filename in &filename_variants {
+                    let candidate = if root.is_empty() {
+                        filename.clone()
+                    } else {
+                        format!("{root}/{filename}")
+                    };
+                    if loaded_paths.contains(&candidate) {
+                        break 'roots;
+                    }
+                    match resolver.resolve(&candidate, ResourceKind::Texture) {
+                        Ok(resource) => {
+                            loaded_paths.insert(candidate);
+                            resources.push(resource);
+                            break 'roots;
+                        }
+                        Err(error) if error.code == DiagnosticCode::PackageIoNotFound => {}
+                        Err(error) => return Err(PackageLoadError::Io(error)),
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(resources)
 }
 
 /// Load a BSP and its companions from a package resolver.
@@ -143,6 +241,9 @@ pub fn load_bsp_package(
     // Parse BSP
     let world = BspLoader::load(bsp_resource.bytes.as_bytes(), &options)
         .map_err(PackageLoadError::Parse)?;
+    let texture_names = bsp::resources::collect_miptex_names(&world.miptex_data);
+    let pbr_texture_resources =
+        discover_package_pbr_texture_companions(resolver, bsp_path, &texture_names)?;
 
     Ok(LoadedBspPackage {
         world,
@@ -150,6 +251,7 @@ pub fn load_bsp_package(
         palette_resource: Some(palette_resource),
         lit_resource,
         wad_resources,
+        pbr_texture_resources,
     })
 }
 
@@ -264,6 +366,10 @@ mod tests {
         let pkg = result.unwrap();
         assert_eq!(pkg.world.entities.len(), 1);
         assert!(pkg.palette_resource.is_some());
+        let mut coordinator = crate::coordinator::BspCoordinator::new();
+        assert!(coordinator
+            .prepare_from_loaded_package(pkg, Some(0.0254))
+            .is_ok());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -288,6 +394,39 @@ mod tests {
             false,
         );
         assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pbr_companions_are_discovered_in_texture_root() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join("textures")).unwrap();
+        fs::write(dir.join("textures/brick1_2_norm.png"), b"normal").unwrap();
+        fs::write(dir.join("textures/brick1_2_gloss.png"), b"gloss").unwrap();
+
+        let root = PackageRoot::new(&dir).unwrap();
+        let ledger = BudgetLedger::default_ledger();
+        let mut resolver = PackageResolver::new(root, ledger);
+        let resources = discover_package_pbr_texture_companions(
+            &mut resolver,
+            "maps/test.bsp",
+            &["brick1_2".to_string()],
+        )
+        .unwrap();
+        assert_eq!(resources.len(), 2);
+        let companions = resources
+            .iter()
+            .map(|resource| {
+                bsp::resources::TextureCompanion::new(
+                    resource.id.as_str(),
+                    resource.bytes.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let found = bsp::resources::discover_pbr_texture_companions("brick1_2", &companions);
+        assert!(found.normal.is_some());
+        assert!(found.gloss.is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

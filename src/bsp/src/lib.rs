@@ -323,7 +323,9 @@ pub use visibility::{
 };
 pub use wad::MiptexPixels;
 pub use resources::{
-    ExtractedTexture, TextureSource,
+    discover_pbr_texture_companions, pbr_companion_file_names, ExtractedTexture,
+    PbrCompanionFileNames, PbrTextureCompanions, TextureCompanion, TextureSource, PBR_GLOSS_SUFFIX,
+    PBR_NORMAL_SUFFIX,
 };
 
 #[cfg(test)]

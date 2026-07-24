@@ -478,7 +478,7 @@ struct BspPipelineSpec {
     blend: BlendingMode,
 }
 
-/// Create all five BSP pipeline variants.
+/// Create all seven BSP pipeline variants, including external-companion PBR.
 ///
 /// Returns `(pipelines, shared_layout)`. On any failure, every pipeline created
 /// in this function and the shared layout are destroyed before the error is
@@ -493,6 +493,7 @@ pub fn create_bsp_pipelines(
 ) -> Result<(Vec<(VkPipelineType, vk::Pipeline)>, vk::PipelineLayout), String> {
     let bsp_vs = shader_modules[CoreShaderType::BspLightmappedVert as usize];
     let bsp_lightmapped_fs = shader_modules[CoreShaderType::BspLightmappedFrag as usize];
+    let bsp_pbr_fs = shader_modules[CoreShaderType::BspPbrFrag as usize];
     let bsp_sky_fs = shader_modules[CoreShaderType::BspSkyFrag as usize];
     let bsp_liquid_fs = shader_modules[CoreShaderType::BspLiquidFrag as usize];
 
@@ -516,6 +517,20 @@ pub fn create_bsp_pipelines(
         BspPipelineSpec {
             pipeline_type: VkPipelineType::BspAlphaMask,
             frag_module: bsp_lightmapped_fs,
+            depth_test: (true, vk::CompareOp::LESS),
+            cull_mode: vk::CullModeFlags::NONE,
+            blend: BlendingMode::Disabled,
+        },
+        BspPipelineSpec {
+            pipeline_type: VkPipelineType::BspPbrOpaque,
+            frag_module: bsp_pbr_fs,
+            depth_test: (true, vk::CompareOp::LESS),
+            cull_mode: vk::CullModeFlags::BACK,
+            blend: BlendingMode::Disabled,
+        },
+        BspPipelineSpec {
+            pipeline_type: VkPipelineType::BspPbrAlphaMask,
+            frag_module: bsp_pbr_fs,
             depth_test: (true, vk::CompareOp::LESS),
             cull_mode: vk::CullModeFlags::NONE,
             blend: BlendingMode::Disabled,

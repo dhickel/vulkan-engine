@@ -19,7 +19,7 @@ bsp = { path = "src/bsp" }                        # for direct extraction
 
 - `bsp` crate: pure parser, zero engine dependencies. Only depends on `glam`.
 - `bsp_runtime` crate: integration coordinator. Depends on `bsp`, `renderer` (with `bsp` feature), `engine_events`.
-- `renderer` crate with `bsp` feature: GPU upload, BSP materials, lightmap atlas, BSP pipelines, PVS-aware submission.
+- `renderer` crate with `bsp` feature: GPU upload, BSP materials, lightmap atlas, legacy and external-companion PBR BSP pipelines, PVS-aware submission.
 
 Feature-gated builds:
 ```bash
@@ -64,6 +64,10 @@ let request = BspExtractionRequest {
     world,
     scale: 0.0254,
     palette: Some(bsp::resources::decode_palette(&palette_bytes)),
+    texture_companions: vec![
+        bsp::TextureCompanion::new("textures/brick_norm.png", normal_png),
+        bsp::TextureCompanion::new("textures/brick_gloss.png", gloss_png),
+    ],
     ..Default::default()
 };
 let extracted = extract(request)?;
@@ -71,6 +75,8 @@ let extracted = extract(request)?;
 ```
 
 `ExtractedVisibility::visleaf_count` is world model 0's authoritative PVS row width. It excludes reserved raw BSP leaf 0; PVS bit `i` corresponds to raw leaf `i + 1`. Renderer batching and light selection consume PVS-bit indices, not raw leaf-lump indices.
+
+`TextureCompanion` carries caller-authorized encoded bytes. Extraction matches the basename conventions `<texture>_norm.png` and `<texture>_gloss.png` (exact case first, then ASCII case-insensitive) and stores matches on `ExtractedTexture::pbr_companions`. It performs no filesystem I/O. Renderer preflight decodes PNGs, requires base-texture dimensions, and treats either companion as PBR opt-in. No match preserves the legacy BSP material route.
 
 ### `bsp_runtime` — Coordinator
 
@@ -82,8 +88,19 @@ use bsp_runtime::{
 
 let mut coordinator = BspCoordinator::new();
 
-// Two-step transaction: prepare → validate → commit
-let prepare = coordinator.prepare(&bsp_bytes, Some(0.0254), "maps/mylevel.bsp")?;
+// Package entrypoint: consumes the world and auto-discovered PBR companions.
+let loaded = bsp_runtime::package::load_bsp_package(
+    &mut resolver,
+    "maps/mylevel.bsp",
+    "palettes/my.lmp",
+    None,
+    &[],
+    false,
+)?;
+let prepare = coordinator.prepare_from_loaded_package(loaded, Some(0.0254))?;
+
+// Raw-byte entrypoint (no external texture companions):
+// let prepare = coordinator.prepare(&bsp_bytes, Some(0.0254), "maps/mylevel.bsp")?;
 // ... build `mount` with renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap()) ...
 coordinator.set_renderer_mount_ready(prepare.token, mount)?;
 coordinator.validate_for_scene(prepare.token, &mut scene)?;

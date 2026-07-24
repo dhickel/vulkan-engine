@@ -436,7 +436,7 @@ impl BspMountState {
             && leaf.has_valid_pvs
             && leaf.leaf_index > 0
             && leaf.leaf_index <= self.num_leaves)
-            .then_some(leaf.leaf_index - 1)
+            .then(|| leaf.leaf_index - 1)
     }
 
     fn ranked_light_indices(&self, camera_pos: Vec3, pvs_primary: bool) -> Vec<usize> {
@@ -692,6 +692,49 @@ mod tests {
         state.nodes = vec![];
         let result = state.update_pvs(Vec3::ZERO);
         assert!(result.is_none());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn reserved_leaf_zero_light_lookup_returns_none_without_underflow() {
+        let mut state = BspMountState::new();
+        state.num_leaves = 1;
+        state.scale = 1.0;
+        state.planes = vec![bsp::lumps::Plane {
+            normal: Vec3::X,
+            dist: 0.0,
+            plane_type: 0,
+        }];
+        state.nodes = vec![bsp::lumps::Node {
+            plane_id: 0,
+            children: [-1, -2],
+            mins: [0; 3],
+            maxs: [0; 3],
+            face_id: 0,
+            face_num: 0,
+        }];
+        state.leaves = vec![
+            bsp::lumps::Leaf {
+                contents: 0,
+                visofs: 0,
+                mins: [0; 3],
+                maxs: [0; 3],
+                mark_id: 0,
+                mark_num: 0,
+                ambient: [0; 4],
+            },
+            bsp::lumps::Leaf {
+                contents: 0,
+                visofs: 0,
+                mins: [0; 3],
+                maxs: [0; 3],
+                mark_id: 0,
+                mark_num: 0,
+                ambient: [0; 4],
+            },
+        ];
+
+        assert_eq!(state.leaf_for_engine_position(Vec3::X), None);
     }
 
     #[cfg(feature = "bsp")]

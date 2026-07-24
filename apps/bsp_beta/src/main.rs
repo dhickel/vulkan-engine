@@ -144,6 +144,11 @@ fn run() -> Result<(), AppError> {
         world.leaves.len(),
         t_build.elapsed().as_millis(),
     );
+    let pbr_texture_companions = discover_pbr_texture_companions(&args, &world)?;
+    log::info!(
+        "Discovered {} external BSP PBR texture companions",
+        pbr_texture_companions.len()
+    );
 
     // ── Coordinator-based prepare ─────────────────────────────────────
     let mut coordinator = BspCoordinator::new();
@@ -155,8 +160,9 @@ fn run() -> Result<(), AppError> {
     coordinator.register_bridge("runtime", Box::new(runtime_bridge));
 
     // Prepare through coordinator using the pre-loaded world
-    let prepare = coordinator.prepare_from_world(
+    let prepare = coordinator.prepare_from_world_with_texture_companions(
         world,
+        pbr_texture_companions,
         Some(args.scale),
         bsp_path.display().to_string(),
     )?;
@@ -203,6 +209,66 @@ fn load_companion_bytes(path: &PathBuf, _label: &str) -> Result<Vec<u8>, AppErro
         path: path.clone(),
         source,
     })
+}
+
+fn discover_pbr_texture_companions(
+    args: &cli::CliArgs,
+    world: &bsp::BspWorld,
+) -> Result<Vec<bsp::resources::TextureCompanion>, AppError> {
+    let mut roots = Vec::<PathBuf>::new();
+    if let Some(root) = args.companion_dir.as_ref() {
+        roots.push(root.clone());
+        if let Some(game_root) = root.parent() {
+            roots.push(game_root.join("textures"));
+        }
+    }
+    if let Some(map_dir) = args.bsp_path.as_ref().and_then(|path| path.parent()) {
+        roots.push(map_dir.to_path_buf());
+        if let Some(game_root) = map_dir.parent() {
+            roots.push(game_root.join("textures"));
+        }
+    }
+    roots.dedup();
+
+    let mut texture_names = bsp::resources::collect_miptex_names(&world.miptex_data);
+    texture_names.sort();
+    texture_names.dedup();
+    let mut loaded = std::collections::HashSet::new();
+    let mut companions = Vec::new();
+
+    for texture_name in texture_names {
+        let Some(names) = bsp::resources::pbr_companion_file_names(&texture_name) else {
+            continue;
+        };
+        for filename in [names.normal, names.gloss] {
+            let mut variants = vec![filename.clone()];
+            let lowercase = filename.to_ascii_lowercase();
+            if lowercase != filename {
+                variants.push(lowercase);
+            }
+            'search: for root in &roots {
+                for variant in &variants {
+                    let candidate = root.join(variant);
+                    if !candidate.is_file() {
+                        continue;
+                    }
+                    let key = candidate.to_string_lossy().into_owned();
+                    if loaded.insert(key.clone()) {
+                        let bytes =
+                            std::fs::read(&candidate).map_err(|source| AppError::BspRead {
+                                path: candidate.clone(),
+                                source,
+                            })?;
+                        log::info!("Loaded BSP PBR companion: {}", candidate.display());
+                        companions.push(bsp::resources::TextureCompanion::new(key, bytes));
+                    }
+                    break 'search;
+                }
+            }
+        }
+    }
+
+    Ok(companions)
 }
 
 // ── Startup proof ─────────────────────────────────────────────────────

@@ -23,6 +23,8 @@ mod bsp_tests {
             match class {
                 BspSurfaceClass::Lightmapped => BspOpaque,
                 BspSurfaceClass::Fullbright => BspFullbright,
+                BspSurfaceClass::PbrLightmapped => BspPbrOpaque,
+                BspSurfaceClass::PbrAlphaMask => BspPbrAlphaMask,
                 BspSurfaceClass::AlphaMask => BspAlphaMask,
                 BspSurfaceClass::Sky => BspSky,
                 BspSurfaceClass::Liquid => BspLiquid,
@@ -32,6 +34,8 @@ mod bsp_tests {
 
         assert_eq!(map(BspSurfaceClass::Lightmapped), BspOpaque);
         assert_eq!(map(BspSurfaceClass::Fullbright), BspFullbright);
+        assert_eq!(map(BspSurfaceClass::PbrLightmapped), BspPbrOpaque);
+        assert_eq!(map(BspSurfaceClass::PbrAlphaMask), BspPbrAlphaMask);
         assert_eq!(map(BspSurfaceClass::AlphaMask), BspAlphaMask);
         assert_eq!(map(BspSurfaceClass::Sky), BspSky);
         assert_eq!(map(BspSurfaceClass::Liquid), BspLiquid);

@@ -2743,6 +2743,8 @@ pub enum CoreShaderType {
     #[cfg(feature = "bsp")]
     BspLightmappedFrag,
     #[cfg(feature = "bsp")]
+    BspPbrFrag,
+    #[cfg(feature = "bsp")]
     BspSkyFrag,
     #[cfg(feature = "bsp")]
     BspLiquidFrag,
@@ -2754,9 +2756,9 @@ impl CoreShaderType {
     #[cfg(all(feature = "instancing", not(feature = "bsp")))]
     pub const COUNT: usize = 14;
     #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
-    pub const COUNT: usize = 17;
-    #[cfg(all(feature = "instancing", feature = "bsp"))]
     pub const COUNT: usize = 18;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 19;
 
     fn from_manifest_key(key: &str) -> Option<Self> {
         match key {
@@ -2779,6 +2781,8 @@ impl CoreShaderType {
             "BspLightmappedVert" => Some(Self::BspLightmappedVert),
             #[cfg(feature = "bsp")]
             "BspLightmappedFrag" => Some(Self::BspLightmappedFrag),
+            #[cfg(feature = "bsp")]
+            "BspPbrFrag" => Some(Self::BspPbrFrag),
             #[cfg(feature = "bsp")]
             "BspSkyFrag" => Some(Self::BspSkyFrag),
             #[cfg(feature = "bsp")]
@@ -2947,6 +2951,10 @@ pub enum VkPipelineType {
     #[cfg(feature = "bsp")]
     BspAlphaMask,
     #[cfg(feature = "bsp")]
+    BspPbrOpaque,
+    #[cfg(feature = "bsp")]
+    BspPbrAlphaMask,
+    #[cfg(feature = "bsp")]
     BspSky,
     #[cfg(feature = "bsp")]
     BspLiquid,
@@ -2958,9 +2966,9 @@ impl VkPipelineType {
     #[cfg(all(feature = "instancing", not(feature = "bsp")))]
     pub const COUNT: usize = 12;
     #[cfg(all(not(feature = "instancing"), feature = "bsp"))]
-    pub const COUNT: usize = 15;
-    #[cfg(all(feature = "instancing", feature = "bsp"))]
     pub const COUNT: usize = 17;
+    #[cfg(all(feature = "instancing", feature = "bsp"))]
+    pub const COUNT: usize = 19;
 }
 
 //#[derive(Clone, Copy)]

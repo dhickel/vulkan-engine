@@ -215,6 +215,15 @@ pub(crate) struct BspPlannedMaterial {
     pub texture_index: Option<usize>,
     pub surface_class: bsp::materials::SurfaceClass,
     pub surface_uniform: BspSurfaceUniform,
+    pub is_pbr: bool,
+}
+
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub(crate) struct BspPlannedTexture {
+    /// R=fullbright mask, G/B=tangent-space normal X/Y, A=gloss.
+    pub material_data_rgba: Vec<u8>,
+    pub pbr_flags: u32,
 }
 
 #[cfg(feature = "bsp")]
@@ -229,6 +238,7 @@ pub(crate) struct BspPlannedBatch {
 #[derive(Debug, Clone)]
 pub(crate) struct BspUploadPlan {
     pub materials: Vec<BspPlannedMaterial>,
+    pub textures: Vec<BspPlannedTexture>,
     pub batches: Vec<BspPlannedBatch>,
     pub face_to_batch: Vec<Option<usize>>,
     pub face_to_material: Vec<Option<usize>>,
@@ -242,6 +252,7 @@ struct PlannedMaterialKey {
     texture_index: u32,
     lightmap_page: u32,
     style_ids: [u32; 4],
+    pbr_flags: u32,
 }
 
 #[cfg(feature = "bsp")]
@@ -260,6 +271,200 @@ struct PlannedFace {
     material_plan_index: usize,
     model_index: u32,
     primary_leaf: Option<u32>,
+}
+
+#[cfg(feature = "bsp")]
+fn pbr_flags_for_companions(companions: &bsp::resources::PbrTextureCompanions) -> u32 {
+    if companions.is_empty() {
+        return 0;
+    }
+    let mut flags = bsp_surface_flags::SURF_PBR;
+    if companions.normal.is_some() {
+        flags |= bsp_surface_flags::SURF_PBR_NORMAL;
+    }
+    if companions.gloss.is_some() {
+        flags |= bsp_surface_flags::SURF_PBR_GLOSS;
+    }
+    flags
+}
+
+#[cfg(feature = "bsp")]
+fn pbr_flags_for_texture(
+    extracted: &ExtractedBsp,
+    texture_index: u32,
+    surface_class: bsp::materials::SurfaceClass,
+) -> u32 {
+    if !matches!(
+        surface_class,
+        bsp::materials::SurfaceClass::Opaque | bsp::materials::SurfaceClass::AlphaMask
+    ) {
+        return 0;
+    }
+    usize::try_from(texture_index)
+        .ok()
+        .and_then(|index| extracted.textures.get(index))
+        .map(|texture| pbr_flags_for_companions(&texture.pbr_companions))
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "bsp")]
+fn texture_has_pbr_surface(extracted: &ExtractedBsp, texture_index: usize) -> bool {
+    extracted.face_materials.iter().any(|material| {
+        usize::try_from(material.material_index).ok() == Some(texture_index)
+            && matches!(
+                material.surface_class,
+                bsp::materials::SurfaceClass::Opaque | bsp::materials::SurfaceClass::AlphaMask
+            )
+    })
+}
+
+#[cfg(feature = "bsp")]
+fn decode_pbr_companion_rgba(
+    texture_index: usize,
+    role: &str,
+    companion: &bsp::resources::TextureCompanion,
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<Vec<u8>, String> {
+    let invalid_png = |error| {
+        format!(
+            "BSP texture {texture_index} {role} companion '{}' is not a valid PNG: {error}",
+            companion.logical_path
+        )
+    };
+    let dimensions = image::ImageReader::with_format(
+        std::io::Cursor::new(&companion.bytes),
+        image::ImageFormat::Png,
+    )
+    .into_dimensions()
+    .map_err(&invalid_png)?;
+    if dimensions != (expected_width, expected_height) {
+        return Err(format!(
+            "BSP texture {texture_index} {role} companion '{}' is {}x{}; expected {}x{}",
+            companion.logical_path,
+            dimensions.0,
+            dimensions.1,
+            expected_width,
+            expected_height
+        ));
+    }
+
+    let mut reader = image::ImageReader::with_format(
+        std::io::Cursor::new(&companion.bytes),
+        image::ImageFormat::Png,
+    );
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(expected_width);
+    limits.max_image_height = Some(expected_height);
+    reader.limits(limits);
+    let image = reader.decode().map_err(invalid_png)?;
+    Ok(image.to_rgba8().into_raw())
+}
+
+#[cfg(feature = "bsp")]
+fn plan_bsp_textures(extracted: &ExtractedBsp) -> Result<Vec<BspPlannedTexture>, String> {
+    extracted
+        .textures
+        .iter()
+        .enumerate()
+        .map(|(texture_index, texture)| {
+            let pixel_count = (texture.width as usize)
+                .checked_mul(texture.height as usize)
+                .ok_or_else(|| format!("BSP texture {texture_index} dimensions overflow"))?;
+            let rgba_size = pixel_count
+                .checked_mul(4)
+                .ok_or_else(|| format!("BSP texture {texture_index} RGBA size overflow"))?;
+            if texture.width == 0
+                || texture.height == 0
+                || texture.width > bsp::resources::MAX_TEXTURE_DIMENSION
+                || texture.height > bsp::resources::MAX_TEXTURE_DIMENSION
+                || texture.albedo.len() != rgba_size
+                || texture.fullbright_mask.len() != pixel_count
+            {
+                return Err(format!(
+                    "BSP texture {texture_index} payload mismatch: {}x{}, albedo={}, mask={}",
+                    texture.width,
+                    texture.height,
+                    texture.albedo.len(),
+                    texture.fullbright_mask.len()
+                ));
+            }
+
+            let pbr_flags = if texture_has_pbr_surface(extracted, texture_index) {
+                pbr_flags_for_companions(&texture.pbr_companions)
+            } else {
+                0
+            };
+            if pbr_flags == 0 {
+                let mut material_data_rgba = Vec::with_capacity(rgba_size);
+                for &mask in &texture.fullbright_mask {
+                    // Preserve the legacy fullbright upload exactly when no PBR
+                    // companions are present.
+                    material_data_rgba.extend_from_slice(&[mask, mask, mask, 255]);
+                }
+                return Ok(BspPlannedTexture {
+                    material_data_rgba,
+                    pbr_flags,
+                });
+            }
+
+            let normal = texture
+                .pbr_companions
+                .normal
+                .as_ref()
+                .map(|companion| {
+                    decode_pbr_companion_rgba(
+                        texture_index,
+                        "normal",
+                        companion,
+                        texture.width,
+                        texture.height,
+                    )
+                })
+                .transpose()?;
+            let gloss = texture
+                .pbr_companions
+                .gloss
+                .as_ref()
+                .map(|companion| {
+                    decode_pbr_companion_rgba(
+                        texture_index,
+                        "gloss",
+                        companion,
+                        texture.width,
+                        texture.height,
+                    )
+                })
+                .transpose()?;
+
+            let mut material_data_rgba = Vec::with_capacity(rgba_size);
+            for pixel in 0..pixel_count {
+                let normal_offset = pixel * 4;
+                let normal_x = normal
+                    .as_ref()
+                    .map(|pixels| pixels[normal_offset])
+                    .unwrap_or(128);
+                let normal_y = normal
+                    .as_ref()
+                    .map(|pixels| pixels[normal_offset + 1])
+                    .unwrap_or(128);
+                let gloss_value = gloss
+                    .as_ref()
+                    .map(|pixels| pixels[normal_offset])
+                    .unwrap_or(0);
+                material_data_rgba.extend_from_slice(&[
+                    texture.fullbright_mask[pixel],
+                    normal_x,
+                    normal_y,
+                    gloss_value,
+                ]);
+            }
+            Ok(BspPlannedTexture {
+                material_data_rgba,
+                pbr_flags,
+            })
+        })
+        .collect()
 }
 
 #[cfg(feature = "bsp")]
@@ -299,6 +504,11 @@ fn material_key_for_face(extracted: &ExtractedBsp, face_index: usize) -> Result<
         texture_index: material.material_index,
         lightmap_page: layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX),
         style_ids: style_id_array(layout),
+        pbr_flags: pbr_flags_for_texture(
+            extracted,
+            material.material_index,
+            material.surface_class,
+        ),
     })
 }
 
@@ -331,6 +541,7 @@ fn build_material_plan(
             .ok_or_else(|| "BSP lightmap layer base overflow".to_string())?
     };
 
+    let is_pbr = key.pbr_flags & bsp_surface_flags::SURF_PBR != 0;
     Ok(BspPlannedMaterial {
         texture_index,
         surface_class,
@@ -343,13 +554,19 @@ fn build_material_plan(
             alpha_threshold: 0.5,
             animation_frame: 0,
             animation_time: 0.0,
-            surface_flags: surface_flags_for(Some(surface_class)),
-            receive_mask: receive_mask_for(Some(surface_class)),
+            surface_flags: surface_flags_for(Some(surface_class)) | key.pbr_flags,
+            receive_mask: receive_mask_for(Some(surface_class))
+                | if is_pbr {
+                    bsp_surface_flags::RECEIVE_IBL
+                } else {
+                    0
+                },
             lightmap_layer_base,
             liquid_warp_scale: 0.02,
             liquid_flow_speed: 1.0,
             _pad1: [0, 0],
         },
+        is_pbr,
     })
 }
 
@@ -603,13 +820,17 @@ fn compute_upload_demand(
     let texture_bytes = extracted.textures.iter().try_fold(0u64, |total, texture| {
         let albedo = u64::try_from(texture.albedo.len())
             .map_err(|_| "BSP albedo byte count exceeds u64".to_string())?;
-        let mask = checked_mul(
+        let material_data = checked_mul(
             u64::try_from(texture.fullbright_mask.len())
-                .map_err(|_| "BSP fullbright byte count exceeds u64".to_string())?,
+                .map_err(|_| "BSP material-data pixel count exceeds u64".to_string())?,
             4,
-            "fullbright expansion",
+            "material-data expansion",
         )?;
-        checked_add(total, checked_add(albedo, mask, "texture")?, "texture total")
+        checked_add(
+            total,
+            checked_add(albedo, material_data, "texture")?,
+            "texture total",
+        )
     })?;
 
     let (atlas_width, atlas_height, atlas_pages) = if let Some(first) = extracted.lightmap_atlas.pages.first() {
@@ -770,6 +991,7 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         });
     }
 
+    // Enforce aggregate demand before decoding and packing companion images.
     let demand = compute_upload_demand(
         extracted,
         &batches,
@@ -777,8 +999,10 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         faces.len(),
         leaf_bucket_span,
     )?;
+    let textures = plan_bsp_textures(extracted)?;
     Ok(BspUploadPlan {
         materials,
+        textures,
         batches,
         face_to_batch,
         face_to_material,
@@ -960,10 +1184,20 @@ pub fn build_bsp_material_descs(
             continue;
         }
 
-        let bsp_class = match sc {
-            Some(bsp::materials::SurfaceClass::AlphaMask) => BspSurfaceClass::AlphaMask,
-            Some(bsp::materials::SurfaceClass::Sky) => BspSurfaceClass::Sky,
-            Some(bsp::materials::SurfaceClass::Liquid) => BspSurfaceClass::Liquid,
+        let pbr_flags = extracted
+            .face_materials
+            .get(fi)
+            .map(|material| {
+                pbr_flags_for_texture(extracted, material.material_index, material.surface_class)
+            })
+            .unwrap_or(0);
+        let is_pbr = pbr_flags & bsp_surface_flags::SURF_PBR != 0;
+        let bsp_class = match (sc, is_pbr) {
+            (Some(bsp::materials::SurfaceClass::AlphaMask), true) => BspSurfaceClass::PbrAlphaMask,
+            (Some(bsp::materials::SurfaceClass::Opaque), true) => BspSurfaceClass::PbrLightmapped,
+            (Some(bsp::materials::SurfaceClass::AlphaMask), false) => BspSurfaceClass::AlphaMask,
+            (Some(bsp::materials::SurfaceClass::Sky), _) => BspSurfaceClass::Sky,
+            (Some(bsp::materials::SurfaceClass::Liquid), _) => BspSurfaceClass::Liquid,
             // Opaque surfaces (standard lightmapped with fullbright mask)
             _ => BspSurfaceClass::Lightmapped,
         };
@@ -977,6 +1211,8 @@ pub fn build_bsp_material_descs(
         let lightmap = match bsp_class {
             BspSurfaceClass::Lightmapped
             | BspSurfaceClass::Fullbright
+            | BspSurfaceClass::PbrLightmapped
+            | BspSurfaceClass::PbrAlphaMask
             | BspSurfaceClass::AlphaMask
             | BspSurfaceClass::Liquid => lightmap_atlas_handle,
             _ => BspTextureHandle::new(0, 0),
@@ -1017,8 +1253,13 @@ pub fn build_bsp_material_descs(
             alpha_threshold: 0.5,
             animation_frame: 0,
             animation_time: 0.0,
-            surface_flags: surface_flags_for(sc),
-            receive_mask: receive_mask_for(sc),
+            surface_flags: surface_flags_for(sc) | pbr_flags,
+            receive_mask: receive_mask_for(sc)
+                | if is_pbr {
+                    bsp_surface_flags::RECEIVE_IBL
+                } else {
+                    0
+                },
             lightmap_layer_base: layout.page_index.saturating_mul(4),
             liquid_warp_scale: 0.02,
             liquid_flow_speed: 1.0,
@@ -1202,6 +1443,128 @@ mod tests {
             source_identity: "stress".to_string(),
             diagnostics: Vec::new(),
         }
+    }
+
+    #[cfg(feature = "bsp")]
+    fn solid_png(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba(pixel));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
+
+    #[cfg(feature = "bsp")]
+    fn one_pixel_png(pixel: [u8; 4]) -> Vec<u8> {
+        solid_png(1, 1, pixel)
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn pbr_companions_pack_material_data_and_route_material() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.textures[0].pbr_companions = bsp::resources::PbrTextureCompanions {
+            normal: Some(bsp::resources::TextureCompanion::new(
+                "textures/texture_0_norm.png",
+                one_pixel_png([64, 192, 255, 255]),
+            )),
+            gloss: Some(bsp::resources::TextureCompanion::new(
+                "textures/texture_0_gloss.png",
+                one_pixel_png([153, 153, 153, 255]),
+            )),
+        };
+
+        let plan = plan_bsp_upload(&extracted).expect("PBR BSP plan");
+        assert_eq!(plan.textures[0].material_data_rgba, [0, 64, 192, 153]);
+        assert_eq!(
+            plan.textures[0].pbr_flags,
+            bsp_surface_flags::SURF_PBR
+                | bsp_surface_flags::SURF_PBR_NORMAL
+                | bsp_surface_flags::SURF_PBR_GLOSS
+        );
+        assert!(plan.materials[0].is_pbr);
+        assert_ne!(
+            plan.materials[0].surface_uniform.receive_mask & bsp_surface_flags::RECEIVE_IBL,
+            0
+        );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn one_pbr_companion_routes_pbr_and_supplies_missing_channel_defaults() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.textures[0].pbr_companions.gloss = Some(
+            bsp::resources::TextureCompanion::new(
+                "textures/texture_0_gloss.png",
+                one_pixel_png([153, 0, 0, 255]),
+            ),
+        );
+
+        let plan = plan_bsp_upload(&extracted).expect("gloss-only BSP plan");
+        assert_eq!(plan.textures[0].material_data_rgba, [0, 128, 128, 153]);
+        assert_eq!(
+            plan.textures[0].pbr_flags,
+            bsp_surface_flags::SURF_PBR | bsp_surface_flags::SURF_PBR_GLOSS
+        );
+        assert!(plan.materials[0].is_pbr);
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn legacy_texture_without_companions_keeps_legacy_material_data_and_route() {
+        let extracted = stress_extracted(1, 1);
+        let plan = plan_bsp_upload(&extracted).expect("legacy BSP plan");
+        assert_eq!(plan.textures[0].material_data_rgba, [0, 0, 0, 255]);
+        assert_eq!(plan.textures[0].pbr_flags, 0);
+        assert!(!plan.materials[0].is_pbr);
+        assert_eq!(
+            plan.materials[0].surface_uniform.surface_flags & bsp_surface_flags::SURF_PBR,
+            0
+        );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn companion_on_ineligible_surface_keeps_legacy_route_without_decoding() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.face_materials[0].surface_class = bsp::materials::SurfaceClass::Liquid;
+        extracted.textures[0].pbr_companions.normal = Some(
+            bsp::resources::TextureCompanion::new(
+                "textures/texture_0_norm.png",
+                vec![1, 2, 3],
+            ),
+        );
+
+        let plan = plan_bsp_upload(&extracted).expect("liquid legacy BSP plan");
+        assert_eq!(plan.textures[0].pbr_flags, 0);
+        assert!(!plan.materials[0].is_pbr);
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn pbr_companion_dimension_mismatch_fails_before_gpu_allocation() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.textures[0].pbr_companions.normal = Some(
+            bsp::resources::TextureCompanion::new(
+                "textures/texture_0_norm.png",
+                solid_png(2, 1, [128, 128, 255, 255]),
+            ),
+        );
+        let error = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(error.contains("is 2x1; expected 1x1"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn malformed_pbr_companion_fails_before_gpu_allocation() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.textures[0].pbr_companions.normal = Some(bsp::resources::TextureCompanion::new(
+            "textures/texture_0_norm.png",
+            vec![1, 2, 3],
+        ));
+        let error = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(error.contains("not a valid PNG"));
     }
 
     #[cfg(feature = "bsp")]

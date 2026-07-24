@@ -858,6 +858,12 @@ pub mod bsp_surface_flags {
     pub const SURF_LIQUID: u32 = 1 << 2;
     /// Fullbright surface: additive emission on top of lit albedo.
     pub const SURF_FULLBRIGHT: u32 = 1 << 3;
+    /// Surface uses the BSP PBR shader path.
+    pub const SURF_PBR: u32 = 1 << 4;
+    /// Packed material-data texture contains a tangent-space normal map.
+    pub const SURF_PBR_NORMAL: u32 = 1 << 5;
+    /// Packed material-data texture contains a gloss map.
+    pub const SURF_PBR_GLOSS: u32 = 1 << 6;
 
     // Receive masks: control which light sources contribute.
     pub const RECEIVE_IBL: u32 = 1 << 8;

@@ -90,6 +90,53 @@ fn load_palette_for_bsp(bsp_path: &std::path::Path) -> Result<bsp::resources::Pa
 }
 
 #[cfg(feature = "bsp")]
+fn load_pbr_companions_for_bsp(
+    bsp_path: &std::path::Path,
+    world: &bsp::BspWorld,
+) -> Result<Vec<bsp::resources::TextureCompanion>, String> {
+    let mut roots = Vec::new();
+    if let Some(map_dir) = bsp_path.parent() {
+        roots.push(map_dir.to_path_buf());
+        if let Some(game_root) = map_dir.parent() {
+            roots.push(game_root.join("textures"));
+        }
+    }
+    roots.dedup();
+
+    let mut texture_names = bsp::resources::collect_miptex_names(&world.miptex_data);
+    texture_names.sort();
+    texture_names.dedup();
+    let mut companions = Vec::new();
+    for texture_name in texture_names {
+        let Some(names) = bsp::resources::pbr_companion_file_names(&texture_name) else {
+            continue;
+        };
+        for filename in [names.normal, names.gloss] {
+            let lowercase = filename.to_ascii_lowercase();
+            'roots: for root in &roots {
+                for variant in [&filename, &lowercase] {
+                    let candidate = root.join(variant);
+                    if candidate.is_file() {
+                        let bytes = std::fs::read(&candidate).map_err(|error| {
+                            format!(
+                                "failed to read PBR companion '{}': {error}",
+                                candidate.display()
+                            )
+                        })?;
+                        companions.push(bsp::resources::TextureCompanion::new(
+                            candidate.to_string_lossy(),
+                            bytes,
+                        ));
+                        break 'roots;
+                    }
+                }
+            }
+        }
+    }
+    Ok(companions)
+}
+
+#[cfg(feature = "bsp")]
 fn run_headless_capture_test(
     bsp_bytes: &[u8],
     bsp_path: &std::path::PathBuf,
@@ -137,6 +184,13 @@ fn run_headless_capture_test(
             return;
         }
     };
+    let pbr_texture_companions = match load_pbr_companions_for_bsp(bsp_path, &world) {
+        Ok(companions) => companions,
+        Err(message) => {
+            log::error!("{message}");
+            return;
+        }
+    };
     let palette = match load_palette_for_bsp(bsp_path) {
         Ok(palette) => palette,
         Err(message) => {
@@ -147,6 +201,7 @@ fn run_headless_capture_test(
     let extracted = match bsp::extract::extract(bsp::BspExtractionRequest {
         world,
         palette: Some(palette),
+        texture_companions: pbr_texture_companions,
         strict: false,
         ..Default::default()
     }) {

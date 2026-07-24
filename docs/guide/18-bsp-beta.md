@@ -31,7 +31,9 @@ my_package/
   wads/
     my_textures.wad       ← optional WAD2 texture archive
   textures/
-    replacement/*.png     ← optional loose replacement textures
+    brick_norm.png         ← optional tangent-space normal companion
+    brick_gloss.png        ← optional gloss companion
+    replacement/*.png      ← optional loose replacement textures
   manifest.toml           ← package manifest referencing the BSP asset
 ```
 
@@ -109,7 +111,7 @@ cargo run -p bsp_beta -- \
   --companion-dir /path/to/game/maps
 ```
 
-Palette lookup order is: explicit `--palette`, the companion/map directory (`palette.lmp` or `project_palette.lmp`), `gfx/palette.lmp` below that directory, then `gfx/palette.lmp` below the map directory's parent game root. The app does **not** fall back to the project test palette; a missing real palette is an error. A same-stem `.lit` file next to the BSP is auto-discovered.
+Palette lookup order is: explicit `--palette`, the companion/map directory (`palette.lmp` or `project_palette.lmp`), `gfx/palette.lmp` below that directory, then `gfx/palette.lmp` below the map directory's parent game root. The app does **not** fall back to the project test palette; a missing real palette is an error. A same-stem `.lit` file next to the BSP is auto-discovered. For each embedded/WAD texture identity, the app also searches the companion/map directory and the game-root `textures/` directory for PBR companions.
 
 For deterministic renderer-owned captures:
 
@@ -119,6 +121,33 @@ cargo run -p bsp_beta -- \
   --bsp /path/to/game/maps/start.bsp \
   --companion-dir /path/to/game/maps
 ```
+
+### External PBR Texture Companions
+
+Companions are named from the BSP texture identity, not the BSP filename:
+
+- `<texture>_norm.png`: tangent-space normal map. Red and green encode X/Y; Z is reconstructed positive in the shader.
+- `<texture>_gloss.png`: gloss in the red channel. The shader uses `roughness = 1 - gloss` (clamped to a minimum roughness of 0.04).
+
+Either file is sufficient to opt an opaque or alpha-mask surface into the BSP PBR pipeline. A missing normal map defaults to a flat normal; a missing gloss map defaults to fully rough. Companion dimensions must exactly match the resolved base texture, and malformed or mismatched PNGs reject the renderer upload rather than silently changing material behavior.
+
+PBR surfaces remain BSP lightmapped surfaces: baked lightmaps provide diffuse irradiance, while the prefiltered scene environment and BRDF LUT provide dielectric specular. Palette fullbright pixels remain additive, hue-preserving emission. Sky and liquid surfaces keep their dedicated legacy shaders. If neither companion exists, the original packed fullbright upload, pipeline selection, and `bsp_lightmapped.frag` path are unchanged.
+
+Package loading discovers these files through `PackageResolver` and carries their hashes into the BSP cache identity:
+
+```rust
+let package = bsp_runtime::package::load_bsp_package(
+    &mut resolver,
+    "maps/my_level.bsp",
+    "palettes/my_palette.lmp",
+    None,
+    &[],
+    false,
+)?;
+let prepare = coordinator.prepare_from_loaded_package(package, Some(0.0254))?;
+```
+
+For a caller-owned world, pass already-authorized bytes with `BspCoordinator::prepare_from_world_with_texture_companions` or `BspExtractionRequest::texture_companions`.
 
 ### Crate Dependencies
 

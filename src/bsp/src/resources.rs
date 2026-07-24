@@ -9,6 +9,104 @@
 
 use crate::diagnostic::{BspReport, DiagnosticCode};
 
+/// Filename suffix used for external tangent-space normal maps.
+pub const PBR_NORMAL_SUFFIX: &str = "_norm.png";
+/// Filename suffix used for external gloss maps (`roughness = 1 - gloss`).
+pub const PBR_GLOSS_SUFFIX: &str = "_gloss.png";
+
+/// Authorized external texture bytes available during neutral BSP extraction.
+///
+/// Filesystem and package confinement remain the integration layer's responsibility;
+/// the pure `bsp` crate only matches logical filenames and carries owned bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureCompanion {
+    /// Package-relative or otherwise diagnostic logical path.
+    pub logical_path: String,
+    /// Encoded image bytes (PNG for the supported PBR companions).
+    pub bytes: Vec<u8>,
+}
+
+impl TextureCompanion {
+    pub fn new(logical_path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        Self {
+            logical_path: logical_path.into(),
+            bytes,
+        }
+    }
+}
+
+/// Companion filenames generated for one BSP texture identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PbrCompanionFileNames {
+    pub normal: String,
+    pub gloss: String,
+}
+
+/// External PBR companions associated with one extracted BSP texture.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PbrTextureCompanions {
+    pub normal: Option<TextureCompanion>,
+    pub gloss: Option<TextureCompanion>,
+}
+
+impl PbrTextureCompanions {
+    pub fn is_empty(&self) -> bool {
+        self.normal.is_none() && self.gloss.is_none()
+    }
+}
+
+/// Return the exact supported PBR companion filenames for a BSP texture.
+///
+/// Unsafe texture identities are rejected rather than being turned into paths.
+pub fn pbr_companion_file_names(texture_name: &str) -> Option<PbrCompanionFileNames> {
+    if texture_name.is_empty()
+        || texture_name.contains(['/', '\\', '\0'])
+        || texture_name.contains("..")
+    {
+        return None;
+    }
+    Some(PbrCompanionFileNames {
+        normal: format!("{texture_name}{PBR_NORMAL_SUFFIX}"),
+        gloss: format!("{texture_name}{PBR_GLOSS_SUFFIX}"),
+    })
+}
+
+fn companion_basename(path: &str) -> &str {
+    path.rsplit(|character| character == '/' || character == '\\')
+        .next()
+        .unwrap_or(path)
+}
+
+/// Match authorized external files to the normal/gloss companions for `texture_name`.
+///
+/// Request order is package-root precedence. Exact-case matches win; an ASCII
+/// case-insensitive fallback keeps Quake texture identities portable across filesystems.
+pub fn discover_pbr_texture_companions(
+    texture_name: &str,
+    available: &[TextureCompanion],
+) -> PbrTextureCompanions {
+    let Some(names) = pbr_companion_file_names(texture_name) else {
+        return PbrTextureCompanions::default();
+    };
+
+    let find = |expected: &str| {
+        available
+            .iter()
+            .find(|resource| companion_basename(&resource.logical_path) == expected)
+            .or_else(|| {
+                available.iter().find(|resource| {
+                    companion_basename(&resource.logical_path).eq_ignore_ascii_case(expected)
+                })
+            })
+            .cloned()
+    };
+
+    PbrTextureCompanions {
+        normal: find(&names.normal),
+        gloss: find(&names.gloss),
+    }
+}
+
 /// Resource resolution outcome.
 #[derive(Debug, Clone)]
 pub enum ResolvedTexture {
@@ -218,6 +316,8 @@ pub struct ExtractedTexture {
     pub animation_frames: Vec<String>,
     /// Whether all animation frames share the same dimensions.
     pub animation_dimensions_uniform: bool,
+    /// Optional external normal/gloss maps discovered for this texture.
+    pub pbr_companions: PbrTextureCompanions,
 }
 
 impl Default for ExtractedTexture {
@@ -233,6 +333,7 @@ impl Default for ExtractedTexture {
             is_animated_base: false,
             animation_frames: Vec::new(),
             animation_dimensions_uniform: false,
+            pbr_companions: PbrTextureCompanions::default(),
         }
     }
 }
@@ -284,6 +385,7 @@ pub fn resolve_extracted_texture(
                             is_animated_base: false,
                             animation_frames: Vec::new(),
                             animation_dimensions_uniform: false,
+                            pbr_companions: PbrTextureCompanions::default(),
                         }, reports);
                     }
                     Err(e) => {
@@ -314,6 +416,7 @@ pub fn resolve_extracted_texture(
                         is_animated_base: false,
                         animation_frames: Vec::new(),
                         animation_dimensions_uniform: false,
+                        pbr_companions: PbrTextureCompanions::default(),
                     }, reports);
                 }
                 Err(e) => {
@@ -424,6 +527,29 @@ mod tests {
         }
         assert!(!reports.is_empty());
         assert_eq!(reports[0].code, DiagnosticCode::FallbackDiagnosticTexture);
+    }
+
+    #[test]
+    fn pbr_companion_names_and_discovery_are_deterministic() {
+        let names = pbr_companion_file_names("brick1_2").expect("safe texture name");
+        assert_eq!(names.normal, "brick1_2_norm.png");
+        assert_eq!(names.gloss, "brick1_2_gloss.png");
+
+        let available = vec![
+            TextureCompanion::new("textures/BRICK1_2_GLOSS.PNG", vec![2]),
+            TextureCompanion::new("textures/brick1_2_norm.png", vec![1]),
+            TextureCompanion::new("textures/unrelated_norm.png", vec![3]),
+        ];
+        let found = discover_pbr_texture_companions("brick1_2", &available);
+        assert_eq!(found.normal.as_ref().map(|map| map.bytes.as_slice()), Some(&[1][..]));
+        assert_eq!(found.gloss.as_ref().map(|map| map.bytes.as_slice()), Some(&[2][..]));
+    }
+
+    #[test]
+    fn pbr_companion_names_reject_unsafe_texture_identity() {
+        assert!(pbr_companion_file_names("../brick").is_none());
+        assert!(pbr_companion_file_names("dir/brick").is_none());
+        assert!(discover_pbr_texture_companions("../brick", &[]).is_empty());
     }
 
     #[test]

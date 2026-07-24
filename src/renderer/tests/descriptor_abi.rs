@@ -191,6 +191,21 @@ fn descriptor_abi_bsp_bindings_registered() {
         "BSP packed style intensity array missing"
     );
 
+    let pbr_frag = read(root.join("src/shaders/bsp_pbr.frag"));
+    for binding in [0, 1, 3, 4] {
+        assert!(
+            pbr_frag.contains(&format!("set = 0, binding = {binding}")),
+            "BSP PBR scene binding {binding} missing"
+        );
+    }
+    for binding in 0..=3 {
+        assert!(
+            pbr_frag.contains(&format!("set = 1, binding = {binding}")),
+            "BSP PBR material binding {binding} missing"
+        );
+    }
+    assert!(pbr_frag.contains("set = 2, binding = 0"));
+
     let sky_frag = read(root.join("src/shaders/bsp_sky.frag"));
     assert!(
         sky_frag.contains("set = 0, binding = 3"),
@@ -215,6 +230,7 @@ fn descriptor_abi_bsp_bindings_registered() {
     for pair in [
         "bsp_lightmapped.vert.spv",
         "bsp_lightmapped.frag.spv",
+        "bsp_pbr.frag.spv",
         "bsp_sky.frag.spv",
         "bsp_liquid.frag.spv",
     ] {
@@ -320,7 +336,7 @@ fn bsp_shader_spirv_separate_from_core() {
     let bsp_manifest = read(root.join("src/shaders/bsp_shader_manifest.txt"));
 
     // No BSP SPIR-V should appear in the core manifest
-    for bsp_shader in ["bsp_lightmapped", "bsp_sky", "bsp_liquid"] {
+    for bsp_shader in ["bsp_lightmapped", "bsp_pbr", "bsp_sky", "bsp_liquid"] {
         assert!(
             !core_manifest.contains(bsp_shader),
             "BSP shader '{bsp_shader}' leaked into core manifest"
@@ -405,6 +421,14 @@ fn bsp_shader_preserves_lightmap_transfer_and_palette_fullbright_color() {
         assert!(shader.contains("outColor = tonemap"));
     }
     assert!(sky.contains("outColor = tonemap"));
+
+    let pbr = read(root.join("src/shaders/bsp_pbr.frag"));
+    assert!(pbr.contains("decodeLightmap"));
+    assert!(pbr.contains("1.0 - gloss"));
+    assert!(pbr.contains("prefilteredMap"));
+    assert!(pbr.contains("samplerBRDFLUT"));
+    assert!(pbr.contains("bakedIrradiance * albedoSample.rgb"));
+    assert!(pbr.contains("materialData.r * albedoSample.rgb"));
 }
 
 #[cfg(feature = "bsp")]

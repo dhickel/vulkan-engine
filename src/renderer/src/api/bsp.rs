@@ -439,12 +439,18 @@ impl PreparedBspMount {
         let mut plan = plan_bsp_upload(extracted)?;
         let demand = plan.demand;
         let face_count = demand.source_face_count;
+        let pbr_texture_count = plan
+            .textures
+            .iter()
+            .filter(|texture| texture.pbr_flags != 0)
+            .count();
         info!(
-            "BSP upload preflight: {} renderable faces -> {} batches, {} materials, {} textures; geometry={} MiB, atlas={} MiB, compact staging={} MiB, estimated GPU={} MiB, leaf bucket span={}",
+            "BSP upload preflight: {} renderable faces -> {} batches, {} materials, {} textures ({} PBR); geometry={} MiB, atlas={} MiB, compact staging={} MiB, estimated GPU={} MiB, leaf bucket span={}",
             demand.renderable_face_count,
             demand.batch_count,
             demand.material_count,
             demand.texture_count,
+            pbr_texture_count,
             demand.geometry_bytes / (1024 * 1024),
             demand.lightmap_image_bytes / (1024 * 1024),
             demand.lightmap_staging_bytes / (1024 * 1024),
@@ -628,31 +634,11 @@ impl PreparedBspMount {
             TextureCache::DEFAULT_EMISSIVE_TEX.slot,
             TextureCache::DEFAULT_EMISSIVE_TEX.generation,
         );
+        if plan.textures.len() != extracted.textures.len() {
+            return Err("BSP planned texture count changed after upload preflight".to_string());
+        }
         let mut texture_metas = Vec::with_capacity(extracted.textures.len() * 2);
-        for (texture_index, texture) in extracted.textures.iter().enumerate() {
-            let pixel_count = (texture.width as usize)
-                .checked_mul(texture.height as usize)
-                .ok_or_else(|| format!("BSP texture {texture_index} dimensions overflow"))?;
-            let expected_albedo = pixel_count
-                .checked_mul(4)
-                .ok_or_else(|| format!("BSP texture {texture_index} albedo size overflow"))?;
-            if texture.width == 0
-                || texture.height == 0
-                || texture.albedo.len() != expected_albedo
-                || texture.fullbright_mask.len() != pixel_count
-            {
-                return Err(format!(
-                    "BSP texture {texture_index} payload mismatch: {}x{}, albedo={}, mask={}",
-                    texture.width,
-                    texture.height,
-                    texture.albedo.len(),
-                    texture.fullbright_mask.len()
-                ));
-            }
-            let mut fullbright_rgba = Vec::with_capacity(expected_albedo);
-            for &mask in &texture.fullbright_mask {
-                fullbright_rgba.extend_from_slice(&[mask, mask, mask, 255]);
-            }
+        for (texture, planned) in extracted.textures.iter().zip(&plan.textures) {
             texture_metas.push(TextureMeta {
                 payload: TexturePayload::Raw {
                     bytes: texture.albedo.clone(),
@@ -666,7 +652,7 @@ impl PreparedBspMount {
             });
             texture_metas.push(TextureMeta {
                 payload: TexturePayload::Raw {
-                    bytes: fullbright_rgba,
+                    bytes: planned.material_data_rgba.clone(),
                     width: texture.width,
                     height: texture.height,
                     format: ash::vk::Format::R8G8B8A8_UNORM,
@@ -897,12 +883,18 @@ impl PreparedBspMount {
                 .zip(material_texture_bindings.iter())
                 .enumerate()
                 .map(|(material_index, ((material, material_descriptor), binding))| {
-                    let pipeline = match material.surface_class {
-                        bsp::materials::SurfaceClass::AlphaMask => {
+                    let pipeline = match (material.surface_class, material.is_pbr) {
+                        (bsp::materials::SurfaceClass::AlphaMask, true) => {
+                            VkPipelineType::BspPbrAlphaMask
+                        }
+                        (bsp::materials::SurfaceClass::Opaque, true) => {
+                            VkPipelineType::BspPbrOpaque
+                        }
+                        (bsp::materials::SurfaceClass::AlphaMask, false) => {
                             VkPipelineType::BspAlphaMask
                         }
-                        bsp::materials::SurfaceClass::Sky => VkPipelineType::BspSky,
-                        bsp::materials::SurfaceClass::Liquid => VkPipelineType::BspLiquid,
+                        (bsp::materials::SurfaceClass::Sky, _) => VkPipelineType::BspSky,
+                        (bsp::materials::SurfaceClass::Liquid, _) => VkPipelineType::BspLiquid,
                         _ => VkPipelineType::BspOpaque,
                     };
                     let ubo_offset = (material_index as u64)
