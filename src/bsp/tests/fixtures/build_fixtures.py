@@ -230,6 +230,32 @@ FIXTURES = [
         "require_nonempty_lit": False,
         "expect_leak": True,
     },
+
+    # -- Phase 05: M1/M2 map class scale evidence fixtures --
+    {
+        "name": "dungeon-m1-bsp2",
+        "source": "dungeon_m1_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-m2-bsp2",
+        "source": "dungeon_m2_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
 ]
 
 # ── Size limits ──────────────────────────────────────────────────────────

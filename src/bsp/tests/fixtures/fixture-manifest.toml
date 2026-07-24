@@ -72,6 +72,18 @@ sha256 = "bfd2760177fc8c66a4bd61d258520ccecd1aa6f7e63d449d02c2fe67243f38b1"
 license = "CC0-1.0"
 provenance = "project-authored Phase 01 BSP beta source fixture"
 
+[source."dungeon_m1_standard.map"]
+path = "maps/dungeon_m1_standard.map"
+sha256 = "d816e8a3012248a315fdca1aeeb8ec383379b82c253253df71fd3acde9d7a53c"
+license = "CC0-1.0"
+provenance = "project-authored Phase 01 BSP beta source fixture"
+
+[source."dungeon_m2_standard.map"]
+path = "maps/dungeon_m2_standard.map"
+sha256 = "bef13e6e26f41465124a3c8d25463b43c81d91aec209db599a74c87f9b9c2308"
+license = "CC0-1.0"
+provenance = "project-authored Phase 01 BSP beta source fixture"
+
 [source."dungeon_materials_standard.map"]
 path = "maps/dungeon_materials_standard.map"
 sha256 = "bd3e8994b640c54a3db0292a386344ab261b0ccd39478d282b8262602b4b7f58"
@@ -426,6 +438,48 @@ bsp_sha256 = "7eaefbd4375930467dae418682de036809e913efac7afedaf6ff0b40c14456df"
 bsp_size = 18688
 lit_sha256 = "ee453c96d75008649270977c2d65b972b3a4c69144da11ead33894781584aa9d"
 lit_size = 4280
+qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
+vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"
+qbsp_args = ["-bsp2"]
+vis_args = []
+light_args = ["-threads", "1", "-lit"]
+
+[fixture."dungeon-m1-bsp2"]
+source = "dungeon_m1_standard.map"
+output = "compiled/dungeon-m1-bsp2.bsp"
+placeholder = false
+profile = "q1-portable-ericw"
+dialect = "bsp2"
+bsp2 = true
+colored = true
+source_sha256 = "d816e8a3012248a315fdca1aeeb8ec383379b82c253253df71fd3acde9d7a53c"
+palette_sha256 = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
+bsp_sha256 = "29f04fbed60289ddc3ba857caf644a39e6fc5808221c3f710523362bd7ef9f6f"
+bsp_size = 69928
+lit_sha256 = "7a7ae50294359cc6a240411c2b810b8430dd6ecf995a0ea12c07f07ea5b424d7"
+lit_size = 56816
+qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
+vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"
+qbsp_args = ["-bsp2"]
+vis_args = []
+light_args = ["-threads", "1", "-lit"]
+
+[fixture."dungeon-m2-bsp2"]
+source = "dungeon_m2_standard.map"
+output = "compiled/dungeon-m2-bsp2.bsp"
+placeholder = false
+profile = "q1-portable-ericw"
+dialect = "bsp2"
+bsp2 = true
+colored = true
+source_sha256 = "bef13e6e26f41465124a3c8d25463b43c81d91aec209db599a74c87f9b9c2308"
+palette_sha256 = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
+bsp_sha256 = "de99b371b410685a2dce864e64cbb4a5768f76c5dc91aae97ccbfb0413a226fe"
+bsp_size = 209896
+lit_sha256 = "9215f9e77968dbe09710a496bb37445c33edfad03efa3d3e17c51f8ee74bbaf8"
+lit_size = 108080
 qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
 vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
 light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"
