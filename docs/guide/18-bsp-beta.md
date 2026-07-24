@@ -15,6 +15,7 @@ Rust developers building applications that include compiled Quake-format BSP map
   ```
 - **Compiler toolchain**: The engine does NOT bundle a BSP compiler. You must supply `ericw-tools 2.0.0-alpha3` (or a pinned compatible version) on your build host. The approved executables are `qbsp`, `vis`, and `light`.
 - **Fixture rights**: All `.map` sources, palettes, and compiled `.bsp` files must be your own work or licensed for redistribution (CC0 or project license). The engine includes **zero** copyrighted id Software content.
+- **Dungeon generator**: A procedural dungeon generator is specified but not yet implemented. See the [dungeon generation specification](../../.internal-dev/specifications/bsp-dungeon-generation.md) for frozen M1/M2 bounds, construction parameters, and the generator authorization gate.
 
 ## Package Layout
 
@@ -297,10 +298,12 @@ The following BSP formats produce `BSP-UNSUPPORTED-DIALECT` errors and will neve
 
 ## Limitations (Beta)
 
-- **No redistributable visible-face fixture**: A real local `start.bsp` has produced visible, stable headless and live-Wayland evidence, but it is third-party content and is not checked in. Formal reference calibration remains blocked until the project owns a visible, lightmapped fixture.
+- **Dungeon generator not yet implemented**: The dungeon generation specification (`bsp-dungeon-generation.md`) freezes M1/M2 bounds, construction parameters, and output ceilings. A dedicated generator sprint must follow Phase 09.
+- **No redistributable visible-face fixture**: A real local `start.bsp` has produced visible, stable headless and live-Wayland evidence, but it is third-party content and is not checked in. The compiler-evidence fixture `dungeon-evidence-bsp2.bsp` (41 faces, BSP2) proves face-visible BSP2 compilation but is a small technical proof, not a visual-calibration fixture.
 - **Render-to-texture deferred**: BSP surfaces render into the main color/depth targets using a dedicated BSP pipeline. Off-screen render targets are not yet supported.
 - **Dynamic entity transforms**: Inline brush model transforms update through `BspMountState` per-batch transform maps. Full entity-to-scene-node mapping for external models is partially implemented.
 - **Physics world colliders**: World trimesh collision from clipnodes is pending; point-contents and hull traces are functional.
+- **Open arches only**: Doors (`func_door`, `func_button`, `func_plat`) are excluded from initial dungeon generator output. All generated room connections use open arches with no moving geometry or trigger wiring.
 
 ## See Also
 

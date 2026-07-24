@@ -57,5 +57,6 @@ cargo check -p renderer --features bsp
 
 - Transaction/Ownership spec: `.internal-dev/specifications/bsp-transaction-ownership.md`
 - Acceptance spec: `.internal-dev/specifications/bsp-acceptance.md`
+- Dungeon generation spec: `.internal-dev/specifications/bsp-dungeon-generation.md`
 - Renderer BSP guide: `src/renderer/AGENTS.md`
 - BSP crate: `src/bsp/`

@@ -351,6 +351,7 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 - [BSP Renderer-Lighting Spec](../../.internal-dev/specifications/bsp-renderer-lighting.md)
 - [BSP Spatial-Physics Spec](../../.internal-dev/specifications/bsp-spatial-physics.md)
 - [BSP Transaction-Ownership Spec](../../.internal-dev/specifications/bsp-transaction-ownership.md)
+- [BSP Dungeon Generation Spec](../../.internal-dev/specifications/bsp-dungeon-generation.md)
 - [Renderer Descriptor ABI](14-renderer-descriptor-abi.md)
 - [Vulkan Sync and Frame Lifecycle](05-vulkan-sync-and-frame-lifecycle.md)
 - [Asset Lifecycle and I/O](03-asset-lifecycle-and-io.md)

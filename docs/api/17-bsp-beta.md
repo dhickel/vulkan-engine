@@ -348,6 +348,7 @@ fn load_bsp_map(
 
 - [Guide: BSP Beta](../guide/18-bsp-beta.md) — app-builder how-to
 - [Internal: BSP Runtime and Lifetime](../internal/18-bsp-runtime-and-lifetime.md) — ownership and protocol details
+- [Dungeon Generation Spec](../../.internal-dev/specifications/bsp-dungeon-generation.md) — frozen M1/M2 bounds, construction parameters, generator authorization gate
 - [BSP Acceptance Spec](../../.internal-dev/specifications/bsp-acceptance.md)
 - [BSP Compatibility Spec](../../.internal-dev/specifications/bsp-compatibility.md)
 - [BSP Transaction/Ownership Spec](../../.internal-dev/specifications/bsp-transaction-ownership.md)

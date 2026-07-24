@@ -158,6 +158,16 @@ key/value data intact.
 For maps exceeding BSP29 limits, add `-bsp2` to `default_qbsp_args` and
 `default_light_args` in the compiler profile.
 
+## Dungeon Generator
+
+A procedural dungeon generator is specified but not yet implemented. The frozen
+generation contract is in `.internal-dev/specifications/bsp-dungeon-generation.md`.
+When the generator is implemented:
+- Generated `.map` output is BSP2 only (use `ericw-q1-bsp2-generated-profile.toml`).
+- Room connections use open arches (no doors for beta).
+- Compile with `light -threads 1 -lit` for reproducible colored-light output.
+- PBR texture companions follow `<texture>_norm.png` / `<texture>_gloss.png` naming.
+
 ## License
 
 These authoring tools and configurations are provided under the same license

@@ -48,3 +48,10 @@ Tests live in `tests/`:
 - `parse_golden.rs` — valid BSP29/BSP2 fixtures, lumps, extensions, companions, entities, resources
 - `parse_adversarial.rs` — table-driven truncation/overflow/cycle/bad-index mutations
 - `entities_and_resources.rs` — entity grammar edge cases, resource resolution, companion binding
+
+## Related
+
+- Dungeon generation specification: `.internal-dev/specifications/bsp-dungeon-generation.md`
+- Compatibility specification: `.internal-dev/specifications/bsp-compatibility.md`
+- Spatial/physics specification: `.internal-dev/specifications/bsp-spatial-physics.md`
+- Renderer-lighting specification: `.internal-dev/specifications/bsp-renderer-lighting.md`
