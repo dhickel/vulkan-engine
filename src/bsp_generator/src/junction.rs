@@ -172,10 +172,10 @@ const CLOSURE_MARGIN: i32 = WALL;
 /// Returns 1 closure brush for the outer corner.
 pub fn build_l_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
     let ((ax0, ay0, az0), (ax1, ay1, az1)) = corridor_extents(a);
-    let ((bx0, by0, _bz0), (bx1, by1, _bz1)) = corridor_extents(b);
+    let ((bx0, by0, bz0), (bx1, by1, bz1)) = corridor_extents(b);
 
-    let z0 = az0;
-    let z1 = az1; // both corridors share Z
+    let z0 = az0.min(bz0);
+    let z1 = az1.max(bz1);
 
     let a_orient = corridor_orientation(a);
     let b_orient = corridor_orientation(b);
@@ -392,11 +392,11 @@ pub fn build_t_junction(terminating: &Corridor, through: &Corridor) -> Vec<Brush
 ///
 /// Returns 4 closure brushes (one per outer corner).
 pub fn build_x_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
-    let ((_ax0, _ay0, az0), (_ax1, _ay1, _az1)) = corridor_extents(a);
-    let ((_bx0, _by0, bz0), (_bx1, _by1, _bz1)) = corridor_extents(b);
+    let ((_ax0, _ay0, az0), (_ax1, _ay1, az1)) = corridor_extents(a);
+    let ((_bx0, _by0, bz0), (_bx1, _by1, bz1)) = corridor_extents(b);
 
-    let z0 = az0;
-    let z1 = az0.max(bz0);
+    let z0 = az0.min(bz0);
+    let z1 = az1.max(bz1);
 
     let a_orient = corridor_orientation(a);
     let b_orient = corridor_orientation(b);

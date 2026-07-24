@@ -6,7 +6,7 @@
 
 use bsp_generator::{
     build_junction_closures, build_l_junction, build_room_portal, build_t_junction,
-    build_x_junction, make_brush, Corridor, RoomIntent, CONSTRUCTION_QUANTUM,
+    build_x_junction, make_brush, Brush, Corridor, RoomIntent, CONSTRUCTION_QUANTUM,
 };
 
 fn corridor_h(x: i32, y: i32, z: i32, len: i32) -> Corridor {
@@ -32,6 +32,38 @@ fn room(x: i32, y: i32, z: i32, dx: u32, dy: u32, dz: u32) -> RoomIntent {
         position: (x, y, z),
         dimensions: (dx, dy, dz),
     }
+}
+
+fn assert_brush_faces_are_non_degenerate(brush: &Brush) {
+    assert_eq!(brush.faces.len(), 6, "brush must have exactly 6 faces");
+    for face in &brush.faces {
+        let [p0, p1, p2] = face.plane_points;
+        let v1 = (p1.0 - p0.0, p1.1 - p0.1, p1.2 - p0.2);
+        let v2 = (p2.0 - p0.0, p2.1 - p0.1, p2.2 - p0.2);
+        let cross = (
+            v1.1 * v2.2 - v1.2 * v2.1,
+            v1.2 * v2.0 - v1.0 * v2.2,
+            v1.0 * v2.1 - v1.1 * v2.0,
+        );
+        assert_ne!(
+            cross,
+            (0, 0, 0),
+            "face has degenerate plane points: {:?}",
+            face.plane_points
+        );
+    }
+}
+
+fn brush_z_range(brush: &Brush) -> (i32, i32) {
+    let mut min_z = i32::MAX;
+    let mut max_z = i32::MIN;
+    for face in &brush.faces {
+        for &(_, _, z) in &face.plane_points {
+            min_z = min_z.min(z);
+            max_z = max_z.max(z);
+        }
+    }
+    (min_z, max_z)
 }
 
 // ── make_brush ────────────────────────────────────────────────────────────
@@ -189,7 +221,21 @@ fn x_junction_produces_four_corner_brushes() {
         brushes.len()
     );
     for b in &brushes {
-        assert_eq!(b.faces.len(), 6);
+        assert_brush_faces_are_non_degenerate(b);
+        assert_eq!(brush_z_range(b), (0, 80));
+    }
+}
+
+#[test]
+fn x_junction_brushes_are_full_height_and_non_degenerate() {
+    let h = corridor_h(0, 64, 0, 192);
+    let v = corridor_v(64, 0, 0, 192);
+    let brushes = build_x_junction(&h, &v);
+
+    assert_eq!(brushes.len(), 4);
+    for brush in &brushes {
+        assert_brush_faces_are_non_degenerate(brush);
+        assert_eq!(brush_z_range(brush), (0, 80));
     }
 }
 
