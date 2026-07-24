@@ -10,6 +10,14 @@
 - **Derivation**: Original project-authored works; NOT derived from id Software Quake maps
 - **Attribution**: Not required (CC0)
 
+### Source WADs (`wads/*.wad`)
+
+- **Author**: vulkan-engine project contributors
+- **License**: CC0 1.0 Universal (Public Domain Dedication)
+- **Rights**: Free to use, modify, distribute
+- **Derivation**: Project-authored WAD2 archives with procedurally-generated palette-indexed textures referencing the project palette (`palettes/project_palette.lmp`); NOT derived from id Software Quake WADs or textures
+- **Attribution**: Not required (CC0)
+
 ### Palette (`palettes/project_palette.lmp`)
 
 - **Author**: vulkan-engine project contributors
@@ -24,7 +32,7 @@
 
 - **Source**: Compiled from project-authored `.map` files using ericw-tools
 - **Compiler**: ericw-tools (MIT license)
-- **Content**: Derived from CC0 source maps and CC0 palette
+- **Content**: Derived from CC0 source maps, CC0 palette, and project-authored CC0 WADs where referenced
 - **License**: CC0 1.0 Universal (the compiled output inherits the source license)
 - **Rights**: Free to use, modify, distribute
 

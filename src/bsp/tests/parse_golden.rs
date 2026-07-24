@@ -10,6 +10,10 @@ const FIXTURE_PALETTE: &[u8] = include_bytes!("fixtures/palettes/project_palette
 const FIXTURE_BSP29_CORE: &[u8] = include_bytes!("fixtures/compiled/q1-bsp29-core.bsp");
 const FIXTURE_BSP2_COLORED: &[u8] = include_bytes!("fixtures/compiled/ericw-bsp2-colored.bsp");
 const FIXTURE_BSP2_LIT: &[u8] = include_bytes!("fixtures/compiled/ericw-bsp2-colored.lit");
+const FIXTURE_DUNGEON_EVIDENCE_BSP2: &[u8] =
+    include_bytes!("fixtures/compiled/dungeon-evidence-bsp2.bsp");
+const FIXTURE_DUNGEON_EVIDENCE_LIT: &[u8] =
+    include_bytes!("fixtures/compiled/dungeon-evidence-bsp2.lit");
 
 /// Construct a minimal valid BSP29 binary with configurable content.
 fn make_bsp29_header(lump_entries: &[(usize, u32, u32)]) -> Vec<u8> {
@@ -395,6 +399,97 @@ fn golden_lit_mismatch_diagnosed() {
         .diagnostics
         .iter()
         .any(|d| d.code == DiagnosticCode::CompanionContentMismatch));
+}
+
+#[test]
+fn dungeon_evidence_bsp2_fixture_parses_strict_with_lit() {
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(FIXTURE_PALETTE.to_vec()),
+        lit_data: Some(FIXTURE_DUNGEON_EVIDENCE_LIT.to_vec()),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(FIXTURE_DUNGEON_EVIDENCE_BSP2, &options).unwrap();
+    assert_eq!(world.profile, profile::BspProfile::Bsp2);
+    assert!(world.worldspawn().is_some());
+    assert!(!world.entities.is_empty());
+    // Must have visible geometry (faces)
+    assert!(!world.faces.is_empty(), "dungeon fixture must have faces");
+    // Must have nonempty lightmap data
+    assert!(
+        !world.lightmap_data.is_empty(),
+        "dungeon fixture must have lightmap data"
+    );
+    // Must have colored light from .lit companion
+    assert_eq!(
+        world.colored_light_source,
+        companions::ColoredLightSource::LitFile
+    );
+}
+
+#[test]
+fn dungeon_evidence_bsp2_lit_is_nonempty_qlit_v1() {
+    // The .lit companion must be >8 bytes (has real light data, not just header)
+    assert!(
+        FIXTURE_DUNGEON_EVIDENCE_LIT.len() > 8,
+        "dungeon .lit must have light data beyond QLIT header"
+    );
+    assert_eq!(&FIXTURE_DUNGEON_EVIDENCE_LIT[0..4], b"QLIT");
+    assert_eq!(
+        u32::from_le_bytes(FIXTURE_DUNGEON_EVIDENCE_LIT[4..8].try_into().unwrap()),
+        1
+    );
+}
+
+#[test]
+fn dungeon_evidence_bsp2_entity_count() {
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(FIXTURE_PALETTE.to_vec()),
+        lit_data: Some(FIXTURE_DUNGEON_EVIDENCE_LIT.to_vec()),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(FIXTURE_DUNGEON_EVIDENCE_BSP2, &options).unwrap();
+    // Must have worldspawn + info_player_start + at least one light
+    assert!(
+        world.entities.len() >= 3,
+        "expected at least 3 entities, got {}",
+        world.entities.len()
+    );
+    let has_spawn = world
+        .entities
+        .iter()
+        .any(|e| e.class == entities::EntityClass::SpawnMarker);
+    let has_light = world
+        .entities
+        .iter()
+        .any(|e| e.class == entities::EntityClass::Light);
+    assert!(has_spawn, "dungeon fixture must have a spawn marker");
+    assert!(has_light, "dungeon fixture must have a light entity");
+}
+
+#[test]
+fn dungeon_evidence_bsp2_has_lightmap_data() {
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(FIXTURE_PALETTE.to_vec()),
+        lit_data: Some(FIXTURE_DUNGEON_EVIDENCE_LIT.to_vec()),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(FIXTURE_DUNGEON_EVIDENCE_BSP2, &options).unwrap();
+    // Lightmap lump must be nonempty for visible geometry
+    assert!(!world.lightmap_data.is_empty());
+    // .lit payload size = lightmap_size * 3
+    let lit_rgb_size = FIXTURE_DUNGEON_EVIDENCE_LIT.len() - 8;
+    let expected_rgb = world.lightmap_data.len() * 3;
+    assert_eq!(
+        lit_rgb_size,
+        expected_rgb,
+        ".lit RGB payload {} must equal lightmap_data {} * 3 = {}",
+        lit_rgb_size,
+        world.lightmap_data.len(),
+        expected_rgb
+    );
 }
 
 #[test]

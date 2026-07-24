@@ -1041,6 +1041,11 @@ fn run_compiler_stage(
     )
 }
 
+fn profile_uses_bsp2(profile: &CompilerProfile) -> bool {
+    profile.default_qbsp_args.iter().any(|a| a == "-bsp2")
+        || profile.default_light_args.iter().any(|a| a == "-bsp2")
+}
+
 /// Compile a .map source file using a compiler profile.
 ///
 /// Steps:
@@ -1057,6 +1062,7 @@ pub fn compile_map(
     work_dir: &Path,
     palette_path: &Path,
     tool_path: Option<&Path>,
+    wad_paths: &[PathBuf],
 ) -> Result<CompileResult, CompilerError> {
     // Validate inputs
     if !source_map.is_file() {
@@ -1070,6 +1076,52 @@ pub fn compile_map(
             path: palette_path.to_path_buf(),
             message: "palette file not found".into(),
         });
+    }
+
+    // Validate and sanitize WAD paths
+    let mut wad_staging_names: Vec<(PathBuf, String)> = Vec::new();
+    let mut seen_basenames: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for wad_path in wad_paths {
+        if !wad_path.is_file() {
+            return Err(CompilerError::SourceError {
+                path: wad_path.clone(),
+                message: "WAD file not found".into(),
+            });
+        }
+        // Reject symlinks
+        let meta = wad_path.symlink_metadata().map_err(|e| CompilerError::Io {
+            message: format!("cannot stat WAD '{}'", wad_path.display()),
+            source: e,
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(CompilerError::SourceError {
+                path: wad_path.clone(),
+                message: "WAD path must not be a symlink".into(),
+            });
+        }
+        // Sanitize basename
+        let basename = wad_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if basename.is_empty()
+            || basename.contains("..")
+            || basename.contains('/')
+            || basename.contains('\\')
+        {
+            return Err(CompilerError::SourceError {
+                path: wad_path.clone(),
+                message: format!("WAD basename '{}' is unsafe", basename),
+            });
+        }
+        if !seen_basenames.insert(basename.clone()) {
+            return Err(CompilerError::SourceError {
+                path: wad_path.clone(),
+                message: format!("duplicate WAD basename '{}'", basename),
+            });
+        }
+        wad_staging_names.push((wad_path.clone(), basename));
     }
 
     let env = minimal_env();
@@ -1145,6 +1197,12 @@ pub fn compile_map(
 
     let work_palette = work_dir.join("palette.lmp");
     std::fs::copy(palette_path, &work_palette)?;
+
+    // Stage WAD files to work dir by basename
+    for (wad_path, basename) in &wad_staging_names {
+        let dest = work_dir.join(basename);
+        std::fs::copy(wad_path, &dest)?;
+    }
 
     let bsp_filename = work_source.with_extension("bsp");
     let bsp_filename_str = bsp_filename
@@ -1251,6 +1309,7 @@ pub fn compile_map(
 
     // Check for .lit companion
     let lit_path = bsp_filename.with_extension("lit");
+    let uses_bsp2 = profile_uses_bsp2(profile);
     let lit_data = if lit_path.exists() {
         let lit_size = lit_path.metadata()?.len();
         if lit_size > profile.max_output_size {
@@ -1265,10 +1324,46 @@ pub fn compile_map(
         None
     };
 
+    // Validate BSP magic matches profile expectation
+    let bsp_magic = &bsp_data[..4];
+    if uses_bsp2 {
+        if bsp_magic != b"BSP2" {
+            return Err(CompilerError::SourceError {
+                path: bsp_filename.clone(),
+                message: format!(
+                    "profile uses -bsp2 but output BSP has magic {:02x?}, expected BSP2",
+                    bsp_magic
+                ),
+            });
+        }
+    } else {
+        let magic_int =
+            i32::from_le_bytes([bsp_magic[0], bsp_magic[1], bsp_magic[2], bsp_magic[3]]);
+        if magic_int != 29 {
+            return Err(CompilerError::SourceError {
+                path: bsp_filename.clone(),
+                message: format!(
+                    "profile expects BSP29 but output BSP has magic {:02x?} (version {})",
+                    bsp_magic, magic_int
+                ),
+            });
+        }
+    }
+
     let compiler_hashes = Some(actual_hashes);
 
     // Read palette for re-validation
     let palette_data = std::fs::read(&work_palette)?;
+
+    // Collect staged WAD bytes for re-validation
+    let mut wad_archives: Vec<(String, Vec<u8>)> = Vec::new();
+    for (_, basename) in &wad_staging_names {
+        let wad_path = work_dir.join(basename);
+        if wad_path.exists() {
+            let wad_bytes = std::fs::read(&wad_path)?;
+            wad_archives.push((basename.clone(), wad_bytes));
+        }
+    }
 
     let mut source_hashes = vec![
         PackageContentHash {
@@ -1285,6 +1380,16 @@ pub fn compile_map(
             sha256: sha256_file(&work_palette)?,
         },
     ];
+    // Include WAD hashes in source provenance
+    for (_, basename) in &wad_staging_names {
+        let wad_path = work_dir.join(basename);
+        if wad_path.exists() {
+            source_hashes.push(PackageContentHash {
+                path: PathBuf::from(basename),
+                sha256: sha256_file(&wad_path)?,
+            });
+        }
+    }
     source_hashes.sort_by(|left, right| left.path.cmp(&right.path));
 
     let mut output_hashes = vec![PackageContentHash {
@@ -1309,7 +1414,7 @@ pub fn compile_map(
         strict: true,
         palette: Some(palette_data),
         lit_data: lit_data.clone(),
-        wad_archives: Vec::new(),
+        wad_archives,
         texture_overrides: Vec::new(),
         source_identity: source_map.display().to_string(),
     };

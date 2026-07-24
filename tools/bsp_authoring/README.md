@@ -8,7 +8,8 @@ targeting the vulkan-engine BSP beta.
 ```
 tools/bsp_authoring/
 ├── README.md                    ← this file
-├── ericw-q1-profile.toml        ← pinned compiler profile for engine_pack compile-bsp
+├── ericw-q1-profile.toml        ← pinned BSP29 compiler profile for engine_pack compile-bsp
+├── ericw-q1-bsp2-generated-profile.toml ← pinned deterministic BSP2 compiler profile
 └── TrenchBroom/
     ├── GameConfig.cfg           ← TrenchBroom game configuration
     └── Engine.fgd               ← entity definitions (FGD)
@@ -19,6 +20,10 @@ tools/bsp_authoring/
 - **ericw-tools** 2.0.0-alpha3 (minimum)
   - Download: https://github.com/ericwa/ericw-tools/releases
   - Required executables: `qbsp`, `vis`, `light`
+  - Pinned executable hashes (SHA-256):
+    - qbsp: `4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17`
+    - vis:  `f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea`
+    - light: `1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5`
 - **TrenchBroom** 2024.1+ (recommended)
   - Download: https://trenchbroom.github.io/
 - **vulkan-engine** with BSP beta support
@@ -75,13 +80,22 @@ directory or create your own 768-byte palette (256 RGB triples).
 ### Compilation (engine_pack)
 
 ```sh
-# Compile with pinned ericw-tools profile
+# Compile with pinned ericw-tools BSP29 profile
 engine_pack compile-bsp \
     path/to/map.map \
     --profile tools/bsp_authoring/ericw-q1-profile.toml \
     --out output/ \
     --palette path/to/palette.lmp \
     --tool-path /path/to/ericw-tools/bin
+
+# Compile deterministic BSP2 with an authored WAD staged by basename
+engine_pack compile-bsp \
+    path/to/map.map \
+    --profile tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml \
+    --out output/ \
+    --palette path/to/palette.lmp \
+    --tool-path /path/to/ericw-tools/bin \
+    --wad path/to/textures.wad
 
 # Validate the compiled BSP
 engine_pack validate-bsp output/map.bsp --palette path/to/palette.lmp
@@ -95,8 +109,10 @@ engine_pack validate-bsp output/map.bsp --palette path/to/palette.lmp
   profile before execution.
 - Output BSP is re-validated through the engine's `bsp` parser after
   compilation (fail-closed: if validation fails, compilation is rejected).
-- Compiler provenance (identity, version, arguments) is recorded alongside
-  the output.
+- Compiler provenance (identity, version, arguments, staged WAD hashes, and
+  output hashes) is recorded alongside the output.
+- The BSP2 generated profile runs `light -threads 1 -lit` so `.bsp` and `.lit`
+  bytes are reproducible across duplicate builds.
 
 ## Entity Reference
 

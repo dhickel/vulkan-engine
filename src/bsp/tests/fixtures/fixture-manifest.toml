@@ -18,6 +18,12 @@ fixture_license = "CC0-1.0"
 derivation = "Project-authored maps and procedural palette; no id Software Quake assets, palettes, WADs, maps, models, or third-party game content."
 license_file = "LICENSES.md"
 
+[source."dungeon_evidence_standard.map"]
+path = "maps/dungeon_evidence_standard.map"
+sha256 = "036f28cd941c2eb4434827131ba54db0cbe56b4b5c76360a3a9deef8fbb28d6a"
+license = "CC0-1.0"
+provenance = "project-authored Phase 01 BSP beta source fixture"
+
 [source."q1_profile_core.map"]
 path = "maps/q1_profile_core.map"
 sha256 = "2d65d0381fe6f4e03929b751340e1208c3d382e5a06cfa9a6150072d8fcde96a"
@@ -41,6 +47,12 @@ path = "maps/q1_profile_visible.map"
 sha256 = "5c46e35a86d727ab035f597eaf608847d44b7ede304ed098ad7c6b4ff3cbb436"
 license = "CC0-1.0"
 provenance = "project-authored Phase 01 BSP beta source fixture"
+
+[wad."dungeon_evidence.wad"]
+path = "wads/dungeon_evidence.wad"
+sha256 = "a41973a96de9bc49d6f817e5442e6b392d8a09c54338a1faba010a0b82f8fd6c"
+license = "CC0-1.0"
+provenance = "project-authored WAD2 archive with generated palette-indexed textures; no id Software content"
 
 [fixture."q1-bsp29-core"]
 source = "q1_profile_core.map"
@@ -100,3 +112,26 @@ light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5
 qbsp_args = ["-bsp2"]
 vis_args = []
 light_args = ["-bsp2", "-lit", "-colored"]
+
+[fixture."dungeon-evidence-bsp2"]
+source = "dungeon_evidence_standard.map"
+output = "compiled/dungeon-evidence-bsp2.bsp"
+placeholder = false
+profile = "q1-portable-ericw"
+dialect = "bsp2"
+bsp2 = true
+colored = true
+source_sha256 = "036f28cd941c2eb4434827131ba54db0cbe56b4b5c76360a3a9deef8fbb28d6a"
+palette_sha256 = "056225760af497967cb7fc67aba0757e915e2f461ba909d440e8073d591c5dd0"
+wad = "wads/dungeon_evidence.wad"
+wad_sha256 = "a41973a96de9bc49d6f817e5442e6b392d8a09c54338a1faba010a0b82f8fd6c"
+bsp_sha256 = "1889a6c7959b3e00e9a907243b61d35b6c7d32525f098e13b5b059bd17ba5f15"
+bsp_size = 26424
+lit_sha256 = "a732a09039ff31485c3d91346d778d5ad41ba563bddca76876fb81c0eb3f1805"
+lit_size = 12776
+qbsp_sha256 = "4a05974acf9e59f73a9c8f4e8236f3d1e0961be477dae002837e166278882f17"
+vis_sha256 = "f7f429e0ad9bebbb0ebdefea8d6cd5e13a6ad6ff9f6893126772e00b66e364ea"
+light_sha256 = "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5"
+qbsp_args = ["-bsp2"]
+vis_args = []
+light_args = ["-threads", "1", "-lit"]

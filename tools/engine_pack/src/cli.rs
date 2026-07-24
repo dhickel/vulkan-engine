@@ -229,7 +229,7 @@ pub fn validate_bsp_schema() -> &'static [CliOption] {
     ]
 }
 
-/// Schema for `compile-bsp <source.map> --profile <profile.toml> --out <dir> [--palette <file.lmp>] [--tool-path <dir>]`
+/// Schema for `compile-bsp <source.map> --profile <profile.toml> --out <dir> [--palette <file.lmp>] [--tool-path <dir>] [--wad <file.wad>]`
 pub fn compile_bsp_schema() -> &'static [CliOption] {
     &[
         CliOption {
@@ -271,6 +271,16 @@ pub fn compile_bsp_schema() -> &'static [CliOption] {
             repeatable: false,
             help: "Directory containing qbsp, vis, light executables",
             value_placeholder: Some("<dir>"),
+        },
+        CliOption {
+            name: "--wad",
+            short: None,
+            value_policy: OptionValuePolicy::Value,
+            allow_spaced: true,
+            allow_equals: true,
+            repeatable: true,
+            help: "WAD2 texture archive to stage alongside source (repeatable)",
+            value_placeholder: Some("<file.wad>"),
         },
     ]
 }
@@ -316,7 +326,7 @@ pub fn command_schemas() -> [CommandSchema; 11] {
         },
         CommandSchema {
             name: "compile-bsp",
-            usage: "engine_pack compile-bsp <source.map> --profile <profile.toml> --out <dir> [--palette <file.lmp>] [--tool-path <dir>]",
+            usage: "engine_pack compile-bsp <source.map> --profile <profile.toml> --out <dir> [--palette <file.lmp>] [--tool-path <dir>] [--wad <file.wad>]",
             description: "Compile a .map source to .bsp using a trusted external compiler.",
             options: compile_bsp_schema(),
         },

@@ -42,6 +42,7 @@ EXPECTED_COMPILER_HASHES = {
     "light": "1210ee9bed8990f67e3be7e28fbfd8d210329b052ac57dba017200d2da1ca5e5",
 }
 EMPTY_QLIT_V1 = b"QLIT\x01\x00\x00\x00"
+WADS_DIR = SCRIPT_DIR / "wads"
 
 # ── Fixture definitions ──────────────────────────────────────────────────
 
@@ -80,6 +81,19 @@ FIXTURES = [
         "args_qbsp": ["-bsp2"],
         "args_vis": [],
         "args_light": ["-bsp2", "-lit", "-colored"],
+    },
+    {
+        "name": "dungeon-evidence-bsp2",
+        "source": "dungeon_evidence_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+        "wad": "dungeon_evidence.wad",
     },
 ]
 
@@ -350,6 +364,13 @@ def compile_fixture(
     work_palette.write_bytes(PALETTE_PATH.read_bytes())
     write_wad2(work_dir / "project_palette.wad")
 
+    # If fixture specifies a WAD, copy it to work dir
+    if fixture.get("wad"):
+        wad_path = WADS_DIR / fixture["wad"]
+        if not wad_path.exists():
+            raise FileNotFoundError(f"WAD not found: {wad_path}")
+        (work_dir / fixture["wad"]).write_bytes(wad_path.read_bytes())
+
     # Determine output BSP path
     bsp_name = fixture["source"].replace(".map", ".bsp")
     work_bsp = work_dir / bsp_name
@@ -385,30 +406,36 @@ def compile_fixture(
 
     # Collect output files
     output_bsp = output_dir / f"{name}.bsp"
+    output_lit = None
     output_bsp.write_bytes(work_bsp.read_bytes())
     if fixture.get("force_lightdata"):
         force_lightdata_for_visible_fixture(output_bsp)
-
-    bsp_hash = sha256_file(output_bsp)
-    bsp_size = output_bsp.stat().st_size
-    assert bsp_size < MAX_BSP_SIZE, f"BSP too large: {bsp_size} > {MAX_BSP_SIZE}"
 
     # Check for companion .lit file
     lit_path = work_dir / bsp_name.replace(".bsp", ".lit")
     lit_hash = None
     lit_size = 0
     if fixture["colored"] and not lit_path.exists():
-        # ericw-tools may skip writing a .lit when a tiny fixture has no luxels.
-        # Publish a deterministic empty QLIT v1 companion so package-loading tests
-        # exercise the companion path without depending on copyrighted content.
+        # Tiny zero-luxel compatibility fixtures use a deterministic empty QLIT v1
+        # companion to exercise the companion path. Evidence fixtures that claim
+        # nonempty compiler-produced lighting must fail instead of being patched.
+        if fixture.get("require_nonempty_lit"):
+            raise RuntimeError(f"compiler did not produce required .lit companion: {lit_path}")
         lit_path.write_bytes(EMPTY_QLIT_V1)
     if lit_path.exists():
         lit_size = lit_path.stat().st_size
+        if fixture.get("require_nonempty_lit") and lit_size <= len(EMPTY_QLIT_V1):
+            raise RuntimeError(f"compiler produced empty .lit for evidence fixture: {lit_path}")
         assert lit_size < MAX_LIT_SIZE, f".lit too large: {lit_size} > {MAX_LIT_SIZE}"
         lit_hash = sha256_file(lit_path)
         # Copy lit to output
         output_lit = output_dir / f"{name}.lit"
         output_lit.write_bytes(lit_path.read_bytes())
+
+    # Recompute BSP hash AFTER any patching
+    bsp_hash = sha256_file(output_bsp)
+    bsp_size = output_bsp.stat().st_size
+    assert bsp_size < MAX_BSP_SIZE, f"BSP too large: {bsp_size} > {MAX_BSP_SIZE}"
 
     # Verify BSP magic
     magic = output_bsp.read_bytes()[:4]
@@ -437,6 +464,8 @@ def compile_fixture(
         "qbsp_hash": qbsp_hash,
         "vis_hash": vis_hash,
         "light_hash": light_hash,
+        "wad": fixture.get("wad"),
+        "wad_hash": sha256_file(WADS_DIR / fixture["wad"]) if fixture.get("wad") else None,
         "qbsp_args": fixture["args_qbsp"],
         "vis_args": fixture["args_vis"],
         "light_args": fixture["args_light"],
@@ -480,6 +509,14 @@ def update_manifest(provenance: list[dict], output_dir: Path):
         lines.append("license = \"CC0-1.0\"")
         lines.append("provenance = \"project-authored Phase 01 BSP beta source fixture\"")
 
+    for wad_path in sorted(WADS_DIR.glob("*.wad")):
+        lines.append("")
+        lines.append(f"[wad.\"{wad_path.name}\"]")
+        lines.append(f"path = \"wads/{wad_path.name}\"")
+        lines.append(f"sha256 = \"{sha256_file(wad_path)}\"")
+        lines.append("license = \"CC0-1.0\"")
+        lines.append("provenance = \"project-authored WAD2 archive with generated palette-indexed textures; no id Software content\"")
+
     for entry in provenance:
         name = entry["name"]
         lines.append("")
@@ -493,6 +530,9 @@ def update_manifest(provenance: list[dict], output_dir: Path):
         lines.append(f"colored = {str(entry['colored']).lower()}")
         lines.append(f"source_sha256 = \"{entry['source_hash']}\"")
         lines.append(f"palette_sha256 = \"{entry['palette_hash']}\"")
+        if entry.get("wad"):
+            lines.append(f"wad = \"wads/{entry['wad']}\"")
+            lines.append(f"wad_sha256 = \"{entry['wad_hash']}\"")
         lines.append(f"bsp_sha256 = \"{entry['bsp_hash']}\"")
         lines.append(f"bsp_size = {entry['bsp_size']}")
         if entry["lit_hash"]:

@@ -282,6 +282,11 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
     let out_dir = require_option("--out", &parsed)?;
     let palette_path = parsed.singleton_value("--palette");
     let tool_path = parsed.singleton_value("--tool-path");
+    let wad_paths: Vec<PathBuf> = parsed
+        .repeated_values("--wad")
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     let source_map = require_positional(
         &parsed,
         "compile-bsp <source.map> --profile <profile.toml> --out <dir>",
@@ -334,6 +339,7 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
             &work_dir,
             &palette,
             tool_path_opt.as_deref(),
+            &wad_paths,
         )
         .map_err(|err| {
             CliError::Validation(ValidationError::single(
