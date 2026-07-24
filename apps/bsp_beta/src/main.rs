@@ -123,7 +123,10 @@ fn run() -> Result<(), AppError> {
     };
 
     // ── Load WAD archive (if available) ──────────────────────────────
-    let wad_archives: Vec<(String, Vec<u8>)> = if let Some(wad_path) = args.resolve_wad_path() {
+    let wad_archives: Vec<(String, Vec<u8>)> = if let Some(wad_path) = args
+        .resolve_wad_path()
+        .map_err(|e| AppError::BridgeProof(e.to_string()))?
+    {
         let wad_bytes = load_companion_bytes(&wad_path, "WAD")?;
         let basename = wad_path
             .file_name()
@@ -136,7 +139,9 @@ fn run() -> Result<(), AppError> {
         );
         vec![(basename, wad_bytes)]
     } else {
-        log::warn!("No WAD file found — textures may not resolve (use --wad <path> or --companion-dir)");
+        log::warn!(
+            "No WAD file found — textures may not resolve (use --wad <path> or --companion-dir)"
+        );
         Vec::new()
     };
 

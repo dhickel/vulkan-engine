@@ -42,6 +42,7 @@ pub enum CliError {
     InvalidCaptureFrames(String),
     UnknownArgument(String),
     PaletteNotFound(String),
+    WadNotFound(String),
 }
 
 impl fmt::Display for CliError {
@@ -68,6 +69,7 @@ impl fmt::Display for CliError {
             }
             CliError::UnknownArgument(arg) => write!(f, "unknown argument: {arg}"),
             CliError::PaletteNotFound(path) => write!(f, "palette file not found: {path}"),
+            CliError::WadNotFound(path) => write!(f, "WAD file not found: {path}"),
         }
     }
 }
@@ -166,14 +168,15 @@ impl CliArgs {
     }
 
     /// Resolve the effective WAD path: explicit --wad, then companion-dir, then BSP-adjacent.
-    pub fn resolve_wad_path(&self) -> Option<PathBuf> {
+    pub fn resolve_wad_path(&self) -> Result<Option<PathBuf>, CliError> {
         if let Some(ref p) = self.wad_path {
             if p.is_file() {
-                return Some(p.clone());
+                return Ok(Some(p.clone()));
             }
+            return Err(CliError::WadNotFound(p.display().to_string()));
         }
         let candidates = self.wad_candidates();
-        candidates.into_iter().find(|p| p.is_file())
+        Ok(candidates.into_iter().find(|p| p.is_file()))
     }
 
     fn wad_candidates(&self) -> Vec<PathBuf> {
@@ -200,6 +203,8 @@ impl CliArgs {
                 }
             }
         }
+        candidates.sort();
+        candidates.dedup();
         candidates
     }
 }
@@ -378,6 +383,8 @@ mod tests {
             "maps/e1m1.lit",
             "--companion-dir",
             "maps/",
+            "--wad",
+            "maps/dungeon.wad",
         ])
         .unwrap();
         assert_eq!(args.bsp_path, Some(PathBuf::from("maps/e1m1.bsp")));
@@ -388,6 +395,7 @@ mod tests {
         assert_eq!(args.palette_path, Some(PathBuf::from("gfx/palette.lmp")));
         assert_eq!(args.lit_path, Some(PathBuf::from("maps/e1m1.lit")));
         assert_eq!(args.companion_dir, Some(PathBuf::from("maps/")));
+        assert_eq!(args.wad_path, Some(PathBuf::from("maps/dungeon.wad")));
     }
 
     #[test]
@@ -410,12 +418,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_companion_dir() {
-        let args = parse_from(["--companion-dir", "assets/companions"]).unwrap();
-        assert_eq!(
-            args.companion_dir,
-            Some(PathBuf::from("assets/companions"))
-        );
+    fn parse_companion_dir_and_wad() {
+        let args = parse_from([
+            "--companion-dir",
+            "assets/companions",
+            "--wad",
+            "assets/dungeon.wad",
+        ])
+        .unwrap();
+        assert_eq!(args.companion_dir, Some(PathBuf::from("assets/companions")));
+        assert_eq!(args.wad_path, Some(PathBuf::from("assets/dungeon.wad")));
     }
 
     #[test]
@@ -441,11 +453,36 @@ mod tests {
     }
 
     #[test]
-    fn palette_resolution_never_falls_back_to_project_test_fixture() {
-        let root = std::env::temp_dir().join(format!(
-            "bsp-beta-missing-palette-{}",
-            std::process::id()
+    fn wad_resolution_requires_explicit_file_and_discovers_companion() {
+        let root =
+            std::env::temp_dir().join(format!("bsp-beta-wad-resolution-{}", std::process::id()));
+        let maps = root.join("maps");
+        let wad = maps.join("dungeon.wad");
+        std::fs::create_dir_all(&maps).unwrap();
+        std::fs::write(&wad, b"WAD2").unwrap();
+
+        let auto_args = CliArgs {
+            bsp_path: Some(maps.join("start.bsp")),
+            ..CliArgs::default()
+        };
+        assert_eq!(auto_args.resolve_wad_path().unwrap(), Some(wad.clone()));
+
+        let missing_args = CliArgs {
+            wad_path: Some(maps.join("missing.wad")),
+            ..CliArgs::default()
+        };
+        assert!(matches!(
+            missing_args.resolve_wad_path(),
+            Err(CliError::WadNotFound(_))
         ));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn palette_resolution_never_falls_back_to_project_test_fixture() {
+        let root =
+            std::env::temp_dir().join(format!("bsp-beta-missing-palette-{}", std::process::id()));
         let maps = root.join("maps");
         std::fs::create_dir_all(&maps).unwrap();
         let args = CliArgs {

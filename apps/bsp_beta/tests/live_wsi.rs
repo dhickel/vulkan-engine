@@ -31,8 +31,7 @@ const M2_SEED: u64 = 17;
 const M2_SEED_255_TIMEOUT: u64 = 255;
 
 fn phase09_capture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.internal-dev/captures/bsp-dungeon-generator")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.internal-dev/captures/bsp-dungeon-generator")
 }
 
 fn phase09_debug_dir() -> PathBuf {
@@ -103,16 +102,22 @@ fn generate_and_compile(
         meta.room_count,
         meta.corridor_count,
         meta.face_count_estimate,
-        (meta.bounds.0, meta.bounds.1, meta.bounds.2, meta.bounds.3, meta.bounds.4, meta.bounds.5),
+        (
+            meta.bounds.0,
+            meta.bounds.1,
+            meta.bounds.2,
+            meta.bounds.3,
+            meta.bounds.4,
+            meta.bounds.5
+        ),
     );
 
     let map_path = staging.join(format!("{label}.map"));
     std::fs::write(&map_path, &map_text).expect("write .map");
 
-    let profile_content =
-        std::fs::read_to_string(profile_path()).expect("read profile");
-    let profile = engine_pack::compiler::parse_compiler_profile(&profile_content)
-        .expect("parse profile");
+    let profile_content = std::fs::read_to_string(profile_path()).expect("read profile");
+    let profile =
+        engine_pack::compiler::parse_compiler_profile(&profile_content).expect("parse profile");
 
     let work_dir = staging.join(".compile-work");
     std::fs::create_dir_all(&work_dir).unwrap();
@@ -130,6 +135,11 @@ fn generate_and_compile(
     // Copy BSP (and .lit if present) to Phase 09 capture directory
     let captures = phase09_capture_dir();
     std::fs::create_dir_all(&captures).unwrap();
+
+    let palette_dest = captures.join(palette_path().file_name().unwrap());
+    std::fs::copy(palette_path(), &palette_dest).expect("copy palette to capture directory");
+    let wad_dest = captures.join(wad_path().file_name().unwrap());
+    std::fs::copy(wad_path(), &wad_dest).expect("copy WAD to capture directory");
 
     let bsp_dest = captures.join(format!("{label}.bsp"));
     std::fs::write(&bsp_dest, &result.bsp_data).expect("write .bsp to captures");
@@ -149,14 +159,31 @@ fn generate_and_compile(
 }
 
 /// Load a compiled BSP through BspLoader with palette + WAD.
-fn load_bsp(bsp_data: &[u8], lit_data: Option<&[u8]>) -> bsp::world::BspWorld {
-    let palette_bytes = std::fs::read(palette_path()).expect("read palette");
+fn wad_archive_bytes() -> (String, Vec<u8>) {
     let wad_bytes = std::fs::read(wad_path()).expect("read WAD");
     let wad_name = wad_path()
         .file_name()
         .unwrap()
         .to_string_lossy()
         .to_string();
+    (wad_name, wad_bytes)
+}
+
+fn ensure_capture_companions(captures: &Path) -> (PathBuf, PathBuf) {
+    let palette = captures.join(palette_path().file_name().unwrap());
+    if !palette.is_file() {
+        std::fs::copy(palette_path(), &palette).expect("copy palette to capture directory");
+    }
+    let wad = captures.join(wad_path().file_name().unwrap());
+    if !wad.is_file() {
+        std::fs::copy(wad_path(), &wad).expect("copy WAD to capture directory");
+    }
+    (palette, wad)
+}
+
+fn load_bsp(bsp_data: &[u8], lit_data: Option<&[u8]>) -> bsp::world::BspWorld {
+    let palette_bytes = std::fs::read(palette_path()).expect("read palette");
+    let (wad_name, wad_bytes) = wad_archive_bytes();
 
     let options = LoadOptions {
         strict: true,
@@ -175,17 +202,18 @@ fn load_bsp(bsp_data: &[u8], lit_data: Option<&[u8]>) -> bsp::world::BspWorld {
 /// Generate M1 seed 1 and verify it passes strict reload with 0 diagnostics.
 #[test]
 fn phase09_generate_m1_seed1() {
-    let Some((bsp_path, bsp_data, lit_data)) = generate_and_compile(
-        "nominal-m1-seed-1",
-        M1_SEED,
-        DungeonConfig::nominal_m1(),
-    ) else {
+    let Some((bsp_path, bsp_data, lit_data)) =
+        generate_and_compile("nominal-m1-seed-1", M1_SEED, DungeonConfig::nominal_m1())
+    else {
         eprintln!("SKIP: ericw-tools unavailable");
         return;
     };
 
     let world = load_bsp(&bsp_data, lit_data.as_deref());
-    assert!(world.diagnostics.is_empty(), "strict reload must have 0 diagnostics");
+    assert!(
+        world.diagnostics.is_empty(),
+        "strict reload must have 0 diagnostics"
+    );
     assert_eq!(world.profile, bsp::profile::BspProfile::Bsp2);
     assert!(world.faces.len() < 2000, "M1 face ceiling");
     assert!(world.entities.len() < 50, "M1 entity ceiling");
@@ -202,17 +230,18 @@ fn phase09_generate_m1_seed1() {
 /// (Seed 255 times out on vis -threads 1; seed 17 is a valid M2 corpus entry.)
 #[test]
 fn phase09_generate_m2_seed17() {
-    let Some((bsp_path, bsp_data, lit_data)) = generate_and_compile(
-        "nominal-m2-seed-17",
-        M2_SEED,
-        DungeonConfig::nominal_m2(),
-    ) else {
+    let Some((bsp_path, bsp_data, lit_data)) =
+        generate_and_compile("nominal-m2-seed-17", M2_SEED, DungeonConfig::nominal_m2())
+    else {
         eprintln!("SKIP: ericw-tools unavailable");
         return;
     };
 
     let world = load_bsp(&bsp_data, lit_data.as_deref());
-    assert!(world.diagnostics.is_empty(), "strict reload must have 0 diagnostics");
+    assert!(
+        world.diagnostics.is_empty(),
+        "strict reload must have 0 diagnostics"
+    );
     assert_eq!(world.profile, bsp::profile::BspProfile::Bsp2);
     assert!(world.faces.len() < 10000, "M2 face ceiling");
     assert!(world.entities.len() < 300, "M2 entity ceiling");
@@ -228,11 +257,9 @@ fn phase09_generate_m2_seed17() {
 /// Coordinator prepare → validate → commit cycle for M1 seed 1.
 #[test]
 fn phase09_coordinator_m1() {
-    let Some((_bsp_path, bsp_data, lit_data)) = generate_and_compile(
-        "nominal-m1-seed-1",
-        M1_SEED,
-        DungeonConfig::nominal_m1(),
-    ) else {
+    let Some((_bsp_path, bsp_data, lit_data)) =
+        generate_and_compile("nominal-m1-seed-1", M1_SEED, DungeonConfig::nominal_m1())
+    else {
         eprintln!("SKIP: ericw-tools unavailable");
         return;
     };
@@ -242,7 +269,13 @@ fn phase09_coordinator_m1() {
     let mut scene = Scene::new();
 
     let prepare = coordinator
-        .prepare_from_world(world, Some(0.0254), "nominal-m1-seed-1")
+        .prepare_from_world_with_texture_companions(
+            world,
+            Vec::new(),
+            vec![wad_archive_bytes()],
+            Some(0.0254),
+            "nominal-m1-seed-1",
+        )
         .expect("prepare must succeed");
 
     eprintln!(
@@ -272,11 +305,9 @@ fn phase09_coordinator_m1() {
 /// Spawn entity validation for M1 seed 1.
 #[test]
 fn phase09_spawn_entity_m1() {
-    let Some((_bsp_path, bsp_data, lit_data)) = generate_and_compile(
-        "nominal-m1-seed-1",
-        M1_SEED,
-        DungeonConfig::nominal_m1(),
-    ) else {
+    let Some((_bsp_path, bsp_data, lit_data)) =
+        generate_and_compile("nominal-m1-seed-1", M1_SEED, DungeonConfig::nominal_m1())
+    else {
         eprintln!("SKIP: ericw-tools unavailable");
         return;
     };
@@ -293,9 +324,11 @@ fn phase09_spawn_entity_m1() {
     eprintln!("M1 spawn entities: {spawn_count}");
 
     // Verify spawn origins are non-degenerate
-    for entity in world.entities.iter().filter(|e| {
-        matches!(e.class, bsp::entities::EntityClass::SpawnMarker)
-    }) {
+    for entity in world
+        .entities
+        .iter()
+        .filter(|e| matches!(e.class, bsp::entities::EntityClass::SpawnMarker))
+    {
         let has_origin = entity.key_values.iter().any(|kv| kv.key == "origin");
         assert!(has_origin, "spawn entity must have origin");
     }
@@ -307,11 +340,9 @@ fn phase09_spawn_entity_m1() {
 /// exist in the topology graph extracted from the generated layout.
 #[test]
 fn phase09_room_reachability_m1() {
-    let Some((_bsp_path, bsp_data, lit_data)) = generate_and_compile(
-        "nominal-m1-seed-1",
-        M1_SEED,
-        DungeonConfig::nominal_m1(),
-    ) else {
+    let Some((_bsp_path, bsp_data, lit_data)) =
+        generate_and_compile("nominal-m1-seed-1", M1_SEED, DungeonConfig::nominal_m1())
+    else {
         eprintln!("SKIP: ericw-tools unavailable");
         return;
     };
@@ -325,8 +356,7 @@ fn phase09_room_reachability_m1() {
         .filter(|e| {
             matches!(
                 e.class,
-                bsp::entities::EntityClass::SpawnMarker
-                    | bsp::entities::EntityClass::Light
+                bsp::entities::EntityClass::SpawnMarker | bsp::entities::EntityClass::Light
             )
         })
         .filter_map(|e| {
@@ -373,15 +403,27 @@ fn phase09_live_wsi_startup_marker() {
         eprintln!("SKIP: M1 BSP not yet generated; run phase09_generate_m1_seed1 first");
         return;
     }
+    let (palette, wad) = ensure_capture_companions(&captures);
+    assert!(
+        palette.is_file(),
+        "palette companion must exist for live WSI"
+    );
+    assert!(wad.is_file(), "WAD companion must exist for live WSI");
     eprintln!("Live WSI command for manual evidence collection:");
     eprintln!(
-        "  RUST_LOG=warn timeout --signal=INT 15s cargo run -p bsp_beta -- --bsp {}",
-        m1_bsp.display()
+        "  RUST_LOG=warn timeout --signal=INT 15s cargo run -p bsp_beta -- --bsp {} --palette {} --companion-dir {} --wad {}",
+        m1_bsp.display(),
+        palette.display(),
+        captures.display(),
+        wad.display()
     );
     eprintln!("Live WSI navigation command:");
     eprintln!(
-        "  RUST_LOG=warn cargo run -p bsp_beta -- --bsp {}",
-        m1_bsp.display()
+        "  RUST_LOG=warn cargo run -p bsp_beta -- --bsp {} --palette {} --companion-dir {} --wad {}",
+        m1_bsp.display(),
+        palette.display(),
+        captures.display(),
+        wad.display()
     );
 }
 
@@ -398,25 +440,19 @@ fn phase09_headless_capture_marker() {
         return;
     }
 
-    let palette = palette_path();
+    let (palette, wad) = ensure_capture_companions(&captures);
     let companion_dir = captures.clone();
+    assert!(
+        wad.is_file(),
+        "WAD companion must exist for headless capture"
+    );
     eprintln!("Headless capture command:");
-    eprintln!(
-        "  RUST_LOG=debug timeout --signal=INT 60s cargo run -p bsp_beta -- \\");
-    eprintln!(
-        "    --headless --capture-frames 3 \\");
-    eprintln!(
-        "    --bsp {} \\",
-        m1_bsp.display()
-    );
-    eprintln!(
-        "    --palette {} \\",
-        palette.display()
-    );
-    eprintln!(
-        "    --companion-dir {}",
-        companion_dir.display()
-    );
+    eprintln!("  RUST_LOG=debug timeout --signal=INT 60s cargo run -p bsp_beta -- \\");
+    eprintln!("    --headless --capture-frames 3 \\");
+    eprintln!("    --bsp {} \\", m1_bsp.display());
+    eprintln!("    --palette {} \\", palette.display());
+    eprintln!("    --companion-dir {} \\", companion_dir.display());
+    eprintln!("    --wad {}", wad.display());
 
     // Verify the BSP artifact exists and has expected size
     let meta = std::fs::metadata(&m1_bsp).expect("BSP file must exist");
