@@ -480,3 +480,299 @@ fn golden_leaf_membership_deduplicated() {
     assert_eq!(members[0], vec![0, 1]);
     assert_eq!(members[1], vec![0]);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 06: Navigation Evidence Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+mod navigation {
+    use bsp::*;
+    use bsp::coords::QuakeToEngine;
+    use glam::Vec3;
+    use std::path::Path;
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    fn compiled_dir() -> std::path::PathBuf {
+        fixtures_dir().join("compiled")
+    }
+
+    fn read(path: &std::path::Path) -> Vec<u8> {
+        std::fs::read(path).expect(&format!("failed to read {}", path.display()))
+    }
+
+    fn load_navigation_fixture() -> BspWorld {
+        let bsp_data = read(&compiled_dir().join("dungeon-navigation-bsp2.bsp"));
+        let options = LoadOptions {
+            strict: true,
+            source_identity: "dungeon-navigation-bsp2".into(),
+            ..LoadOptions::default()
+        };
+        BspLoader::load(&bsp_data, &options)
+            .expect("strict load of dungeon-navigation-bsp2")
+    }
+
+    fn load_straight_junction_fixture() -> BspWorld {
+        let bsp_data = read(&compiled_dir().join("dungeon-junction-straight-bsp2.bsp"));
+        let options = LoadOptions {
+            strict: true,
+            source_identity: "dungeon-junction-straight-bsp2".into(),
+            ..LoadOptions::default()
+        };
+        BspLoader::load(&bsp_data, &options)
+            .expect("strict load of dungeon-junction-straight-bsp2")
+    }
+
+    // ── EVIDENCE FINDING: Hull 0 and Hull 1 share headnodes ──────────
+
+    #[test]
+    fn nav_hull_dispute_resolved_headnodes_equal() {
+        for (name, load) in [
+            ("navigation", load_navigation_fixture as fn() -> BspWorld),
+            ("straight-junction", load_straight_junction_fixture),
+        ] {
+            let world = load();
+            let m0 = &world.models[0];
+            assert_eq!(
+                m0.headnode[0], m0.headnode[1],
+                "{name}: hull 0 and hull 1 headnodes must be equal (compiler merges them)"
+            );
+        }
+    }
+
+    // ── NAV-SPAWN-VALID ───────────────────────────────────────────────
+
+    #[test]
+    fn nav_spawn_point_non_solid() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        // info_player_start is at Quake (-128, 0, 0) in the navigation fixture
+        let spawn_q = Vec3::new(-128.0, 0.0, 0.0);
+        let spawn_eng = qte.position_vec3(spawn_q);
+        let contents = queries::point_contents(
+            spawn_eng,
+            &world.nodes,
+            &world.leaves,
+            &world.planes,
+        );
+        assert!(!contents.is_solid(), "spawn point must be non-solid, got {:?}", contents);
+        assert!(contents.is_empty(), "spawn point must be in empty space, got {:?}", contents);
+    }
+
+    #[test]
+    fn nav_spawn_valid_point_trace() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+        let spawn_q = Vec3::new(-128.0, 0.0, 0.0);
+        let spawn_eng = qte.position_vec3(spawn_q);
+
+        let result = queries::trace_line(
+            spawn_eng, spawn_eng,
+            StoredHull::Point,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid, "spawn must not be start-solid for point hull");
+    }
+
+    // ── NAV-STRAIGHT-LINE-TRAVERSAL ───────────────────────────────────
+
+    #[test]
+    fn nav_straight_line_move_east_across_room() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        // Move from west side to east side, north of the central pillar
+        let start_q = Vec3::new(-128.0, 100.0, 0.0);
+        let end_q = Vec3::new(128.0, 100.0, 0.0);
+        let start_eng = qte.position_vec3(start_q);
+        let end_eng = qte.position_vec3(end_q);
+
+        let result = queries::trace_line(
+            start_eng, end_eng,
+            StoredHull::Point,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid);
+        assert!(result.no_hit,
+            "straight line north of pillar must complete without hitting, got fraction={}",
+            result.hit_fraction);
+    }
+
+    #[test]
+    fn nav_straight_line_blocked_by_pillar() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        // Trace through the central pillar at origin
+        let start_q = Vec3::new(-128.0, 0.0, 0.0);
+        let end_q = Vec3::new(128.0, 0.0, 0.0);
+        let start_eng = qte.position_vec3(start_q);
+        let end_eng = qte.position_vec3(end_q);
+
+        let result = queries::trace_line(
+            start_eng, end_eng,
+            StoredHull::Point,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid);
+        assert!(!result.no_hit, "trace through pillar must hit something");
+        assert!(result.hit_fraction > 0.0 && result.hit_fraction < 1.0);
+    }
+
+    // ── NAV-STRAIGHT-JUNCTION-TRAVERSAL ───────────────────────────────
+
+    #[test]
+    fn nav_straight_junction_traverse_corridor() {
+        let world = load_straight_junction_fixture();
+        let qte = QuakeToEngine::default();
+
+        // info_player_start at Quake (-192, 0, 0). Two rooms connected.
+        let start_q = Vec3::new(-192.0, 0.0, 0.0);
+        let end_q = Vec3::new(192.0, 0.0, 0.0);
+        let start_eng = qte.position_vec3(start_q);
+        let end_eng = qte.position_vec3(end_q);
+
+        let result = queries::trace_line(
+            start_eng, end_eng,
+            StoredHull::Point,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid);
+        assert!(result.no_hit,
+            "point trace from Room A to Room B must complete without hitting, got fraction={}",
+            result.hit_fraction);
+    }
+
+    // ── NAV-CORNER-SLIDING ────────────────────────────────────────────
+
+    #[test]
+    fn nav_corner_sliding_around_pillar() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        // Move south of pillar (clear path)
+        let start_q = Vec3::new(-64.0, -64.0, 0.0);
+        let end_q = Vec3::new(64.0, -64.0, 0.0);
+        let start_eng = qte.position_vec3(start_q);
+        let end_eng = qte.position_vec3(end_q);
+
+        let result = queries::trace_line(
+            start_eng, end_eng,
+            StoredHull::Point,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid);
+        assert!(result.no_hit,
+            "trace south of pillar must complete without hitting, got fraction={}",
+            result.hit_fraction);
+    }
+
+    // ── NAV-WALL-HIT ──────────────────────────────────────────────────
+
+    #[test]
+    fn nav_wall_hit_west_wall() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        let start_q = Vec3::new(-128.0, 0.0, 0.0);
+        let end_q = Vec3::new(-300.0, 0.0, 0.0);
+        let start_eng = qte.position_vec3(start_q);
+        let end_eng = qte.position_vec3(end_q);
+
+        let result = queries::trace_line(
+            start_eng, end_eng,
+            StoredHull::Point,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid);
+        assert!(!result.no_hit, "westward trace must hit wall");
+        assert!(result.hit_fraction > 0.0 && result.hit_fraction < 1.0);
+    }
+
+    // ── NAV-ROUTE-REACHABILITY ────────────────────────────────────────
+
+    #[test]
+    fn nav_route_reachability_all_quadrants_reachable() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        let start_q = Vec3::new(-128.0, 0.0, 0.0);
+        let targets = [
+            ("NE", Vec3::new(128.0, 128.0, 0.0)),
+            ("NW", Vec3::new(-128.0, 128.0, 0.0)),
+            ("SE", Vec3::new(128.0, -128.0, 0.0)),
+            ("SW", Vec3::new(-128.0, -128.0, 0.0)),
+        ];
+        for (label, target_q) in &targets {
+            let start_eng = qte.position_vec3(start_q);
+            let end_eng = qte.position_vec3(*target_q);
+            let result = queries::trace_line(
+                start_eng, end_eng,
+                StoredHull::Point,
+                &world.clipnodes, &world.planes, &world.models, &qte,
+            );
+            assert!(result.no_hit,
+                "spawn to {} quadrant must be reachable, got fraction={}",
+                label, result.hit_fraction);
+        }
+    }
+
+    // ── NAV-HULL2 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn nav_hull2_navigable_around_pillar() {
+        let world = load_navigation_fixture();
+        let qte = QuakeToEngine::default();
+
+        // Hull 2 around pillar north side: plenty of space
+        let start_q = Vec3::new(-128.0, 100.0, 0.0);
+        let end_q = Vec3::new(128.0, 100.0, 0.0);
+        let start_eng = qte.position_vec3(start_q);
+        let end_eng = qte.position_vec3(end_q);
+
+        let result = queries::trace_line(
+            start_eng, end_eng,
+            StoredHull::LargeMonster,
+            &world.clipnodes, &world.planes, &world.models, &qte,
+        );
+        assert!(!result.starts_solid);
+        assert!(result.no_hit,
+            "hull 2 trace north of pillar must complete, got fraction={}",
+            result.hit_fraction);
+    }
+
+    // ── NAV-FIXTURE-INTEGRITY ─────────────────────────────────────────
+
+    #[test]
+    fn nav_fixture_strict_reload() {
+        let world = load_navigation_fixture();
+        assert!(world.num_models() > 0);
+        assert!(world.num_leaves() > 0);
+        assert!(!world.entities.is_empty());
+        assert!(world.worldspawn().is_some());
+        assert!(!world.clipnodes.is_empty(), "navigation fixture must have clipnodes");
+    }
+
+    #[test]
+    fn nav_fixture_has_info_player_start() {
+        let world = load_navigation_fixture();
+        let has_player_start = world
+            .entities
+            .iter()
+            .any(|e| matches!(e.class, bsp::entities::EntityClass::SpawnMarker));
+        assert!(has_player_start, "navigation fixture must have info_player_start");
+    }
+
+    #[test]
+    fn nav_fixture_hull_headnodes_valid() {
+        let world = load_navigation_fixture();
+        let model0 = &world.models[0];
+        assert!((model0.headnode[0] as usize) < world.clipnodes.len(),
+            "hull 0 headnode must be within clipnodes");
+        assert!((model0.headnode[2] as usize) < world.clipnodes.len() || model0.headnode[2] == 0,
+            "hull 2 headnode must be within clipnodes");
+    }
+}

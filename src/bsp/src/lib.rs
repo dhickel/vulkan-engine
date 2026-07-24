@@ -314,8 +314,8 @@ pub use package::{
     CompilerHashes, CompilerProfile, CompilerProvenance, PackageContentHash,
 };
 pub use queries::{
-    point_contents, point_contents_with_transform, trace_stored_hull, PointContents, StoredHull,
-    TraceResult,
+    point_contents, point_contents_with_transform, trace_line, trace_stored_hull,
+    PointContents, StoredHull, TraceResult,
 };
 pub use visibility::{
     build_leaf_membership, camera_leaf_index, camera_pvs, camera_pvs_with_scale, CameraLeafResult,

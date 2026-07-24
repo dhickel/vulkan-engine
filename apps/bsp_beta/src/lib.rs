@@ -17,3 +17,4 @@ pub mod physics_bridge;
 pub mod runtime_bridge;
 pub mod scene_sync;
 pub mod snapshot;
+pub mod player_navigation;

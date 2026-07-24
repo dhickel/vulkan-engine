@@ -1,6 +1,22 @@
-//! Spatial queries: point_contents and stored-hull trace.
+//! Spatial queries: point_contents, stored-hull trace, and line trace.
 //!
 //! Contract: `bsp-spatial-physics.md` §5.
+//!
+//! # Hull Semantics
+//!
+//! The compiler (qbsp) pre-expands clipnode trees for hulls 0–2.
+//! Hull 0 is the point hull (no expansion).
+//! Hull 1 is the player hull with nominal extents ±(16,16,24) Quake units.
+//! Hull 2 is the large-monster hull with nominal extents ±(24,24,32).
+//!
+//! All trace functions trace a **point** through the pre-expanded clipnode
+//! tree. The caller must pass the correct headnode from the world model.
+//! The `StoredHull` parameter is informational (extent queries); the actual
+//! hull selection is determined by `hull_headnode`.
+//!
+//! The player-movement contract (bsp-spatial-physics.md §5.2.1) documents
+//! two competing hull records. Phase 06 threshold tests resolve this dispute
+//! by tracing hull 0 and hull 1 through known gap widths in a compiled fixture.
 
 use glam::Vec3;
 
@@ -148,6 +164,33 @@ impl StoredHull {
         let (mins, maxs) = qte.aabb(-q, q);
         (maxs - mins) * 0.5
     }
+}
+
+/// Trace a line from `start` to `end` using the world model's stored hull.
+///
+/// This is the primary query for player movement. It looks up the headnode
+/// from `models[0].headnode[hull]` and delegates to [`trace_stored_hull`].
+pub fn trace_line(
+    start: Vec3,
+    end: Vec3,
+    hull: StoredHull,
+    clipnodes: &[lumps::Clipnode],
+    planes: &[lumps::Plane],
+    models: &[lumps::Model],
+    qte: &QuakeToEngine,
+) -> TraceResult {
+    if models.is_empty() {
+        return TraceResult::no_hit();
+    }
+    let headnode = models[0].headnode[hull as usize];
+    if headnode == 0 && hull as usize != 0 {
+        // Hull not compiled; fall back to point hull.
+        return trace_stored_hull(
+            start, end, StoredHull::Point,
+            clipnodes, planes, models[0].headnode[0], qte,
+        );
+    }
+    trace_stored_hull(start, end, hull, clipnodes, planes, headnode, qte)
 }
 
 /// Result of a stored-hull trace.
