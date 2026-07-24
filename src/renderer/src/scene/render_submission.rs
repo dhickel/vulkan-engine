@@ -86,8 +86,10 @@ pub struct BspFrameValuesState {
 #[cfg(feature = "bsp")]
 impl Default for BspFrameValuesState {
     fn default() -> Self {
+        let mut style_intensities = [0.0; 64];
+        style_intensities[0] = 1.0;
         Self {
-            style_intensities: [1.0; 64],
+            style_intensities,
             liquid_time: 0.0,
         }
     }

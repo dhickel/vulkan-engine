@@ -391,6 +391,24 @@ fn ubo_sizes_are_multiple_of_16_for_std140() {
 
 #[cfg(feature = "bsp")]
 #[test]
+fn bsp_shader_preserves_lightmap_transfer_and_palette_fullbright_color() {
+    let root = renderer_root();
+    let lightmapped = read(root.join("src/shaders/bsp_lightmapped.frag"));
+    let liquid = read(root.join("src/shaders/bsp_liquid.frag"));
+    let sky = read(root.join("src/shaders/bsp_sky.frag"));
+
+    for shader in [&lightmapped, &liquid] {
+        assert!(shader.contains("decodeLightmap"));
+        assert!(shader.contains("vec3(2.2)"));
+        assert!(shader.contains("fullbright * albedo"));
+        assert!(!shader.contains("vec3(fullbright)"));
+        assert!(shader.contains("outColor = tonemap"));
+    }
+    assert!(sky.contains("outColor = tonemap"));
+}
+
+#[cfg(feature = "bsp")]
+#[test]
 fn bsp_style_array_packed_as_vec4_in_glsl() {
     let root = renderer_root();
     let frag = read(root.join("src/shaders/bsp_lightmapped.frag"));

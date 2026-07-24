@@ -99,6 +99,27 @@ fn load_map(
 }
 ```
 
+### Maintained `bsp_beta` Entrypoint and Companion Discovery
+
+The workspace app accepts a map and discovers Quake-style companions deterministically:
+
+```bash
+cargo run -p bsp_beta -- \
+  --bsp /path/to/game/maps/start.bsp \
+  --companion-dir /path/to/game/maps
+```
+
+Palette lookup order is: explicit `--palette`, the companion/map directory (`palette.lmp` or `project_palette.lmp`), `gfx/palette.lmp` below that directory, then `gfx/palette.lmp` below the map directory's parent game root. The app does **not** fall back to the project test palette; a missing real palette is an error. A same-stem `.lit` file next to the BSP is auto-discovered.
+
+For deterministic renderer-owned captures:
+
+```bash
+cargo run -p bsp_beta -- \
+  --headless --capture-frames 5 \
+  --bsp /path/to/game/maps/start.bsp \
+  --companion-dir /path/to/game/maps
+```
+
 ### Crate Dependencies
 
 The root `engine` crate does not currently re-export BSP APIs. BSP applications should depend directly on the support crates they use:
@@ -200,6 +221,8 @@ Inline brush models (doors, platforms, buttons) and external models referenced b
 let snapshot = snapshot_producer.capture(dt);
 scene.set_bsp_frame_values(snapshot.light_styles.intensities, snapshot.liquid_time);
 scene_sync::sync_snapshot_to_scene(&snapshot, &entity_node_map, &mut scene);
+// Snapshot defaults are deterministic: style 0 = 1.0; styles 1..63 = 0.0
+// until the app explicitly activates an animated light style.
 ```
 
 ## Deterministic Captures vs Live WSI
@@ -245,7 +268,7 @@ The following BSP formats produce `BSP-UNSUPPORTED-DIALECT` errors and will neve
 
 ## Limitations (Beta)
 
-- **No visible-face fixtures**: Current project fixtures produce zero face geometry from the pinned compiler. The `capture_bsp_beta` example compiles behind `renderer/bsp`, but visual acceptance captures remain blocked until a valid visible, lightmapped BSP fixture exists.
+- **No redistributable visible-face fixture**: A real local `start.bsp` has produced visible, stable headless and live-Wayland evidence, but it is third-party content and is not checked in. Formal reference calibration remains blocked until the project owns a visible, lightmapped fixture.
 - **Render-to-texture deferred**: BSP surfaces render into the main color/depth targets using a dedicated BSP pipeline. Off-screen render targets are not yet supported.
 - **Dynamic entity transforms**: Inline brush model transforms update through `BspMountState` per-batch transform maps. Full entity-to-scene-node mapping for external models is partially implemented.
 - **Physics world colliders**: World trimesh collision from clipnodes is pending; point-contents and hull traces are functional.

@@ -250,25 +250,32 @@ fn compute_lightmap_layout(
         max_t = max_t.max(t);
     }
 
-    // Luxel count = ceil(max_extent / 16.0) + 1 (Quake convention)
-    let tex_s_scale = texinfo.vec_s.length().max(1e-6);
-    let tex_t_scale = texinfo.vec_t.length().max(1e-6);
-    let width = ((max_s - min_s) / tex_s_scale / 16.0).ceil() as u32 + 1;
-    let height = ((max_t - min_t) / tex_t_scale / 16.0).ceil() as u32 + 1;
+    // Quake stores lightofs against a luxel rectangle snapped to the global
+    // 16-texel grid. The texinfo vectors already project world coordinates
+    // into texture texels, so dividing by their lengths changes the byte count
+    // and desynchronizes every later style in the lightdata stream.
+    const LUXEL_SIZE: f32 = 16.0;
+    let min_luxel_s = (min_s / LUXEL_SIZE).floor();
+    let max_luxel_s = (max_s / LUXEL_SIZE).ceil();
+    let min_luxel_t = (min_t / LUXEL_SIZE).floor();
+    let max_luxel_t = (max_t / LUXEL_SIZE).ceil();
+    let width = (max_luxel_s - min_luxel_s) as u32 + 1;
+    let height = (max_luxel_t - min_luxel_t) as u32 + 1;
 
-    // Clamp to reasonable limits
-    let width = width.min(256);
-    let height = height.min(256);
-
-    // UV1: luxel position within the face (0–1 normalized for atlas placement)
+    // Store face-local normalized coordinates that resolve to luxel centers
+    // after the renderer applies the atlas rectangle. The half-luxel offset is
+    // the classic Quake lightmap sampling rule and keeps edge vertices out of
+    // padding or adjacent atlas rectangles.
+    let texture_min_s = min_luxel_s * LUXEL_SIZE;
+    let texture_min_t = min_luxel_t * LUXEL_SIZE;
     let uv1: Vec<Vec2> = winding
         .iter()
         .map(|v| {
             let s = v.dot(texinfo.vec_s) + texinfo.dist_s;
             let t = v.dot(texinfo.vec_t) + texinfo.dist_t;
-            let u = (s - min_s) / (max_s - min_s).max(1e-6);
-            let v_lm = (t - min_t) / (max_t - min_t).max(1e-6);
-            Vec2::new(u, v_lm)
+            let local_s = (s - texture_min_s) / LUXEL_SIZE + 0.5;
+            let local_t = (t - texture_min_t) / LUXEL_SIZE + 0.5;
+            Vec2::new(local_s / width as f32, local_t / height as f32)
         })
         .collect();
 
@@ -501,6 +508,54 @@ mod tests {
         // Empty input produces empty output
         let batches = batch_faces(&[], &[], &[], &[], &[], &[]);
         assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn lightmap_layout_uses_snapped_quake_luxel_bounds_and_centers() {
+        let winding = vec![
+            Vec3::new(-320.0, -1040.0, 0.0),
+            Vec3::new(-224.0, -1040.0, 0.0),
+            Vec3::new(-224.0, -816.0, 0.0),
+            Vec3::new(-320.0, -816.0, 0.0),
+        ];
+        let texinfo = lumps::Texinfo {
+            vec_s: Vec3::X,
+            dist_s: 0.0,
+            vec_t: Vec3::Y,
+            dist_t: 0.0,
+            miptex: 0,
+            flags: 0,
+        };
+
+        let (extents, uv) = compute_lightmap_layout(&winding, &texinfo, [0, 255, 255, 255]);
+
+        assert_eq!(extents, (7, 15));
+        assert_eq!(uv[0], Vec2::new(0.5 / 7.0, 0.5 / 15.0));
+        assert_eq!(uv[2], Vec2::new(6.5 / 7.0, 14.5 / 15.0));
+    }
+
+    #[test]
+    fn lightmap_layout_does_not_divide_extents_by_texinfo_vector_length() {
+        let winding = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(64.0, 0.0, 0.0),
+            Vec3::new(64.0, 64.0, 0.0),
+        ];
+        let texinfo = lumps::Texinfo {
+            vec_s: Vec3::X * 2.0,
+            dist_s: 3.0,
+            vec_t: Vec3::Y * 0.5,
+            dist_t: -5.0,
+            miptex: 0,
+            flags: 0,
+        };
+
+        let (extents, uv) = compute_lightmap_layout(&winding, &texinfo, [0, 255, 255, 255]);
+
+        assert_eq!(extents, (10, 4));
+        assert!(uv.iter().all(|coord| coord.is_finite()));
+        assert!(uv.iter().all(|coord| coord.x > 0.0 && coord.x < 1.0));
+        assert!(uv.iter().all(|coord| coord.y > 0.0 && coord.y < 1.0));
     }
 
     #[test]

@@ -85,35 +85,53 @@ impl CliArgs {
         }
     }
 
-    /// Resolve the effective palette path from explicit arg, companion dir, or default search.
+    /// Resolve the effective palette path from an explicit argument or the map's
+    /// companion/game directory. Production content never falls back to a test palette.
     pub fn resolve_palette_path(&self) -> Result<PathBuf, CliError> {
-        if let Some(ref p) = self.palette_path {
-            if p.is_file() {
-                return Ok(p.clone());
+        if let Some(ref path) = self.palette_path {
+            if path.is_file() {
+                return Ok(path.clone());
             }
-            return Err(CliError::PaletteNotFound(p.display().to_string()));
+            return Err(CliError::PaletteNotFound(path.display().to_string()));
         }
+
+        let mut candidates = Vec::new();
         if let Some(ref dir) = self.companion_dir {
-            let candidate = dir.join("palette.lmp");
-            if candidate.is_file() {
-                return Ok(candidate);
+            candidates.extend([
+                dir.join("palette.lmp"),
+                dir.join("project_palette.lmp"),
+                dir.join("gfx/palette.lmp"),
+            ]);
+            if let Some(game_root) = dir.parent() {
+                candidates.push(game_root.join("gfx/palette.lmp"));
             }
         }
-        // Auto-discover next to the .bsp
         if let Some(ref bsp) = self.bsp_path {
-            for name in &["palette.lmp", "project_palette.lmp"] {
-                let candidate = bsp.with_file_name(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
+            if let Some(map_dir) = bsp.parent() {
+                candidates.extend([
+                    map_dir.join("palette.lmp"),
+                    map_dir.join("project_palette.lmp"),
+                ]);
+                if let Some(game_root) = map_dir.parent() {
+                    candidates.push(game_root.join("gfx/palette.lmp"));
                 }
             }
         }
-        // Fallback to the test fixture
-        let fixture = PathBuf::from("src/bsp/tests/fixtures/palettes/project_palette.lmp");
-        if fixture.is_file() {
-            return Ok(fixture);
+
+        if let Some(path) = candidates.iter().find(|path| path.is_file()) {
+            return Ok(path.clone());
         }
-        Err(CliError::PaletteNotFound("no palette found".into()))
+
+        let searched = candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(CliError::PaletteNotFound(if searched.is_empty() {
+            "provide --palette <path> or --companion-dir <path>".to_string()
+        } else {
+            format!("none of [{searched}]")
+        }))
     }
 
     /// Resolve the effective .lit path from explicit arg, companion dir, or auto-discovery.
@@ -351,6 +369,50 @@ mod tests {
             args.companion_dir,
             Some(PathBuf::from("assets/companions"))
         );
+    }
+
+    #[test]
+    fn palette_resolution_finds_game_root_gfx_from_maps_companion_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "bsp-beta-palette-resolution-{}",
+            std::process::id()
+        ));
+        let maps = root.join("maps");
+        let palette = root.join("gfx/palette.lmp");
+        std::fs::create_dir_all(&maps).unwrap();
+        std::fs::create_dir_all(palette.parent().unwrap()).unwrap();
+        std::fs::write(&palette, [0u8; 768]).unwrap();
+
+        let args = CliArgs {
+            bsp_path: Some(maps.join("start.bsp")),
+            companion_dir: Some(maps),
+            ..CliArgs::default()
+        };
+        assert_eq!(args.resolve_palette_path().unwrap(), palette);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn palette_resolution_never_falls_back_to_project_test_fixture() {
+        let root = std::env::temp_dir().join(format!(
+            "bsp-beta-missing-palette-{}",
+            std::process::id()
+        ));
+        let maps = root.join("maps");
+        std::fs::create_dir_all(&maps).unwrap();
+        let args = CliArgs {
+            bsp_path: Some(maps.join("start.bsp")),
+            companion_dir: Some(maps),
+            ..CliArgs::default()
+        };
+
+        assert!(matches!(
+            args.resolve_palette_path(),
+            Err(CliError::PaletteNotFound(_))
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -103,11 +103,15 @@ fn run() -> Result<(), AppError> {
     );
 
     // ── Load companions (palette + .lit) ──────────────────────────────
-    let palette_bytes = load_companion_bytes(
-        &args.resolve_palette_path().map_err(|e| AppError::BridgeProof(e.to_string()))?,
-        "palette",
-    )?;
-    log::info!("Loaded palette: {} bytes", palette_bytes.len());
+    let palette_path = args
+        .resolve_palette_path()
+        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
+    let palette_bytes = load_companion_bytes(&palette_path, "palette")?;
+    log::info!(
+        "Loaded palette: {} ({} bytes)",
+        palette_path.display(),
+        palette_bytes.len()
+    );
 
     let lit_data: Option<Vec<u8>> = if let Some(lit_path) = args.resolve_lit_path() {
         let data = load_companion_bytes(&lit_path, ".lit")?;

@@ -25,13 +25,20 @@ const DEFAULT_LIGHT_HYSTERESIS_FRAMES: u8 = 2;
 #[cfg(feature = "bsp")]
 const TELEPORT_RESET_DISTANCE_SQUARED: f32 = 64.0 * 64.0;
 
+#[cfg(feature = "bsp")]
+fn default_style_intensities() -> [f32; 64] {
+    let mut intensities = [0.0; 64];
+    intensities[0] = 1.0;
+    intensities
+}
+
 // ── BSP mount state ─────────────────────────────────────────────────────
 
 #[cfg(feature = "bsp")]
 /// Mounted BSP visibility state used by the renderer each frame.
 #[derive(Debug, Clone)]
 pub struct BspMountState {
-    /// Number of leaves in the BSP tree.
+    /// Number of PVS bits per row from world model 0's `visleafs` field.
     pub num_leaves: u32,
     /// Raw VIS data for PVS decompression.
     pub vis_data: Vec<u8>,
@@ -51,7 +58,7 @@ pub struct BspMountState {
     pub planes: Vec<bsp::lumps::Plane>,
     /// BSP scale for engine-space ↔ Quake-space conversion.
     pub scale: f32,
-    /// Leaf membership per face: for each face, the sorted non-solid leaf indices.
+    /// Leaf membership per face in PVS-bit space (`raw_leaf_index - 1`).
     pub leaf_membership: Vec<Vec<u32>>,
     /// Whether a BSP mount is active.
     pub active: bool,
@@ -135,7 +142,7 @@ impl BspMountState {
             light_selection: BspLightSelectionState::default(),
             inline_model_transforms: std::collections::HashMap::new(),
             inline_model_bounds: std::collections::HashMap::new(),
-            frame_style_intensities: [1.0_f32; 64],
+            frame_style_intensities: default_style_intensities(),
             frame_liquid_time: 0.0,
         }
     }
@@ -143,8 +150,14 @@ impl BspMountState {
     /// Initialize mount state from a BspWorld.
     pub fn from_world(world: &BspWorld, scale: f32) -> Self {
         let vis_data = world.vis_data.clone();
-        let has_pvs = !vis_data.is_empty();
-        let num_leaves = world.leaves.len() as u32;
+        let max_visleaf_count = world.leaves.len().saturating_sub(1) as u32;
+        let num_leaves = world
+            .models
+            .first()
+            .and_then(|model| u32::try_from(model.visleafs).ok())
+            .filter(|&count| count > 0 && count <= max_visleaf_count)
+            .unwrap_or(0);
+        let has_pvs = !vis_data.is_empty() && num_leaves > 0;
 
         Self {
             num_leaves,
@@ -168,7 +181,7 @@ impl BspMountState {
             light_selection: BspLightSelectionState::default(),
             inline_model_transforms: std::collections::HashMap::new(),
             inline_model_bounds: std::collections::HashMap::new(),
-            frame_style_intensities: [1.0_f32; 64],
+            frame_style_intensities: default_style_intensities(),
             frame_liquid_time: 0.0,
         }
     }
@@ -177,12 +190,13 @@ impl BspMountState {
     pub fn from_extracted(extracted: &ExtractedBsp) -> Self {
         let visibility = &extracted.visibility;
         let has_pvs = extracted.has_pvs
+            && visibility.visleaf_count > 0
             && !visibility.vis_data.is_empty()
             && !visibility.nodes.is_empty()
             && !visibility.leaves.is_empty()
             && !visibility.planes.is_empty();
         Self {
-            num_leaves: visibility.leaves.len() as u32,
+            num_leaves: visibility.visleaf_count,
             vis_data: visibility.vis_data.clone(),
             has_pvs,
             current_pvs: None,
@@ -203,7 +217,7 @@ impl BspMountState {
             light_selection: BspLightSelectionState::default(),
             inline_model_transforms: std::collections::HashMap::new(),
             inline_model_bounds: std::collections::HashMap::new(),
-            frame_style_intensities: [1.0_f32; 64],
+            frame_style_intensities: default_style_intensities(),
             frame_liquid_time: 0.0,
         }
     }
@@ -259,8 +273,14 @@ impl BspMountState {
 
         self.camera_leaf = Some(cam_leaf.clone());
 
-        if cam_leaf.in_solid || cam_leaf.outside || !cam_leaf.has_valid_pvs {
-            // Camera in solid or outside: PVS empty, conservative fallback.
+        if cam_leaf.in_solid
+            || cam_leaf.outside
+            || !cam_leaf.has_valid_pvs
+            || cam_leaf.leaf_index == 0
+            || cam_leaf.leaf_index > self.num_leaves
+        {
+            // Camera in solid, outside, or beyond world model 0's PVS range:
+            // disable PVS conservatively for this frame.
             self.current_pvs = None;
             return None;
         }
@@ -282,7 +302,7 @@ impl BspMountState {
         self.current_pvs.as_ref()
     }
 
-    /// Check whether a set of leaf indices intersects the current PVS.
+    /// Check whether a set of PVS-bit indices intersects the current PVS.
     ///
     /// Returns `true` when:
     /// - PVS is not available (conservative: all visible)
@@ -302,7 +322,7 @@ impl BspMountState {
         leaf_indices.iter().any(|&leaf| pvs.is_visible(leaf))
     }
 
-    /// Check whether a single leaf is in the current PVS.
+    /// Check whether a single PVS-bit index is in the current PVS.
     pub fn leaf_in_pvs(&self, leaf_index: u32) -> bool {
         let Some(pvs) = &self.current_pvs else {
             return true; // conservative
@@ -411,7 +431,12 @@ impl BspMountState {
         }
         let quake_pos = engine_to_quake_space(position, self.scale);
         let leaf = camera_leaf_index(&quake_pos, &self.nodes, &self.leaves, &self.planes);
-        (!leaf.in_solid && !leaf.outside && leaf.has_valid_pvs).then_some(leaf.leaf_index)
+        (!leaf.in_solid
+            && !leaf.outside
+            && leaf.has_valid_pvs
+            && leaf.leaf_index > 0
+            && leaf.leaf_index <= self.num_leaves)
+            .then_some(leaf.leaf_index - 1)
     }
 
     fn ranked_light_indices(&self, camera_pos: Vec3, pvs_primary: bool) -> Vec<usize> {
@@ -655,6 +680,8 @@ mod tests {
         assert!(!state.active);
         assert!(!state.has_pvs);
         assert!(state.current_pvs.is_none());
+        assert_eq!(state.frame_style_intensities[0], 1.0);
+        assert!(state.frame_style_intensities[1..].iter().all(|&v| v == 0.0));
     }
 
     #[cfg(feature = "bsp")]

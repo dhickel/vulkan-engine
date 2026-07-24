@@ -271,7 +271,8 @@ pub fn resolve_extracted_texture(
         if let Some(idx) = actual_idx {
             if let Some(data) = crate::wad::read_embedded_miptex_entry(miptex_data, idx) {
                 match crate::wad::decode_miptex_pixels(data, palette, fullbright_start, fullbright_end) {
-                    Ok(pixels) => {
+                    Ok(mut pixels) => {
+                        apply_alpha_mask_convention(tex_name, &mut pixels);
                         return (ExtractedTexture {
                             identity: tex_name.to_string(),
                             palette_indices: pixels.palette_indices,
@@ -297,7 +298,8 @@ pub fn resolve_extracted_texture(
     for (wad_name, archive) in wad_archives {
         if let Some(entry_data) = crate::wad::read_wad_lump(archive, tex_name) {
             match crate::wad::decode_miptex_pixels(entry_data, palette, fullbright_start, fullbright_end) {
-                Ok(pixels) => {
+                Ok(mut pixels) => {
+                    apply_alpha_mask_convention(tex_name, &mut pixels);
                     return (ExtractedTexture {
                         identity: tex_name.to_string(),
                         palette_indices: pixels.palette_indices,
@@ -338,6 +340,18 @@ pub fn resolve_extracted_texture(
         source: TextureSource::FallbackDiagnostic,
         ..Default::default()
     }, reports)
+}
+
+fn apply_alpha_mask_convention(texture_name: &str, pixels: &mut crate::wad::MiptexPixels) {
+    if !texture_name.starts_with('{') {
+        return;
+    }
+    for (pixel_index, &palette_index) in pixels.palette_indices.iter().enumerate() {
+        if palette_index == 255 {
+            pixels.albedo[pixel_index * 4 + 3] = 0;
+            pixels.fullbright_mask[pixel_index] = 0;
+        }
+    }
 }
 
 /// Find a miptex entry by name in the embedded miptex lump.
@@ -443,6 +457,39 @@ mod tests {
     fn validate_texture_dim_too_large() {
         let r = validate_texture_dimension(8192, "test");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn alpha_mask_texture_makes_only_palette_index_255_transparent() {
+        let mut pixels = crate::wad::MiptexPixels {
+            palette_indices: vec![1, 255],
+            albedo: vec![10, 20, 30, 255, 40, 50, 60, 255],
+            fullbright_mask: vec![0, 255],
+            width: 2,
+            height: 1,
+        };
+
+        apply_alpha_mask_convention("{fence", &mut pixels);
+
+        assert_eq!(pixels.albedo[3], 255);
+        assert_eq!(pixels.albedo[7], 0);
+        assert_eq!(pixels.fullbright_mask, vec![0, 0]);
+    }
+
+    #[test]
+    fn palette_index_255_stays_opaque_for_non_alpha_textures() {
+        let mut pixels = crate::wad::MiptexPixels {
+            palette_indices: vec![255],
+            albedo: vec![40, 50, 60, 255],
+            fullbright_mask: vec![255],
+            width: 1,
+            height: 1,
+        };
+
+        apply_alpha_mask_convention("wall", &mut pixels);
+
+        assert_eq!(pixels.albedo[3], 255);
+        assert_eq!(pixels.fullbright_mask, vec![255]);
     }
 
     #[test]

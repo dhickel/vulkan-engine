@@ -76,6 +76,16 @@ impl SurfaceClass {
 pub fn classify_surface(tex_flags: u32, texture_name: &str) -> SurfaceClass {
     let name_lower = texture_name.to_ascii_lowercase();
 
+    // Tool/internal faces must be removed before checking liquid/sky prefixes.
+    // Community WADs commonly use names such as `*waterskip` and `*lavaskip`.
+    if name_lower == "skip"
+        || name_lower == "hint"
+        || name_lower == "origin"
+        || name_lower.ends_with("skip")
+    {
+        return SurfaceClass::Skip;
+    }
+
     // Check texture name conventions first
     if name_lower.starts_with("sky") || name_lower.starts_with("*sky") {
         return SurfaceClass::Sky;
@@ -86,9 +96,6 @@ pub fn classify_surface(tex_flags: u32, texture_name: &str) -> SurfaceClass {
     }
     if name_lower == "trigger" {
         return SurfaceClass::Trigger;
-    }
-    if name_lower == "skip" || name_lower == "hint" || name_lower == "origin" {
-        return SurfaceClass::Skip;
     }
     if name_lower == "nodraw" || name_lower == "null" {
         return SurfaceClass::NoDraw;
@@ -344,6 +351,13 @@ mod tests {
         assert_eq!(classify_surface(0, "*water01"), SurfaceClass::Liquid);
         assert_eq!(classify_surface(0, "*slime"), SurfaceClass::Liquid);
         assert_eq!(classify_surface(0, "*lava"), SurfaceClass::Liquid);
+    }
+
+    #[test]
+    fn classify_liquid_skip_tool_textures_as_hidden() {
+        assert_eq!(classify_surface(0, "*waterskip"), SurfaceClass::Skip);
+        assert_eq!(classify_surface(0, "*slimeskip"), SurfaceClass::Skip);
+        assert_eq!(classify_surface(0, "*lavaskip"), SurfaceClass::Skip);
     }
 
     #[test]

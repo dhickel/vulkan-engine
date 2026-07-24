@@ -3,6 +3,8 @@
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_buffer_reference2 : enable
 
+#include "tonemapping.glsl"
+
 // BSP liquid/warp fragment shader — animated UV, two-sided, translucent.
 //
 // Computes:
@@ -23,6 +25,16 @@ layout (set = 0, binding = 0) uniform UBO {
     mat4 view;
     vec3 camPos;
 } ubo;
+
+layout (set = 0, binding = 1) uniform EnvironmentParams {
+    vec4 light_dir;
+    vec4 light_color;
+    mat4 light_view_proj;
+    float exposure;
+    float gamma;
+    float prefilter_mips_levels;
+    float ibl_ambient_scale;
+} env;
 
 // Material bindings (set 1).
 layout (set = 1, binding = 0) uniform sampler2D albedoTex;
@@ -69,6 +81,11 @@ float styleIntensity(uint styleId)
     return frameValues.styleIntensityPacked[vectorIndex][int(componentIndex)];
 }
 
+vec3 decodeLightmap(vec3 encoded)
+{
+    return pow(max(encoded, vec3(0.0)), vec3(2.2));
+}
+
 void main()
 {
     // ── Warped UV coordinate driven by frame-local time ─────────────
@@ -96,25 +113,29 @@ void main()
 
     if (surf.styleIds.x != 255u) {
         float intensity = styleIntensity(surf.styleIds.x);
-        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb * intensity;
+        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb) * intensity;
     }
     if (surf.styleIds.y != 255u) {
         float intensity = styleIntensity(surf.styleIds.y);
-        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb * intensity;
+        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb) * intensity;
     }
     if (surf.styleIds.z != 255u) {
         float intensity = styleIntensity(surf.styleIds.z);
-        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb * intensity;
+        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb) * intensity;
     }
     if (surf.styleIds.w != 255u) {
         float intensity = styleIntensity(surf.styleIds.w);
-        lightmapIrradiance += texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb * intensity;
+        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb) * intensity;
     }
 
     vec3 irradiance = lightmapIrradiance * OVERBRIGHT;
     vec3 diffuse = irradiance * albedo * PI_INV;
+    float fullbright = texture(fullbrightMask, warpedUV).r;
+    // Preserve the palette's emissive color instead of bleaching fullbright
+    // lava pixels to white.
+    vec3 color = diffuse + fullbright * albedo;
 
     // ── Output with alpha for post-blend depth sort ─────────────────
 
-    outColor = vec4(diffuse, LIQUID_ALPHA);
+    outColor = tonemap(vec4(color, LIQUID_ALPHA), env.exposure, env.gamma);
 }

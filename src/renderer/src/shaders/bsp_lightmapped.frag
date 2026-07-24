@@ -3,6 +3,8 @@
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_buffer_reference2 : enable
 
+#include "tonemapping.glsl"
+
 // BSP lightmapped fragment shader — opaque / fullbright / alpha-mask.
 //
 // Surface classification is driven by `surf.surfaceFlags`:
@@ -90,7 +92,6 @@ const uint RECEIVE_DYNAMIC_LIGHTS = 1u << 10;
 
 const float OVERBRIGHT   = 2.0;
 const float PI_INV       = 1.0 / 3.14159265359;
-const vec4  FULLBRIGHT_EMISSIVE = vec4(1.0, 1.0, 1.0, 0.0);
 
 float styleIntensity(uint styleId)
 {
@@ -100,6 +101,11 @@ float styleIntensity(uint styleId)
     uint vectorIndex = styleId >> 2;
     uint componentIndex = styleId & 3u;
     return frameValues.styleIntensityPacked[vectorIndex][int(componentIndex)];
+}
+
+vec3 decodeLightmap(vec3 encoded)
+{
+    return pow(max(encoded, vec3(0.0)), vec3(2.2));
 }
 
 void main()
@@ -125,25 +131,25 @@ void main()
     if (surf.styleIds.x != 255u) {
         float intensity = styleIntensity(surf.styleIds.x);
         vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb;
-        lightmapIrradiance += sample0 * intensity;
+        lightmapIrradiance += decodeLightmap(sample0) * intensity;
     }
     // Style slot 1
     if (surf.styleIds.y != 255u) {
         float intensity = styleIntensity(surf.styleIds.y);
         vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb;
-        lightmapIrradiance += sample1 * intensity;
+        lightmapIrradiance += decodeLightmap(sample1) * intensity;
     }
     // Style slot 2
     if (surf.styleIds.z != 255u) {
         float intensity = styleIntensity(surf.styleIds.z);
         vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb;
-        lightmapIrradiance += sample2 * intensity;
+        lightmapIrradiance += decodeLightmap(sample2) * intensity;
     }
     // Style slot 3
     if (surf.styleIds.w != 255u) {
         float intensity = styleIntensity(surf.styleIds.w);
         vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb;
-        lightmapIrradiance += sample3 * intensity;
+        lightmapIrradiance += decodeLightmap(sample3) * intensity;
     }
 
     // Apply transfer function and overbright once after sum.
@@ -157,8 +163,9 @@ void main()
     // ── 4. Fullbright emissive ─────────────────────────────────────
 
     float fullbright = texture(fullbrightMask, inUV0).r;
-    vec3 emissiveOut = fullbright * FULLBRIGHT_EMISSIVE.rgb;
-    color += emissiveOut;
+    // Palette fullbrights emit their source color. Adding a white scalar
+    // destroys colored lava, lamps, and trim even when the palette decoded correctly.
+    color += fullbright * albedo;
 
     // ── 5. IBL ambient contribution ────────────────────────────────
 
@@ -177,5 +184,5 @@ void main()
 
     // ── 7. Output ──────────────────────────────────────────────────
 
-    outColor = vec4(color, 1.0);
+    outColor = tonemap(vec4(color, 1.0), env.exposure, env.gamma);
 }

@@ -83,8 +83,9 @@ pub struct SnapshotLightStyles {
 
 impl Default for SnapshotLightStyles {
     fn default() -> Self {
-        let mut intensities = [1.0_f32; 64];
-        // Style 0 (static) is always 1.0.
+        let mut intensities = [0.0_f32; 64];
+        // Deterministic mounts start with static lighting only. Animated styles
+        // are enabled explicitly by the app-owned simulation snapshot.
         intensities[0] = 1.0;
         Self { intensities }
     }
@@ -346,21 +347,21 @@ mod tests {
         builder.set_light_style(5, 0.5);
         let snap = builder.build();
         assert!((snap.light_styles.intensities[5] - 0.5).abs() < 1e-6);
-        // Default for unused styles is 1.0.
+        // Static style 0 is on; unused animated styles are off.
         assert!((snap.light_styles.intensities[0] - 1.0).abs() < 1e-6);
-        assert!((snap.light_styles.intensities[10] - 1.0).abs() < 1e-6);
+        assert_eq!(snap.light_styles.intensities[10], 0.0);
     }
 
     #[test]
     fn style_change_detected() {
         let mut builder = SnapshotBuilder::new(1, 0, 0.016, 0.0);
-        // Default 1.0 — setting to 0.5 is a change.
+        // Animated styles default off, so enabling one is a change.
         builder.set_light_style(3, 0.5);
         assert!(builder.any_style_change);
 
         let mut builder2 = SnapshotBuilder::new(1, 0, 0.016, 0.0);
-        // Default 1.0 — staying at 1.0 is not a change.
-        builder2.set_light_style(3, 1.0);
+        // Leaving an animated style off is not a change.
+        builder2.set_light_style(3, 0.0);
         assert!(!builder2.any_style_change);
     }
 

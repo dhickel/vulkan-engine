@@ -66,7 +66,8 @@ The `bsp::extract` module produces renderer-agnostic DTOs:
 | `ExtractedBsp` | top-level container | `bsp_runtime` |
 | `FaceGeometry` | indexed triangle geometry in engine space | `renderer::build_face_meshes` |
 | `BspMaterial` | resolved texture + lightmap + surface class | `renderer::build_bsp_material_descs` |
-| `FaceLightmapLayout` | atlas offset, luxel extents, per-style layers | `renderer` atlas upload |
+| `FaceLightmapLayout` | atlas offset, Quake-grid-snapped luxel extents, half-luxel-centered UVs, per-style layers | `renderer` atlas upload |
+| `ExtractedVisibility` | VIS bytes, world model 0 `visleaf_count`, nodes/leaves/planes; PVS bit `i` maps raw leaf `i + 1` | renderer PVS submission and light selection |
 | `LightDescriptor` | point light position, color, intensity | `renderer` light publication |
 | `CollisionRecipe` | clipnode-derived hull data | app bridge → Rapier |
 | `ColliderRecipe` | convex decomposition output | app bridge → Rapier |
@@ -84,8 +85,9 @@ BspExtractionRequest
        ▼
 renderer::prepare_bsp_mount()
        │
-       ├─► build_face_meshes()        → MeshHandle[]         (VkMeshBuffers, VkSubAlloc)
-       ├─► build_bsp_material_descs() → BspMaterialHandle[]   (descriptor sets 1+2)
+       ├─► plan_bsp_upload()          → bounded merged batches (≤2,048), shared material plans
+       ├─► merged batch upload        → MeshHandle[]         (VkMeshBuffers, VkSubAlloc)
+       ├─► shared material register   → BspMaterialHandle[]   (descriptor sets 1+2)
        ├─► BspSurfaceCache            → VkImage (lightmap atlas, 4-layer array)
        │                              → VkImageView (array view)
        │                              → VkSampler (linear clamp)
@@ -140,7 +142,15 @@ Identical six-binding layout as `SceneData`. BSP and PBR paths can share the sam
 
 - In-flight descriptors are **never** mutated.
 - Set 2 UBO is written once per frame max, after frame-slot fence wait.
+- A mount starts static-only: style 0 intensity is 1.0 and styles 1–63 are 0.0 until an app snapshot activates them.
 - Static textures (albedo, fullbright mask) use one array layer — animation frame changes are communicated via `animationFrame`/`animationTime` uniforms, not by rewriting texture bindings.
+
+### BSP Fragment Color Path
+
+- Lightmap images are `R8G8B8A8_UNORM`; fragment shaders decode sampled bytes with `pow(encoded, 2.2)` before applying the 2× overbright factor.
+- Opaque, liquid, and sky output all use the shared renderer exposure/tone-map/gamma path.
+- Fullbright masks multiply sampled albedo RGB. A white scalar is not a valid emissive color because it destroys palette-authored lava/trim hues.
+- `{...}` alpha-mask textures clear alpha and fullbright emission only where palette index 255 occurs; index 255 stays opaque on other texture classes.
 
 ### Pipeline Variants
 
@@ -158,9 +168,9 @@ All five BSP pipeline variants share one `vk::PipelineLayout`:
 
 BSP mesh and atlas uploads use the renderer's transfer queue. The upload pipeline:
 
-1. `build_face_meshes()` creates `VkSubAlloc` entries for vertex/index data
-2. `build_bsp_material_descs()` creates descriptor sets
-3. Atlas pixels are uploaded via staging buffer → `vkCmdCopyBufferToImage`
+1. `plan_bsp_upload()` preflights bounded merged geometry, shared materials, textures, atlas image size, and compact staging demand before allocation
+2. Merged batch meshes create `VkSubAlloc` entries for vertex/index data and shared material descriptors are registered
+3. Sparse atlas rectangles are uploaded via compact staging buffer regions → `vkCmdCopyBufferToImage`
 4. Transfer completions are observed through `VkFenceQueue`
 5. `PreparedBspMount` is only returned after all uploads reach fence-completion
 
@@ -303,8 +313,8 @@ BSP draws are recorded before the geometry dynamic-rendering scope ends. `record
 | Lump truncation/overlap | `BSP-STRUCT-CORRUPT-LUMP` → whole-asset rejection |
 | Corrupt entity string | `BSP-STRUCT-CORRUPT-ENTITY` → whole-asset rejection |
 | Missing palette (strict) | `BSP-MISSING-REQUIRED-PALETTE` → whole-asset rejection |
-| Missing palette (dev) | diagnostic fallback textures |
-| Corrupt VIS | `BSP-STRUCT-CORRUPT-VIS` → PVS disabled, frustum/BVH only |
+| Missing palette (dev) | textured maps are rejected; no test/default palette substitution |
+| Corrupt VIS | invalid/missing global VIS disables PVS; a corrupt per-leaf row falls back conservatively. Row width is model 0 `visleafs`, and raw leaf 0 is never interpreted as PVS bit 0 |
 | Corrupt clipnodes | `BSP-STRUCT-CORRUPT-CLIP` → whole-asset rejection |
 | Bridge prepare fails | coordinator rolls back, re-prepare needed |
 | Bridge commit panics | coordinator poisoned |

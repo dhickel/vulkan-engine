@@ -145,6 +145,9 @@ pub struct ExtractedBsp {
 pub struct ExtractedVisibility {
     /// Raw compressed VIS lump bytes.
     pub vis_data: Vec<u8>,
+    /// Number of PVS bits per row from world model 0's `visleafs` field.
+    /// BSP leaf 0 is reserved solid and is not represented in these bits.
+    pub visleaf_count: u32,
     /// BSP traversal nodes in Quake space.
     pub nodes: Vec<lumps::Node>,
     /// BSP leaves referenced by node children and VIS offsets.
@@ -415,8 +418,12 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         .collect();
 
     // ── 5. Build leaf membership ──
-    let leaf_membership =
-        visibility::build_leaf_membership(&world.leaves, &world.markfaces);
+    let visleaf_count = world_visibility_leaf_count(&world);
+    let leaf_membership = visibility::build_leaf_membership_with_visleaf_count(
+        &world.leaves,
+        &world.markfaces,
+        visleaf_count,
+    );
 
     // ── 6. Identify inline model faces ──
     let inline_model_faces: Vec<(u32, u32)> = collect_inline_model_faces(&world.models);
@@ -448,17 +455,18 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
     );
 
     // ── 10. PVS decompression ──
-    let has_pvs = !world.vis_data.is_empty();
-    diagnostics.extend(validate_visibility_data(&world, strict));
+    let has_pvs = !world.vis_data.is_empty() && visleaf_count > 0;
+    diagnostics.extend(validate_visibility_data(&world, visleaf_count, strict));
     fail_on_error_diagnostic(&diagnostics)?;
     let camera_pvs = if has_pvs {
-        visibility::camera_pvs_with_scale(
+        visibility::camera_pvs_with_visleaf_count(
             &Vec3::ZERO,
             &world.vis_data,
             &world.nodes,
             &world.leaves,
             &world.planes,
             scale,
+            visleaf_count,
         )
     } else {
         None
@@ -528,6 +536,7 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         camera_pvs,
         visibility: ExtractedVisibility {
             vis_data: world.vis_data.clone(),
+            visleaf_count,
             nodes: world.nodes.clone(),
             leaves: world.leaves.clone(),
             planes: world.planes.clone(),
@@ -852,18 +861,34 @@ fn decode_face_style_luxels(
     }
 }
 
-fn validate_visibility_data(world: &BspWorld, strict: bool) -> Vec<BspReport> {
-    if world.vis_data.is_empty() || world.leaves.is_empty() {
+fn world_visibility_leaf_count(world: &BspWorld) -> u32 {
+    let max_count = world.leaves.len().saturating_sub(1) as u32;
+    world
+        .models
+        .first()
+        .and_then(|model| u32::try_from(model.visleafs).ok())
+        .filter(|&count| count > 0 && count <= max_count)
+        .unwrap_or(0)
+}
+
+fn validate_visibility_data(
+    world: &BspWorld,
+    visleaf_count: u32,
+    strict: bool,
+) -> Vec<BspReport> {
+    if world.vis_data.is_empty() || visleaf_count == 0 {
         return Vec::new();
     }
     // VIS corruption is non-fatal in dev mode: the decompressor returns a
     // conservative all-visible fallback, and we log at Warning level.
     if strict {
-        let state = visibility::PvsState::new(world.leaves.len() as u32, &world.vis_data);
+        let state = visibility::PvsState::new(visleaf_count, &world.vis_data);
         return world
             .leaves
             .iter()
             .enumerate()
+            .skip(1)
+            .take(visleaf_count as usize)
             .filter(|(_, leaf)| leaf.visofs >= 0)
             .filter_map(|(leaf_index, leaf)| {
                 let pvs = state.decompress_for_leaf(leaf_index as u32, leaf, &world.vis_data);

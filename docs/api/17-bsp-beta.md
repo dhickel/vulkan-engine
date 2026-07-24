@@ -70,6 +70,8 @@ let extracted = extract(request)?;
 // extracted.geometries, extracted.materials, extracted.light_descriptors, etc.
 ```
 
+`ExtractedVisibility::visleaf_count` is world model 0's authoritative PVS row width. It excludes reserved raw BSP leaf 0; PVS bit `i` corresponds to raw leaf `i + 1`. Renderer batching and light selection consume PVS-bit indices, not raw leaf-lump indices.
+
 ### `bsp_runtime` — Coordinator
 
 ```rust
@@ -190,6 +192,8 @@ Each frame, the app captures a BSP simulation snapshot and synchronizes it to th
 use bsp_runtime::snapshot::{BspSimulationSnapshot, SnapshotBuilder};
 
 let mut builder = SnapshotBuilder::new(generation, tick, dt, elapsed);
+// Defaults are static-only: style 0 = 1.0 and styles 1..63 = 0.0.
+// Set animated styles explicitly from app-owned simulation state.
 for (style_id, intensity) in current_style_intensities.iter().copied().enumerate() {
     builder.set_light_style(style_id as u8, intensity);
 }

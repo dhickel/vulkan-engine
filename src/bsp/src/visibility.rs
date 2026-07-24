@@ -8,8 +8,9 @@ use crate::lumps;
 
 /// Decompressed PVS bit array for a single leaf.
 ///
-/// Each bit represents a leaf index: bit `i` set = leaf `i` is potentially
-/// visible from the source leaf.
+/// Each bit represents a world-model visibility index: bit `i` set means raw
+/// BSP leaf `i + 1` is potentially visible from the source leaf. Raw leaf 0 is
+/// reserved solid and has no bit.
 #[derive(Debug, Clone)]
 pub struct PvsSet {
     /// Which leaf this PVS set is for.
@@ -21,7 +22,7 @@ pub struct PvsSet {
 }
 
 impl PvsSet {
-    /// Check whether a leaf is in this PVS set.
+    /// Check whether a PVS-bit index is in this set (`raw_leaf_index - 1`).
     pub fn is_visible(&self, leaf_index: u32) -> bool {
         let byte_idx = (leaf_index / 8) as usize;
         let bit_idx = (leaf_index % 8) as usize;
@@ -35,7 +36,8 @@ impl PvsSet {
 /// PVS decompression state for the entire map.
 #[derive(Debug, Clone)]
 pub struct PvsState {
-    /// Number of leaves in the map.
+    /// Number of visibility leaves in world model 0 (`dmodel.visleafs`).
+    /// This excludes reserved solid leaf 0 and may be smaller than the leaf lump.
     pub num_leaves: u32,
     /// Number of bytes per decompressed PVS set.
     pub pvs_bytes: u32,
@@ -44,10 +46,10 @@ pub struct PvsState {
 }
 
 impl PvsState {
-    /// Create a new PVS state.
+    /// Create a new PVS state from world model 0's visibility-leaf count.
     pub fn new(num_leaves: u32, vis_data: &[u8]) -> Self {
         let pvs_bytes = (num_leaves + 7) / 8;
-        let corrupt = vis_data.is_empty();
+        let corrupt = vis_data.is_empty() || num_leaves == 0;
         PvsState {
             num_leaves,
             pvs_bytes,
@@ -234,14 +236,42 @@ pub fn camera_pvs_with_scale(
     planes: &[lumps::Plane],
     scale: f32,
 ) -> Option<PvsSet> {
-    if vis_data.is_empty() {
+    // Callers that only have leaf records can use the canonical BSP fallback:
+    // leaf 0 is reserved solid and all remaining leaves are visibility leaves.
+    let visleaf_count = leaves.len().saturating_sub(1) as u32;
+    camera_pvs_with_visleaf_count(
+        cam_point,
+        vis_data,
+        nodes,
+        leaves,
+        planes,
+        scale,
+        visleaf_count,
+    )
+}
+
+/// Conduct a PVS query using world model 0's authoritative `visleafs` count.
+pub(crate) fn camera_pvs_with_visleaf_count(
+    cam_point: &Vec3,
+    vis_data: &[u8],
+    nodes: &[lumps::Node],
+    leaves: &[lumps::Leaf],
+    planes: &[lumps::Plane],
+    scale: f32,
+    visleaf_count: u32,
+) -> Option<PvsSet> {
+    let max_visleaf_count = leaves.len().saturating_sub(1) as u32;
+    if vis_data.is_empty() || visleaf_count == 0 || visleaf_count > max_visleaf_count {
         return None;
     }
 
     let cam_quake = engine_to_quake_space(*cam_point, scale);
     let cam = camera_leaf_index(&cam_quake, nodes, leaves, planes);
-    if cam.in_solid || cam.outside {
-        // Camera in solid: PVS empty, conservative fallback
+    if cam.in_solid
+        || cam.outside
+        || cam.leaf_index == 0
+        || cam.leaf_index > visleaf_count
+    {
         return None;
     }
 
@@ -250,14 +280,10 @@ pub fn camera_pvs_with_scale(
         return None;
     }
 
-    let state = PvsState::new(leaves.len() as u32, vis_data);
-    let pvs = state.decompress_for_leaf(cam.leaf_index as u32, leaf, vis_data);
+    let state = PvsState::new(visleaf_count, vis_data);
+    let pvs = state.decompress_for_leaf(cam.leaf_index, leaf, vis_data);
 
-    if !pvs.valid {
-        return None;
-    }
-
-    Some(pvs)
+    pvs.valid.then_some(pvs)
 }
 
 fn engine_to_quake_space(v: Vec3, scale: f32) -> Vec3 {
@@ -276,25 +302,39 @@ pub fn build_leaf_membership(
     leaves: &[lumps::Leaf],
     markfaces: &[u32],
 ) -> Vec<Vec<u32>> {
-    let num_faces = markfaces.iter().max().map(|m| *m + 1).unwrap_or(0) as usize;
-    // Initialize empty per-face membership
-    let mut face_members: Vec<Vec<u32>> = vec![Vec::new(); num_faces as usize];
+    let visleaf_count = leaves.len().saturating_sub(1) as u32;
+    build_leaf_membership_with_visleaf_count(leaves, markfaces, visleaf_count)
+}
 
-    for (leaf_idx, leaf) in leaves.iter().enumerate() {
-        // Only non-solid leaves contribute to face visibility
-        if leaf.contents == -2 {
+/// Build face memberships in PVS-bit space using model 0's `visleafs` count.
+///
+/// BSP leaf 0 is the reserved solid leaf, while PVS bit 0 represents BSP leaf
+/// 1. Leaves beyond model 0's visibility range are omitted so affected faces
+/// retain an empty, conservative-visible signature instead of being false-culled.
+pub(crate) fn build_leaf_membership_with_visleaf_count(
+    leaves: &[lumps::Leaf],
+    markfaces: &[u32],
+    visleaf_count: u32,
+) -> Vec<Vec<u32>> {
+    let num_faces = markfaces.iter().max().map(|m| *m + 1).unwrap_or(0) as usize;
+    let mut face_members: Vec<Vec<u32>> = vec![Vec::new(); num_faces];
+    let valid_visleaf_count = visleaf_count.min(leaves.len().saturating_sub(1) as u32);
+
+    for (leaf_idx, leaf) in leaves.iter().enumerate().skip(1) {
+        let raw_leaf_index = leaf_idx as u32;
+        if raw_leaf_index > valid_visleaf_count || leaf.contents == -2 {
             continue;
         }
+        let pvs_bit_index = raw_leaf_index - 1;
         let start = leaf.mark_id as usize;
         let end = (leaf.mark_id + leaf.mark_num) as usize;
         for &mf in &markfaces[start..end.min(markfaces.len())] {
             if (mf as usize) < face_members.len() {
-                face_members[mf as usize].push(leaf_idx as u32);
+                face_members[mf as usize].push(pvs_bit_index);
             }
         }
     }
 
-    // Sort and deduplicate per-face leaf membership
     for members in &mut face_members {
         members.sort_unstable();
         members.dedup();
@@ -518,18 +558,38 @@ mod tests {
     }
 
     #[test]
-    fn build_leaf_membership_maps_faces() {
+    fn build_leaf_membership_maps_raw_leaves_to_pvs_bits() {
         let leaves = vec![
-            make_test_leaf(0, 0, 0, 2), // leaf 0: faces [0, 1]
-            make_test_leaf(0, 0, 2, 1), // leaf 1: face [2]
+            make_test_leaf(-2, -1, 0, 0), // raw leaf 0: reserved solid
+            make_test_leaf(0, 0, 0, 2),   // raw leaf 1 / PVS bit 0: faces [0, 1]
+            make_test_leaf(0, 0, 2, 1),   // raw leaf 2 / PVS bit 1: face [2]
         ];
         let markfaces = vec![0u32, 1, 2];
 
         let members = build_leaf_membership(&leaves, &markfaces);
-        assert_eq!(members.len(), 3); // 3 faces (0, 1, 2)
-        assert_eq!(members[0], vec![0]); // face 0 referenced by leaf 0
-        assert_eq!(members[1], vec![0]); // face 1 referenced by leaf 0
-        assert_eq!(members[2], vec![1]); // face 2 referenced by leaf 1
+        assert_eq!(members.len(), 3);
+        assert_eq!(members[0], vec![0]);
+        assert_eq!(members[1], vec![0]);
+        assert_eq!(members[2], vec![1]);
+    }
+
+    #[test]
+    fn model_visleaf_count_controls_row_width_and_membership_range() {
+        let leaves = vec![
+            make_test_leaf(-2, -1, 0, 0),
+            make_test_leaf(0, 0, 0, 1),
+            make_test_leaf(0, 1, 1, 1),
+            make_test_leaf(0, 2, 2, 1), // outside model 0 visibility range
+        ];
+        let state = PvsState::new(2, &[0x01, 0x02, 0x04]);
+        let pvs = state.decompress_for_leaf(1, &leaves[1], &[0x01, 0x02, 0x04]);
+        assert!(pvs.valid);
+        assert_eq!(pvs.bits, vec![0x01]);
+
+        let members = build_leaf_membership_with_visleaf_count(&leaves, &[0, 1, 2], 2);
+        assert_eq!(members[0], vec![0]);
+        assert_eq!(members[1], vec![1]);
+        assert!(members[2].is_empty());
     }
 
     #[test]

@@ -3,6 +3,8 @@
 #extension GL_EXT_buffer_reference : enable
 #extension GL_EXT_buffer_reference2 : enable
 
+#include "tonemapping.glsl"
+
 // BSP sky fragment shader — environment sampling, depth-tested, no depth write.
 //
 // Sky surfaces render the environment color sampled from the prefiltered
@@ -17,6 +19,16 @@ layout (set = 0, binding = 0) uniform UBO {
     mat4 view;
     vec3 camPos;
 } ubo;
+
+layout (set = 0, binding = 1) uniform EnvironmentParams {
+    vec4 light_dir;
+    vec4 light_color;
+    mat4 light_view_proj;
+    float exposure;
+    float gamma;
+    float prefilter_mips_levels;
+    float ibl_ambient_scale;
+} env;
 
 // Prefiltered environment cube map at set 0 binding 3.
 layout (set = 0, binding = 3) uniform samplerCube prefilteredMap;
@@ -56,5 +68,5 @@ void main()
     // No gl_FragDepth — depth is written (or not) by pipeline state.
     vec3 viewDir = normalize(inWorldPos - ubo.camPos);
     vec3 envColor = texture(prefilteredMap, viewDir).rgb;
-    outColor = vec4(envColor, 1.0);
+    outColor = tonemap(vec4(envColor, 1.0), env.exposure, env.gamma);
 }

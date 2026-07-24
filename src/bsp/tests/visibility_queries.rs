@@ -442,7 +442,17 @@ fn golden_hull_extents_different() {
 #[test]
 fn golden_leaf_membership_deduplicated() {
     let leaves = vec![
-        // leaf 0 references faces [0, 1]
+        // Raw leaf 0 is the reserved solid leaf and has no PVS bit.
+        lumps::Leaf {
+            contents: -2,
+            visofs: -1,
+            mins: [0; 3],
+            maxs: [0; 3],
+            mark_id: 0,
+            mark_num: 0,
+            ambient: [0; 4],
+        },
+        // Raw leaf 1 / PVS bit 0 references faces [0, 1].
         lumps::Leaf {
             contents: 0,
             visofs: 0,
@@ -452,7 +462,7 @@ fn golden_leaf_membership_deduplicated() {
             mark_num: 2,
             ambient: [0; 4],
         },
-        // leaf 1 also references face 0 (should be deduplicated per face)
+        // Raw leaf 2 / PVS bit 1 also references face 0.
         lumps::Leaf {
             contents: 0,
             visofs: 0,
@@ -463,12 +473,10 @@ fn golden_leaf_membership_deduplicated() {
             ambient: [0; 4],
         },
     ];
-    let markfaces = vec![0u32, 1, 0]; // leaf 0: [0, 1], leaf 1: [0]
+    let markfaces = vec![0u32, 1, 0];
 
     let members = visibility::build_leaf_membership(&leaves, &markfaces);
 
-    // face 0 is referenced by leaves [0, 1]
     assert_eq!(members[0], vec![0, 1]);
-    // face 1 is referenced by leaf [0] only
     assert_eq!(members[1], vec![0]);
 }
