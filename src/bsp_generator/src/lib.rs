@@ -30,7 +30,9 @@ pub mod config;
 pub mod error;
 pub mod geometry;
 pub mod intent;
+pub mod junction;
 pub mod placement;
+pub mod routing;
 pub mod seed;
 pub mod topology;
 
@@ -42,6 +44,11 @@ pub use intent::{
     Brush, BrushFace, Corridor, EmissionIntent, EntityIntent, Junction, LayoutIntent, RoomIntent,
     RoutedIntent,
 };
+pub use junction::{
+    build_junction_closures, build_l_junction, build_room_portal, build_t_junction,
+    build_x_junction, make_brush,
+};
 pub use placement::place_rooms;
+pub use routing::{route_all_edges, route_edge, CORRIDOR_HEIGHT, CORRIDOR_WIDTH};
 pub use seed::{Seed, StageRng, StageSeed};
 pub use topology::build_topology;
