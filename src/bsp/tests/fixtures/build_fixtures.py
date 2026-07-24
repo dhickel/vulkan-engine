@@ -107,6 +107,129 @@ FIXTURES = [
         "args_light": ["-threads", "1", "-lit"],
         "require_nonempty_lit": True,
     },
+
+    # ── Phase 04: dungeon geometry & topology evidence fixtures ──
+    {
+        "name": "dungeon-junction-straight-bsp2",
+        "source": "dungeon_junction_straight_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-junction-l-bsp2",
+        "source": "dungeon_junction_l_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-junction-t-bsp2",
+        "source": "dungeon_junction_t_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-junction-x-bsp2",
+        "source": "dungeon_junction_x_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-adjacent-closed-bsp2",
+        "source": "dungeon_adjacent_closed_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-parallel-corridors-bsp2",
+        "source": "dungeon_parallel_corridors_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-grazing-route-bsp2",
+        "source": "dungeon_grazing_route_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-large-face-bsp2",
+        "source": "dungeon_large_face_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-unequal-ceiling-bsp2",
+        "source": "dungeon_unequal_ceiling_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": True,
+    },
+    {
+        "name": "dungeon-intentional-leak-bsp2",
+        "source": "dungeon_intentional_leak_standard.map",
+        "profile": "q1-portable-ericw",
+        "dialect": "bsp2",
+        "bsp2": True,
+        "colored": True,
+        "args_qbsp": ["-bsp2"],
+        "args_vis": [],
+        "args_light": ["-threads", "1", "-lit"],
+        "require_nonempty_lit": False,
+        "expect_leak": True,
+    },
 ]
 
 # ── Size limits ──────────────────────────────────────────────────────────
@@ -405,9 +528,13 @@ def compile_fixture(
     print("  [vis]")
     vis_args = fixture["args_vis"] + [bsp_name]
     result = run_compiler(vis_exe, vis_args, work_dir, ALLOWED_ENV)
+    leak_expected = fixture.get("expect_leak", False)
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(f"vis failed (exit {result.returncode}):\n{stderr}")
+        if leak_expected:
+            print(f"  vis reported leak (expected for this fixture): {stderr[:200]}")
+        else:
+            raise RuntimeError(f"vis failed (exit {result.returncode}):\n{stderr}")
 
     # Step 3: light
     print("  [light]")
@@ -415,7 +542,10 @@ def compile_fixture(
     result = run_compiler(light_exe, light_args, work_dir, ALLOWED_ENV)
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(f"light failed (exit {result.returncode}):\n{stderr}")
+        if leak_expected:
+            print(f"  light reported issue on leaky map (expected): {stderr[:200]}")
+        else:
+            raise RuntimeError(f"light failed (exit {result.returncode}):\n{stderr}")
 
     # Collect output files
     output_bsp = output_dir / f"{name}.bsp"
@@ -428,7 +558,7 @@ def compile_fixture(
     lit_path = work_dir / bsp_name.replace(".bsp", ".lit")
     lit_hash = None
     lit_size = 0
-    if fixture["colored"] and not lit_path.exists():
+    if fixture["colored"] and not lit_path.exists() and not leak_expected:
         # Tiny zero-luxel compatibility fixtures use a deterministic empty QLIT v1
         # companion to exercise the companion path. Evidence fixtures that claim
         # nonempty compiler-produced lighting must fail instead of being patched.
