@@ -57,6 +57,19 @@ pub struct BehaviorEntityRecipe {
     pub origin: glam::Vec3,
     pub targetname: Option<String>,
     pub target: Option<String>,
+    pub killtarget: Option<String>,
+    /// Movement direction (unit vector), e.g. "0 0 1" for upward.
+    pub movedir: Option<[f32; 3]>,
+    /// Movement speed in Quake units per second.
+    pub speed: Option<f32>,
+    /// Seconds to wait before auto-closing/returning.
+    pub wait: Option<f32>,
+    /// Lip (how far from fully closed).
+    pub lip: Option<f32>,
+    /// Height (for platforms).
+    pub height: Option<f32>,
+    /// Light style string.
+    pub light_style: Option<String>,
 }
 
 /// Token returned by a bridge during prepare, presented at validate/commit/rollback.

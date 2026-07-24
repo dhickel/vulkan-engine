@@ -96,6 +96,16 @@ impl RuntimeBridge {
     pub fn set_light_style(&mut self, style: &str, active: bool) {
         self.adapter.set_light_style(style, active);
     }
+
+    /// Export current mutable behavior state for persistence.
+    pub fn export_state(&self) -> bsp_runtime::MutableBehaviorState {
+        self.adapter.export_state()
+    }
+
+    /// Import mutable behavior state from a persistence payload.
+    pub fn import_state(&mut self, state: &bsp_runtime::MutableBehaviorState) {
+        self.adapter.import_state(state);
+    }
 }
 
 impl Default for RuntimeBridge {
@@ -124,14 +134,14 @@ impl AppBridge for RuntimeBridge {
                 classname: b.classname.clone(),
                 targetname: b.targetname.clone(),
                 target: b.target.clone(),
-                killtarget: None,
+                killtarget: b.killtarget.clone(),
                 origin: [b.origin.x, b.origin.y, b.origin.z],
-                movedir: None,
-                speed: None,
-                wait: None,
-                lip: None,
-                height: None,
-                light_style: None,
+                movedir: b.movedir,
+                speed: b.speed,
+                wait: b.wait,
+                lip: b.lip,
+                height: b.height,
+                light_style: b.light_style.clone(),
             })
             .collect();
 

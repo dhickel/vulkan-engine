@@ -263,3 +263,179 @@ fn deterministic_entity_position_tracks_movement() {
     let pos_after = adapter.entity_position(1).unwrap();
     assert!(pos_after[0] > pos_before[0]);
 }
+
+// ── Door-Specific Tests (Phase 07) ─────────────────────────────────
+
+#[test]
+fn door_trigger_chain_opens_door() {
+    let mut adapter = StructuralBehaviorAdapter::new();
+    adapter.register_entities(vec![
+        BehaviorEntityInfo {
+            entity_index: 1,
+            classname: "func_door".into(),
+            targetname: Some("door_main".into()),
+            target: None,
+            killtarget: None,
+            origin: [0.0, 0.0, 0.0],
+            movedir: Some([0.0, 0.0, 1.0]),
+            speed: Some(100.0),
+            wait: Some(3.0),
+            lip: Some(0.0),
+            height: None,
+            light_style: None,
+        },
+        BehaviorEntityInfo {
+            entity_index: 2,
+            classname: "trigger_multiple".into(),
+            targetname: None,
+            target: Some("door_main".into()),
+            killtarget: None,
+            origin: [-64.0, 0.0, 0.0],
+            movedir: None,
+            speed: None,
+            wait: None,
+            lip: None,
+            height: None,
+            light_style: None,
+        },
+    ]);
+
+    // Trigger fires via occupant entry
+    let event = adapter
+        .update_trigger_occupants(2, HashSet::from([100]))
+        .unwrap();
+    assert!(matches!(event, TriggerEvent::Fired { .. }));
+
+    let door = adapter.doors.get(&1).unwrap();
+    assert_eq!(door.phase, DoorPhase::Opening);
+}
+
+#[test]
+fn door_position_tracks_vertical_movement() {
+    let mut adapter = StructuralBehaviorAdapter::new();
+    adapter.register_entities(vec![BehaviorEntityInfo {
+        entity_index: 1,
+        classname: "func_door".into(),
+        targetname: None,
+        target: None,
+        killtarget: None,
+        origin: [0.0, 0.0, 0.0],
+        movedir: Some([0.0, 0.0, 1.0]),
+        speed: Some(100.0),
+        wait: Some(3.0),
+        lip: Some(0.0),
+        height: None,
+        light_style: None,
+    }]);
+
+    adapter.activate_by_index(1, Activation::On);
+    // At speed=100 and travel_distance=1, full open takes 0.01s
+    let _updates = adapter.update(0.005); // Halfway
+    let pos = adapter.entity_position(1).unwrap();
+    assert!(pos[2] > 0.0 && pos[2] < 1.0);
+    assert!(adapter.is_moving(1));
+}
+
+#[test]
+fn door_closed_state_has_correct_position() {
+    let adapter = StructuralBehaviorAdapter::new();
+    let mut adapter = adapter;
+    adapter.register_entities(vec![BehaviorEntityInfo {
+        entity_index: 1,
+        classname: "func_door".into(),
+        targetname: None,
+        target: None,
+        killtarget: None,
+        origin: [10.0, 5.0, 0.0],
+        movedir: Some([1.0, 0.0, 0.0]),
+        speed: Some(100.0),
+        wait: Some(1.0),
+        lip: Some(0.0),
+        height: None,
+        light_style: None,
+    }]);
+
+    let pos = adapter.entity_position(1).unwrap();
+    assert_eq!(pos, [10.0, 5.0, 0.0]);
+    assert!(!adapter.is_moving(1));
+}
+
+#[test]
+fn door_export_import_state_round_trip() {
+    let mut adapter = StructuralBehaviorAdapter::new();
+    adapter.register_entities(vec![BehaviorEntityInfo {
+        entity_index: 1,
+        classname: "func_door".into(),
+        targetname: Some("d1".into()),
+        target: None,
+        killtarget: None,
+        origin: [0.0, 0.0, 0.0],
+        movedir: Some([0.0, 0.0, 1.0]),
+        speed: Some(100.0),
+        wait: Some(3.0),
+        lip: Some(0.0),
+        height: None,
+        light_style: None,
+    }]);
+
+    // Open the door
+    adapter.activate_by_index(1, Activation::On);
+    adapter.update(1.0);
+
+    let exported = adapter.export_state();
+    assert_eq!(exported.doors.len(), 1);
+    assert_eq!(exported.doors[0].entity_index, 1);
+    assert_eq!(exported.doors[0].phase, 2); // Open
+
+    // Fresh adapter, import
+    let mut fresh = StructuralBehaviorAdapter::new();
+    fresh.register_entities(vec![BehaviorEntityInfo {
+        entity_index: 1,
+        classname: "func_door".into(),
+        targetname: Some("d1".into()),
+        target: None,
+        killtarget: None,
+        origin: [0.0, 0.0, 0.0],
+        movedir: Some([0.0, 0.0, 1.0]),
+        speed: Some(100.0),
+        wait: Some(3.0),
+        lip: Some(0.0),
+        height: None,
+        light_style: None,
+    }]);
+
+    assert_eq!(fresh.doors.get(&1).unwrap().phase, DoorPhase::Closed);
+    fresh.import_state(&exported);
+    assert_eq!(fresh.doors.get(&1).unwrap().phase, DoorPhase::Open);
+}
+
+#[test]
+fn door_activation_toggle_behavior() {
+    let mut adapter = StructuralBehaviorAdapter::new();
+    adapter.register_entities(vec![BehaviorEntityInfo {
+        entity_index: 1,
+        classname: "func_door".into(),
+        targetname: None,
+        target: None,
+        killtarget: None,
+        origin: [0.0, 0.0, 0.0],
+        movedir: Some([1.0, 0.0, 0.0]),
+        speed: Some(100.0),
+        wait: Some(3.0),
+        lip: Some(0.0),
+        height: None,
+        light_style: None,
+    }]);
+
+    // Activate once → opens
+    adapter.activate_by_index(1, Activation::Toggle);
+    assert_eq!(adapter.doors.get(&1).unwrap().phase, DoorPhase::Opening);
+
+    // Fast-forward through open
+    adapter.update(1.0);
+    assert_eq!(adapter.doors.get(&1).unwrap().phase, DoorPhase::Open);
+
+    // Activate again → closes
+    adapter.activate_by_index(1, Activation::Toggle);
+    assert_eq!(adapter.doors.get(&1).unwrap().phase, DoorPhase::Closing);
+}

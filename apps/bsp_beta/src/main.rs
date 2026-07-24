@@ -443,6 +443,13 @@ fn bridge_inputs_from_extraction(extracted: &bsp::extract::ExtractedBsp) -> Brid
             origin: entity.origin.unwrap_or(Vec3::ZERO),
             targetname: None,
             target: None,
+            killtarget: None,
+            movedir: None,
+            speed: None,
+            wait: None,
+            lip: None,
+            height: None,
+            light_style: None,
         })
         .collect();
 

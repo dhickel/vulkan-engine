@@ -1237,12 +1237,31 @@ impl BspCoordinator {
             .entity_descriptors
             .iter()
             .filter(|ed| ed.classname.starts_with("func_") || ed.classname.starts_with("trigger_"))
-            .map(|ed| BehaviorEntityRecipe {
-                entity_index: ed.entity_index,
-                classname: ed.classname.clone(),
-                origin: ed.origin.unwrap_or(glam::Vec3::ZERO),
-                targetname: ed.targetname.clone(),
-                target: ed.target.clone(),
+            .map(|ed| {
+                // Extract door/button/platform-specific properties from key_values.
+                let kv = &ed.key_values;
+                let movedir = parse_vec3_opt(&get_kv(kv, "movedir"))
+                    .map(|v| [v.x, v.y, v.z]);
+                let speed = get_kv(kv, "speed").and_then(|s| s.parse::<f32>().ok());
+                let wait = get_kv(kv, "wait").and_then(|s| s.parse::<f32>().ok());
+                let lip = get_kv(kv, "lip").and_then(|s| s.parse::<f32>().ok());
+                let height = get_kv(kv, "height").and_then(|s| s.parse::<f32>().ok());
+                let killtarget = get_kv(kv, "killtarget").map(|s| s.to_string());
+                let light_style = get_kv(kv, "style").map(|s| s.to_string());
+                BehaviorEntityRecipe {
+                    entity_index: ed.entity_index,
+                    classname: ed.classname.clone(),
+                    origin: ed.origin.unwrap_or(glam::Vec3::ZERO),
+                    targetname: ed.targetname.clone(),
+                    target: ed.target.clone(),
+                    killtarget,
+                    movedir,
+                    speed,
+                    wait,
+                    lip,
+                    height,
+                    light_style,
+                }
             })
             .collect();
 
@@ -1452,4 +1471,30 @@ struct BridgeDtos {
     entity_colliders: Vec<EntityCollisionRecipe>,
     lights: Vec<LightEntityRecipe>,
     behaviors: Vec<BehaviorEntityRecipe>,
+}
+
+// ── Key/Value helpers ────────────────────────────────────────────────
+
+/// Get a singleton key value from entity key/value pairs.
+fn get_kv<'a>(kvs: &'a [bsp::entities::KeyValue], key: &str) -> Option<&'a str> {
+    for kv in kvs.iter().rev() {
+        if kv.key == key {
+            return Some(kv.value.as_str());
+        }
+    }
+    None
+}
+
+/// Parse an optional `"x y z"` string into a glam::Vec3.
+fn parse_vec3_opt(s: &Option<&str>) -> Option<glam::Vec3> {
+    let s = s.as_ref()?;
+    let parts: Vec<f32> = s
+        .split_whitespace()
+        .filter_map(|p| p.parse::<f32>().ok())
+        .collect();
+    if parts.len() == 3 {
+        Some(glam::Vec3::new(parts[0], parts[1], parts[2]))
+    } else {
+        None
+    }
 }

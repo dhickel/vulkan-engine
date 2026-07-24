@@ -898,6 +898,156 @@ impl StructuralBehaviorAdapter {
             }
         }
     }
+
+    // ── Persistence ─────────────────────────────────────────────────
+
+    /// Export current mutable behavior state for persistence.
+    pub fn export_state(&self) -> crate::source_link::MutableBehaviorState {
+        use crate::source_link::{
+            CanonicalFloat, SerializedButtonState, SerializedDoorState,
+            SerializedPlatformState, SerializedTriggerState,
+        };
+        let mut state = crate::source_link::MutableBehaviorState::default();
+
+        let mut door_indices: Vec<u32> = self.doors.keys().copied().collect();
+        door_indices.sort();
+        for ei in door_indices {
+            let d = &self.doors[&ei];
+            let phase: u8 = match d.phase {
+                DoorPhase::Closed => 0,
+                DoorPhase::Opening => 1,
+                DoorPhase::Open => 2,
+                DoorPhase::Closing => 3,
+            };
+            state.doors.push(SerializedDoorState {
+                entity_index: ei,
+                phase,
+                travel: CanonicalFloat(d.travel),
+                wait_timer: CanonicalFloat(d.wait_timer),
+            });
+        }
+
+        let mut button_indices: Vec<u32> = self.buttons.keys().copied().collect();
+        button_indices.sort();
+        for ei in button_indices {
+            let b = &self.buttons[&ei];
+            let phase: u8 = match b.phase {
+                ButtonPhase::Up => 0,
+                ButtonPhase::Pressing => 1,
+                ButtonPhase::Down => 2,
+                ButtonPhase::Returning => 3,
+            };
+            state.buttons.push(SerializedButtonState {
+                entity_index: ei,
+                phase,
+                travel: CanonicalFloat(b.travel),
+                wait_timer: CanonicalFloat(b.wait_timer),
+            });
+        }
+
+        let mut plat_indices: Vec<u32> = self.platforms.keys().copied().collect();
+        plat_indices.sort();
+        for ei in plat_indices {
+            let p = &self.platforms[&ei];
+            let phase: u8 = match p.phase {
+                PlatformPhase::Low => 0,
+                PlatformPhase::Raising => 1,
+                PlatformPhase::High => 2,
+                PlatformPhase::Lowering => 3,
+            };
+            state.platforms.push(SerializedPlatformState {
+                entity_index: ei,
+                phase,
+                travel: CanonicalFloat(p.travel),
+                wait_timer: CanonicalFloat(p.wait_timer),
+            });
+        }
+
+        let mut trigger_indices: Vec<u32> = self.triggers.keys().copied().collect();
+        trigger_indices.sort();
+        for ei in trigger_indices {
+            let t = &self.triggers[&ei];
+            state.triggers.push(SerializedTriggerState {
+                entity_index: ei,
+                fired: t.fired,
+            });
+        }
+
+        let mut style_keys: Vec<&String> = self.light_styles.keys().collect();
+        style_keys.sort();
+        for key in style_keys {
+            if let Ok(idx) = key.parse::<u32>() {
+                if idx <= 63 {
+                    let ls = &self.light_styles[key];
+                    state.light_styles.insert(idx, CanonicalFloat(ls.intensity));
+                }
+            }
+        }
+
+        state
+    }
+
+    /// Import mutable behavior state from a persistence payload.
+    ///
+    /// Only entities that exist in the adapter (from the current BSP)
+    /// are restored. Entities in the payload that don't match the current
+    /// BSP are ignored.
+    pub fn import_state(&mut self, state: &crate::source_link::MutableBehaviorState) {
+        for sd in &state.doors {
+            if let Some(door) = self.doors.get_mut(&sd.entity_index) {
+                door.phase = match sd.phase {
+                    0 => DoorPhase::Closed,
+                    1 => DoorPhase::Opening,
+                    2 => DoorPhase::Open,
+                    3 => DoorPhase::Closing,
+                    _ => DoorPhase::Closed,
+                };
+                door.travel = sd.travel.0.clamp(0.0, 1.0);
+                door.wait_timer = sd.wait_timer.0.max(0.0);
+            }
+        }
+        for sb in &state.buttons {
+            if let Some(button) = self.buttons.get_mut(&sb.entity_index) {
+                button.phase = match sb.phase {
+                    0 => ButtonPhase::Up,
+                    1 => ButtonPhase::Pressing,
+                    2 => ButtonPhase::Down,
+                    3 => ButtonPhase::Returning,
+                    _ => ButtonPhase::Up,
+                };
+                button.travel = sb.travel.0.clamp(0.0, 1.0);
+                button.wait_timer = sb.wait_timer.0.max(0.0);
+            }
+        }
+        for sp in &state.platforms {
+            if let Some(plat) = self.platforms.get_mut(&sp.entity_index) {
+                plat.phase = match sp.phase {
+                    0 => PlatformPhase::Low,
+                    1 => PlatformPhase::Raising,
+                    2 => PlatformPhase::High,
+                    3 => PlatformPhase::Lowering,
+                    _ => PlatformPhase::Low,
+                };
+                plat.travel = sp.travel.0.clamp(0.0, 1.0);
+                plat.wait_timer = sp.wait_timer.0.max(0.0);
+            }
+        }
+        for st in &state.triggers {
+            if let Some(trigger) = self.triggers.get_mut(&st.entity_index) {
+                trigger.fired = st.fired;
+            }
+        }
+        for (style_id, intensity) in &state.light_styles {
+            let style_key = style_id.to_string();
+            // Light styles are keyed by string name; try to find the matching style.
+            for (name, ls) in self.light_styles.iter_mut() {
+                if *name == style_key {
+                    ls.intensity = intensity.0.clamp(0.0, 1.0);
+                    ls.active = intensity.0 > 0.0;
+                }
+            }
+        }
+    }
 }
 
 impl Default for StructuralBehaviorAdapter {

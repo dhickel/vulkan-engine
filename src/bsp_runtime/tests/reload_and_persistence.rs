@@ -651,3 +651,129 @@ fn restore_restore_order_is_correct() {
     // Reconciliation should have been performed
     assert!(restored.reconciliation.is_some());
 }
+
+// ── Door Persistence Tests (Phase 07) ───────────────────────────────
+
+#[test]
+fn door_state_survives_mutable_behavior_round_trip() {
+    use bsp_runtime::source_link::{
+        CanonicalFloat, MutableBehaviorState, SerializedButtonState, SerializedDoorState,
+        SerializedPlatformState, SerializedTriggerState,
+    };
+    use std::collections::BTreeMap;
+
+    let mut state = MutableBehaviorState::default();
+
+    // Add door state: index 1, open, 70% travel, no wait timer remaining
+    state.doors.push(SerializedDoorState {
+        entity_index: 1,
+        phase: 2, // Open
+        travel: CanonicalFloat(1.0),
+        wait_timer: CanonicalFloat(0.0),
+    });
+    state.doors.push(SerializedDoorState {
+        entity_index: 2,
+        phase: 1, // Opening
+        travel: CanonicalFloat(0.3),
+        wait_timer: CanonicalFloat(0.0),
+    });
+
+    // Add button state
+    state.buttons.push(SerializedButtonState {
+        entity_index: 3,
+        phase: 0, // Up
+        travel: CanonicalFloat(0.0),
+        wait_timer: CanonicalFloat(0.0),
+    });
+
+    // Add platform state
+    state.platforms.push(SerializedPlatformState {
+        entity_index: 4,
+        phase: 2, // High
+        travel: CanonicalFloat(1.0),
+        wait_timer: CanonicalFloat(2.5),
+    });
+
+    // Add trigger state
+    state.triggers.push(SerializedTriggerState {
+        entity_index: 5,
+        fired: true,
+    });
+
+    // Add light style
+    state.light_styles.insert(3, CanonicalFloat(0.5));
+
+    // Serialize to JSON
+    let json = serde_json::to_string(&state).unwrap();
+    assert!(json.contains("entity_index"));
+    assert!(json.contains("fired"));
+    assert!(json.len() > 0);
+
+    // Deserialize
+    let deserialized: MutableBehaviorState = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.doors.len(), 2);
+    assert_eq!(deserialized.doors[0].phase, 2);
+    assert!((deserialized.doors[0].travel.0 - 1.0).abs() < 0.001);
+    assert_eq!(deserialized.buttons.len(), 1);
+    assert_eq!(deserialized.platforms.len(), 1);
+    assert!(deserialized.triggers[0].fired);
+    assert!((deserialized.light_styles[&3].0 - 0.5).abs() < 0.001);
+
+    // Validate the deserialized state
+    assert!(deserialized.validate().is_ok());
+}
+
+#[test]
+fn mutable_behavior_validation_rejects_invalid_phase() {
+    use bsp_runtime::source_link::{
+        CanonicalFloat, MutableBehaviorState, SerializedDoorState,
+    };
+    let mut state = MutableBehaviorState::default();
+    state.doors.push(SerializedDoorState {
+        entity_index: 1,
+        phase: 5, // Invalid phase (>3)
+        travel: CanonicalFloat(0.5),
+        wait_timer: CanonicalFloat(0.0),
+    });
+
+    assert!(state.validate().is_err());
+}
+
+#[test]
+fn mutable_behavior_validation_rejects_non_finite_float() {
+    use bsp_runtime::source_link::{
+        CanonicalFloat, MutableBehaviorState, SerializedDoorState,
+    };
+    let mut state = MutableBehaviorState::default();
+    state.doors.push(SerializedDoorState {
+        entity_index: 1,
+        phase: 0,
+        travel: CanonicalFloat(f32::NAN),
+        wait_timer: CanonicalFloat(0.0),
+    });
+
+    assert!(state.validate().is_err());
+}
+
+#[test]
+fn mutable_behavior_validation_rejects_negative_timer() {
+    use bsp_runtime::source_link::{
+        CanonicalFloat, MutableBehaviorState, SerializedDoorState,
+    };
+    let mut state = MutableBehaviorState::default();
+    state.doors.push(SerializedDoorState {
+        entity_index: 1,
+        phase: 0,
+        travel: CanonicalFloat(0.0),
+        wait_timer: CanonicalFloat(-1.0),
+    });
+
+    assert!(state.validate().is_err());
+}
+
+#[test]
+fn empty_mutable_behavior_state_is_empty() {
+    let state = MutableBehaviorState::default();
+    assert!(state.is_empty());
+    assert!(state.validate().is_ok());
+}
