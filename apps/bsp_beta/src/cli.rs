@@ -29,6 +29,8 @@ pub struct CliArgs {
     pub lit_path: Option<PathBuf>,
     /// Directory to auto-discover .lit and palette companions next to the .bsp.
     pub companion_dir: Option<PathBuf>,
+    /// Explicit path to a WAD file for texture resolution.
+    pub wad_path: Option<PathBuf>,
 }
 
 /// CLI parse failure with usage-facing wording.
@@ -162,6 +164,44 @@ impl CliArgs {
         }
         None
     }
+
+    /// Resolve the effective WAD path: explicit --wad, then companion-dir, then BSP-adjacent.
+    pub fn resolve_wad_path(&self) -> Option<PathBuf> {
+        if let Some(ref p) = self.wad_path {
+            if p.is_file() {
+                return Some(p.clone());
+            }
+        }
+        let candidates = self.wad_candidates();
+        candidates.into_iter().find(|p| p.is_file())
+    }
+
+    fn wad_candidates(&self) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Some(ref dir) = self.companion_dir {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "wad").unwrap_or(false) {
+                        candidates.push(path);
+                    }
+                }
+            }
+        }
+        if let Some(ref bsp) = self.bsp_path {
+            if let Some(map_dir) = bsp.parent() {
+                if let Ok(entries) = std::fs::read_dir(map_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map(|e| e == "wad").unwrap_or(false) {
+                            candidates.push(path);
+                        }
+                    }
+                }
+            }
+        }
+        candidates
+    }
 }
 
 impl Default for CliArgs {
@@ -175,6 +215,7 @@ impl Default for CliArgs {
             palette_path: None,
             lit_path: None,
             companion_dir: None,
+            wad_path: None,
         }
     }
 }
@@ -233,6 +274,11 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.companion_dir = Some(PathBuf::from(value));
                 i += 2;
             }
+            "--wad" => {
+                let value = next_value(&args, i, "--wad")?;
+                opts.wad_path = Some(PathBuf::from(value));
+                i += 2;
+            }
             other => return Err(CliError::UnknownArgument(other.to_string())),
         }
     }
@@ -269,6 +315,7 @@ fn print_usage() {
     eprintln!("  --palette <path>       Path to 768-byte palette .lmp file");
     eprintln!("  --lit <path>           Path to .lit colored-light companion file");
     eprintln!("  --companion-dir <path> Directory to auto-discover .lit and palette");
+    eprintln!("  --wad <path>           Path to WAD file for texture resolution");
     eprintln!();
 }
 

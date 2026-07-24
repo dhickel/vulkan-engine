@@ -249,7 +249,7 @@ impl BspCoordinator {
             }
         })?;
 
-        self.build_candidate(world, Vec::new(), scale, source_identity, token)
+        self.build_candidate(world, Vec::new(), Vec::new(), scale, source_identity, token)
     }
 
     /// Prepare a package-loaded BSP and its auto-discovered PBR companions.
@@ -276,6 +276,7 @@ impl BspCoordinator {
         self.prepare_from_world_with_texture_companions(
             world,
             texture_companions,
+            Vec::new(),
             scale,
             source_identity,
         )
@@ -291,17 +292,25 @@ impl BspCoordinator {
         scale: Option<f32>,
         source_identity: impl Into<String>,
     ) -> Result<PrepareResult, BspRuntimeError> {
-        self.prepare_from_world_with_texture_companions(world, Vec::new(), scale, source_identity)
+        self.prepare_from_world_with_texture_companions(
+            world,
+            Vec::new(),
+            Vec::new(),
+            scale,
+            source_identity,
+        )
     }
 
     /// Prepare a pre-parsed world with authorized external PBR texture companions.
     ///
     /// Companion bytes are matched during neutral extraction by the exact
     /// `<texture>_norm.png` / `<texture>_gloss.png` filename convention.
+    /// `wad_archives` provide raw WAD file bytes for BSP texture resolution.
     pub fn prepare_from_world_with_texture_companions(
         &mut self,
         world: bsp::world::BspWorld,
         texture_companions: Vec<bsp::resources::TextureCompanion>,
+        wad_archives: Vec<(String, Vec<u8>)>,
         scale: Option<f32>,
         source_identity: impl Into<String>,
     ) -> Result<PrepareResult, BspRuntimeError> {
@@ -323,6 +332,7 @@ impl BspCoordinator {
         self.build_candidate(
             world,
             texture_companions,
+            wad_archives,
             scale,
             source_identity.into(),
             token,
@@ -334,6 +344,7 @@ impl BspCoordinator {
         &mut self,
         world: bsp::world::BspWorld,
         texture_companions: Vec<bsp::resources::TextureCompanion>,
+        wad_archives: Vec<(String, Vec<u8>)>,
         scale: Option<f32>,
         source_identity: String,
         token: BspGenerationToken,
@@ -346,6 +357,7 @@ impl BspCoordinator {
         let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
             world,
             texture_companions,
+            wad_archives,
             scale: resolved_scale,
             ..Default::default()
         })

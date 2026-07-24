@@ -122,12 +122,31 @@ fn run() -> Result<(), AppError> {
         None
     };
 
+    // ── Load WAD archive (if available) ──────────────────────────────
+    let wad_archives: Vec<(String, Vec<u8>)> = if let Some(wad_path) = args.resolve_wad_path() {
+        let wad_bytes = load_companion_bytes(&wad_path, "WAD")?;
+        let basename = wad_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        log::info!(
+            "Loaded WAD: {} ({} bytes)",
+            wad_path.display(),
+            wad_bytes.len()
+        );
+        vec![(basename, wad_bytes)]
+    } else {
+        log::warn!("No WAD file found — textures may not resolve (use --wad <path> or --companion-dir)");
+        Vec::new()
+    };
+
     // ── Load BSP with companions ──────────────────────────────────────
     let t_build = Instant::now();
     let load_options = bsp::LoadOptions {
         strict: false,
         palette: Some(palette_bytes),
         lit_data: lit_data.clone(),
+        wad_archives: wad_archives.clone(),
         source_identity: bsp_path.display().to_string(),
         ..bsp::LoadOptions::default()
     };
@@ -163,6 +182,7 @@ fn run() -> Result<(), AppError> {
     let prepare = coordinator.prepare_from_world_with_texture_companions(
         world,
         pbr_texture_companions,
+        wad_archives,
         Some(args.scale),
         bsp_path.display().to_string(),
     )?;
@@ -480,6 +500,40 @@ fn bsp_player_start(extracted: &bsp::extract::ExtractedBsp, fallback: Vec3) -> V
     start
 }
 
+/// Compute a camera orientation that faces the interior of the map from the
+/// starting position. The Quake→engine transform maps Quake +Y to engine -Z,
+/// so map interiors are generally in the +Z direction from a spawn at the
+/// -Z edge. A 180° yaw faces +Z (toward Quake +Y = map interior).
+fn bsp_headless_camera(start_pos: Vec3, extracted: &bsp::extract::ExtractedBsp) -> Camera {
+    // Compute map center from face geometry bounds, then position camera
+    // at center XY, head-height Y, facing +Z toward map interior.
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for face in &extracted.face_geometries {
+        for v in &face.vertices {
+            min = min.min(*v);
+            max = max.max(*v);
+        }
+    }
+
+    let pos = if min.x < max.x {
+        let center = (min + max) * 0.5;
+        // Use map center XZ, head-height Y (1.8m above floor = 2.0 in engine units).
+        Vec3::new(center.x, 2.0, center.z)
+    } else {
+        start_pos
+    };
+
+    let mut camera = Camera::new(pos);
+    // Face the +Z direction (toward map interior in engine space).
+    camera.update_rotation(std::f32::consts::PI, 0.0);
+    log::info!(
+        "BSP headless camera: pos={:?} (bounds: min={:?}, max={:?})",
+        pos, min, max
+    );
+    camera
+}
+
 // ─── Windowed mode ─────────────────────────────────────────────────────
 
 fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
@@ -556,7 +610,7 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
     let model_mappings = ModelMappings::default();
 
     // ── Camera + Input + Snapshot ──────────────────────────────────────
-    let mut loop_state = AppLoopState::new(player_start, model_mappings);
+    let mut loop_state = AppLoopState::new(Camera::new(player_start), model_mappings);
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
@@ -689,6 +743,9 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
         .filter_map(|ed| ed.model_ref.map(|m| (ed.entity_index, format!("*{}", m))))
         .collect();
 
+    // ── Compute camera before extracted is consumed by mount ──────────
+    let headless_camera = bsp_headless_camera(player_start, extracted);
+
     let mount = renderer.prepare_bsp_mount(extracted)?;
     let token = bsp_runtime::BspGenerationToken {
         generation: coordinator.current_generation(),
@@ -700,7 +757,7 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     coordinator.commit(token, &mut scene)?;
 
     // ── Camera + app-owned loop state ─────────────────────────────────
-    let mut loop_state = AppLoopState::new(player_start, ModelMappings::default());
+    let mut loop_state = AppLoopState::new(headless_camera, ModelMappings::default());
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
@@ -827,9 +884,9 @@ struct AppLoopState {
 }
 
 impl AppLoopState {
-    fn new(camera_position: Vec3, model_mappings: ModelMappings) -> Self {
+    fn new(camera: Camera, model_mappings: ModelMappings) -> Self {
         Self {
-            camera: Camera::new(camera_position),
+            camera,
             fps_controller: FPSController::new(0.002, 1.0),
             input: InputSystem::new(),
             action_events: InputActionEventEmitter::new(),

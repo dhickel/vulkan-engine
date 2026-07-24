@@ -53,6 +53,7 @@ fn cli_preserves_struct_values() {
         palette_path: None,
         lit_path: None,
         companion_dir: None,
+        wad_path: None,
     };
 
     let cloned = original.clone();
