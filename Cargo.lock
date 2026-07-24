@@ -431,6 +431,7 @@ version = "0.1.0"
 dependencies = [
  "bsp",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "walkdir",
