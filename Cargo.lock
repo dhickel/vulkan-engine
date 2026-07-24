@@ -424,6 +424,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsp_generator"
+version = "0.1.0"
+dependencies = [
+ "bsp",
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "bsp_runtime"
 version = "0.1.0"
 dependencies = [
