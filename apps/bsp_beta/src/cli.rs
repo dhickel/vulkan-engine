@@ -4,6 +4,7 @@
 //!   --bsp <path>          Path to a compiled .bsp file (required by runtime).
 //!   --scale <float>       Quake→engine scale factor (default: 0.0254).
 //!   --headless            Run in headless mode (no window).
+//!   --mcp                 Run a headless MCP JSON-RPC server over stdio.
 //!   --capture-frames <n>  Number of frames to capture in headless mode.
 //!   --lights              Log all imported light descriptors.
 
@@ -19,6 +20,8 @@ pub struct CliArgs {
     pub scale: f32,
     /// Whether to run in headless mode.
     pub headless: bool,
+    /// Whether to serve MCP JSON-RPC requests over stdio.
+    pub mcp: bool,
     /// Number of frames to capture (headless only, 0 = no capture).
     pub capture_frames: u32,
     /// Whether to log imported light descriptors at startup.
@@ -215,6 +218,7 @@ impl Default for CliArgs {
             bsp_path: None,
             scale: 0.0254,
             headless: false,
+            mcp: false,
             capture_frames: 0,
             show_lights: false,
             palette_path: None,
@@ -250,6 +254,11 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 i += 2;
             }
             "--headless" => {
+                opts.headless = true;
+                i += 1;
+            }
+            "--mcp" => {
+                opts.mcp = true;
                 opts.headless = true;
                 i += 1;
             }
@@ -315,6 +324,7 @@ fn print_usage() {
     eprintln!("  --bsp <path>           Path to compiled .bsp file");
     eprintln!("  --scale <float>        Quake→engine scale factor (default: 0.0254)");
     eprintln!("  --headless             Run headless (no window, renders N frames)");
+    eprintln!("  --mcp                  Run headless MCP JSON-RPC server over stdio");
     eprintln!("  --capture-frames <n>   Frame count for headless capture (default: 0)");
     eprintln!("  --lights               Log all imported light descriptors at startup");
     eprintln!("  --palette <path>       Path to 768-byte palette .lmp file");
@@ -333,6 +343,7 @@ mod tests {
         let args = parse_from(Vec::<&str>::new()).unwrap();
         assert!(args.bsp_path.is_none());
         assert!(!args.headless);
+        assert!(!args.mcp);
         assert_eq!(args.capture_frames, 0);
         assert!(!args.show_lights);
         assert!(args.palette_path.is_none());
@@ -351,7 +362,15 @@ mod tests {
     fn parse_headless_with_capture() {
         let args = parse_from(["--headless", "--capture-frames", "10"]).unwrap();
         assert!(args.headless);
+        assert!(!args.mcp);
         assert_eq!(args.capture_frames, 10);
+    }
+
+    #[test]
+    fn parse_mcp_implies_headless() {
+        let args = parse_from(["--mcp"]).unwrap();
+        assert!(args.mcp);
+        assert!(args.headless);
     }
 
     #[test]
@@ -374,6 +393,7 @@ mod tests {
             "--scale",
             "0.05",
             "--headless",
+            "--mcp",
             "--capture-frames",
             "5",
             "--lights",
@@ -390,6 +410,7 @@ mod tests {
         assert_eq!(args.bsp_path, Some(PathBuf::from("maps/e1m1.bsp")));
         assert!((args.scale - 0.05).abs() < 1e-6);
         assert!(args.headless);
+        assert!(args.mcp);
         assert_eq!(args.capture_frames, 5);
         assert!(args.show_lights);
         assert_eq!(args.palette_path, Some(PathBuf::from("gfx/palette.lmp")));

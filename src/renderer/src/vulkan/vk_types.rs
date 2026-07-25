@@ -1824,7 +1824,7 @@ impl VkSceneDescriptors {
 
         let scene_descriptors: Vec<vk::DescriptorSet> = (0..count)
             .map(|i| {
-                println!("Writing buffers: {}", i);
+                log::debug!("Writing scene descriptor buffers: {i}");
                 unsafe {
                     write_uniform_slot(scene_ptr, &scene_data, scene_data_size as usize);
                     write_uniform_slot(env_ptr, &env_maps.environment_ubo, env_data_size as usize);

@@ -8,8 +8,10 @@
 //!
 //! Windowed: `cargo run -p bsp_beta -- --bsp maps/e1m1.bsp`
 //! Headless: `cargo run -p bsp_beta -- --headless --capture-frames 5 --bsp maps/e1m1.bsp`
+//! MCP: `cargo run -p bsp_beta -- --mcp --bsp maps/e1m1.bsp`
 
 mod cli;
+mod mcp;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -72,6 +74,8 @@ enum AppError {
     EventLoop(#[from] winit::error::EventLoopError),
     #[error("window error: {0}")]
     Window(#[from] winit::error::OsError),
+    #[error("MCP stdio error: {0}")]
+    McpIo(#[from] std::io::Error),
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────
@@ -221,7 +225,9 @@ fn run() -> Result<(), AppError> {
     run_load_query_physics_behavior_proof(&args, &bsp_bytes, lit_data, bsp_path)?;
 
     // ── Run ────────────────────────────────────────────────────────────
-    if args.headless {
+    if args.mcp {
+        run_mcp(&mut coordinator, bsp_bytes.len())
+    } else if args.headless {
         run_headless(&args, &mut coordinator)
     } else {
         run_windowed(&mut coordinator)
@@ -693,9 +699,17 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
 
 // ─── Headless mode ─────────────────────────────────────────────────────
 
-fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result<(), AppError> {
-    log::info!("Starting BSP beta headless mode");
+struct HeadlessRuntime {
+    renderer: Renderer,
+    scene: Scene,
+    loop_state: AppLoopState,
+    mcp_map: Option<mcp::McpMap>,
+}
 
+fn prepare_headless_runtime(
+    coordinator: &mut BspCoordinator,
+    mcp_bsp_size: Option<usize>,
+) -> Result<HeadlessRuntime, AppError> {
     let config = RendererConfig {
         app_name: "bsp_beta".to_string(),
         window_width: 1920,
@@ -707,13 +721,13 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     let mut renderer = Renderer::new_headless(config).map_err(AppError::RendererInit)?;
     let mut scene = Scene::new();
 
-    // Upload renderer resources from the staged extraction
+    // Upload renderer resources from the staged extraction.
     let extracted = coordinator
         .staged_extraction()
         .ok_or_else(|| AppError::BridgeProof("no staged extraction".to_string()))?;
     let player_start = bsp_player_start(extracted, Vec3::new(0.0, 3.0, 10.0));
 
-    // ── Capture inline model info before commit consumes extraction ────
+    // Capture app-owned state before coordinator commit consumes extraction.
     let inline_model_infos: Vec<InlineModelInfo> = extracted
         .inline_models
         .iter()
@@ -735,37 +749,48 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
             ],
         })
         .collect();
-
     let entity_classnames: HashMap<u32, String> = extracted
         .entity_descriptors
         .iter()
         .map(|ed| (ed.entity_index, ed.classname.clone()))
         .collect();
-
     let entity_source_models: HashMap<u32, String> = extracted
         .entity_descriptors
         .iter()
         .filter_map(|ed| ed.model_ref.map(|m| (ed.entity_index, format!("*{}", m))))
         .collect();
-
-    // ── Compute camera before extracted is consumed by mount ──────────
     let headless_camera = bsp_headless_camera(player_start, extracted);
 
     let mount = renderer.prepare_bsp_mount(extracted)?;
+    let mcp_map = mcp_bsp_size.map(|size| mcp::McpMap::from_mount(extracted, &mount, size));
     let token = bsp_runtime::BspGenerationToken {
         generation: coordinator.current_generation(),
     };
     coordinator.set_renderer_mount_ready(token, mount)?;
-
-    // Validate all fallible publication checks, then commit.
     coordinator.validate_for_scene(token, &mut scene)?;
     coordinator.commit(token, &mut scene)?;
 
-    // ── Camera + app-owned loop state ─────────────────────────────────
     let mut loop_state = AppLoopState::new(headless_camera, ModelMappings::default());
     loop_state.inline_model_infos = inline_model_infos;
     loop_state.entity_classnames = entity_classnames;
     loop_state.entity_source_models = entity_source_models;
+
+    Ok(HeadlessRuntime {
+        renderer,
+        scene,
+        loop_state,
+        mcp_map,
+    })
+}
+
+fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result<(), AppError> {
+    log::info!("Starting BSP beta headless mode");
+    let HeadlessRuntime {
+        mut renderer,
+        mut scene,
+        mut loop_state,
+        ..
+    } = prepare_headless_runtime(coordinator, None)?;
 
     // ── Warmup ─────────────────────────────────────────────────────────
     for _ in 0..5 {
@@ -858,6 +883,28 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     }
 
     log::info!("BSP beta headless complete");
+    Ok(())
+}
+
+fn run_mcp(coordinator: &mut BspCoordinator, bsp_size: usize) -> Result<(), AppError> {
+    log::info!("Starting BSP beta MCP mode (headless 1920×1080)");
+    let HeadlessRuntime {
+        mut renderer,
+        mut scene,
+        mut loop_state,
+        mcp_map,
+    } = prepare_headless_runtime(coordinator, Some(bsp_size))?;
+    let mcp_map = mcp_map
+        .ok_or_else(|| AppError::BridgeProof("MCP map data was not retained".to_string()))?;
+
+    // Prime GPU resources before accepting the first capture request.
+    for _ in 0..5 {
+        render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)?;
+    }
+
+    log::info!("BSP mount published; serving MCP JSON-RPC on stdio");
+    mcp::serve(&mut renderer, &mut scene, &mut loop_state, mcp_map)?;
+    log::info!("MCP stdin closed; shutting down");
     Ok(())
 }
 

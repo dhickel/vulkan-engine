@@ -10,6 +10,7 @@ fn cli_default_args() {
     let args = cli::CliArgs::default();
     assert!(args.bsp_path.is_none());
     assert!(!args.headless);
+    assert!(!args.mcp);
     assert_eq!(args.capture_frames, 0);
     assert!(!args.show_lights);
     assert!((args.scale - 0.0254).abs() < 1e-6);
@@ -29,6 +30,7 @@ fn cli_parses_supported_space_separated_flags() {
         "--scale",
         "0.03125",
         "--headless",
+        "--mcp",
         "--capture-frames",
         "30",
         "--lights",
@@ -38,6 +40,7 @@ fn cli_parses_supported_space_separated_flags() {
     assert_eq!(args.bsp_path, Some(PathBuf::from("maps/e1m1.bsp")));
     assert!((args.scale - 0.03125).abs() < 1e-6);
     assert!(args.headless);
+    assert!(args.mcp);
     assert_eq!(args.capture_frames, 30);
     assert!(args.show_lights);
 }
@@ -48,6 +51,7 @@ fn cli_preserves_struct_values() {
         bsp_path: Some(PathBuf::from("data/test.bsp")),
         scale: 0.03125,
         headless: true,
+        mcp: true,
         capture_frames: 120,
         show_lights: false,
         palette_path: None,
@@ -60,6 +64,7 @@ fn cli_preserves_struct_values() {
     assert_eq!(cloned.bsp_path, original.bsp_path);
     assert!((cloned.scale - original.scale).abs() < 1e-6);
     assert_eq!(cloned.headless, original.headless);
+    assert_eq!(cloned.mcp, original.mcp);
     assert_eq!(cloned.capture_frames, original.capture_frames);
     assert_eq!(cloned.show_lights, original.show_lights);
 }

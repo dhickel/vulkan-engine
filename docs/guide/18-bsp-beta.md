@@ -123,6 +123,26 @@ cargo run -p bsp_beta -- \
   --companion-dir /path/to/game/maps
 ```
 
+### MCP Headless Server
+
+`--mcp` mounts the BSP in a 1920×1080 headless renderer and then serves newline-delimited MCP JSON-RPC 2.0 over stdin/stdout. It implies headless mode and never creates a window or WSI surface. Stdout contains only JSON-RPC responses; engine diagnostics remain on stderr.
+
+```bash
+cargo run -p bsp_beta -- \
+  --mcp \
+  --bsp /path/to/game/maps/start.bsp \
+  --companion-dir /path/to/game/maps
+```
+
+The server supports the MCP `initialize`, `tools/list`, and `tools/call` methods and exposes:
+
+- `set_camera`: engine-space `x`, `y`, `z` plus `yaw` and `pitch` in radians.
+- `capture`: optional PNG `path`; returns the completed path and 1920×1080 dimensions.
+- `get_info`: face, batch, material, texture, PBR-texture, BSP-byte-size, and camera-position data.
+- `point_contents`: engine-space `x`, `y`, `z`; returns `solid` and the raw BSP leaf index.
+
+Each request and response is one JSON object followed by a newline. Close stdin to stop the server.
+
 ### External PBR Texture Companions
 
 Companions are named from the BSP texture identity, not the BSP filename:
