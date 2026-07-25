@@ -74,7 +74,7 @@ String  (.map bytes)                              │
 | placement | `ValidatedConfig`, `StageRng` | `Vec<RoomIntent>` | `placement.rs` | `PlacementExhausted` |
 | topology | `Vec<RoomIntent>`, `ValidatedConfig`, `StageRng` | `LayoutIntent` | `topology.rs` | `InvariantViolation` |
 | routing | `&[RoomIntent]`, `&[(usize,usize)]`, `ValidatedConfig`, `StageRng` | `RoutedIntent` | `routing.rs` | `RouteExhausted` |
-| junction | corridor intersection geometry | `Brush` closures | `junction.rs` | none (pure geometry) |
+| junction | corridor/room intersections | outer wall posts and portal wall pieces | `junction.rs` | none (pure geometry) |
 | emission | `&LayoutIntent`, `&RoutedIntent` | `EmissionIntent` | `emission.rs` | none (infallible) |
 | serialize | `&EmissionIntent` | `String` | `serialize.rs` | `SerializationFailed` |
 
@@ -85,7 +85,7 @@ String  (.map bytes)                              │
 1. For each room index 0..`room_count`:
    a. For attempt 0..`max_placement_attempts`:
       - Generate `placement_candidates` random candidate positions within XY bounds, snapped to 16-unit quantum
-      - Random dimensions: 2–10 quantum units per axis (32–160 Quake units)
+      - Consume the frozen 2–10-quanta random dimension draw, then clamp each horizontal span to 7–10 quanta (112–160 Quake units) so a room has an 80-unit clear interior
       - Test each candidate against all previously placed rooms using `rooms_overlap()` with `WALL_THICKNESS = 16`
       - Accept first non-overlapping candidate
    b. If no candidate succeeds after all attempts: return `PlacementExhausted`
@@ -98,9 +98,9 @@ Rooms are axis-aligned rectangles. The `rooms_overlap()` check expands each room
 ### Bounds
 
 - `WALL_THICKNESS`: 16 units (1 quantum)
-- Room dimensions: 2–10 quanta per axis (32–160 units)
+- Room horizontal dimensions: 7–10 quanta per axis (112–160 units)
 - XY positions: `[WALL_THICKNESS, xy_bounds - room_width - WALL_THICKNESS]`
-- Z: `floor = WALL_THICKNESS`, `ceiling = floor + z_span`
+- Z: `floor = 0`, `ceiling = z_span`
 
 ## 5. Topology Construction (`topology.rs`)
 
@@ -133,9 +133,11 @@ pub const CORRIDOR_HEIGHT: u32 = 80;  // 5 quanta — clear interior
 
 For each edge `(room_a_idx, room_b_idx)`:
 
-1. **Direct path attempt**: If the two room portal centers are axis-aligned, emit a single straight corridor.
-2. **L-shaped path attempt**: Try both L-path orders (horizontal-then-vertical, vertical-then-horizontal). Check that the corner is not inside any room's expanded bounding box.
-3. **A* fallback**: If direct and L-shaped paths fail, run bounded A* on the quantum grid. The cost function is Manhattan distance. Search terminates after `max_astar_expansions` node expansions. The corridor centerline follows the A* path, with two segment orientations (horizontal or vertical only — no diagonal).
+1. Compute 64-unit portal centers on the two facing room walls and reserve normal approach lanes through the endpoint occupancy margins.
+2. **Direct path attempt**: If the two offset centerline points are axis-aligned, emit a straight route.
+3. **L-shaped path attempt**: Try both L-path orders (horizontal-then-vertical, vertical-then-horizontal). Check that the corner is not inside any non-endpoint room's expanded bounding box.
+4. **A* fallback**: If direct and L-shaped paths fail, run bounded A* on the quantum grid. The cost function is Manhattan distance. Search terminates after `max_astar_expansions` node expansions.
+5. Prepend and append the reserved approach legs so the routed intent reaches the actual room-wall portals, then simplify the complete orthogonal path into corridor segments.
 
 ### Quantum Grid
 
@@ -147,16 +149,16 @@ Returns `RouteExhausted { expansions }` if any edge cannot be routed within the 
 
 ## 7. Junction Geometry (`junction.rs`)
 
-Every corridor-to-corridor and corridor-to-room transition produces explicit closure brushes. There is no CSG boolean operation — the generator constructs each brush explicitly.
+Quake world brushes are additive: overlapping a corridor with a room-wall brush cannot subtract a doorway. Portal helpers therefore return only the solid wall columns and lintel around an omitted aperture. Junction helpers place closure posts only in outer wall-thickness quadrants; no helper brush may enter the central 64×64 clear square. Production emission applies the same rule through the floor-plan union described in §8.
 
 ### Junction Types
 
-| type | description | brush count |
-|------|-------------|-------------|
-| **Room portal** | corridor meets room wall | opening marker (no closure brush) |
-| **L-junction** | two perpendicular corridors meet at corner | 1 closure fill |
-| **T-junction** | one corridor terminates into through corridor | 1 closure fill |
-| **X-junction** | two corridors cross at right angles | 1 closure fill |
+| type | description | helper brush count |
+|------|-------------|--------------------|
+| **Room portal** | corridor meets room wall | up to 3 wall pieces around the opening |
+| **L-junction** | two perpendicular corridors meet at corner | 1 outer-corner post |
+| **T-junction** | one corridor terminates into through corridor | 2 outer-corner posts |
+| **X-junction** | two corridors cross at right angles | 4 outer-corner posts |
 
 ### `make_brush()`
 
@@ -174,38 +176,37 @@ Produces an axis-aligned rectangular prism with exactly 6 faces in canonical ord
 
 ### Texture Roles
 
-The CC0 Stone Beta theme provides four texture roles:
+The CC0 Stone Beta theme provides four visual texture roles plus one compiler-only surface:
 
 | role | WAD name | used on |
 |------|----------|---------|
-| floor | `stone_floor` | room floors, corridor floors |
-| wall | `stone_wall` | room walls, corridor walls |
-| ceiling | `stone_ceiling` | room ceilings, corridor ceilings |
-| accent | `stone_accent` | (reserved for future use) |
+| floor | `stone_floor` | room and corridor floor slabs |
+| wall | `stone_wall` | boundary walls, outer junction posts, portal lintels |
+| ceiling | `stone_ceiling` | room and corridor ceiling slabs |
+| accent | `stone_accent` | reserved for future visible use |
+| compiler skip | `skip` | invisible compiler-helper faces only; no PBR companion |
 
-Texture role bindings are hard-coded constants in `emission.rs` (not yet loaded from `theme.toml` at runtime — the beta uses a single theme).
+Texture role bindings are hard-coded constants in `emission.rs` (not yet loaded from `theme.toml` at runtime — the beta uses a single theme). Every emitted visible face uses a theme-backed texture; `generator_brick` is not a valid role.
 
-### Brush Construction
+### Floor-Plan Union and Brush Construction
 
-Each architectural element produces worldspawn brushes:
+Emission rasterizes one open floor plan on the 16-unit construction grid rather than emitting independently sealed room and corridor shells:
 
-| element | brush count | texture(s) |
-|---------|-------------|------------|
-| Room floor | 1 | stone_floor |
-| Room ceiling | 1 | stone_ceiling |
-| Room walls (4) | 4 | stone_wall |
-| Corridor floor | 1 | stone_floor |
-| Corridor ceiling | 1 | stone_ceiling |
-| Corridor walls (2) | 2 | stone_wall |
-| Junction closures | 1 per junction | stone_wall |
+1. Corridor rectangles and full 64×64 endpoint squares mark open cells at the 80-unit corridor ceiling.
+2. Room clear interiors mark open cells at room ceiling height and override lower corridor ceilings where they overlap.
+3. Equal-height cells are deterministically merged into rectangular 16-unit floor and ceiling slabs.
+4. Wall boxes are emitted only along the boundary of the complete open-cell union. Portal throats and L/T/X centers are therefore real openings created by omission, not attempted subtraction.
+5. Height-transition wall boxes fill only the volume above a lower corridor ceiling where it meets a taller room, preserving the full 80-unit portal headroom.
 
-All slab thicknesses are 16 units (1 quantum).
+Rooms have a minimum outer span of 112 units (7 quanta), which leaves an 80-unit clear interior after two 16-unit wall cells: enough for a 64-unit portal plus one quantum of total lateral margin. All emitted primitives remain rectangular six-face brushes in canonical face order.
 
 ### Entities
 
 - `worldspawn`: all structural brushes + `"wad" "cc0_stone_beta.wad"`
-- `info_player_start`: one per room, placed at room center (Z = floor + 24)
-- `light`: one per room, placed at room center (Z = ceiling - 16), intensity 300
+- `info_player_start`: one in the first room, centered horizontally at Z = floor + 16-unit slab + 24-unit eye offset
+- `light`: one per room, centered within the clear volume (midway between the floor-slab top and ceiling-slab bottom), intensity 300
+
+Point entities are never placed in floor slabs. Compiled-corpus tests query their origins and require non-solid BSP contents.
 
 ## 9. Canonical Serialization (`serialize.rs`)
 
@@ -286,7 +287,7 @@ src/bsp_generator/themes/cc0_stone_beta/
     └── stone_accent_gloss.png
 ```
 
-`build.py` is deterministic — it produces byte-identical WAD, palette, and PNGs on every invocation. The WAD contains four 64×64 miptex entries: `STONE_FLR`, `STONE_WALL`, `STONE_CEIL`, `STONE_ACNT`. The generator's texture constants map to these WAD names.
+`build.py` is deterministic — it produces byte-identical WAD, palette, and PNGs on every invocation. The WAD contains five 64×64 miptex entries: `STONE_FLR`, `STONE_WALL`, `STONE_CEIL`, `STONE_ACNT`, and compiler-only `SKIP`. The four visual roles have normal/gloss companions; `SKIP` deliberately does not. The generator's texture constants map to the visual WAD names.
 
 ## 12. Validation and Testing
 
@@ -307,7 +308,7 @@ src/bsp_generator/themes/cc0_stone_beta/
 | `tests/invariants.rs` | output guarantees (sealed, walkable, no overlap) |
 | `tests/collision.rs` | corridor-to-room clearance |
 | `tests/theme_evidence.rs` | theme asset determinism, WAD structure |
-| `tests/corpus_execution.rs` | all 12 support corpus configs compile successfully |
+| `tests/corpus_execution.rs` | all 12 support corpus configs compile warning-free, reload strictly, remain sealed, and return non-solid contents at room/entity/corridor/portal/junction witnesses |
 
 ### Key Invariants Tested
 
@@ -316,8 +317,9 @@ src/bsp_generator/themes/cc0_stone_beta/
 - Placement: rooms never overlap, always within XY bounds
 - Topology: all rooms reachable, exact edge count = `room_count - 1 + loop_count`
 - Routing: all corridors have width ≥ 64, height ≥ 80
-- Emission: all brushes have exactly 6 faces, face order canonical
+- Emission: all brushes have exactly 6 faces, face order canonical, portals/junction centers remain outside every solid brush, point entities sit above the floor slab
 - Serialization: worldspawn first, alphabetical keys, no trailing whitespace
+- Compiler pipeline: any `qbsp`, `vis`, or `light` warning (including skipped fill) is a hard failure
 - Corpus: all 12 nominal + boundary configs generate successfully, compile successfully, and M2 exceeds M1 on at least one metric
 
 ## 13. Frozen Contract Values

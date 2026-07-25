@@ -10,7 +10,7 @@ Pure-Rust offline dungeon generator producing Quake 1 `.map` text from `(u64 see
 
 All construction parameters, bounds, and serialization rules are frozen in `.internal-dev/specifications/bsp-dungeon-generation.md`. **Do not change** any of the following without explicit re-review:
 
-- Construction quantum (16), wall thickness (16), corridor width (64), corridor height (80)
+- Construction quantum (16), wall thickness (16), minimum room outer span (112), corridor/portal width (64), corridor/portal height (80)
 - M1/M2 room count, loop count, XY max, Z max ranges
 - Stage tags (`"room-placement"`, `"corridor-routing"`, `"entity-placement"`, `"light-placement"`)
 - Domain separator `"dungeon-gen/v1"`
@@ -31,9 +31,9 @@ src/
   placement.rs    — place_rooms() — bounded grid-based placement
   topology.rs     — build_topology() — Kruskal MST + loop augmentation
   routing.rs      — route_edge(), route_all_edges() — orthogonal A* routing
-  junction.rs     — make_brush(), build_l_junction, build_t_junction,
-                      build_x_junction, build_room_portal
-  emission.rs     — build_emission() — brush construction, entity creation
+  junction.rs     — make_brush(), outer-quadrant L/T/X helpers,
+                      solid wall pieces around omitted room portals
+  emission.rs     — build_emission() — grid-union shell construction, entity creation
   serialize.rs    — serialize() — canonical .map text output
 
 tests/
@@ -70,6 +70,8 @@ themes/cc0_stone_beta/
 5. **Exhaustion, not panic**: Every bounded loop has a hard limit and returns a typed error on exhaustion. Never use `unwrap()`, `expect()`, or `panic!()` in production code paths.
 6. **Frozen values**: Constants from the specification are declared as `const` items. Changing a `const` is a contract violation.
 7. **No inline texture generation**: The CC0 Stone Beta theme assets are pre-built by `build.py`. The generator references WAD texture names — it does not produce textures.
+8. **Open space is a union**: Quake brushes are additive. Never expect a corridor brush to carve a room wall. Rasterize connected clear space first and emit only its boundary shell, or split the solid wall around an omitted aperture.
+9. **Point entities occupy clear volume**: Spawn Z includes floor-slab thickness plus the 24-unit eye offset; lights use the midpoint between floor-slab top and ceiling-slab bottom.
 
 ## Testing
 
@@ -91,11 +93,12 @@ cargo test -p bsp_generator --test invariants          # output guarantees
 ### Corpus Execution Test
 
 The `corpus_execution` test requires `ericw-tools 2.0.0-alpha3` installed at `~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/`. It generates all 12 support corpus configurations, compiles them through the BSP2 profile, and validates:
-- Successful compilation (no qbsp/vis/light errors)
-- BSP2 magic in output headers
+- Successful warning-free compilation (no qbsp/vis/light errors, warnings, missing textures, or skipped fill)
+- BSP2 magic in output headers and strict parser reload
 - Sealed maps (no pointfile leaks)
+- Non-solid `point_contents` at room centers, point-entity origins, corridor centers, portal throats, and junction centers
 - Deterministic byte-identical output across duplicate runs
-- M2 exceeds M1 on at least one metric (faces, entities, or batches)
+- Face/entity ceilings and M2 tier separation (static-batch ceiling enforcement remains tracked by GitHub #57)
 
 ## Adding a New Configuration Preset
 
@@ -121,6 +124,9 @@ The `corpus_execution` test requires `ericw-tools 2.0.0-alpha3` installed at `~/
 
 - **Seed exhaustion**: `PlacementExhausted` and `RouteExhausted` are seed-dependent. A config that works with seed `0` may fail with seed `1` and vice versa. The support corpus guarantees specific seeds work — do not "fix" seeds that fail by changing bounds.
 - **Quantum snapping**: All positions and dimensions must be multiples of 16. Use `snap_to_quantum()` for any computed coordinate. Debug builds assert quantum alignment via `debug_assert!`.
+- **Additive brush misconception**: Overlap is union, not subtraction. A portal represented by a solid "opening brush" is still solid after `qbsp`; omit the aperture from the wall boundary.
+- **Junction center obstruction**: L/T/X closure posts belong only in outer quadrants. Test the entire central 64×64 square, not only the exact center point.
+- **Compiler warnings**: Generated output is accepted only when all three compiler stages are warning-free. The theme WAD includes compiler-only `skip`; never reintroduce `generator_brick` or an unbacked miptex.
 - **Canonical face order**: bottom, top, north, south, west, east. This order is frozen. Changing it breaks byte-compatibility.
 - **Entity order**: worldspawn first, then creation-index order. Do not sort entities by classname or origin.
 - **Key order**: alphabetical by key string (ASCII byte order). Use `sort_unstable()` before emission.

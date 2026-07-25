@@ -369,7 +369,7 @@ pub fn place_rooms(
 ) -> Result<Vec<RoomIntent>, GeneratorError>
 ```
 
-Bounded room placement with grid-based spatial reservation. For each of `config.room_count` rooms, generates up to `config.placement_candidates` random candidates per attempt, accepting the first that does not overlap previously placed rooms. Exhausts after `config.max_placement_attempts` attempts per room.
+Bounded room placement with grid-based spatial reservation. For each of `config.room_count` rooms, generates up to `config.placement_candidates` random candidates per attempt, clamps horizontal spans to the 112–160-unit range required for an 80-unit clear interior, and accepts the first candidate that does not overlap previous rooms. Exhausts after `config.max_placement_attempts` attempts per room.
 
 ### `build_topology()`
 
@@ -394,7 +394,7 @@ pub fn route_all_edges(
 ) -> Result<RoutedIntent, GeneratorError>
 ```
 
-Routes all topology edges into axis-aligned corridor segments. Tries direct and L-shaped orthogonal paths first, then falls back to bounded A* on the quantum grid.
+Routes all topology edges into axis-aligned corridor segments. Tries direct and L-shaped orthogonal paths first, then falls back to bounded A* on the quantum grid. Returned routes include the normal approach legs from the offset routing grid to the actual room-wall portals.
 
 ### `build_emission()`
 
@@ -405,7 +405,7 @@ pub fn build_emission(
 ) -> EmissionIntent
 ```
 
-Builds the final emission intent: sealed solid brushes for rooms, corridors, and junctions, plus point entities (spawn, lights). Every brush is a rectangular prism with 6 faces in canonical order.
+Builds the final emission intent by rasterizing the complete room/corridor open-space union on the 16-unit grid, merging floor and ceiling cells, and emitting walls only on the union boundary. Room portals and 64-unit-clear L/T/X centers are openings by omission rather than overlapping additive brushes. The spawn and room lights are placed inside clear volume above the floor slab. Every resulting brush is a rectangular prism with 6 faces in canonical order.
 
 ### `serialize()`
 

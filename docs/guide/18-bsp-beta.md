@@ -197,6 +197,7 @@ engine_pack compile-bsp maps/my_level.map \
 The CLI enforces:
 - Shell-free subprocess invocation (no shell interpolation)
 - Compiler identity verification (SHA-256 of executables)
+- Warning-free compiler stages: any `qbsp`, `vis`, or `light` warning, including missing textures or skipped fill, returns `CompilerWarning` and blocks publication
 - Output size budget (default 128 MiB)
 - Post-compile re-validation through the `bsp` parser in strict mode
 - Timeout per stage (default 120 seconds)

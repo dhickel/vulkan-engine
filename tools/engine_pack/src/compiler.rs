@@ -502,6 +502,13 @@ pub enum CompilerError {
         stdout: String,
         stderr: String,
     },
+    /// Compiler returned success but reported an authoring warning. Generated
+    /// BSP publication is warning-free and fails closed on these diagnostics.
+    CompilerWarning {
+        stage: String,
+        stdout: String,
+        stderr: String,
+    },
     /// Compiler timed out.
     Timeout { stage: String, timeout_seconds: u64 },
     /// Output file not produced.
@@ -568,6 +575,16 @@ impl std::fmt::Display for CompilerError {
                 write!(
                     f,
                     "{stage} failed (exit {exit_code}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                )
+            }
+            CompilerError::CompilerWarning {
+                stage,
+                stdout,
+                stderr,
+            } => {
+                write!(
+                    f,
+                    "{stage} reported a compiler warning:\nstdout:\n{stdout}\nstderr:\n{stderr}"
                 )
             }
             CompilerError::Timeout {
@@ -1046,6 +1063,28 @@ fn profile_uses_bsp2(profile: &CompilerProfile) -> bool {
         || profile.default_light_args.iter().any(|a| a == "-bsp2")
 }
 
+fn contains_compiler_warning(stdout: &str, stderr: &str) -> bool {
+    [stdout, stderr].into_iter().any(|stream| {
+        let stream = stream.to_ascii_lowercase();
+        stream.contains("warning:")
+            || stream.contains("no entities in empty space")
+            || stream.contains("no filling performed")
+    })
+}
+
+fn reject_compiler_warnings(stage: &str, output: &Output) -> Result<(), CompilerError> {
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if contains_compiler_warning(&stdout, &stderr) {
+        return Err(CompilerError::CompilerWarning {
+            stage: stage.to_string(),
+            stdout,
+            stderr,
+        });
+    }
+    Ok(())
+}
+
 /// Compile a .map source file using a compiler profile.
 ///
 /// Steps:
@@ -1241,6 +1280,7 @@ pub fn compile_map(
             stderr: String::from_utf8_lossy(&qbsp_output.stderr).into(),
         });
     }
+    reject_compiler_warnings("qbsp", &qbsp_output)?;
     if !bsp_filename.exists() {
         return Err(CompilerError::MissingOutput {
             expected_path: bsp_filename.clone(),
@@ -1270,6 +1310,7 @@ pub fn compile_map(
             stderr: String::from_utf8_lossy(&vis_output.stderr).into(),
         });
     }
+    reject_compiler_warnings("vis", &vis_output)?;
 
     // Stage 3: light
     let light_args: Vec<String> = {
@@ -1293,6 +1334,7 @@ pub fn compile_map(
             stderr: String::from_utf8_lossy(&light_output.stderr).into(),
         });
     }
+    reject_compiler_warnings("light", &light_output)?;
 
     // Check output size
     let bsp_size = bsp_filename.metadata()?.len();
@@ -1493,6 +1535,50 @@ mod tests {
         let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, expected);
+    }
+
+    #[test]
+    fn compiler_warning_detection_is_case_insensitive_and_checks_both_streams() {
+        assert!(contains_compiler_warning(
+            "WARNING: unable to find texture stone_missing",
+            ""
+        ));
+        assert!(contains_compiler_warning(
+            "",
+            "Warning: No entities in empty space -- no filling performed"
+        ));
+        assert!(contains_compiler_warning(
+            "No filling performed for hull 0",
+            ""
+        ));
+        assert!(!contains_compiler_warning(
+            "Lighting Completed; 0 warnings.",
+            ""
+        ));
+    }
+
+    #[test]
+    fn compiler_warning_is_a_typed_publication_failure() {
+        let output = Output {
+            status: Default::default(),
+            stdout: b"WARNING: No entities in empty space -- no filling performed".to_vec(),
+            stderr: Vec::new(),
+        };
+        let error = reject_compiler_warnings("qbsp", &output).unwrap_err();
+        assert!(matches!(
+            error,
+            CompilerError::CompilerWarning { ref stage, .. } if stage == "qbsp"
+        ));
+    }
+
+    #[test]
+    fn zero_warning_summary_is_not_a_publication_failure() {
+        let output = Output {
+            status: Default::default(),
+            stdout: b"Completed with 0 warnings.".to_vec(),
+            stderr: Vec::new(),
+        };
+        reject_compiler_warnings("light", &output).unwrap();
     }
 
     #[test]

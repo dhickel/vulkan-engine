@@ -1,41 +1,30 @@
-//! Explicit junction geometry for corridor-to-corridor and corridor-to-room
-//! connections.
+//! Explicit wall and junction geometry for generated BSP corridors.
 //!
-//! Every junction produces explicit closure brushes (6 faces per brush) rather
-//! than relying on CSG ambiguity from overlapping brushes. This guarantees
-//! sealed maps with no gaps at corridor intersections.
-//!
-//! Supported junction types:
-//! - **L-junction**: two perpendicular corridors meet at a corner turn.
-//! - **T-junction**: one corridor terminates into a through corridor.
-//! - **X-junction**: two corridors cross at right angles.
-//! - **Room portal**: corridor meets a room wall (produces opening marker).
-//!
-//! Each closure brush is an axis-aligned rectangular prism whose faces use the
-//! canonical face ordering: bottom, top, north, south, west, east.
+//! Quake brushes are additive: an overlapping corridor never subtracts a
+//! doorway from a room wall. This module therefore emits only the solid pieces
+//! around room portals and keeps junction closure solids in outer corner
+//! quadrants, outside the 64-unit clear route through each junction centre.
 
 use crate::config::CONSTRUCTION_QUANTUM;
 use crate::intent::{Brush, BrushFace, Corridor, RoomIntent};
 
-/// Default wall texture name for generated closure brushes.
-const DEFAULT_WALL_TEXTURE: &str = "generator_brick";
+/// Wall texture role from the CC0 Stone Beta theme.
+const WALL_TEXTURE: &str = "stone_wall";
+/// Frozen wall/floor/ceiling slab thickness.
+const WALL: i32 = CONSTRUCTION_QUANTUM as i32;
 
-/// Create an axis-aligned solid brush from `(min_x, min_y, min_z)` to
-/// `(max_x, max_y, max_z)` with the given texture.
+/// Create an axis-aligned solid brush from `min` to `max`.
 ///
-/// All coordinates must be multiples of [`CONSTRUCTION_QUANTUM`].
-/// The 6 faces are ordered: bottom, top, north, south, west, east.
-pub fn make_brush(
-    min: (i32, i32, i32),
-    max: (i32, i32, i32),
-    texture: &str,
-) -> Brush {
+/// Faces are emitted in canonical order: bottom, top, north, south, west,
+/// east. Callers are responsible for passing a non-empty box.
+pub fn make_brush(min: (i32, i32, i32), max: (i32, i32, i32), texture: &str) -> Brush {
+    debug_assert!(min.0 < max.0 && min.1 < max.1 && min.2 < max.2);
+
     let tex = texture.to_string();
     let default_axis = [1, 0, 0, 0];
 
     Brush {
         faces: vec![
-            // Bottom face (z = min.2)
             BrushFace {
                 plane_points: [
                     (min.0, max.1, min.2),
@@ -46,7 +35,6 @@ pub fn make_brush(
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // Top face (z = max.2)
             BrushFace {
                 plane_points: [
                     (min.0, max.1, max.2),
@@ -57,7 +45,6 @@ pub fn make_brush(
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // North face (y = max.1)
             BrushFace {
                 plane_points: [
                     (min.0, max.1, max.2),
@@ -68,7 +55,6 @@ pub fn make_brush(
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // South face (y = min.1)
             BrushFace {
                 plane_points: [
                     (min.0, min.1, max.2),
@@ -79,7 +65,6 @@ pub fn make_brush(
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // West face (x = min.0)
             BrushFace {
                 plane_points: [
                     (min.0, max.1, max.2),
@@ -90,7 +75,6 @@ pub fn make_brush(
                 u_axis: default_axis,
                 v_axis: default_axis,
             },
-            // East face (x = max.0)
             BrushFace {
                 plane_points: [
                     (max.0, max.1, min.2),
@@ -105,650 +89,363 @@ pub fn make_brush(
     }
 }
 
-// ── Corridor extent helpers ───────────────────────────────────────────────
-
-/// Compute the bounding box of a corridor's solid wall region.
-/// Returns `(min, max)` in world coordinates.
-///
-/// The corridor centerline runs from `c.start` to `c.end`. The corridor
-/// occupies `width` units across the centerline and `height` units vertically
-/// from floor to ceiling. The solid wall surrounds the corridor's clear
-/// interior.
-fn corridor_extents(c: &Corridor) -> ((i32, i32, i32), (i32, i32, i32)) {
-    let hw = (c.width / 2) as i32; // half-width
-    let hh = c.height as i32;
-
-    let (x0, x1) = if c.start.0 <= c.end.0 {
-        (c.start.0 - hw, c.end.0 + hw)
-    } else {
-        (c.end.0 - hw, c.start.0 + hw)
-    };
-    let (y0, y1) = if c.start.1 <= c.end.1 {
-        (c.start.1 - hw, c.end.1 + hw)
-    } else {
-        (c.end.1 - hw, c.start.1 + hw)
-    };
-
-    let z0 = c.start.2;
-    let z1 = z0 + hh;
-
-    ((x0, y0, z0), (x1, y1, z1))
-}
-
-/// Determine if a corridor is horizontal (east-west) or vertical (north-south).
-fn corridor_orientation(c: &Corridor) -> Orientation {
-    let dx = (c.end.0 - c.start.0).abs();
-    let dy = (c.end.1 - c.start.1).abs();
-    if dx >= dy {
-        Orientation::Horizontal
-    } else {
-        Orientation::Vertical
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Orientation {
     Horizontal,
     Vertical,
 }
 
-/// Get the wall thickness in world units.
-const WALL: i32 = CONSTRUCTION_QUANTUM as i32; // 16
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomWall {
+    West,
+    East,
+    South,
+    North,
+}
 
-/// The outer wall half-thickness used to extend closure brushes beyond the
-/// corridor extents to prevent gaps.
-const CLOSURE_MARGIN: i32 = WALL;
+fn orientation(corridor: &Corridor) -> Orientation {
+    if (corridor.end.0 - corridor.start.0).abs() >= (corridor.end.1 - corridor.start.1).abs() {
+        Orientation::Horizontal
+    } else {
+        Orientation::Vertical
+    }
+}
 
-// ── L-junction ────────────────────────────────────────────────────────────
+fn clear_half(corridor: &Corridor) -> i32 {
+    corridor.width as i32 / 2
+}
 
-/// Build closure brushes for an L-junction where two perpendicular corridors
-/// meet at a corner turn.
+fn outer_half(corridor: &Corridor) -> i32 {
+    clear_half(corridor) + WALL
+}
+
+fn shell_z(corridor: &Corridor) -> (i32, i32) {
+    let z0 = corridor.start.2.min(corridor.end.2);
+    (z0, z0 + WALL + corridor.height as i32 + WALL)
+}
+
+fn push_box(brushes: &mut Vec<Brush>, min: (i32, i32, i32), max: (i32, i32, i32)) {
+    if min.0 < max.0 && min.1 < max.1 && min.2 < max.2 {
+        brushes.push(make_brush(min, max, WALL_TEXTURE));
+    }
+}
+
+fn signed_ring(center: i32, sign: i32, inner: i32, outer: i32) -> (i32, i32) {
+    if sign > 0 {
+        (center + inner, center + outer)
+    } else {
+        (center - outer, center - inner)
+    }
+}
+
+fn shared_endpoint(a: &Corridor, b: &Corridor) -> Option<(i32, i32)> {
+    for ap in [(a.start.0, a.start.1), (a.end.0, a.end.1)] {
+        for bp in [(b.start.0, b.start.1), (b.end.0, b.end.1)] {
+            if ap == bp {
+                return Some(ap);
+            }
+        }
+    }
+    None
+}
+
+fn other_endpoint(corridor: &Corridor, junction: (i32, i32)) -> (i32, i32) {
+    let start = (corridor.start.0, corridor.start.1);
+    if start == junction {
+        (corridor.end.0, corridor.end.1)
+    } else {
+        start
+    }
+}
+
+/// Build the one outer-corner post needed by a perpendicular L turn.
 ///
-/// An L-junction occurs when corridor A connects to corridor B at a shared
-/// endpoint, and the two are perpendicular. The **outer corner** of the turn
-/// requires a solid brush to fill the gap between the two corridor outer
-/// walls. The **inner corner** is open (both corridors share walkable space).
-///
-/// Returns 1 closure brush for the outer corner.
+/// Corridor shells extend one clear half-width past their centerline endpoint,
+/// so the central 64×64 square remains open. The only uncovered solid is the
+/// 16×16 post outside that clear square.
 pub fn build_l_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
-    let ((ax0, ay0, az0), (ax1, ay1, az1)) = corridor_extents(a);
-    let ((bx0, by0, bz0), (bx1, by1, bz1)) = corridor_extents(b);
-
-    let z0 = az0.min(bz0);
-    let z1 = az1.max(bz1);
-
-    let a_orient = corridor_orientation(a);
-    let b_orient = corridor_orientation(b);
-
-    // Determine the outer corner region based on corridor orientations
-    // and which side they approach from.
-
-    // The shared endpoint (junction center)
-    let (jx, jy) = find_shared_endpoint(a, b);
-
-    // Compute the closure brush for the outer corner.
-    // The outer corner is the quadrant that is NOT covered by either corridor.
-    let brush = match (a_orient, b_orient) {
-        (Orientation::Horizontal, Orientation::Vertical) => {
-            // Determine which quadrant needs filling based on corridor directions
-            l_closure_hv(a, b, jx, jy, z0, z1, ax0, ax1, ay0, ay1, bx0, bx1, by0, by1)
-        }
-        (Orientation::Vertical, Orientation::Horizontal) => {
-            l_closure_hv(b, a, jx, jy, z0, z1, bx0, bx1, by0, by1, ax0, ax1, ay0, ay1)
-        }
-        _ => {
-            // Parallel corridors at L-junction — shouldn't happen; return empty
-            return Vec::new();
-        }
+    let (horizontal, vertical) = match (orientation(a), orientation(b)) {
+        (Orientation::Horizontal, Orientation::Vertical) => (a, b),
+        (Orientation::Vertical, Orientation::Horizontal) => (b, a),
+        _ => return Vec::new(),
+    };
+    let Some((jx, jy)) = shared_endpoint(horizontal, vertical) else {
+        return Vec::new();
     };
 
-    brush.into_iter().collect()
+    let h_other = other_endpoint(horizontal, (jx, jy));
+    let v_other = other_endpoint(vertical, (jx, jy));
+    let missing_x_sign = if h_other.0 < jx { 1 } else { -1 };
+    let missing_y_sign = if v_other.1 < jy { 1 } else { -1 };
+
+    let clear = clear_half(horizontal).max(clear_half(vertical));
+    let outer = outer_half(horizontal).max(outer_half(vertical));
+    let (x0, x1) = signed_ring(jx, missing_x_sign, clear, outer);
+    let (y0, y1) = signed_ring(jy, missing_y_sign, clear, outer);
+    let (az0, az1) = shell_z(a);
+    let (bz0, bz1) = shell_z(b);
+
+    vec![make_brush(
+        (x0, y0, az0.min(bz0)),
+        (x1, y1, az1.max(bz1)),
+        WALL_TEXTURE,
+    )]
 }
 
-/// Compute the L-junction outer corner closure when `h` is horizontal (E-W)
-/// and `v` is vertical (N-S).
-fn l_closure_hv(
-    h: &Corridor,
-    v: &Corridor,
-    jx: i32,
-    jy: i32,
-    z0: i32,
-    z1: i32,
-    _hx0: i32,
-    _hx1: i32,
-    _hy0: i32,
-    _hy1: i32,
-    _vx0: i32,
-    _vx1: i32,
-    _vy0: i32,
-    _vy1: i32,
-) -> Vec<Brush> {
-    let hw = WALL; // use full wall thickness for closure brush size
+fn point_on_corridor_interior(point: (i32, i32), corridor: &Corridor) -> bool {
+    let min_x = corridor.start.0.min(corridor.end.0);
+    let max_x = corridor.start.0.max(corridor.end.0);
+    let min_y = corridor.start.1.min(corridor.end.1);
+    let max_y = corridor.start.1.max(corridor.end.1);
 
-    // Horizontal corridor: comes from one side of jx, extends to the other
-    let h_from_west = h.start.0 < jx || h.end.0 < jx;
-    let h_from_east = h.start.0 > jx || h.end.0 > jx;
-
-    // Vertical corridor: comes from one side of jy
-    let v_from_south = v.start.1 < jy || v.end.1 < jy;
-    let v_from_north = v.start.1 > jy || v.end.1 > jy;
-
-    // The outer corner is the quadrant opposite both "from" directions.
-    // Snap closure brush to quantum grid.
-    let (ox_min, ox_max, oy_min, oy_max) = match (h_from_west, h_from_east, v_from_south, v_from_north) {
-        (true, false, true, false) => {
-            // H from west, V from south → outer NE
-            (jx - hw, jx + hw, jy - hw, jy + hw)
+    match orientation(corridor) {
+        Orientation::Horizontal => {
+            point.1 == corridor.start.1 && point.0 > min_x && point.0 < max_x
         }
-        (true, false, false, true) => {
-            // H from west, V from north → outer SE
-            (jx - hw, jx + hw, jy - hw, jy + hw)
-        }
-        (false, true, true, false) => {
-            // H from east, V from south → outer NW
-            (jx - hw, jx + hw, jy - hw, jy + hw)
-        }
-        (false, true, false, true) => {
-            // H from east, V from north → outer SW
-            (jx - hw, jx + hw, jy - hw, jy + hw)
-        }
-        _ => {
-            // Can't determine: build a minimal closure at junction
-            (jx - CLOSURE_MARGIN, jx + CLOSURE_MARGIN, jy - CLOSURE_MARGIN, jy + CLOSURE_MARGIN)
-        }
-    };
-
-    // Snap to quantum grid
-    let q = CONSTRUCTION_QUANTUM as i32;
-    let ox_min = snap_to_quantum_grid(ox_min, q);
-    let ox_max = snap_to_quantum_grid(ox_max, q);
-    let oy_min = snap_to_quantum_grid(oy_min, q);
-    let oy_max = snap_to_quantum_grid(oy_max, q);
-    // Ensure minimum size of at least one quantum
-    let ox_min = ox_min.min(ox_max - q);
-    let oy_min = oy_min.min(oy_max - q);
-
-    // Build the outer corner closure brush
-    let brush = make_brush(
-        (ox_min, oy_min, z0),
-        (ox_max, oy_max, z1),
-        DEFAULT_WALL_TEXTURE,
-    );
-
-    vec![brush]
+        Orientation::Vertical => point.0 == corridor.start.0 && point.1 > min_y && point.1 < max_y,
+    }
 }
 
-// ── T-junction ────────────────────────────────────────────────────────────
+fn termination_point(terminating: &Corridor, through: &Corridor) -> Option<(i32, i32)> {
+    [
+        (terminating.start.0, terminating.start.1),
+        (terminating.end.0, terminating.end.1),
+    ]
+    .into_iter()
+    .find(|point| point_on_corridor_interior(*point, through))
+}
 
-/// Build closure brushes for a T-junction where one corridor terminates
-/// into another through corridor.
-///
-/// The terminating corridor's dead-end wall needs a closure brush at the
-/// point where it meets the through corridor (covering the wall gap).
-/// The through corridor's side walls also need closure at the junction
-/// edges.
-///
-/// Returns 1–2 closure brushes.
+/// Build two outer corner posts where a terminating branch meets a through
+/// corridor. No post enters the central clear square.
 pub fn build_t_junction(terminating: &Corridor, through: &Corridor) -> Vec<Brush> {
-    let (_tx0, _ty0, _tz0) = corridor_extents(terminating).0;
-    let (_, (_thx1, _thy1, thz1)) = corridor_extents(through);
+    if orientation(terminating) == orientation(through) {
+        return Vec::new();
+    }
+    let Some((jx, jy)) = termination_point(terminating, through) else {
+        return Vec::new();
+    };
 
-    let z0 = terminating.start.2;
-    let z1 = terminating.start.2 + terminating.height as i32;
-    let z1 = z1.max(thz1);
+    let other = other_endpoint(terminating, (jx, jy));
+    let clear = clear_half(terminating).max(clear_half(through));
+    let outer = outer_half(terminating).max(outer_half(through));
+    let (tz0, tz1) = shell_z(terminating);
+    let (hz0, hz1) = shell_z(through);
+    let z0 = tz0.min(hz0);
+    let z1 = tz1.max(hz1);
+    let mut brushes = Vec::with_capacity(2);
 
-    let q = CONSTRUCTION_QUANTUM as i32;
-
-    let t_orient = corridor_orientation(terminating);
-    let th_orient = corridor_orientation(through);
-
-    let mut brushes = Vec::new();
-
-    match (t_orient, th_orient) {
-        (Orientation::Horizontal, Orientation::Vertical) => {
-            // Terminating E-W corridor meets through N-S corridor
-            // The terminating corridor's east/west end meets the through corridor
-            let (jx, jy) = find_shared_endpoint(terminating, through);
-
-            // Closure brushes: fill wall gaps at the junction
-            let hw = (terminating.width / 2) as i32;
-            let th_hw = (through.width / 2) as i32;
-
-            // Two closure brushes at the T-junction: one on each side of the
-            // terminating corridor where it meets the through corridor wall.
-            let t_comes_from_west = terminating.start.0 < jx || terminating.end.0 < jx;
-
-            let (cx_min, cx_max) = if t_comes_from_west {
-                // Terminating from west: closure at east end
-                (jx - WALL, jx)
-            } else {
-                // Terminating from east: closure at west end
-                (jx, jx + WALL)
-            };
-
-            // Closure on north side of terminating corridor
-            brushes.push(make_brush(
-                (snap_to_quantum_grid(cx_min, q), snap_to_quantum_grid(jy + hw - WALL, q), z0),
-                (snap_to_quantum_grid(cx_max, q), snap_to_quantum_grid(jy + th_hw, q), z1),
-                DEFAULT_WALL_TEXTURE,
-            ));
-            // Closure on south side of terminating corridor
-            brushes.push(make_brush(
-                (snap_to_quantum_grid(cx_min, q), snap_to_quantum_grid(jy - th_hw, q), z0),
-                (snap_to_quantum_grid(cx_max, q), snap_to_quantum_grid(jy - hw + WALL, q), z1),
-                DEFAULT_WALL_TEXTURE,
-            ));
+    match orientation(terminating) {
+        Orientation::Horizontal => {
+            let branch_sign = if other.0 < jx { -1 } else { 1 };
+            let (x0, x1) = signed_ring(jx, branch_sign, clear, outer);
+            for y_sign in [-1, 1] {
+                let (y0, y1) = signed_ring(jy, y_sign, clear, outer);
+                push_box(&mut brushes, (x0, y0, z0), (x1, y1, z1));
+            }
         }
-        (Orientation::Vertical, Orientation::Horizontal) => {
-            // Terminating N-S corridor meets through E-W corridor
-            let (jx, jy) = find_shared_endpoint(terminating, through);
-
-            let hw = (terminating.width / 2) as i32;
-            let th_hw = (through.width / 2) as i32;
-
-            let t_comes_from_south = terminating.start.1 < jy || terminating.end.1 < jy;
-
-            let (cy_min, cy_max) = if t_comes_from_south {
-                (jy - WALL, jy)
-            } else {
-                (jy, jy + WALL)
-            };
-
-            // Closure on east side of terminating corridor
-            brushes.push(make_brush(
-                (snap_to_quantum_grid(jx + hw - WALL, q), snap_to_quantum_grid(cy_min, q), z0),
-                (snap_to_quantum_grid(jx + th_hw, q), snap_to_quantum_grid(cy_max, q), z1),
-                DEFAULT_WALL_TEXTURE,
-            ));
-            // Closure on west side of terminating corridor
-            brushes.push(make_brush(
-                (snap_to_quantum_grid(jx - th_hw, q), snap_to_quantum_grid(cy_min, q), z0),
-                (snap_to_quantum_grid(jx - hw + WALL, q), snap_to_quantum_grid(cy_max, q), z1),
-                DEFAULT_WALL_TEXTURE,
-            ));
-        }
-        _ => {
-            // Parallel corridors: treat as simple wall closure
-            let (jx, jy) = find_shared_endpoint(terminating, through);
-            brushes.push(make_brush(
-                (jx - WALL, jy - WALL, z0),
-                (jx + WALL, jy + WALL, z1),
-                DEFAULT_WALL_TEXTURE,
-            ));
+        Orientation::Vertical => {
+            let branch_sign = if other.1 < jy { -1 } else { 1 };
+            let (y0, y1) = signed_ring(jy, branch_sign, clear, outer);
+            for x_sign in [-1, 1] {
+                let (x0, x1) = signed_ring(jx, x_sign, clear, outer);
+                push_box(&mut brushes, (x0, y0, z0), (x1, y1, z1));
+            }
         }
     }
 
     brushes
 }
 
-// ── X-junction ────────────────────────────────────────────────────────────
+fn crossing_point(a: &Corridor, b: &Corridor) -> Option<(i32, i32)> {
+    let (horizontal, vertical) = match (orientation(a), orientation(b)) {
+        (Orientation::Horizontal, Orientation::Vertical) => (a, b),
+        (Orientation::Vertical, Orientation::Horizontal) => (b, a),
+        _ => return None,
+    };
+    let point = (vertical.start.0, horizontal.start.1);
+    let hx0 = horizontal.start.0.min(horizontal.end.0);
+    let hx1 = horizontal.start.0.max(horizontal.end.0);
+    let vy0 = vertical.start.1.min(vertical.end.1);
+    let vy1 = vertical.start.1.max(vertical.end.1);
+    (point.0 >= hx0 && point.0 <= hx1 && point.1 >= vy0 && point.1 <= vy1).then_some(point)
+}
 
-/// Build closure brushes for an X-junction where two corridors cross at
-/// right angles.
-///
-/// All 4 outer corners of the crossing need closure brushes to seal gaps
-/// between the corridor outer walls. The center region (where both corridors
-/// overlap) is open walkable space.
-///
-/// Returns 4 closure brushes (one per outer corner).
+/// Build four wall-thickness corner posts around an X crossing while leaving
+/// the complete central 64×64 clear square untouched.
 pub fn build_x_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
-    let ((_ax0, _ay0, az0), (_ax1, _ay1, az1)) = corridor_extents(a);
-    let ((_bx0, _by0, bz0), (_bx1, _by1, bz1)) = corridor_extents(b);
-
+    let Some((jx, jy)) = crossing_point(a, b) else {
+        return Vec::new();
+    };
+    let clear = clear_half(a).max(clear_half(b));
+    let outer = outer_half(a).max(outer_half(b));
+    let (az0, az1) = shell_z(a);
+    let (bz0, bz1) = shell_z(b);
     let z0 = az0.min(bz0);
     let z1 = az1.max(bz1);
+    let mut brushes = Vec::with_capacity(4);
 
-    let a_orient = corridor_orientation(a);
-    let b_orient = corridor_orientation(b);
-
-    if a_orient == b_orient {
-        // Parallel corridors crossing — not a true X-junction
-        return Vec::new();
+    for x_sign in [-1, 1] {
+        let (x0, x1) = signed_ring(jx, x_sign, clear, outer);
+        for y_sign in [-1, 1] {
+            let (y0, y1) = signed_ring(jy, y_sign, clear, outer);
+            push_box(&mut brushes, (x0, y0, z0), (x1, y1, z1));
+        }
     }
-
-    // Determine which corridor is horizontal and which is vertical
-    let (hc, vc) = if a_orient == Orientation::Horizontal {
-        (a, b)
-    } else {
-        (b, a)
-    };
-
-    let ((hx0, hy0, _), (hx1, hy1, _)) = corridor_extents(hc);
-    let ((vx0, vy0, _), (vx1, vy1, _)) = corridor_extents(vc);
-
-    // Intersection region
-    let ix0 = hx0.max(vx0);
-    let ix1 = hx1.min(vx1);
-    let iy0 = hy0.max(vy0);
-    let iy1 = hy1.min(vy1);
-
-    // Four outer corner closures:
-    // NE: x > ix1, y > iy1
-    // NW: x < ix0, y > iy1
-    // SE: x > ix1, y < iy0
-    // SW: x < ix0, y < iy0
-
-    let m = CLOSURE_MARGIN;
-    let q = CONSTRUCTION_QUANTUM as i32;
-
-    vec![
-        // NE corner
-        make_brush(
-            (snap_to_quantum_grid(ix1 - m, q), snap_to_quantum_grid(iy1 - m, q), z0),
-            (snap_to_quantum_grid(ix1 + m, q), snap_to_quantum_grid(iy1 + m, q), z1),
-            DEFAULT_WALL_TEXTURE,
-        ),
-        // NW corner
-        make_brush(
-            (snap_to_quantum_grid(ix0 - m, q), snap_to_quantum_grid(iy1 - m, q), z0),
-            (snap_to_quantum_grid(ix0 + m, q), snap_to_quantum_grid(iy1 + m, q), z1),
-            DEFAULT_WALL_TEXTURE,
-        ),
-        // SE corner
-        make_brush(
-            (snap_to_quantum_grid(ix1 - m, q), snap_to_quantum_grid(iy0 - m, q), z0),
-            (snap_to_quantum_grid(ix1 + m, q), snap_to_quantum_grid(iy0 + m, q), z1),
-            DEFAULT_WALL_TEXTURE,
-        ),
-        // SW corner
-        make_brush(
-            (snap_to_quantum_grid(ix0 - m, q), snap_to_quantum_grid(iy0 - m, q), z0),
-            (snap_to_quantum_grid(ix0 + m, q), snap_to_quantum_grid(iy0 + m, q), z1),
-            DEFAULT_WALL_TEXTURE,
-        ),
-    ]
+    brushes
 }
 
-// ── Room portal ───────────────────────────────────────────────────────────
+fn nearest_room_wall(corridor: &Corridor, room: &RoomIntent) -> (RoomWall, (i32, i32)) {
+    let min_x = room.position.0;
+    let max_x = min_x + room.dimensions.0 as i32;
+    let min_y = room.position.1;
+    let max_y = min_y + room.dimensions.1 as i32;
+    let mut best: Option<(i32, usize, RoomWall, (i32, i32))> = None;
 
-/// Build the portal opening brush for a corridor entering a room.
-///
-/// In Quake .map terms, this returns the **opening marker** — the rectangular
-/// region on the room wall where the corridor passes through. The wall brush
-/// for the room should omit this region (or be split around it), creating an
-/// open arch.
-///
-/// Returns a single brush representing the portal opening (used as a
-/// subtraction hint for room wall generation).
-pub fn build_room_portal(corridor: &Corridor, room: &RoomIntent) -> Vec<Brush> {
-    let hw = (corridor.width / 2) as i32;
-    let hh = corridor.height as i32;
-    let z0 = room.position.2;
-    let z1 = z0 + hh;
-
-    let r_min_x = room.position.0;
-    let r_max_x = room.position.0 + room.dimensions.0 as i32;
-    let r_min_y = room.position.1;
-    let r_max_y = room.position.1 + room.dimensions.1 as i32;
-
-    // Find which wall the corridor connects to
-    let (cx, cy) = find_corridor_room_contact(corridor, room);
-
-    // Determine portal position on the wall
-    let portal = if cx <= r_min_x + WALL {
-        // West wall
-        Some(make_brush(
-            (r_min_x - WALL, cy - hw, z0),
-            (r_min_x + WALL, cy + hw, z1),
-            DEFAULT_WALL_TEXTURE,
-        ))
-    } else if cx >= r_max_x - WALL {
-        // East wall
-        Some(make_brush(
-            (r_max_x - WALL, cy - hw, z0),
-            (r_max_x + WALL, cy + hw, z1),
-            DEFAULT_WALL_TEXTURE,
-        ))
-    } else if cy <= r_min_y + WALL {
-        // South wall
-        Some(make_brush(
-            (cx - hw, r_min_y - WALL, z0),
-            (cx + hw, r_min_y + WALL, z1),
-            DEFAULT_WALL_TEXTURE,
-        ))
-    } else if cy >= r_max_y - WALL {
-        // North wall
-        Some(make_brush(
-            (cx - hw, r_max_y - WALL, z0),
-            (cx + hw, r_max_y + WALL, z1),
-            DEFAULT_WALL_TEXTURE,
-        ))
-    } else {
-        None
-    };
-
-    portal.into_iter().collect()
-}
-
-/// Find where a corridor contacts a room wall.
-/// Returns the contact point (center of portal) on the room wall.
-fn find_corridor_room_contact(corridor: &Corridor, room: &RoomIntent) -> (i32, i32) {
-    let r_min_x = room.position.0;
-    let r_max_x = room.position.0 + room.dimensions.0 as i32;
-    let r_min_y = room.position.1;
-    let r_max_y = room.position.1 + room.dimensions.1 as i32;
-
-    // The corridor start is at the room portal
-    let sx = corridor.start.0;
-    let sy = corridor.start.1;
-
-    // Clamp to room wall
-    let cx = clamp_to_range(sx, r_min_x, r_max_x);
-    let cy = clamp_to_range(sy, r_min_y, r_max_y);
-
-    // Determine which wall the corridor contacts
-    let dist_left = (sx - r_min_x).abs();
-    let dist_right = (sx - r_max_x).abs();
-    let dist_bottom = (sy - r_min_y).abs();
-    let dist_top = (sy - r_max_y).abs();
-    let min_dist = dist_left.min(dist_right).min(dist_bottom).min(dist_top);
-
-    if min_dist == dist_left {
-        (r_min_x, cy)
-    } else if min_dist == dist_right {
-        (r_max_x, cy)
-    } else if min_dist == dist_top {
-        (cx, r_max_y)
-    } else {
-        (cx, r_min_y)
-    }
-}
-
-// ── Utility ────────────────────────────────────────────────────────────────
-
-/// Find the shared endpoint between two corridors (the junction center).
-fn find_shared_endpoint(a: &Corridor, b: &Corridor) -> (i32, i32) {
-    // Check if a.start matches b.start or b.end, etc.
-    let eps = CONSTRUCTION_QUANTUM as i32;
-    let points = [
-        (a.start.0, a.start.1),
-        (a.end.0, a.end.1),
-        (b.start.0, b.start.1),
-        (b.end.0, b.end.1),
-    ];
-
-    // Find the midpoint of the two closest endpoints
-    for &(ax, ay) in &[(a.start.0, a.start.1), (a.end.0, a.end.1)] {
-        for &(bx, by) in &[(b.start.0, b.start.1), (b.end.0, b.end.1)] {
-            if (ax - bx).abs() <= eps && (ay - by).abs() <= eps {
-                return ((ax + bx) / 2, (ay + by) / 2);
+    for point in [
+        (corridor.start.0, corridor.start.1),
+        (corridor.end.0, corridor.end.1),
+    ] {
+        let cy = point.1.clamp(min_y, max_y);
+        let cx = point.0.clamp(min_x, max_x);
+        let candidates = [
+            (
+                (point.0 - min_x).abs() + (point.1 - cy).abs(),
+                0,
+                RoomWall::West,
+                (min_x, cy),
+            ),
+            (
+                (point.0 - max_x).abs() + (point.1 - cy).abs(),
+                1,
+                RoomWall::East,
+                (max_x, cy),
+            ),
+            (
+                (point.1 - min_y).abs() + (point.0 - cx).abs(),
+                2,
+                RoomWall::South,
+                (cx, min_y),
+            ),
+            (
+                (point.1 - max_y).abs() + (point.0 - cx).abs(),
+                3,
+                RoomWall::North,
+                (cx, max_y),
+            ),
+        ];
+        for candidate in candidates {
+            if best
+                .as_ref()
+                .is_none_or(|current| (candidate.0, candidate.1) < (current.0, current.1))
+            {
+                best = Some(candidate);
             }
         }
     }
 
-    // Fallback: use midpoint of all endpoints
-    let sum_x: i32 = points.iter().map(|p| p.0).sum();
-    let sum_y: i32 = points.iter().map(|p| p.1).sum();
-    (sum_x / 4, sum_y / 4)
+    best.map(|(_, _, wall, contact)| (wall, contact))
+        .unwrap_or((RoomWall::West, (min_x, min_y)))
 }
 
-fn clamp_to_range(v: i32, lo: i32, hi: i32) -> i32 {
-    if v < lo {
-        lo
-    } else if v > hi {
-        hi
-    } else {
-        v
-    }
-}
-
-/// Snap a value to the nearest multiple of `quantum` (rounds toward zero for
-/// half-way values to ensure conservative snapping).
-fn snap_to_quantum_grid(v: i32, quantum: i32) -> i32 {
-    let rem = v.rem_euclid(quantum);
-    let half = quantum / 2;
-    if rem == 0 {
-        v
-    } else if rem <= half {
-        v - rem
-    } else {
-        v + (quantum - rem)
-    }
-}
-
-// ── Junction classification ───────────────────────────────────────────────
-
-/// Classify the type of junction formed by a set of corridors meeting at a
-/// common point.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JunctionKind {
-    /// Two corridors meet at a corner turn (L-shape).
-    L,
-    /// One corridor terminates into another (T-shape).
-    T,
-    /// Two corridors cross (X-shape).
-    X,
-    /// A corridor endpoint at a room wall (portal).
-    Portal,
-    /// Straight pass-through: corridors align end-to-end.
-    Straight,
-}
-
-/// Build all closure brushes for explicit endpoint junctions in a routed
-/// corridor set.
+/// Build only the solid target-wall pieces around a corridor portal.
 ///
-/// This function classifies corridors that share endpoints and delegates to
-/// the appropriate builder. Incidental mid-span crossings are left to normal
-/// CSG overlap instead of receiving pairwise X-closure brushes; otherwise dense
-/// generated maps emit O(n²) source brushes and can exceed the M1 face budget.
-pub fn build_junction_closures(corridors: &[Corridor]) -> Vec<Brush> {
-    if corridors.len() < 2 {
-        return Vec::new();
+/// The aperture begins at the top of the floor slab and has the corridor's
+/// full clear width and clear height. No brush is emitted in that aperture;
+/// returned brushes are the low/high side columns and the lintel above it.
+pub fn build_room_portal(corridor: &Corridor, room: &RoomIntent) -> Vec<Brush> {
+    let (wall, (cx, cy)) = nearest_room_wall(corridor, room);
+    let min_x = room.position.0;
+    let max_x = min_x + room.dimensions.0 as i32;
+    let min_y = room.position.1;
+    let max_y = min_y + room.dimensions.1 as i32;
+    let z0 = room.position.2;
+    let z1 = z0 + room.dimensions.2 as i32;
+    let opening_bottom = z0 + WALL;
+    let opening_top = (opening_bottom + corridor.height as i32).min(z1);
+    let half = clear_half(corridor);
+    let mut brushes = Vec::with_capacity(3);
+
+    match wall {
+        RoomWall::West | RoomWall::East => {
+            let open_min = (cy - half).max(min_y + WALL);
+            let open_max = (cy + half).min(max_y - WALL);
+            let (wx0, wx1) = if wall == RoomWall::West {
+                (min_x, min_x + WALL)
+            } else {
+                (max_x - WALL, max_x)
+            };
+            if open_min >= open_max {
+                push_box(&mut brushes, (wx0, min_y, z0), (wx1, max_y, z1));
+                return brushes;
+            }
+            push_box(&mut brushes, (wx0, min_y, z0), (wx1, open_min, z1));
+            push_box(&mut brushes, (wx0, open_max, z0), (wx1, max_y, z1));
+            push_box(
+                &mut brushes,
+                (wx0, open_min, opening_top),
+                (wx1, open_max, z1),
+            );
+        }
+        RoomWall::South | RoomWall::North => {
+            let open_min = (cx - half).max(min_x + WALL);
+            let open_max = (cx + half).min(max_x - WALL);
+            let (wy0, wy1) = if wall == RoomWall::South {
+                (min_y, min_y + WALL)
+            } else {
+                (max_y - WALL, max_y)
+            };
+            if open_min >= open_max {
+                push_box(&mut brushes, (min_x, wy0, z0), (max_x, wy1, z1));
+                return brushes;
+            }
+            push_box(&mut brushes, (min_x, wy0, z0), (open_min, wy1, z1));
+            push_box(&mut brushes, (open_max, wy0, z0), (max_x, wy1, z1));
+            push_box(
+                &mut brushes,
+                (open_min, wy0, opening_top),
+                (open_max, wy1, z1),
+            );
+        }
     }
 
-    // Classify pairs of corridors
+    brushes
+}
+
+fn terminates_at(a: &Corridor, b: &Corridor) -> bool {
+    termination_point(a, b).is_some()
+}
+
+/// Build all unique L/T/X outer-corner closures in a corridor network.
+pub fn build_junction_closures(corridors: &[Corridor]) -> Vec<Brush> {
     let mut brushes = Vec::new();
 
     for i in 0..corridors.len() {
         for j in (i + 1)..corridors.len() {
             let a = &corridors[i];
             let b = &corridors[j];
-
-            if !corridors_meet(a, b) {
+            if orientation(a) == orientation(b) {
                 continue;
             }
 
-            let a_orient = corridor_orientation(a);
-            let b_orient = corridor_orientation(b);
-
-            if a_orient == b_orient {
-                // Parallel: straight pass-through, no closure needed
-                continue;
-            }
-
-            // Determine if share endpoint (L/T) or crossing (X)
-            if share_endpoint(a, b) {
-                // Could be L or T — build both and let L-junction handle it
-                // For T-junction, one corridor terminates at the other's midpoint
-                let a_terminates = terminates_at(a, b);
-                let b_terminates = terminates_at(b, a);
-
-                if a_terminates && !b_terminates {
-                    brushes.extend(build_t_junction(a, b));
-                } else if b_terminates && !a_terminates {
-                    brushes.extend(build_t_junction(b, a));
-                } else {
-                    brushes.extend(build_l_junction(a, b));
-                }
+            let candidates = if terminates_at(a, b) {
+                build_t_junction(a, b)
+            } else if terminates_at(b, a) {
+                build_t_junction(b, a)
+            } else if shared_endpoint(a, b).is_some() {
+                build_l_junction(a, b)
             } else {
-                // Incidental crossing, not an explicit routed endpoint
-                // junction. Do not emit pairwise X closures in generated maps;
-                // explicit X fixtures can still call `build_x_junction`.
+                build_x_junction(a, b)
+            };
+
+            for brush in candidates {
+                if !brushes.contains(&brush) {
+                    brushes.push(brush);
+                }
             }
         }
     }
 
     brushes
-}
-
-/// Check if two corridors share an endpoint (within 1 quantum tolerance).
-fn share_endpoint(a: &Corridor, b: &Corridor) -> bool {
-    let eps = CONSTRUCTION_QUANTUM as i32;
-    let a_pts = [(a.start.0, a.start.1), (a.end.0, a.end.1)];
-    let b_pts = [(b.start.0, b.start.1), (b.end.0, b.end.1)];
-
-    for &(ax, ay) in &a_pts {
-        for &(bx, by) in &b_pts {
-            if (ax - bx).abs() <= eps && (ay - by).abs() <= eps {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Check if corridor `a` terminates into corridor `b` (instead of meeting at
-/// an endpoint). Termination means one endpoint of `a` lies along the length
-/// of `b`, not at `b`'s endpoints.
-fn terminates_at(a: &Corridor, b: &Corridor) -> bool {
-    let eps = CONSTRUCTION_QUANTUM as i32;
-    let a_pts = [(a.start.0, a.start.1), (a.end.0, a.end.1)];
-    let b_min_x = b.start.0.min(b.end.0);
-    let b_max_x = b.start.0.max(b.end.0);
-    let b_min_y = b.start.1.min(b.end.1);
-    let b_max_y = b.start.1.max(b.end.1);
-
-    for &(ax, ay) in &a_pts {
-        // Check if this point lies along b's interior
-        let on_b = if b_min_x == b_max_x {
-            // b is vertical
-            (ax - b_min_x).abs() <= eps && ay > b_min_y + eps && ay < b_max_y - eps
-        } else if b_min_y == b_max_y {
-            // b is horizontal
-            (ay - b_min_y).abs() <= eps && ax > b_min_x + eps && ax < b_max_x - eps
-        } else {
-            false
-        };
-
-        if on_b {
-            return true;
-        }
-    }
-    false
-}
-
-/// Check if two corridors meet (share an endpoint or one terminates into the
-/// other).
-fn corridors_meet(a: &Corridor, b: &Corridor) -> bool {
-    share_endpoint(a, b) || terminates_at(a, b) || terminates_at(b, a) || corridors_cross(a, b)
-}
-
-/// Check if two perpendicular corridors cross each other.
-fn corridors_cross(a: &Corridor, b: &Corridor) -> bool {
-    let a_orient = corridor_orientation(a);
-    let b_orient = corridor_orientation(b);
-    if a_orient == b_orient {
-        return false;
-    }
-
-    let ((ax0, ay0, _), (ax1, ay1, _)) = corridor_extents(a);
-    let ((bx0, by0, _), (bx1, by1, _)) = corridor_extents(b);
-
-    // Check if the extents overlap in both axes
-    let overlap_x = ax0 < bx1 && bx0 < ax1;
-    let overlap_y = ay0 < by1 && by0 < ay1;
-
-    overlap_x && overlap_y
 }
 
 #[cfg(test)]
@@ -780,157 +477,75 @@ mod tests {
         }
     }
 
-    // ── make_brush ─────────────────────────────────────────────────────
+    fn bounds(brush: &Brush) -> ((i32, i32, i32), (i32, i32, i32)) {
+        let mut min = (i32::MAX, i32::MAX, i32::MAX);
+        let mut max = (i32::MIN, i32::MIN, i32::MIN);
+        for face in &brush.faces {
+            for &(x, y, z) in &face.plane_points {
+                min = (min.0.min(x), min.1.min(y), min.2.min(z));
+                max = (max.0.max(x), max.1.max(y), max.2.max(z));
+            }
+        }
+        (min, max)
+    }
+
+    fn contains_open(brush: &Brush, point: (i32, i32, i32)) -> bool {
+        let (min, max) = bounds(brush);
+        point.0 > min.0
+            && point.0 < max.0
+            && point.1 > min.1
+            && point.1 < max.1
+            && point.2 > min.2
+            && point.2 < max.2
+    }
 
     #[test]
-    fn make_brush_has_six_faces() {
-        let brush = make_brush((0, 0, 0), (64, 64, 128), "test_tex");
+    fn make_brush_has_canonical_faces() {
+        let brush = make_brush((0, 0, 0), (64, 64, 128), "test");
         assert_eq!(brush.faces.len(), 6);
-        for face in &brush.faces {
-            assert_eq!(face.texture, "test_tex");
-        }
+        assert!(brush.faces.iter().all(|face| face.texture == "test"));
     }
 
     #[test]
-    fn make_brush_planes_are_valid() {
-        let brush = make_brush((0, 0, 0), (64, 64, 128), "t");
-        // Each face should have 3 non-collinear points
-        for face in &brush.faces {
-            let (p0, p1, p2) = (face.plane_points[0], face.plane_points[1], face.plane_points[2]);
-            // Points should not all be identical
-            assert!(
-                p0 != p1 || p1 != p2,
-                "face has collinear/identical points: {:?}",
-                face.plane_points
-            );
-        }
-    }
-
-    // ── L-junction ──────────────────────────────────────────────────────
-
-    #[test]
-    fn l_junction_produces_closure_brush() {
-        // Horizontal corridor from (0,0) to (128,0), vertical from (128,0) to (128,128)
+    fn l_closure_does_not_occupy_junction_centre() {
         let h = corridor_h(0, 0, 0, 128);
         let v = corridor_v(128, 0, 0, 128);
         let brushes = build_l_junction(&h, &v);
-        assert!(!brushes.is_empty(), "L-junction should produce closure brushes");
-        for b in &brushes {
-            assert_eq!(b.faces.len(), 6);
-        }
+        assert_eq!(brushes.len(), 1);
+        assert!(!contains_open(&brushes[0], (128, 0, 40)));
+        assert_eq!(bounds(&brushes[0]), ((160, -48, 0), (176, -32, 112)));
     }
 
-    // ── T-junction ──────────────────────────────────────────────────────
-
     #[test]
-    fn t_junction_produces_closure_brushes() {
-        // Through: vertical corridor from (64,0) to (64,192)
+    fn t_and_x_closures_leave_clear_centres() {
         let through = corridor_v(64, 0, 0, 192);
-        // Terminating: horizontal from (0,64) to (64,64)
-        let term = corridor_h(0, 64, 0, 64);
-        let brushes = build_t_junction(&term, &through);
-        assert!(!brushes.is_empty(), "T-junction should produce closure brushes");
-        for b in &brushes {
-            assert_eq!(b.faces.len(), 6);
-        }
-    }
+        let terminating = corridor_h(0, 64, 0, 64);
+        let t = build_t_junction(&terminating, &through);
+        assert_eq!(t.len(), 2);
+        assert!(t.iter().all(|brush| !contains_open(brush, (64, 64, 40))));
 
-    // ── X-junction ──────────────────────────────────────────────────────
-
-    #[test]
-    fn x_junction_produces_four_corner_brushes() {
         let h = corridor_h(0, 64, 0, 192);
-        let v = corridor_v(64, 0, 0, 192);
-        let brushes = build_x_junction(&h, &v);
-        // An X-junction with crossing corridors should produce 4 corner closures
-        assert!(brushes.len() == 4, "expected 4 corner brushes, got {}", brushes.len());
-        for b in &brushes {
-            assert_eq!(b.faces.len(), 6);
-        }
+        let x = build_x_junction(&h, &through);
+        assert_eq!(x.len(), 4);
+        assert!(x.iter().all(|brush| !contains_open(brush, (64, 64, 40))));
     }
 
     #[test]
-    fn x_junction_parallel_corridors_no_closure() {
-        let h1 = corridor_h(0, 0, 0, 128);
-        let h2 = corridor_h(0, 64, 0, 128); // parallel, offset
-        let brushes = build_x_junction(&h1, &h2);
-        assert!(brushes.is_empty());
-    }
-
-    // ── Room portal ────────────────────────────────────────────────────
-
-    #[test]
-    fn room_portal_produces_opening_brush() {
-        // Room at (0,0) 64x64, corridor enters from east
-        let room = room(0, 0, 0, 64, 64, 128);
-        let corr = Corridor {
-            start: (64, 32, 0), // on east wall
-            end: (128, 32, 0),
+    fn portal_returns_wall_pieces_not_an_opening_solid() {
+        let room = room(0, 0, 0, 96, 96, 192);
+        let corridor = Corridor {
+            start: (96, 48, 0),
+            end: (192, 48, 0),
             width: 64,
             height: 80,
         };
-        let brushes = build_room_portal(&corr, &room);
-        assert!(!brushes.is_empty(), "room portal should produce portal brush");
-        for b in &brushes {
-            assert_eq!(b.faces.len(), 6);
-        }
-    }
-
-    // ── Utility ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn find_shared_endpoint_at_common_point() {
-        let a = corridor_h(0, 0, 0, 64);
-        let b = corridor_v(64, 0, 0, 64);
-        let (x, y) = find_shared_endpoint(&a, &b);
-        assert!((x - 64).abs() <= 16);
-        assert!((y - 0).abs() <= 16);
-    }
-
-    #[test]
-    fn share_endpoint_detects_common_endpoint() {
-        let a = corridor_h(0, 0, 0, 64);
-        let b = corridor_v(64, 0, 0, 64);
-        assert!(share_endpoint(&a, &b));
-    }
-
-    #[test]
-    fn share_endpoint_rejects_separate_corridors() {
-        let a = corridor_h(0, 0, 0, 64);
-        let b = corridor_v(128, 128, 0, 64);
-        assert!(!share_endpoint(&a, &b));
-    }
-
-    // ── build_junction_closures ────────────────────────────────────────
-
-    #[test]
-    fn build_junction_closures_for_l_shape() {
-        let corridors = vec![
-            corridor_h(0, 0, 0, 64),
-            corridor_v(64, 0, 0, 64),
-        ];
-        let brushes = build_junction_closures(&corridors);
-        assert!(!brushes.is_empty());
-    }
-
-    #[test]
-    fn build_junction_closures_empty_for_single_corridor() {
-        let corridors = vec![corridor_h(0, 0, 0, 64)];
-        let brushes = build_junction_closures(&corridors);
-        assert!(brushes.is_empty());
-    }
-
-    #[test]
-    fn all_junction_brushes_have_six_faces() {
-        let corridors = vec![
-            corridor_h(0, 0, 0, 64),
-            corridor_v(64, 0, 0, 64),
-            corridor_v(64, 64, 0, 64),
-            corridor_h(64, 128, 0, 64),
-        ];
-        let brushes = build_junction_closures(&corridors);
-        for b in &brushes {
-            assert_eq!(b.faces.len(), 6, "every closure brush must have exactly 6 faces");
-        }
+        let pieces = build_room_portal(&corridor, &room);
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces
+            .iter()
+            .all(|brush| { brush.faces.iter().all(|face| face.texture == WALL_TEXTURE) }));
+        assert!(pieces
+            .iter()
+            .all(|brush| !contains_open(brush, (88, 48, 40))));
     }
 }

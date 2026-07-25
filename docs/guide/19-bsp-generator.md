@@ -141,9 +141,9 @@ All failures return `GeneratorError` — never panics, never silently falls back
 
 The beta generator uses the **CC0 Stone Beta** theme — a project-authored, license-clean procedural texture set. Theme assets live in `src/bsp_generator/themes/cc0_stone_beta/` and include:
 
-- `cc0_stone_beta.wad` — WAD2 texture archive
+- `cc0_stone_beta.wad` — WAD2 archive with four visible stone roles and a compiler-only `skip` miptex
 - `palette.lmp` — 768-byte Quake palette
-- `textures/*.png` — PBR companions (normal + gloss for each surface role)
+- `textures/*.png` — PBR companions (normal + gloss for each visible surface role; none for `skip`)
 - `theme.toml` — texture role bindings (floor, wall, ceiling, accent)
 - `LICENSE` — CC0 public domain dedication
 
@@ -174,6 +174,8 @@ This produces `my_dungeon.bsp` (BSP2 format) and `my_dungeon.lit` (colored light
 - `-bsp2` (BSP2 format, mandatory for generated output)
 - `light -threads 1 -lit` (deterministic, external `.lit` output)
 
+`engine_pack` fails closed if `qbsp`, `vis`, or `light` reports a warning, including missing textures or skipped map filling. A successful command therefore means the published BSP was compiled warning-free; inspect the reported `CompilerWarning` instead of using a partial output.
+
 ### Deterministic Builds
 
 Two independent compilations of the same `.map` with the same WAD and palette produce byte-identical `.bsp` and `.lit` files. Combined with seed determinism in the generator, this guarantees reproducible builds from `(seed, config)` to compiled output.
@@ -182,17 +184,21 @@ Two independent compilations of the same `.map` with the same WAD and palette pr
 
 Generated maps guarantee:
 
-1. **Sealed geometry**: no leaks (no pointfile from `vis`)
+1. **Sealed geometry**: no leaks and no skipped compiler fill
 2. **Walkable topology**: all rooms reachable from `info_player_start`
-3. **No overlapping rooms**: rooms separated by at least 16-unit wall thickness
-4. **Open arches only**: no doors, buttons, or moving geometry
-5. **Single-layer**: flat floors, common ceiling height
-6. **BSP2 only**: no BSP29 output
-7. **Deterministic**: byte-identical `.map` for identical inputs
+3. **Real open portals**: corridor routes reach room walls and the additive brush set omits each 64×80 arch aperture
+4. **Clear junctions**: L/T/X centers retain the full 64-unit route width
+5. **Non-solid point entities**: the spawn and room lights are above the floor slab in clear room volume
+6. **No overlapping rooms**: rooms are separated by at least 16-unit wall thickness and have a minimum 112-unit outer span
+7. **Open arches only**: no doors, buttons, or moving geometry
+8. **Single-layer**: flat floors, common room ceiling height
+9. **BSP2 only**: no BSP29 output
+10. **Deterministic**: byte-identical `.map` for identical inputs
+11. **Warning-free compilation**: any `qbsp`, `vis`, or `light` warning is an error
 
 ## Support Corpus
 
-All 12 frozen configurations (8 nominal seeds + 4 boundary configs) compile successfully through the BSP2 profile and produce valid output within their declared M1/M2 ceilings. The corpus is executed by:
+All 12 frozen configurations (8 nominal seeds + 4 boundary configs) compile warning-free through the BSP2 profile, reload in strict mode, remain sealed, and return non-solid BSP contents at room, spawn/light, corridor, portal-throat, and junction witnesses. Face and entity ceilings pass; static-batch ceiling enforcement is tracked separately in GitHub issue #57. The corpus is executed by:
 
 ```bash
 cargo test -p bsp_generator --test corpus_execution

@@ -44,8 +44,6 @@ enum Dir {
     South,
 }
 
-
-
 // ── Portal computation ────────────────────────────────────────────────────
 
 /// Compute portal centerline positions (in world coordinates) on two rooms'
@@ -84,30 +82,62 @@ fn compute_portals(
         if cb.0 >= ca.0 {
             // A east wall → B west wall
             // Use room center for the perpendicular coordinate, clamped to wall
-            let a_y = clamp(ca.1, a_min.1 + CONSTRUCTION_QUANTUM as i32, a_max.1 - CONSTRUCTION_QUANTUM as i32);
+            let a_y = clamp(
+                ca.1,
+                a_min.1 + CONSTRUCTION_QUANTUM as i32,
+                a_max.1 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_a = (a_max.0, a_y, a.position.2);
-            let b_y = clamp(cb.1, b_min.1 + CONSTRUCTION_QUANTUM as i32, b_max.1 - CONSTRUCTION_QUANTUM as i32);
+            let b_y = clamp(
+                cb.1,
+                b_min.1 + CONSTRUCTION_QUANTUM as i32,
+                b_max.1 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_b = (b_min.0, b_y, b.position.2);
         } else {
             // A west wall → B east wall
-            let a_y = clamp(ca.1, a_min.1 + CONSTRUCTION_QUANTUM as i32, a_max.1 - CONSTRUCTION_QUANTUM as i32);
+            let a_y = clamp(
+                ca.1,
+                a_min.1 + CONSTRUCTION_QUANTUM as i32,
+                a_max.1 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_a = (a_min.0, a_y, a.position.2);
-            let b_y = clamp(cb.1, b_min.1 + CONSTRUCTION_QUANTUM as i32, b_max.1 - CONSTRUCTION_QUANTUM as i32);
+            let b_y = clamp(
+                cb.1,
+                b_min.1 + CONSTRUCTION_QUANTUM as i32,
+                b_max.1 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_b = (b_max.0, b_y, b.position.2);
         }
     } else {
         // North-South facing
         if cb.1 >= ca.1 {
             // A north wall → B south wall
-            let a_x = clamp(ca.0, a_min.0 + CONSTRUCTION_QUANTUM as i32, a_max.0 - CONSTRUCTION_QUANTUM as i32);
+            let a_x = clamp(
+                ca.0,
+                a_min.0 + CONSTRUCTION_QUANTUM as i32,
+                a_max.0 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_a = (a_x, a_max.1, a.position.2);
-            let b_x = clamp(cb.0, b_min.0 + CONSTRUCTION_QUANTUM as i32, b_max.0 - CONSTRUCTION_QUANTUM as i32);
+            let b_x = clamp(
+                cb.0,
+                b_min.0 + CONSTRUCTION_QUANTUM as i32,
+                b_max.0 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_b = (b_x, b_min.1, b.position.2);
         } else {
             // A south wall → B north wall
-            let a_x = clamp(ca.0, a_min.0 + CONSTRUCTION_QUANTUM as i32, a_max.0 - CONSTRUCTION_QUANTUM as i32);
+            let a_x = clamp(
+                ca.0,
+                a_min.0 + CONSTRUCTION_QUANTUM as i32,
+                a_max.0 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_a = (a_x, a_min.1, a.position.2);
-            let b_x = clamp(cb.0, b_min.0 + CONSTRUCTION_QUANTUM as i32, b_max.0 - CONSTRUCTION_QUANTUM as i32);
+            let b_x = clamp(
+                cb.0,
+                b_min.0 + CONSTRUCTION_QUANTUM as i32,
+                b_max.0 - CONSTRUCTION_QUANTUM as i32,
+            );
             portal_b = (b_x, b_max.1, b.position.2);
         }
     }
@@ -246,37 +276,47 @@ fn snap_to_grid(v: i32, quantum: i32) -> i32 {
     }
 }
 
-/// Clear the endpoint approach corridors from each room portal to its routed
-/// centerline. Endpoint rooms are still marked in the occupancy grid so other
-/// routes keep away from them, but the connecting edge must carve a local arch
-/// through its two endpoint margins. Clearing only a 3×3 blob around each
-/// centerline leaves one blocked margin row between close room pairs; clear the
-/// full portal-to-centerline tube instead, with the same half-width as the
-/// corridor centerline footprint.
-fn clear_endpoint_approach(
-    portal: (i32, i32),
-    centerline: (i32, i32),
-    grid: &mut OccupancyGrid,
-) {
+fn grid_to_world(gx: i32, gy: i32, z: i32) -> (i32, i32, i32) {
+    (gx * Q, gy * Q, z)
+}
+
+fn clear_endpoint_approach(portal: (i32, i32), centerline: (i32, i32), grid: &mut OccupancyGrid) {
     let dx = (centerline.0 - portal.0).signum();
     let dy = (centerline.1 - portal.1).signum();
     let steps = (centerline.0 - portal.0)
         .abs()
         .max((centerline.1 - portal.1).abs());
 
-    for i in 0..=steps {
-        let x = portal.0 + dx * i;
-        let y = portal.1 + dy * i;
-        for oy in -CORRIDOR_HALF_CELLS..=CORRIDOR_HALF_CELLS {
-            for ox in -CORRIDOR_HALF_CELLS..=CORRIDOR_HALF_CELLS {
-                grid.clear(x + ox, y + oy);
+    for step in 0..=steps {
+        let x = portal.0 + dx * step;
+        let y = portal.1 + dy * step;
+        for offset_y in -CORRIDOR_HALF_CELLS..=CORRIDOR_HALF_CELLS {
+            for offset_x in -CORRIDOR_HALF_CELLS..=CORRIDOR_HALF_CELLS {
+                grid.clear(x + offset_x, y + offset_y);
             }
         }
     }
 }
 
-fn grid_to_world(gx: i32, gy: i32, z: i32) -> (i32, i32, i32) {
-    (gx * Q, gy * Q, z)
+/// Extend a routed centerline through each endpoint room's reserved margin to
+/// the actual wall portal. Keeping these normal approach legs in the routed
+/// intent gives emission an explicit corridor-to-room connection instead of
+/// leaving a disconnected gap between the room shell and the first segment.
+fn with_endpoint_approaches(
+    route: &[(i32, i32)],
+    portal_a: (i32, i32),
+    portal_b: (i32, i32),
+) -> Vec<(i32, i32)> {
+    let (Some(&start), Some(&end)) = (route.first(), route.last()) else {
+        return Vec::new();
+    };
+
+    let mut path = vec![portal_a];
+    straight_line_points(portal_a, start, &mut path);
+    path.extend(route.iter().copied().skip(1));
+    straight_line_points(end, portal_b, &mut path);
+
+    path
 }
 
 // ── A* search ─────────────────────────────────────────────────────────────
@@ -501,10 +541,7 @@ fn l_shaped_paths(
 
 /// Convert a grid path into simplified straight corridor segments.
 /// Consecutive steps in the same direction are collapsed into one segment.
-fn simplify_path(
-    path: &[(i32, i32)],
-    z: i32,
-) -> Vec<Corridor> {
+fn simplify_path(path: &[(i32, i32)], z: i32) -> Vec<Corridor> {
     if path.len() < 2 {
         return Vec::new();
     }
@@ -620,20 +657,8 @@ pub fn route_edge(
     let start = world_to_grid((center_a.0, center_a.1, 0));
     let end = world_to_grid((center_b.0, center_b.1, 0));
 
-    // If start and end are the same grid cell, emit a minimal corridor segment
-    // directly between the portal centerline positions.
-    if start == end {
-        return Ok(vec![Corridor {
-            start: center_a,
-            end: center_b,
-            width: CORRIDOR_WIDTH,
-            height: CORRIDOR_HEIGHT,
-        }]);
-    }
-
-    // Unblock start/end and carve local approach tubes through the endpoint
-    // room margins. These openings are limited to the two endpoint rooms, not
-    // the full inter-room route, so unrelated room margins remain solid.
+    // Carve only the two endpoint approach reservations through their rooms'
+    // occupancy margins, then retain those approaches in the emitted route.
     grid.clear(start.0, start.1);
     grid.clear(end.0, end.1);
     let portal_a_grid = world_to_grid((portal_a.0, portal_a.1, 0));
@@ -641,19 +666,30 @@ pub fn route_edge(
     clear_endpoint_approach(portal_a_grid, start, &mut grid);
     clear_endpoint_approach(portal_b_grid, end, &mut grid);
 
+    let finish = |path: Vec<(i32, i32)>| {
+        simplify_path(
+            &with_endpoint_approaches(&path, portal_a_grid, portal_b_grid),
+            z,
+        )
+    };
+
+    if start == end {
+        return Ok(finish(vec![start]));
+    }
+
     // Try direct orthogonal path first
     if let Some(path) = direct_orthogonal_path(start, end, &grid) {
-        return Ok(simplify_path(&path, z));
+        return Ok(finish(path));
     }
 
     // Try L-shaped paths
     if let Some(path) = l_shaped_paths(start, end, &grid, rng) {
-        return Ok(simplify_path(&path, z));
+        return Ok(finish(path));
     }
 
     // Fall back to A* with expansion budget
     if let Some(path) = astar_search(start, end, &grid, config.max_astar_expansions) {
-        return Ok(simplify_path(&path, z));
+        return Ok(finish(path));
     }
 
     Err(GeneratorError::RouteExhausted {
@@ -702,9 +738,7 @@ pub fn route_all_edges(
             j.position.0 == seg.end.0 && j.position.1 == seg.end.1 && j.position.2 == seg.end.2
         });
         if !end_exists {
-            junctions.push(crate::intent::Junction {
-                position: seg.end,
-            });
+            junctions.push(crate::intent::Junction { position: seg.end });
         }
     }
 
@@ -892,9 +926,9 @@ mod tests {
     fn route_rooms_with_blocking_room_between() {
         // Room A and B are far apart with a blocking room in between
         let rooms = vec![
-            room_at(0, 0, 0, 64, 64, 128),     // A
-            room_at(80, 80, 0, 64, 64, 128),   // blocking
-            room_at(0, 160, 0, 64, 64, 128),   // B
+            room_at(0, 0, 0, 64, 64, 128),   // A
+            room_at(80, 80, 0, 64, 64, 128), // blocking
+            room_at(0, 160, 0, 64, 64, 128), // B
         ];
         let cfg = valid_m1_config();
         let mut rng = make_rng(42);

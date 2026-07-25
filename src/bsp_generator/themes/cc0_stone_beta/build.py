@@ -6,7 +6,7 @@ beyond the Python stdlib. Two independent runs produce byte-identical output.
 
 Outputs (placed in the target directory, default CWD):
 - palette.lmp              — 256-color Quake-style palette (768 bytes)
-- cc0_stone_beta.wad       — WAD2 archive with 4 miptex entries
+- cc0_stone_beta.wad       — WAD2 archive with 4 role miptex entries plus `skip`
 - theme.toml               — texture role bindings
 - LICENSE                  — CC0-1.0 public domain dedication
 - textures/
@@ -347,6 +347,13 @@ def main():
         indices = quantize(pixels, palette)
         miptex = make_miptex(name, 64, 64, indices, palette)
         wad_entries.append((name, miptex))
+
+    # ericw-tools reserves the conventional `skip` material while building
+    # hulls even when no source face names it. Keep a compiler-only miptex in
+    # the WAD so a clean generated-map compile has no missing-texture warning.
+    # It has no theme role and no renderer companion textures.
+    skip_indices = [0] * (64 * 64)
+    wad_entries.append(('skip', make_miptex('skip', 64, 64, skip_indices, palette)))
 
     # ── WAD2 archive ───────────────────────────────────────────────────
     wad_data = make_wad2(wad_entries)

@@ -66,7 +66,7 @@ fn spawn_is_at_first_room_centre() {
     };
     let emission = build_emission(&layout, &routed);
     let spawn = &emission.entities[0];
-    assert_eq!(spawn.origin, (32, 32, 0)); // centre of first room
+    assert_eq!(spawn.origin, (32, 32, 40)); // floor top (16) + player half-height (24)
 }
 
 #[test]
@@ -102,8 +102,8 @@ fn lights_are_at_room_centres() {
         junctions: Vec::new(),
     };
     let emission = build_emission(&layout, &routed);
-    assert_eq!(emission.entities[1].origin, (32, 32, 0));
-    assert_eq!(emission.entities[2].origin, (192, 32, 0));
+    assert_eq!(emission.entities[1].origin, (32, 32, 64));
+    assert_eq!(emission.entities[2].origin, (192, 32, 64));
 }
 
 // ── Brush counts ───────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ fn room_count_times_six_brushes() {
 }
 
 #[test]
-fn corridor_count_times_four_brushes() {
+fn corridor_adds_boundary_shell_brushes() {
     let rooms = vec![room(0, 0, 0, 64, 64, 128), room(160, 0, 0, 64, 64, 128)];
     let layout = LayoutIntent {
         rooms,
@@ -138,8 +138,22 @@ fn corridor_count_times_four_brushes() {
         junctions: Vec::new(),
     };
     let emission = build_emission(&layout, &routed);
-    // 2 rooms × 6 + 1 corridor × 4 = 16 brushes
-    assert_eq!(emission.brushes.len(), 16);
+    let rooms_only = build_emission(
+        &LayoutIntent {
+            rooms: layout.rooms.clone(),
+            edges: Vec::new(),
+            loop_count: 0,
+        },
+        &RoutedIntent {
+            corridors: Vec::new(),
+            junctions: Vec::new(),
+        },
+    );
+    assert!(
+        emission.brushes.len() > rooms_only.brushes.len(),
+        "corridor must add floor-plan shell geometry"
+    );
+    assert!(emission.brushes.iter().all(|brush| brush.faces.len() == 6));
 }
 
 // ── Every brush has 6 faces ────────────────────────────────────────────

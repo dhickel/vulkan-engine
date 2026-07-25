@@ -4,6 +4,7 @@
 //! Tests invoke `build.py` in a temporary directory, inspect every output,
 //! and confirm byte-identical regeneration.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -126,7 +127,7 @@ fn palette_reserves_224_to_255_for_fullbrights() {
 // ── WAD2 header and directory validation ────────────────────────────────
 
 #[test]
-fn wad2_has_valid_header_and_four_miptex_entries() {
+fn wad2_has_valid_header_and_role_plus_compiler_miptex_entries() {
     let tmp = tempfile::tempdir().expect("tempdir");
     assert!(run_build(tmp.path()).success());
     let wad = std::fs::read(tmp.path().join("cc0_stone_beta.wad")).expect("read wad");
@@ -134,13 +135,22 @@ fn wad2_has_valid_header_and_four_miptex_entries() {
     // Header: magic, numlumps (i32 LE), infotableofs (i32 LE)
     assert!(&wad[0..4] == b"WAD2", "WAD2 magic missing");
     let numlumps = i32::from_le_bytes(wad[4..8].try_into().unwrap());
-    assert_eq!(numlumps, 4, "expected 4 lumps");
+    assert_eq!(
+        numlumps, 5,
+        "expected four role textures plus compiler skip"
+    );
     let infotableofs = i32::from_le_bytes(wad[8..12].try_into().unwrap()) as usize;
     assert!(infotableofs >= 12, "infotableofs must be after header");
 
     // Parse each directory entry
-    let expected_names = ["stone_floor", "stone_wall", "stone_ceiling", "stone_accent"];
-    for i in 0..4usize {
+    let expected_names = [
+        "stone_floor",
+        "stone_wall",
+        "stone_ceiling",
+        "stone_accent",
+        "skip",
+    ];
+    for i in 0..expected_names.len() {
         let off = infotableofs + i * 32;
         let filepos = i32::from_le_bytes(wad[off..off + 4].try_into().unwrap());
         let disksize = i32::from_le_bytes(wad[off + 4..off + 8].try_into().unwrap());
@@ -186,6 +196,34 @@ fn wad2_has_valid_header_and_four_miptex_entries() {
     }
 }
 
+#[test]
+fn every_emitted_face_texture_exists_in_theme_wad() {
+    let (map, _) = bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+        .expect("seed 0 generation");
+    let emitted: BTreeSet<&str> = map
+        .lines()
+        .filter(|line| line.starts_with('('))
+        .filter_map(|line| line.split('"').nth(1))
+        .collect();
+
+    let wad = std::fs::read(theme_dir().join("cc0_stone_beta.wad")).expect("read WAD");
+    let count = i32::from_le_bytes(wad[4..8].try_into().unwrap()) as usize;
+    let directory = i32::from_le_bytes(wad[8..12].try_into().unwrap()) as usize;
+    let available: BTreeSet<&str> = (0..count)
+        .map(|index| {
+            let start = directory + index * 32 + 16;
+            let bytes = &wad[start..start + 16];
+            let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(16);
+            std::str::from_utf8(&bytes[..end]).expect("ASCII WAD name")
+        })
+        .collect();
+
+    assert!(
+        emitted.is_subset(&available),
+        "emitted textures {emitted:?} are not a subset of WAD names {available:?}"
+    );
+}
+
 // ── WAD lump bounds ──────────────────────────────────────────────────────
 
 #[test]
@@ -197,7 +235,7 @@ fn wad_lumps_do_not_overlap() {
     let infotableofs = i32::from_le_bytes(wad[8..12].try_into().unwrap()) as usize;
     let mut ranges: Vec<(usize, usize)> = Vec::new();
 
-    for i in 0..4usize {
+    for i in 0..5usize {
         let off = infotableofs + i * 32;
         let filepos = i32::from_le_bytes(wad[off..off + 4].try_into().unwrap()) as usize;
         let disksize = i32::from_le_bytes(wad[off + 4..off + 8].try_into().unwrap()) as usize;

@@ -17,10 +17,11 @@ use crate::StageRng;
 /// The wall thickness reserved between rooms, in Quake units.
 pub const WALL_THICKNESS: u32 = 16;
 
-/// Room dimension range in quantum units: each room is at least 2 quantum
-/// units (32 Quake units) and at most 10 quantum units (160 Quake units)
-/// per axis, enforced by the placement generator.
-const MIN_ROOM_QUANTA: u32 = 2; // 32 units
+/// Room dimension range in quantum units. Seven quanta leaves an 80-unit
+/// clear interior between two 16-unit walls, enough for a 64-unit portal plus
+/// clearance between room-centre entities and portal tunnel shells.
+const MIN_ROOM_QUANTA: u32 = 7; // 112 units
+const RANDOM_ROOM_QUANTA_MIN: u32 = 2;
 const MAX_ROOM_QUANTA: u32 = 10; // 160 units
 
 /// Attempt to place `config.room_count` non-overlapping rooms within the
@@ -123,8 +124,14 @@ fn generate_candidates(
 
     for _ in 0..count {
         // Random dimensions in quantum units
-        let dx_quanta = rng.range_inclusive(MIN_ROOM_QUANTA, MAX_ROOM_QUANTA + 1);
-        let dy_quanta = rng.range_inclusive(MIN_ROOM_QUANTA, MAX_ROOM_QUANTA + 1);
+        // Keep the v1 random draw framing stable, then raise undersized
+        // candidates to the minimum portal-capable shell span.
+        let dx_quanta = rng
+            .range_inclusive(RANDOM_ROOM_QUANTA_MIN, MAX_ROOM_QUANTA + 1)
+            .max(MIN_ROOM_QUANTA);
+        let dy_quanta = rng
+            .range_inclusive(RANDOM_ROOM_QUANTA_MIN, MAX_ROOM_QUANTA + 1)
+            .max(MIN_ROOM_QUANTA);
         // Z fills the full span for single-layer
         let dz_quanta = z_span / q;
 

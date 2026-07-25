@@ -1,8 +1,8 @@
 //! Integration tests for junction geometry.
 //!
-//! Validates that L, T, X junction builders and room portal builders produce
-//! explicit closure brushes with exactly 6 faces per brush, and that the
-//! geometry is consistent (no gaps, no overlaps at junctions).
+//! Validates that L/T/X closure posts remain outside the clear junction
+//! square and room portal builders return only solid wall pieces around an
+//! omitted aperture. Every returned brush has six canonical faces.
 
 use bsp_generator::{
     build_junction_closures, build_l_junction, build_room_portal, build_t_junction,
@@ -89,7 +89,11 @@ fn make_brush_planes_are_non_collinear() {
         let [p0, p1, p2] = face.plane_points;
         // At least two points must differ
         let all_same = p0 == p1 && p1 == p2;
-        assert!(!all_same, "face has three identical points: {:?}", face.plane_points);
+        assert!(
+            !all_same,
+            "face has three identical points: {:?}",
+            face.plane_points
+        );
         // Points should span a plane: not all collinear
         let v1 = (p1.0 - p0.0, p1.1 - p0.1, p1.2 - p0.2);
         let v2 = (p2.0 - p0.0, p2.1 - p0.1, p2.2 - p0.2);
@@ -127,7 +131,10 @@ fn l_junction_produces_closure_brushes() {
     let h = corridor_h(0, 0, 0, 128);
     let v = corridor_v(128, 0, 0, 128);
     let brushes = build_l_junction(&h, &v);
-    assert!(!brushes.is_empty(), "L-junction must produce closure brushes");
+    assert!(
+        !brushes.is_empty(),
+        "L-junction must produce closure brushes"
+    );
     for b in &brushes {
         assert_eq!(b.faces.len(), 6);
     }
@@ -171,7 +178,10 @@ fn t_junction_produces_closure_brushes() {
     // Terminating: horizontal corridor meeting the through corridor
     let term = corridor_h(0, 64, 0, 64);
     let brushes = build_t_junction(&term, &through);
-    assert!(!brushes.is_empty(), "T-junction must produce closure brushes");
+    assert!(
+        !brushes.is_empty(),
+        "T-junction must produce closure brushes"
+    );
     for b in &brushes {
         assert_eq!(b.faces.len(), 6);
     }
@@ -222,7 +232,7 @@ fn x_junction_produces_four_corner_brushes() {
     );
     for b in &brushes {
         assert_brush_faces_are_non_degenerate(b);
-        assert_eq!(brush_z_range(b), (0, 80));
+        assert_eq!(brush_z_range(b), (0, 112));
     }
 }
 
@@ -235,7 +245,7 @@ fn x_junction_brushes_are_full_height_and_non_degenerate() {
     assert_eq!(brushes.len(), 4);
     for brush in &brushes {
         assert_brush_faces_are_non_degenerate(brush);
-        assert_eq!(brush_z_range(brush), (0, 80));
+        assert_eq!(brush_z_range(brush), (0, 112));
     }
 }
 
@@ -244,7 +254,10 @@ fn x_junction_parallel_corridors_produces_nothing() {
     let h1 = corridor_h(0, 0, 0, 128);
     let h2 = corridor_h(0, 64, 0, 128);
     let brushes = build_x_junction(&h1, &h2);
-    assert!(brushes.is_empty(), "parallel corridors should not produce X-junction");
+    assert!(
+        brushes.is_empty(),
+        "parallel corridors should not produce X-junction"
+    );
 }
 
 #[test]
@@ -262,58 +275,59 @@ fn x_junction_corners_are_symmetric() {
 // ── Room portal ───────────────────────────────────────────────────────────
 
 #[test]
-fn room_portal_produces_opening_brush() {
-    let room = room(0, 0, 0, 64, 64, 128);
+fn room_portal_produces_wall_pieces_around_opening() {
+    let room = room(0, 0, 0, 112, 112, 128);
     let corr = Corridor {
-        start: (64, 32, 0), // on east wall
-        end: (128, 32, 0),
+        start: (112, 56, 0), // on east wall
+        end: (176, 56, 0),
         width: 64,
         height: 80,
     };
     let brushes = build_room_portal(&corr, &room);
-    assert!(!brushes.is_empty(), "room portal must produce opening brush");
-    for b in &brushes {
-        assert_eq!(b.faces.len(), 6);
+    assert_eq!(brushes.len(), 3, "two columns and one lintel expected");
+    for brush in &brushes {
+        assert_eq!(brush.faces.len(), 6);
+        assert!(brush.faces.iter().all(|face| face.texture == "stone_wall"));
     }
 }
 
 #[test]
 fn room_portal_north_wall() {
-    let room = room(32, 0, 0, 64, 64, 128);
+    let room = room(32, 0, 0, 112, 112, 128);
     let corr = Corridor {
-        start: (64, 64, 0), // on north wall
-        end: (64, 128, 0),
+        start: (88, 112, 0), // on north wall
+        end: (88, 176, 0),
         width: 64,
         height: 80,
     };
     let brushes = build_room_portal(&corr, &room);
-    assert!(!brushes.is_empty());
+    assert_eq!(brushes.len(), 3);
 }
 
 #[test]
 fn room_portal_west_wall() {
-    let room = room(64, 32, 0, 64, 64, 128);
+    let room = room(64, 32, 0, 112, 112, 128);
     let corr = Corridor {
-        start: (64, 64, 0), // on west wall
-        end: (0, 64, 0),
+        start: (64, 88, 0), // on west wall
+        end: (0, 88, 0),
         width: 64,
         height: 80,
     };
     let brushes = build_room_portal(&corr, &room);
-    assert!(!brushes.is_empty());
+    assert_eq!(brushes.len(), 3);
 }
 
 #[test]
 fn room_portal_south_wall() {
-    let room = room(32, 64, 0, 64, 64, 128);
+    let room = room(32, 64, 0, 112, 112, 128);
     let corr = Corridor {
-        start: (64, 64, 0), // on south wall
-        end: (64, 0, 0),
+        start: (88, 64, 0), // on south wall
+        end: (88, 0, 0),
         width: 64,
         height: 80,
     };
     let brushes = build_room_portal(&corr, &room);
-    assert!(!brushes.is_empty());
+    assert_eq!(brushes.len(), 3);
 }
 
 // ── build_junction_closures ──────────────────────────────────────────────

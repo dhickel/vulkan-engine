@@ -10,9 +10,13 @@
 //!   ~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/
 //! Tests skip gracefully when tools are absent.
 
-use bsp::{BspLoader, LoadOptions};
-use bsp_generator::{generate, DungeonConfig, MapClass};
+use bsp::{point_contents, BspLoader, LoadOptions, PointContents, QuakeToEngine};
+use bsp_generator::{
+    build_topology, generate, place_rooms, route_all_edges, DungeonConfig, LayoutIntent, MapClass,
+    RoutedIntent, Seed,
+};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -61,10 +65,8 @@ fn unique_tmp(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "bsp-corpus-{label}-{}-{nanos}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("bsp-corpus-{label}-{}-{nanos}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -112,6 +114,16 @@ fn run_stage(
             "{stage_name} failed (exit {code}):\nstdout:\n{stdout}\nstderr:\n{stderr}"
         ));
     }
+    let combined = format!("{stdout}\n{stderr}");
+    let normalized = combined.to_ascii_lowercase();
+    if normalized.contains("warning:")
+        || normalized.contains("no entities in empty space")
+        || normalized.contains("no filling performed")
+    {
+        return Err(format!(
+            "{stage_name} reported a compiler warning:\n{combined}"
+        ));
+    }
     Ok(stdout)
 }
 
@@ -130,8 +142,7 @@ fn compile_generated_map(
     // truncates it.
     let work_map = work_dir.join("generated.map");
     if map_path != work_map {
-        std::fs::copy(map_path, &work_map)
-            .map_err(|e| format!("copy map to work dir: {e}"))?;
+        std::fs::copy(map_path, &work_map).map_err(|e| format!("copy map to work dir: {e}"))?;
     }
 
     // Stage palette and WAD (always needed in work_dir).
@@ -140,8 +151,7 @@ fn compile_generated_map(
         .map_err(|e| format!("copy palette to work dir: {e}"))?;
 
     let work_wad = work_dir.join("cc0_stone_beta.wad");
-    std::fs::copy(wad_path(), &work_wad)
-        .map_err(|e| format!("copy WAD to work dir: {e}"))?;
+    std::fs::copy(wad_path(), &work_wad).map_err(|e| format!("copy WAD to work dir: {e}"))?;
 
     // Stage 1: qbsp
     let _qbsp_stdout = run_stage(
@@ -218,6 +228,141 @@ fn strict_reload(bsp_data: &[u8], lit_data: Option<&[u8]>) -> Result<bsp::BspWor
     };
 
     BspLoader::load(bsp_data, &options).map_err(|report| format!("strict load failed: {report}"))
+}
+
+fn generation_intents(
+    seed: u64,
+    config: &DungeonConfig,
+) -> Result<(LayoutIntent, RoutedIntent), bsp_generator::GeneratorError> {
+    let validated = config.clone().validate()?;
+    let master = Seed::new(seed);
+    let rooms = place_rooms(&validated, &mut master.stage_seed("room-placement").rng())?;
+    let mut routing_rng = master.stage_seed("corridor-routing").rng();
+    let layout = build_topology(rooms, &validated, &mut routing_rng)?;
+    let routed = route_all_edges(&layout.rooms, &layout.edges, &validated, &mut routing_rng)?;
+    Ok((layout, routed))
+}
+
+fn assert_non_solid(world: &bsp::BspWorld, label: &str, quake_point: (i32, i32, i32)) {
+    let transform = QuakeToEngine::default();
+    let engine_point = transform.position(
+        quake_point.0 as f32,
+        quake_point.1 as f32,
+        quake_point.2 as f32,
+    );
+    let contents = point_contents(engine_point, &world.nodes, &world.leaves, &world.planes);
+    assert_ne!(
+        contents,
+        PointContents::Solid,
+        "{label} is solid at Quake point {quake_point:?}"
+    );
+}
+
+fn assert_navigation_witnesses(
+    world: &bsp::BspWorld,
+    layout: &LayoutIntent,
+    routed: &RoutedIntent,
+) {
+    for (index, room) in layout.rooms.iter().enumerate() {
+        let x = room.position.0 + room.dimensions.0 as i32 / 2;
+        let y = room.position.1 + room.dimensions.1 as i32 / 2;
+        assert_non_solid(world, &format!("room {index} player centre"), (x, y, 40));
+        assert_non_solid(
+            world,
+            &format!("room {index} light centre"),
+            (x, y, room.position.2 + room.dimensions.2 as i32 / 2),
+        );
+    }
+
+    for (index, corridor) in routed.corridors.iter().enumerate() {
+        assert_non_solid(
+            world,
+            &format!("corridor {index} centre"),
+            (
+                (corridor.start.0 + corridor.end.0) / 2,
+                (corridor.start.1 + corridor.end.1) / 2,
+                corridor.start.2 + 40,
+            ),
+        );
+    }
+
+    for (index, junction) in routed.junctions.iter().enumerate() {
+        let point = (junction.position.0, junction.position.1);
+        assert_non_solid(
+            world,
+            &format!("junction {index} centre"),
+            (point.0, point.1, junction.position.2 + 40),
+        );
+
+        let horizontal = routed.corridors.iter().any(|corridor| {
+            corridor.start.1 == corridor.end.1
+                && point.1 == corridor.start.1
+                && point.0 >= corridor.start.0.min(corridor.end.0)
+                && point.0 <= corridor.start.0.max(corridor.end.0)
+        });
+        let vertical = routed.corridors.iter().any(|corridor| {
+            corridor.start.0 == corridor.end.0
+                && point.0 == corridor.start.0
+                && point.1 >= corridor.start.1.min(corridor.end.1)
+                && point.1 <= corridor.start.1.max(corridor.end.1)
+        });
+        if horizontal && vertical {
+            for offset_x in [-31, 0, 31] {
+                for offset_y in [-31, 0, 31] {
+                    assert_non_solid(
+                        world,
+                        &format!("junction {index} 64-unit clearance"),
+                        (
+                            point.0 + offset_x,
+                            point.1 + offset_y,
+                            junction.position.2 + 40,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut portal_throats = BTreeSet::new();
+    for room in &layout.rooms {
+        let min_x = room.position.0;
+        let max_x = min_x + room.dimensions.0 as i32;
+        let min_y = room.position.1;
+        let max_y = min_y + room.dimensions.1 as i32;
+        for corridor in &routed.corridors {
+            if corridor.start.2 != room.position.2 {
+                continue;
+            }
+            if corridor.start.1 == corridor.end.1 {
+                let lo = corridor.start.0.min(corridor.end.0);
+                let hi = corridor.start.0.max(corridor.end.0);
+                if corridor.start.1 >= min_y && corridor.start.1 <= max_y {
+                    for wall_x in [min_x, max_x] {
+                        if wall_x >= lo && wall_x <= hi {
+                            portal_throats.insert((wall_x, corridor.start.1, room.position.2 + 40));
+                        }
+                    }
+                }
+            } else {
+                let lo = corridor.start.1.min(corridor.end.1);
+                let hi = corridor.start.1.max(corridor.end.1);
+                if corridor.start.0 >= min_x && corridor.start.0 <= max_x {
+                    for wall_y in [min_y, max_y] {
+                        if wall_y >= lo && wall_y <= hi {
+                            portal_throats.insert((corridor.start.0, wall_y, room.position.2 + 40));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !portal_throats.is_empty(),
+        "generated map has no portal witnesses"
+    );
+    for (index, point) in portal_throats.into_iter().enumerate() {
+        assert_non_solid(world, &format!("portal throat {index}"), point);
+    }
 }
 
 // ── Corpus configurations ─────────────────────────────────────────────────
@@ -418,11 +563,7 @@ fn corpus_execution_all_12_configurations() {
     }
 
     let entries = corpus_entries();
-    assert_eq!(
-        entries.len(),
-        12,
-        "corpus must contain exactly 12 entries"
-    );
+    assert_eq!(entries.len(), 12, "corpus must contain exactly 12 entries");
 
     let mut results: Vec<CorpusResult> = Vec::with_capacity(12);
 
@@ -471,6 +612,8 @@ fn corpus_execution_all_12_configurations() {
         };
 
         let gen_duration = gen_start.elapsed().as_millis() as u64;
+        let (layout, routed) = generation_intents(entry.seed, &entry.config)
+            .unwrap_or_else(|error| panic!("{} intent replay failed: {error:?}", entry.name));
 
         assert!(!map_text.is_empty(), "generated .map must be nonempty");
         let map_hash = sha256(map_text.as_bytes());
@@ -491,7 +634,8 @@ fn corpus_execution_all_12_configurations() {
         let comp_start = std::time::Instant::now();
 
         // 3. Compile through ericw-tools
-        let (bsp_data, lit_data) = match compile_generated_map(&map_path, &staging, &tool_dir, false) {
+        let (bsp_data, lit_data) = match compile_generated_map(&map_path, &staging, &tool_dir, true)
+        {
             Ok(result) => result,
             Err(e) => {
                 let result = CorpusResult {
@@ -543,11 +687,13 @@ fn corpus_execution_all_12_configurations() {
         let bsp_hash = sha256(&bsp_data);
 
         let lit_present = lit_data.is_some();
+        assert!(
+            lit_present,
+            "{}: full compiler profile must produce a .lit companion",
+            entry.name
+        );
         let lit_size = lit_data.as_ref().map(|d| d.len()).unwrap_or(0);
-        let lit_hash = lit_data
-            .as_ref()
-            .map(|d| sha256(d))
-            .unwrap_or_default();
+        let lit_hash = lit_data.as_ref().map(|d| sha256(d)).unwrap_or_default();
 
         // 4. Verify sealed: no .pts pointfile (leak file) in work dir.
         //    .prt portal files are normal BSP2 output and do not indicate leaks.
@@ -560,8 +706,8 @@ fn corpus_execution_all_12_configurations() {
         );
 
         // 5. Strict reload with 0 diagnostics
-        let world = strict_reload(&bsp_data, lit_data.as_deref())
-            .expect("strict reload must succeed");
+        let world =
+            strict_reload(&bsp_data, lit_data.as_deref()).expect("strict reload must succeed");
 
         assert!(
             world.diagnostics.is_empty(),
@@ -573,6 +719,7 @@ fn corpus_execution_all_12_configurations() {
                 .map(|d| (&d.severity, &d.message))
                 .collect::<Vec<_>>()
         );
+        assert_navigation_witnesses(&world, &layout, &routed);
 
         let compiled_faces = world.faces.len();
         let compiled_entities = world.entities.len();
@@ -639,9 +786,7 @@ fn corpus_execution_all_12_configurations() {
 
     // Verify all 12 passed
     let pass_count = results.iter().filter(|r| r.status == "PASS").count();
-    eprintln!(
-        "\n═══ Corpus Summary: {pass_count}/12 passed ═══"
-    );
+    eprintln!("\n═══ Corpus Summary: {pass_count}/12 passed ═══");
     for r in &results {
         eprintln!(
             "  {}: {} (faces={}, entities={})",
@@ -797,10 +942,26 @@ fn write_evidence_json(results: &[CorpusResult]) {
         .filter(|r| r.class == "M2" && r.status == "PASS")
         .collect();
 
-    let m1_max_faces = m1_results.iter().map(|r| r.compiled_faces).max().unwrap_or(0);
-    let m2_max_faces = m2_results.iter().map(|r| r.compiled_faces).max().unwrap_or(0);
-    let m1_max_entities = m1_results.iter().map(|r| r.compiled_entities).max().unwrap_or(0);
-    let m2_max_entities = m2_results.iter().map(|r| r.compiled_entities).max().unwrap_or(0);
+    let m1_max_faces = m1_results
+        .iter()
+        .map(|r| r.compiled_faces)
+        .max()
+        .unwrap_or(0);
+    let m2_max_faces = m2_results
+        .iter()
+        .map(|r| r.compiled_faces)
+        .max()
+        .unwrap_or(0);
+    let m1_max_entities = m1_results
+        .iter()
+        .map(|r| r.compiled_entities)
+        .max()
+        .unwrap_or(0);
+    let m2_max_entities = m2_results
+        .iter()
+        .map(|r| r.compiled_entities)
+        .max()
+        .unwrap_or(0);
     let m2_exceeds_m1 = m2_max_faces > m1_max_faces || m2_max_entities > m1_max_entities;
 
     let per_config: Vec<serde_json::Value> = results
@@ -868,6 +1029,9 @@ fn write_evidence_json(results: &[CorpusResult]) {
         },
         "exit_criteria": {
             "all_12_configurations_pass": pass_count == 12,
+            "full_qbsp_vis_light_pipeline_all_12": results.iter().all(|r| r.lit_present),
+            "compiler_warnings_rejected": true,
+            "compiled_spatial_witnesses_non_solid": true,
             "strict_reload_zero_diagnostics": results.iter().all(|r| r.strict_diagnostics == 0),
             "sealed_no_pointfile": results.iter().all(|r| r.sealed),
             "face_counts_within_ceilings": results.iter().all(|r| {
@@ -880,6 +1044,8 @@ fn write_evidence_json(results: &[CorpusResult]) {
             }),
             "m2_exceeds_m1": m2_exceeds_m1,
             "determinism_generate_twice_compile_twice": true,
+            "runtime_budget_measurements_present": false,
+            "static_batch_ceiling_measured": false,
         },
     });
 
