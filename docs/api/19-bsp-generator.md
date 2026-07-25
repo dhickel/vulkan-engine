@@ -405,7 +405,7 @@ pub fn build_emission(
 ) -> EmissionIntent
 ```
 
-Builds the final emission intent by rasterizing the complete room/corridor open-space union on the 16-unit grid, merging floor and ceiling cells, and emitting walls only on the union boundary. Room portals and 64-unit-clear L/T/X centers are openings by omission rather than overlapping additive brushes. The spawn and room lights are placed inside clear volume above the floor slab. Every resulting brush is a rectangular prism with 6 faces in canonical order.
+Builds the final emission intent with explicit role-bound room shells and a corridor-only 16-unit grid union. Each room gets floor and ceiling slabs plus four full-height wall masks split around omitted portal apertures; corridor floors, ceilings, boundary walls, and 64×64 endpoint chambers remain connected without extending the low corridor ceiling into room interiors. The spawn and room lights are placed inside clear volume above the floor slab. Every resulting brush is a rectangular prism with 6 faces in canonical order.
 
 ### `serialize()`
 

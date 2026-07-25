@@ -33,7 +33,7 @@ src/
   routing.rs      — route_edge(), route_all_edges() — orthogonal A* routing
   junction.rs     — make_brush(), outer-quadrant L/T/X helpers,
                       solid wall pieces around omitted room portals
-  emission.rs     — build_emission() — grid-union shell construction, entity creation
+  emission.rs     — build_emission() — split room shells, corridor-union shell, entities
   serialize.rs    — serialize() — canonical .map text output
 
 tests/
@@ -70,7 +70,7 @@ themes/cc0_stone_beta/
 5. **Exhaustion, not panic**: Every bounded loop has a hard limit and returns a typed error on exhaustion. Never use `unwrap()`, `expect()`, or `panic!()` in production code paths.
 6. **Frozen values**: Constants from the specification are declared as `const` items. Changing a `const` is a contract violation.
 7. **No inline texture generation**: The CC0 Stone Beta theme assets are pre-built by `build.py`. The generator references WAD texture names — it does not produce textures.
-8. **Open space is a union**: Quake brushes are additive. Never expect a corridor brush to carve a room wall. Rasterize connected clear space first and emit only its boundary shell, or split the solid wall around an omitted aperture.
+8. **Hybrid shell construction**: Quake brushes are additive. Emit each room's floor, ceiling, and four walls explicitly; split wall masks around omitted routed apertures. Use a corridor-only open-cell union for floors, ceilings, boundary walls, and 64×64 endpoint chambers so turns remain clear without creating scene-spanning room slabs.
 9. **Point entities occupy clear volume**: Spawn Z includes floor-slab thickness plus the 24-unit eye offset; lights use the midpoint between floor-slab top and ceiling-slab bottom.
 
 ## Testing

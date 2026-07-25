@@ -1,11 +1,11 @@
 //! Build the final brush/entity emission intent for a generated BSP dungeon.
 //!
-//! Quake brushes are additive, so overlapping a corridor with a solid room
-//! wall cannot carve a portal. Emission instead rasterizes the complete clear
-//! floor plan on the 16-unit construction grid, then emits floors, ceilings,
-//! and only the boundary wall pieces around that union. Room portals and
-//! L/T/X junction openings therefore exist by omission rather than by fake
-//! subtraction brushes.
+//! Rooms are emitted as explicit floor, ceiling, and four wall slabs.  Wall
+//! cells intersected by a routed corridor are omitted from the wall mask, so
+//! portals are real apertures rather than additive "opening" brushes.
+//! Corridors use a grid union only for their own shell: this keeps turns and
+//! L/T/X junctions open without merging room floors or ceilings into broad
+//! scene-spanning slabs.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,9 +15,11 @@ use crate::intent::{
 };
 use crate::junction;
 
+/// CC0 Stone Beta role bindings from `themes/cc0_stone_beta/theme.toml`.
 const FLOOR_TEXTURE: &str = "stone_floor";
-const CEILING_TEXTURE: &str = "stone_ceiling";
 const WALL_TEXTURE: &str = "stone_wall";
+const CEILING_TEXTURE: &str = "stone_ceiling";
+
 const SLAB: i32 = CONSTRUCTION_QUANTUM as i32;
 const EYE_OFFSET: i32 = 24;
 
@@ -27,6 +29,22 @@ type Cell = (i32, i32);
 enum Orientation {
     Horizontal,
     Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomWall {
+    North,
+    South,
+    East,
+    West,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Opening {
+    tangent_min: i32,
+    tangent_max: i32,
+    bottom: i32,
+    top: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,8 +58,19 @@ struct GridRect {
 
 /// Build the complete worldspawn brush set and point entities.
 pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionIntent {
-    let open_cells = build_open_cells(layout, routed);
-    let brushes = build_shell_brushes(&open_cells, layout);
+    let mut brushes = Vec::new();
+    let corridor_cells = build_corridor_cells(&routed.corridors);
+
+    for room in &layout.rooms {
+        brushes.extend(build_room_brushes(room, &routed.corridors, &corridor_cells));
+    }
+
+    let room_clear_cells = build_room_clear_cells(layout);
+    brushes.extend(build_corridor_slabs(&corridor_cells, &room_clear_cells));
+    brushes.extend(build_corridor_boundary_walls(
+        &corridor_cells,
+        &room_clear_cells,
+    ));
 
     for (index, brush) in brushes.iter().enumerate() {
         debug_assert_eq!(brush.faces.len(), 6, "brush {index} is not a box");
@@ -109,8 +138,196 @@ fn light_origin(room: &RoomIntent) -> (i32, i32, i32) {
     )
 }
 
+// ── Room shell ────────────────────────────────────────────────────────────
+
+fn build_room_brushes(
+    room: &RoomIntent,
+    corridors: &[Corridor],
+    corridor_cells: &BTreeMap<Cell, i32>,
+) -> Vec<Brush> {
+    let (x, y, z) = room.position;
+    let dx = room.dimensions.0 as i32;
+    let dy = room.dimensions.1 as i32;
+    let dz = room.dimensions.2 as i32;
+    let mut brushes = Vec::new();
+
+    push_box(
+        &mut brushes,
+        (x, y, z),
+        (x + dx, y + dy, z + SLAB),
+        FLOOR_TEXTURE,
+    );
+    push_box(
+        &mut brushes,
+        (x, y, z + dz - SLAB),
+        (x + dx, y + dy, z + dz),
+        CEILING_TEXTURE,
+    );
+
+    for wall in [
+        RoomWall::North,
+        RoomWall::South,
+        RoomWall::East,
+        RoomWall::West,
+    ] {
+        let openings = openings_for_wall(room, corridors, wall);
+        brushes.extend(build_split_wall(room, wall, &openings, corridor_cells));
+    }
+
+    brushes
+}
+
+fn openings_for_wall(room: &RoomIntent, corridors: &[Corridor], wall: RoomWall) -> Vec<Opening> {
+    let min_x = room.position.0;
+    let max_x = min_x + room.dimensions.0 as i32;
+    let min_y = room.position.1;
+    let max_y = min_y + room.dimensions.1 as i32;
+    let room_bottom = room.position.2;
+    let room_ceiling_bottom = room_bottom + room.dimensions.2 as i32 - SLAB;
+    let (wall_coord, tangent_min, tangent_max, expected_orientation) = match wall {
+        RoomWall::West => (min_x, min_y, max_y, Orientation::Horizontal),
+        RoomWall::East => (max_x, min_y, max_y, Orientation::Horizontal),
+        RoomWall::South => (min_y, min_x, max_x, Orientation::Vertical),
+        RoomWall::North => (max_y, min_x, max_x, Orientation::Vertical),
+    };
+
+    let mut openings = Vec::new();
+    for corridor in corridors {
+        let orientation = corridor_orientation(corridor);
+        if orientation != expected_orientation {
+            continue;
+        }
+
+        let (line_min, line_max, tangent_center) = match orientation {
+            Orientation::Horizontal => (
+                corridor.start.0.min(corridor.end.0),
+                corridor.start.0.max(corridor.end.0),
+                corridor.start.1,
+            ),
+            Orientation::Vertical => (
+                corridor.start.1.min(corridor.end.1),
+                corridor.start.1.max(corridor.end.1),
+                corridor.start.0,
+            ),
+        };
+        if wall_coord < line_min || wall_coord > line_max {
+            continue;
+        }
+
+        let half = corridor.width as i32 / 2;
+        let opening = Opening {
+            tangent_min: (tangent_center - half).max(tangent_min + SLAB),
+            tangent_max: (tangent_center + half).min(tangent_max - SLAB),
+            bottom: (corridor.start.2.min(corridor.end.2) + SLAB).max(room_bottom + SLAB),
+            top: (corridor.start.2.min(corridor.end.2) + SLAB + corridor.height as i32)
+                .min(room_ceiling_bottom),
+        };
+        if opening.tangent_min < opening.tangent_max && opening.bottom < opening.top {
+            openings.push(opening);
+        }
+    }
+
+    openings.sort_unstable_by_key(|opening| {
+        (
+            opening.tangent_min,
+            opening.tangent_max,
+            opening.bottom,
+            opening.top,
+        )
+    });
+    openings.dedup();
+    openings
+}
+
+fn build_split_wall(
+    room: &RoomIntent,
+    wall: RoomWall,
+    openings: &[Opening],
+    corridor_cells: &BTreeMap<Cell, i32>,
+) -> Vec<Brush> {
+    let min_x = room.position.0;
+    let max_x = min_x + room.dimensions.0 as i32;
+    let min_y = room.position.1;
+    let max_y = min_y + room.dimensions.1 as i32;
+    let z0 = room.position.2;
+    let z1 = z0 + room.dimensions.2 as i32;
+    let (tangent_min, tangent_max) = match wall {
+        RoomWall::West | RoomWall::East => (min_y, max_y),
+        RoomWall::South | RoomWall::North => (min_x, max_x),
+    };
+
+    let mut solid_cells = BTreeMap::new();
+    for z_cell in z0.div_euclid(SLAB)..z1.div_euclid(SLAB) {
+        for tangent_cell in tangent_min.div_euclid(SLAB)..tangent_max.div_euclid(SLAB) {
+            solid_cells.insert((tangent_cell, z_cell), 0);
+        }
+    }
+    for opening in openings {
+        for z_cell in opening.bottom.div_euclid(SLAB)..opening.top.div_euclid(SLAB) {
+            for tangent_cell in
+                opening.tangent_min.div_euclid(SLAB)..opening.tangent_max.div_euclid(SLAB)
+            {
+                solid_cells.remove(&(tangent_cell, z_cell));
+            }
+        }
+    }
+
+    // Endpoint turning chambers can touch an endpoint room wall even when the
+    // segment centerline itself turns just outside it. Preserve the routed
+    // 64×64 clear footprint at the compiled boundary by subtracting every
+    // corridor-open wall cell, not only centerline-normal portal intervals.
+    // The room's floor and lintel still bound the aperture vertically.
+    let opening_bottom = z0 + SLAB;
+    let opening_limit = z1 - SLAB;
+    for tangent_cell in tangent_min.div_euclid(SLAB)..tangent_max.div_euclid(SLAB) {
+        let wall_cell = match wall {
+            RoomWall::West => (min_x.div_euclid(SLAB), tangent_cell),
+            RoomWall::East => (max_x.div_euclid(SLAB) - 1, tangent_cell),
+            RoomWall::South => (tangent_cell, min_y.div_euclid(SLAB)),
+            RoomWall::North => (tangent_cell, max_y.div_euclid(SLAB) - 1),
+        };
+        let Some(&corridor_ceiling) = corridor_cells.get(&wall_cell) else {
+            continue;
+        };
+        let opening_top = corridor_ceiling.min(opening_limit);
+        for z_cell in opening_bottom.div_euclid(SLAB)..opening_top.div_euclid(SLAB) {
+            solid_cells.remove(&(tangent_cell, z_cell));
+        }
+    }
+
+    let mut brushes = Vec::new();
+    for rect in merge_cells(&solid_cells) {
+        let tangent0 = rect.x0 * SLAB;
+        let tangent1 = rect.x1 * SLAB;
+        let wall_z0 = rect.y0 * SLAB;
+        let wall_z1 = rect.y1 * SLAB;
+        let (min, max) = match wall {
+            RoomWall::West => (
+                (min_x, tangent0, wall_z0),
+                (min_x + SLAB, tangent1, wall_z1),
+            ),
+            RoomWall::East => (
+                (max_x - SLAB, tangent0, wall_z0),
+                (max_x, tangent1, wall_z1),
+            ),
+            RoomWall::South => (
+                (tangent0, min_y, wall_z0),
+                (tangent1, min_y + SLAB, wall_z1),
+            ),
+            RoomWall::North => (
+                (tangent0, max_y - SLAB, wall_z0),
+                (tangent1, max_y, wall_z1),
+            ),
+        };
+        push_box(&mut brushes, min, max, WALL_TEXTURE);
+    }
+    brushes
+}
+
+// ── Corridor shell ────────────────────────────────────────────────────────
+
 fn corridor_orientation(corridor: &Corridor) -> Orientation {
-    if (corridor.end.0 - corridor.start.0).abs() >= (corridor.end.1 - corridor.start.1).abs() {
+    if corridor.start.1 == corridor.end.1 {
         Orientation::Horizontal
     } else {
         Orientation::Vertical
@@ -140,15 +357,13 @@ fn mark_open_rect(
     }
 }
 
-fn build_open_cells(layout: &LayoutIntent, routed: &RoutedIntent) -> BTreeMap<Cell, i32> {
+fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
     let mut cells = BTreeMap::new();
 
-    // Corridors contribute their 64-unit clear rectangles. Endpoint squares
-    // fill the full turn chamber, so short L/T/X segments cannot leave a solid
-    // quadrant in the junction centre.
-    for corridor in &routed.corridors {
+    for corridor in corridors {
         let half = corridor.width as i32 / 2;
-        let ceiling_bottom = corridor.start.2 + SLAB + corridor.height as i32;
+        let floor_z = corridor.start.2.min(corridor.end.2);
+        let ceiling_bottom = floor_z + SLAB + corridor.height as i32;
         match corridor_orientation(corridor) {
             Orientation::Horizontal => mark_open_rect(
                 &mut cells,
@@ -167,6 +382,9 @@ fn build_open_cells(layout: &LayoutIntent, routed: &RoutedIntent) -> BTreeMap<Ce
                 ceiling_bottom,
             ),
         }
+
+        // A full endpoint square preserves the complete 64×64 turning chamber
+        // at L/T/X junctions instead of leaving a blocked inner quadrant.
         for endpoint in [corridor.start, corridor.end] {
             mark_open_rect(
                 &mut cells,
@@ -179,31 +397,45 @@ fn build_open_cells(layout: &LayoutIntent, routed: &RoutedIntent) -> BTreeMap<Ce
         }
     }
 
-    // Room clear interiors override the lower corridor ceiling wherever a
-    // route crosses a room. Wall cells remain absent unless a corridor portal
-    // explicitly marks them open.
-    for room in &layout.rooms {
-        mark_open_rect(
-            &mut cells,
-            room.position.0 + SLAB,
-            room.position.1 + SLAB,
-            room.position.0 + room.dimensions.0 as i32 - SLAB,
-            room.position.1 + room.dimensions.1 as i32 - SLAB,
-            room.position.2 + room.dimensions.2 as i32 - SLAB,
-        );
-    }
-
     cells
 }
 
-fn build_shell_brushes(open_cells: &BTreeMap<Cell, i32>, layout: &LayoutIntent) -> Vec<Brush> {
-    if open_cells.is_empty() {
+fn build_room_clear_cells(layout: &LayoutIntent) -> BTreeSet<Cell> {
+    let mut cells = BTreeSet::new();
+    for room in &layout.rooms {
+        let min_x = room.position.0 + SLAB;
+        let min_y = room.position.1 + SLAB;
+        let max_x = room.position.0 + room.dimensions.0 as i32 - SLAB;
+        let max_y = room.position.1 + room.dimensions.1 as i32 - SLAB;
+        for gy in min_y.div_euclid(SLAB)..max_y.div_euclid(SLAB) {
+            for gx in min_x.div_euclid(SLAB)..max_x.div_euclid(SLAB) {
+                cells.insert((gx, gy));
+            }
+        }
+    }
+    cells
+}
+
+fn build_corridor_slabs(
+    corridor_cells: &BTreeMap<Cell, i32>,
+    room_clear_cells: &BTreeSet<Cell>,
+) -> Vec<Brush> {
+    if corridor_cells.is_empty() {
         return Vec::new();
     }
-    let floor_z = layout.rooms.first().map_or(0, |room| room.position.2);
-    let mut brushes = Vec::new();
+    let floor_z = corridor_cells
+        .values()
+        .map(|ceiling_bottom| ceiling_bottom - SLAB - crate::routing::CORRIDOR_HEIGHT as i32)
+        .min()
+        .unwrap_or(0);
+    let shell_cells: BTreeMap<Cell, i32> = corridor_cells
+        .iter()
+        .filter(|(cell, _)| !room_clear_cells.contains(cell))
+        .map(|(&cell, &ceiling_bottom)| (cell, ceiling_bottom))
+        .collect();
 
-    let floor_cells: BTreeMap<Cell, i32> = open_cells
+    let mut brushes = Vec::new();
+    let floor_cells: BTreeMap<Cell, i32> = shell_cells
         .keys()
         .copied()
         .map(|cell| (cell, floor_z))
@@ -211,13 +443,12 @@ fn build_shell_brushes(open_cells: &BTreeMap<Cell, i32>, layout: &LayoutIntent) 
     for rect in merge_cells(&floor_cells) {
         push_box(
             &mut brushes,
-            (rect.x0 * SLAB, rect.y0 * SLAB, floor_z),
-            (rect.x1 * SLAB, rect.y1 * SLAB, floor_z + SLAB),
+            (rect.x0 * SLAB, rect.y0 * SLAB, rect.value),
+            (rect.x1 * SLAB, rect.y1 * SLAB, rect.value + SLAB),
             FLOOR_TEXTURE,
         );
     }
-
-    for rect in merge_cells(open_cells) {
+    for rect in merge_cells(&shell_cells) {
         push_box(
             &mut brushes,
             (rect.x0 * SLAB, rect.y0 * SLAB, rect.value),
@@ -225,11 +456,54 @@ fn build_shell_brushes(open_cells: &BTreeMap<Cell, i32>, layout: &LayoutIntent) 
             CEILING_TEXTURE,
         );
     }
-
-    brushes.extend(build_boundary_walls(open_cells, floor_z));
-    brushes.extend(build_height_transition_walls(open_cells));
     brushes
 }
+
+fn build_corridor_boundary_walls(
+    corridor_cells: &BTreeMap<Cell, i32>,
+    room_clear_cells: &BTreeSet<Cell>,
+) -> Vec<Brush> {
+    if corridor_cells.is_empty() {
+        return Vec::new();
+    }
+    let floor_z = corridor_cells
+        .values()
+        .map(|ceiling_bottom| ceiling_bottom - SLAB - crate::routing::CORRIDOR_HEIGHT as i32)
+        .min()
+        .unwrap_or(0);
+    let mut wall_cells: BTreeMap<Cell, i32> = BTreeMap::new();
+
+    for (&cell, &ceiling_bottom) in corridor_cells {
+        let top = ceiling_bottom + SLAB;
+        for neighbor in [
+            (cell.0 - 1, cell.1),
+            (cell.0 + 1, cell.1),
+            (cell.0, cell.1 - 1),
+            (cell.0, cell.1 + 1),
+        ] {
+            if corridor_cells.contains_key(&neighbor) || room_clear_cells.contains(&neighbor) {
+                continue;
+            }
+            wall_cells
+                .entry(neighbor)
+                .and_modify(|height| *height = (*height).max(top))
+                .or_insert(top);
+        }
+    }
+
+    let mut brushes = Vec::new();
+    for rect in merge_cells(&wall_cells) {
+        push_box(
+            &mut brushes,
+            (rect.x0 * SLAB, rect.y0 * SLAB, floor_z),
+            (rect.x1 * SLAB, rect.y1 * SLAB, rect.value),
+            WALL_TEXTURE,
+        );
+    }
+    brushes
+}
+
+// ── Grid rectangle merging ────────────────────────────────────────────────
 
 fn merge_cells(cells: &BTreeMap<Cell, i32>) -> Vec<GridRect> {
     let mut rows: BTreeMap<i32, Vec<(i32, i32)>> = BTreeMap::new();
@@ -239,7 +513,7 @@ fn merge_cells(cells: &BTreeMap<Cell, i32>) -> Vec<GridRect> {
 
     let mut active: BTreeMap<(i32, i32, i32), GridRect> = BTreeMap::new();
     let mut finished = Vec::new();
-    let mut previous_y: Option<i32> = None;
+    let mut previous_y = None;
 
     for (y, mut row) in rows {
         row.sort_unstable();
@@ -287,126 +561,6 @@ fn merge_cells(cells: &BTreeMap<Cell, i32>) -> Vec<GridRect> {
     finished
 }
 
-fn build_boundary_walls(open_cells: &BTreeMap<Cell, i32>, floor_z: i32) -> Vec<Brush> {
-    let mut vertical: BTreeMap<(i32, i32), BTreeSet<i32>> = BTreeMap::new();
-    let mut horizontal: BTreeMap<(i32, i32), BTreeSet<i32>> = BTreeMap::new();
-
-    for (&(x, y), &ceiling_bottom) in open_cells {
-        let top = ceiling_bottom + SLAB;
-        if !open_cells.contains_key(&(x - 1, y)) {
-            vertical.entry((x - 1, top)).or_default().insert(y);
-        }
-        if !open_cells.contains_key(&(x + 1, y)) {
-            vertical.entry((x + 1, top)).or_default().insert(y);
-        }
-        if !open_cells.contains_key(&(x, y - 1)) {
-            horizontal.entry((y - 1, top)).or_default().insert(x);
-        }
-        if !open_cells.contains_key(&(x, y + 1)) {
-            horizontal.entry((y + 1, top)).or_default().insert(x);
-        }
-    }
-
-    let mut brushes = Vec::new();
-    for ((wall_x, top), coordinates) in vertical {
-        for (start, end) in contiguous_ranges(coordinates) {
-            push_box(
-                &mut brushes,
-                (wall_x * SLAB, start * SLAB, floor_z),
-                ((wall_x + 1) * SLAB, end * SLAB, top),
-                WALL_TEXTURE,
-            );
-        }
-    }
-    for ((wall_y, top), coordinates) in horizontal {
-        for (start, end) in contiguous_ranges(coordinates) {
-            push_box(
-                &mut brushes,
-                (start * SLAB, wall_y * SLAB, floor_z),
-                (end * SLAB, (wall_y + 1) * SLAB, top),
-                WALL_TEXTURE,
-            );
-        }
-    }
-    brushes
-}
-
-fn build_height_transition_walls(open_cells: &BTreeMap<Cell, i32>) -> Vec<Brush> {
-    let mut vertical: BTreeMap<(i32, i32, i32), BTreeSet<i32>> = BTreeMap::new();
-    let mut horizontal: BTreeMap<(i32, i32, i32), BTreeSet<i32>> = BTreeMap::new();
-
-    for (&(x, y), &high) in open_cells {
-        for (neighbor, vertical_wall) in [
-            ((x - 1, y), Some((x - 1, y))),
-            ((x + 1, y), Some((x + 1, y))),
-            ((x, y - 1), None),
-            ((x, y + 1), None),
-        ] {
-            let Some(&low) = open_cells.get(&neighbor) else {
-                continue;
-            };
-            if high <= low {
-                continue;
-            }
-            let top = high + SLAB;
-            if let Some((wall_x, coordinate)) = vertical_wall {
-                vertical
-                    .entry((wall_x, low, top))
-                    .or_default()
-                    .insert(coordinate);
-            } else {
-                horizontal
-                    .entry((neighbor.1, low, top))
-                    .or_default()
-                    .insert(neighbor.0);
-            }
-        }
-    }
-
-    let mut brushes = Vec::new();
-    for ((wall_x, z0, z1), coordinates) in vertical {
-        for (start, end) in contiguous_ranges(coordinates) {
-            push_box(
-                &mut brushes,
-                (wall_x * SLAB, start * SLAB, z0),
-                ((wall_x + 1) * SLAB, end * SLAB, z1),
-                WALL_TEXTURE,
-            );
-        }
-    }
-    for ((wall_y, z0, z1), coordinates) in horizontal {
-        for (start, end) in contiguous_ranges(coordinates) {
-            push_box(
-                &mut brushes,
-                (start * SLAB, wall_y * SLAB, z0),
-                (end * SLAB, (wall_y + 1) * SLAB, z1),
-                WALL_TEXTURE,
-            );
-        }
-    }
-    brushes
-}
-
-fn contiguous_ranges(values: BTreeSet<i32>) -> Vec<(i32, i32)> {
-    let mut ranges = Vec::new();
-    let mut iter = values.into_iter();
-    let Some(mut start) = iter.next() else {
-        return ranges;
-    };
-    let mut end = start + 1;
-    for value in iter {
-        if value == end {
-            end += 1;
-        } else {
-            ranges.push((start, end));
-            start = value;
-            end = value + 1;
-        }
-    }
-    ranges.push((start, end));
-    ranges
-}
-
 fn push_box(brushes: &mut Vec<Brush>, min: (i32, i32, i32), max: (i32, i32, i32), texture: &str) {
     if min.0 < max.0 && min.1 < max.1 && min.2 < max.2 {
         brushes.push(junction::make_brush(min, max, texture));
@@ -433,77 +587,98 @@ mod tests {
         }
     }
 
-    fn point_in_open_cell(cells: &BTreeMap<Cell, i32>, point: (i32, i32)) -> bool {
-        let candidates = [
-            (point.0.div_euclid(SLAB), point.1.div_euclid(SLAB)),
-            ((point.0 - 1).div_euclid(SLAB), point.1.div_euclid(SLAB)),
-            (point.0.div_euclid(SLAB), (point.1 - 1).div_euclid(SLAB)),
-            (
-                (point.0 - 1).div_euclid(SLAB),
-                (point.1 - 1).div_euclid(SLAB),
-            ),
+    fn bounds(brush: &Brush) -> ((i32, i32, i32), (i32, i32, i32)) {
+        let mut min = (i32::MAX, i32::MAX, i32::MAX);
+        let mut max = (i32::MIN, i32::MIN, i32::MIN);
+        for face in &brush.faces {
+            for &(x, y, z) in &face.plane_points {
+                min = (min.0.min(x), min.1.min(y), min.2.min(z));
+                max = (max.0.max(x), max.1.max(y), max.2.max(z));
+            }
+        }
+        (min, max)
+    }
+
+    fn contains(brush: &Brush, point: (i32, i32, i32)) -> bool {
+        let (min, max) = bounds(brush);
+        point.0 > min.0
+            && point.0 < max.0
+            && point.1 > min.1
+            && point.1 < max.1
+            && point.2 > min.2
+            && point.2 < max.2
+    }
+
+    #[test]
+    fn isolated_room_emits_six_role_correct_brushes() {
+        let room = room(0, 0, 0, 112, 112, 192);
+        let brushes = build_room_brushes(&room, &[], &BTreeMap::new());
+        assert_eq!(brushes.len(), 6);
+        assert_eq!(bounds(&brushes[0]), ((0, 0, 0), (112, 112, 16)));
+        assert_eq!(bounds(&brushes[1]), ((0, 0, 176), (112, 112, 192)));
+        assert!(brushes[0]
+            .faces
+            .iter()
+            .all(|face| face.texture == FLOOR_TEXTURE));
+        assert!(brushes[1]
+            .faces
+            .iter()
+            .all(|face| face.texture == CEILING_TEXTURE));
+        assert!(brushes[2..]
+            .iter()
+            .all(|brush| brush.faces.iter().all(|face| face.texture == WALL_TEXTURE)));
+    }
+
+    #[test]
+    fn portal_wall_mask_omits_only_the_aperture() {
+        let room = room(0, 0, 0, 112, 112, 192);
+        let corridor = corridor_h(112, 64, 0, 96);
+        let corridor_cells = build_corridor_cells(std::slice::from_ref(&corridor));
+        let brushes = build_room_brushes(&room, &[corridor], &corridor_cells);
+
+        assert!(brushes.iter().all(|brush| !contains(brush, (104, 64, 40))));
+        assert!(brushes.iter().any(|brush| contains(brush, (104, 8, 40))));
+        assert!(brushes.iter().any(|brush| contains(brush, (104, 64, 120))));
+        assert!(brushes.iter().any(|brush| contains(brush, (104, 64, 8))));
+    }
+
+    #[test]
+    fn corridor_ceiling_stops_at_room_clear_interior() {
+        let layout = LayoutIntent {
+            rooms: vec![room(0, 0, 0, 112, 112, 192)],
+            edges: Vec::new(),
+            loop_count: 0,
+        };
+        let cells = build_corridor_cells(&[corridor_h(112, 64, 0, 96)]);
+        let room_clear = build_room_clear_cells(&layout);
+        let slabs = build_corridor_slabs(&cells, &room_clear);
+
+        assert!(slabs
+            .iter()
+            .filter(|brush| brush.faces[0].texture == CEILING_TEXTURE)
+            .all(|brush| bounds(brush).0 .0 >= 96));
+    }
+
+    #[test]
+    fn l_turn_keeps_full_junction_square_clear() {
+        let corridors = vec![
+            corridor_h(0, 0, 0, 64),
+            Corridor {
+                start: (64, 0, 0),
+                end: (64, 64, 0),
+                width: 64,
+                height: 80,
+            },
         ];
-        candidates.iter().all(|cell| cells.contains_key(cell))
-    }
-
-    #[test]
-    fn room_centre_is_open() {
-        let layout = LayoutIntent {
-            rooms: vec![room(0, 0, 0, 112, 112, 192)],
-            edges: Vec::new(),
-            loop_count: 0,
-        };
-        let routed = RoutedIntent {
-            corridors: Vec::new(),
-            junctions: Vec::new(),
-        };
-        let cells = build_open_cells(&layout, &routed);
-        assert!(point_in_open_cell(&cells, (56, 56)));
-    }
-
-    #[test]
-    fn corridor_portal_clears_room_wall() {
-        let layout = LayoutIntent {
-            rooms: vec![room(0, 0, 0, 112, 112, 192)],
-            edges: vec![(0, 0)],
-            loop_count: 0,
-        };
-        let routed = RoutedIntent {
-            corridors: vec![corridor_h(112, 64, 0, 96)],
-            junctions: Vec::new(),
-        };
-        let cells = build_open_cells(&layout, &routed);
-        assert!(point_in_open_cell(&cells, (104, 64)));
-        assert!(point_in_open_cell(&cells, (112, 64)));
-    }
-
-    #[test]
-    fn l_junction_keeps_full_central_square_open() {
-        let layout = LayoutIntent {
-            rooms: Vec::new(),
-            edges: Vec::new(),
-            loop_count: 0,
-        };
-        let routed = RoutedIntent {
-            corridors: vec![
-                corridor_h(0, 0, 0, 64),
-                Corridor {
-                    start: (64, 0, 0),
-                    end: (64, 64, 0),
-                    width: 64,
-                    height: 80,
-                },
-            ],
-            junctions: Vec::new(),
-        };
-        let cells = build_open_cells(&layout, &routed);
-        for point in [(48, -16), (64, 0), (80, 16)] {
-            assert!(point_in_open_cell(&cells, point), "closed point {point:?}");
+        let cells = build_corridor_cells(&corridors);
+        let walls = build_corridor_boundary_walls(&cells, &BTreeSet::new());
+        for point in [(48, -16, 40), (64, 0, 40), (80, 16, 40)] {
+            assert!(walls.iter().all(|brush| !contains(brush, point)));
         }
     }
 
     #[test]
-    fn spawn_and_light_are_above_floor_slab() {
+    fn spawn_and_light_are_in_clear_volume() {
         let room = room(0, 0, 0, 112, 112, 192);
         assert_eq!(spawn_origin(&room), (56, 56, 40));
         assert_eq!(light_origin(&room), (56, 56, 96));

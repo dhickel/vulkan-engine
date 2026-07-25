@@ -511,37 +511,14 @@ fn bsp_player_start(extracted: &bsp::extract::ExtractedBsp, fallback: Vec3) -> V
     start
 }
 
-/// Compute a camera orientation that faces the interior of the map from the
-/// starting position. The Quake→engine transform maps Quake +Y to engine -Z,
-/// so map interiors are generally in the +Z direction from a spawn at the
-/// -Z edge. A 180° yaw faces +Z (toward Quake +Y = map interior).
-fn bsp_headless_camera(start_pos: Vec3, extracted: &bsp::extract::ExtractedBsp) -> Camera {
-    // Compute map center from face geometry bounds, then position camera
-    // at center XY, head-height Y, facing +Z toward map interior.
-    let mut min = Vec3::splat(f32::MAX);
-    let mut max = Vec3::splat(f32::MIN);
-    for face in &extracted.face_geometries {
-        for v in &face.vertices {
-            min = min.min(*v);
-            max = max.max(*v);
-        }
-    }
-
-    let pos = if min.x < max.x {
-        let center = (min + max) * 0.5;
-        // Use map center XZ, head-height Y (1.8m above floor = 2.0 in engine units).
-        Vec3::new(center.x, 2.0, center.z)
-    } else {
-        start_pos
-    };
-
-    let mut camera = Camera::new(pos);
-    // Face the +Z direction (toward map interior in engine space).
-    camera.update_rotation(std::f32::consts::PI, 0.0);
-    log::info!(
-        "BSP headless camera: pos={:?} (bounds: min={:?}, max={:?})",
-        pos, min, max
-    );
+/// Start headless and MCP views at the authored player spawn.
+///
+/// A BSP's geometric bounds center is not guaranteed to be part of its sealed
+/// interior; generated layouts commonly leave that point in exterior void.
+/// The point entity is the authoritative safe camera origin.
+fn bsp_headless_camera(start_pos: Vec3, _extracted: &bsp::extract::ExtractedBsp) -> Camera {
+    let camera = Camera::new(start_pos);
+    log::info!("BSP headless camera: pos={start_pos:?} (info_player_start)");
     camera
 }
 

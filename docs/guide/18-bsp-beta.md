@@ -125,7 +125,7 @@ cargo run -p bsp_beta -- \
 
 ### MCP Headless Server
 
-`--mcp` mounts the BSP in a 1920×1080 headless renderer and then serves newline-delimited MCP JSON-RPC 2.0 over stdin/stdout. It implies headless mode and never creates a window or WSI surface. Stdout contains only JSON-RPC responses; engine diagnostics remain on stderr.
+`--mcp` mounts the BSP in a 1920×1080 headless renderer and then serves newline-delimited MCP JSON-RPC 2.0 over stdin/stdout. It implies headless mode and never creates a window or WSI surface. The initial camera uses the authored `info_player_start` origin rather than the BSP bounds center, which may be exterior void. Stdout contains only JSON-RPC responses; engine diagnostics remain on stderr.
 
 ```bash
 cargo run -p bsp_beta -- \

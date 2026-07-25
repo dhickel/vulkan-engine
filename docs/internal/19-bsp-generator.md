@@ -188,15 +188,15 @@ The CC0 Stone Beta theme provides four visual texture roles plus one compiler-on
 
 Texture role bindings are hard-coded constants in `emission.rs` (not yet loaded from `theme.toml` at runtime — the beta uses a single theme). Every emitted visible face uses a theme-backed texture; `generator_brick` is not a valid role.
 
-### Floor-Plan Union and Brush Construction
+### Explicit Room Shell and Corridor Union
 
-Emission rasterizes one open floor plan on the 16-unit construction grid rather than emitting independently sealed room and corridor shells:
+Emission keeps room role surfaces explicit while using a corridor-only 16-unit grid union for turns and intersections:
 
-1. Corridor rectangles and full 64×64 endpoint squares mark open cells at the 80-unit corridor ceiling.
-2. Room clear interiors mark open cells at room ceiling height and override lower corridor ceilings where they overlap.
-3. Equal-height cells are deterministically merged into rectangular 16-unit floor and ceiling slabs.
-4. Wall boxes are emitted only along the boundary of the complete open-cell union. Portal throats and L/T/X centers are therefore real openings created by omission, not attempted subtraction.
-5. Height-transition wall boxes fill only the volume above a lower corridor ceiling where it meets a taller room, preserving the full 80-unit portal headroom.
+1. Every room emits one `stone_floor` slab at Z `0..16` and one `stone_ceiling` slab at `(ceiling-16)..ceiling`.
+2. Each north/south/east/west room wall starts as a full-height 16-unit `stone_wall` mask. Portal rectangles and any routed 64×64 endpoint footprint intersecting that wall are removed, then the remaining cells are deterministically merged into non-overlapping wall boxes. No brush occupies an aperture.
+3. Corridor centerline rectangles and full endpoint squares mark the corridor-open union. Floor and ceiling cells overlapping a room clear interior are omitted so the low corridor ceiling does not protrude into a tall room.
+4. Corridor floors occupy Z `0..16`; corridor ceilings occupy Z `96..112`, leaving the frozen 80-unit clear headroom. Boundary wall cells surround only the corridor union and preserve open L/T/X centers.
+5. Compiler tests validate the resulting BSP, not just source intent: room, point-entity, corridor, portal, and full 64×64 junction witnesses must all be non-solid.
 
 Rooms have a minimum outer span of 112 units (7 quanta), which leaves an 80-unit clear interior after two 16-unit wall cells: enough for a 64-unit portal plus one quantum of total lateral margin. All emitted primitives remain rectangular six-face brushes in canonical face order.
 
