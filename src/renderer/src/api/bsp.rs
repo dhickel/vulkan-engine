@@ -77,31 +77,104 @@ pub struct PreparedBspMount {
     pub resource_lease: Option<BspResourceLease>,
 }
 
-/// Opaque renderer-owned receipt for a BSP mount detached from publication.
+// ── Lease-bearing mount wrappers ─────────────────────────────────────
+
+/// Published BSP mount active in `SceneWorld`.
 ///
-/// The receipt proves that scene submission no longer retains the mount state.
-/// It does **not** enqueue GPU resource destruction: that requires the
-/// renderer's cache and submission-serial context, which `Scene` does not
-/// own. Dropping this receipt is therefore not fence-aware retirement.
+/// Carries the full GPU resource lease and scene-state projection.
+/// The lease moves with the mount through every ownership transition.
 #[cfg(feature = "bsp")]
-#[must_use = "a detached BSP mount receipt documents removal from scene publication"]
-pub struct RetiredBspMount {
-    _state: BspMountState,
+#[derive(Debug)]
+pub struct PublishedBspMount {
+    pub(crate) state: BspMountState,
+    pub(crate) lease: BspResourceLease,
 }
 
 #[cfg(feature = "bsp")]
-impl std::fmt::Debug for RetiredBspMount {
+impl PublishedBspMount {
+    pub(crate) fn new(mut state: BspMountState, lease: BspResourceLease) -> Self {
+        state.active = true;
+        Self { state, lease }
+    }
+}
+
+/// Detached BSP mount removed from scene publication but not yet retired.
+///
+/// Holds both the PVS state and the resource lease. The renderer must
+/// accept this through a retirement preflight before GPU destruction.
+#[cfg(feature = "bsp")]
+#[must_use = "a detached BSP mount must be retired through the renderer"]
+#[derive(Debug)]
+pub struct DetachedBspMount {
+    pub(crate) state: BspMountState,
+    pub(crate) lease: BspResourceLease,
+}
+
+#[cfg(feature = "bsp")]
+impl DetachedBspMount {
+    pub(crate) fn from_published(mut published: PublishedBspMount) -> Self {
+        published.state.deactivate();
+        Self {
+            state: published.state,
+            lease: published.lease,
+        }
+    }
+}
+
+// ── Retirement permit, acknowledgement, and rejection ────────────────
+
+/// Single-use permit binding a detached lease to a verified retirement closure.
+///
+/// Created by the renderer preflight; consumed exactly once by finalization.
+/// A duplicate, stale, or mismatched permit is an invariant violation.
+#[cfg(feature = "bsp")]
+#[must_use = "a retirement permit must be finalized"]
+pub struct BspRetirementPermit {
+    arena_id: u64,
+    retire_after: crate::data::retirement::FrameSerial,
+    mesh_count: usize,
+    texture_count: usize,
+    material_count: usize,
+}
+
+#[cfg(feature = "bsp")]
+impl std::fmt::Debug for BspRetirementPermit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("RetiredBspMount")
+        f.debug_struct("BspRetirementPermit")
+            .field("arena_id", &self.arena_id)
+            .field("retire_after", &self.retire_after)
+            .finish_non_exhaustive()
     }
 }
 
+/// Typed acknowledgement that a BSP mount's resources have been enqueued
+/// for fence-aware GPU destruction.
+///
+/// The acknowledgement records the common retirement serial and the
+/// tombstoned resource counts. Borrowed defaults are never counted.
 #[cfg(feature = "bsp")]
-impl RetiredBspMount {
-    pub(crate) fn from_scene_state(mut state: BspMountState) -> Self {
-        state.deactivate();
-        Self { _state: state }
-    }
+#[derive(Debug, Clone)]
+pub struct BspRetirementAcknowledgement {
+    pub arena_id: u64,
+    pub retire_after: crate::data::retirement::FrameSerial,
+    pub mesh_count: usize,
+    pub texture_count: usize,
+    pub material_count: usize,
+    pub lightmap_atlas_count: usize,
+}
+
+/// Recoverable rejection from a BSP retirement preflight.
+///
+/// The lease, scene state, handles, generations, and queues are unchanged.
+/// The caller may retry or use the mount elsewhere.
+#[cfg(feature = "bsp")]
+#[derive(Debug)]
+pub struct BspRetirementRejection {
+    pub reason: String,
+    /// The intact lease, returned for retry or alternative disposal.
+    pub lease: BspResourceLease,
+    /// The deactivated mount state (still holds PVS data for diagnostics).
+    pub state: BspMountState,
 }
 
 #[cfg(feature = "bsp")]
@@ -451,38 +524,77 @@ impl PreparedBspMount {
         }
     }
 
-    /// Consume this prepared lease into the scene-owned mount state.
+    /// Consume this prepared lease into a published BSP mount.
     ///
     /// This is crate-visible because only [`crate::api::scene::Scene`] may
     /// publish a prepared mount. The lease is deliberately move-only: a
     /// coordinator cannot retain a second copy after publication.
-    pub(crate) fn into_scene_state(self) -> BspMountState {
+    pub(crate) fn into_published(self) -> PublishedBspMount {
         let PreparedBspMount {
             mut mount_state,
             leaf_membership,
             resource_lease,
             ..
         } = self;
-        mount_state.activate();
         mount_state.set_leaf_membership(leaf_membership);
-        // Preserve arena identity for frame-values and draw-command routing.
-        mount_state.arena_id = resource_lease.as_ref().map(|l| l.arena_id);
-        mount_state
+        let lease = resource_lease.unwrap_or_else(|| {
+            // Empty mounts (no renderable batches) may publish without a lease.
+            assert!(
+                mount_state.mounted_batches.is_empty(),
+                "PreparedBspMount with renderable batches must carry a resource lease"
+            );
+            BspResourceLease {
+                arena_id: 0,
+                mesh_handles: Vec::new(),
+                texture_handles: Vec::new(),
+                material_handles: Vec::new(),
+            }
+        });
+        mount_state.arena_id = Some(lease.arena_id);
+        PublishedBspMount::new(mount_state, lease)
+    }
+
+    /// Consume this prepared mount without publication, returning a detached
+    /// mount suitable for direct renderer retirement.
+    ///
+    /// The mount was never visible to scene submission. The returned
+    /// `DetachedBspMount` retains the full resource lease.
+    pub fn into_detached(self) -> DetachedBspMount {
+        let PreparedBspMount {
+            mut mount_state,
+            leaf_membership,
+            resource_lease,
+            ..
+        } = self;
+        mount_state.set_leaf_membership(leaf_membership);
+        let lease = resource_lease.unwrap_or_else(|| {
+            assert!(
+                mount_state.mounted_batches.is_empty(),
+                "PreparedBspMount with renderable batches must carry a resource lease"
+            );
+            BspResourceLease {
+                arena_id: 0,
+                mesh_handles: Vec::new(),
+                texture_handles: Vec::new(),
+                material_handles: Vec::new(),
+            }
+        });
+        mount_state.arena_id = Some(lease.arena_id);
+        mount_state.deactivate();
+        DetachedBspMount {
+            state: mount_state,
+            lease,
+        }
     }
 
     /// Detach an unpublished mount from runtime ownership.
     ///
-    /// The mount was never visible to scene submission. The opaque receipt
-    /// prevents integration code from reaching into renderer-owned handles,
-    /// but does not itself enqueue fence-aware GPU retirement.
-    pub fn retire(self) -> RetiredBspMount {
-        let PreparedBspMount {
-            mut mount_state,
-            leaf_membership,
-            ..
-        } = self;
-        mount_state.set_leaf_membership(leaf_membership);
-        RetiredBspMount::from_scene_state(mount_state)
+    /// Deprecated: prefer [`PreparedBspMount::into_detached`] or
+    /// renderer cancellation. This compat path discards the resource lease
+    /// and must only be used by legacy callers that never uploaded GPU data.
+    #[deprecated(since = "0.14.0", note = "use into_detached() or renderer cancellation")]
+    pub fn retire(self) -> DetachedBspMount {
+        self.into_detached()
     }
 
     /// Build a `PreparedBspMount` from canonical mounted batch records.
@@ -495,7 +607,9 @@ impl PreparedBspMount {
     /// not mask a failed nonempty upload.
     ///
     /// When `resource_lease` is `Some`, material handles in mounted batches
-    /// are validated through the authoritative surface cache lookup.
+    /// are validated through the lease. When `None`, the mount must be empty
+    /// (no renderable geometry); publication will fail for a nonempty mount
+    /// without a lease.
     pub fn from_canonical(
         mut mount_state: BspMountState,
         mounted_batches: Vec<MountedBspBatch>,
@@ -1654,7 +1768,7 @@ impl Default for PreparedBspMount {
     }
 }
 
-// ── BSP Upload Request / Mount Lease ──────────────────────────────────
+// ── BSP Upload Request ───────────────────────────────────────────────
 
 /// Upload request for BSP resources.
 ///
@@ -1668,26 +1782,6 @@ pub struct BspUploadRequest {
     /// Authorized resource bytes (palette data, WAD replacement textures).
     /// Reserved for future phases; ignored in Phase 04.
     pub _resource_bytes: Vec<u8>,
-}
-
-/// Conceptual mount lease state machine.
-///
-/// A complete implementation transitions through `pending` → `ready` →
-/// `active` → `retiring` → `retired`. The current Scene detachment path only
-/// establishes publication removal; it does not yet drive `Retiring`/`Retired`
-/// through a renderer fence-aware queue.
-#[cfg(feature = "bsp")]
-pub enum BspMountLease {
-    /// Upload in progress; generation token guards against cancellation.
-    Pending { generation: u64 },
-    /// Upload complete, ready to attach to scene.
-    Ready(PreparedBspMount),
-    /// Attached to scene and receiving frame updates.
-    Active,
-    /// Unmounted; intended future state for renderer-held fence retirement.
-    Retiring,
-    /// Intended future state after renderer-owned GPU payload destruction.
-    Retired,
 }
 
 #[cfg(test)]
@@ -1812,13 +1906,24 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     #[test]
-    fn bsp_mount_lease_states() {
-        // Verify enum variants exist and can be constructed.
-        let _pending = BspMountLease::Pending { generation: 1 };
-        let _ready = BspMountLease::Ready(PreparedBspMount::new());
-        let _active = BspMountLease::Active;
-        let _retiring = BspMountLease::Retiring;
-        let _retired = BspMountLease::Retired;
+    fn prepared_bsp_mount_lease_ownership_transitions() {
+        // Verify that the lease-bearing types exist and can be constructed.
+        let lease = BspResourceLease {
+            arena_id: 1,
+            mesh_handles: vec![],
+            texture_handles: vec![],
+            material_handles: vec![],
+        };
+        let _published = PublishedBspMount::new(BspMountState::new(), lease);
+        // Detached mount requires a lease
+        let lease2 = BspResourceLease {
+            arena_id: 2,
+            mesh_handles: vec![],
+            texture_handles: vec![],
+            material_handles: vec![],
+        };
+        let published = PublishedBspMount::new(BspMountState::new(), lease2);
+        let _detached = DetachedBspMount::from_published(published);
     }
 
     // ── Phase 06: Canonical mount tests ────────────────────────────────
@@ -1920,5 +2025,69 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("batch count mismatch"));
+    }
+
+    // ── Phase 04: Retirement type tests ───────────────────────────────
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn retirement_permit_and_ack_types_exist() {
+        // Verify the retirement types can be constructed.
+        let _permit = BspRetirementPermit {
+            arena_id: 1,
+            retire_after: crate::data::retirement::FrameSerial::new(5),
+            mesh_count: 3,
+            texture_count: 2,
+            material_count: 1,
+        };
+        let _ack = BspRetirementAcknowledgement {
+            arena_id: 1,
+            retire_after: crate::data::retirement::FrameSerial::new(5),
+            mesh_count: 3,
+            texture_count: 2,
+            material_count: 1,
+            lightmap_atlas_count: 1,
+        };
+        let _rejection = BspRetirementRejection {
+            reason: "test rejection".to_string(),
+            lease: BspResourceLease {
+                arena_id: 1,
+                mesh_handles: vec![],
+                texture_handles: vec![],
+                material_handles: vec![],
+            },
+            state: BspMountState::new(),
+        };
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn published_mount_roundtrips_through_retire() {
+        let lease = BspResourceLease {
+            arena_id: 42,
+            mesh_handles: vec![MeshHandle::new(1, 0)],
+            texture_handles: vec![],
+            material_handles: vec![],
+        };
+        let mut state = BspMountState::new();
+        state.activate();
+        let published = PublishedBspMount::new(state, lease);
+
+        let detached = DetachedBspMount::from_published(published);
+        assert_eq!(detached.lease.arena_id, 42);
+        assert!(!detached.state.active);
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn detach_empty_published_yields_detached_with_lease() {
+        // A published mount from an empty PreparedBspMount should still
+        // produce a detached mount (with arena_id 0).
+        let prepared = PreparedBspMount::new();
+        let published = prepared.into_published();
+        assert_eq!(published.lease.arena_id, 0);
+
+        let detached = DetachedBspMount::from_published(published);
+        assert_eq!(detached.lease.arena_id, 0);
     }
 }

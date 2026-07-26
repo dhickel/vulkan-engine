@@ -805,6 +805,127 @@ impl Renderer {
         }
     }
 
+    /// Retire a detached BSP mount through the renderer's fence-aware queue.
+    ///
+    /// Preflight validates every owned handle, computes the common `retire_after`
+    /// serial (`max(last_referenced, latest_submitted)`), extracts the arena
+    /// closure from the surface cache, and enqueues the closure for deferred GPU
+    /// destruction. On success, returns a [`BspRetirementAcknowledgement`].
+    ///
+    /// On preflight failure, returns a [`BspRetirementRejection`] that preserves
+    /// the intact lease and mount state.
+    ///
+    /// Available only with the `bsp` feature.
+    #[cfg(feature = "bsp")]
+    pub fn retire_bsp_mount(
+        &mut self,
+        detached: crate::api::bsp::DetachedBspMount,
+    ) -> Result<
+        crate::api::bsp::BspRetirementAcknowledgement,
+        crate::api::bsp::BspRetirementRejection,
+    > {
+        let core = &mut self.runtime.core;
+        let crate::api::bsp::DetachedBspMount {
+            state: mount_state,
+            lease,
+        } = detached;
+
+        // ── Preflight: compute retire_after ────────────────────────
+        let retire_after = crate::data::retirement::FrameSerial::new(
+            core.latest_submitted_serial.max(0),
+        );
+
+        let mesh_count = lease.mesh_handles.len();
+        let texture_count = lease.texture_handles.len();
+        let material_count = lease.material_handles.len();
+
+        // Validate every mesh handle.
+        match core.data_cache.mesh_cache.lock() {
+            Ok(mesh_cache) => {
+                for handle in &lease.mesh_handles {
+                    if mesh_cache.get_id(*handle).is_err() {
+                        return Err(bsp_retire_rejection(
+                            format!("stale or invalid mesh handle {:?}", handle),
+                            lease,
+                            mount_state,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(bsp_retire_rejection(
+                    "mesh_cache lock poisoned".to_string(),
+                    lease,
+                    mount_state,
+                ));
+            }
+        }
+
+        // Validate every texture handle.
+        match core.data_cache.texture_cache.lock() {
+            Ok(texture_cache) => {
+                for handle in &lease.texture_handles {
+                    if texture_cache.get_texture(*handle).is_err() {
+                        return Err(bsp_retire_rejection(
+                            format!("stale or invalid texture handle {:?}", handle),
+                            lease,
+                            mount_state,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(bsp_retire_rejection(
+                    "texture_cache lock poisoned".to_string(),
+                    lease,
+                    mount_state,
+                ));
+            }
+        }
+
+        // Extract the retirement closure from the surface cache.
+        let closure = match core.data_cache.bsp_surface_cache.lock() {
+            Ok(mut surface_cache) => {
+                match surface_cache.extract_retirement_closure(lease.arena_id) {
+                    Some(c) => c,
+                    None => {
+                        return Err(bsp_retire_rejection(
+                            format!("arena {} has no active payloads", lease.arena_id),
+                            lease,
+                            mount_state,
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                return Err(bsp_retire_rejection(
+                    "bsp_surface_cache lock poisoned".to_string(),
+                    lease,
+                    mount_state,
+                ));
+            }
+        };
+
+        let arena_id = closure.arena_id;
+        let lightmap_atlas_count = if closure.lightmap_atlas.is_some() { 1 } else { 0 };
+
+        // Enqueue the closure for deferred GPU destruction.
+        core.bsp_retirement_queue.enqueue(
+            crate::data::retirement::RetirementClass::BspArenaRetirement,
+            retire_after,
+            closure,
+        );
+
+        Ok(crate::api::bsp::BspRetirementAcknowledgement {
+            arena_id,
+            retire_after,
+            mesh_count,
+            texture_count,
+            material_count,
+            lightmap_atlas_count,
+        })
+    }
+
     /// Thread: Main
     /// May Stall: No
     pub fn pump_asset_tasks(&mut self, max_steps: usize) -> Result<usize, RendererError> {
@@ -1399,6 +1520,19 @@ impl Renderer {
                 failure.listener, failure.sequence, failure.message
             );
         }
+    }
+}
+
+#[cfg(feature = "bsp")]
+fn bsp_retire_rejection(
+    reason: String,
+    lease: crate::api::bsp::BspResourceLease,
+    state: crate::scene::bsp_visibility::BspMountState,
+) -> crate::api::bsp::BspRetirementRejection {
+    crate::api::bsp::BspRetirementRejection {
+        reason,
+        lease,
+        state,
     }
 }
 

@@ -199,6 +199,13 @@ pub(crate) struct FrameLifecycleContext<'a> {
     pub material_retirement_queue: &'a mut GpuRetirementQueue<MaterialRetiredPayload>,
     pub texture_retirement_queue: &'a mut GpuRetirementQueue<TextureRetiredPayload>,
     pub bounds_retirement_queue: &'a mut GpuRetirementQueue<MeshGeometryDto>,
+    /// BSP arena retirement queue (only present when `bsp` feature is active).
+    #[cfg(feature = "bsp")]
+    pub bsp_retirement_queue:
+        &'a mut GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
+    /// Allocator for GPU resource destruction (needed by BSP reaping).
+    #[cfg(feature = "bsp")]
+    pub allocator: &'a std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
     pub data_cache: &'a Arc<VkDataCache>,
     pub gpu_timing: &'a mut GpuTimingState,
 }
@@ -406,6 +413,101 @@ pub(crate) fn reap_texture_retirement(
 }
 
 // ---------------------------------------------------------------------------
+// BSP retirement reaping
+// ---------------------------------------------------------------------------
+
+/// Reap the BSP retirement queue up through `latest_completed_serial`.
+///
+/// Acquires the BSP surface cache lock **before** removing records from the
+/// queue so lock poisoning preserves every queued payload. Destroys GPU
+/// resources in dependency order, then releases mesh/texture cache slots.
+#[cfg(feature = "bsp")]
+pub(crate) fn reap_bsp_retirement(
+    latest_completed_serial: u64,
+    bsp_retirement_queue: &mut GpuRetirementQueue<
+        crate::data::retirement::BspRetirementClosure,
+    >,
+    data_cache: &Arc<VkDataCache>,
+    device: &ash::Device,
+    allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+) -> Result<(), String> {
+    let completed = FrameSerial::new(latest_completed_serial);
+
+    let closure_guard = |closure: &crate::data::retirement::BspRetirementClosure| {
+        // Validate before commit: the allocator must be lockable.
+        let alloc_guard = allocator
+            .lock()
+            .map_err(|_| "allocator lock poisoned during BSP retirement reaping".to_string())?;
+        let _ = (closure, alloc_guard);
+        Ok::<_, String>(())
+    };
+
+    let reaped = bsp_retirement_queue
+        .try_reap(completed, |eligible| {
+            for record in eligible {
+                debug_assert_eq!(
+                    record.class,
+                    crate::data::retirement::RetirementClass::BspArenaRetirement
+                );
+                closure_guard(&record.payload)?;
+            }
+            Ok::<_, String>(())
+        })
+        .map_err(|err| match err {
+            TryReapError::CompletionRegressed { previous, observed } => {
+                format!(
+                    "BSP retirement completion regression: previous={previous:?} observed={observed:?}"
+                )
+            }
+            TryReapError::ClosureFailed(e) => e,
+        })?;
+
+    if reaped.is_empty() {
+        return Ok(());
+    }
+
+    // Now commit: destroy GPU resources and release cache slots.
+    let alloc_guard = allocator
+        .lock()
+        .map_err(|_| "allocator lock poisoned during BSP retirement destruction".to_string())?;
+
+    let mut surface_cache = data_cache
+        .bsp_surface_cache
+        .lock()
+        .map_err(|_| "bsp_surface_cache lock poisoned during BSP retirement reaping".to_string())?;
+
+    let mut mesh_handles_to_free: Vec<crate::data::handles::MeshHandle> = Vec::new();
+    let mut texture_handles_to_free: Vec<crate::data::handles::TextureHandle> = Vec::new();
+
+    for record in reaped {
+        let (meshes, textures) =
+            surface_cache.destroy_closure_owned(record.payload, device, &alloc_guard);
+        mesh_handles_to_free.extend(meshes);
+        texture_handles_to_free.extend(textures);
+    }
+
+    // Release mesh handles through the mesh cache.
+    if !mesh_handles_to_free.is_empty() {
+        let mut mesh_cache = data_cache.mesh_cache.lock().map_err(|_| {
+            "mesh_cache lock poisoned during BSP retirement reaping".to_string()
+        })?;
+        mesh_cache.deallocate_ids(&mesh_handles_to_free);
+    }
+
+    // Release texture handles through the texture cache.
+    if !texture_handles_to_free.is_empty() {
+        let mut texture_cache = data_cache.texture_cache.lock().map_err(|_| {
+            "texture_cache lock poisoned during BSP retirement reaping".to_string()
+        })?;
+        for handle in texture_handles_to_free {
+            texture_cache.deallocate_texture(handle);
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Swapchain image acquisition
 // ---------------------------------------------------------------------------
 
@@ -519,6 +621,16 @@ pub(crate) fn acquire_frame_slot(
         ctx.data_cache,
     )?;
     reap_bounds_retirement(*ctx.latest_completed_serial, ctx.bounds_retirement_queue)?;
+
+    // Reap BSP arena retirements when the `bsp` feature is active.
+    #[cfg(feature = "bsp")]
+    reap_bsp_retirement(
+        *ctx.latest_completed_serial,
+        ctx.bsp_retirement_queue,
+        ctx.data_cache,
+        ctx.device,
+        ctx.allocator,
+    )?;
 
     // GPU timing resolution for the retiring slot
     resolve_gpu_timing_for_slot(ctx.device, ctx.gpu_timing, frame_slot_index);

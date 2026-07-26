@@ -179,6 +179,10 @@ pub struct VkRenderCore {
     pub(crate) texture_retirement_queue: GpuRetirementQueue<TextureRetiredPayload>,
     /// CPU bounds/geometry metadata retained to the same fence boundary.
     pub(crate) bounds_retirement_queue: GpuRetirementQueue<MeshGeometryDto>,
+    /// BSP arena retirement queue — holds complete BspRetirementClosure payloads
+    /// awaiting GPU fence completion.
+    #[cfg(feature = "bsp")]
+    pub(crate) bsp_retirement_queue: GpuRetirementQueue<crate::data::retirement::BspRetirementClosure>,
     pub(crate) gpu_timing: GpuTimingState,
     frame_timing_snapshot: DebugTimingSnapshot,
     pub(crate) due_frame_captures: Vec<DueFrameCapture>,
@@ -1480,6 +1484,8 @@ impl VkRenderCore {
             material_retirement_queue: GpuRetirementQueue::new(),
             texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -1685,6 +1691,8 @@ impl VkRenderCore {
             material_retirement_queue: GpuRetirementQueue::new(),
             texture_retirement_queue: GpuRetirementQueue::new(),
             bounds_retirement_queue: GpuRetirementQueue::new(),
+            #[cfg(feature = "bsp")]
+            bsp_retirement_queue: GpuRetirementQueue::new(),
             gpu_timing,
             frame_timing_snapshot: DebugTimingSnapshot::default(),
             due_frame_captures: Vec::new(),
@@ -2627,6 +2635,10 @@ impl VkRenderCore {
                 material_retirement_queue: &mut self.material_retirement_queue,
                 texture_retirement_queue: &mut self.texture_retirement_queue,
                 bounds_retirement_queue: &mut self.bounds_retirement_queue,
+                #[cfg(feature = "bsp")]
+                bsp_retirement_queue: &mut self.bsp_retirement_queue,
+                #[cfg(feature = "bsp")]
+                allocator: &self.allocator,
                 data_cache: &self.data_cache,
                 gpu_timing: &mut self.gpu_timing,
             };

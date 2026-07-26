@@ -59,10 +59,11 @@ pub use snapshot::{
 };
 pub use source_link::{
     build_identity_records, canonical_hash, fingerprint_key, reconcile_overrides,
-    AtlasPolicy, BspOverrideLayer, BspPersistenceEnvelope, BspSourceLink, BspSourceReference,
-    CanonicalFloat, CompanionHashes, CompilerProvenance, EntityIdentityEntry, EntityIdentityRecord,
-    EntityOverride, ExternalModelOverride, ImportLightCalibration, ImportPolicy, LightOverride,
-    ModelMappingIdentity, MutableBehaviorState, OverrideReconciliation, ReconciliationEvent,
+    AtlasPolicy, BspOverrideLayer, BspPersistenceEnvelope, BspSemanticClosure, BspSourceLink,
+    BspSourceReference, CanonicalFloat, CompanionHashes, CompilerProvenance,
+    EntityIdentityEntry, EntityIdentityRecord, EntityOverride, ExternalModelOverride,
+    ImportLightCalibration, ImportPolicy, LightOverride, ModelMappingIdentity,
+    MutableBehaviorState, OverrideReconciliation, PbrClosureEntry, ReconciliationEvent,
     SchemaVersion, SerializedButtonState, SerializedDoorState, SerializedPlatformState,
-    SerializedTimer, SerializedTriggerState, SourceLinkError,
+    SerializedTimer, SerializedTriggerState, SourceLinkError, WadClosureEntry,
 };

@@ -1201,25 +1201,31 @@ impl Scene {
     /// PVS-culled before frustum culling. Replacing an existing mount detaches
     /// it from scene publication before publishing the new lease.
     ///
+    /// The caller must retire the returned [`DetachedBspMount`] through the
+    /// renderer to complete fence-aware GPU resource teardown.
+    ///
     /// Thread: Any
     /// May Stall: No
     #[cfg(feature = "bsp")]
-    pub fn set_bsp_mount(&mut self, mount: crate::api::bsp::PreparedBspMount) {
-        let _retired = self.retire_bsp_mount();
-        self.world.set_bsp_mount(mount.into_scene_state());
+    pub fn set_bsp_mount(
+        &mut self,
+        mount: crate::api::bsp::PreparedBspMount,
+    ) -> Option<crate::api::bsp::DetachedBspMount> {
+        let detached = self.retire_bsp_mount();
+        self.world.set_bsp_mount(mount.into_published());
+        detached
     }
 
     /// Retire the currently published BSP mount.
     ///
-    /// The returned opaque receipt proves that scene submission no longer
-    /// retains the mount. It does not itself enqueue fence-aware GPU teardown;
-    /// that requires renderer cache and submission-serial ownership outside
-    /// this `Scene` facade.
+    /// The returned [`DetachedBspMount`] retains the full resource lease.
+    /// The caller must pass it to the renderer's retirement path for
+    /// fence-aware GPU teardown. Dropping the detached mount leaks GPU
+    /// resources.
     #[cfg(feature = "bsp")]
-    pub fn retire_bsp_mount(&mut self) -> Option<crate::api::bsp::RetiredBspMount> {
-        self.world
-            .retire_bsp_mount()
-            .map(crate::api::bsp::RetiredBspMount::from_scene_state)
+    #[must_use = "a detached BSP mount must be retired through the renderer"]
+    pub fn retire_bsp_mount(&mut self) -> Option<crate::api::bsp::DetachedBspMount> {
+        self.world.retire_bsp_mount()
     }
 
     /// Return whether this scene currently publishes a BSP mount.
@@ -3731,12 +3737,12 @@ mod tests {
         scene.set_bsp_mount(crate::api::bsp::PreparedBspMount::new());
         assert!(scene.has_bsp_mount());
 
-        let receipt = scene
+        let detached = scene
             .retire_bsp_mount()
-            .expect("published BSP mount must return an opaque detach receipt");
+            .expect("published BSP mount must return a detached mount");
         assert!(!scene.has_bsp_mount());
         assert!(scene.retire_bsp_mount().is_none());
-        drop(receipt);
+        drop(detached);
     }
 
     #[test]

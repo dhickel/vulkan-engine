@@ -3201,6 +3201,7 @@ impl VkDestroyable for VkDescLayoutCache {
 
 /// GPU resources for a BSP lightmap atlas.
 #[cfg(feature = "bsp")]
+#[derive(Debug)]
 pub struct BspLightmapAtlasGpu {
     /// RGBA8 2D-array image.
     pub image: vk::Image,
@@ -3238,6 +3239,7 @@ impl BspLightmapAtlasGpu {
 }
 
 #[cfg(feature = "bsp")]
+#[derive(Debug)]
 pub struct BspSurfaceUboGpu {
     pub buffer: vk::Buffer,
     pub allocation: vk_mem::Allocation,
@@ -3770,6 +3772,71 @@ impl BspSurfaceCache {
     /// Clear the active arena (unmount).
     pub fn clear_active_arena(&mut self) {
         self.active_arena_id = None;
+    }
+
+    /// Extract a [`BspRetirementClosure`] from the given arena.
+    ///
+    /// The caller receives ownership of every GPU resource owned by the
+    /// arena. Material slots are invalidated immediately (generation bump),
+    /// and the arena record is removed. Mesh and texture handles are listed
+    /// in the closure for deferred deallocation through their respective
+    /// caches.
+    ///
+    /// Returns `None` when the arena does not exist or has no payloads.
+    pub fn extract_retirement_closure(
+        &mut self,
+        arena_id: u64,
+    ) -> Option<crate::data::retirement::BspRetirementClosure> {
+        let arena = self.arenas.remove(&arena_id)?;
+
+        // Invalidate all material slots immediately.
+        for slot in arena.material_slots.iter().copied() {
+            self.remove_by_slot(slot);
+        }
+
+        Some(crate::data::retirement::BspRetirementClosure {
+            arena_id,
+            lightmap_atlas: arena.lightmap_atlas,
+            surface_ubo: arena.surface_ubo,
+            frame_values_ubo: arena.frame_values_ubo,
+            material_desc_pool: arena.material_desc_pool,
+            frame_values_desc_pool: arena.frame_values_desc_pool,
+            material_slots: arena.material_slots,
+            mesh_handles: arena.mesh_handles,
+            texture_handles: arena.texture_handles,
+        })
+    }
+
+    /// Destroy a [`BspRetirementClosure`] by taking ownership.
+    ///
+    /// This is the fence-reap path: every GPU resource is destroyed in
+    /// dependency order, and mesh/texture handles are returned for the
+    /// caller to deallocate through their respective caches.
+    pub fn destroy_closure_owned(
+        &mut self,
+        closure: crate::data::retirement::BspRetirementClosure,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) -> (Vec<crate::data::handles::MeshHandle>, Vec<crate::data::handles::TextureHandle>) {
+        // Pool destruction releases all descriptor sets allocated from them.
+        if let Some(pool) = closure.material_desc_pool {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        if let Some(pool) = closure.frame_values_desc_pool {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        // Destroy UBOs.
+        if let Some(mut ubo) = closure.surface_ubo {
+            ubo.destroy(allocator);
+        }
+        if let Some(mut ubo) = closure.frame_values_ubo {
+            ubo.destroy(allocator);
+        }
+        // Destroy atlas.
+        if let Some(mut atlas) = closure.lightmap_atlas {
+            atlas.destroy(device, allocator);
+        }
+        (closure.mesh_handles, closure.texture_handles)
     }
 
     // ── Legacy compatibility methods (used by draw/mount code) ─────

@@ -149,6 +149,15 @@ pub struct BspSourceLink {
     /// activation, light-style table, timers/counters.
     #[serde(default, skip_serializing_if = "MutableBehaviorState::is_empty")]
     pub mutable_behavior: MutableBehaviorState,
+    /// Semantic closure: ordered WAD entries and PBR companion-resolution
+    /// closure (Phase 02). These are semantic truth, never stage paths.
+    ///
+    /// Serialization of this field is blocked on the Scope Gate
+    /// (coordinator.rs is not an approved Phase 02 write target).
+    /// The field is declared for typed validation only until the gate
+    /// is resolved.
+    #[serde(default, skip_serializing_if = "BspSemanticClosure::is_empty")]
+    pub semantic_closure: BspSemanticClosure,
 }
 
 impl BspSourceLink {
@@ -164,13 +173,14 @@ impl BspSourceLink {
             entity_identity_records: Vec::new(),
             overrides: BspOverrideLayer::default(),
             mutable_behavior: MutableBehaviorState::default(),
+            semantic_closure: BspSemanticClosure::default(),
         }
     }
 
     /// Validate that no runtime handles or banned fields are present.
     ///
     /// Banned fields: GPU handles, descriptors, allocations, cache slots,
-    /// transient generation handles, generated geometry.
+    /// transient generation handles, generated geometry, stage paths.
     pub fn validate_no_runtime_handles(&self) -> Result<(), SourceLinkError> {
         let mut stable_handles = std::collections::BTreeSet::new();
         for record in &self.entity_identity_records {
@@ -196,6 +206,8 @@ impl BspSourceLink {
                 });
             }
         }
+        // Phase 02: Validate semantic closure has no stage-path values.
+        self.semantic_closure.validate_semantic()?;
         Ok(())
     }
 }
@@ -692,6 +704,110 @@ pub struct EntityIdentityEntry {
     pub classname: String,
     /// Origin in engine space.
     pub origin: [f32; 3],
+}
+
+// ── Semantic Closure Types (Phase 02) ───────────────────────────────
+
+/// A typed WAD entry in the source-link closure.
+///
+/// WAD declaration order and sanitized basenames determine texture
+/// lookup precedence. These values are semantic, never stage paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WadClosureEntry {
+    /// Declaration ordinal (preserves WAD lookup order).
+    pub ordinal: u32,
+    /// Sanitized basename.
+    pub basename: String,
+    /// SHA-256 hex of WAD content.
+    pub content_hash: String,
+}
+
+impl WadClosureEntry {
+    /// Reject any value that looks like a stage path or transport root.
+    pub fn validate_semantic(&self) -> Result<(), SourceLinkError> {
+        if self.basename.contains('/')
+            || self.basename.contains('\\')
+            || self.basename.contains("direct-import-staging")
+        {
+            return Err(SourceLinkError::InvalidPayload {
+                reason: format!(
+                    "WAD closure entry basename '{}' looks like a stage or transport path",
+                    self.basename
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A typed PBR companion entry in the source-link closure.
+///
+/// Every entry is traceable to a Phase 02 source slot and one concrete
+/// root. These values are semantic, never stage paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PbrClosureEntry {
+    /// Source slot index from the authoritative miptex table.
+    pub source_slot: u32,
+    /// Texture identity (sanitized miptex name from the slot).
+    pub texture_identity: String,
+    /// Companion kind: "normal" or "gloss".
+    pub kind: String,
+    /// Match mode: "exact", "ascii-insensitive", or "absent".
+    pub match_mode: String,
+    /// Whether the companion is present.
+    pub present: bool,
+    /// SHA-256 hex of companion content (empty string if absent).
+    pub content_hash: String,
+}
+
+impl PbrClosureEntry {
+    /// Reject any value that looks like a stage path or transport root.
+    pub fn validate_semantic(&self) -> Result<(), SourceLinkError> {
+        if self.texture_identity.contains('/')
+            || self.texture_identity.contains('\\')
+            || self.texture_identity.contains("direct-import-staging")
+        {
+            return Err(SourceLinkError::InvalidPayload {
+                reason: format!(
+                    "PBR closure entry texture_identity '{}' looks like a stage or transport path",
+                    self.texture_identity
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A typed semantic closure for the BSP source link.
+///
+/// Contains ordered WAD entries and PBR companion-resolution closure.
+/// These are the semantic truth; stage paths and random root labels
+/// must never appear here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BspSemanticClosure {
+    /// Ordered WAD entries in declaration order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wad_entries: Vec<WadClosureEntry>,
+    /// PBR companion-resolution closure, sorted by source_slot then kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pbr_entries: Vec<PbrClosureEntry>,
+}
+
+impl BspSemanticClosure {
+    /// Validate that every entry is semantic (no stage paths).
+    pub fn validate_semantic(&self) -> Result<(), SourceLinkError> {
+        for entry in &self.wad_entries {
+            entry.validate_semantic()?;
+        }
+        for entry in &self.pbr_entries {
+            entry.validate_semantic()?;
+        }
+        Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.wad_entries.is_empty() && self.pbr_entries.is_empty()
+    }
 }
 
 // ── Source-Link Errors ───────────────────────────────────────────────

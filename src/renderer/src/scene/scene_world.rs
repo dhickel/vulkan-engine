@@ -174,9 +174,11 @@ pub struct SceneWorld {
     /// from `build_submission`. Descendants are tested independently. Enabled
     /// by default.
     pub enable_frustum_culling: bool,
-    /// BSP mount state for PVS-aware culling, light selection, and depth-sorting.
+    /// Published BSP mount for PVS-aware culling, light selection, and
+    /// depth-sorting. `None` when no mount is active. The lease moves with
+    /// the mount through every ownership transition.
     #[cfg(feature = "bsp")]
-    pub(crate) bsp_mount: crate::scene::bsp_visibility::BspMountState,
+    pub(crate) bsp_mount: Option<crate::api::bsp::PublishedBspMount>,
 }
 
 impl Default for SceneWorld {
@@ -202,7 +204,7 @@ impl SceneWorld {
             shadow_casting_directional: None,
             enable_frustum_culling: true,
             #[cfg(feature = "bsp")]
-            bsp_mount: crate::scene::bsp_visibility::BspMountState::new(),
+            bsp_mount: None,
         }
     }
 
@@ -625,16 +627,19 @@ impl SceneWorld {
         };
 
         #[cfg(feature = "bsp")]
-        if self.bsp_mount.active {
+        if let Some(ref mut mount) = self.bsp_mount {
+            // Update PVS first (requires &mut mount.state).
+            let cam_pos = self.camera.cam_pos;
+            mount.state.update_pvs(cam_pos);
+
             submission.bsp_frame_values = crate::scene::render_submission::BspFrameValuesState {
-                style_intensities: self.bsp_mount.frame_style_intensities,
-                liquid_time: self.bsp_mount.frame_liquid_time,
-                arena_id: self.bsp_mount.arena_id,
+                style_intensities: mount.state.frame_style_intensities,
+                liquid_time: mount.state.frame_liquid_time,
+                arena_id: mount.state.arena_id,
             };
-            self.update_bsp_pvs();
-            let bsp_lights = self
-                .bsp_mount
-                .select_frame_lights_for_camera(self.camera.cam_pos, MAX_POINT_LIGHTS_GPU);
+            let bsp_lights = mount
+                .state
+                .select_frame_lights_for_camera(cam_pos, MAX_POINT_LIGHTS_GPU);
             submission.bsp_selected_lights = bsp_lights.clone();
             submission.point_lights.extend(bsp_lights);
         }
@@ -678,8 +683,8 @@ impl SceneWorld {
         }
 
         #[cfg(feature = "bsp")]
-        if self.bsp_mount.active {
-            self.collect_bsp_draw_items(&mut submission, frustum.as_ref());
+        if let Some(ref mount) = self.bsp_mount {
+            self.collect_bsp_draw_items_from_mount(mount, &mut submission, frustum.as_ref());
         }
 
         let Some(root_id) = self.root else {
@@ -699,16 +704,19 @@ impl SceneWorld {
     }
 
     #[cfg(feature = "bsp")]
-    fn collect_bsp_draw_items(&self, submission: &mut RenderSubmission, frustum: Option<&Frustum>) {
+    fn collect_bsp_draw_items_from_mount(
+        &self,
+        mount: &crate::api::bsp::PublishedBspMount,
+        submission: &mut RenderSubmission,
+        frustum: Option<&Frustum>,
+    ) {
         use crate::scene::bsp_visibility::{
             classify_bsp_visibility, mounted_visibility_decision, VisibilityDecision,
         };
         use crate::scene::render_submission::BspSubmissionFailure;
 
-        let diagnostics = classify_bsp_visibility(
-            &self.bsp_mount.mounted_batches,
-            &self.bsp_mount,
-        );
+        let state = &mount.state;
+        let diagnostics = classify_bsp_visibility(&state.mounted_batches, state);
         submission.bsp_diagnostics = diagnostics.clone();
         log::debug!(
             "BSP submission: total={} eligible={} pvs_visible={} pvs_culled={} conservative={} invalid_member={}",
@@ -720,9 +728,9 @@ impl SceneWorld {
             diagnostics.invalid_membership,
         );
 
-        for (batch_index, mounted) in self.bsp_mount.mounted_batches.iter().enumerate() {
+        for (batch_index, mounted) in state.mounted_batches.iter().enumerate() {
             // --- PVS Classification ---
-            let pvs_decision = mounted_visibility_decision(mounted, &self.bsp_mount);
+            let pvs_decision = mounted_visibility_decision(mounted, state);
             match pvs_decision {
                 VisibilityDecision::PvsCulled => {
                     continue;
@@ -733,7 +741,7 @@ impl SceneWorld {
             // --- Inline model frustum cull ---
             let batch = &mounted.render;
             let batch_transform = if batch.is_inline_model {
-                self.bsp_mount
+                state
                     .inline_model_transforms
                     .get(&batch.model_index)
                     .copied()
@@ -743,8 +751,7 @@ impl SceneWorld {
             };
 
             if batch.is_inline_model {
-                if let Some((world_min, world_max)) = self
-                    .bsp_mount
+                if let Some((world_min, world_max)) = state
                     .inline_model_bounds
                     .get(&batch.model_index)
                     .copied()
@@ -1387,42 +1394,44 @@ impl SceneWorld {
 
     // ── BSP mount management ────────────────────────────────────────
 
-    /// Set the BSP mount state for PVS-aware culling and light selection.
+    /// Set the published BSP mount for PVS-aware culling and light selection.
+    ///
+    /// The lease-bearing [`PublishedBspMount`] owns every GPU resource.
     #[cfg(feature = "bsp")]
-    pub(crate) fn set_bsp_mount(&mut self, mount: crate::scene::bsp_visibility::BspMountState) {
-        self.bsp_mount = mount;
+    pub(crate) fn set_bsp_mount(
+        &mut self,
+        mount: crate::api::bsp::PublishedBspMount,
+    ) {
+        self.bsp_mount = Some(mount);
     }
 
     /// Clear the BSP mount, disabling PVS culling and BSP light selection.
+    ///
+    /// Deprecated: this drops the resource lease. Use [`Self::retire_bsp_mount`]
+    /// to obtain a [`DetachedBspMount`] for renderer retirement.
     #[cfg(feature = "bsp")]
+    #[deprecated(since = "0.14.0", note = "use retire_bsp_mount() to preserve the lease")]
     pub(crate) fn clear_bsp_mount(&mut self) {
-        self.bsp_mount.deactivate();
+        let _ = self.retire_bsp_mount();
     }
 
-    /// Detach the active BSP mount and return its previous scene state.
+    /// Detach the active BSP mount and return the lease-bearing
+    /// [`DetachedBspMount`] for renderer retirement.
     ///
-    /// The returned state is no longer referenced by scene submission. This
-    /// method does not itself enqueue GPU resource retirement; a caller with
-    /// renderer/core cache ownership must perform that work.
+    /// The returned mount retains the full resource lease. The caller must
+    /// pass it to the renderer's retirement path for fence-aware GPU teardown.
     #[cfg(feature = "bsp")]
     pub(crate) fn retire_bsp_mount(
         &mut self,
-    ) -> Option<crate::scene::bsp_visibility::BspMountState> {
-        if !self.bsp_mount.active {
-            return None;
-        }
-        let mut retired = crate::scene::bsp_visibility::BspMountState::new();
-        std::mem::swap(&mut self.bsp_mount, &mut retired);
-        // The swapped-in mount is empty/inactive; the caller receives the
-        // previous active mount state. GPU cache retirement requires a
-        // separate renderer/core handoff.
-        Some(retired)
+    ) -> Option<crate::api::bsp::DetachedBspMount> {
+        let published = self.bsp_mount.take()?;
+        Some(crate::api::bsp::DetachedBspMount::from_published(published))
     }
 
-    /// Return whether a BSP mount is currently active.
+    /// Return whether a BSP mount is currently published.
     #[cfg(feature = "bsp")]
     pub(crate) fn has_bsp_mount(&self) -> bool {
-        self.bsp_mount.active
+        self.bsp_mount.is_some()
     }
 
     /// Update BSP PVS for the current camera position.
@@ -1430,7 +1439,9 @@ impl SceneWorld {
     #[cfg(feature = "bsp")]
     pub(crate) fn update_bsp_pvs(&mut self) {
         let cam_pos = self.camera.cam_pos;
-        self.bsp_mount.update_pvs(cam_pos);
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.update_pvs(cam_pos);
+        }
     }
 
     /// Set per-frame BSP frame values (style intensities, liquid time).
@@ -1438,8 +1449,10 @@ impl SceneWorld {
     /// These are uploaded to the BSP frame-values UBO each frame.
     #[cfg(feature = "bsp")]
     pub(crate) fn set_bsp_frame_values(&mut self, style_intensities: [f32; 64], liquid_time: f32) {
-        self.bsp_mount.frame_style_intensities = style_intensities;
-        self.bsp_mount.frame_liquid_time = liquid_time;
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.frame_style_intensities = style_intensities;
+            mount.state.frame_liquid_time = liquid_time;
+        }
     }
 
     /// Set per-model transforms for inline model draws.
@@ -1451,7 +1464,9 @@ impl SceneWorld {
         &mut self,
         transforms: std::collections::HashMap<u32, glam::Mat4>,
     ) {
-        self.bsp_mount.inline_model_transforms = transforms;
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.inline_model_transforms = transforms;
+        }
     }
 
     /// Set per-model world-space bounds for inline model culling.
@@ -1460,7 +1475,9 @@ impl SceneWorld {
         &mut self,
         bounds: std::collections::HashMap<u32, (glam::Vec3, glam::Vec3)>,
     ) {
-        self.bsp_mount.inline_model_bounds = bounds;
+        if let Some(ref mut mount) = self.bsp_mount {
+            mount.state.inline_model_bounds = bounds;
+        }
     }
 }
 
@@ -2612,6 +2629,7 @@ mod tests {
     #[cfg(feature = "bsp")]
     #[test]
     fn bsp_mount_submits_draws_and_lights_without_scene_root() {
+        use crate::api::bsp::{BspResourceLease, PublishedBspMount};
         use crate::data::bsp_import::MountedBspBatch;
 
         let mut scene = SceneWorld::new();
@@ -2655,7 +2673,14 @@ mod tests {
                 }],
             )
             .expect("canonical batch publish");
-        scene.set_bsp_mount(mount);
+        let lease = BspResourceLease {
+            arena_id: 1,
+            mesh_handles: vec![mesh],
+            texture_handles: vec![],
+            material_handles: vec![material],
+        };
+        mount.arena_id = Some(1);
+        scene.set_bsp_mount(PublishedBspMount::new(mount, lease));
 
         let submission = scene.build_submission();
 
@@ -2671,7 +2696,8 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     #[test]
-    fn bsp_mount_retirement_returns_active_state_and_leaves_scene_empty() {
+    fn bsp_mount_retirement_returns_detached_mount_and_leaves_scene_empty() {
+        use crate::api::bsp::{BspResourceLease, PublishedBspMount};
         use crate::data::bsp_import::MountedBspBatch;
 
         let mut scene = SceneWorld::new();
@@ -2703,7 +2729,14 @@ mod tests {
         mount
             .set_render_assets_from_canonical(&[mounted], vec![mesh], vec![Some(material)], vec![])
             .expect("canonical batch publish");
-        scene.set_bsp_mount(mount);
+        let lease = BspResourceLease {
+            arena_id: 3,
+            mesh_handles: vec![mesh],
+            texture_handles: vec![],
+            material_handles: vec![material],
+        };
+        mount.arena_id = Some(3);
+        scene.set_bsp_mount(PublishedBspMount::new(mount, lease));
         assert!(scene.has_bsp_mount());
 
         let retired = scene.retire_bsp_mount();
