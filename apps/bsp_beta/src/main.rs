@@ -52,18 +52,8 @@ const FIXED_DT: f32 = 1.0 / 60.0;
 enum AppError {
     #[error("no BSP path provided; use --bsp <path>")]
     NoBspPath,
-    #[error("failed to read BSP file '{path}': {source}")]
-    BspRead {
-        path: PathBuf,
-        source: std::io::Error,
-    },
     #[error("no import mode selected; use --strict or --development")]
     NoImportMode,
-    #[error("BSP load/query proof failed: {code:?}: {message}")]
-    BspLoadProof {
-        code: bsp::diagnostic::DiagnosticCode,
-        message: String,
-    },
     #[error("BSP app-owned bridge proof failed: {0}")]
     BridgeProof(String),
     #[error("renderer init failed: {0}")]
@@ -152,6 +142,10 @@ fn run() -> Result<(), AppError> {
     coordinator.register_bridge("physics", Box::new(physics_bridge));
     coordinator.register_bridge("runtime", Box::new(runtime_bridge));
 
+    // The proof below consumes this already-authorized parsed world and the
+    // coordinator's staged extraction; it never reauthorizes, reparses, or
+    // reextracts the launch inputs.
+    let proof_world = import.world.clone();
     let prepare = coordinator.prepare_authorized_import(import)?;
 
     log::info!(
@@ -180,7 +174,10 @@ fn run() -> Result<(), AppError> {
     }
 
     // ── Run startup proof ─────────────────────────────────────────────
-    run_load_query_physics_behavior_proof(&args)?;
+    let extracted = coordinator.staged_extraction().ok_or_else(|| {
+        AppError::BridgeProof("authorized import did not stage extraction".into())
+    })?;
+    run_load_query_physics_behavior_proof(&proof_world, args.scale, extracted)?;
 
     // ── Run ────────────────────────────────────────────────────────────
     if args.mcp {
@@ -194,57 +191,12 @@ fn run() -> Result<(), AppError> {
 
 // ─── Startup proof ─────────────────────────────────────────────────────
 
-fn run_load_query_physics_behavior_proof(args: &cli::CliArgs) -> Result<(), AppError> {
-    // Re-load through the authorized import for the proof.
-    let bsp_path = args.bsp_path.as_ref().ok_or(AppError::NoBspPath)?;
-    let palette_path = args
-        .resolve_palette_path()
-        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
-    let lit_path = args.resolve_lit_path();
-    let wad_path = args
-        .resolve_wad_path()
-        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
-    let import_mode = args
-        .require_import_mode()
-        .map_err(|_| AppError::NoImportMode)?;
-
-    let bsp_runtime_mode = match import_mode {
-        cli::ImportMode::Strict => package::ImportMode::Strict,
-        cli::ImportMode::Development => package::ImportMode::Development,
-    };
-
-    let wad_paths: Vec<PathBuf> = wad_path.into_iter().collect();
-    let import = package::authorize_direct_import(
-        bsp_path,
-        &palette_path,
-        lit_path.as_deref(),
-        &wad_paths,
-        args.textures_dir.as_deref(),
-        bsp_runtime_mode,
-        args.scale,
-    )?;
-
-    // Parse BSP independently for physics/behavior proof.
-    let load_options = bsp::LoadOptions {
-        strict: bsp_runtime_mode.is_strict(),
-        palette: import.palette.as_ref().map(|r| r.bytes.clone()),
-        lit_data: import.lit.as_ref().map(|r| r.bytes.clone()),
-        wad_archives: import
-            .wads
-            .iter()
-            .map(|w| (w.basename.clone(), w.resource.bytes.clone()))
-            .collect(),
-        source_identity: bsp_path.display().to_string(),
-        ..bsp::LoadOptions::default()
-    };
-    let world = bsp::BspLoader::load(&import.bsp.bytes, &load_options).map_err(|report| {
-        AppError::BspLoadProof {
-            code: report.code,
-            message: report.message,
-        }
-    })?;
-
-    let qte = bsp::coords::QuakeToEngine::new(args.scale);
+fn run_load_query_physics_behavior_proof(
+    world: &bsp::world::BspWorld,
+    scale: f32,
+    extracted: &bsp::extract::ExtractedBsp,
+) -> Result<(), AppError> {
+    let qte = bsp::coords::QuakeToEngine::new(scale);
     let contents = bsp::point_contents_with_transform(
         Vec3::ZERO,
         &world.nodes,
@@ -253,41 +205,7 @@ fn run_load_query_physics_behavior_proof(args: &cli::CliArgs) -> Result<(), AppE
         &qte,
     );
 
-    // Direct extraction for bridge proof.
-    let palette = import
-        .palette
-        .as_ref()
-        .map(|r| bsp::resources::decode_palette(&r.bytes));
-    let wad_archives: Vec<(String, Vec<u8>)> = import
-        .wads
-        .iter()
-        .map(|w| (w.basename.clone(), w.resource.bytes.clone()))
-        .collect();
-    let texture_companions: Vec<bsp::resources::TextureCompanion> = import
-        .pbr
-        .iter()
-        .filter_map(|c| {
-            c.resource.as_ref().map(|r| {
-                bsp::resources::TextureCompanion::new(r.logical_id.clone(), r.bytes.clone())
-            })
-        })
-        .collect();
-
-    let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
-        world,
-        palette,
-        wad_archives,
-        texture_companions,
-        strict: bsp_runtime_mode.is_strict(),
-        scale: args.scale,
-        ..Default::default()
-    })
-    .map_err(|report| AppError::BspLoadProof {
-        code: report.code,
-        message: report.message,
-    })?;
-
-    let bridge_inputs = bridge_inputs_from_extraction(&extracted);
+    let bridge_inputs = bridge_inputs_from_extraction(extracted);
     let mut physics_bridge = PhysicsBridge::new();
     let mut runtime_bridge = RuntimeBridge::new();
 

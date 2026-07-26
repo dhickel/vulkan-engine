@@ -54,7 +54,6 @@ pub enum CliError {
     InvalidCaptureFrames(String),
     UnknownArgument(String),
     PaletteNotFound(String),
-    WadNotFound(String),
     /// Both --strict and --development specified.
     ConflictingImportMode,
     /// No import mode selected; --strict or --development required.
@@ -84,8 +83,7 @@ impl fmt::Display for CliError {
                 )
             }
             CliError::UnknownArgument(arg) => write!(f, "unknown argument: {arg}"),
-            CliError::PaletteNotFound(path) => write!(f, "palette file not found: {path}"),
-            CliError::WadNotFound(path) => write!(f, "WAD file not found: {path}"),
+            CliError::PaletteNotFound(path) => write!(f, "palette path is required: {path}"),
             CliError::ConflictingImportMode => {
                 write!(f, "--strict and --development are mutually exclusive")
             }
@@ -111,38 +109,22 @@ impl CliArgs {
         }
     }
 
-    /// Resolve the effective palette path: explicit --palette only.
+    /// Return the declared palette path. Resource existence and authorization
+    /// belong exclusively to the runtime package boundary.
     pub fn resolve_palette_path(&self) -> Result<PathBuf, CliError> {
-        if let Some(ref path) = self.palette_path {
-            if path.is_file() {
-                return Ok(path.clone());
-            }
-            return Err(CliError::PaletteNotFound(path.display().to_string()));
-        }
-        Err(CliError::PaletteNotFound(
-            "provide --palette <path>".to_string(),
-        ))
+        self.palette_path
+            .clone()
+            .ok_or_else(|| CliError::PaletteNotFound("provide --palette <path>".to_string()))
     }
 
-    /// Resolve the effective .lit path: explicit --lit only.
+    /// Return the declared optional `.lit` path without probing it.
     pub fn resolve_lit_path(&self) -> Option<PathBuf> {
-        if let Some(ref p) = self.lit_path {
-            if p.is_file() {
-                return Some(p.clone());
-            }
-        }
-        None
+        self.lit_path.clone()
     }
 
-    /// Resolve the effective WAD path: explicit --wad only.
+    /// Return the declared optional WAD path without probing it.
     pub fn resolve_wad_path(&self) -> Result<Option<PathBuf>, CliError> {
-        if let Some(ref p) = self.wad_path {
-            if p.is_file() {
-                return Ok(Some(p.clone()));
-            }
-            return Err(CliError::WadNotFound(p.display().to_string()));
-        }
-        Ok(None)
+        Ok(self.wad_path.clone())
     }
 
     /// Resolve the import mode; error if not specified.
@@ -251,6 +233,10 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
         }
     }
 
+    if opts.bsp_path.is_some() && opts.import_mode.is_none() {
+        return Err(CliError::NoImportMode);
+    }
+
     Ok(opts)
 }
 
@@ -317,8 +303,7 @@ mod tests {
 
     #[test]
     fn parse_headless_with_capture() {
-        let args =
-            parse_from(["--development", "--headless", "--capture-frames", "10"]).unwrap();
+        let args = parse_from(["--development", "--headless", "--capture-frames", "10"]).unwrap();
         assert!(args.headless);
         assert!(!args.mcp);
         assert_eq!(args.capture_frames, 10);
@@ -368,11 +353,11 @@ mod tests {
     }
 
     #[test]
-    fn no_import_mode_is_allowed_by_parser() {
-        // Parser allows no mode; app validates later.
-        let args = parse_from(["--bsp", "maps/test.bsp"]).unwrap();
-        assert!(args.import_mode.is_none());
-        assert!(args.require_import_mode().is_err());
+    fn bsp_launch_without_import_mode_is_a_cli_error() {
+        assert_eq!(
+            parse_from(["--bsp", "maps/test.bsp"]).unwrap_err(),
+            CliError::NoImportMode
+        );
     }
 
     #[test]
@@ -425,9 +410,14 @@ mod tests {
 
     #[test]
     fn parse_palette_and_lit_flags() {
-        let args =
-            parse_from(["--strict", "--palette", "gfx/pal.lmp", "--lit", "maps/test.lit"])
-                .unwrap();
+        let args = parse_from([
+            "--strict",
+            "--palette",
+            "gfx/pal.lmp",
+            "--lit",
+            "maps/test.lit",
+        ])
+        .unwrap();
         assert_eq!(args.palette_path, Some(PathBuf::from("gfx/pal.lmp")));
         assert_eq!(args.lit_path, Some(PathBuf::from("maps/test.lit")));
     }
@@ -447,22 +437,22 @@ mod tests {
     }
 
     #[test]
-    fn palette_resolution_requires_explicit_path() {
+    fn palette_resolution_preserves_declared_path_without_probing() {
+        let path = PathBuf::from("/tmp/not-yet-authorized-palette.lmp");
         let args = CliArgs {
-            palette_path: Some(PathBuf::from("/tmp/pal.lmp")),
+            palette_path: Some(path.clone()),
             ..CliArgs::default()
         };
-        // File doesn't exist, so it fails.
-        assert!(matches!(
-            args.resolve_palette_path(),
-            Err(CliError::PaletteNotFound(_))
-        ));
+        assert_eq!(args.resolve_palette_path().unwrap(), path);
     }
 
     #[test]
     fn no_mode_reports_error() {
         let args = CliArgs::default();
-        assert_eq!(args.require_import_mode().unwrap_err(), CliError::NoImportMode);
+        assert_eq!(
+            args.require_import_mode().unwrap_err(),
+            CliError::NoImportMode
+        );
     }
 
     #[test]

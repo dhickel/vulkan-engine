@@ -23,7 +23,9 @@ pub struct CacheIdentity {
     pub dialect_profile_tag: String,
     /// Resolved scale as canonical f32 bytes (little-endian).
     pub bsp_scale: [u8; 4],
-    /// SHA-256 of palette bytes (empty if no palette).
+    /// Whether an authorized palette was supplied.
+    pub palette_present: bool,
+    /// SHA-256 of palette bytes (zero-filled only when no palette was supplied).
     pub palette_content_hash: [u8; 32],
     /// Strict import mode (affects extraction diagnostics and face resolution).
     pub strict_mode: bool,
@@ -55,6 +57,8 @@ pub struct CacheIdentity {
 pub struct CompanionId {
     /// Companion kind (e.g., "lit", "palette", "wad").
     pub kind: String,
+    /// Resolver-issued logical ID when this companion was bound.
+    pub logical_id: Option<String>,
     /// SHA-256 of companion file content.
     pub content_hash: [u8; 32],
 }
@@ -81,8 +85,12 @@ pub struct PbrClosureEntry {
     pub texture_identity: String,
     /// Companion kind tag: "normal" or "gloss".
     pub kind: String,
+    /// Exact, ASCII-insensitive, or explicit-absence match result.
+    pub match_mode: String,
     /// Whether the companion is present.
     pub present: bool,
+    /// Resolver-issued logical ID when present.
+    pub logical_id: Option<String>,
     /// SHA-256 of companion content (zero-filled if absent).
     pub content_hash: [u8; 32],
 }
@@ -116,6 +124,7 @@ pub struct AtlasPolicy {
     pub page_size: u32,
     pub padding: u32,
     pub style_count: u32,
+    pub max_pages: u64,
 }
 
 impl Default for AtlasPolicy {
@@ -124,6 +133,7 @@ impl Default for AtlasPolicy {
             page_size: 2048,
             padding: 2,
             style_count: 4,
+            max_pages: 4,
         }
     }
 }
@@ -153,23 +163,30 @@ impl CacheIdentity {
         bsp_content_hash: [u8; 32],
         dialect_profile_tag: impl Into<String>,
         bsp_scale: f32,
+        palette_present: bool,
         palette_content_hash: [u8; 32],
         strict_mode: bool,
-        companion_identities: Vec<CompanionId>,
+        mut companion_identities: Vec<CompanionId>,
         wad_entries: Vec<WadCacheEntry>,
-        pbr_closure: Vec<PbrClosureEntry>,
-        texture_resolution_roots: Vec<String>,
-        replacement_mappings: Vec<ReplacementMapping>,
+        mut pbr_closure: Vec<PbrClosureEntry>,
+        mut texture_resolution_roots: Vec<String>,
+        mut replacement_mappings: Vec<ReplacementMapping>,
         light_calibration: LightCalibration,
         atlas_policy: AtlasPolicy,
         collision_policy: CollisionPolicy,
         fullbright_range: [u8; 2],
         overbright: f32,
     ) -> Self {
+        companion_identities.sort();
+        pbr_closure.sort();
+        texture_resolution_roots.sort();
+        replacement_mappings.sort();
+
         Self {
             bsp_content_hash,
             dialect_profile_tag: dialect_profile_tag.into(),
-            bsp_scale: bsp_scale.to_le_bytes(),
+            bsp_scale: canonical_f32_bytes(bsp_scale),
+            palette_present,
             palette_content_hash,
             strict_mode,
             companion_identities,
@@ -177,11 +194,16 @@ impl CacheIdentity {
             pbr_closure,
             texture_resolution_roots,
             replacement_mappings,
-            light_calibration,
+            light_calibration: LightCalibration {
+                intensity_scale: canonical_f32_bytes(f32::from_le_bytes(
+                    light_calibration.intensity_scale,
+                )),
+                overbright: canonical_f32_bytes(f32::from_le_bytes(light_calibration.overbright)),
+            },
             atlas_policy,
             collision_policy,
             fullbright_range,
-            overbright: overbright.to_le_bytes(),
+            overbright: canonical_f32_bytes(overbright),
         }
     }
 
@@ -197,34 +219,55 @@ impl CacheIdentity {
             out.extend_from_slice(data);
         }
 
-        tag_bytes(b"PROFILE", self.dialect_profile_tag.as_bytes(), &mut suffix_input);
+        tag_bytes(b"BSP", &self.bsp_content_hash, &mut suffix_input);
+        tag_bytes(
+            b"PROFILE",
+            self.dialect_profile_tag.as_bytes(),
+            &mut suffix_input,
+        );
         tag_bytes(b"SCALE", &self.bsp_scale, &mut suffix_input);
+        tag_bytes(
+            b"PALPRESENT",
+            &[self.palette_present as u8],
+            &mut suffix_input,
+        );
         tag_bytes(b"PAL", &self.palette_content_hash, &mut suffix_input);
         tag_bytes(b"STRICT", &[self.strict_mode as u8], &mut suffix_input);
 
         for comp in &self.companion_identities {
             let mut entry = Vec::new();
-            entry.extend_from_slice(comp.kind.as_bytes());
-            entry.extend_from_slice(&comp.content_hash);
+            tag_bytes(b"KIND", comp.kind.as_bytes(), &mut entry);
+            tag_bytes(
+                b"LOGICAL-ID",
+                comp.logical_id.as_deref().unwrap_or("").as_bytes(),
+                &mut entry,
+            );
+            tag_bytes(b"HASH", &comp.content_hash, &mut entry);
             tag_bytes(b"COMP", &entry, &mut suffix_input);
         }
 
         for wad in &self.wad_entries {
             let mut entry = Vec::new();
-            entry.extend_from_slice(&wad.ordinal.to_le_bytes());
-            entry.extend_from_slice(wad.basename.as_bytes());
-            entry.extend_from_slice(wad.logical_id.as_bytes());
-            entry.extend_from_slice(&wad.content_hash);
+            tag_bytes(b"ORD", &wad.ordinal.to_le_bytes(), &mut entry);
+            tag_bytes(b"BASE", wad.basename.as_bytes(), &mut entry);
+            tag_bytes(b"ID", wad.logical_id.as_bytes(), &mut entry);
+            tag_bytes(b"HASH", &wad.content_hash, &mut entry);
             tag_bytes(b"WAD", &entry, &mut suffix_input);
         }
 
         for pbr in &self.pbr_closure {
             let mut entry = Vec::new();
-            entry.extend_from_slice(&pbr.source_slot.to_le_bytes());
-            entry.extend_from_slice(pbr.texture_identity.as_bytes());
-            entry.extend_from_slice(pbr.kind.as_bytes());
-            entry.extend_from_slice(&[pbr.present as u8]);
-            entry.extend_from_slice(&pbr.content_hash);
+            tag_bytes(b"SLOT", &pbr.source_slot.to_le_bytes(), &mut entry);
+            tag_bytes(b"IDENTITY", pbr.texture_identity.as_bytes(), &mut entry);
+            tag_bytes(b"KIND", pbr.kind.as_bytes(), &mut entry);
+            tag_bytes(b"MATCH", pbr.match_mode.as_bytes(), &mut entry);
+            tag_bytes(b"PRESENT", &[pbr.present as u8], &mut entry);
+            tag_bytes(
+                b"LOGICAL-ID",
+                pbr.logical_id.as_deref().unwrap_or("").as_bytes(),
+                &mut entry,
+            );
+            tag_bytes(b"HASH", &pbr.content_hash, &mut entry);
             tag_bytes(b"PBR", &entry, &mut suffix_input);
         }
 
@@ -233,21 +276,49 @@ impl CacheIdentity {
         }
         for mapping in &self.replacement_mappings {
             let mut entry = Vec::new();
-            entry.extend_from_slice(mapping.texture_name.as_bytes());
-            entry.extend_from_slice(&mapping.resolved_path_hash);
+            tag_bytes(b"NAME", mapping.texture_name.as_bytes(), &mut entry);
+            tag_bytes(b"HASH", &mapping.resolved_path_hash, &mut entry);
             tag_bytes(b"REPL", &entry, &mut suffix_input);
         }
-        tag_bytes(b"LIGHT", &self.light_calibration.intensity_scale, &mut suffix_input);
-        tag_bytes(b"OVER", &self.light_calibration.overbright, &mut suffix_input);
-        tag_bytes(b"ATLAS", &self.atlas_policy.page_size.to_le_bytes(), &mut suffix_input);
-        tag_bytes(b"ATPAD", &self.atlas_policy.padding.to_le_bytes(), &mut suffix_input);
-        tag_bytes(b"ATSTY", &self.atlas_policy.style_count.to_le_bytes(), &mut suffix_input);
+        tag_bytes(
+            b"LIGHT",
+            &self.light_calibration.intensity_scale,
+            &mut suffix_input,
+        );
+        tag_bytes(
+            b"OVER",
+            &self.light_calibration.overbright,
+            &mut suffix_input,
+        );
+        tag_bytes(
+            b"ATLAS",
+            &self.atlas_policy.page_size.to_le_bytes(),
+            &mut suffix_input,
+        );
+        tag_bytes(
+            b"ATPAD",
+            &self.atlas_policy.padding.to_le_bytes(),
+            &mut suffix_input,
+        );
+        tag_bytes(
+            b"ATSTY",
+            &self.atlas_policy.style_count.to_le_bytes(),
+            &mut suffix_input,
+        );
+        tag_bytes(
+            b"ATMAX",
+            &self.atlas_policy.max_pages.to_le_bytes(),
+            &mut suffix_input,
+        );
         for hull_idx in &self.collision_policy.hull_indices {
             tag_bytes(b"HULL", &hull_idx.to_le_bytes(), &mut suffix_input);
         }
         tag_bytes(
             b"CVDEC",
-            &self.collision_policy.convex_decomposition_limit.to_le_bytes(),
+            &self
+                .collision_policy
+                .convex_decomposition_limit
+                .to_le_bytes(),
             &mut suffix_input,
         );
         tag_bytes(b"FBRNG", &self.fullbright_range, &mut suffix_input);
@@ -258,6 +329,11 @@ impl CacheIdentity {
         let suffix_hex = hex_encode(&suffix_hash);
         format!("{}-{}", &primary[..16], &suffix_hex)
     }
+}
+
+/// Canonical cache encoding for extraction settings represented as `f32`.
+pub(crate) fn canonical_f32_bytes(value: f32) -> [u8; 4] {
+    (if value == 0.0 { 0.0 } else { value }).to_le_bytes()
 }
 
 /// Compute a 32-byte identity hash from arbitrary input bytes using a
@@ -290,12 +366,52 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn representative_identity(
+        scale: f32,
+        wad_basename: &str,
+        wad_logical_id: &str,
+        pbr_closure: Vec<PbrClosureEntry>,
+        max_pages: u64,
+    ) -> CacheIdentity {
+        CacheIdentity::compute(
+            [0xabu8; 32],
+            "q1-portable-ericw",
+            scale,
+            true,
+            [0x11; 32],
+            true,
+            vec![CompanionId {
+                kind: "lit".to_string(),
+                logical_id: Some("maps/test.lit".to_string()),
+                content_hash: [0x22; 32],
+            }],
+            vec![WadCacheEntry {
+                ordinal: 0,
+                basename: wad_basename.to_string(),
+                logical_id: wad_logical_id.to_string(),
+                content_hash: [0x33; 32],
+            }],
+            pbr_closure,
+            vec![],
+            vec![],
+            LightCalibration::default(),
+            AtlasPolicy {
+                max_pages,
+                ..AtlasPolicy::default()
+            },
+            CollisionPolicy::default(),
+            [224, 255],
+            2.0,
+        )
+    }
+
     #[test]
     fn cache_identity_key_is_deterministic() {
         let identity = CacheIdentity::compute(
             [0xabu8; 32],
             "q1-portable-ericw",
             0.0254,
+            false,
             [0; 32],
             false,
             vec![],
@@ -321,6 +437,7 @@ mod tests {
             [0xabu8; 32],
             "q1-portable-ericw",
             0.0254,
+            false,
             [0; 32],
             false,
             vec![],
@@ -339,6 +456,7 @@ mod tests {
             [0xabu8; 32],
             "q1-portable-ericw",
             0.5,
+            false,
             [0; 32],
             false,
             vec![],
@@ -362,6 +480,7 @@ mod tests {
             [0xabu8; 32],
             "q1-portable-ericw",
             0.0254,
+            false,
             [0; 32],
             false,
             vec![],
@@ -380,6 +499,7 @@ mod tests {
             [0xcd; 32],
             "q1-portable-ericw",
             0.0254,
+            false,
             [0; 32],
             false,
             vec![],
@@ -403,6 +523,7 @@ mod tests {
             [0xabu8; 32],
             "q1-portable-ericw",
             0.0254,
+            false,
             [0; 32],
             false,
             vec![],
@@ -421,6 +542,7 @@ mod tests {
             [0xabu8; 32],
             "q1-portable-ericw",
             0.0254,
+            false,
             [0; 32],
             true,
             vec![],
@@ -436,5 +558,42 @@ mod tests {
         );
 
         assert_ne!(id1.to_key_string(), id2.to_key_string());
+    }
+
+    #[test]
+    fn cache_identity_includes_pbr_closure_wad_boundaries_and_atlas_limit() {
+        let pbr = vec![PbrClosureEntry {
+            source_slot: 2,
+            texture_identity: "brick".to_string(),
+            kind: "normal".to_string(),
+            match_mode: "exact".to_string(),
+            present: true,
+            logical_id: Some("textures/brick_norm.png".to_string()),
+            content_hash: [0x44; 32],
+        }];
+        let base = representative_identity(0.0254, "a", "bc", pbr.clone(), 4);
+
+        let mut fallback_pbr = pbr.clone();
+        fallback_pbr[0].match_mode = "ascii-insensitive".to_string();
+        assert_ne!(
+            base.to_key_string(),
+            representative_identity(0.0254, "a", "bc", fallback_pbr, 4).to_key_string()
+        );
+        // Length-delimited WAD fields distinguish `a` + `bc` from `ab` + `c`.
+        assert_ne!(
+            base.to_key_string(),
+            representative_identity(0.0254, "ab", "c", pbr.clone(), 4).to_key_string()
+        );
+        assert_ne!(
+            base.to_key_string(),
+            representative_identity(0.0254, "a", "bc", pbr, 3).to_key_string()
+        );
+    }
+
+    #[test]
+    fn cache_identity_normalizes_signed_zero_scale() {
+        let plus_zero = representative_identity(0.0, "a", "b", vec![], 4);
+        let minus_zero = representative_identity(-0.0, "a", "b", vec![], 4);
+        assert_eq!(plus_zero.to_key_string(), minus_zero.to_key_string());
     }
 }

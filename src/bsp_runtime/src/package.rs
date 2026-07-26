@@ -11,10 +11,8 @@
 use bsp::resources::{self, MiptexSlot};
 use bsp::{BspLoader, BspReport, LoadOptions};
 use package_io::resolver::PackageResolver;
-use package_io::{
-    ConfinedResource, ContentIdentity, DiagnosticCode, ResourceKind,
-};
-use std::collections::HashSet;
+use package_io::{ConfinedResource, ContentIdentity, DiagnosticCode, ResourceKind};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 // ── Import Mode ──────────────────────────────────────────────────────
@@ -26,9 +24,9 @@ pub enum ImportMode {
     /// Unresolved faces, missing palette/WAD/lit, and ambiguous PBR companions
     /// are errors.
     Strict,
-    /// Tagged development mode for raw-byte preparation only.
-    /// Cannot be selected by package/direct startup, proof, cache, or release
-    /// acceptance paths.
+    /// Explicit development policy. Raw-byte compatibility helpers remain
+    /// development/test-only, while package and direct imports may select this
+    /// mode only through an explicit caller choice.
     Development,
 }
 
@@ -104,6 +102,18 @@ impl PbrCompanionKind {
 pub enum PbrMatchMode {
     Exact,
     AsciiInsensitive,
+    /// No matching companion was present in the authorized concrete root.
+    Absent,
+}
+
+impl PbrMatchMode {
+    pub fn tag(self) -> &'static str {
+        match self {
+            PbrMatchMode::Exact => "exact",
+            PbrMatchMode::AsciiInsensitive => "ascii-insensitive",
+            PbrMatchMode::Absent => "absent",
+        }
+    }
 }
 
 /// A bound PBR companion entry in the resolution closure.
@@ -179,22 +189,6 @@ pub struct AuthorizedBspImport {
 }
 
 impl AuthorizedBspImport {
-    /// Build [`LoadOptions`] from this authorized import.
-    fn build_load_options(&self) -> LoadOptions {
-        LoadOptions {
-            strict: self.policy.is_strict(),
-            palette: self.palette.as_ref().map(|r| r.bytes.clone()),
-            lit_data: self.lit.as_ref().map(|r| r.bytes.clone()),
-            wad_archives: self
-                .wads
-                .iter()
-                .map(|n| (n.basename.clone(), n.resource.bytes.clone()))
-                .collect(),
-            texture_overrides: Vec::new(),
-            source_identity: self.bsp.logical_id.clone(),
-        }
-    }
-
     /// Build a [`bsp::BspExtractionRequest`] from this authorized import.
     pub fn to_extraction_request(&self) -> bsp::BspExtractionRequest {
         let palette = self
@@ -213,10 +207,7 @@ impl AuthorizedBspImport {
             .iter()
             .filter_map(|c| {
                 c.resource.as_ref().map(|r| {
-                    bsp::resources::TextureCompanion::new(
-                        r.logical_id.clone(),
-                        r.bytes.clone(),
-                    )
+                    bsp::resources::TextureCompanion::new(r.logical_id.clone(), r.bytes.clone())
                 })
             })
             .collect();
@@ -246,7 +237,8 @@ impl AuthorizedBspImport {
 /// - No supplied root means no PBR discovery.
 /// - A supplied root that is absent, not a directory, or symlinked is an error.
 ///
-/// Returns the concrete textures directory path, or `None` if no root was supplied.
+/// This direct-path helper performs no resource reads. Accepted companion files
+/// still flow through [`PackageResolver`] below.
 pub fn normalize_companion_root(
     supplied: Option<&Path>,
 ) -> Result<Option<PathBuf>, PackageLoadError> {
@@ -254,273 +246,234 @@ pub fn normalize_companion_root(
         return Ok(None);
     };
 
-    // Reject non-existent roots.
-    if !root.exists() {
-        return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoNotFound,
-            format!("companion root does not exist: '{}'", root.display()),
-        )));
-    }
+    require_safe_directory(root)?;
+    let concrete = concrete_textures_path(root);
+    require_safe_directory(&concrete)?;
+    Ok(Some(concrete))
+}
 
-    // Check for symlinks — reject.
-    let meta = root.symlink_metadata().map_err(|e| {
-        PackageLoadError::Io(package_io::PackageIoError::io(
-            DiagnosticCode::PackageIoMetadataFailed,
-            root,
-            e,
-        ))
+fn concrete_textures_path(root: &Path) -> PathBuf {
+    if root
+        .file_name()
+        .map(|name| name == "textures")
+        .unwrap_or(false)
+    {
+        root.to_path_buf()
+    } else {
+        root.join("textures")
+    }
+}
+
+fn require_safe_directory(path: &Path) -> Result<(), PackageLoadError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        let code = if error.kind() == std::io::ErrorKind::NotFound {
+            DiagnosticCode::PackageIoNotFound
+        } else {
+            DiagnosticCode::PackageIoMetadataFailed
+        };
+        PackageLoadError::Io(package_io::PackageIoError::io(code, path, error))
     })?;
-    if meta.is_symlink() {
+
+    if metadata.file_type().is_symlink() {
         return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoDeviceFile,
-            format!("companion root is a symlink: '{}'", root.display()),
+            DiagnosticCode::PackageIoSymlinkRejected,
+            format!("companion root is a symlink: '{}'", path.display()),
         )));
     }
-
-    // Must be a directory.
-    if !root.is_dir() {
+    if !metadata.is_dir() {
         return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoNotARegularFile,
-            format!("companion root is not a directory: '{}'", root.display()),
+            DiagnosticCode::PackageIoNotADirectory,
+            format!("companion root is not a directory: '{}'", path.display()),
         )));
     }
+    Ok(())
+}
 
-    // If the final component is exactly `textures`, it's the concrete root.
-    if root.file_name().map(|n| n == "textures").unwrap_or(false) {
-        return Ok(Some(root.to_path_buf()));
-    }
+/// Normalize and validate one package-relative companion root.
+///
+/// Directory enumeration is confined to this validated root. Every selected
+/// file is then authorized through the resolver, which repeats symlink,
+/// regular-file, metadata-drift, budget, and hashing checks.
+fn normalize_companion_root_with_resolver(
+    resolver: &PackageResolver,
+    supplied: &str,
+) -> Result<String, PackageLoadError> {
+    // `.` is the only package-root spelling accepted here; `None` remains
+    // the explicit no-discovery choice.
+    let normalized = if supplied == "." {
+        String::new()
+    } else {
+        package_io::resolver::normalize_logical_path(supplied)?
+    };
+    let concrete = concrete_textures_path(Path::new(&normalized));
+    let concrete = package_io::resolver::normalize_logical_path(&concrete.to_string_lossy())?;
+    validate_package_directory(resolver, &concrete)?;
+    Ok(concrete)
+}
 
-    // Otherwise, map to its confined `textures` child.
-    let child = root.join("textures");
-    if !child.exists() {
-        return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoNotFound,
-            format!(
-                "companion root '{}' has no 'textures/' child directory",
-                root.display()
-            ),
-        )));
+fn validate_package_directory(
+    resolver: &PackageResolver,
+    logical_root: &str,
+) -> Result<PathBuf, PackageLoadError> {
+    let mut path = resolver.root().canonical_path().to_path_buf();
+    for component in logical_root.split('/') {
+        path.push(component);
+        require_safe_directory(&path)?;
     }
-    if !child.is_dir() {
-        return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoNotARegularFile,
-            format!(
-                "companion root '{}' has a 'textures' entry that is not a directory",
-                root.display()
-            ),
-        )));
-    }
-
-    Ok(Some(child))
+    Ok(path)
 }
 
 // ── PBR Companion Discovery ──────────────────────────────────────────
 
 /// Discover PBR companions from Phase 02 source-slot mappings.
 ///
-/// Only visible opaque and alpha-mask faces are considered. For each unique
-/// texture identity from those faces, queries `<identity>_norm.png` and
-/// `<identity>_gloss.png` in the one concrete root.
-///
-/// Matching is exact-case first, then ASCII-insensitive fallback. Ambiguous
-/// fallback candidates (two or more) are rejected.
+/// The concrete root is a package-relative, normalized `textures` directory.
+/// Enumeration supplies candidate names only; every accepted file is read by
+/// `PackageResolver` rather than a direct filesystem read.
 pub fn discover_pbr_companions(
+    resolver: &mut PackageResolver,
     slots: &[MiptexSlot],
     world: &bsp::world::BspWorld,
-    concrete_root: &Path,
+    concrete_root: &str,
 ) -> Result<Vec<BoundPbrCompanion>, PackageLoadError> {
-    use bsp::materials::SurfaceClass;
+    let root_path = validate_package_directory(resolver, concrete_root)?;
+    let slot_entries = pbr_slot_entries(slots, world);
+    let identities: BTreeSet<String> = slot_entries
+        .iter()
+        .map(|(_, identity)| identity.clone())
+        .collect();
 
-    // Collect unique (source_slot, texture_identity) pairs for visible faces.
-    let mut seen: HashSet<(usize, String)> = HashSet::new();
-    let mut query_entries: Vec<(usize, String)> = Vec::new();
-
-    for face in &world.faces {
-        let texinfo_idx = face.texinfo_id as usize;
-        if texinfo_idx >= world.texinfos.len() {
-            continue;
-        }
-        let miptex_idx = world.texinfos[texinfo_idx].miptex as usize;
-        if miptex_idx >= slots.len() {
-            continue;
-        }
-        let slot = &slots[miptex_idx];
-
-        // Only consider slots with a usable identity.
-        let Some(ref identity) = slot.identity else {
-            continue;
-        };
-
-        // Only consider visible opaque and alpha-mask faces.
-        let surface_class = classify_face_surface_class(face, &world.texinfos, slots);
-        match surface_class {
-            SurfaceClass::Opaque | SurfaceClass::AlphaMask => {}
-            _ => continue,
-        }
-
-        let key = (miptex_idx, identity.clone());
-        if seen.insert(key.clone()) {
-            query_entries.push(key);
+    // Query each identity once, then project the result back to every source
+    // slot that resolves to it. This preserves slot provenance without
+    // rereading a shared companion file.
+    let mut resolved = Vec::with_capacity(identities.len() * 2);
+    for identity in identities {
+        for kind in [PbrCompanionKind::Normal, PbrCompanionKind::Gloss] {
+            let (match_mode, resource) =
+                resolve_pbr_companion(resolver, &root_path, concrete_root, &identity, kind)?;
+            resolved.push((identity.clone(), kind, match_mode, resource));
         }
     }
 
-    // Query each identity for normal and gloss companions.
-    let mut companions = Vec::with_capacity(query_entries.len() * 2);
-
-    for (source_slot, texture_identity) in &query_entries {
+    let mut companions = Vec::with_capacity(slot_entries.len() * 2);
+    for (source_slot, texture_identity) in slot_entries {
         for kind in [PbrCompanionKind::Normal, PbrCompanionKind::Gloss] {
-            let suffix = kind.file_suffix();
-            let exact_filename = format!("{}{}", texture_identity, suffix);
-
-            // Try exact case first.
-            let exact_path = concrete_root.join(&exact_filename);
-            let result = if exact_path.is_file() {
-                Some((exact_filename.clone(), PbrMatchMode::Exact))
-            } else {
-                // Try ASCII-insensitive fallback.
-                let lower_filename = exact_filename.to_ascii_lowercase();
-                let lower_path = concrete_root.join(&lower_filename);
-
-                if lower_filename == exact_filename {
-                    // Already exact case — not found.
-                    None
-                } else if lower_path.is_file() {
-                    // Check for ambiguity: if exact matches but also has
-                    // fallback collision, exact wins. If two different
-                    // fallback candidates exist, reject.
-                    let candidates = find_fallback_candidates(
-                        concrete_root,
-                        texture_identity,
-                        suffix,
-                    )?;
-                    match candidates.len() {
-                        0 => None,
-                        1 => Some((candidates.into_iter().next().unwrap(), PbrMatchMode::AsciiInsensitive)),
-                        _ => {
-                            return Err(PackageLoadError::AmbiguousPbrCompanion {
-                                texture_identity: texture_identity.clone(),
-                                suffix: suffix.to_string(),
-                                candidates,
-                            });
-                        }
-                    }
-                } else {
-                    None
-                }
-            };
-
-            if let Some((filename, match_mode)) = result {
-                // Read through PackageResolver if available; for direct path,
-                // we read the file directly with confinement checks.
-                let bytes = read_confined_file(&concrete_root.join(&filename))?;
-                let identity = ContentIdentity::from_bytes(&bytes);
-                let resource = AuthorizedResource {
-                    logical_id: filename,
-                    kind: ResourceKind::Texture,
-                    identity,
-                    bytes,
-                };
-                companions.push(BoundPbrCompanion {
-                    source_slot: *source_slot,
-                    texture_identity: texture_identity.clone(),
-                    kind,
-                    match_mode,
-                    resource: Some(resource),
-                });
-            } else {
-                // Absent companion — record as explicit no-companion result.
-                companions.push(BoundPbrCompanion {
-                    source_slot: *source_slot,
-                    texture_identity: texture_identity.clone(),
-                    kind,
-                    match_mode: PbrMatchMode::Exact,
-                    resource: None,
-                });
-            }
+            let (_, _, match_mode, resource) = resolved
+                .iter()
+                .find(|(identity, resolved_kind, _, _)| {
+                    identity == &texture_identity && *resolved_kind == kind
+                })
+                .expect("every PBR slot identity was queried");
+            companions.push(BoundPbrCompanion {
+                source_slot,
+                texture_identity: texture_identity.clone(),
+                kind,
+                match_mode: *match_mode,
+                resource: resource.clone(),
+            });
         }
     }
 
     Ok(companions)
 }
 
-/// Find case-insensitive fallback candidates for a companion file in a directory.
-///
-/// Returns an error if directory enumeration fails (other than NotFound).
-fn find_fallback_candidates(
+fn pbr_slot_entries(slots: &[MiptexSlot], world: &bsp::world::BspWorld) -> Vec<(usize, String)> {
+    use bsp::materials::SurfaceClass;
+
+    let mut entries = BTreeSet::new();
+    for face in &world.faces {
+        let texinfo_idx = face.texinfo_id as usize;
+        let Some(texinfo) = world.texinfos.get(texinfo_idx) else {
+            continue;
+        };
+        let miptex_idx = texinfo.miptex as usize;
+        let Some(slot) = slots.get(miptex_idx) else {
+            continue;
+        };
+        let Some(identity) = slot.identity.as_ref() else {
+            continue;
+        };
+
+        if !matches!(
+            classify_face_surface_class(face, &world.texinfos, slots),
+            SurfaceClass::Opaque | SurfaceClass::AlphaMask
+        ) {
+            continue;
+        }
+        entries.insert((miptex_idx, identity.clone()));
+    }
+    entries.into_iter().collect()
+}
+
+fn resolve_pbr_companion(
+    resolver: &mut PackageResolver,
+    root_path: &Path,
+    logical_root: &str,
+    texture_identity: &str,
+    kind: PbrCompanionKind,
+) -> Result<(PbrMatchMode, Option<AuthorizedResource>), PackageLoadError> {
+    let Some((filename, match_mode)) =
+        find_pbr_filename(root_path, texture_identity, kind.file_suffix())?
+    else {
+        return Ok((PbrMatchMode::Absent, None));
+    };
+
+    let logical_path = format!("{logical_root}/{filename}");
+    let resource = resolver.resolve(&logical_path, ResourceKind::Texture)?;
+    Ok((
+        match_mode,
+        Some(AuthorizedResource::from_confined(resource)),
+    ))
+}
+
+fn find_pbr_filename(
     root: &Path,
     texture_identity: &str,
     suffix: &str,
-) -> Result<Vec<String>, PackageLoadError> {
-    let exact_lower = format!("{}{}", texture_identity.to_ascii_lowercase(), suffix);
-    let mut candidates = Vec::new();
+) -> Result<Option<(String, PbrMatchMode)>, PackageLoadError> {
+    let expected = format!("{texture_identity}{suffix}");
+    let mut fallback_candidates = Vec::new();
 
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(PackageLoadError::Io(package_io::PackageIoError::io(
-                DiagnosticCode::PackageIoMetadataFailed,
-                root,
-                e,
-            )));
-        }
-    };
-
+    let entries = std::fs::read_dir(root).map_err(|error| {
+        PackageLoadError::Io(package_io::PackageIoError::io(
+            DiagnosticCode::PackageIoMetadataFailed,
+            root,
+            error,
+        ))
+    })?;
     for entry in entries {
-        let entry = entry.map_err(|e| {
+        let entry = entry.map_err(|error| {
             PackageLoadError::Io(package_io::PackageIoError::io(
                 DiagnosticCode::PackageIoMetadataFailed,
                 root,
-                e,
+                error,
             ))
         })?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.to_ascii_lowercase() == exact_lower && name_str != exact_lower {
-            // This is a case-insensitive match but not the exact lowercase form —
-            // it's a potential fallback candidate. But we also need to exclude the
-            // exact-case form (which was already checked).
-            let exact_form = format!("{}{}", texture_identity, suffix);
-            if name_str != exact_form {
-                candidates.push(name_str.into_owned());
-            }
+        let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if filename == expected {
+            // Exact case always wins, even when fallback-case collisions exist.
+            return Ok(Some((filename, PbrMatchMode::Exact)));
+        }
+        if filename.eq_ignore_ascii_case(&expected) {
+            fallback_candidates.push(filename);
         }
     }
 
-    Ok(candidates)
-}
-
-/// Read a file with basic confinement checks (for direct-path PBR companions).
-fn read_confined_file(path: &Path) -> Result<Vec<u8>, PackageLoadError> {
-    let meta = path.symlink_metadata().map_err(|e| {
-        PackageLoadError::Io(package_io::PackageIoError::io(
-            DiagnosticCode::PackageIoMetadataFailed,
-            path,
-            e,
-        ))
-    })?;
-
-    if meta.is_symlink() {
-        return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoDeviceFile,
-            format!("PBR companion is a symlink: '{}'", path.display()),
-        )));
+    fallback_candidates.sort();
+    match fallback_candidates.len() {
+        0 => Ok(None),
+        1 => Ok(Some((
+            fallback_candidates.pop().expect("one fallback candidate"),
+            PbrMatchMode::AsciiInsensitive,
+        ))),
+        _ => Err(PackageLoadError::AmbiguousPbrCompanion {
+            texture_identity: texture_identity.to_string(),
+            suffix: suffix.to_string(),
+            candidates: fallback_candidates,
+        }),
     }
-
-    if !meta.is_file() {
-        return Err(PackageLoadError::Io(package_io::PackageIoError::new(
-            DiagnosticCode::PackageIoNotARegularFile,
-            format!("PBR companion is not a regular file: '{}'", path.display()),
-        )));
-    }
-
-    std::fs::read(path).map_err(|e| {
-        PackageLoadError::Io(package_io::PackageIoError::io(
-            DiagnosticCode::PackageIoReadFailed,
-            path,
-            e,
-        ))
-    })
 }
 
 /// Classify a face's surface class from its texinfo and slot table.
@@ -554,10 +507,7 @@ pub enum PackageLoadError {
     /// BSP parse failure.
     Parse(BspReport),
     /// Missing required resource.
-    MissingRequired {
-        kind: ResourceKind,
-        path: String,
-    },
+    MissingRequired { kind: ResourceKind, path: String },
     /// Ambiguous PBR companion (two or more case-insensitive candidates).
     AmbiguousPbrCompanion {
         texture_identity: String,
@@ -565,24 +515,17 @@ pub enum PackageLoadError {
         candidates: Vec<String>,
     },
     /// Invalid WAD basename (empty or duplicate after sanitization).
-    InvalidWadBasename {
-        path: String,
-        reason: String,
-    },
+    InvalidWadBasename { path: String, reason: String },
     /// No import mode selected (CLI error for direct launch).
     NoImportMode,
     /// Direct path resource is not confined within the common ancestor root.
-    PathNotConfined {
-        path: PathBuf,
-        root: PathBuf,
-    },
+    PathNotConfined { path: PathBuf, root: PathBuf },
     /// No common ancestor for direct path resources.
     NoCommonAncestor,
+    /// Direct resources would require using the filesystem root as package root.
+    UnconfinedDirectRoot { root: PathBuf },
     /// Companion root error.
-    CompanionRoot {
-        path: PathBuf,
-        reason: String,
-    },
+    CompanionRoot { path: PathBuf, reason: String },
 }
 
 impl std::fmt::Display for PackageLoadError {
@@ -621,13 +564,15 @@ impl std::fmt::Display for PackageLoadError {
             PackageLoadError::NoCommonAncestor => {
                 write!(f, "no common ancestor for direct-path resources")
             }
-            PackageLoadError::CompanionRoot { path, reason } => {
+            PackageLoadError::UnconfinedDirectRoot { root } => {
                 write!(
                     f,
-                    "companion root '{}': {}",
-                    path.display(),
-                    reason
+                    "direct import root '{}' is unconstrained",
+                    root.display()
                 )
+            }
+            PackageLoadError::CompanionRoot { path, reason } => {
+                write!(f, "companion root '{}': {}", path.display(), reason)
             }
         }
     }
@@ -677,7 +622,7 @@ pub fn authorize_package_import(
 
     // ── Authorize WADs ────────────────────────────────────────────
     let mut wads = Vec::new();
-    let mut seen_basenames = HashSet::new();
+    let mut seen_basenames = BTreeSet::new();
     for (ordinal, wad_path) in wad_paths.iter().enumerate() {
         let wad_resource = resolver.resolve(wad_path, ResourceKind::Wad)?;
 
@@ -716,30 +661,17 @@ pub fn authorize_package_import(
 
     // ── PBR companion discovery ───────────────────────────────────
     let slots = resources::parse_miptex_slots(&world.miptex_data);
-    let provenance_root = textures_dir.map(|d| d.to_string());
-
-    let pbr = if !slots.is_empty() {
-        // Normalize companion root within the package.
-        let concrete_root_opt = if let Some(td) = textures_dir {
-            normalize_companion_root_with_resolver(resolver, td)?
-        } else {
-            None
-        };
-
-        if let Some(concrete_root) = concrete_root_opt {
-            // For package path, the root is already confined by the resolver.
-            let resolver_root = resolver.root().canonical_path();
-            let full_root = if concrete_root.is_absolute() {
-                concrete_root
-            } else {
-                resolver_root.join(&concrete_root)
-            };
-            discover_pbr_companions(&slots, &world, &full_root)?
-        } else {
-            build_empty_pbr_closure(&slots, &world)?
-        }
-    } else {
+    // Validate a supplied root even when the map has no eligible faces: a
+    // declared unsafe or missing root must never silently turn into no-PBR.
+    let concrete_root = textures_dir
+        .map(|root| normalize_companion_root_with_resolver(resolver, root))
+        .transpose()?;
+    let pbr = if slots.is_empty() {
         Vec::new()
+    } else if let Some(root) = concrete_root.as_deref() {
+        discover_pbr_companions(resolver, &slots, &world, root)?
+    } else {
+        build_empty_pbr_closure(&slots, &world)?
     };
 
     Ok(AuthorizedBspImport {
@@ -752,8 +684,8 @@ pub fn authorize_package_import(
         pbr,
         provenance: ImportProvenance {
             route: "package".to_string(),
-            companion_root_label: provenance_root.clone(),
-            logical_root: provenance_root,
+            companion_root_label: concrete_root.clone(),
+            logical_root: concrete_root,
         },
         scale,
         fullbright_start: 224,
@@ -769,78 +701,19 @@ fn build_empty_pbr_closure(
     slots: &[MiptexSlot],
     world: &bsp::world::BspWorld,
 ) -> Result<Vec<BoundPbrCompanion>, PackageLoadError> {
-    let mut seen = HashSet::new();
     let mut companions = Vec::new();
-
-    for face in &world.faces {
-        let texinfo_idx = face.texinfo_id as usize;
-        if texinfo_idx >= world.texinfos.len() {
-            continue;
-        }
-        let miptex_idx = world.texinfos[texinfo_idx].miptex as usize;
-        if miptex_idx >= slots.len() {
-            continue;
-        }
-        let slot = &slots[miptex_idx];
-        let Some(ref identity) = slot.identity else {
-            continue;
-        };
-
-        let surface_class = classify_face_surface_class(face, &world.texinfos, slots);
-        match surface_class {
-            bsp::materials::SurfaceClass::Opaque | bsp::materials::SurfaceClass::AlphaMask => {}
-            _ => continue,
-        }
-
-        let key = (miptex_idx, identity.clone());
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-
+    for (source_slot, texture_identity) in pbr_slot_entries(slots, world) {
         for kind in [PbrCompanionKind::Normal, PbrCompanionKind::Gloss] {
             companions.push(BoundPbrCompanion {
-                source_slot: miptex_idx,
-                texture_identity: identity.clone(),
+                source_slot,
+                texture_identity: texture_identity.clone(),
                 kind,
-                match_mode: PbrMatchMode::Exact,
+                match_mode: PbrMatchMode::Absent,
                 resource: None,
             });
         }
     }
-
     Ok(companions)
-}
-
-/// Normalize a companion root within a package, using the resolver for confinement.
-fn normalize_companion_root_with_resolver(
-    resolver: &PackageResolver,
-    textures_dir: &str,
-) -> Result<Option<PathBuf>, PackageLoadError> {
-    let root = std::path::Path::new(textures_dir);
-
-    // If the path ends with `textures`, it's the concrete root.
-    let concrete = if root.file_name().map(|n| n == "textures").unwrap_or(false) {
-        root.to_path_buf()
-    } else {
-        root.join("textures")
-    };
-
-    // Verify the directory exists within the package by resolving a sentinel.
-    // We check existence by trying to read an entry; NotFound is acceptable
-    // for empty directories.
-    let resolver_root = resolver.root().canonical_path();
-    let full_path = if concrete.is_absolute() {
-        concrete.clone()
-    } else {
-        resolver_root.join(&concrete)
-    };
-
-    if full_path.exists() && full_path.is_dir() {
-        Ok(Some(concrete))
-    } else {
-        // No textures directory — no PBR discovery.
-        Ok(None)
-    }
 }
 
 // ── Direct-Path Authorization ────────────────────────────────────────
@@ -865,80 +738,51 @@ pub fn authorize_direct_import(
     use package_io::budget::BudgetLedger;
     use package_io::PackageRoot;
 
-    // Ensure import mode is explicit.
-    if mode == ImportMode::Development {
-        // Development mode is only for raw-byte preparation, not direct launch.
-        // Actually, per the phase, development can be selected explicitly via CLI.
-        // But strict must be explicit. Let me re-read...
-        // Step 7: "represent import mode as mutually exclusive --strict and --development;
-        // a BSP launch without a selected mode is a CLI error."
-        // So both --strict and --development are valid CLI selections.
-        // Keep development tagged but allow it.
-    }
-
-    // ── Collect all paths for common ancestor computation ─────────
-    let mut all_paths: Vec<&Path> = Vec::new();
-    all_paths.push(bsp_path);
-    all_paths.push(palette_path);
-    if let Some(lp) = lit_path {
-        all_paths.push(lp);
-    }
-    for wp in wad_paths {
-        all_paths.push(wp);
-    }
-
-    // Canonicalize all paths.
-    let canonical_paths: Vec<PathBuf> = all_paths
-        .iter()
-        .map(|p| {
-            p.canonicalize().map_err(|e| {
-                PackageLoadError::Io(package_io::PackageIoError::io(
-                    DiagnosticCode::PackageIoNotFound,
-                    p,
-                    e,
-                ))
-            })
-        })
-        .collect::<Result<_, _>>()?;
-
-    // Find the common ancestor.
-    let common_root = find_common_ancestor(&canonical_paths)?;
-
-    // Create a PackageRoot from the common ancestor.
-    let package_root = PackageRoot::new(&common_root).map_err(|e| {
-        PackageLoadError::CompanionRoot {
-            path: common_root.clone(),
-            reason: format!("cannot create package root: {e}"),
-        }
-    })?;
-
-    let ledger = BudgetLedger::default_ledger();
-    let mut resolver = PackageResolver::new(package_root.clone(), ledger);
-
-    // ── Derive root-relative paths ────────────────────────────────
-    let bsp_rel = relativize(&common_root, bsp_path)?;
-    let palette_rel = relativize(&common_root, palette_path)?;
-
-    let lit_rel = if let Some(lp) = lit_path {
-        Some(relativize(&common_root, lp)?)
-    } else {
-        None
-    };
-
-    let wad_rels: Vec<String> = wad_paths
-        .iter()
-        .map(|wp| relativize(&common_root, wp))
-        .collect::<Result<_, _>>()?;
-
-    // ── Normalize companion root ─────────────────────────────────
+    // Normalize before selecting a common root so the companion directory is
+    // part of the same confinement domain as every declared file.
     let concrete_textures_root = normalize_companion_root(textures_dir)?;
 
-    let textures_rel = textures_dir.and_then(|td| {
-        // Only record if the textures dir is under the common root.
-        relativize(&common_root, td).ok()
-    });
+    let mut all_paths: Vec<&Path> = vec![bsp_path, palette_path];
+    if let Some(path) = lit_path {
+        all_paths.push(path);
+    }
+    all_paths.extend(wad_paths.iter().map(PathBuf::as_path));
+    if let Some(path) = concrete_textures_root.as_deref() {
+        all_paths.push(path);
+    }
 
-    // ── Authorize through resolver ───────────────────────────────
+    // Reject original symlink components before canonicalization can erase
+    // their evidence, then form one root from the real declared locations.
+    let canonical_paths = all_paths
+        .iter()
+        .map(|path| canonicalize_direct_path(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let common_root = find_common_ancestor(&canonical_paths)?;
+    if common_root.parent().is_none() {
+        return Err(PackageLoadError::UnconfinedDirectRoot { root: common_root });
+    }
+
+    let package_root =
+        PackageRoot::new(&common_root).map_err(|error| PackageLoadError::CompanionRoot {
+            path: common_root.clone(),
+            reason: format!("cannot create package root: {error}"),
+        })?;
+    let mut resolver = PackageResolver::new(package_root, BudgetLedger::default_ledger());
+
+    let bsp_rel = relativize(&common_root, bsp_path)?;
+    let palette_rel = relativize(&common_root, palette_path)?;
+    let lit_rel = lit_path
+        .map(|path| relativize(&common_root, path))
+        .transpose()?;
+    let wad_rels = wad_paths
+        .iter()
+        .map(|path| relativize(&common_root, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let textures_rel = concrete_textures_root
+        .as_deref()
+        .map(|path| relativize(&common_root, path))
+        .transpose()?;
+
     authorize_package_import(
         &mut resolver,
         &bsp_rel,
@@ -950,13 +794,12 @@ pub fn authorize_direct_import(
         scale,
     )
     .map(|mut import| {
-        // Override provenance for direct path.
         import.provenance = ImportProvenance {
             route: "direct".to_string(),
             companion_root_label: concrete_textures_root
                 .as_ref()
-                .map(|p| p.display().to_string()),
-            logical_root: Some(common_root.display().to_string()),
+                .map(|path| path.display().to_string()),
+            logical_root: textures_rel,
         };
         import
     })
@@ -981,6 +824,63 @@ fn find_common_ancestor(paths: &[PathBuf]) -> Result<PathBuf, PackageLoadError> 
             return Err(PackageLoadError::NoCommonAncestor);
         }
     }
+}
+
+fn canonicalize_direct_path(path: &Path) -> Result<PathBuf, PackageLoadError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                PackageLoadError::Io(package_io::PackageIoError::io(
+                    DiagnosticCode::PackageIoMetadataFailed,
+                    Path::new("."),
+                    error,
+                ))
+            })?
+            .join(path)
+    };
+    reject_symlink_components(&absolute)?;
+    absolute.canonicalize().map_err(|error| {
+        PackageLoadError::Io(package_io::PackageIoError::io(
+            DiagnosticCode::PackageIoNotFound,
+            &absolute,
+            error,
+        ))
+    })
+}
+
+fn reject_symlink_components(path: &Path) -> Result<(), PackageLoadError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir | std::path::Component::Normal(_) => {
+                current.push(component.as_os_str());
+                let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+                    let code = if error.kind() == std::io::ErrorKind::NotFound {
+                        DiagnosticCode::PackageIoNotFound
+                    } else {
+                        DiagnosticCode::PackageIoMetadataFailed
+                    };
+                    PackageLoadError::Io(package_io::PackageIoError::io(code, &current, error))
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(PackageLoadError::Io(package_io::PackageIoError::new(
+                        DiagnosticCode::PackageIoSymlinkRejected,
+                        format!(
+                            "symlink component in direct import path: '{}'",
+                            current.display()
+                        ),
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compute a root-relative path, rejecting paths outside the root.
@@ -1086,11 +986,7 @@ pub fn effective_import_summary(import: &AuthorizedBspImport) -> String {
         lines.push(format!("Companion root: {}", root));
     }
 
-    let present_pbr: Vec<_> = import
-        .pbr
-        .iter()
-        .filter(|c| c.resource.is_some())
-        .collect();
+    let present_pbr: Vec<_> = import.pbr.iter().filter(|c| c.resource.is_some()).collect();
     lines.push(format!(
         "PBR companions: {} present, {} absent",
         present_pbr.len(),
@@ -1119,38 +1015,27 @@ pub fn effective_import_summary(import: &AuthorizedBspImport) -> String {
 
 // ── Legacy LoadedBspPackage (thin wrapper) ───────────────────────────
 
-/// Legacy wrapper around [`AuthorizedBspImport`] for backward compatibility.
+/// Compatibility wrapper that owns exactly one authorized import handoff.
 ///
-/// Kept as a thin owner of one authorized import handoff. New code should
-/// use [`authorize_package_import`] and [`AuthorizedBspImport`] directly.
+/// It deliberately exposes no parallel resource fields, so legacy callers
+/// cannot drop palette, WAD, `.lit`, policy, or PBR closure inputs before the
+/// coordinator receives them.
 #[derive(Debug)]
 pub struct LoadedBspPackage {
-    /// The parsed BSP world.
-    pub world: bsp::world::BspWorld,
-    /// Authorized BSP resource.
-    pub bsp_resource: ConfinedResource,
-    /// Optional palette resource.
-    pub palette_resource: Option<ConfinedResource>,
-    /// Optional .lit companion resource.
-    pub lit_resource: Option<ConfinedResource>,
-    /// Loaded WAD archive resources, keyed by archive name.
-    pub wad_resources: Vec<(String, ConfinedResource)>,
-    /// Auto-discovered PBR texture companions.
-    pub pbr_texture_resources: Vec<ConfinedResource>,
+    import: AuthorizedBspImport,
 }
 
 impl LoadedBspPackage {
-    /// Convert confined PBR resources into neutral extraction inputs.
-    pub fn pbr_texture_companions(&self) -> Vec<bsp::resources::TextureCompanion> {
-        self.pbr_texture_resources
-            .iter()
-            .map(|resource| {
-                bsp::resources::TextureCompanion::new(
-                    resource.id.as_str(),
-                    resource.bytes.as_bytes().to_vec(),
-                )
-            })
-            .collect()
+    pub fn new(import: AuthorizedBspImport) -> Self {
+        Self { import }
+    }
+
+    pub fn into_authorized_import(self) -> AuthorizedBspImport {
+        self.import
+    }
+
+    pub fn authorized_import(&self) -> &AuthorizedBspImport {
+        &self.import
     }
 }
 
@@ -1168,10 +1053,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!(
-            "bsp-pkg-test-{}-{nanos}",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("bsp-pkg-test-{}-{nanos}", std::process::id()))
     }
 
     /// Build a minimal valid BSP29 file for testing.
@@ -1191,8 +1073,19 @@ mod tests {
         let lumps: [(u32, u32); 15] = [
             (entity_offset, entity_size),
             (plane_offset, plane_size),
-            (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
-            (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
         ];
         for (off, sz) in &lumps {
             data.extend_from_slice(&off.to_le_bytes());
@@ -1239,6 +1132,9 @@ mod tests {
         assert_eq!(import.world.entities.len(), 1);
         assert!(import.palette.is_some());
         assert!(import.policy.is_strict());
+        let request = import.to_extraction_request();
+        assert!(request.strict);
+        assert!(request.palette.is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1305,6 +1201,10 @@ mod tests {
         assert_eq!(import.wads.len(), 1);
         assert_eq!(import.wads[0].basename, "test");
         assert_eq!(import.wads[0].ordinal, 0);
+        let request = import.to_extraction_request();
+        assert_eq!(request.wad_archives.len(), 1);
+        assert_eq!(request.wad_archives[0].0, "test");
+        assert!(request.strict);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1413,6 +1313,147 @@ mod tests {
     }
 
     #[test]
+    fn direct_import_normalizes_root_to_textures_child() {
+        let dir = temp_dir();
+        let maps = dir.join("maps");
+        let palettes = dir.join("palettes");
+        fs::create_dir_all(&maps).unwrap();
+        fs::create_dir_all(&palettes).unwrap();
+        fs::create_dir_all(dir.join("textures")).unwrap();
+        fs::write(maps.join("test.bsp"), make_minimal_bsp29()).unwrap();
+        fs::write(palettes.join("pal.lmp"), &[0u8; 768]).unwrap();
+
+        let import = authorize_direct_import(
+            &maps.join("test.bsp"),
+            &palettes.join("pal.lmp"),
+            None,
+            &[],
+            Some(&dir),
+            ImportMode::Strict,
+            0.0254,
+        )
+        .unwrap();
+        assert_eq!(import.provenance.logical_root.as_deref(), Some("textures"));
+        let expected_label = dir.join("textures").display().to_string();
+        assert_eq!(
+            import.provenance.companion_root_label.as_deref(),
+            Some(expected_label.as_str())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn commit_authorized_import(
+        import: AuthorizedBspImport,
+    ) -> (
+        crate::cache::CacheIdentity,
+        crate::source_link::BspSourceLink,
+    ) {
+        let mut coordinator = crate::coordinator::BspCoordinator::new();
+        let prepare = coordinator.prepare_authorized_import(import).unwrap();
+        let mut scene = renderer::api::Scene::new();
+        coordinator
+            .set_renderer_mount_ready(prepare.token, renderer::api::bsp::PreparedBspMount::new())
+            .unwrap();
+        coordinator
+            .validate_for_scene(prepare.token, &mut scene)
+            .unwrap();
+        let cache_identity = coordinator
+            .commit(prepare.token, &mut scene)
+            .unwrap()
+            .cache_identity;
+        let source_link = coordinator.source_link().cloned().unwrap();
+        (cache_identity, source_link)
+    }
+
+    fn committed_cache_identity(import: AuthorizedBspImport) -> crate::cache::CacheIdentity {
+        commit_authorized_import(import).0
+    }
+
+    #[test]
+    fn package_and_direct_imports_share_one_semantic_cache_identity() {
+        let dir = temp_dir();
+        let maps = dir.join("maps");
+        let palettes = dir.join("palettes");
+        fs::create_dir_all(&maps).unwrap();
+        fs::create_dir_all(&palettes).unwrap();
+        fs::write(maps.join("test.bsp"), make_minimal_bsp29()).unwrap();
+        fs::write(palettes.join("pal.lmp"), &[0u8; 768]).unwrap();
+        fs::write(
+            maps.join("test.wad"),
+            [b"WAD2".as_slice(), &[0, 0, 0, 0, 8, 0, 0, 0]].concat(),
+        )
+        .unwrap();
+        fs::write(maps.join("test.lit"), b"QLIT\x01\x00\x00\x00").unwrap();
+
+        let root = PackageRoot::new(&dir).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+        let package_import = authorize_package_import(
+            &mut resolver,
+            "maps/test.bsp",
+            "palettes/pal.lmp",
+            Some("maps/test.lit"),
+            &["maps/test.wad".to_string()],
+            None,
+            ImportMode::Strict,
+            0.0254,
+        )
+        .unwrap();
+        let direct_import = authorize_direct_import(
+            &maps.join("test.bsp"),
+            &palettes.join("pal.lmp"),
+            Some(&maps.join("test.lit")),
+            &[maps.join("test.wad")],
+            None,
+            ImportMode::Strict,
+            0.0254,
+        )
+        .unwrap();
+
+        let package_key = committed_cache_identity(package_import).to_key_string();
+        let direct_key = committed_cache_identity(direct_import).to_key_string();
+        assert_eq!(package_key, direct_key);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_link_uses_resolver_issued_bsp_sha256() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join("maps")).unwrap();
+        fs::create_dir_all(dir.join("palettes")).unwrap();
+        fs::write(dir.join("maps/test.bsp"), make_minimal_bsp29()).unwrap();
+        fs::write(dir.join("palettes/pal.lmp"), [0u8; 768]).unwrap();
+
+        let root = PackageRoot::new(&dir).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+        let import = authorize_package_import(
+            &mut resolver,
+            "maps/test.bsp",
+            "palettes/pal.lmp",
+            None,
+            &[],
+            None,
+            ImportMode::Strict,
+            0.0254,
+        )
+        .unwrap();
+        let expected_bsp_hash = format!("sha256:{}", import.bsp.identity.hex());
+        let expected_palette_hash =
+            format!("sha256:{}", import.palette.as_ref().unwrap().identity.hex());
+
+        let (_, source_link) = commit_authorized_import(import);
+        assert_eq!(source_link.content_hash, expected_bsp_hash);
+        assert_eq!(
+            source_link.companion_hashes.palette.as_deref(),
+            Some(expected_palette_hash.as_str())
+        );
+        assert!(source_link.import_policy.strict);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn direct_import_unconfined_path_rejected() {
         let dir1 = temp_dir();
         let dir2 = temp_dir();
@@ -1437,6 +1478,40 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir1);
         let _ = fs::remove_dir_all(&dir2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_import_rejects_original_symlink_before_canonicalization() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir();
+        let maps = dir.join("maps");
+        let palettes = dir.join("palettes");
+        fs::create_dir_all(&maps).unwrap();
+        fs::create_dir_all(&palettes).unwrap();
+        fs::write(maps.join("test.bsp"), make_minimal_bsp29()).unwrap();
+        fs::write(palettes.join("pal.lmp"), &[0u8; 768]).unwrap();
+        symlink(maps.join("test.bsp"), maps.join("alias.bsp")).unwrap();
+
+        let err = authorize_direct_import(
+            &maps.join("alias.bsp"),
+            &palettes.join("pal.lmp"),
+            None,
+            &[],
+            None,
+            ImportMode::Strict,
+            0.0254,
+        )
+        .unwrap_err();
+        match err {
+            PackageLoadError::Io(error) => {
+                assert_eq!(error.code, DiagnosticCode::PackageIoSymlinkRejected)
+            }
+            other => panic!("expected symlink rejection, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1489,6 +1564,95 @@ mod tests {
     }
 
     #[test]
+    fn package_authorization_binds_fixture_pbr_companions() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bsp/tests/fixtures");
+        let root = PackageRoot::new(&fixtures).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+
+        let import = authorize_package_import(
+            &mut resolver,
+            "compiled/dungeon-materials-bsp2.bsp",
+            "palettes/project_palette.lmp",
+            Some("compiled/dungeon-materials-bsp2.lit"),
+            &[],
+            Some("."),
+            ImportMode::Development,
+            0.0254,
+        )
+        .expect("fixture package must authorize");
+
+        assert_eq!(import.provenance.logical_root.as_deref(), Some("textures"));
+        assert!(import.pbr.iter().any(|companion| {
+            companion.texture_identity == "WALL01"
+                && companion.kind == PbrCompanionKind::Normal
+                && companion.resource.is_some()
+        }));
+        assert!(import.pbr.iter().any(|companion| {
+            companion.texture_identity == "WALL01"
+                && companion.kind == PbrCompanionKind::Gloss
+                && companion.resource.is_some()
+        }));
+
+        let direct_import = authorize_direct_import(
+            &fixtures.join("compiled/dungeon-materials-bsp2.bsp"),
+            &fixtures.join("palettes/project_palette.lmp"),
+            Some(&fixtures.join("compiled/dungeon-materials-bsp2.lit")),
+            &[],
+            Some(&fixtures.join("textures")),
+            ImportMode::Development,
+            0.0254,
+        )
+        .expect("fixture direct route must authorize");
+        assert_eq!(
+            import.provenance.logical_root,
+            direct_import.provenance.logical_root
+        );
+        let package_closure: Vec<_> = import
+            .pbr
+            .iter()
+            .map(|companion| {
+                (
+                    companion.source_slot,
+                    companion.texture_identity.clone(),
+                    companion.kind,
+                    companion.match_mode,
+                    companion
+                        .resource
+                        .as_ref()
+                        .map(|resource| resource.identity),
+                )
+            })
+            .collect();
+        let direct_closure: Vec<_> = direct_import
+            .pbr
+            .iter()
+            .map(|companion| {
+                (
+                    companion.source_slot,
+                    companion.texture_identity.clone(),
+                    companion.kind,
+                    companion.match_mode,
+                    companion
+                        .resource
+                        .as_ref()
+                        .map(|resource| resource.identity),
+                )
+            })
+            .collect();
+        assert_eq!(package_closure, direct_closure);
+
+        let request = import.to_extraction_request();
+        assert!(request
+            .texture_companions
+            .iter()
+            .any(|companion| { companion.logical_path.ends_with("WALL01_norm.png") }));
+        assert!(request
+            .texture_companions
+            .iter()
+            .any(|companion| { companion.logical_path.ends_with("WALL01_gloss.png") }));
+    }
+
+    #[test]
     fn pbr_companion_discovery_exact_case() {
         let dir = temp_dir();
         let textures = dir.join("textures");
@@ -1501,13 +1665,133 @@ mod tests {
         let world_result = BspLoader::load(&bsp_data, &LoadOptions::default());
         if let Ok(world) = world_result {
             let slots = resources::parse_miptex_slots(&world.miptex_data);
-            let companions = discover_pbr_companions(&slots, &world, &textures).unwrap();
-            // Without actual faces referencing the texture, may be empty.
-            // This test primarily validates the function doesn't panic.
-            assert!(companions.is_empty() || !companions.is_empty());
+            let root = PackageRoot::new(&dir).unwrap();
+            let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+            let companions =
+                discover_pbr_companions(&mut resolver, &slots, &world, "textures").unwrap();
+            // Without actual faces referencing the texture, the closure is empty.
+            assert!(companions.is_empty());
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pbr_exact_case_wins_and_unique_ascii_fallback_is_authorized() {
+        let dir = temp_dir();
+        let textures = dir.join("textures");
+        fs::create_dir_all(&textures).unwrap();
+        fs::write(textures.join("Brick_norm.png"), b"exact").unwrap();
+        fs::write(textures.join("brick_norm.png"), b"fallback").unwrap();
+
+        let root = PackageRoot::new(&dir).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+        let (mode, resource) = resolve_pbr_companion(
+            &mut resolver,
+            &textures,
+            "textures",
+            "Brick",
+            PbrCompanionKind::Normal,
+        )
+        .unwrap();
+        assert_eq!(mode, PbrMatchMode::Exact);
+        let resource = resource.expect("exact companion must be authorized");
+        assert_eq!(resource.logical_id, "textures/Brick_norm.png");
+        assert_eq!(resource.bytes, b"exact");
+
+        fs::remove_file(textures.join("Brick_norm.png")).unwrap();
+        fs::remove_file(textures.join("brick_norm.png")).unwrap();
+        fs::write(textures.join("bRiCk_NoRm.PnG"), b"fallback").unwrap();
+        let root = PackageRoot::new(&dir).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+        let (mode, resource) = resolve_pbr_companion(
+            &mut resolver,
+            &textures,
+            "textures",
+            "Brick",
+            PbrCompanionKind::Normal,
+        )
+        .unwrap();
+        assert_eq!(mode, PbrMatchMode::AsciiInsensitive);
+        assert_eq!(resource.unwrap().bytes, b"fallback");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pbr_ambiguous_fallback_and_symlink_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir();
+        let textures = dir.join("textures");
+        fs::create_dir_all(&textures).unwrap();
+        fs::write(textures.join("bRiCk_norm.png"), b"one").unwrap();
+        fs::write(textures.join("bricK_norm.png"), b"two").unwrap();
+
+        let root = PackageRoot::new(&dir).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+        let err = resolve_pbr_companion(
+            &mut resolver,
+            &textures,
+            "textures",
+            "Brick",
+            PbrCompanionKind::Normal,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            PackageLoadError::AmbiguousPbrCompanion { .. }
+        ));
+
+        fs::remove_file(textures.join("bRiCk_norm.png")).unwrap();
+        fs::remove_file(textures.join("bricK_norm.png")).unwrap();
+        let outside = dir.join("outside.png");
+        fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, textures.join("Brick_norm.png")).unwrap();
+        let root = PackageRoot::new(&dir).unwrap();
+        let mut resolver = PackageResolver::new(root, BudgetLedger::default_ledger());
+        let err = resolve_pbr_companion(
+            &mut resolver,
+            &textures,
+            "textures",
+            "Brick",
+            PbrCompanionKind::Normal,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            PackageLoadError::Io(package_io::PackageIoError {
+                code: DiagnosticCode::PackageIoSymlinkRejected,
+                ..
+            })
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn companion_root_symlink_child_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir();
+        let outside = temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, dir.join("textures")).unwrap();
+
+        let err = normalize_companion_root(Some(&dir)).unwrap_err();
+        assert!(matches!(
+            err,
+            PackageLoadError::Io(package_io::PackageIoError {
+                code: DiagnosticCode::PackageIoSymlinkRejected,
+                ..
+            })
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     /// Build a minimal BSP29 with a miptex lump containing one named texture.
@@ -1550,15 +1834,21 @@ mod tests {
         current_offset += plane_size;
 
         let lumps: [(u32, u32); 15] = [
-            (entity_offset, entity_size),   // 0: entities
-            (plane_offset, plane_size),     // 1: planes
-            (miptex_offset, miptex_size),   // 2: miptex
-            (0, 0), // 3: vertices
-            (0, 0), // 4: visinfo
-            (0, 0), // 5: nodes
-            (0, 0), // 6: texinfo
-            (face_offset, face_size),       // 7: faces
-            (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0), (0, 0),
+            (entity_offset, entity_size), // 0: entities
+            (plane_offset, plane_size),   // 1: planes
+            (miptex_offset, miptex_size), // 2: miptex
+            (0, 0),                       // 3: vertices
+            (0, 0),                       // 4: visinfo
+            (0, 0),                       // 5: nodes
+            (0, 0),                       // 6: texinfo
+            (face_offset, face_size),     // 7: faces
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
         ];
         for (off, sz) in &lumps {
             data.extend_from_slice(&off.to_le_bytes());

@@ -23,11 +23,14 @@ use crate::bridge::{
     AppBridge, BehaviorEntityRecipe, BridgeAggregator, EntityCollisionRecipe, LightEntityRecipe,
     WorldCollisionRecipe,
 };
-use crate::cache::{compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry, WadCacheEntry};
+use crate::cache::{
+    canonical_f32_bytes, compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry,
+    WadCacheEntry,
+};
 use crate::candidate::{BspCandidate, CandidatePointLight};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
-use crate::package::{AuthorizedBspImport, PbrCompanionKind};
+use crate::package::{AuthorizedBspImport, ImportMode, PbrCompanionKind};
 use crate::source_link::{reconcile_overrides, BspSourceLink, OverrideReconciliation};
 
 use bsp::extract::{EntityDescriptor, ExtractedBsp};
@@ -91,15 +94,16 @@ pub struct ReloadResult {
 /// ```ignore
 /// let mut coordinator = BspCoordinator::new();
 ///
-/// // Step 1: Prepare from raw bytes (or use prepare_from_package)
-/// let prepare = coordinator.prepare(&bsp_bytes, None, "maps/e1m1")?;
+/// // Step 1: Pass the complete AuthorizedBspImport returned by
+/// // authorize_package_import or authorize_direct_import.
+/// let prepare = coordinator.prepare_authorized_import(import)?;
 ///
 /// // Step 2: Upload renderer resources
 /// let mount = renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap())?;
 /// coordinator.set_renderer_mount_ready(prepare.token, mount)?;
 ///
-/// // Step 3: Validate
-/// coordinator.validate(prepare.token)?;
+/// // Step 3: Validate publication
+/// coordinator.validate_for_scene(prepare.token, &mut scene)?;
 ///
 /// // Step 4: Commit (pure publish — no new work)
 /// let commit = coordinator.commit(prepare.token, &mut scene)?;
@@ -197,8 +201,9 @@ impl BspCoordinator {
 
     // ── Prepare ────────────────────────────────────────────────────────
 
-    /// Prepare a BSP from raw bytes for subsequent commit.
+    /// Prepare raw bytes through the explicit development/test compatibility path.
     ///
+    /// Package and direct startup must use [`prepare_authorized_import`](Self::prepare_authorized_import).
     /// This is the first step of the two-step transaction. It:
     /// 1. Increments the generation counter (cancelling any previous candidate)
     /// 2. Parses and validates the BSP bytes
@@ -210,6 +215,7 @@ impl BspCoordinator {
     /// After prepare, call [`set_renderer_mount_ready`](BspCoordinator::set_renderer_mount_ready)
     /// then [`validate`](BspCoordinator::validate) then
     /// [`commit`](BspCoordinator::commit).
+    #[doc(hidden)]
     pub fn prepare(
         &mut self,
         bsp_bytes: &[u8],
@@ -236,7 +242,7 @@ impl BspCoordinator {
 
         // Parse BSP
         let load_options = bsp::LoadOptions {
-            strict: false,
+            strict: ImportMode::Development.is_strict(),
             palette: None,
             lit_data: None,
             wad_archives: Vec::new(),
@@ -253,39 +259,16 @@ impl BspCoordinator {
         self.build_candidate(world, Vec::new(), Vec::new(), scale, source_identity, token)
     }
 
-    /// Prepare a package-loaded BSP and its auto-discovered PBR companions.
+    /// Prepare a legacy package wrapper through the one authorized-import path.
     ///
-    /// **Development-only**: this path uses raw bytes without the authorized import
-    /// boundary. Production package and direct startup must use
-    /// [`prepare_authorized_import`](Self::prepare_authorized_import).
+    /// The wrapper owns a complete [`AuthorizedBspImport`], so this compatibility
+    /// entry point cannot discard policy or companion resources.
     #[doc(hidden)]
     pub fn prepare_from_loaded_package(
         &mut self,
         package: crate::package::LoadedBspPackage,
-        scale: Option<f32>,
     ) -> Result<PrepareResult, BspRuntimeError> {
-        let crate::package::LoadedBspPackage {
-            world,
-            bsp_resource,
-            pbr_texture_resources,
-            ..
-        } = package;
-        let source_identity = bsp_resource.id.as_str().to_string();
-        drop(bsp_resource);
-        let texture_companions = pbr_texture_resources
-            .into_iter()
-            .map(|resource| {
-                let logical_path = resource.id.as_str().to_string();
-                bsp::resources::TextureCompanion::new(logical_path, resource.bytes.into_bytes())
-            })
-            .collect();
-        self.prepare_from_world_with_texture_companions(
-            world,
-            texture_companions,
-            Vec::new(),
-            scale,
-            source_identity,
-        )
+        self.prepare_authorized_import(package.into_authorized_import())
     }
 
     /// Prepare an authorized BSP import — the single entry point for package
@@ -319,13 +302,11 @@ impl BspCoordinator {
 
         let was_occupied = self.is_active();
         let source_identity = import.bsp.logical_id.clone();
-        let _policy_strict = import.policy.is_strict();
         let resolved_scale = import.scale;
 
         // Derive extraction request from the authorized import.
         let extraction_request = import.to_extraction_request();
         let world_profile_tag = extraction_request.world.profile.tag().to_string();
-        let _world_miptex_data_len = extraction_request.world.miptex_data.len();
 
         let extracted = bsp::extract::extract(extraction_request).map_err(|e| {
             BspRuntimeError::SourceUnavailable {
@@ -353,11 +334,8 @@ impl BspCoordinator {
             })?;
 
         // Build cache identity from authorized import.
-        let cache_identity = self.build_cache_identity_from_import(
-            &extracted,
-            &import,
-            &world_profile_tag,
-        );
+        let cache_identity =
+            self.build_cache_identity_from_import(&extracted, &import, &world_profile_tag);
         let point_lights = Self::build_candidate_point_lights(&extracted)?;
 
         // Build bridge DTOs and call app bridge prepare.
@@ -473,10 +451,16 @@ impl BspCoordinator {
         // Extract DTOs
         let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
             world,
+            palette: None,
             texture_companions,
             wad_archives,
+            strict: ImportMode::Development.is_strict(),
             scale: resolved_scale,
-            ..Default::default()
+            fullbright_start: 224,
+            fullbright_end: 255,
+            max_atlas_pages: bsp::lightmaps::MAX_ATLAS_PAGES,
+            overbright: 2.0,
+            light_scale: 1.0,
         })
         .map_err(|e| BspRuntimeError::SourceUnavailable {
             reason: format!("BSP extraction failed: {} (code {:?})", e.message, e.code),
@@ -1369,8 +1353,7 @@ impl BspCoordinator {
             .map(|ed| {
                 // Extract door/button/platform-specific properties from key_values.
                 let kv = &ed.key_values;
-                let movedir = parse_vec3_opt(&get_kv(kv, "movedir"))
-                    .map(|v| [v.x, v.y, v.z]);
+                let movedir = parse_vec3_opt(&get_kv(kv, "movedir")).map(|v| [v.x, v.y, v.z]);
                 let speed = get_kv(kv, "speed").and_then(|s| s.parse::<f32>().ok());
                 let wait = get_kv(kv, "wait").and_then(|s| s.parse::<f32>().ok());
                 let lip = get_kv(kv, "lip").and_then(|s| s.parse::<f32>().ok());
@@ -1410,12 +1393,10 @@ impl BspCoordinator {
         source_identity: &str,
         scale: f32,
     ) -> BspSourceLink {
-        let content_hash_hex: String = extracted
-            .content_hash
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        let content_hash = format!("sha256:{}", content_hash_hex);
+        // The package resolver issued the authoritative SHA-256. Do not
+        // persist the BSP crate's internal extraction fingerprint as though
+        // it were a SHA-256 resource identity.
+        let content_hash = format!("sha256:{}", import.bsp.identity.hex());
 
         let entity_identity_records = crate::source_link::build_identity_records(
             &extracted.entity_identities,
@@ -1432,12 +1413,7 @@ impl BspCoordinator {
                 overbright: crate::source_link::CanonicalFloat(import.overbright),
             },
             atlas_policy: crate::source_link::AtlasPolicy::default(),
-            texture_roots: import
-                .provenance
-                .companion_root_label
-                .iter()
-                .cloned()
-                .collect(),
+            texture_roots: import.provenance.logical_root.iter().cloned().collect(),
             strict: import.policy.is_strict(),
         };
 
@@ -1474,6 +1450,7 @@ impl BspCoordinator {
         profile_tag: &str,
     ) -> CacheIdentity {
         let bsp_content_hash = import.bsp.identity.as_bytes();
+        let palette_present = import.palette.is_some();
         let palette_hash = import
             .palette
             .as_ref()
@@ -1485,12 +1462,14 @@ impl BspCoordinator {
         if let Some(ref lit) = import.lit {
             companion_identities.push(CompanionId {
                 kind: "lit".to_string(),
+                logical_id: Some(lit.logical_id.clone()),
                 content_hash: *lit.identity.as_bytes(),
             });
         }
         for wad in &import.wads {
             companion_identities.push(CompanionId {
                 kind: format!("wad:{}", wad.basename),
+                logical_id: Some(wad.resource.logical_id.clone()),
                 content_hash: *wad.resource.identity.as_bytes(),
             });
         }
@@ -1521,7 +1500,9 @@ impl BspCoordinator {
                     source_slot: c.source_slot,
                     texture_identity: c.texture_identity.clone(),
                     kind: kind_str.to_string(),
+                    match_mode: c.match_mode.tag().to_string(),
                     present: c.resource.is_some(),
+                    logical_id: c.resource.as_ref().map(|r| r.logical_id.clone()),
                     content_hash: c
                         .resource
                         .as_ref()
@@ -1536,6 +1517,7 @@ impl BspCoordinator {
             *bsp_content_hash,
             profile_tag,
             import.scale,
+            palette_present,
             palette_hash,
             import.policy.is_strict(),
             companion_identities,
@@ -1544,13 +1526,14 @@ impl BspCoordinator {
             vec![],
             vec![],
             crate::cache::LightCalibration {
-                intensity_scale: import.light_scale.to_le_bytes(),
-                overbright: import.overbright.to_le_bytes(),
+                intensity_scale: canonical_f32_bytes(import.light_scale),
+                overbright: canonical_f32_bytes(import.overbright),
             },
             crate::cache::AtlasPolicy {
                 page_size: 2048,
                 padding: 2,
                 style_count: 4,
+                max_pages: u64::try_from(import.max_atlas_pages).unwrap_or(u64::MAX),
             },
             crate::cache::CollisionPolicy::default(),
             [import.fullbright_start, import.fullbright_end],
@@ -1600,6 +1583,7 @@ impl BspCoordinator {
                         .as_ref()
                         .map(|companion| CompanionId {
                             kind: format!("pbr-normal:{}", texture.identity),
+                            logical_id: None,
                             content_hash: compute_identity_hash(&companion.bytes),
                         }),
                     texture
@@ -1608,6 +1592,7 @@ impl BspCoordinator {
                         .as_ref()
                         .map(|companion| CompanionId {
                             kind: format!("pbr-gloss:{}", texture.identity),
+                            logical_id: None,
                             content_hash: compute_identity_hash(&companion.bytes),
                         }),
                 ]
@@ -1621,6 +1606,7 @@ impl BspCoordinator {
             extracted.content_hash,
             extracted.profile_tag,
             0.0254,
+            false,
             [0; 32],
             false,
             companion_identities,

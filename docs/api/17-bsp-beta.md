@@ -88,31 +88,30 @@ use bsp_runtime::{
 
 let mut coordinator = BspCoordinator::new();
 
-// Package entrypoint: consumes the world and auto-discovered PBR companions.
-let loaded = bsp_runtime::package::load_bsp_package(
+// Package and direct launch paths first create one complete authorized import.
+// Every declared file is read through PackageResolver before parsing/extraction.
+let import = bsp_runtime::package::authorize_package_import(
     &mut resolver,
     "maps/mylevel.bsp",
     "palettes/my.lmp",
-    None,
-    &[],
-    false,
+    None,             // optional declared .lit
+    &[],              // ordered declared WAD paths
+    Some("textures"), // one confined companion root
+    bsp_runtime::PackageImportMode::Strict,
+    0.0254,
 )?;
-let prepare = coordinator.prepare_from_loaded_package(loaded, Some(0.0254))?;
+let prepare = coordinator.prepare_authorized_import(import)?;
 
-// Raw-byte entrypoint (no external texture companions):
-// let prepare = coordinator.prepare(&bsp_bytes, Some(0.0254), "maps/mylevel.bsp")?;
 // ... build `mount` with renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap()) ...
 coordinator.set_renderer_mount_ready(prepare.token, mount)?;
 coordinator.validate_for_scene(prepare.token, &mut scene)?;
 coordinator.commit(prepare.token, &mut scene)?;
 
-// Cancel in-flight prepare
-coordinator.prepare(&new_bytes, Some(0.0254), "maps/mylevel.bsp")?; // previous prepare is stale
+// Calling `prepare_authorized_import` with a replacement authorized import
+// cancels the previous prepare and makes its token stale.
 
-// Reload with different source
-coordinator.reload(&new_bytes, Some(0.0254), "maps/mylevel.bsp", &mut scene, |extracted| {
-    renderer.prepare_bsp_mount(extracted).expect("BSP upload")
-})?;
+// Reimport a different package/direct source by authorizing a new import and
+// running the normal prepare → upload → validate → commit transaction.
 
 // Persist
 let mutable_behavior = coordinator.capture_mutable_behavior();
@@ -302,43 +301,38 @@ All BSP diagnostics pass through `BspReport` with stable `DiagnosticCode` values
 | `BSP-ENTITY-UNKNOWN-CLASS` | unknown app entity | info | info |
 | (see [bsp-compatibility](../../.internal-dev/specifications/bsp-compatibility.md) §7 for the full table) | | | |
 
-## Example — Full Workflow Using Only Public Paths
+## Example — Direct Runtime Workflow
 
 ```rust
-use bsp::{extract::{extract, BspExtractionRequest}, BspLoader, LoadOptions};
-use bsp_runtime::BspCoordinator;
+use std::path::Path;
+
+use bsp_runtime::{BspCoordinator, PackageImportMode};
+use bsp_runtime::package::authorize_direct_import;
 use renderer::prelude::*;
 
 fn load_bsp_map(
     renderer: &mut Renderer,
     scene: &mut Scene,
-    bsp_path: &str,
-    palette_path: &str,
+    bsp_path: &Path,
+    palette_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let bsp_bytes = std::fs::read(bsp_path)?;
-    let palette_bytes = std::fs::read(palette_path)?;
+    // The runtime boundary reads and authorizes every declared path once.
+    let import = authorize_direct_import(
+        bsp_path,
+        palette_path,
+        None,
+        &[],
+        None,
+        PackageImportMode::Strict,
+        0.0254,
+    )?;
 
-    let world = BspLoader::load(&bsp_bytes, &LoadOptions {
-        palette: Some(palette_bytes.clone()),
-        source_identity: bsp_path.to_string(),
-        ..Default::default()
-    })?;
-
-    // Full lifecycle path.
     let mut coordinator = BspCoordinator::new();
-    let prepare = coordinator.prepare_from_world(world.clone(), Some(0.0254), bsp_path)?;
+    let prepare = coordinator.prepare_authorized_import(import)?;
     let mount = renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap())?;
     coordinator.set_renderer_mount_ready(prepare.token, mount)?;
     coordinator.validate_for_scene(prepare.token, scene)?;
     coordinator.commit(prepare.token, scene)?;
-
-    // Direct extraction path (for diagnostics or custom pipelines).
-    let extracted = extract(BspExtractionRequest {
-        world,
-        palette: Some(bsp::resources::decode_palette(&palette_bytes)),
-        scale: 0.0254,
-        ..Default::default()
-    })?;
 
     Ok(())
 }

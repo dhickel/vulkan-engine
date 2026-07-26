@@ -62,37 +62,34 @@ lit = "maps/my_level.lit"
 ### Quick Start — App-Owned Loop with BSP
 
 ```rust
-use bsp::{BspLoader, LoadOptions};
-use bsp_runtime::BspCoordinator;
+use bsp_runtime::{BspCoordinator, PackageImportMode};
+use bsp_runtime::package::authorize_package_import;
+use package_io::resolver::PackageResolver;
 use renderer::prelude::*;
 
 fn load_map(
     renderer: &mut Renderer,
     scene: &mut Scene,
-    bsp_bytes: Vec<u8>,
-    palette_bytes: Vec<u8>,
+    resolver: &mut PackageResolver,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Parse with authorized companion bytes. The raw coordinator prepare
-    // path has no palette/lit parameters; textured maps should enter through
-    // a parsed BspWorld or a package-owned resolver path.
-    let world = BspLoader::load(
-        &bsp_bytes,
-        &LoadOptions {
-            strict: false,
-            palette: Some(palette_bytes),
-            source_identity: "maps/my_level.bsp".to_string(),
-            ..LoadOptions::default()
-        },
+    // 1. Authorize every declared resource and parse exactly once.
+    let import = authorize_package_import(
+        resolver,
+        "maps/my_level.bsp",
+        "palettes/my_palette.lmp",
+        None,
+        &[],
+        Some("textures"),
+        PackageImportMode::Strict,
+        0.0254,
     )?;
 
-    // 2. Register any app bridges before prepare so their hidden resources are
-    // included in the candidate. Bridge implementations are app-specific; see
-    // the API reference for the exact AppBridge trait.
+    // 2. Register app bridges before preparation so their hidden resources
+    // are included in the candidate.
     let mut coordinator = BspCoordinator::new();
 
-    // 3. Prepare hidden state, upload renderer resources, validate the target
-    // scene, then publish. Commit is publication-only.
-    let prepare = coordinator.prepare_from_world(world, Some(0.0254), "maps/my_level.bsp")?;
+    // 3. Extract from the one authorized import, upload, validate, publish.
+    let prepare = coordinator.prepare_authorized_import(import)?;
     let mount = renderer.prepare_bsp_mount(coordinator.staged_extraction().unwrap())?;
     coordinator.set_renderer_mount_ready(prepare.token, mount)?;
     coordinator.validate_for_scene(prepare.token, scene)?;
@@ -102,25 +99,40 @@ fn load_map(
 }
 ```
 
-### Maintained `bsp_beta` Entrypoint and Companion Discovery
+### Maintained `bsp_beta` Entrypoint and Authorized Inputs
 
-The workspace app accepts a map and discovers Quake-style companions deterministically:
+The workspace app requires an explicit import policy and explicit declared
+resources. It does not probe the BSP parent, game root, or any fallback
+location for companions:
 
 ```bash
 cargo run -p bsp_beta -- \
+  --strict \
   --bsp /path/to/game/maps/start.bsp \
-  --companion-dir /path/to/game/maps
+  --palette /path/to/game/gfx/palette.lmp \
+  --wad /path/to/game/id1/pak0-textures.wad \
+  --lit /path/to/game/maps/start.lit \
+  --textures /path/to/game
 ```
 
-Palette lookup order is: explicit `--palette`, the companion/map directory (`palette.lmp` or `project_palette.lmp`), `gfx/palette.lmp` below that directory, then `gfx/palette.lmp` below the map directory's parent game root. The app does **not** fall back to the project test palette; a missing real palette is an error. A same-stem `.lit` file next to the BSP is auto-discovered. For each embedded/WAD texture identity, the app also searches the companion/map directory and the game-root `textures/` directory for PBR companions.
+`--strict` and `--development` are mutually exclusive; one is required for a
+BSP launch. `--palette` is required, while `--wad` and `--lit` are optional
+only when omitted (a declared missing resource is an authorization error).
+`--textures` is the sole PBR companion root: a path ending exactly in
+`textures` is used directly; every other path is confined to its `textures/`
+child. No `--textures` argument means no PBR discovery. The runtime authorizes
+all accepted bytes through one `PackageResolver` boundary before parse or
+extraction.
 
 For deterministic renderer-owned captures:
 
 ```bash
 cargo run -p bsp_beta -- \
-  --headless --capture-frames 5 \
+  --strict --headless --capture-frames 5 \
   --bsp /path/to/game/maps/start.bsp \
-  --companion-dir /path/to/game/maps
+  --palette /path/to/game/gfx/palette.lmp \
+  --wad /path/to/game/id1/pak0-textures.wad \
+  --textures /path/to/game
 ```
 
 ### MCP Headless Server
@@ -129,9 +141,11 @@ cargo run -p bsp_beta -- \
 
 ```bash
 cargo run -p bsp_beta -- \
-  --mcp \
+  --strict --mcp \
   --bsp /path/to/game/maps/start.bsp \
-  --companion-dir /path/to/game/maps
+  --palette /path/to/game/gfx/palette.lmp \
+  --wad /path/to/game/id1/pak0-textures.wad \
+  --textures /path/to/game
 ```
 
 The server supports the MCP `initialize`, `tools/list`, and `tools/call` methods and exposes:
@@ -154,21 +168,27 @@ Either file is sufficient to opt an opaque or alpha-mask surface into the BSP PB
 
 PBR surfaces remain BSP lightmapped surfaces: baked lightmaps provide diffuse irradiance, while the prefiltered scene environment and BRDF LUT provide dielectric specular. Palette fullbright pixels remain additive, hue-preserving emission. Sky and liquid surfaces keep their dedicated legacy shaders. If neither companion exists, the original packed fullbright upload, pipeline selection, and `bsp_lightmapped.frag` path are unchanged.
 
-Package loading discovers these files through `PackageResolver` and carries their hashes into the BSP cache identity:
+Package loading derives these files through `PackageResolver`, records both
+present and absent PBR closure entries, and carries their verified identities
+into the BSP cache identity:
 
 ```rust
-let package = bsp_runtime::package::load_bsp_package(
+let import = bsp_runtime::package::authorize_package_import(
     &mut resolver,
     "maps/my_level.bsp",
     "palettes/my_palette.lmp",
     None,
     &[],
-    false,
+    Some("textures"),
+    bsp_runtime::PackageImportMode::Strict,
+    0.0254,
 )?;
-let prepare = coordinator.prepare_from_loaded_package(package, Some(0.0254))?;
+let prepare = coordinator.prepare_authorized_import(import)?;
 ```
 
-For a caller-owned world, pass already-authorized bytes with `BspCoordinator::prepare_from_world_with_texture_companions` or `BspExtractionRequest::texture_companions`.
+The raw-world and raw-byte coordinator helpers are development/test
+compatibility paths; package and direct production launch must use an
+`AuthorizedBspImport`.
 
 ### Crate Dependencies
 
@@ -234,17 +254,22 @@ The BSP coordinator supports two diagnostic severity modes:
 
 | mode | behavior |
 |------|----------|
-| **Development** (`strict = false`, default) | Missing optional resources (WADs, models) produce warnings. Unsupported compatibility features are diagnosed but allowed. |
-| **Strict / Release** (`strict = true`) | All compatibility issues, missing resources, and structural concerns produce errors. Maps with errors are rejected. |
+| **Development** (`--development`) | Explicit diagnostic policy for development/test imports. Unsupported compatibility features are diagnosed but may remain usable. |
+| **Strict / Release** (`--strict`) | Explicit release policy. Required-resource, compatibility, and structural failures reject the import before candidate/GPU work. |
 
-Set strict mode when validating release-ready content:
+Set strict mode when validating release-ready package/direct content:
 
 ```rust
-let options = bsp::LoadOptions {
-    strict: true,
-    palette: Some(palette_bytes),
-    ..Default::default()
-};
+let import = bsp_runtime::package::authorize_direct_import(
+    bsp_path,
+    palette_path,
+    lit_path,
+    wad_paths,
+    textures_root,
+    bsp_runtime::PackageImportMode::Strict,
+    0.0254,
+)?;
+let prepare = coordinator.prepare_authorized_import(import)?;
 ```
 
 ## App-Owned Loop Responsibilities

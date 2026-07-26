@@ -124,6 +124,14 @@ fn cli_requires_import_mode() {
 }
 
 #[test]
+fn cli_rejects_bsp_launch_without_import_mode() {
+    assert_eq!(
+        cli::parse_from(["--bsp", "maps/e1m1.bsp"]).unwrap_err(),
+        cli::CliError::NoImportMode
+    );
+}
+
+#[test]
 fn cli_accepts_textures_dir() {
     let args = cli::parse_from([
         "--strict",
@@ -136,5 +144,32 @@ fn cli_accepts_textures_dir() {
         Some(PathBuf::from(
             "src/bsp_generator/themes/cc0_stone_beta/textures"
         ))
+    );
+}
+
+#[test]
+fn cli_leaves_declared_resources_for_runtime_authorization() {
+    let args = cli::parse_from([
+        "--strict",
+        "--palette",
+        "/tmp/not-authorized-palette.lmp",
+        "--lit",
+        "/tmp/not-authorized.lit",
+        "--wad",
+        "/tmp/not-authorized.wad",
+    ])
+    .unwrap();
+
+    assert_eq!(
+        args.resolve_palette_path().unwrap(),
+        PathBuf::from("/tmp/not-authorized-palette.lmp")
+    );
+    assert_eq!(
+        args.resolve_lit_path(),
+        Some(PathBuf::from("/tmp/not-authorized.lit"))
+    );
+    assert_eq!(
+        args.resolve_wad_path().unwrap(),
+        Some(PathBuf::from("/tmp/not-authorized.wad"))
     );
 }

@@ -55,7 +55,7 @@ The `package_io::PackageResolver` boundary used by BSP package loading enforces:
 | Symlink escape | Non-regular file rejection |
 | Content hash verification | `ContentIdentity` vs manifest `expected_hashes` |
 
-`package_io::AuthorizedBytes::new` is `pub(crate)` — external crates must go through `PackageResolver::resolve` before passing companion/source bytes into BSP parsing or extraction. `load_bsp_package` derives `<texture>_norm.png` and `<texture>_gloss.png` candidates from sanitized miptex identities, resolves them only under confined package roots, and stores the resulting `ConfinedResource`s on `LoadedBspPackage`. `prepare_from_loaded_package` converts those resources to neutral owned bytes at the coordinator boundary.
+`package_io::AuthorizedBytes::new` is `pub(crate)` — external crates must go through `PackageResolver::resolve` before passing companion/source bytes into BSP parsing or extraction. `authorize_package_import` and `authorize_direct_import` both construct one `AuthorizedBspImport`; it owns the parsed world, explicit policy, verified BSP/palette/WAD/`.lit` bytes, normalized companion-root provenance, and a source-slot PBR closure. PBR enumeration supplies filenames only: each selected candidate is normalized and re-read through the same resolver. `prepare_authorized_import` derives the one neutral extraction request from that record without reloading or applying caller defaults.
 
 ## 4. Neutral Extraction ABI
 
@@ -185,10 +185,10 @@ The coordinator must pump transfer submissions (done automatically by `Renderer:
 ## 8. Logical Commit Protocol
 
 ```
-prepare(bytes, scale, source_id) / prepare_from_world(world, scale, source_id)
-/ prepare_from_loaded_package(package, scale)
+prepare_authorized_import(import)
   │
-  ├─► BspLoader::load() or caller-provided world → BspWorld (validated, immutable)
+  ├─► `AuthorizedBspImport` already owns a resolver-authorized, parsed BspWorld
+  ├─► derive one strict/development extraction request from the import
   ├─► extract(request)          → ExtractedBsp (neutral DTOs)
   ├─► build candidate           → BspCandidate (hidden, staging)
   ├─► run bridge prepare hooks  → physics objects created (not published)
@@ -234,24 +234,19 @@ commit(token, scene)
 
 ## 10. Shared Cache
 
-`CacheIdentity` produces a SHA-256 fingerprint from 10 components:
+`CacheIdentity` builds a tagged, length-delimited fingerprint from the authorized
+import closure. It includes the resolver-issued BSP SHA-256 and parsed profile,
+canonical scale, palette presence/hash, explicit strictness, ordered WAD
+ordinal/basename/logical-ID/hash entries, `.lit` binding, every present or
+absent PBR source-slot entry (including match mode), light calibration,
+fullbright range, atlas policy, and collision policy. Route-specific host paths
+and companion-root labels are excluded, so equivalent package and direct
+imports share a key.
 
-```
-cache_identity = SHA-256(
-    bsp_content_hash ||
-    dialect_profile_tag ||
-    bsp_scale ||
-    palette_content_hash ||
-    companion_identities ||
-    texture_resolution_roots ||
-    replacement_mappings ||
-    light_calibration ||
-    atlas_policy ||
-    collision_policy
-)
-```
-
-This identity is stored in the source-link and used to detect when cached GPU resources need invalidation. Normal and gloss companion bytes are independently hashed into sorted `CompanionId` entries, so adding, removing, or editing either map invalidates the candidate cache identity.
+This identity is stored with the active mount and used to detect when cached GPU
+resources need invalidation. Normal and gloss companion bytes are independently
+represented in the source-slot closure, so adding, removing, renaming by case,
+or editing either map invalidates the candidate cache identity.
 
 ## 11. Fence Retirement
 
