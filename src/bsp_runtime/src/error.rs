@@ -113,6 +113,34 @@ pub enum BspRuntimeError {
         phase: BridgePhase,
         detail: String,
     },
+    /// Typed acknowledgement: a candidate was cancelled and its lease/receipts retired.
+    /// The active mount (if any) is unchanged.
+    CandidateCancellationAcknowledged {
+        generation: u64,
+        detail: String,
+    },
+    /// Typed acknowledgement: the renderer accepted retirement of A's mount.
+    ReplacementAcknowledged {
+        retired_generation: u64,
+        new_generation: u64,
+    },
+    /// Typed acknowledgement: an active mount was fully unloaded.
+    UnloadAcknowledged {
+        generation: u64,
+    },
+    /// B was published, but teardown of A's active bridge receipts failed.
+    /// B is active; A's bridge receipts are quarantined.
+    PublishedButQuarantined {
+        published_generation: u64,
+        prior_generation: u64,
+        quarantine_bridge: String,
+        quarantine_detail: String,
+    },
+    /// The coordinator is blocked from ordinary operations due to retained
+    /// cleanup custody. Only terminal drain/recreation is permitted.
+    CleanupBlocked {
+        reason: String,
+    },
 }
 
 /// Which phase of the two-step transaction a bridge failure occurred in.
@@ -362,6 +390,42 @@ impl fmt::Display for BspRuntimeError {
                     "bridge '{}' invariant violated during {}: {}",
                     bridge_name, phase, detail
                 )
+            }
+            BspRuntimeError::CandidateCancellationAcknowledged {
+                generation,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "candidate generation {generation} cancelled: {detail}"
+                )
+            }
+            BspRuntimeError::ReplacementAcknowledged {
+                retired_generation,
+                new_generation,
+            } => {
+                write!(
+                    f,
+                    "replacement acknowledged: retired gen {retired_generation}, new gen {new_generation}"
+                )
+            }
+            BspRuntimeError::UnloadAcknowledged { generation } => {
+                write!(f, "unload acknowledged for generation {generation}")
+            }
+            BspRuntimeError::PublishedButQuarantined {
+                published_generation,
+                prior_generation,
+                quarantine_bridge,
+                quarantine_detail,
+            } => {
+                write!(
+                    f,
+                    "published gen {published_generation} but prior gen {prior_generation} bridge '{}' quarantined: {}",
+                    quarantine_bridge, quarantine_detail
+                )
+            }
+            BspRuntimeError::CleanupBlocked { reason } => {
+                write!(f, "coordinator cleanup blocked: {reason}")
             }
         }
     }

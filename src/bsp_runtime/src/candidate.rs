@@ -1,15 +1,22 @@
 //! BSP candidate: self-contained preparation state for one generation.
 //!
 //! A candidate owns every staged resource for a single prepare cycle:
-//! extracted DTOs, cache identity, renderer mount lease, bridge tokens,
-//! source-link payload, external asset readiness, validation status,
-//! and diagnostics. The coordinator holds at most one candidate at a time;
-//! a new prepare atomically replaces the previous candidate.
+//! extracted DTOs, cache identity, renderer mount lease (PreparedBspMount),
+//! prepared bridge tokens, source-link payload, prevalidated light payload
+//! and scene reservation, generation, and opaque renderer attach/replacement
+//! permit. The coordinator holds at most one candidate at a time; a new
+//! prepare atomically replaces the previous candidate.
 //!
 //! The candidate is the unit of idempotent rollback: releasing a candidate
 //! frees all associated staged resources without touching the active world.
 //!
-//! # Phase 05: Typed State Machine
+//! # Phase 06: Move-Only Ownership
+//!
+//! The candidate owns B's ready lease (PreparedBspMount), prepared bridge
+//! receipts, pre-serialized source-link payload, validated light payloads
+//! and scene reservation, and an opaque single-use replacement/attach permit.
+//! Scene/renderer owns the published lease; the renderer retirement queue
+//! owns it only after typed acknowledgement.
 //!
 //! Legal transitions:
 //! ```text
@@ -94,18 +101,18 @@ pub struct CandidatePointLight {
 
 // ── Active BSP Mount ──────────────────────────────────────────────────
 
-/// The published (committed) BSP mount state.
+/// The published (committed) BSP mount state — coordinator metadata.
 ///
 /// After a candidate is consumed by commit, its resources move into an
 /// `ActiveBspMount`. The active mount owns the extracted DTOs, source-link
 /// metadata, cache identity, point-light IDs, published source-link JSON,
-/// and active bridge receipts.
+/// and active bridge receipts. The opaque renderer lease (PublishedBspMount)
+/// lives in `Scene`, not in this record.
 ///
-/// The opaque renderer lease moves directly from a validated candidate into
-/// `Scene`. On replacement or unload, `Scene::retire_bsp_mount` returns an
-/// opaque scene-detachment receipt; `bsp_runtime` never retains a cloned mount
-/// or reads raw GPU handles. Fence-aware GPU retirement still requires a
-/// renderer-owned queue handoff outside this record.
+/// On replacement or unload, `Scene::retire_bsp_mount` returns an opaque
+/// scene-detachment receipt. The coordinator passes it to the renderer for
+/// fence-aware GPU retirement and receives a typed acknowledgement.
+/// `bsp_runtime` never retains a cloned mount or reads raw GPU handles.
 pub struct ActiveBspMount {
     /// Active extracted BSP DTOs.
     pub extracted: ExtractedBsp,
@@ -190,7 +197,39 @@ pub struct BspCandidate {
     /// Reserved diagnostic count for scene-detachment handoffs associated
     /// with this candidate (not evidence of GPU queueing).
     pub retirement_handoff_count: u64,
+    /// Opaque renderer attach/replacement permit, set during validation
+    /// and consumed by commit. Proves preflighted publication readiness.
+    pub(crate) attach_permit: Option<RendererAttachPermit>,
 }
+
+// ── Renderer Attach/Replacement Permit ────────────────────────────────
+
+/// Opaque single-use permit binding a candidate's prepared lease to an
+/// attach or replacement operation.
+///
+/// Created during validation; consumed during commit. The permit proves
+/// the coordinator preflighted every fallible publication check and owns
+/// the exact lease at the correct generation.
+#[derive(Debug)]
+pub struct RendererAttachPermit {
+    pub(crate) generation: u64,
+    pub(crate) is_replacement: bool,
+}
+
+// ── Unload Permit ─────────────────────────────────────────────────────
+
+/// Opaque single-use permit authorizing one active-unload operation.
+///
+/// Created during unload preflight; consumed when finalizing the unload.
+/// The permit binds the exact active lease and scene-clear to one
+/// generation. Dropping without finalization retains custody.
+#[derive(Debug)]
+pub struct UnloadPermit {
+    pub(crate) generation: u64,
+    pub(crate) source_identity: String,
+}
+
+// ── Import Provenance ─────────────────────────────────────────────────
 
 /// Phase 03 import provenance retained for diagnostics.
 ///
@@ -246,6 +285,7 @@ impl BspCandidate {
             has_pvs,
             import_provenance: None,
             retirement_handoff_count: 0,
+            attach_permit: None,
         }
     }
 

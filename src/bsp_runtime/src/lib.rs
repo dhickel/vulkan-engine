@@ -45,7 +45,7 @@ pub use bridge::{
     PreparedBridgeState, PreparedBridgeToken,
 };
 pub use cache::CacheIdentity;
-pub use candidate::BspCandidate;
+pub use candidate::{BspCandidate, RendererAttachPermit, UnloadPermit};
 pub use coordinator::BspCoordinator;
 pub use error::{BridgePhase, BspRuntimeError};
 pub use generation::BspGenerationToken;

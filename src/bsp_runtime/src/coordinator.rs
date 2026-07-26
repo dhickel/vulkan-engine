@@ -7,17 +7,22 @@
 //! coordinates resources owned by the renderer and app bridges, never
 //! creating GPU or physics objects directly.
 //!
-//! # Architecture (Phase 05)
+//! # Architecture (Phase 06 — Atomic Coordinator)
 //!
-//! A [`BspCandidate`] holds all staged state for one generation. The
-//! coordinator holds at most one candidate at a time. A new prepare
-//! atomically replaces the previous candidate (cancellation).
+//! The coordinator state is a typed enum that enforces invariants:
+//! - [`CoordinatorState::Idle`]: no active mount, no candidate
+//! - [`CoordinatorState::Active`]: active mount published, no candidate
+//! - [`CoordinatorState::CandidateBesideActive`]: candidate B + optional active A
+//! - [`CoordinatorState::CleanupBlocked`]: retained custody, drain only
+//! - [`CoordinatorState::PublishedQuarantined`]: B published, A bridge quarantine
 //!
-//! The commit step is a pure publish: it moves the candidate's ready
-//! resources into the active world without performing any new parsing,
-//! package resolution, external asset loading, allocation, upload,
-//! lookup, serialization, bridge validation, restored-state validation,
-//! or app-world capacity reservation. All of those are done before commit.
+//! A candidate holds all staged state for one generation. The coordinator
+//! holds at most one candidate at a time. A new prepare atomically replaces
+//! the previous candidate (cancellation).
+//!
+//! The commit step is a pure publish: it activates B's prepared receipts,
+//! finalizes the renderer attach/replacement permit, installs B's metadata,
+//! then consumes A's active bridge receipts exactly once.
 
 use crate::bridge::{
     ActiveBridgeReceipts, AppBridge, BehaviorEntityRecipe, BridgeAggregator,
@@ -27,7 +32,10 @@ use crate::cache::{
     canonical_f32_bytes, compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry,
     WadCacheEntry,
 };
-use crate::candidate::{ActiveBspMount, BspCandidate, CandidatePointLight, ImportProvenanceRecord};
+use crate::candidate::{
+    ActiveBspMount, BspCandidate, CandidatePointLight, ImportProvenanceRecord,
+    RendererAttachPermit,
+};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
 use crate::package::{AuthorizedBspImport, ImportMode, PbrCompanionKind};
@@ -82,6 +90,44 @@ pub struct ReloadResult {
     pub reconciliation: Option<OverrideReconciliation>,
 }
 
+// ── Coordinator State Machine ──────────────────────────────────────────
+
+/// Invariant-bearing coordinator state.
+///
+/// Replaces loose `active_mount`/`candidate`/`poisoned` fields.
+/// Only the states listed below are legal; every transition is typed.
+#[derive(Debug)]
+enum CoordinatorState {
+    /// No active mount, no candidate.
+    Idle,
+    /// Active mount published in scene, no staged candidate.
+    Active(ActiveBspMount),
+    /// Candidate B staged beside an optional active mount A.
+    /// `active` is `None` for first-mount prepare.
+    CandidateBesideActive {
+        candidate: BspCandidate,
+        active: Option<ActiveBspMount>,
+    },
+    /// Coordinator is blocked from ordinary operations; only terminal
+    /// drain/recreation is permitted. Retains custody of any active
+    /// mount, candidate, and bridge quarantine state.
+    CleanupBlocked {
+        detail: String,
+        bridge_activation_panic: bool,
+        active: Option<ActiveBspMount>,
+        candidate: Option<BspCandidate>,
+    },
+    /// B is published in scene, but teardown of A's active bridge
+    /// receipts failed. B is active; A's bridge receipts are retained
+    /// for diagnostics. No ordinary replacement/unload is permitted.
+    PublishedQuarantined {
+        active: ActiveBspMount,
+        prior_generation: u64,
+        prior_source_identity: String,
+        quarantine_detail: String,
+    },
+}
+
 /// BSP transaction coordinator.
 ///
 /// The coordinator implements the two-step prepare → validate → commit
@@ -89,7 +135,7 @@ pub struct ReloadResult {
 /// unload/reload/reimport semantics. It owns the active mount state,
 /// the current preparation candidate, and the source-link lifecycle.
 ///
-/// # Usage (Phase 05)
+/// # Usage (Phase 06)
 ///
 /// ```ignore
 /// let mut coordinator = BspCoordinator::new();
@@ -112,20 +158,11 @@ pub struct BspCoordinator {
     /// Monotonic generation counter for serialize-and-stale detection.
     generation: BspGenerationCounter,
 
-    /// Active published BSP mount (if a mount is active).
-    ///
-    /// Separated from the candidate: the candidate is hidden preparation;
-    /// the active mount is the published state visible in the scene.
-    active_mount: Option<ActiveBspMount>,
-
-    /// Current preparation candidate (hidden until commit).
-    candidate: Option<BspCandidate>,
+    /// Invariant-bearing typed coordinator state.
+    state: CoordinatorState,
 
     /// App bridge aggregator.
     bridges: BridgeAggregator,
-
-    /// Whether the coordinator has been poisoned.
-    poisoned: bool,
 
     /// Diagnostic counter: number of opaque scene-detachment handoffs.
     /// This records removal from runtime/scene ownership only, not acceptance
@@ -134,28 +171,34 @@ pub struct BspCoordinator {
 }
 
 impl BspCoordinator {
-    /// Create a new BSP coordinator with no active mount.
+    /// Create a new BSP coordinator in `Idle` state.
     pub fn new() -> Self {
         Self {
             generation: BspGenerationCounter::new(),
-            active_mount: None,
-            candidate: None,
+            state: CoordinatorState::Idle,
             bridges: BridgeAggregator::new(),
-            poisoned: false,
             retired_mount_count: 0,
         }
     }
 
     // ── Query ──────────────────────────────────────────────────────────
 
-    /// Returns true if a BSP mount is currently active.
+    /// Returns true if a BSP mount is currently active in the scene.
     pub fn is_active(&self) -> bool {
-        self.active_mount.is_some()
+        matches!(
+            self.state,
+            CoordinatorState::Active(_)
+                | CoordinatorState::CandidateBesideActive {
+                    active: Some(_),
+                    ..
+                }
+                | CoordinatorState::PublishedQuarantined { .. }
+        )
     }
 
-    /// Returns true if the coordinator is poisoned.
+    /// Returns true if the coordinator is poisoned (CleanupBlocked).
     pub fn is_poisoned(&self) -> bool {
-        self.poisoned
+        matches!(self.state, CoordinatorState::CleanupBlocked { .. })
     }
 
     /// Returns the current generation value.
@@ -165,12 +208,12 @@ impl BspCoordinator {
 
     /// Returns a reference to the active source link, if any.
     pub fn source_link(&self) -> Option<&BspSourceLink> {
-        self.active_mount.as_ref().map(|m| &m.source_link)
+        self.active_mount_ref().map(|m| &m.source_link)
     }
 
     /// Returns a reference to the active cache identity, if any.
     pub fn cache_identity(&self) -> Option<&CacheIdentity> {
-        self.active_mount.as_ref().map(|m| &m.cache_identity)
+        self.active_mount_ref().map(|m| &m.cache_identity)
     }
 
     /// Returns the number of detached mounts (diagnostic only, not renderer
@@ -184,14 +227,102 @@ impl BspCoordinator {
     ///
     /// The caller uses this to build a [`PreparedBspMount`] before commit.
     pub fn staged_extraction(&self) -> Option<&ExtractedBsp> {
-        self.candidate.as_ref().map(|c| &c.extracted)
+        self.candidate_ref().map(|c| &c.extracted)
     }
 
     /// Returns staged entity descriptors from the current candidate.
     pub fn staged_entity_descriptors(&self) -> Option<&[EntityDescriptor]> {
-        self.candidate
-            .as_ref()
+        self.candidate_ref()
             .map(|c| c.extracted.entity_descriptors.as_slice())
+    }
+
+    // ── Internal State Accessors ───────────────────────────────────────
+
+    /// Borrow the active mount, if any.
+    fn active_mount_ref(&self) -> Option<&ActiveBspMount> {
+        match &self.state {
+            CoordinatorState::Active(m) => Some(m),
+            CoordinatorState::CandidateBesideActive {
+                active: Some(m), ..
+            } => Some(m),
+            CoordinatorState::PublishedQuarantined { active: m, .. } => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Borrow the candidate, if any.
+    fn candidate_ref(&self) -> Option<&BspCandidate> {
+        match &self.state {
+            CoordinatorState::CandidateBesideActive {
+                candidate, ..
+            } => Some(candidate),
+            CoordinatorState::CleanupBlocked {
+                candidate: Some(c), ..
+            } => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Borrow the candidate mutably, if any.
+    fn candidate_mut(&mut self) -> Option<&mut BspCandidate> {
+        match &mut self.state {
+            CoordinatorState::CandidateBesideActive {
+                candidate, ..
+            } => Some(candidate),
+            CoordinatorState::CleanupBlocked {
+                candidate: Some(c), ..
+            } => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Take the active mount out of the state.
+    fn take_active_mount(&mut self) -> Option<ActiveBspMount> {
+        match &mut self.state {
+            CoordinatorState::Active(_) => {
+                let old = std::mem::replace(&mut self.state, CoordinatorState::Idle);
+                if let CoordinatorState::Active(m) = old {
+                    Some(m)
+                } else {
+                    None
+                }
+            }
+            CoordinatorState::CandidateBesideActive { active, .. } => active.take(),
+            _ => None,
+        }
+    }
+
+    /// Take the candidate out of the state, preserving any active mount.
+    fn take_candidate(&mut self) -> Option<BspCandidate> {
+        match &mut self.state {
+            CoordinatorState::CandidateBesideActive {
+                ref mut candidate,
+                ref mut active,
+            } => {
+                // Take the active mount first so we can restore it
+                let active_mount = active.take();
+                // Now take candidate by swapping state
+                let old = std::mem::replace(&mut self.state, CoordinatorState::Idle);
+                if let CoordinatorState::CandidateBesideActive {
+                    candidate: c, ..
+                } = old
+                {
+                    if let Some(m) = active_mount {
+                        self.state = CoordinatorState::Active(m);
+                    }
+                    Some(c)
+                } else {
+                    if let Some(m) = active_mount {
+                        self.state = CoordinatorState::Active(m);
+                    }
+                    None
+                }
+            }
+            CoordinatorState::CleanupBlocked {
+                ref mut candidate, ..
+            } => candidate.take(),
+            _ => None,
+        }
     }
 
     // ── Bridge Registration ───────────────────────────────────────────
@@ -228,7 +359,7 @@ impl BspCoordinator {
         scale: Option<f32>,
         source_identity: impl Into<String>,
     ) -> Result<PrepareResult, BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
@@ -289,7 +420,7 @@ impl BspCoordinator {
         &mut self,
         import: AuthorizedBspImport,
     ) -> Result<PrepareResult, BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
@@ -377,7 +508,11 @@ impl BspCoordinator {
             asset_id: import.bsp.logical_id.clone(),
         });
 
-        self.candidate = Some(candidate);
+        let active = self.take_active_mount();
+        self.state = CoordinatorState::CandidateBesideActive {
+            candidate,
+            active,
+        };
 
         Ok(PrepareResult {
             token,
@@ -423,7 +558,7 @@ impl BspCoordinator {
         scale: Option<f32>,
         source_identity: impl Into<String>,
     ) -> Result<PrepareResult, BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
@@ -526,7 +661,11 @@ impl BspCoordinator {
             was_occupied,
         );
 
-        self.candidate = Some(candidate);
+        let active = self.take_active_mount();
+        self.state = CoordinatorState::CandidateBesideActive {
+            candidate,
+            active,
+        };
 
         Ok(PrepareResult {
             token,
@@ -553,7 +692,7 @@ impl BspCoordinator {
         self.generation.validate(token)?;
         self.require_candidate()?;
         let current_gen = self.generation.current();
-        let candidate = self.candidate.as_mut().unwrap();
+        let candidate = self.candidate_mut().unwrap();
         candidate.transition_to_renderer_pending(current_gen)
     }
 
@@ -579,7 +718,7 @@ impl BspCoordinator {
         }
 
         let current_generation = self.generation.current();
-        let completion = match self.candidate.as_mut() {
+        let completion = match self.candidate_mut() {
             Some(candidate) => candidate.transition_to_renderer_ready(current_generation, mount),
             None => {
                 self.retire_unpublished_mount(mount);
@@ -618,7 +757,7 @@ impl BspCoordinator {
     ) -> Result<(), BspRuntimeError> {
         self.generation.validate(token)?;
         let current_gen = self.generation.current();
-        let candidate = match self.candidate.as_mut() {
+        let candidate = match self.candidate_mut() {
             Some(c) => c,
             None => {
                 return Err(BspRuntimeError::StaleRendererCompletion {
@@ -681,19 +820,18 @@ impl BspCoordinator {
     ///
     /// # Panic Safety
     ///
-    /// Bridge commit panics poison the coordinator. Renderer publication is
-    /// non-fallible after validation.
+    /// Bridge activation panics transition to CleanupBlocked. Renderer
+    /// publication is non-fallible after validation.
     pub fn commit(
         &mut self,
         token: BspGenerationToken,
         scene: &mut Scene,
     ) -> Result<CommitResult, BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
-        // Check generation and candidate readiness before changing either the
-        // current scene or the active record.
+        // Check generation and candidate readiness.
         self.generation.validate(token)?;
         {
             let candidate = self.require_candidate_mut()?;
@@ -707,11 +845,8 @@ impl BspCoordinator {
             }
         }
 
-        // The coordinator and scene must agree about whether an old mount is
-        // published. Check this before bridge activation or candidate
-        // consumption so a broken scene-detachment boundary leaves the old
-        // payload diagnosable and untouched.
-        let replacing_active = self.active_mount.is_some();
+        // The coordinator and scene must agree about published state.
+        let replacing_active = self.is_active();
         if replacing_active != scene.has_bsp_mount() {
             return Err(BspRuntimeError::RetirementHandoffFailed {
                 reason: "coordinator active-mount state disagrees with Scene BSP publication"
@@ -720,36 +855,29 @@ impl BspCoordinator {
         }
 
         let old_light_ids = self
-            .active_mount
-            .as_ref()
+            .active_mount_ref()
             .map(|mount| mount.light_ids.clone())
             .unwrap_or_default();
         let staged_lights: Vec<PointLight> = self
-            .candidate
-            .as_ref()
+            .candidate_ref()
             .expect("candidate was checked above")
             .point_lights
             .iter()
             .map(|candidate_light| candidate_light.light)
             .collect();
 
-        // Activate bridges (non-fallible publication after validation).
-        // This consumes the prepared tokens and produces active receipts.
+        // ── Step 1: Activate B prepared receipts ───────────────────
         let bridge_count = self.bridges.len();
         let active_receipts = if self.bridges.has_bridges() {
             let tokens = std::mem::take(
                 &mut self
-                    .candidate
-                    .as_mut()
+                    .candidate_mut()
                     .expect("candidate was checked above")
                     .prepared_tokens,
             );
             match self.bridges.activate_all(tokens) {
                 Ok(receipts) => receipts,
                 Err(quarantine) => {
-                    // Activation panic — quarantine retains all state.
-                    // The prepared tokens have already been moved into the
-                    // quarantine; the candidate is left with empty tokens.
                     log::error!(
                         "BSP coordinator: bridge activation panic at '{}' (index {}, generation {}): {:?}",
                         quarantine.panic_bridge,
@@ -757,7 +885,13 @@ impl BspCoordinator {
                         quarantine.generation,
                         quarantine,
                     );
-                    self.poisoned = true;
+                    self.enter_cleanup_blocked(
+                        format!(
+                            "bridge '{}' activation panic at index {}",
+                            quarantine.panic_bridge, quarantine.panic_index
+                        ),
+                        true,
+                    );
                     return Err(BspRuntimeError::CoordinatorPoisoned);
                 }
             }
@@ -765,11 +899,12 @@ impl BspCoordinator {
             ActiveBridgeReceipts::empty(self.generation.current())
         };
 
-        // Consume the candidate before retiring the old scene payload. The
-        // prepared renderer lease moves directly into Scene below; the active
-        // record deliberately retains only coordinator-owned metadata.
-        let candidate = self.candidate.take().ok_or_else(|| {
-            self.poisoned = true;
+        // ── Step 2: Consume candidate → active mount + prepared mount ──
+        let candidate = self.take_candidate().ok_or_else(|| {
+            self.enter_cleanup_blocked(
+                "candidate missing after bridge activation".to_string(),
+                false,
+            );
             BspRuntimeError::CommitContractViolated {
                 detail: "candidate missing after bridge activation".to_string(),
             }
@@ -782,23 +917,33 @@ impl BspCoordinator {
             ) {
                 Ok(value) => value,
                 Err((error, candidate)) => {
-                    // Preserve move-only cleanup even if an internal invariant is
-                    // violated after bridge activation.
-                    self.candidate = Some(candidate);
+                    // Restore candidate in state for cleanup
+                    let active = self.take_active_mount();
+                    self.state = CoordinatorState::CandidateBesideActive {
+                        candidate,
+                        active,
+                    };
                     let _ = self.rollback_candidate_with_retirement();
-                    self.poisoned = true;
+                    self.enter_cleanup_blocked(
+                        format!("commit candidate consumption failed: {error}"),
+                        false,
+                    );
                     return Err(error);
                 }
             };
 
-        // This method validates every input before removing old lights, so a
-        // contract violation leaves the old scene mount/source-link intact.
+        // ── Step 3: Finalize B's renderer attach/replacement ───────
+        // Scene::set_bsp_mount publishes B and returns A's DetachedBspMount.
+        // This is the atomic publication boundary.
         let new_light_ids =
             match scene.replace_prevalidated_bsp_point_lights(&old_light_ids, &staged_lights) {
                 Ok(ids) => ids,
                 Err(error) => {
                     self.retire_unpublished_mount(prepared_mount);
-                    self.poisoned = true;
+                    self.enter_cleanup_blocked(
+                        format!("prevalidated BSP light publication failed: {error:?}"),
+                        false,
+                    );
                     return Err(BspRuntimeError::CommitContractViolated {
                         detail: format!("prevalidated BSP light publication failed: {error:?}"),
                     });
@@ -807,9 +952,7 @@ impl BspCoordinator {
         let light_count = new_light_ids.len();
         active_mount.light_ids = new_light_ids;
 
-        // All remaining publication operations are infallible moves. Detach
-        // the old scene state only now, after every candidate-side fallible
-        // operation has completed, then transfer the new opaque lease once.
+        // ── Step 4: Publish B to scene, detach A if replacing ──────
         let retired = if replacing_active {
             Some(
                 scene
@@ -822,13 +965,58 @@ impl BspCoordinator {
         scene.set_bsp_mount(prepared_mount);
         scene.set_bsp_source_link(active_mount.source_link_json.clone());
 
-        let cache_identity = active_mount.cache_identity.clone();
-        let old_mount = self.active_mount.replace(active_mount);
-        if let Some(old_mount) = old_mount {
+        // ── Step 5: Consume A's active bridge receipts ─────────────
+        let prior_a = self.take_active_mount();
+        if let Some(old_mount) = prior_a {
             debug_assert!(retired.is_some());
             self.retired_mount_count = self.retired_mount_count.saturating_add(1);
+
+            // Teardown A's active bridge receipts exactly once.
+            if !old_mount.active_bridge_receipts.is_empty() {
+                if let Err(quarantine) = self
+                    .bridges
+                    .teardown_all(old_mount.active_bridge_receipts)
+                {
+                    // B is published, but A bridge teardown failed.
+                    // Enter PublishedQuarantined.
+                    let q_detail = format!(
+                        "{}: {}",
+                        quarantine
+                            .failed_bridge
+                            .as_deref()
+                            .unwrap_or("<unknown>"),
+                        quarantine
+                            .failed
+                            .as_ref()
+                            .map(|(_, msg)| msg.as_str())
+                            .unwrap_or("teardown failed")
+                    );
+                    log::error!(
+                        "BSP coordinator: bridge teardown quarantine for prior mount '{}': {:?}",
+                        old_mount.source_identity,
+                        quarantine
+                    );
+                    let published_gen = active_mount.committed_generation;
+                    let prior_gen = old_mount.committed_generation;
+                    let prior_id = old_mount.source_identity.clone();
+                    self.state = CoordinatorState::PublishedQuarantined {
+                        active: active_mount,
+                        prior_generation: prior_gen,
+                        prior_source_identity: prior_id.clone(),
+                        quarantine_detail: q_detail,
+                    };
+                    drop(retired);
+                    return Err(BspRuntimeError::PublishedButQuarantined {
+                        published_generation: published_gen,
+                        prior_generation: prior_gen,
+                        quarantine_bridge: prior_id,
+                        quarantine_detail: "A bridge teardown quarantined; B is published"
+                            .to_string(),
+                    });
+                }
+            }
             log::debug!(
-                "BSP coordinator: detached active mount '{}' (generation {})",
+                "BSP coordinator: retired active mount '{}' (generation {})",
                 old_mount.source_identity,
                 old_mount.committed_generation
             );
@@ -836,6 +1024,11 @@ impl BspCoordinator {
             debug_assert!(retired.is_none());
         }
         drop(retired);
+
+        let cache_identity = active_mount.cache_identity.clone();
+
+        // ── Step 6: Install B as the new active mount ──────────────
+        self.state = CoordinatorState::Active(active_mount);
 
         Ok(CommitResult {
             node_count: 0,
@@ -859,21 +1052,18 @@ impl BspCoordinator {
 
         // Auto-validate if the candidate has no scene lights (backward compat).
         // If there are lights, validate_for_scene must have been called already.
-        let needs_validate = self
-            .candidate
-            .as_ref()
+        let needs_validate = self.candidate_ref()
             .map(|c| c.state == crate::candidate::CandidateState::RendererReady)
             .unwrap_or(false);
         if needs_validate {
-            let point_lights_empty = self
-                .candidate
-                .as_ref()
+            let point_lights_empty = self.candidate_ref()
                 .map(|c| c.point_lights.is_empty())
                 .unwrap_or(true);
             if point_lights_empty {
                 // Auto-validate: no scene lights means no scene preflight needed.
-                if let Some(ref mut c) = self.candidate {
-                    c.transition_to_validated_for_scene(self.generation.current())?;
+                let current_gen = self.generation.current();
+                if let Some(c) = self.candidate_mut() {
+                    c.transition_to_validated_for_scene(current_gen)?;
                 }
             }
         }
@@ -891,7 +1081,7 @@ impl BspCoordinator {
     ///
     /// Returns `CoordinatorPoisoned` if the coordinator is poisoned.
     pub fn rollback(&mut self) -> Result<(), BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
         self.rollback_candidate_with_retirement()
@@ -918,7 +1108,7 @@ impl BspCoordinator {
     /// fence-aware GPU queueing require renderer/bridge capabilities not
     /// supplied by this coordinator boundary.
     pub fn unload(&mut self, scene: &mut Scene) -> Result<(), BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
@@ -951,14 +1141,12 @@ impl BspCoordinator {
         scene: &mut Scene,
         build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
     ) -> Result<ReloadResult, BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
         let source_identity = source_identity.into();
-        let previous_overrides = self
-            .active_mount
-            .as_ref()
+        let previous_overrides = self.active_mount_ref()
             .map(|m| m.source_link.overrides.clone())
             .unwrap_or_default();
 
@@ -966,9 +1154,7 @@ impl BspCoordinator {
         let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
 
         // Build mount from extraction
-        let extracted = self
-            .candidate
-            .as_ref()
+        let extracted = self.candidate_ref()
             .map(|c| &c.extracted)
             .ok_or_else(|| BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
@@ -987,14 +1173,14 @@ impl BspCoordinator {
         let reconciliation = if !previous_overrides.entity_overrides.is_empty()
             || !previous_overrides.light_overrides.is_empty()
         {
-            let candidate = self.candidate.as_ref().unwrap();
+            let candidate = self.candidate_ref().unwrap();
             let (report, reconciled) = reconcile_overrides(
                 &previous_overrides,
                 &candidate.extracted.entity_identities,
                 &candidate.extracted.entity_descriptors,
             );
             // Update candidate's source link and pre-serialized scene payload.
-            if let Some(ref mut c) = self.candidate {
+            if let Some(c) = self.candidate_mut() {
                 c.source_link.overrides = reconciled;
                 let envelope =
                     crate::source_link::BspPersistenceEnvelope::new(c.source_link.clone());
@@ -1035,7 +1221,7 @@ impl BspCoordinator {
         scene: &mut Scene,
         build_mount: impl FnOnce(&ExtractedBsp) -> PreparedBspMount,
     ) -> Result<(ReloadResult, OverrideReconciliation), BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
@@ -1045,17 +1231,14 @@ impl BspCoordinator {
         let prepare = self.prepare(bsp_bytes, scale, source_identity.clone())?;
 
         // Capture previous overrides for reconciliation
-        let previous_overrides = self
-            .active_mount
-            .as_ref()
+        let previous_overrides = self.active_mount_ref()
             .map(|m| m.source_link.overrides.clone())
             .unwrap_or_default();
 
         // Reconcile overrides against candidate extraction
         let (reconciliation, reconciled) = {
             let candidate =
-                self.candidate
-                    .as_ref()
+                self.candidate_ref()
                     .ok_or_else(|| BspRuntimeError::BridgeFailure {
                         bridge_name: "coordinator".to_string(),
                         phase: BridgePhase::Commit,
@@ -1070,7 +1253,7 @@ impl BspCoordinator {
 
         // Update candidate's source link with reconciled overrides and refresh
         // the pre-serialized scene payload before commit.
-        if let Some(ref mut c) = self.candidate {
+        if let Some(c) = self.candidate_mut() {
             c.source_link.overrides = reconciled;
             let envelope = crate::source_link::BspPersistenceEnvelope::new(c.source_link.clone());
             c.source_link_json = serde_json::to_value(&envelope).map_err(|e| {
@@ -1081,9 +1264,7 @@ impl BspCoordinator {
         }
 
         // Build mount from extraction
-        let extracted = self
-            .candidate
-            .as_ref()
+        let extracted = self.candidate_ref()
             .map(|c| &c.extracted)
             .ok_or_else(|| BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
@@ -1138,7 +1319,7 @@ impl BspCoordinator {
         &self,
         mutable_behavior: crate::source_link::MutableBehaviorState,
     ) -> Option<crate::source_link::BspPersistenceEnvelope> {
-        let source_link = &self.active_mount.as_ref()?.source_link;
+        let source_link = &self.active_mount_ref()?.source_link;
         let mut link = source_link.clone();
         link.mutable_behavior = mutable_behavior;
         Some(crate::source_link::BspPersistenceEnvelope::new(link))
@@ -1197,8 +1378,7 @@ impl BspCoordinator {
         // 4. Verify content hash matches the restored source before any publication.
         {
             let candidate =
-                self.candidate
-                    .as_ref()
+                self.candidate_ref()
                     .ok_or_else(|| BspRuntimeError::BridgeFailure {
                         bridge_name: "coordinator".into(),
                         phase: BridgePhase::Validate,
@@ -1216,7 +1396,7 @@ impl BspCoordinator {
 
         // 5. Upload/build renderer mount readiness while still hidden.
         let mount = {
-            let candidate = self.candidate.as_ref().unwrap();
+            let candidate = self.candidate_ref().unwrap();
             build_mount(&candidate.extracted)
         };
         if let Err(err) = self.set_renderer_mount_ready(prepare.token, mount) {
@@ -1225,7 +1405,7 @@ impl BspCoordinator {
 
         // 6. Reconcile entity identities and fail ambiguous restores before commit.
         let (reconciliation, reconciled_overrides) = {
-            let candidate = self.candidate.as_ref().unwrap();
+            let candidate = self.candidate_ref().unwrap();
             let previous_overrides = stored_link.overrides.clone();
             reconcile_overrides(
                 &previous_overrides,
@@ -1242,7 +1422,7 @@ impl BspCoordinator {
 
         // 7. Validate companion/model mapping identities against the candidate.
         {
-            let candidate = self.candidate.as_ref().unwrap();
+            let candidate = self.candidate_ref().unwrap();
             if let Err(err) =
                 Self::validate_restore_source_link(stored_link, &candidate.source_link)
             {
@@ -1259,7 +1439,7 @@ impl BspCoordinator {
 
         // 9. Finalize the source-link payload before scene preflight. Commit
         // only publishes this already serialized value.
-        let source_link_json = if let Some(ref mut c) = self.candidate {
+        let source_link_json = if let Some(c) = self.candidate_mut() {
             c.source_link.overrides = reconciled_overrides;
             c.source_link.mutable_behavior = stored_link.mutable_behavior.clone();
             serde_json::to_value(crate::source_link::BspPersistenceEnvelope::new(
@@ -1272,7 +1452,7 @@ impl BspCoordinator {
             unreachable!("candidate was present through restore reconciliation")
         };
         match source_link_json {
-            Ok(json) => self.candidate.as_mut().unwrap().source_link_json = json,
+            Ok(json) => self.candidate_mut().unwrap().source_link_json = json,
             Err(error) => return self.cancel_restore_candidate(error),
         }
 
@@ -1294,7 +1474,7 @@ impl BspCoordinator {
     // ── Internal Helpers ───────────────────────────────────────────────
 
     fn require_candidate(&self) -> Result<(), BspRuntimeError> {
-        if self.candidate.is_none() {
+        if self.candidate_ref().is_none() {
             return Err(BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
                 phase: BridgePhase::Validate,
@@ -1305,8 +1485,7 @@ impl BspCoordinator {
     }
 
     fn require_candidate_mut(&mut self) -> Result<&mut BspCandidate, BspRuntimeError> {
-        self.candidate
-            .as_mut()
+        self.candidate_mut()
             .ok_or_else(|| BspRuntimeError::BridgeFailure {
                 bridge_name: "coordinator".to_string(),
                 phase: BridgePhase::Validate,
@@ -1319,7 +1498,7 @@ impl BspCoordinator {
         token: BspGenerationToken,
         scene: Option<&mut Scene>,
     ) -> Result<(), BspRuntimeError> {
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
@@ -1329,8 +1508,7 @@ impl BspCoordinator {
 
         let result = (|| {
             let candidate_ref =
-                self.candidate
-                    .as_ref()
+                self.candidate_ref()
                     .ok_or_else(|| BspRuntimeError::BridgeFailure {
                         bridge_name: "coordinator".to_string(),
                         phase: BridgePhase::Validate,
@@ -1373,9 +1551,7 @@ impl BspCoordinator {
         }
 
         // Reserve point-light capacity before commit (no growing during commit).
-        let active_light_count = self
-            .active_mount
-            .as_ref()
+        let active_light_count = self.active_mount_ref()
             .map(|m| m.light_ids.len())
             .unwrap_or(0);
 
@@ -1389,9 +1565,7 @@ impl BspCoordinator {
         // Transition candidate to ValidatedForScene. If an unexpected state
         // violation appears here, clean up this candidate rather than leaving
         // a ready lease stranded after a failed validation call.
-        let transition = self
-            .candidate
-            .as_mut()
+        let transition = self.candidate_mut()
             .expect("candidate was checked during validation")
             .transition_to_validated_for_scene(current_gen);
         if let Err(error) = transition {
@@ -1833,9 +2007,7 @@ impl BspCoordinator {
         candidate: &BspCandidate,
         scene: &Scene,
     ) -> Result<(), BspRuntimeError> {
-        let replacing_active_lights = self
-            .active_mount
-            .as_ref()
+        let replacing_active_lights = self.active_mount_ref()
             .map(|m| m.light_ids.len())
             .unwrap_or(0);
         let available_slots = scene
@@ -1860,6 +2032,19 @@ impl BspCoordinator {
     /// The opaque receipt is intentionally not inspected by `bsp_runtime`.
     /// It confirms that the coordinator no longer owns scene state, but does
     /// not acknowledge fence-aware renderer queueing.
+    /// Transition to CleanupBlocked state, retaining custody of
+    /// any active mount and candidate for terminal drain.
+    fn enter_cleanup_blocked(&mut self, detail: String, bridge_activation_panic: bool) {
+        let active = self.take_active_mount();
+        let candidate = self.take_candidate();
+        self.state = CoordinatorState::CleanupBlocked {
+            detail,
+            bridge_activation_panic,
+            active,
+            candidate,
+        };
+    }
+
     fn retire_unpublished_mount(&mut self, mount: PreparedBspMount) {
         let _detached = mount.retire();
         self.retired_mount_count = self.retired_mount_count.saturating_add(1);
@@ -1871,7 +2056,7 @@ impl BspCoordinator {
     ///
     /// After this call, the candidate is cleared (taken).
     fn rollback_candidate_with_retirement(&mut self) -> Result<(), BspRuntimeError> {
-        let mut candidate = match self.candidate.take() {
+        let mut candidate = match self.take_candidate() {
             Some(candidate) => candidate,
             None => return Ok(()),
         };
@@ -1887,7 +2072,13 @@ impl BspCoordinator {
 
         if !tokens.is_empty() {
             if let Err(quarantine) = self.bridges.rollback_all(tokens) {
-                self.poisoned = true;
+                self.enter_cleanup_blocked(
+                    format!(
+                        "bridge '{}' rollback quarantine during {}",
+                        quarantine.bridge_name, quarantine.phase
+                    ),
+                    false,
+                );
                 log::error!(
                     "BSP coordinator: bridge rollback quarantine: {:?}",
                     quarantine
@@ -1912,7 +2103,7 @@ impl BspCoordinator {
     /// receipt; it never reads GPU handles, serials, or cache slots. The
     /// receipt does not prove fence-aware renderer queueing.
     fn retire_active_mount_into_scene(&mut self, scene: &mut Scene) -> Result<(), BspRuntimeError> {
-        let Some(active_mount) = self.active_mount.as_ref() else {
+        let Some(active_mount) = self.active_mount_ref() else {
             return Ok(());
         };
         if !scene.has_bsp_mount() {
@@ -1921,12 +2112,11 @@ impl BspCoordinator {
             });
         }
 
-        // Phase 05: Teardown active bridge receipts before scene detach.
+        // Phase 06: Teardown active bridge receipts before scene detach.
         // Bridge teardown removes app-owned resources (physics, behavior state)
         // while the scene mount is still published.
         let old_mount = self
-            .active_mount
-            .take()
+            .take_active_mount()
             .expect("active mount was borrowed and prechecked above");
 
         let old_light_ids = old_mount.light_ids.clone();
