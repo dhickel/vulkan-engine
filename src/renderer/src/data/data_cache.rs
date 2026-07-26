@@ -3256,11 +3256,91 @@ impl BspSurfaceUboGpu {
 }
 
 #[cfg(feature = "bsp")]
+/// Per-mount arena owning BSP GPU resources for one candidate or active mount.
+///
+/// Each arena owns its material and frame-value descriptor pools, all sets
+/// allocated from them, surface/frame UBOs, atlas payload, and arena identity.
+/// Mesh and texture caches remain the physical owners of their payloads; the
+/// arena records only cache handles and arena association.
+pub(crate) struct BspSurfaceArena {
+    pub id: u64,
+    pub material_desc_pool: Option<vk::DescriptorPool>,
+    pub material_set_layout: Option<vk::DescriptorSetLayout>,
+    pub lightmap_atlas: Option<BspLightmapAtlasGpu>,
+    pub surface_ubo: Option<BspSurfaceUboGpu>,
+    pub frame_values_ubo: Option<BspSurfaceUboGpu>,
+    pub frame_values_desc_pool: Option<vk::DescriptorPool>,
+    pub frame_values_descriptors: Vec<vk::DescriptorSet>,
+    pub frame_values_set_layout: Option<vk::DescriptorSetLayout>,
+    pub frame_slot_count: u32,
+    pub frame_values_stride: u64,
+    /// BSP material slots owned by this arena (for rollback invalidation).
+    pub material_slots: Vec<u32>,
+    /// Mesh handles reserved by this arena (cache-owned payloads).
+    pub mesh_handles: Vec<crate::data::handles::MeshHandle>,
+    /// Texture handles reserved by this arena (cache-owned payloads).
+    pub texture_handles: Vec<crate::data::handles::TextureHandle>,
+}
+
+#[cfg(feature = "bsp")]
+impl BspSurfaceArena {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            material_desc_pool: None,
+            material_set_layout: None,
+            lightmap_atlas: None,
+            surface_ubo: None,
+            frame_values_ubo: None,
+            frame_values_desc_pool: None,
+            frame_values_descriptors: Vec::new(),
+            frame_values_set_layout: None,
+            frame_slot_count: 0,
+            frame_values_stride: 0,
+            material_slots: Vec::new(),
+            mesh_handles: Vec::new(),
+            texture_handles: Vec::new(),
+        }
+    }
+
+    fn destroy(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        // Pools own their sets; destroy pools first.
+        if let Some(pool) = self.material_desc_pool.take() {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        if let Some(pool) = self.frame_values_desc_pool.take() {
+            unsafe { device.destroy_descriptor_pool(pool, None); }
+        }
+        self.frame_values_descriptors.clear();
+        // Destroy UBOs and atlas after pools.
+        if let Some(ref mut ubo) = self.surface_ubo {
+            ubo.destroy(allocator);
+            self.surface_ubo = None;
+        }
+        if let Some(ref mut ubo) = self.frame_values_ubo {
+            ubo.destroy(allocator);
+            self.frame_values_ubo = None;
+        }
+        if let Some(ref mut atlas) = self.lightmap_atlas {
+            atlas.destroy(device, allocator);
+            self.lightmap_atlas = None;
+        }
+        self.material_set_layout = None;
+        self.frame_values_set_layout = None;
+    }
+}
+
+#[cfg(feature = "bsp")]
 /// Lazy BSP surface material cache.
 ///
 /// Stores GPU-prepared BSP material records (descriptor set, surface UBO allocation,
 /// pipeline variant). Grows on first BSP material registration and is never freed
 /// until cache destruction.
+///
+/// Arena model: each mount (active A or candidate B) owns a [`BspSurfaceArena`]
+/// that holds its descriptor pools, UBOs, and atlas. Material records are
+/// associated with their creating arena; a valid slot/generation from A cannot
+/// be accepted as B. Arena destruction is the only descriptor-set release path.
 pub struct BspSurfaceCache {
     /// Prepared BSP materials indexed by slot.
     cached_materials: Vec<BspCachedSurface>,
@@ -3268,30 +3348,16 @@ pub struct BspSurfaceCache {
     generations: Vec<u32>,
     /// Free slot indices for reuse after retirement.
     free_slots: Vec<u32>,
-    /// Descriptor pool for material descriptor sets (set 1).
-    pub(crate) material_desc_pool: Option<vk::DescriptorPool>,
-    /// Cached material descriptor set layout.
-    material_set_layout: Option<vk::DescriptorSetLayout>,
-    /// Device handle for pool destruction.
+    /// Arena registry: generation-bearing arena id → arena state.
+    arenas: std::collections::HashMap<u64, BspSurfaceArena>,
+    /// Monotonically-increasing arena id counter.
+    next_arena_id: u64,
+    /// The arena currently published to the scene (set by scene mount).
+    active_arena_id: Option<u64>,
+    /// Device handle for pool/atlas destruction.
     device: Option<ash::Device>,
-    /// Allocator handle for atlas destruction.
+    /// Allocator handle for UBO/atlas destruction.
     allocator: Option<std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>>,
-    /// GPU resources for the active lightmap atlas.
-    pub lightmap_atlas: Option<BspLightmapAtlasGpu>,
-    /// Shared BSP surface-parameter UBO backing all active material descriptors.
-    surface_ubo: Option<BspSurfaceUboGpu>,
-    /// Frame-values UBO buffer (per-frame-slot double-buffered for in-flight safety).
-    frame_values_ubo: Option<BspSurfaceUboGpu>,
-    /// Descriptor pool for frame-values descriptor sets (set 2).
-    frame_values_desc_pool: Option<vk::DescriptorPool>,
-    /// Per-frame-slot frame-values descriptor sets (set 2).
-    frame_values_descriptors: Vec<vk::DescriptorSet>,
-    /// Frame-values descriptor set layout (cached from VkDescLayoutCache).
-    frame_values_set_layout: Option<vk::DescriptorSetLayout>,
-    /// Number of frame slots for frame-values buffering.
-    frame_slot_count: u32,
-    /// Device-aligned byte stride between frame-value slots.
-    frame_values_stride: u64,
 }
 
 #[cfg(feature = "bsp")]
@@ -3310,6 +3376,8 @@ pub struct BspCachedSurface {
     pub fullbright_tex: Option<crate::data::handles::TextureHandle>,
     /// Lightmap atlas texture handle.
     pub lightmap_tex: crate::data::handles::TextureHandle,
+    /// Arena that owns this material's descriptor set and UBO allocation.
+    pub arena_id: u64,
 }
 
 #[cfg(feature = "bsp")]
@@ -3319,83 +3387,114 @@ impl BspSurfaceCache {
             cached_materials: Vec::with_capacity(256),
             generations: Vec::with_capacity(256),
             free_slots: Vec::new(),
-            material_desc_pool: None,
-            material_set_layout: None,
+            arenas: std::collections::HashMap::new(),
+            next_arena_id: 1,
+            active_arena_id: None,
             device: None,
             allocator: None,
-            lightmap_atlas: None,
-            surface_ubo: None,
-            frame_values_ubo: None,
-            frame_values_desc_pool: None,
-            frame_values_descriptors: Vec::new(),
-            frame_values_set_layout: None,
-            frame_slot_count: 0,
-            frame_values_stride: 0,
         }
     }
 
-    /// Initialize the BSP material descriptor pool.
-    ///
-    /// Must be called once before any descriptor allocation. The pool and
-    /// layout are destroyed when the cache is dropped.
-    pub fn init_material_descriptor_pool(
+    // ── Arena lifecycle ──────────────────────────────────────────────
+
+    /// Allocate a generation-bearing arena identity. The caller must install
+    /// pools, UBOs, and atlas into this arena before any material allocation.
+    pub fn allocate_arena(&mut self) -> u64 {
+        let id = self.next_arena_id;
+        self.next_arena_id = self.next_arena_id.wrapping_add(1);
+        self.arenas.insert(id, BspSurfaceArena::new(id));
+        id
+    }
+
+    /// Look up an arena by identity. Returns `None` for unknown ids.
+    fn arena(&self, arena_id: u64) -> Result<&BspSurfaceArena, String> {
+        self.arenas
+            .get(&arena_id)
+            .ok_or_else(|| format!("BSP arena {arena_id} does not exist"))
+    }
+
+    fn arena_mut(&mut self, arena_id: u64) -> Result<&mut BspSurfaceArena, String> {
+        self.arenas
+            .get_mut(&arena_id)
+            .ok_or_else(|| format!("BSP arena {arena_id} does not exist"))
+    }
+
+    /// Destroy an arena and all its owned GPU resources. Pool destruction
+    /// implicitly releases all sets allocated from it. Cache-owned material
+    /// slots associated with this arena are invalidated.
+    pub fn destroy_arena(
+        &mut self,
+        arena_id: u64,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) {
+        if let Some(mut arena) = self.arenas.remove(&arena_id) {
+            // Invalidate all material slots owned by this arena before destroying
+            // the pool, so no handle can later reference a destroyed set.
+            for slot in arena.material_slots.drain(..) {
+                self.remove_by_slot(slot);
+            }
+            arena.destroy(device, allocator);
+        }
+    }
+
+    /// True when the given arena owns any cache payloads.
+    pub fn arena_has_active_payloads(&self, arena_id: u64) -> bool {
+        self.arenas.get(&arena_id).is_some_and(|a| {
+            a.lightmap_atlas.is_some() || a.surface_ubo.is_some() || !a.material_slots.is_empty()
+        })
+    }
+
+    /// Store device and allocator handles for arena-scoped resource teardown.
+    pub fn set_device_handles(
         &mut self,
         device: ash::Device,
         allocator: std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
-        material_set_layout: vk::DescriptorSetLayout,
-        pool: vk::DescriptorPool,
     ) {
         self.device = Some(device);
         self.allocator = Some(allocator);
-        self.material_set_layout = Some(material_set_layout);
-        self.material_desc_pool = Some(pool);
     }
 
-    /// True if the material descriptor pool has been initialized.
-    pub fn has_material_pool(&self) -> bool {
-        self.material_desc_pool.is_some()
-    }
+    // ── Material descriptor pool (arena-scoped) ─────────────────────
 
-    /// Install the active lightmap atlas. The current Phase 04 upload path is
-    /// single-mount: callers must retire the existing mount before replacing it.
-    pub fn install_lightmap_atlas(&mut self, atlas: BspLightmapAtlasGpu) -> Result<(), String> {
-        if self.lightmap_atlas.is_some() {
-            return Err(
-                "BSP lightmap atlas already active; retire it before uploading another mount"
-                    .to_string(),
-            );
+    /// Initialize the BSP material descriptor pool for an arena.
+    pub fn init_material_descriptor_pool(
+        &mut self,
+        arena_id: u64,
+        material_set_layout: vk::DescriptorSetLayout,
+        pool: vk::DescriptorPool,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.material_desc_pool.is_some() {
+            return Err(format!(
+                "BSP arena {arena_id} already has a material descriptor pool"
+            ));
         }
-        self.lightmap_atlas = Some(atlas);
+        arena.material_set_layout = Some(material_set_layout);
+        arena.material_desc_pool = Some(pool);
         Ok(())
     }
 
-    /// Install the shared surface-parameter UBO for the active BSP mount.
-    pub fn install_surface_ubo(&mut self, ubo: BspSurfaceUboGpu) -> Result<(), String> {
-        if self.surface_ubo.is_some() {
-            return Err(
-                "BSP surface UBO already active; retire it before uploading another mount"
-                    .to_string(),
-            );
-        }
-        self.surface_ubo = Some(ubo);
-        Ok(())
+    /// True if the arena has an initialized material descriptor pool.
+    pub fn has_material_pool(&self, arena_id: u64) -> bool {
+        self.arenas
+            .get(&arena_id)
+            .is_some_and(|a| a.material_desc_pool.is_some())
     }
 
-    /// True when an uploaded BSP mount still owns cache payloads.
-    pub fn has_active_payloads(&self) -> bool {
-        self.lightmap_atlas.is_some()
-            || self.surface_ubo.is_some()
-            || !self.cached_materials.is_empty()
-    }
-
-    /// Allocate a single BSP material descriptor set (set 1).
-    pub fn allocate_material_set(&self, device: &ash::Device) -> Result<vk::DescriptorSet, String> {
-        let layout = self
+    /// Allocate a single BSP material descriptor set (set 1) from an arena's pool.
+    pub fn allocate_material_set(
+        &self,
+        arena_id: u64,
+        device: &ash::Device,
+    ) -> Result<vk::DescriptorSet, String> {
+        let arena = self.arena(arena_id)?;
+        let layout = arena
             .material_set_layout
-            .ok_or_else(|| "BSP material descriptor layout not initialized".to_string())?;
-        let pool = self
+            .ok_or_else(|| format!("BSP arena {arena_id} material descriptor layout not initialized"))?;
+        let pool = arena
             .material_desc_pool
-            .ok_or_else(|| "BSP material descriptor pool not initialized".to_string())?;
+            .ok_or_else(|| format!("BSP arena {arena_id} material descriptor pool not initialized"))?;
 
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
@@ -3409,68 +3508,47 @@ impl BspSurfaceCache {
         Ok(sets[0])
     }
 
-    fn clear_frame_values_with_allocator(
+    // ── Lightmap atlas (arena-scoped) ───────────────────────────────
+
+    /// Install the lightmap atlas for an arena.
+    pub fn install_lightmap_atlas(
         &mut self,
-        device: &ash::Device,
-        allocator: &vk_mem::Allocator,
-    ) {
-        // Destroying a descriptor pool implicitly releases every set allocated
-        // from it. The frame-values pool was not created with
-        // FREE_DESCRIPTOR_SET, so individual set frees are neither needed nor
-        // valid here.
-        if let Some(pool) = self.frame_values_desc_pool.take() {
-            unsafe {
-                device.destroy_descriptor_pool(pool, None);
-            }
+        arena_id: u64,
+        atlas: BspLightmapAtlasGpu,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.lightmap_atlas.is_some() {
+            return Err(format!(
+                "BSP arena {arena_id} already has a lightmap atlas"
+            ));
         }
-        self.frame_values_descriptors.clear();
-        self.frame_values_set_layout = None;
-        self.frame_slot_count = 0;
-        self.frame_values_stride = 0;
-        if let Some(ref mut ubo) = self.frame_values_ubo {
-            ubo.destroy(allocator);
-            self.frame_values_ubo = None;
-        }
+        arena.lightmap_atlas = Some(atlas);
+        Ok(())
     }
 
-    /// Destroy all cache-owned BSP payloads and reset the cache.
-    ///
-    /// Descriptor pools are destroyed before the buffers/images referenced by
-    /// their sets. This method is idempotent because each destroyable handle is
-    /// taken from the cache before destruction.
-    pub fn destroy_descriptor_pool(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
-        // The material pool owns every material descriptor set.
-        if let Some(pool) = self.material_desc_pool.take() {
-            unsafe {
-                device.destroy_descriptor_pool(pool, None);
-            }
+    /// Install the shared surface-parameter UBO for an arena.
+    pub fn install_surface_ubo(
+        &mut self,
+        arena_id: u64,
+        ubo: BspSurfaceUboGpu,
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        if arena.surface_ubo.is_some() {
+            return Err(format!(
+                "BSP arena {arena_id} already has a surface UBO"
+            ));
         }
-        self.clear_frame_values_with_allocator(device, allocator);
-
-        if let Some(ref mut ubo) = self.surface_ubo {
-            ubo.destroy(allocator);
-            self.surface_ubo = None;
-        }
-        if let Some(ref mut atlas) = self.lightmap_atlas {
-            atlas.destroy(device, allocator);
-            self.lightmap_atlas = None;
-        }
-
-        self.material_set_layout = None;
-        self.cached_materials.clear();
-        self.generations.clear();
-        self.free_slots.clear();
-        self.device = None;
-        self.allocator = None;
+        arena.surface_ubo = Some(ubo);
+        Ok(())
     }
 
-    /// Install the frame-values UBO and per-frame-slot descriptor sets (set 2).
-    ///
-    /// `frame_values_ubo` is the GPU buffer, `descriptors` are pre-written
-    /// descriptor sets (one per frame slot), and `pool` owns the sets.
-    /// The cache takes ownership of the pool for teardown.
+    // ── Frame-values (arena-scoped) ─────────────────────────────────
+
+    /// Install the frame-values UBO and per-frame-slot descriptor sets (set 2)
+    /// for an arena. The arena takes ownership of the pool for teardown.
     pub fn install_frame_values(
         &mut self,
+        arena_id: u64,
         ubo: BspSurfaceUboGpu,
         pool: vk::DescriptorPool,
         descriptors: Vec<vk::DescriptorSet>,
@@ -3478,47 +3556,52 @@ impl BspSurfaceCache {
         frame_slot_count: u32,
         frame_values_stride: u64,
     ) -> Result<(), String> {
-        if self.frame_values_desc_pool.is_some() {
-            return Err("BSP frame-values already installed".to_string());
+        let arena = self.arena_mut(arena_id)?;
+        if arena.frame_values_desc_pool.is_some() {
+            return Err(format!("BSP arena {arena_id} frame-values already installed"));
         }
-        self.frame_values_ubo = Some(ubo);
-        self.frame_values_desc_pool = Some(pool);
-        self.frame_values_descriptors = descriptors;
-        self.frame_values_set_layout = Some(set_layout);
-        self.frame_slot_count = frame_slot_count;
-        self.frame_values_stride = frame_values_stride;
+        arena.frame_values_ubo = Some(ubo);
+        arena.frame_values_desc_pool = Some(pool);
+        arena.frame_values_descriptors = descriptors;
+        arena.frame_values_set_layout = Some(set_layout);
+        arena.frame_slot_count = frame_slot_count;
+        arena.frame_values_stride = frame_values_stride;
         Ok(())
     }
 
-    /// Get the frame-values descriptor set for the current frame slot.
-    pub fn frame_values_descriptor_for_slot(&self, slot_index: u32) -> vk::DescriptorSet {
-        self.frame_values_descriptors
-            .get(slot_index as usize)
-            .copied()
+    /// Get the frame-values descriptor set for an arena's frame slot.
+    pub fn frame_values_descriptor_for_slot(
+        &self,
+        arena_id: u64,
+        slot_index: u32,
+    ) -> vk::DescriptorSet {
+        self.arenas
+            .get(&arena_id)
+            .and_then(|a| a.frame_values_descriptors.get(slot_index as usize).copied())
             .unwrap_or(vk::DescriptorSet::null())
     }
 
-    /// Return true if frame-values have been installed.
-    pub fn has_frame_values(&self) -> bool {
-        self.frame_values_ubo.is_some()
+    /// Return true if the arena has frame-values installed.
+    pub fn has_frame_values(&self, arena_id: u64) -> bool {
+        self.arenas
+            .get(&arena_id)
+            .is_some_and(|a| a.frame_values_ubo.is_some())
     }
 
     /// Write one immutable frame-local copy of BSP frame-varying values.
-    ///
-    /// The caller must only write a frame slot after that slot's fence has been
-    /// waited. Descriptors are not rewritten; each set permanently points at a
-    /// distinct slot in this buffer.
     pub fn write_frame_values_for_slot(
         &mut self,
+        arena_id: u64,
         slot_index: u32,
         values: &crate::data::gpu_data::BspFrameValuesUniform,
     ) -> Result<(), String> {
-        if self.frame_slot_count == 0 {
-            return Err("BSP frame-values slot count is zero".to_string());
+        let arena = self.arena(arena_id)?;
+        if arena.frame_slot_count == 0 {
+            return Err(format!("BSP arena {arena_id} frame-values slot count is zero"));
         }
-        let slot = slot_index % self.frame_slot_count;
+        let slot = slot_index % arena.frame_slot_count;
         let ubo_size = std::mem::size_of::<crate::data::gpu_data::BspFrameValuesUniform>() as u64;
-        let offset = self
+        let offset = arena
             .frame_values_stride
             .checked_mul(slot as u64)
             .ok_or_else(|| "BSP frame-values slot offset overflow".to_string())?;
@@ -3530,10 +3613,12 @@ impl BspSurfaceCache {
         let alloc_guard = allocator
             .lock()
             .map_err(|_| "BSP allocator lock poisoned".to_string())?;
-        let ubo = self
+        // Re-borrow arena mutably through arenas for the write.
+        let arena = self.arena_mut(arena_id)?;
+        let ubo = arena
             .frame_values_ubo
             .as_mut()
-            .ok_or_else(|| "BSP frame-values UBO not installed".to_string())?;
+            .ok_or_else(|| format!("BSP arena {arena_id} frame-values UBO not installed"))?;
         unsafe {
             let mapped = alloc_guard
                 .map_memory(&mut ubo.allocation)
@@ -3548,26 +3633,44 @@ impl BspSurfaceCache {
         Ok(())
     }
 
+    // ── Material slot management ────────────────────────────────────
+
     fn handle_for_slot(&self, slot: u32) -> crate::data::handles::BspMaterialHandle {
         crate::data::handles::BspMaterialHandle::new(slot, self.generations[slot as usize])
     }
 
-    pub fn add(&mut self, material: BspCachedSurface) -> crate::data::handles::BspMaterialHandle {
+    /// Add a material record for the given arena and register the slot.
+    pub fn add(
+        &mut self,
+        arena_id: u64,
+        material: BspCachedSurface,
+    ) -> crate::data::handles::BspMaterialHandle {
         assert!(
             material.material_descriptor != vk::DescriptorSet::null(),
             "BSP material cache requires a real descriptor set"
         );
-        if let Some(slot) = self.free_slots.pop() {
+        debug_assert_eq!(
+            material.arena_id, arena_id,
+            "BSP material arena_id must match the registering arena"
+        );
+        let (slot, handle) = if let Some(slot) = self.free_slots.pop() {
             self.cached_materials[slot as usize] = material;
-            self.handle_for_slot(slot)
+            (slot, self.handle_for_slot(slot))
         } else {
             let slot = self.cached_materials.len() as u32;
             self.cached_materials.push(material);
             self.generations.push(0);
-            crate::data::handles::BspMaterialHandle::new(slot, 0)
+            (slot, crate::data::handles::BspMaterialHandle::new(slot, 0))
+        };
+        // Register the slot in the arena for rollback tracking.
+        if let Ok(arena) = self.arena_mut(arena_id) {
+            arena.material_slots.push(slot);
         }
+        handle
     }
 
+    /// Authoritative slot + generation lookup. Rejects stale, out-of-range,
+    /// and wrong-arena handles.
     pub fn get(
         &self,
         handle: crate::data::handles::BspMaterialHandle,
@@ -3584,44 +3687,129 @@ impl BspSurfaceCache {
             .ok_or(crate::data::handles::CacheError::InvalidHandle)
     }
 
+    /// Authoritative slot + generation + arena lookup. Rejects handles whose
+    /// material was created under a different arena.
+    pub fn get_with_arena(
+        &self,
+        arena_id: u64,
+        handle: crate::data::handles::BspMaterialHandle,
+    ) -> Result<&BspCachedSurface, String> {
+        let surface = self.get(handle).map_err(|e| match e {
+            crate::data::handles::CacheError::OutOfBounds => {
+                format!("BSP material handle {:?} out of bounds", handle)
+            }
+            crate::data::handles::CacheError::StaleHandle => {
+                format!("BSP material handle {:?} is stale", handle)
+            }
+            crate::data::handles::CacheError::InvalidHandle => {
+                format!("BSP material handle {:?} is invalid", handle)
+            }
+            other => format!("BSP material handle {:?}: {:?}", handle, other),
+        })?;
+        if surface.arena_id != arena_id {
+            return Err(format!(
+                "BSP material handle {:?} belongs to arena {} but was requested for arena {}",
+                handle, surface.arena_id, arena_id
+            ));
+        }
+        Ok(surface)
+    }
+
     /// Invalidate a BSP material handle by bumping its generation counter.
-    ///
-    /// Idempotent: calling twice on the same handle is safe; the second call
-    /// is a no-op because the generation has already advanced past the handle.
     pub fn remove(&mut self, handle: crate::data::handles::BspMaterialHandle) {
-        let slot = handle.slot as usize;
-        if let Some(gen) = self.generations.get_mut(slot) {
-            if *gen == handle.generation {
-                *gen = gen.wrapping_add(1);
-                self.free_slots.push(handle.slot);
+        self.remove_by_slot(handle.slot);
+    }
+
+    fn remove_by_slot(&mut self, slot: u32) {
+        if let Some(gen) = self.generations.get_mut(slot as usize) {
+            *gen = gen.wrapping_add(1);
+            if !self.free_slots.contains(&slot) {
+                self.free_slots.push(slot);
             }
         }
     }
 
-    /// Clear the lightmap atlas from the surface cache.
-    ///
-    /// Used by receipt rollback to release atlas GPU resources without
-    /// destroying the entire cache.
-    pub fn clear_lightmap_atlas(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
-        if let Some(ref mut atlas) = self.lightmap_atlas {
-            atlas.destroy(device, allocator);
-            self.lightmap_atlas = None;
-        }
+    /// Destroy all resources owned by a specific arena, leaving other arenas intact.
+    /// This is the rollback-safe path: it scopes destruction to one arena identity.
+    pub fn destroy_arena_resources(
+        &mut self,
+        arena_id: u64,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) {
+        self.destroy_arena(arena_id, device, allocator);
     }
 
-    /// Clear only frame-values state from the surface cache.
-    ///
-    /// This remains available for scoped cache maintenance; candidate rollback
-    /// uses [`Self::destroy_descriptor_pool`] so all cache-owned BSP resources
-    /// have one destruction authority.
-    pub fn clear_frame_values(
-        &mut self,
-        device: &ash::Device,
-        allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
-    ) {
-        if let Ok(alloc_guard) = allocator.lock() {
-            self.clear_frame_values_with_allocator(device, &alloc_guard);
+    /// Legacy: destroy all BSP payloads across all arenas (cache-wide teardown).
+    /// Prefer [`Self::destroy_arena_resources`] for per-mount rollback.
+    pub fn destroy_descriptor_pool(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        let arena_ids: Vec<u64> = self.arenas.keys().copied().collect();
+        for id in arena_ids {
+            self.destroy_arena(id, device, allocator);
         }
+        self.cached_materials.clear();
+        self.generations.clear();
+        self.free_slots.clear();
+        self.device = None;
+        self.allocator = None;
+    }
+
+    // ── Active arena bridge (for draw path; replaced by Phase 04) ─
+
+    /// Return the active (published) arena ID, if any.
+    pub fn active_arena_id(&self) -> Option<u64> {
+        self.active_arena_id
+    }
+
+    /// Set the active arena after publication. Phase 04 will formalize this
+    /// as part of the scene publication path.
+    pub fn set_active_arena(&mut self, arena_id: u64) {
+        self.active_arena_id = Some(arena_id);
+    }
+
+    /// Clear the active arena (unmount).
+    pub fn clear_active_arena(&mut self) {
+        self.active_arena_id = None;
+    }
+
+    // ── Legacy compatibility methods (used by draw/mount code) ─────
+
+    /// Access the arena's lightmap view for draw binding.
+    pub fn lightmap_view_for_arena(&self, arena_id: u64) -> Option<vk::ImageView> {
+        self.arenas
+            .get(&arena_id)
+            .and_then(|a| a.lightmap_atlas.as_ref())
+            .map(|a| a.view)
+    }
+
+    /// Access the arena's lightmap sampler for draw binding.
+    pub fn lightmap_sampler_for_arena(&self, arena_id: u64) -> Option<vk::Sampler> {
+        self.arenas
+            .get(&arena_id)
+            .and_then(|a| a.lightmap_atlas.as_ref())
+            .map(|a| a.sampler)
+    }
+
+    /// Register mesh handles that belong to an arena (for rollback tracking).
+    pub fn register_mesh_handles(
+        &mut self,
+        arena_id: u64,
+        handles: &[crate::data::handles::MeshHandle],
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        arena.mesh_handles.extend_from_slice(handles);
+        Ok(())
+    }
+
+    /// Register texture handles that belong to an arena (for rollback tracking).
+    pub fn register_texture_handles(
+        &mut self,
+        arena_id: u64,
+        handles: &[crate::data::handles::TextureHandle],
+    ) -> Result<(), String> {
+        let arena = self.arena_mut(arena_id)?;
+        arena.texture_handles.extend_from_slice(handles);
+        Ok(())
     }
 }
 

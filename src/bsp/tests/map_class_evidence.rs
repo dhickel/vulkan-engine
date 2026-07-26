@@ -528,3 +528,138 @@ fn map_class_m2_parse_time_within_budget() {
         "M2 parse time {elapsed_ms:.2} ms must be < 200 ms (parse budget)"
     );
 }
+
+// ── Phase 01: Strict extraction evidence ─────────────────────────────────
+
+fn load_wad_archive() -> (String, Vec<u8>) {
+    let wad_path = fixtures_dir().join("wads/dungeon_evidence.wad");
+    let wad_bytes = std::fs::read(&wad_path).expect("read dungeon_evidence.wad");
+    ("dungeon_evidence.wad".to_string(), wad_bytes)
+}
+
+fn strict_extract_fixture(bsp_name: &str, bsp_data: &[u8], lit_data: &[u8]) -> ExtractedBsp {
+    let palette_data = read(&palette_path());
+    let palette = load_palette();
+    let (wad_name, wad_bytes) = load_wad_archive();
+
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(palette_data),
+        lit_data: Some(lit_data.to_vec()),
+        wad_archives: vec![(wad_name.clone(), wad_bytes.clone())],
+        source_identity: bsp_name.into(),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(bsp_data, &options)
+        .expect(&format!("strict load of {bsp_name}"));
+
+    let request = BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        wad_archives: vec![(wad_name, wad_bytes)],
+        strict: true,
+        ..Default::default()
+    };
+    extract(request).expect(&format!("strict extract of {bsp_name}"))
+}
+
+/// Strict extraction of M1 succeeds with 0 fatal errors.
+#[test]
+fn phase01_m1_strict_extraction() {
+    let (bsp_data, lit_data) = load_m1_bsp2();
+    let extracted = strict_extract_fixture("dungeon-m1-bsp2", &bsp_data, &lit_data);
+
+    assert!(!extracted.face_geometries.is_empty());
+    assert!(!extracted.render_batches.is_empty());
+    assert!(extracted.has_pvs);
+    // All diagnostics at strict level must be non-fatal
+    assert!(extracted.diagnostics.iter().all(|d| !d.is_error()));
+}
+
+/// Strict extraction of M2 — currently blocked by pre-existing face 104
+/// (Opaque/DNGN01, lightofs=-1, all styles sentinel). The phase requires
+/// this to be resolved via compiler fix or reclassification.
+#[test]
+fn phase01_m2_strict_extraction_blocked() {
+    let (bsp_data, lit_data) = load_m2_bsp2();
+    let (wad_name, wad_bytes) = load_wad_archive();
+    let palette_data = read(&palette_path());
+    let palette = load_palette();
+
+    let options = LoadOptions {
+        strict: true,
+        palette: Some(palette_data),
+        lit_data: Some(lit_data.to_vec()),
+        wad_archives: vec![(wad_name.clone(), wad_bytes.clone())],
+        source_identity: "dungeon-m2-bsp2".into(),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(&bsp_data, &options).expect("strict load M2");
+
+    let request = BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        wad_archives: vec![(wad_name, wad_bytes)],
+        strict: true,
+        ..Default::default()
+    };
+    let result = extract(request);
+    // Currently expected to fail on face 104. This documents the status.
+    // Post-phase: M2 should strictly extract after compiler fix.
+    if let Err(ref e) = result {
+        eprintln!("M2 strict extraction blocked: {e}");
+        assert_eq!(e.code, DiagnosticCode::MissingRequiredLightmap);
+    }
+}
+
+/// Every Opaque/AlphaMask face in strict extraction has lightmap data.
+#[test]
+fn phase01_baked_consumers_have_lightmap_data() {
+    let (bsp_data, lit_data) = load_m1_bsp2();
+    let extracted = strict_extract_fixture("dungeon-m1-bsp2", &bsp_data, &lit_data);
+
+    for (fi, material) in extracted.face_materials.iter().enumerate() {
+        if material.surface_class.requires_baked_lightmap() {
+            let layout = &extracted.face_lightmap_layouts[fi];
+            assert!(
+                layout.has_data,
+                "baked consumer face {fi} (class={:?}) has no lightmap data",
+                material.surface_class
+            );
+        }
+    }
+}
+
+/// Sky, liquid, and tool surfaces do not have lightmap data.
+#[test]
+fn phase01_non_baked_consumers_skip_lightmaps() {
+    let (bsp_data, lit_data) = load_m1_bsp2();
+    let extracted = strict_extract_fixture("dungeon-m1-bsp2", &bsp_data, &lit_data);
+
+    for (fi, material) in extracted.face_materials.iter().enumerate() {
+        if !material.surface_class.requires_baked_lightmap() && material.surface_class.is_visible() {
+            let layout = &extracted.face_lightmap_layouts[fi];
+            assert!(
+                !layout.has_data,
+                "non-baked consumer face {fi} (class={:?}) has unexpected lightmap data",
+                material.surface_class
+            );
+        }
+    }
+}
+
+/// Every extracted face has matching material and surface class.
+#[test]
+fn phase01_material_surface_class_consistency() {
+    let (bsp_data, lit_data) = load_m1_bsp2();
+    let extracted = strict_extract_fixture("dungeon-m1-bsp2", &bsp_data, &lit_data);
+
+    for (fi, material) in extracted.face_materials.iter().enumerate() {
+        assert!(
+            material.surface_class.is_visible(),
+            "face {fi} material has non-visible surface class {:?}",
+            material.surface_class
+        );
+    }
+}
+

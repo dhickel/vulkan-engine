@@ -20,8 +20,8 @@
 //! or app-world capacity reservation. All of those are done before commit.
 
 use crate::bridge::{
-    AppBridge, BehaviorEntityRecipe, BridgeAggregator, EntityCollisionRecipe, LightEntityRecipe,
-    WorldCollisionRecipe,
+    ActiveBridgeReceipts, AppBridge, BehaviorEntityRecipe, BridgeAggregator,
+    EntityCollisionRecipe, LightEntityRecipe, WorldCollisionRecipe,
 };
 use crate::cache::{
     canonical_f32_bytes, compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry,
@@ -347,7 +347,8 @@ impl BspCoordinator {
         // Build bridge DTOs and call app bridge prepare.
         let bridge_dtos = self.build_bridge_dtos(&extracted);
         let bridge_tokens = if self.bridges.has_bridges() {
-            self.bridges.prepare_with_tokens(
+            self.bridges.prepare_all(
+                token.generation,
                 &bridge_dtos.world_collision,
                 &bridge_dtos.entity_colliders,
                 &bridge_dtos.lights,
@@ -501,7 +502,8 @@ impl BspCoordinator {
 
         // Call app bridge prepare
         let bridge_tokens = if self.bridges.has_bridges() {
-            self.bridges.prepare_with_tokens(
+            self.bridges.prepare_all(
+                token.generation,
                 &bridge_dtos.world_collision,
                 &bridge_dtos.entity_colliders,
                 &bridge_dtos.lights,
@@ -731,24 +733,36 @@ impl BspCoordinator {
             .map(|candidate_light| candidate_light.light)
             .collect();
 
-        // Commit bridges (non-fallible activation after validation).
-        let bridge_count = if self.bridges.has_bridges() {
-            match self
-                .bridges
-                .commit_candidate(self.candidate.as_mut().unwrap())
-            {
-                Ok(()) => self.bridges.len(),
-                Err(BspRuntimeError::CoordinatorPoisoned) => {
+        // Activate bridges (non-fallible publication after validation).
+        // This consumes the prepared tokens and produces active receipts.
+        let bridge_count = self.bridges.len();
+        let active_receipts = if self.bridges.has_bridges() {
+            let tokens = std::mem::take(
+                &mut self
+                    .candidate
+                    .as_mut()
+                    .expect("candidate was checked above")
+                    .prepared_tokens,
+            );
+            match self.bridges.activate_all(tokens) {
+                Ok(receipts) => receipts,
+                Err(quarantine) => {
+                    // Activation panic — quarantine retains all state.
+                    // The prepared tokens have already been moved into the
+                    // quarantine; the candidate is left with empty tokens.
+                    log::error!(
+                        "BSP coordinator: bridge activation panic at '{}' (index {}, generation {}): {:?}",
+                        quarantine.panic_bridge,
+                        quarantine.panic_index,
+                        quarantine.generation,
+                        quarantine,
+                    );
                     self.poisoned = true;
                     return Err(BspRuntimeError::CoordinatorPoisoned);
                 }
-                Err(err) => {
-                    self.poisoned = true;
-                    return Err(err);
-                }
             }
         } else {
-            0
+            ActiveBridgeReceipts::empty(self.generation.current())
         };
 
         // Consume the candidate before retiring the old scene payload. The
@@ -757,11 +771,15 @@ impl BspCoordinator {
         let candidate = self.candidate.take().ok_or_else(|| {
             self.poisoned = true;
             BspRuntimeError::CommitContractViolated {
-                detail: "candidate missing after bridge commit".to_string(),
+                detail: "candidate missing after bridge activation".to_string(),
             }
         })?;
         let (mut active_mount, prepared_mount) =
-            match candidate.consume_into_active(self.generation.current(), Vec::new()) {
+            match candidate.consume_into_active(
+                self.generation.current(),
+                Vec::new(),
+                active_receipts,
+            ) {
                 Ok(value) => value,
                 Err((error, candidate)) => {
                     // Preserve move-only cleanup even if an internal invariant is
@@ -1331,7 +1349,7 @@ impl BspCoordinator {
 
             // Phase 05: Bridge validation (non-fallible after this point)
             if self.bridges.has_bridges() {
-                self.bridges.validate_candidate(candidate_ref)?;
+                self.bridges.validate_all(&candidate_ref.prepared_tokens)?;
             }
 
             // Phase 05: Scene light preflight
@@ -1867,10 +1885,21 @@ impl BspCoordinator {
             self.retire_unpublished_mount(mount);
         }
 
-        let failures = self.bridges.rollback_tokens(tokens);
-        if !failures.is_empty() {
-            self.poisoned = true;
-            return Err(BspRuntimeError::RollbackFailure { failures });
+        if !tokens.is_empty() {
+            if let Err(quarantine) = self.bridges.rollback_all(tokens) {
+                self.poisoned = true;
+                log::error!(
+                    "BSP coordinator: bridge rollback quarantine: {:?}",
+                    quarantine
+                );
+                return Err(BspRuntimeError::RollbackFailure {
+                    failures: vec![crate::error::BridgeFailure::new(
+                        quarantine.bridge_name,
+                        quarantine.phase,
+                        quarantine.message,
+                    )],
+                });
+            }
         }
 
         Ok(())
@@ -1892,12 +1921,36 @@ impl BspCoordinator {
             });
         }
 
-        let old_light_ids = active_mount.light_ids.clone();
+        // Phase 05: Teardown active bridge receipts before scene detach.
+        // Bridge teardown removes app-owned resources (physics, behavior state)
+        // while the scene mount is still published.
+        let old_mount = self
+            .active_mount
+            .take()
+            .expect("active mount was borrowed and prechecked above");
+
+        let old_light_ids = old_mount.light_ids.clone();
         scene
             .replace_prevalidated_bsp_point_lights(&old_light_ids, &[])
             .map_err(|error| BspRuntimeError::RetirementHandoffFailed {
                 reason: format!("failed to remove BSP-owned point lights: {error:?}"),
             })?;
+
+        // Teardown bridge receipts — on failure, the quarantine retains receipts
+        // but the scene is still detached.
+        if !old_mount.active_bridge_receipts.is_empty() {
+            if let Err(quarantine) = self
+                .bridges
+                .teardown_all(old_mount.active_bridge_receipts)
+            {
+                log::error!(
+                    "BSP coordinator: bridge teardown quarantine for mount '{}': {:?}",
+                    old_mount.source_identity,
+                    quarantine
+                );
+            }
+        }
+
         let retired =
             scene
                 .retire_bsp_mount()
@@ -1906,10 +1959,6 @@ impl BspCoordinator {
                 })?;
         scene.clear_bsp_source_link();
 
-        let old_mount = self
-            .active_mount
-            .take()
-            .expect("active mount was borrowed and prechecked above");
         self.retired_mount_count = self.retired_mount_count.saturating_add(1);
         log::debug!(
             "BSP coordinator: detached active mount '{}' (generation {})",

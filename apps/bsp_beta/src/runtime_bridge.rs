@@ -5,29 +5,71 @@
 //! entity descriptors during prepare, initializes behavior state machines,
 //! and wires trigger→target activation chains.
 //!
-//! # State Machine Ownership
+//! # Phase 05: Active Bridge Receipts
 //!
-//! The runtime bridge owns the [`StructuralBehaviorAdapter`] and advances
-//! it each frame. Moving entities produce position updates that the physics
-//! bridge syncs with Rapier kinematic bodies.
-//!
-//! # Activation Flow
-//!
-//! ```text
-//! Trigger enter → TriggerState::update_occupants → TriggerEvent::Fired
-//!     → queue_target_activation(target) → Door/Button/Platform::activate
-//!     → door.update(dt) → new position → scene/collider sync
-//! ```
+//! - **Prepare**: Creates a separate adapter state from entity recipes.
+//! - **Validate**: Confirms entity count and consistency.
+//! - **Activate**: Moves prevalidated adapter state into an active receipt.
+//!   Does not reset the previously active A.
+//! - **Teardown**: Resets the adapter, generation-specific cleanup.
 
-use std::collections::HashSet;
-
-use bsp_runtime::behavior::{BehaviorEntityInfo, StructuralBehaviorAdapter, TriggerEvent};
+use bsp_runtime::behavior::{
+    BehaviorEntityInfo, StructuralBehaviorAdapter, TriggerEvent,
+};
 use bsp_runtime::bridge::{
-    AppBridge, BehaviorEntityRecipe, BridgeToken, EntityCollisionRecipe, LightEntityRecipe,
-    WorldCollisionRecipe,
+    ActiveBridgeState, AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe,
+    PreparedBridgeState, WorldCollisionRecipe,
 };
 use bsp_runtime::Activation;
 use log;
+
+// ── Prepared Runtime State ─────────────────────────────────────────────
+
+/// Prepared behavior state built from entity recipes during prepare.
+#[derive(Debug)]
+pub struct RuntimePreparedState {
+    /// Staged entity infos to register during activation.
+    pub entity_infos: Vec<BehaviorEntityInfo>,
+}
+
+impl PreparedBridgeState for RuntimePreparedState {
+    fn registration_name(&self) -> &str {
+        "runtime"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// ── Active Runtime State ───────────────────────────────────────────────
+
+/// Published behavior adapter moved into the active receipt during activation.
+#[derive(Debug)]
+pub struct RuntimeActiveState {
+    /// The active behavior adapter.
+    pub adapter: StructuralBehaviorAdapter,
+}
+
+impl ActiveBridgeState for RuntimeActiveState {
+    fn registration_name(&self) -> &str {
+        "runtime"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// ── Runtime Bridge ─────────────────────────────────────────────────────
 
 /// Runtime bridge that manages BSP structural behaviors.
 ///
@@ -35,12 +77,8 @@ use log;
 /// Exposes trigger occupant tracking and entity position queries for
 /// integration with the physics bridge and scene graph.
 pub struct RuntimeBridge {
-    /// The structural behavior adapter.
+    /// The structural behavior adapter (populated from active receipt).
     pub adapter: StructuralBehaviorAdapter,
-    /// Staged entity info from prepare, registered on commit.
-    staged_infos: Option<Vec<BehaviorEntityInfo>>,
-    /// Whether we've been committed.
-    committed: bool,
 }
 
 impl RuntimeBridge {
@@ -48,8 +86,6 @@ impl RuntimeBridge {
     pub fn new() -> Self {
         Self {
             adapter: StructuralBehaviorAdapter::new(),
-            staged_infos: None,
-            committed: false,
         }
     }
 
@@ -66,7 +102,7 @@ impl RuntimeBridge {
     pub fn update_trigger(
         &mut self,
         trigger_entity: u32,
-        occupants: HashSet<u32>,
+        occupants: std::collections::HashSet<u32>,
     ) -> Option<TriggerEvent> {
         self.adapter
             .update_trigger_occupants(trigger_entity, occupants)
@@ -125,7 +161,7 @@ impl AppBridge for RuntimeBridge {
         _entity_colliders: &[EntityCollisionRecipe],
         lights: &[LightEntityRecipe],
         behaviors: &[BehaviorEntityRecipe],
-    ) -> Result<BridgeToken, String> {
+    ) -> Result<Box<dyn PreparedBridgeState>, String> {
         // Convert BehaviorEntityRecipe to BehaviorEntityInfo for adapter registration.
         let mut entity_infos: Vec<BehaviorEntityInfo> = behaviors
             .iter()
@@ -163,65 +199,75 @@ impl AppBridge for RuntimeBridge {
         }));
 
         let count = entity_infos.len();
-        self.staged_infos = Some(entity_infos);
-
         log::debug!("Runtime bridge prepare: {} behavior entities staged", count);
-        Ok(BridgeToken::new(vec![1u8])) // generation marker
+        Ok(Box::new(RuntimePreparedState {
+            entity_infos,
+        }))
     }
 
-    fn validate(&self, token: &BridgeToken) -> Result<(), String> {
-        if token.payload.is_empty() {
-            return Err("empty bridge token".to_string());
-        }
+    fn validate(&self, prepared: &dyn PreparedBridgeState) -> Result<(), String> {
+        let state: &RuntimePreparedState = prepared
+            .as_any()
+            .downcast_ref::<RuntimePreparedState>()
+            .ok_or_else(|| "runtime bridge received non-runtime prepared state".to_string())?;
 
-        let staged = self
-            .staged_infos
-            .as_ref()
-            .ok_or_else(|| "no staged behavior state".to_string())?;
-
-        if staged.is_empty() {
+        if state.entity_infos.is_empty() {
             log::debug!("Runtime bridge: no behavior entities to validate");
         }
 
         Ok(())
     }
 
-    fn commit(&mut self, token: BridgeToken) -> Result<(), String> {
-        if token.payload.is_empty() {
-            return Err("empty bridge token".to_string());
-        }
+    fn activate(&mut self, prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
+        let state: &mut RuntimePreparedState = prepared
+            .as_any_mut()
+            .downcast_mut::<RuntimePreparedState>()
+            .expect("runtime bridge received non-runtime prepared state");
 
-        // Allow re-commit: reset prior committed state before accepting new batch.
-        if self.committed {
-            log::debug!("Runtime bridge: resetting prior committed state for new mount");
-            self.committed = false;
-            self.adapter.reset();
-        }
+        let mut adapter = StructuralBehaviorAdapter::new();
+        adapter.register_entities(std::mem::take(&mut state.entity_infos));
 
-        let staged = self
-            .staged_infos
-            .take()
-            .ok_or_else(|| "no staged behavior state to commit".to_string())?;
+        // Clone into the active receipt; the receipt owns the teardown target.
+        let receipt_adapter = adapter.clone();
+        // The bridge's own adapter is the live one the app drives.
+        self.adapter = adapter;
 
-        // Register all entities into the adapter
-        self.adapter.register_entities(staged);
-
-        self.committed = true;
         log::debug!(
-            "Runtime bridge commit: {} doors, {} buttons, {} platforms, {} triggers, {} light styles",
-            self.adapter.doors.len(),
-            self.adapter.buttons.len(),
-            self.adapter.platforms.len(),
-            self.adapter.triggers.len(),
-            self.adapter.light_styles.len(),
+            "Runtime bridge activate: {} doors, {} buttons, {} platforms, {} triggers, {} light styles",
+            receipt_adapter.doors.len(),
+            receipt_adapter.buttons.len(),
+            receipt_adapter.platforms.len(),
+            receipt_adapter.triggers.len(),
+            receipt_adapter.light_styles.len(),
         );
+
+        Box::new(RuntimeActiveState {
+            adapter: receipt_adapter,
+        })
+    }
+
+    fn teardown(&mut self, active: &mut dyn ActiveBridgeState) -> Result<(), String> {
+        let state: &mut RuntimeActiveState = active
+            .as_any_mut()
+            .downcast_mut::<RuntimeActiveState>()
+            .ok_or_else(|| "runtime bridge received non-runtime active state".to_string())?;
+
+        // Reset the receipt's adapter (generation-specific cleanup)
+        state.adapter.reset();
+
+        // Also reset the bridge's own adapter
+        self.adapter.reset();
 
         Ok(())
     }
 
-    fn rollback(&mut self, _token: BridgeToken) {
-        self.staged_infos = None;
-        self.adapter.reset();
-        self.committed = false;
+    fn rollback(&mut self, prepared: &mut dyn PreparedBridgeState) {
+        let state: &mut RuntimePreparedState = prepared
+            .as_any_mut()
+            .downcast_mut::<RuntimePreparedState>()
+            .expect("runtime bridge received non-runtime prepared state");
+
+        // Clear staged entity infos
+        state.entity_infos.clear();
     }
 }

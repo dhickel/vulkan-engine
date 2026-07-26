@@ -161,8 +161,11 @@ pub(crate) fn create_bsp_material_descriptor_pool(
             .descriptor_count(max_sets),
     ];
 
+    // Pool-owned mode: no FREE_DESCRIPTOR_SET. The pool destruction is the
+    // only descriptor-set release operation. Individual set frees are not
+    // valid and would cause a double-free if attempted alongside pool teardown.
     let pool_info = vk::DescriptorPoolCreateInfo::default()
-        .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+        .flags(vk::DescriptorPoolCreateFlags::empty())
         .max_sets(max_sets)
         .pool_sizes(&pool_sizes);
 

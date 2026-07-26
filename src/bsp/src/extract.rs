@@ -1168,7 +1168,7 @@ fn extract_lightmaps(
         let visible_lightmapped = surface_classes
             .get(fi)
             .copied()
-            .map(|sc| matches!(sc, SurfaceClass::Opaque | SurfaceClass::AlphaMask))
+            .map(|sc| sc.requires_baked_lightmap())
             .unwrap_or(true);
         let has_any_valid_style = face
             .styles
@@ -1241,7 +1241,9 @@ fn extract_lightmaps(
                     max_pages,
                 ) {
                     Ok(style_layout) => {
-                        if source_slot == 0 {
+                        // Set face-level projection from the first successfully
+                        // decoded layer, regardless of its source slot.
+                        if !layout.has_data {
                             layout.page_index = style_layout.page_index;
                             layout.atlas_offset = style_layout.atlas_offset;
                             layout.luxel_extents = style_layout.luxel_extents;
@@ -1885,12 +1887,12 @@ fn validate_strict_face_resources(
                 ),
             ));
         }
-        if matches!(
-            surface_class,
-            SurfaceClass::Opaque | SurfaceClass::AlphaMask
-        ) && face_lightmap_layouts
-            .get(face_index)
-            .is_none_or(|layout| !layout.has_data)
+        let face_kind = lightmaps::LightmapFaceKind::classify(geometry.luxel_extents);
+        if surface_class.requires_baked_lightmap()
+            && face_kind.requires_baked_lightmap()
+            && face_lightmap_layouts
+                .get(face_index)
+                .is_none_or(|layout| !layout.has_data)
         {
             return Err(BspReport::fatal(
                 DiagnosticCode::MissingRequiredLightmap,
@@ -1969,10 +1971,7 @@ pub fn extract_with_mapping_trace(
                 material_index,
                 batch_index: face_batches[face_index],
                 surface_class,
-                lightmap_required: matches!(
-                    surface_class,
-                    SurfaceClass::Opaque | SurfaceClass::AlphaMask
-                ),
+                lightmap_required: surface_class.requires_baked_lightmap(),
                 strict: result.strict,
             }
         })
@@ -2120,11 +2119,10 @@ fn validate_extraction_invariants(
                     ),
                 ));
             }
+            let face_kind = lightmaps::LightmapFaceKind::classify(geometry.luxel_extents);
             if strict
-                && matches!(
-                    surface_class,
-                    SurfaceClass::Opaque | SurfaceClass::AlphaMask
-                )
+                && surface_class.requires_baked_lightmap()
+                && face_kind.requires_baked_lightmap()
                 && !face_lightmap_layouts[face_index].has_data
             {
                 return Err(BspReport::fatal(

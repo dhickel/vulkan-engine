@@ -55,6 +55,17 @@ impl SurfaceClass {
         matches!(self, SurfaceClass::Trigger)
     }
 
+    /// Whether the approved rendering pipeline consumes baked lightmaps for
+    /// this surface class.
+    ///
+    /// `Opaque` and `AlphaMask` (including fullbright and PBR variants) are
+    /// baked-lightmap consumers. Sky, liquid, and tool/non-renderable classes
+    /// are exempt because their approved pipeline does not consume baked
+    /// lightmaps.
+    pub const fn requires_baked_lightmap(self) -> bool {
+        matches!(self, Self::Opaque | Self::AlphaMask)
+    }
+
     /// Get the render class for batch grouping.
     pub fn render_class(self) -> crate::geometry::RenderClass {
         match self {

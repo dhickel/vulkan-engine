@@ -197,6 +197,8 @@ pub struct BspFrameDrawItem {
 pub struct BspFrameValuesState {
     pub style_intensities: [f32; 64],
     pub liquid_time: f32,
+    /// Active BSP surface-cache arena identity for the published mount.
+    pub arena_id: Option<u64>,
 }
 
 #[cfg(feature = "bsp")]
@@ -207,6 +209,7 @@ impl Default for BspFrameValuesState {
         Self {
             style_intensities,
             liquid_time: 0.0,
+            arena_id: None,
         }
     }
 }

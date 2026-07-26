@@ -302,7 +302,7 @@ pub use identity::{
 };
 pub use lightmaps::{
     decode_lightmaps_monochrome, decode_lightmaps_rgb, AtlasPage, FaceLightmapLayout,
-    LightmapAtlas, Luxel, StyleLightmapLayout,
+    LightmapAtlas, LightmapFaceKind, Luxel, StyleLightmapLayout,
 };
 pub use materials::{
     classify_surface, detect_animation, material_identity, AnimatedTexture, AnimationCycleType,

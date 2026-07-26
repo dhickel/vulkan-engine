@@ -2241,4 +2241,206 @@ mod tests {
         let err = compute_batch_bounds(&mesh).unwrap_err();
         assert!(err.contains("non-finite vertex"));
     }
+
+    // ── Phase 03: Bounds retention, material slot zero, A/B coexistence ──
+
+    /// Bounds survive vertex/index transfer via `mem::take` because they're a
+    /// separate `Copy` field on `BspPlannedBatch`.
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn planned_bounds_survive_mesh_transfer() {
+        let mesh = ProceduralMeshData {
+            name: "test".to_string(),
+            vertices: vec![
+                ProceduralVertex {
+                    position: glam::Vec3::new(-1.0, 0.0, -1.0),
+                    ..ProceduralVertex::default()
+                },
+                ProceduralVertex {
+                    position: glam::Vec3::new(2.0, 3.0, 4.0),
+                    ..ProceduralVertex::default()
+                },
+            ],
+            indices: vec![0, 1],
+            material: None,
+        };
+        let bounds = compute_batch_bounds(&mesh).expect("valid bounds");
+        assert_eq!(bounds.0, glam::Vec3::new(-1.0, 0.0, -1.0));
+        assert_eq!(bounds.1, glam::Vec3::new(2.0, 3.0, 4.0));
+
+        // Simulate transfer: vertices and indices are moved out.
+        let mut batch = BspPlannedBatch {
+            mesh,
+            bounds, // Copy retained
+            material_plan_index: 0,
+            render_batch: bsp::geometry::RenderBatch {
+                key: bsp::geometry::BatchKey {
+                    render_class: 0,
+                    material_identity: 0,
+                    lightmap_page: 0,
+                    style_ids: [0, 255, 255, 255],
+                    model_index: 0,
+                },
+                leaf_signature: vec![],
+                face_indices: vec![0],
+                pvs_eligible: false,
+                is_inline_model: false,
+                model_index: 0,
+            },
+        };
+        // mesh transfer: vertices and indices are consumed
+        let _vertices = std::mem::take(&mut batch.mesh.vertices);
+        let _indices = std::mem::take(&mut batch.mesh.indices);
+        let _name = std::mem::take(&mut batch.mesh.name);
+
+        // Bounds must survive the transfer
+        assert_eq!(batch.bounds.0, glam::Vec3::new(-1.0, 0.0, -1.0));
+        assert_eq!(batch.bounds.1, glam::Vec3::new(2.0, 3.0, 4.0));
+    }
+
+    /// MountedBspBatch::try_new rejects null (slot 0, gen 0) material handles
+    /// when no resource lease validates them. Cache-issued handles (slot 0,
+    /// gen > 0) are valid.
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn mounted_batch_material_slot_zero_rules() {
+        use crate::api::bsp::MountedBspBatch;
+        use crate::api::MeshHandle;
+        use crate::api::BspMaterialHandle;
+
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
+                model_index: 0,
+            },
+            leaf_signature: vec![],
+            face_indices: vec![0],
+            pvs_eligible: false,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(1, 0);
+        let bounds = (glam::Vec3::ZERO, glam::Vec3::ONE);
+
+        // Null handle: slot 0, gen 0 — rejected by try_new (but try_new
+        // only rejects null mesh, not null material for backward compat).
+        // Full validation happens in from_canonical with a resource lease.
+        let mat_null = BspMaterialHandle::new(0, 0);
+        let result = MountedBspBatch::try_new(&batch, mesh, mat_null, bounds);
+        assert!(result.is_ok(), "try_new accepts slot-0 material (lease validates later)");
+
+        // Cache-issued: slot 0, gen 1 — valid
+        let mat_issued = BspMaterialHandle::new(0, 1);
+        let result = MountedBspBatch::try_new(&batch, mesh, mat_issued, bounds);
+        assert!(result.is_ok(), "cache-issued slot-0 material is valid");
+
+        // Non-zero: slot 5, gen 0 — valid
+        let mat_normal = BspMaterialHandle::new(5, 0);
+        let result = MountedBspBatch::try_new(&batch, mesh, mat_normal, bounds);
+        assert!(result.is_ok());
+    }
+
+    /// from_canonical with a resource lease rejects material handles not in the lease.
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_mount_rejects_material_not_in_lease() {
+        use crate::api::bsp::{MountedBspBatch, PreparedBspMount, BspResourceLease};
+        use crate::api::{MeshHandle, BspMaterialHandle};
+        use crate::scene::bsp_visibility::BspMountState;
+
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
+                model_index: 0,
+            },
+            leaf_signature: vec![],
+            face_indices: vec![0],
+            pvs_eligible: false,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(1, 0);
+        let material = BspMaterialHandle::new(5, 0);
+        let bounds = (glam::Vec3::ZERO, glam::Vec3::ONE);
+        let mounted = MountedBspBatch::try_new(&batch, mesh, material, bounds).unwrap();
+
+        let mut mount_state = BspMountState::new();
+        mount_state.face_meshes = vec![mesh];
+        mount_state.face_materials = vec![Some(material)];
+
+        // Lease does NOT contain the material handle.
+        let lease = BspResourceLease {
+            arena_id: 1,
+            mesh_handles: vec![],
+            texture_handles: vec![],
+            material_handles: vec![BspMaterialHandle::new(99, 0)], // wrong handle
+        };
+
+        let err = PreparedBspMount::from_canonical(
+            mount_state,
+            vec![mounted],
+            vec![vec![0]],
+            vec![],
+            None,
+            Some(lease),
+        )
+        .unwrap_err();
+        assert!(err.contains("not found in resource lease"));
+    }
+
+    /// from_canonical rejects null material (slot 0, gen 0) when a lease is present.
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn canonical_mount_rejects_null_material_with_lease() {
+        use crate::api::bsp::{MountedBspBatch, PreparedBspMount, BspResourceLease};
+        use crate::api::{MeshHandle, BspMaterialHandle};
+        use crate::scene::bsp_visibility::BspMountState;
+
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
+                model_index: 0,
+            },
+            leaf_signature: vec![],
+            face_indices: vec![0],
+            pvs_eligible: false,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(1, 0);
+        let null_mat = BspMaterialHandle::new(0, 0);
+        let bounds = (glam::Vec3::ZERO, glam::Vec3::ONE);
+        let mounted = MountedBspBatch::try_new(&batch, mesh, null_mat, bounds).unwrap();
+
+        let mut mount_state = BspMountState::new();
+        mount_state.face_meshes = vec![mesh];
+        mount_state.face_materials = vec![Some(null_mat)];
+
+        let lease = BspResourceLease {
+            arena_id: 1,
+            mesh_handles: vec![],
+            texture_handles: vec![],
+            material_handles: vec![],
+        };
+
+        let err = PreparedBspMount::from_canonical(
+            mount_state,
+            vec![mounted],
+            vec![vec![0]],
+            vec![],
+            None,
+            Some(lease),
+        )
+        .unwrap_err();
+        assert!(err.contains("null handle"));
+    }
 }

@@ -863,9 +863,26 @@ fn candidate_cleared_after_bridge_prepare_failure() {
 }
 
 use bsp_runtime::bridge::{
-    AppBridge, BehaviorEntityRecipe, BridgeToken, EntityCollisionRecipe, LightEntityRecipe,
-    WorldCollisionRecipe,
+    ActiveBridgeState, AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe,
+    LightEntityRecipe, PreparedBridgeState, WorldCollisionRecipe,
 };
+
+/// Dummy prepared state for failing bridges.
+#[derive(Debug)]
+struct SimplePrepared(String);
+impl PreparedBridgeState for SimplePrepared {
+    fn registration_name(&self) -> &str { &self.0 }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+}
+/// Dummy active state for failing bridges.
+#[derive(Debug)]
+struct SimpleActive(String);
+impl ActiveBridgeState for SimpleActive {
+    fn registration_name(&self) -> &str { &self.0 }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+}
 
 /// A bridge that fails on prepare.
 pub(crate) struct PrepareFailingBridge;
@@ -880,16 +897,19 @@ impl AppBridge for PrepareFailingBridge {
         _entities: &[EntityCollisionRecipe],
         _lights: &[LightEntityRecipe],
         _behaviors: &[BehaviorEntityRecipe],
-    ) -> Result<BridgeToken, String> {
+    ) -> Result<Box<dyn PreparedBridgeState>, String> {
         Err("intentional prepare failure".to_string())
     }
-    fn validate(&self, _token: &BridgeToken) -> Result<(), String> {
+    fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn commit(&mut self, _token: BridgeToken) -> Result<(), String> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
+        Box::new(SimpleActive("prepare-failing".into()))
+    }
+    fn teardown(&mut self, _active: &mut dyn ActiveBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn rollback(&mut self, _token: BridgeToken) {}
+    fn rollback(&mut self, _prepared: &mut dyn PreparedBridgeState) {}
 }
 
 /// A bridge that fails on validate.
@@ -905,16 +925,19 @@ impl AppBridge for ValidateFailingBridge {
         _entities: &[EntityCollisionRecipe],
         _lights: &[LightEntityRecipe],
         _behaviors: &[BehaviorEntityRecipe],
-    ) -> Result<BridgeToken, String> {
-        Ok(BridgeToken::new(vec![]))
+    ) -> Result<Box<dyn PreparedBridgeState>, String> {
+        Ok(Box::new(SimplePrepared("validate-failing".into())))
     }
-    fn validate(&self, _token: &BridgeToken) -> Result<(), String> {
+    fn validate(&self, _prepared: &dyn PreparedBridgeState) -> Result<(), String> {
         Err("injected validation failure".to_string())
     }
-    fn commit(&mut self, _token: BridgeToken) -> Result<(), String> {
+    fn activate(&mut self, _prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
+        Box::new(SimpleActive("validate-failing".into()))
+    }
+    fn teardown(&mut self, _active: &mut dyn ActiveBridgeState) -> Result<(), String> {
         Ok(())
     }
-    fn rollback(&mut self, _token: BridgeToken) {}
+    fn rollback(&mut self, _prepared: &mut dyn PreparedBridgeState) {}
 }
 
 #[test]

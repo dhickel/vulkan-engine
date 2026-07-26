@@ -629,6 +629,7 @@ impl SceneWorld {
             submission.bsp_frame_values = crate::scene::render_submission::BspFrameValuesState {
                 style_intensities: self.bsp_mount.frame_style_intensities,
                 liquid_time: self.bsp_mount.frame_liquid_time,
+                arena_id: self.bsp_mount.arena_id,
             };
             self.update_bsp_pvs();
             let bsp_lights = self

@@ -336,3 +336,55 @@ fn coordinator_extracts_non_solid_spawn() {
         );
     }
 }
+
+// ── Phase 01: Strict extraction of generated BSP ───────────────────────
+
+/// Prove that a freshly generated and compiled BSP passes strict extraction
+/// through the bsp crate (no GPU, no coordinator).
+#[test]
+fn phase01_strict_extract_generated_bsp() {
+    let Some((world, _bsp_data, _lit_data)) = generate_compile_and_load("strict-extract") else {
+        return;
+    };
+
+    let palette_data = std::fs::read(palette_path()).expect("read palette");
+    let palette = bsp::resources::decode_palette(&palette_data);
+    let wad_name = wad_path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wad_bytes = std::fs::read(wad_path()).expect("read WAD");
+
+    let request = bsp::BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        wad_archives: vec![(wad_name, wad_bytes)],
+        strict: true,
+        ..Default::default()
+    };
+    let extracted = bsp::extract(request).expect("strict extraction must succeed");
+
+    assert!(!extracted.face_geometries.is_empty());
+    assert!(!extracted.render_batches.is_empty());
+    assert!(!extracted.entity_descriptors.is_empty());
+    assert!(extracted.diagnostics.iter().all(|d| !d.is_error()));
+
+    // Verify every baked consumer has lightmap data
+    for (fi, material) in extracted.face_materials.iter().enumerate() {
+        if material.surface_class.requires_baked_lightmap() {
+            let layout = &extracted.face_lightmap_layouts[fi];
+            assert!(
+                layout.has_data,
+                "baked consumer face {fi} has no lightmap data"
+            );
+        }
+    }
+
+    eprintln!(
+        "Strict extraction OK: {} faces, {} batches, {} lights",
+        extracted.face_geometries.len(),
+        extracted.render_batches.len(),
+        extracted.light_descriptors.len()
+    );
+}

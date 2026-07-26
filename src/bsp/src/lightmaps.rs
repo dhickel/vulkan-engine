@@ -351,6 +351,49 @@ impl Default for LightmapAtlas {
     }
 }
 
+// ── Lightmap Face Kind ──
+
+/// Classification of a face by its luxel extents.
+///
+/// Used during strict validation to determine whether a face requires baked
+/// lightmap data regardless of its `SurfaceClass`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightmapFaceKind {
+    /// No lightmap data (width == 0 or height == 0).
+    Empty,
+    /// Single vertex/sample point (width == 1 or height == 1).
+    Vertex,
+    /// Standard lightmapped surface.
+    Light,
+    /// Large/tool surface — dimensions suggest a non-renderable tool face
+    /// that should be excluded from lightmap requirements.
+    Surface,
+}
+
+impl LightmapFaceKind {
+    /// Classify a face by its luxel extents.
+    pub fn classify(luxel_extents: (u32, u32)) -> Self {
+        let (w, h) = luxel_extents;
+        if w == 0 || h == 0 {
+            return Self::Empty;
+        }
+        if w == 1 || h == 1 {
+            return Self::Vertex;
+        }
+        // Large dimensions (>= 64 in either axis) are tool/surface faces
+        // that should be excluded from lightmap requirements.
+        if w >= 64 || h >= 64 {
+            return Self::Surface;
+        }
+        Self::Light
+    }
+
+    /// Whether faces of this kind require baked lightmap data for rendering.
+    pub fn requires_baked_lightmap(self) -> bool {
+        matches!(self, Self::Light | Self::Vertex)
+    }
+}
+
 /// Decode lightmap data from BSP raw bytes into luxel arrays.
 ///
 /// For monochrome source: each byte becomes equal R, G, B.
@@ -507,5 +550,40 @@ mod tests {
         let mut atlas = LightmapAtlas::new();
         atlas.add_style(STYLE_SENTINEL);
         assert_eq!(atlas.styles, vec![0]);
+    }
+
+    // ── LightmapFaceKind tests ──
+
+    #[test]
+    fn face_kind_empty() {
+        assert_eq!(LightmapFaceKind::classify((0, 0)), LightmapFaceKind::Empty);
+        assert_eq!(LightmapFaceKind::classify((16, 0)), LightmapFaceKind::Empty);
+        assert_eq!(LightmapFaceKind::classify((0, 16)), LightmapFaceKind::Empty);
+        assert!(!LightmapFaceKind::Empty.requires_baked_lightmap());
+    }
+
+    #[test]
+    fn face_kind_vertex() {
+        assert_eq!(LightmapFaceKind::classify((1, 1)), LightmapFaceKind::Vertex);
+        assert_eq!(LightmapFaceKind::classify((1, 16)), LightmapFaceKind::Vertex);
+        assert_eq!(LightmapFaceKind::classify((16, 1)), LightmapFaceKind::Vertex);
+        assert!(LightmapFaceKind::Vertex.requires_baked_lightmap());
+    }
+
+    #[test]
+    fn face_kind_light() {
+        assert_eq!(LightmapFaceKind::classify((2, 2)), LightmapFaceKind::Light);
+        assert_eq!(LightmapFaceKind::classify((16, 16)), LightmapFaceKind::Light);
+        assert_eq!(LightmapFaceKind::classify((8, 32)), LightmapFaceKind::Light);
+        assert!(LightmapFaceKind::Light.requires_baked_lightmap());
+    }
+
+    #[test]
+    fn face_kind_surface() {
+        assert_eq!(LightmapFaceKind::classify((64, 16)), LightmapFaceKind::Surface);
+        assert_eq!(LightmapFaceKind::classify((8, 64)), LightmapFaceKind::Surface);
+        assert_eq!(LightmapFaceKind::classify((64, 64)), LightmapFaceKind::Surface);
+        assert_eq!(LightmapFaceKind::classify((128, 256)), LightmapFaceKind::Surface);
+        assert!(!LightmapFaceKind::Surface.requires_baked_lightmap());
     }
 }

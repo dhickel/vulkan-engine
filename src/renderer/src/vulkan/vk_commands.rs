@@ -1793,9 +1793,14 @@ fn update_bsp_frame_values_for_slot(
         .bsp_surface_cache
         .lock()
         .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
-    if surface_cache.has_frame_values() {
+    let Some(arena_id) = frame_values.arena_id else {
+        return Ok(());
+    };
+    // Bridge: set the active arena so draw commands can find frame-values descriptors.
+    surface_cache.set_active_arena(arena_id);
+    if surface_cache.has_frame_values(arena_id) {
         surface_cache
-            .write_frame_values_for_slot(frame_slot_index, &values)
+            .write_frame_values_for_slot(arena_id, frame_slot_index, &values)
             .map_err(|err| format!("failed to update BSP frame-values UBO: {err}"))?;
     }
     Ok(())
@@ -1852,7 +1857,10 @@ unsafe fn draw_bsp_item_impl(
         .map_err(|_| format!("failed to mark BSP lightmap texture referenced (batch {})", item.batch_index))?;
 
     let pipeline = *vulkan_cache.pipelines.get_pipeline(bsp_mat.pipeline);
-    let frame_values_desc = bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index);
+    let arena_id = bsp_surface_cache.active_arena_id();
+    let frame_values_desc = arena_id
+        .map(|id| bsp_surface_cache.frame_values_descriptor_for_slot(id, frame_slot_index))
+        .unwrap_or(vk::DescriptorSet::null());
     let material_descriptor = bsp_mat.material_descriptor;
 
     // Release cache locks before Vulkan commands.
@@ -2023,12 +2031,17 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
         .lock()
         .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
 
-    let frame_values_desc = if bsp_surface_cache.has_frame_values() {
-        let desc = bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index);
-        if desc == vk::DescriptorSet::null() {
-            return Err("BSP frame-values descriptor is null for slot {frame_slot_index}".to_string());
+    let arena_id = bsp_surface_cache.active_arena_id();
+    let frame_values_desc = if let Some(id) = arena_id {
+        if bsp_surface_cache.has_frame_values(id) {
+            let desc = bsp_surface_cache.frame_values_descriptor_for_slot(id, frame_slot_index);
+            if desc == vk::DescriptorSet::null() {
+                return Err(format!("BSP frame-values descriptor is null for slot {frame_slot_index}"));
+            }
+            desc
+        } else {
+            vk::DescriptorSet::null()
         }
-        desc
     } else {
         vk::DescriptorSet::null()
     };

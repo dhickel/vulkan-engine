@@ -100,6 +100,19 @@ pub enum BspRuntimeError {
     CommitContractViolated {
         detail: String,
     },
+    /// Teardown of an active bridge receipt failed. The receipt is quarantined,
+    /// not silently dropped.
+    TeardownQuarantined {
+        bridge_name: String,
+        message: String,
+        unattempted: usize,
+    },
+    /// A bridge invariant was violated (registration mismatch, double activation, etc.).
+    BridgeInvariantViolated {
+        bridge_name: String,
+        phase: BridgePhase,
+        detail: String,
+    },
 }
 
 /// Which phase of the two-step transaction a bridge failure occurred in.
@@ -107,9 +120,25 @@ pub enum BspRuntimeError {
 pub enum BridgePhase {
     Prepare,
     Validate,
+    /// Activation (Phase 05): non-fallible publication after validation.
+    Activate,
+    /// Teardown (Phase 05): exact-once active receipt cleanup.
+    Teardown,
+    #[doc(hidden)]
     Commit,
     Rollback,
 }
+
+// ── Invariant Violation String Constants ─────────────────────────────
+
+pub(crate) const INVARIANT_REGISTRATION_MISMATCH: &str =
+    "bridge registration mismatch";
+pub(crate) const INVARIANT_DOUBLE_ACTIVATION: &str =
+    "double activation of prepared token";
+pub(crate) const INVARIANT_DUPLICATE_TEARDOWN: &str =
+    "duplicate teardown of active receipt";
+pub(crate) const INVARIANT_TEARDOWN_OF_PREPARED: &str =
+    "teardown of a prepared token";
 
 /// States in the candidate lifecycle for transition validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +164,8 @@ impl fmt::Display for BridgePhase {
         match self {
             BridgePhase::Prepare => write!(f, "prepare"),
             BridgePhase::Validate => write!(f, "validate"),
+            BridgePhase::Activate => write!(f, "activate"),
+            BridgePhase::Teardown => write!(f, "teardown"),
             BridgePhase::Commit => write!(f, "commit"),
             BridgePhase::Rollback => write!(f, "rollback"),
         }
@@ -309,6 +340,28 @@ impl fmt::Display for BspRuntimeError {
             }
             BspRuntimeError::CommitContractViolated { detail } => {
                 write!(f, "commit contract violated: {}", detail)
+            }
+            BspRuntimeError::TeardownQuarantined {
+                bridge_name,
+                message,
+                unattempted,
+            } => {
+                write!(
+                    f,
+                    "bridge '{}' teardown quarantined: {} ({} unattempted)",
+                    bridge_name, message, unattempted
+                )
+            }
+            BspRuntimeError::BridgeInvariantViolated {
+                bridge_name,
+                phase,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "bridge '{}' invariant violated during {}: {}",
+                    bridge_name, phase, detail
+                )
             }
         }
     }

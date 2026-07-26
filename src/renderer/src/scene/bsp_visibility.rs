@@ -98,6 +98,10 @@ pub struct BspMountState {
     /// Diagnostic PVS-off switch (debug-only; never serialized or packaged).
     #[cfg(debug_assertions)]
     pub(crate) diagnostic_pvs_off: bool,
+    /// Active BSP surface-cache arena identity for the published mount.
+    /// Set by `PreparedBspMount::into_scene_state`; consumed by frame-values
+    /// and draw-command paths to select the correct arena resources.
+    pub(crate) arena_id: Option<u64>,
 }
 
 #[cfg(feature = "bsp")]
@@ -131,6 +135,7 @@ impl BspMountState {
     /// Create an empty, inactive mount state.
     pub fn new() -> Self {
         Self {
+            arena_id: None,
             num_leaves: 0,
             vis_data: Vec::new(),
             has_pvs: false,
@@ -173,6 +178,7 @@ impl BspMountState {
         let has_pvs = !vis_data.is_empty() && num_leaves > 0;
 
         Self {
+            arena_id: None,
             num_leaves,
             vis_data,
             has_pvs,
@@ -212,6 +218,7 @@ impl BspMountState {
             && !visibility.leaves.is_empty()
             && !visibility.planes.is_empty();
         Self {
+            arena_id: None,
             num_leaves: visibility.visleaf_count,
             vis_data: visibility.vis_data.clone(),
             has_pvs,

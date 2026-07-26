@@ -40,7 +40,10 @@ pub use behavior::{
     LightStyleState, PlatformPhase, PlatformState, StructuralBehaviorAdapter, TriggerEvent,
     TriggerState,
 };
-pub use bridge::AppBridge;
+pub use bridge::{
+    ActiveBridgeReceipt, ActiveBridgeReceipts, ActiveBridgeState, AppBridge,
+    PreparedBridgeState, PreparedBridgeToken,
+};
 pub use cache::CacheIdentity;
 pub use candidate::BspCandidate;
 pub use coordinator::BspCoordinator;

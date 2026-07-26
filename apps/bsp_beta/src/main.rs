@@ -209,7 +209,7 @@ fn run_load_query_physics_behavior_proof(
     let mut physics_bridge = PhysicsBridge::new();
     let mut runtime_bridge = RuntimeBridge::new();
 
-    let physics_token = physics_bridge
+    let mut physics_prepared = physics_bridge
         .prepare(
             &bridge_inputs.world_collision,
             &bridge_inputs.entity_colliders,
@@ -217,7 +217,7 @@ fn run_load_query_physics_behavior_proof(
             &bridge_inputs.behaviors,
         )
         .map_err(|err| AppError::BridgeProof(format!("physics prepare: {err}")))?;
-    let runtime_token = runtime_bridge
+    let mut runtime_prepared = runtime_bridge
         .prepare(
             &bridge_inputs.world_collision,
             &bridge_inputs.entity_colliders,
@@ -225,37 +225,38 @@ fn run_load_query_physics_behavior_proof(
             &bridge_inputs.behaviors,
         )
         .map_err(|err| AppError::BridgeProof(format!("runtime prepare: {err}")))?;
+
     physics_bridge
-        .validate(&physics_token)
+        .validate(&*physics_prepared)
         .map_err(|err| AppError::BridgeProof(format!("physics validate: {err}")))?;
     runtime_bridge
-        .validate(&runtime_token)
+        .validate(&*runtime_prepared)
         .map_err(|err| AppError::BridgeProof(format!("runtime validate: {err}")))?;
 
-    let staged_body_count = physics_bridge
-        .staged()
-        .map_or(0, |staged| staged.bodies.len());
-    let staged_collider_count = physics_bridge
-        .staged()
-        .map_or(0, |staged| staged.colliders.len());
+    let staged_body_count = physics_prepared
+        .as_any()
+        .downcast_ref::<bsp_beta::physics_bridge::PhysicsPreparedState>()
+        .map_or(0, |s| s.all_body_ids.len());
+    let staged_collider_count = physics_prepared
+        .as_any()
+        .downcast_ref::<bsp_beta::physics_bridge::PhysicsPreparedState>()
+        .map_or(0, |s| s.all_collider_ids.len());
 
-    physics_bridge
-        .commit(physics_token)
-        .map_err(|err| AppError::BridgeProof(format!("physics commit: {err}")))?;
-    runtime_bridge
-        .commit(runtime_token)
-        .map_err(|err| AppError::BridgeProof(format!("runtime commit: {err}")))?;
+    let mut physics_active = physics_bridge.activate(&mut *physics_prepared);
+    let mut runtime_active = runtime_bridge.activate(&mut *runtime_prepared);
 
-    let mut physics_world = physics::PhysicsWorld::new();
-    physics_world.set_gravity(0.0, 0.0, 0.0);
-    if let Err(err) = physics_bridge.commit_to_world(&mut physics_world) {
-        log::warn!("BSP proof: physics world publish failed (non-fatal): {err}");
-    }
+    let physics_active_state: &mut bsp_beta::physics_bridge::PhysicsActiveState = physics_active
+        .as_any_mut()
+        .downcast_mut::<bsp_beta::physics_bridge::PhysicsActiveState>()
+        .expect("physics active state type mismatch");
 
     for (entity_index, position) in runtime_bridge.update(FIXED_DT) {
-        let _ = physics_bridge.sync_body_transform(entity_index, position, &mut physics_world);
+        let _ = physics_bridge.sync_body_transform(
+            entity_index, position, &mut physics_active_state.world,
+        );
     }
-    physics_world
+    physics_active_state
+        .world
         .step(FIXED_DT)
         .map_err(|err| AppError::BridgeProof(format!("physics step: {err}")))?;
 
@@ -266,6 +267,9 @@ fn run_load_query_physics_behavior_proof(
         staged_collider_count,
         bridge_inputs.behaviors.len(),
     );
+
+    let _ = physics_bridge.teardown(&mut *physics_active);
+    let _ = runtime_bridge.teardown(&mut *runtime_active);
 
     Ok(())
 }

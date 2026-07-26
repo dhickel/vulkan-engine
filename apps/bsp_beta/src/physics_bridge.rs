@@ -5,14 +5,16 @@
 //! physics dependencies appear for BSP data — `bsp` and `bsp_runtime` remain
 //! physics-free.
 //!
-//! # Resource Lifecycle
+//! # Phase 05: Active Bridge Receipts
 //!
-//! - **Prepare**: Creates Rapier bodies and colliders from collision recipes
-//!   (not yet added to the simulation world). Stores them in the bridge struct.
-//! - **Validate**: Confirms all bodies and colliders are valid and complete.
-//! - **Commit**: Publishes staged bodies/colliders into the active
-//!   `PhysicsWorld` simulation.
-//! - **Rollback**: Clears staged state (idempotent).
+//! - **Prepare**: Creates a candidate-private `PhysicsWorld` with all bodies
+//!   and colliders pre-created. All fallible creation work happens here.
+//!   Undoes partial construction before returning an error.
+//! - **Validate**: Confirms body/collider references are valid.
+//! - **Activate**: Moves the prevalidated `PhysicsWorld` into an active receipt.
+//!   No new `create_body`/`create_collider` calls.
+//! - **Teardown**: Removes colliders before bodies from the receipt's world.
+//!   Returns failure without relinquishing the receipt.
 //!
 //! # Collision Mapping
 //!
@@ -25,43 +27,109 @@
 use std::collections::HashMap;
 
 use bsp_runtime::bridge::{
-    AppBridge, BehaviorEntityRecipe, BridgeToken, EntityCollisionRecipe, LightEntityRecipe,
-    WorldCollisionRecipe,
+    ActiveBridgeState, AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe,
+    PreparedBridgeState, WorldCollisionRecipe,
 };
 
-/// Staged physics descriptors awaiting commit.
-#[derive(Debug, Clone)]
-pub struct StagedPhysics {
-    /// Descriptors for bodies to create.
-    pub bodies: Vec<physics::BodyDescriptor>,
-    /// Descriptors for colliders to create.
-    pub colliders: Vec<physics::ColliderDescriptor>,
+// ── Prepared Physics State ─────────────────────────────────────────────
+
+/// Candidate-private physics world built during prepare.
+///
+/// All bodies and colliders are created in this private world during prepare.
+/// If construction fails, partial state is undone before returning an error.
+pub struct PhysicsPreparedState {
+    /// The candidate-private physics world with pre-created bodies/colliders.
+    pub world: physics::PhysicsWorld,
     /// Entity index → body ID mapping for transform sync.
     pub entity_body_map: HashMap<u32, physics::PhysicsBodyId>,
-    /// Entity index → collider IDs for removal.
+    /// Entity index → collider IDs for teardown removal.
     pub entity_collider_map: HashMap<u32, Vec<physics::PhysicsColliderId>>,
     /// World body ID for the static trimesh.
     pub world_body_id: Option<physics::PhysicsBodyId>,
-    /// World collider ID when a concrete static collider is available.
-    pub world_collider_id: Option<physics::PhysicsColliderId>,
+    /// World collider IDs.
+    pub world_collider_ids: Vec<physics::PhysicsColliderId>,
+    /// All body IDs in creation order (for teardown).
+    pub all_body_ids: Vec<physics::PhysicsBodyId>,
+    /// All collider IDs in creation order (for teardown).
+    pub all_collider_ids: Vec<physics::PhysicsColliderId>,
 }
+
+impl std::fmt::Debug for PhysicsPreparedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicsPreparedState")
+            .field("entity_body_map", &self.entity_body_map)
+            .field("all_body_count", &self.all_body_ids.len())
+            .field("all_collider_count", &self.all_collider_ids.len())
+            .finish()
+    }
+}
+
+impl PreparedBridgeState for PhysicsPreparedState {
+    fn registration_name(&self) -> &str {
+        "physics"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// ── Active Physics State ───────────────────────────────────────────────
+
+/// Published physics world moved into the active receipt during activation.
+///
+/// Owns the complete `PhysicsWorld` with all BSP bodies and colliders.
+/// Teardown removes resources in colliders-before-bodies order.
+pub struct PhysicsActiveState {
+    /// The active physics world.
+    pub world: physics::PhysicsWorld,
+    /// Entity index → body ID for transform sync.
+    pub entity_body_map: HashMap<u32, physics::PhysicsBodyId>,
+    /// Entity index → collider IDs for removal.
+    pub entity_collider_map: HashMap<u32, Vec<physics::PhysicsColliderId>>,
+    /// All body IDs in creation order.
+    pub all_body_ids: Vec<physics::PhysicsBodyId>,
+    /// All collider IDs in creation order.
+    pub all_collider_ids: Vec<physics::PhysicsColliderId>,
+}
+
+impl std::fmt::Debug for PhysicsActiveState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhysicsActiveState")
+            .field("entity_body_map", &self.entity_body_map)
+            .field("all_body_count", &self.all_body_ids.len())
+            .field("all_collider_count", &self.all_collider_ids.len())
+            .finish()
+    }
+}
+
+impl ActiveBridgeState for PhysicsActiveState {
+    fn registration_name(&self) -> &str {
+        "physics"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+// ── Physics Bridge ─────────────────────────────────────────────────────
 
 /// A physics bridge that creates Rapier resources from BSP collision recipes.
 ///
-/// The bridge stores staged physics state internally during prepare and
-/// publishes it into the provided `PhysicsWorld` during commit. The bridge
-/// token carries a generation marker; actual physics descriptors are stored
-/// in the bridge struct to avoid serializing Rapier types.
+/// The bridge builds a candidate-private `PhysicsWorld` during prepare.
+/// Activation moves this world into the active receipt. No post-activation
+/// world insertion is performed.
 pub struct PhysicsBridge {
-    /// Staged physics from the last prepare. Cleared on commit or rollback.
-    staged: Option<StagedPhysics>,
-    /// Whether we've been committed (used for idempotent rollback).
-    committed: bool,
-    /// Currently published body IDs (for removal during unload).
-    published_bodies: Vec<physics::PhysicsBodyId>,
-    /// Currently published collider IDs (for removal during unload).
-    published_colliders: Vec<physics::PhysicsColliderId>,
-    /// Entity index → body ID for transform sync.
+    /// Entity index → body ID for external query (populated from active receipt).
     pub entity_bodies: HashMap<u32, physics::PhysicsBodyId>,
 }
 
@@ -69,58 +137,8 @@ impl PhysicsBridge {
     /// Create a new physics bridge.
     pub fn new() -> Self {
         Self {
-            staged: None,
-            committed: false,
-            published_bodies: Vec::new(),
-            published_colliders: Vec::new(),
             entity_bodies: HashMap::new(),
         }
-    }
-
-    /// Access the staged physics descriptors after prepare.
-    pub fn staged(&self) -> Option<&StagedPhysics> {
-        self.staged.as_ref()
-    }
-
-    /// Publish prepared physics into the simulation world.
-    ///
-    /// Call this after `commit` with the active `PhysicsWorld`.
-    pub fn commit_to_world(
-        &mut self,
-        physics_world: &mut physics::PhysicsWorld,
-    ) -> Result<(), String> {
-        let staged = self
-            .staged
-            .take()
-            .ok_or_else(|| "no staged physics to commit".to_string())?;
-
-        for body_desc in &staged.bodies {
-            physics_world
-                .create_body(body_desc.clone())
-                .map_err(|e| format!("failed to create body: {e}"))?;
-            self.published_bodies.push(body_desc.id.clone());
-        }
-        for collider_desc in &staged.colliders {
-            physics_world
-                .create_collider(collider_desc.clone())
-                .map_err(|e| format!("failed to create collider: {e}"))?;
-            self.published_colliders.push(collider_desc.id.clone());
-        }
-        self.entity_bodies = staged.entity_body_map.clone();
-        self.committed = true;
-        Ok(())
-    }
-
-    /// Remove all published physics resources from the world.
-    pub fn remove_from_world(&mut self, physics_world: &mut physics::PhysicsWorld) {
-        for collider_id in self.published_colliders.drain(..) {
-            physics_world.remove_collider(&collider_id);
-        }
-        for body_id in self.published_bodies.drain(..) {
-            physics_world.remove_body(&body_id);
-        }
-        self.entity_bodies.clear();
-        self.committed = false;
     }
 
     /// Sync a kinematic body's transform with a new world-space position.
@@ -208,11 +226,27 @@ impl AppBridge for PhysicsBridge {
         entity_colliders: &[EntityCollisionRecipe],
         _lights: &[LightEntityRecipe],
         _behaviors: &[BehaviorEntityRecipe],
-    ) -> Result<BridgeToken, String> {
-        let mut bodies: Vec<physics::BodyDescriptor> = Vec::new();
-        let mut colliders: Vec<physics::ColliderDescriptor> = Vec::new();
+    ) -> Result<Box<dyn PreparedBridgeState>, String> {
+        let mut world = physics::PhysicsWorld::new();
+        world.set_gravity(0.0, 0.0, 0.0);
+
         let mut entity_body_map: HashMap<u32, physics::PhysicsBodyId> = HashMap::new();
         let mut entity_collider_map: HashMap<u32, Vec<physics::PhysicsColliderId>> = HashMap::new();
+        let mut all_body_ids: Vec<physics::PhysicsBodyId> = Vec::new();
+        let mut all_collider_ids: Vec<physics::PhysicsColliderId> = Vec::new();
+        let mut world_collider_ids: Vec<physics::PhysicsColliderId> = Vec::new();
+
+        // Track what we've created so we can undo on failure.
+        let clean_undo = |w: &mut physics::PhysicsWorld,
+                              body_ids: &[physics::PhysicsBodyId],
+                              collider_ids: &[physics::PhysicsColliderId]| {
+            for cid in collider_ids.iter().rev() {
+                w.remove_collider(cid);
+            }
+            for bid in body_ids.iter().rev() {
+                w.remove_body(bid);
+            }
+        };
 
         // ── World static collision ────────────────────────────────────
         let world_body_id = if !world_collider.planes.is_empty() {
@@ -222,7 +256,11 @@ impl AppBridge for PhysicsBridge {
                 physics::BodyKind::Static,
                 [0.0, 0.0, 0.0],
             );
-            bodies.push(body_desc);
+            world
+                .create_body(body_desc)
+                .map_err(|e| format!("failed to create world body: {e}"))?;
+            all_body_ids.push(body_id.clone());
+
             log::warn!(
                 "World collision has {} planes but no concrete mesh recipe; world collider not created",
                 world_collider.planes.len()
@@ -257,7 +295,16 @@ impl AppBridge for PhysicsBridge {
                     entity_recipe.origin.z,
                 ],
             );
-            bodies.push(body_desc);
+
+            // Create body in candidate-private world
+            if let Err(e) = world.create_body(body_desc) {
+                clean_undo(&mut world, &all_body_ids, &all_collider_ids);
+                return Err(format!(
+                    "failed to create body for entity {}: {}",
+                    entity_index, e
+                ));
+            }
+            all_body_ids.push(body_id.clone());
             entity_body_map.insert(entity_index, body_id.clone());
 
             let mut piece_collider_ids: Vec<physics::PhysicsColliderId> = Vec::new();
@@ -273,7 +320,6 @@ impl AppBridge for PhysicsBridge {
                         entity_index, piece_idx
                     ));
 
-                    // Convert glam::Vec3 to [f32; 3]
                     let points: Vec<[f32; 3]> =
                         piece.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
 
@@ -289,7 +335,14 @@ impl AppBridge for PhysicsBridge {
                         entity_recipe.origin.z,
                     ]);
 
-                    colliders.push(collider_desc);
+                    if let Err(e) = world.create_collider(collider_desc) {
+                        clean_undo(&mut world, &all_body_ids, &all_collider_ids);
+                        return Err(format!(
+                            "failed to create collider for entity {} piece {}: {}",
+                            entity_index, piece_idx, e
+                        ));
+                    }
+                    all_collider_ids.push(collider_id.clone());
                     piece_collider_ids.push(collider_id);
                 }
             }
@@ -299,37 +352,39 @@ impl AppBridge for PhysicsBridge {
             }
         }
 
-        let staged = StagedPhysics {
-            bodies,
-            colliders,
+        Ok(Box::new(PhysicsPreparedState {
+            world,
             entity_body_map,
             entity_collider_map,
             world_body_id,
-            world_collider_id: None,
-        };
-
-        let token = BridgeToken::new(vec![1u8]); // generation marker
-        self.staged = Some(staged);
-        Ok(token)
+            world_collider_ids,
+            all_body_ids,
+            all_collider_ids,
+        }))
     }
 
-    fn validate(&self, token: &BridgeToken) -> Result<(), String> {
-        if token.payload.is_empty() {
-            return Err("empty bridge token".to_string());
-        }
-
-        let staged = self
-            .staged
-            .as_ref()
-            .ok_or_else(|| "no staged physics".to_string())?;
+    fn validate(&self, prepared: &dyn PreparedBridgeState) -> Result<(), String> {
+        let state: &PhysicsPreparedState = prepared
+            .as_any()
+            .downcast_ref::<PhysicsPreparedState>()
+            .ok_or_else(|| "physics bridge received non-physics prepared state".to_string())?;
 
         // Verify all body references in colliders have matching bodies
-        let body_ids: std::collections::HashSet<_> = staged.bodies.iter().map(|b| &b.id).collect();
-        for collider in &staged.colliders {
-            if !body_ids.contains(&&collider.parent_body) {
+        let body_ids: std::collections::HashSet<_> =
+            state.all_body_ids.iter().collect();
+        for cid in &state.all_collider_ids {
+            // Check collider exists in the world
+            if !state.world.collider_exists(cid) {
+                return Err(format!("collider {} missing from prepared world", cid));
+            }
+        }
+
+        // Verify entity body references
+        for (entity_idx, body_id) in &state.entity_body_map {
+            if !body_ids.contains(body_id) {
                 return Err(format!(
-                    "collider {} references unknown body {}",
-                    collider.id, collider.parent_body
+                    "entity {} references unknown body {}",
+                    entity_idx, body_id
                 ));
             }
         }
@@ -337,35 +392,69 @@ impl AppBridge for PhysicsBridge {
         Ok(())
     }
 
-    fn commit(&mut self, token: BridgeToken) -> Result<(), String> {
-        if token.payload.is_empty() {
-            return Err("empty bridge token".to_string());
+    fn activate(&mut self, prepared: &mut dyn PreparedBridgeState) -> Box<dyn ActiveBridgeState> {
+        let state: &mut PhysicsPreparedState = prepared
+            .as_any_mut()
+            .downcast_mut::<PhysicsPreparedState>()
+            .expect("physics bridge received non-physics prepared state");
+
+        // Copy entity body map for external query
+        self.entity_bodies = state.entity_body_map.clone();
+
+        // Move the world and metadata into the active state.
+        // We use take + replace to move out of the prepared state.
+        let mut world = physics::PhysicsWorld::new();
+        std::mem::swap(&mut world, &mut state.world);
+
+        Box::new(PhysicsActiveState {
+            world,
+            entity_body_map: std::mem::take(&mut state.entity_body_map),
+            entity_collider_map: std::mem::take(&mut state.entity_collider_map),
+            all_body_ids: std::mem::take(&mut state.all_body_ids),
+            all_collider_ids: std::mem::take(&mut state.all_collider_ids),
+        })
+    }
+
+    fn teardown(&mut self, active: &mut dyn ActiveBridgeState) -> Result<(), String> {
+        let state: &mut PhysicsActiveState = active
+            .as_any_mut()
+            .downcast_mut::<PhysicsActiveState>()
+            .ok_or_else(|| "physics bridge received non-physics active state".to_string())?;
+
+        // Remove colliders before bodies (dependent order)
+        for cid in state.all_collider_ids.iter() {
+            state.world.remove_collider(cid);
+        }
+        for bid in state.all_body_ids.iter() {
+            state.world.remove_body(bid);
         }
 
-        // Allow re-commit: clear previous committed state before accepting new batch.
-        // The coordinator guarantees that the previous active mount has been unloaded
-        // before committing a new candidate.
-        if self.committed {
-            log::debug!("Physics bridge: resetting prior committed state for new mount");
-            self.committed = false;
-            self.staged = None;
-            self.published_bodies.clear();
-            self.published_colliders.clear();
-            self.entity_bodies.clear();
-        }
+        state.all_collider_ids.clear();
+        state.all_body_ids.clear();
+        state.entity_body_map.clear();
+        state.entity_collider_map.clear();
+        self.entity_bodies.clear();
 
-        log::debug!(
-            "Physics bridge commit: {} bodies, {} colliders staged for publication",
-            self.staged.as_ref().map_or(0, |s| s.bodies.len()),
-            self.staged.as_ref().map_or(0, |s| s.colliders.len()),
-        );
-
-        self.committed = true;
         Ok(())
     }
 
-    fn rollback(&mut self, _token: BridgeToken) {
-        self.staged = None;
-        self.committed = false;
+    fn rollback(&mut self, prepared: &mut dyn PreparedBridgeState) {
+        let state: &mut PhysicsPreparedState = prepared
+            .as_any_mut()
+            .downcast_mut::<PhysicsPreparedState>()
+            .expect("physics bridge received non-physics prepared state");
+
+        // Remove colliders before bodies
+        for cid in state.all_collider_ids.iter() {
+            state.world.remove_collider(cid);
+        }
+        for bid in state.all_body_ids.iter() {
+            state.world.remove_body(bid);
+        }
+
+        state.all_collider_ids.clear();
+        state.all_body_ids.clear();
+        state.entity_body_map.clear();
+        state.entity_collider_map.clear();
     }
 }

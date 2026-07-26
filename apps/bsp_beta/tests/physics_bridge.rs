@@ -1,15 +1,16 @@
 //! Tests for the physics bridge: app-owned bodies/colliders, trigger sensor
-//! contact phases, kinematic sync, and prepare/validate/commit/rollback.
+//! contact phases, kinematic sync, and prepare/validate/activate/teardown.
+//!
+//! Phase 05: All body/collider creation happens during prepare in a
+//! candidate-private world. Activation moves the prevalidated world. No
+//! post-activation commit_to_world. Teardown removes colliders before bodies.
 
-use bsp_beta::physics_bridge::PhysicsBridge;
+use bsp_beta::physics_bridge::{PhysicsActiveState, PhysicsBridge, PhysicsPreparedState};
 use bsp_runtime::bridge::{
-    AppBridge, BehaviorEntityRecipe, BridgeToken, EntityCollisionRecipe, LightEntityRecipe,
+    AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe,
     WorldCollisionRecipe,
 };
-use physics::{
-    BodyDescriptor, BodyKind, ColliderDescriptor, ColliderShape, PhysicsBodyId, PhysicsColliderId,
-    PhysicsContactKind, PhysicsContactPhase, PhysicsWorld,
-};
+use physics::{BodyKind, PhysicsBodyId, PhysicsColliderId, PhysicsContactKind, PhysicsContactPhase};
 
 fn world_with_plane() -> WorldCollisionRecipe {
     WorldCollisionRecipe {
@@ -65,45 +66,55 @@ fn empty_behaviors() -> Vec<BehaviorEntityRecipe> {
     vec![]
 }
 
-fn publish_bridge_with_entities(
+fn prepare_and_activate(
+    bridge: &mut PhysicsBridge,
     entities: &[EntityCollisionRecipe],
-) -> (PhysicsBridge, PhysicsWorld) {
-    let mut bridge = PhysicsBridge::new();
-    let token = bridge
-        .prepare(
-            &empty_world(),
-            entities,
-            &empty_lights(),
-            &empty_behaviors(),
-        )
+) -> (Box<dyn bsp_runtime::ActiveBridgeState>, PhysicsBodyId) {
+    let mut prepared = bridge
+        .prepare(&empty_world(), entities, &empty_lights(), &empty_behaviors())
         .unwrap();
-    bridge.validate(&token).unwrap();
-    bridge.commit(token).unwrap();
+    bridge.validate(&*prepared).unwrap();
 
-    let mut world = PhysicsWorld::new();
-    world.set_gravity(0.0, 0.0, 0.0);
-    bridge.commit_to_world(&mut world).unwrap();
-    (bridge, world)
+    // Verify the prepared state has what we expect
+    let ps: &PhysicsPreparedState = prepared
+        .as_any()
+        .downcast_ref::<PhysicsPreparedState>()
+        .unwrap();
+    let body_count = ps.all_body_ids.len();
+    let collider_count = ps.all_collider_ids.len();
+
+    let active = bridge.activate(&mut *prepared);
+
+    // Verify the active state
+    let ast: &PhysicsActiveState = active
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap();
+    assert_eq!(ast.all_body_ids.len(), body_count);
+    assert_eq!(ast.all_collider_ids.len(), collider_count);
+
+    (active, PhysicsBodyId::new("bsp.entity.42")) // dummy for tests that don't need it
 }
 
 #[test]
 fn prepare_creates_world_static_body_from_collision_planes() {
     let mut bridge = PhysicsBridge::new();
-    let token = bridge
-        .prepare(
-            &world_with_plane(),
-            &[],
-            &empty_lights(),
-            &empty_behaviors(),
-        )
+    let prepared = bridge
+        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
         .unwrap();
 
-    assert!(!token.payload.is_empty());
-
-    let staged = bridge.staged().unwrap();
-    assert_eq!(staged.bodies.len(), 1);
-    assert_eq!(staged.bodies[0].kind, BodyKind::Static);
-    assert!(staged.colliders.is_empty());
+    let ps: &PhysicsPreparedState = prepared
+        .as_any()
+        .downcast_ref::<PhysicsPreparedState>()
+        .unwrap();
+    assert_eq!(ps.all_body_ids.len(), 1);
+    // Body kind is not exposed on the prepared state directly, but we can
+    // check the world has the body
+    assert!(ps
+        .world
+        .body_position_by_id(&PhysicsBodyId::new("bsp.world"))
+        .is_some());
+    assert!(ps.all_collider_ids.is_empty());
 }
 
 #[test]
@@ -111,26 +122,23 @@ fn prepare_creates_kinematic_body_for_brush_entity() {
     let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(5, false);
 
-    bridge
-        .prepare(
-            &empty_world(),
-            &[entity],
-            &empty_lights(),
-            &empty_behaviors(),
-        )
+    let prepared = bridge
+        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
         .unwrap();
 
-    let staged = bridge.staged().unwrap();
-    assert_eq!(staged.bodies.len(), 1);
-    let entity_body = &staged.bodies[0];
-    assert_eq!(entity_body.kind, BodyKind::Kinematic);
-    assert_eq!(entity_body.id, PhysicsBodyId::new("bsp.entity.5"));
-
-    let entity_collider = &staged.colliders[0];
-    assert!(matches!(
-        entity_collider.shape,
-        ColliderShape::ConvexHull { .. }
-    ));
+    let ps: &PhysicsPreparedState = prepared
+        .as_any()
+        .downcast_ref::<PhysicsPreparedState>()
+        .unwrap();
+    assert_eq!(ps.all_body_ids.len(), 1);
+    assert!(ps
+        .world
+        .body_position_by_id(&PhysicsBodyId::new("bsp.entity.5"))
+        .is_some());
+    assert!(!ps.all_collider_ids.is_empty());
+    assert!(ps
+        .world
+        .collider_exists(&PhysicsColliderId::new("bsp.entity.5.piece.0")));
 }
 
 #[test]
@@ -138,7 +146,7 @@ fn prepare_creates_trigger_sensor_for_trigger_entity() {
     let mut bridge = PhysicsBridge::new();
     let trigger_entity = make_entity_collision(10, true);
 
-    bridge
+    let prepared = bridge
         .prepare(
             &empty_world(),
             &[trigger_entity],
@@ -147,33 +155,20 @@ fn prepare_creates_trigger_sensor_for_trigger_entity() {
         )
         .unwrap();
 
-    let staged = bridge.staged().unwrap();
-    let trigger_body = staged
-        .bodies
-        .iter()
-        .find(|b| b.id == PhysicsBodyId::new("bsp.entity.10"))
+    let ps: &PhysicsPreparedState = prepared
+        .as_any()
+        .downcast_ref::<PhysicsPreparedState>()
         .unwrap();
-    assert_eq!(trigger_body.kind, BodyKind::Static);
-
-    let trigger_collider = staged
-        .colliders
-        .iter()
-        .find(|c| c.parent_body == PhysicsBodyId::new("bsp.entity.10"))
-        .unwrap();
-    assert!(trigger_collider.is_trigger);
+    assert!(ps
+        .world
+        .body_position_by_id(&PhysicsBodyId::new("bsp.entity.10"))
+        .is_some());
 }
 
 #[test]
-fn validate_rejects_empty_token() {
-    let bridge = PhysicsBridge::new();
-    let result = bridge.validate(&BridgeToken::new(vec![]));
-    assert!(result.is_err());
-}
-
-#[test]
-fn validate_accepts_prepared_body_references() {
+fn validate_accepts_prepared_state() {
     let mut bridge = PhysicsBridge::new();
-    let token = bridge
+    let prepared = bridge
         .prepare(
             &empty_world(),
             &[make_entity_collision(1, false)],
@@ -182,99 +177,162 @@ fn validate_accepts_prepared_body_references() {
         )
         .unwrap();
 
-    assert!(bridge.validate(&token).is_ok());
+    assert!(bridge.validate(&*prepared).is_ok());
 }
 
 #[test]
-fn commit_and_rollback_lifecycle() {
+fn activate_and_teardown_lifecycle() {
     let mut bridge = PhysicsBridge::new();
-    let token = bridge
-        .prepare(
-            &world_with_plane(),
-            &[],
-            &empty_lights(),
-            &empty_behaviors(),
-        )
+    let mut prepared = bridge
+        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
         .unwrap();
 
-    bridge.validate(&token).unwrap();
-    assert!(bridge.commit(token.clone()).is_ok());
+    bridge.validate(&*prepared).unwrap();
 
-    bridge.rollback(token);
-    assert!(bridge.staged().is_none());
+    let ps: &PhysicsPreparedState = prepared
+        .as_any()
+        .downcast_ref::<PhysicsPreparedState>()
+        .unwrap();
+    assert!(ps.all_body_ids.len() > 0);
+
+    let mut active = bridge.activate(&mut *prepared);
+    let ast: &PhysicsActiveState = active
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap();
+    assert!(ast.all_body_ids.len() > 0);
+
+    // Teardown
+    assert!(bridge.teardown(&mut *active).is_ok());
+    let ast: &PhysicsActiveState = active
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap();
+    assert!(ast.all_body_ids.is_empty());
+    assert!(ast.all_collider_ids.is_empty());
 }
 
 #[test]
-fn double_commit_after_unload_is_allowed() {
+fn double_activate_after_teardown_is_allowed() {
     let mut bridge = PhysicsBridge::new();
-    let token = bridge
-        .prepare(
-            &world_with_plane(),
-            &[],
-            &empty_lights(),
-            &empty_behaviors(),
-        )
+    let mut prepared = bridge
+        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
         .unwrap();
 
-    bridge.validate(&token).unwrap();
-    bridge.commit(token.clone()).unwrap();
+    bridge.validate(&*prepared).unwrap();
+    let mut active = bridge.activate(&mut *prepared);
+    let _ = bridge.teardown(&mut *active);
 
-    // Phase 05: double commit is allowed (resets prior state) for atomic
-    // publication where the coordinator prepares a new candidate beside
-    // the active world and then swaps them.
-    let token2 = bridge
-        .prepare(
-            &world_with_plane(),
-            &[],
-            &empty_lights(),
-            &empty_behaviors(),
-        )
+    // Second prepare/activate cycle
+    let mut prepared2 = bridge
+        .prepare(&world_with_plane(), &[], &empty_lights(), &empty_behaviors())
         .unwrap();
-    bridge.validate(&token2).unwrap();
-    assert!(bridge.commit(token2).is_ok());
+    bridge.validate(&*prepared2).unwrap();
+    let active2 = bridge.activate(&mut *prepared2);
+    assert!(!active2
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap()
+        .all_body_ids
+        .is_empty());
 }
 
 #[test]
-fn commit_to_world_publishes_entity_body_and_collider() {
+fn activate_publishes_entity_body_and_collider_in_private_world() {
+    let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(42, false);
-    let (bridge, world) = publish_bridge_with_entities(&[entity]);
+    let mut prepared = bridge
+        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .unwrap();
+    bridge.validate(&*prepared).unwrap();
 
-    assert!(bridge.entity_bodies.contains_key(&42));
-    assert!(world
+    let active = bridge.activate(&mut *prepared);
+    let ast: &PhysicsActiveState = active
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap();
+
+    // The active state's world has the pre-created bodies/colliders
+    assert!(ast
+        .world
         .body_position_by_id(&PhysicsBodyId::new("bsp.entity.42"))
         .is_some());
-    assert!(world.collider_exists(&PhysicsColliderId::new("bsp.entity.42.piece.0")));
+    assert!(ast
+        .world
+        .collider_exists(&PhysicsColliderId::new("bsp.entity.42.piece.0")));
+    assert!(bridge.entity_bodies.contains_key(&42));
 }
 
 #[test]
-fn remove_from_world_cleans_up() {
+fn teardown_removes_colliders_before_bodies() {
+    let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(12, false);
-    let (mut bridge, mut world) = publish_bridge_with_entities(&[entity]);
-    assert!(world.collider_exists(&PhysicsColliderId::new("bsp.entity.12.piece.0")));
+    let mut prepared = bridge
+        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .unwrap();
+    bridge.validate(&*prepared).unwrap();
 
-    bridge.remove_from_world(&mut world);
-    assert!(!world.collider_exists(&PhysicsColliderId::new("bsp.entity.12.piece.0")));
+    let mut active = bridge.activate(&mut *prepared);
+    let ast: &PhysicsActiveState = active
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap();
+    assert!(ast
+        .world
+        .collider_exists(&PhysicsColliderId::new("bsp.entity.12.piece.0")));
+
+    bridge.teardown(&mut *active).unwrap();
+
+    let ast: &PhysicsActiveState = active
+        .as_any()
+        .downcast_ref::<PhysicsActiveState>()
+        .unwrap();
+    assert!(!ast
+        .world
+        .collider_exists(&PhysicsColliderId::new("bsp.entity.12.piece.0")));
+    assert!(ast.all_body_ids.is_empty());
 }
 
 #[test]
 fn sync_body_transform_updates_registered_kinematic_body() {
+    let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(7, false);
-    let (bridge, mut world) = publish_bridge_with_entities(&[entity]);
+    let mut prepared = bridge
+        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .unwrap();
+    bridge.validate(&*prepared).unwrap();
+    let mut active = bridge.activate(&mut *prepared);
+    let ast: &mut PhysicsActiveState = active
+        .as_any_mut()
+        .downcast_mut::<PhysicsActiveState>()
+        .unwrap();
 
-    assert!(bridge.sync_body_transform(7, [1.0, 2.0, 3.0], &mut world));
+    assert!(bridge.sync_body_transform(7, [1.0, 2.0, 3.0], &mut ast.world));
     assert_eq!(
-        world.body_position_by_id(&PhysicsBodyId::new("bsp.entity.7")),
+        ast.world
+            .body_position_by_id(&PhysicsBodyId::new("bsp.entity.7")),
         Some([1.0, 2.0, 3.0])
     );
-    assert!(!bridge.sync_body_transform(999, [0.0, 0.0, 0.0], &mut world));
+    assert!(!bridge.sync_body_transform(999, [0.0, 0.0, 0.0], &mut ast.world));
 }
 
 #[test]
 fn sync_from_snapshot_updates_full_kinematic_pose() {
+    let mut bridge = PhysicsBridge::new();
     let entity = make_entity_collision(8, false);
-    let (bridge, mut world) = publish_bridge_with_entities(&[entity]);
+    let mut prepared = bridge
+        .prepare(&empty_world(), &[entity], &empty_lights(), &empty_behaviors())
+        .unwrap();
+    bridge.validate(&*prepared).unwrap();
+    let mut active = bridge.activate(&mut *prepared);
+    let ast: &mut PhysicsActiveState = active
+        .as_any_mut()
+        .downcast_mut::<PhysicsActiveState>()
+        .unwrap();
+
     let rotation = glam::Quat::from_rotation_y(90.0_f32.to_radians());
-    let transform = glam::Mat4::from_rotation_translation(rotation, glam::Vec3::new(4.0, 5.0, 6.0));
+    let transform =
+        glam::Mat4::from_rotation_translation(rotation, glam::Vec3::new(4.0, 5.0, 6.0));
     let mut builder = bsp_runtime::SnapshotBuilder::new(1, 1, 1.0 / 60.0, 1.0 / 60.0);
     builder.push_entity_pose(bsp_runtime::SnapshotEntityPose {
         entity_index: 8,
@@ -284,10 +342,11 @@ fn sync_from_snapshot_updates_full_kinematic_pose() {
         is_moving: true,
     });
 
-    let updated = bridge.sync_from_snapshot(&builder.build(), &mut world);
+    let updated = bridge.sync_from_snapshot(&builder.build(), &mut ast.world);
     assert_eq!(updated, 1);
 
-    let pose = world
+    let pose = ast
+        .world
         .body_pose_by_id(&PhysicsBodyId::new("bsp.entity.8"))
         .expect("synced body pose");
     assert_eq!(pose.translation, [4.0, 5.0, 6.0]);
@@ -303,46 +362,59 @@ fn sync_from_snapshot_updates_full_kinematic_pose() {
 
 #[test]
 fn trigger_sensor_reports_enter_stay_and_exit_phases() {
+    let mut bridge = PhysicsBridge::new();
     let trigger = make_entity_collision(10, true);
-    let (_bridge, mut world) = publish_bridge_with_entities(&[trigger]);
+    let mut prepared = bridge
+        .prepare(&empty_world(), &[trigger], &empty_lights(), &empty_behaviors())
+        .unwrap();
+    bridge.validate(&*prepared).unwrap();
+    let mut active = bridge.activate(&mut *prepared);
+    let ast: &mut PhysicsActiveState = active
+        .as_any_mut()
+        .downcast_mut::<PhysicsActiveState>()
+        .unwrap();
 
     let actor_body = PhysicsBodyId::new("actor");
     let actor_collider = PhysicsColliderId::new("actor.collider");
-    world
-        .create_body(BodyDescriptor::new(
+
+    // Create the actor in the same private world
+    ast.world
+        .create_body(physics::BodyDescriptor::new(
             actor_body.clone(),
             BodyKind::Dynamic,
             [0.0, 0.0, 0.0],
         ))
         .unwrap();
-    world
-        .create_collider(ColliderDescriptor::new(
-            actor_collider.clone(),
-            actor_body.clone(),
-            ColliderShape::Cuboid {
-                half_extents: [0.25, 0.25, 0.25],
-            },
-        ))
+    ast.world
+        .create_collider(
+            physics::ColliderDescriptor::new(
+                actor_collider.clone(),
+                actor_body.clone(),
+                physics::ColliderShape::Cuboid {
+                    half_extents: [0.25, 0.25, 0.25],
+                },
+            ),
+        )
         .unwrap();
 
-    world.step(0.016).unwrap();
-    assert!(world.last_contact_records().iter().any(|record| {
+    ast.world.step(0.016).unwrap();
+    assert!(ast.world.last_contact_records().iter().any(|record| {
         record.phase == PhysicsContactPhase::Enter
             && record.kind == PhysicsContactKind::Trigger
             && record.a == PhysicsColliderId::new("bsp.entity.10.piece.0")
             && record.b == actor_collider
     }));
 
-    world.step(0.016).unwrap();
-    assert!(world.last_contact_records().iter().any(|record| {
+    ast.world.step(0.016).unwrap();
+    assert!(ast.world.last_contact_records().iter().any(|record| {
         record.phase == PhysicsContactPhase::Stay && record.kind == PhysicsContactKind::Trigger
     }));
 
-    world
+    ast.world
         .set_body_position_by_id(&actor_body, [10.0, 0.0, 0.0])
         .unwrap();
-    world.step(0.016).unwrap();
-    assert!(world.last_contact_records().iter().any(|record| {
+    ast.world.step(0.016).unwrap();
+    assert!(ast.world.last_contact_records().iter().any(|record| {
         record.phase == PhysicsContactPhase::Exit && record.kind == PhysicsContactKind::Trigger
     }));
 }
@@ -358,7 +430,7 @@ fn empty_entity_recipes_are_skipped() {
         recipes: vec![],
     };
 
-    bridge
+    let prepared = bridge
         .prepare(
             &world_with_plane(),
             &[empty_entity],
@@ -367,6 +439,9 @@ fn empty_entity_recipes_are_skipped() {
         )
         .unwrap();
 
-    let staged = bridge.staged().unwrap();
-    assert_eq!(staged.bodies.len(), 1);
+    let ps: &PhysicsPreparedState = prepared
+        .as_any()
+        .downcast_ref::<PhysicsPreparedState>()
+        .unwrap();
+    assert_eq!(ps.all_body_ids.len(), 1); // only world body
 }

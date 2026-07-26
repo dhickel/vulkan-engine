@@ -23,7 +23,7 @@
 //! Duplicate, stale, and out-of-order transitions are rejected with typed
 //! errors. A stale renderer completion is sent to retirement, not accepted.
 
-use crate::bridge::BridgeToken;
+use crate::bridge::{ActiveBridgeReceipts, PreparedBridgeToken};
 use crate::cache::CacheIdentity;
 use crate::error::{BspRuntimeError, CandidatePhase};
 use crate::source_link::BspSourceLink;
@@ -98,7 +98,8 @@ pub struct CandidatePointLight {
 ///
 /// After a candidate is consumed by commit, its resources move into an
 /// `ActiveBspMount`. The active mount owns the extracted DTOs, source-link
-/// metadata, cache identity, point-light IDs, and published source-link JSON.
+/// metadata, cache identity, point-light IDs, published source-link JSON,
+/// and active bridge receipts.
 ///
 /// The opaque renderer lease moves directly from a validated candidate into
 /// `Scene`. On replacement or unload, `Scene::retire_bsp_mount` returns an
@@ -120,6 +121,8 @@ pub struct ActiveBspMount {
     pub source_identity: String,
     /// Generation at which this mount was committed.
     pub committed_generation: u64,
+    /// Active bridge receipts for all committed bridges.
+    pub active_bridge_receipts: ActiveBridgeReceipts,
 }
 
 impl std::fmt::Debug for ActiveBspMount {
@@ -160,8 +163,8 @@ pub struct BspCandidate {
     pub cache_identity: CacheIdentity,
     /// Renderer mount lease state.
     pub renderer_lease: RendererLease,
-    /// Bridge tokens from prepare, indexed by bridge position.
-    pub bridge_tokens: Vec<Option<BridgeToken>>,
+    /// Prepared bridge tokens from prepare, indexed by bridge position.
+    pub prepared_tokens: Vec<Option<PreparedBridgeToken>>,
     /// Typed source-link payload.
     pub source_link: BspSourceLink,
     /// Scene-owned JSON source-link payload, serialized before commit.
@@ -214,7 +217,7 @@ impl BspCandidate {
         source_link: BspSourceLink,
         source_link_json: serde_json::Value,
         point_lights: Vec<CandidatePointLight>,
-        bridge_tokens: Vec<Option<BridgeToken>>,
+        prepared_tokens: Vec<Option<PreparedBridgeToken>>,
         was_occupied: bool,
     ) -> Self {
         let face_count = extracted.face_geometries.len();
@@ -230,7 +233,7 @@ impl BspCandidate {
             extracted,
             cache_identity,
             renderer_lease: RendererLease::NotStarted,
-            bridge_tokens,
+            prepared_tokens,
             source_link,
             source_link_json,
             point_lights,
@@ -546,6 +549,7 @@ impl BspCandidate {
         mut self,
         current_generation: u64,
         light_ids: Vec<renderer::api::PointLightId>,
+        active_bridge_receipts: ActiveBridgeReceipts,
     ) -> Result<(ActiveBspMount, PreparedBspMount), (BspRuntimeError, BspCandidate)> {
         if self.generation != current_generation {
             let error = BspRuntimeError::StaleGeneration {
@@ -581,6 +585,7 @@ impl BspCandidate {
                         light_ids,
                         source_identity: self.source_identity,
                         committed_generation: self.generation,
+                        active_bridge_receipts,
                     },
                     mount,
                 ))
@@ -628,9 +633,9 @@ impl BspCandidate {
     /// and renderer lease are yielded to the caller for cleanup (bridge rollback
     /// and renderer retirement, respectively).
     ///
-    /// Returns the bridge tokens that need rollback and any ready renderer mount
-    /// that needs opaque scene detachment.
-    pub fn rollback(&mut self) -> (Vec<Option<BridgeToken>>, Option<PreparedBspMount>) {
+    /// Returns the prepared bridge tokens that need rollback and any ready
+    /// renderer mount that needs opaque scene detachment.
+    pub fn rollback(&mut self) -> (Vec<Option<PreparedBridgeToken>>, Option<PreparedBspMount>) {
         match self.state {
             CandidateState::Consumed | CandidateState::RolledBack => {
                 // Terminal states: nothing to do.
@@ -638,7 +643,7 @@ impl BspCandidate {
             }
             _ => {
                 self.state = CandidateState::RolledBack;
-                let tokens = std::mem::take(&mut self.bridge_tokens);
+                let tokens = std::mem::take(&mut self.prepared_tokens);
                 let mount =
                     match std::mem::replace(&mut self.renderer_lease, RendererLease::NotStarted) {
                         RendererLease::Ready(m) => Some(m),

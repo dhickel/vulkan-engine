@@ -10,7 +10,7 @@
 //!   ~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/
 //! Tests skip gracefully when tools are absent.
 
-use bsp::{point_contents, BspLoader, LoadOptions, PointContents, QuakeToEngine};
+use bsp::{point_contents, resources, BspLoader, LoadOptions, PointContents, QuakeToEngine};
 use bsp_generator::{
     build_topology, generate, place_rooms, route_all_edges, DungeonConfig, LayoutIntent, MapClass,
     RoutedIntent, Seed,
@@ -228,6 +228,27 @@ fn strict_reload(bsp_data: &[u8], lit_data: Option<&[u8]>) -> Result<bsp::BspWor
     };
 
     BspLoader::load(bsp_data, &options).map_err(|report| format!("strict load failed: {report}"))
+}
+
+/// Strict-extract a loaded BSP world through the extraction pipeline.
+fn strict_extract(world: bsp::BspWorld) -> Result<bsp::ExtractedBsp, String> {
+    let palette_data = std::fs::read(palette_path()).map_err(|e| format!("read palette: {e}"))?;
+    let palette = resources::decode_palette(&palette_data);
+    let wad_name = wad_path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wad_bytes = std::fs::read(wad_path()).map_err(|e| format!("read WAD: {e}"))?;
+
+    let request = bsp::BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        wad_archives: vec![(wad_name, wad_bytes)],
+        strict: true,
+        ..Default::default()
+    };
+    bsp::extract(request).map_err(|report| format!("strict extract failed: {report}"))
 }
 
 fn generation_intents(
@@ -727,6 +748,12 @@ fn corpus_execution_all_12_configurations() {
         let compiled_nodes = world.nodes.len();
         let compiled_leaves = world.leaves.len();
         let bsp_size = bsp_data.len();
+
+        // 5b. Strict extraction (Phase 01)
+        let extraction_result = strict_extract(world.clone());
+        if let Err(ref e) = extraction_result {
+            eprintln!("  Strict extraction FAILED: {e}");
+        }
 
         // 6. Budget validation
         assert!(

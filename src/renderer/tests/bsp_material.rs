@@ -82,6 +82,7 @@ mod bsp_tests {
     #[test]
     fn bsp_surface_cache_add_and_get() {
         let mut cache = BspSurfaceCacheRepr::new();
+        let arena_id = cache.allocate_arena();
         let cached = BspCachedSurfaceRepr {
             material_descriptor: ash::vk::DescriptorSet::from_raw(0xBEEF),
             surf_ubo_alloc: Default::default(),
@@ -90,9 +91,10 @@ mod bsp_tests {
             albedo_tex: TextureHandle::new(10, 0),
             fullbright_tex: None,
             lightmap_tex: TextureHandle::new(11, 0),
+            arena_id,
         };
 
-        let handle = cache.add(cached);
+        let handle = cache.add(arena_id, cached);
         assert_eq!(handle.slot, 0);
         assert_eq!(handle.generation, 0);
 
@@ -141,8 +143,9 @@ mod bsp_tests {
     #[test]
     fn bsp_surface_cache_records_only_real_descriptor_payloads() {
         let mut cache = BspSurfaceCacheRepr::new();
+        let arena_id = cache.allocate_arena();
         let descriptor = ash::vk::DescriptorSet::from_raw(0xCAFE);
-        let handle = cache.add(BspCachedSurfaceRepr {
+        let handle = cache.add(arena_id, BspCachedSurfaceRepr {
             material_descriptor: descriptor,
             surf_ubo_alloc: Default::default(),
             pipeline: VkPipelineType::BspOpaque,
@@ -150,6 +153,7 @@ mod bsp_tests {
             albedo_tex: TextureHandle::new(10, 1),
             fullbright_tex: Some(TextureHandle::new(11, 2)),
             lightmap_tex: TextureHandle::new(20, 3),
+            arena_id,
         });
 
         let cached = cache
@@ -159,5 +163,6 @@ mod bsp_tests {
         assert_eq!(cached.albedo_tex, TextureHandle::new(10, 1));
         assert_eq!(cached.fullbright_tex, Some(TextureHandle::new(11, 2)));
         assert_eq!(cached.lightmap_tex, TextureHandle::new(20, 3));
+        assert_eq!(cached.arena_id, arena_id);
     }
 }
