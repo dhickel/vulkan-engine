@@ -30,10 +30,19 @@ pub struct CliArgs {
     pub palette_path: Option<PathBuf>,
     /// Path to a .lit colored-light companion file.
     pub lit_path: Option<PathBuf>,
-    /// Directory to auto-discover .lit and palette companions next to the .bsp.
-    pub companion_dir: Option<PathBuf>,
     /// Explicit path to a WAD file for texture resolution.
     pub wad_path: Option<PathBuf>,
+    /// Import mode: strict or development.
+    pub import_mode: Option<ImportMode>,
+    /// Companion textures directory for PBR discovery.
+    pub textures_dir: Option<PathBuf>,
+}
+
+/// Import mode for CLI — mutually exclusive --strict and --development.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportMode {
+    Strict,
+    Development,
 }
 
 /// CLI parse failure with usage-facing wording.
@@ -46,6 +55,10 @@ pub enum CliError {
     UnknownArgument(String),
     PaletteNotFound(String),
     WadNotFound(String),
+    /// Both --strict and --development specified.
+    ConflictingImportMode,
+    /// No import mode selected; --strict or --development required.
+    NoImportMode,
 }
 
 impl fmt::Display for CliError {
@@ -73,6 +86,12 @@ impl fmt::Display for CliError {
             CliError::UnknownArgument(arg) => write!(f, "unknown argument: {arg}"),
             CliError::PaletteNotFound(path) => write!(f, "palette file not found: {path}"),
             CliError::WadNotFound(path) => write!(f, "WAD file not found: {path}"),
+            CliError::ConflictingImportMode => {
+                write!(f, "--strict and --development are mutually exclusive")
+            }
+            CliError::NoImportMode => {
+                write!(f, "no import mode selected; use --strict or --development")
+            }
         }
     }
 }
@@ -92,8 +111,7 @@ impl CliArgs {
         }
     }
 
-    /// Resolve the effective palette path from an explicit argument or the map's
-    /// companion/game directory. Production content never falls back to a test palette.
+    /// Resolve the effective palette path: explicit --palette only.
     pub fn resolve_palette_path(&self) -> Result<PathBuf, CliError> {
         if let Some(ref path) = self.palette_path {
             if path.is_file() {
@@ -101,76 +119,22 @@ impl CliArgs {
             }
             return Err(CliError::PaletteNotFound(path.display().to_string()));
         }
-
-        let mut candidates = Vec::new();
-        if let Some(ref dir) = self.companion_dir {
-            candidates.extend([
-                dir.join("palette.lmp"),
-                dir.join("project_palette.lmp"),
-                dir.join("gfx/palette.lmp"),
-            ]);
-            if let Some(game_root) = dir.parent() {
-                candidates.push(game_root.join("gfx/palette.lmp"));
-            }
-        }
-        if let Some(ref bsp) = self.bsp_path {
-            if let Some(map_dir) = bsp.parent() {
-                candidates.extend([
-                    map_dir.join("palette.lmp"),
-                    map_dir.join("project_palette.lmp"),
-                ]);
-                if let Some(game_root) = map_dir.parent() {
-                    candidates.push(game_root.join("gfx/palette.lmp"));
-                }
-            }
-        }
-
-        if let Some(path) = candidates.iter().find(|path| path.is_file()) {
-            return Ok(path.clone());
-        }
-
-        let searched = candidates
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(CliError::PaletteNotFound(if searched.is_empty() {
-            "provide --palette <path> or --companion-dir <path>".to_string()
-        } else {
-            format!("none of [{searched}]")
-        }))
+        Err(CliError::PaletteNotFound(
+            "provide --palette <path>".to_string(),
+        ))
     }
 
-    /// Resolve the effective .lit path from explicit arg, companion dir, or auto-discovery.
+    /// Resolve the effective .lit path: explicit --lit only.
     pub fn resolve_lit_path(&self) -> Option<PathBuf> {
         if let Some(ref p) = self.lit_path {
             if p.is_file() {
                 return Some(p.clone());
             }
         }
-        if let Some(ref dir) = self.companion_dir {
-            let candidate = dir.join(
-                self.bsp_path
-                    .as_ref()
-                    .and_then(|b| b.file_stem())
-                    .map(|s| format!("{}.lit", s.to_string_lossy()))
-                    .unwrap_or_default(),
-            );
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        // Auto-discover next to the .bsp (same stem, .lit extension)
-        if let Some(ref bsp) = self.bsp_path {
-            let candidate = bsp.with_extension("lit");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
         None
     }
 
-    /// Resolve the effective WAD path: explicit --wad, then companion-dir, then BSP-adjacent.
+    /// Resolve the effective WAD path: explicit --wad only.
     pub fn resolve_wad_path(&self) -> Result<Option<PathBuf>, CliError> {
         if let Some(ref p) = self.wad_path {
             if p.is_file() {
@@ -178,37 +142,12 @@ impl CliArgs {
             }
             return Err(CliError::WadNotFound(p.display().to_string()));
         }
-        let candidates = self.wad_candidates();
-        Ok(candidates.into_iter().find(|p| p.is_file()))
+        Ok(None)
     }
 
-    fn wad_candidates(&self) -> Vec<PathBuf> {
-        let mut candidates = Vec::new();
-        if let Some(ref dir) = self.companion_dir {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "wad").unwrap_or(false) {
-                        candidates.push(path);
-                    }
-                }
-            }
-        }
-        if let Some(ref bsp) = self.bsp_path {
-            if let Some(map_dir) = bsp.parent() {
-                if let Ok(entries) = std::fs::read_dir(map_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.extension().map(|e| e == "wad").unwrap_or(false) {
-                            candidates.push(path);
-                        }
-                    }
-                }
-            }
-        }
-        candidates.sort();
-        candidates.dedup();
-        candidates
+    /// Resolve the import mode; error if not specified.
+    pub fn require_import_mode(&self) -> Result<ImportMode, CliError> {
+        self.import_mode.ok_or(CliError::NoImportMode)
     }
 }
 
@@ -223,8 +162,9 @@ impl Default for CliArgs {
             show_lights: false,
             palette_path: None,
             lit_path: None,
-            companion_dir: None,
             wad_path: None,
+            import_mode: None,
+            textures_dir: None,
         }
     }
 }
@@ -283,14 +223,28 @@ pub fn parse_from(args: impl IntoIterator<Item = impl Into<String>>) -> Result<C
                 opts.lit_path = Some(PathBuf::from(value));
                 i += 2;
             }
-            "--companion-dir" => {
-                let value = next_value(&args, i, "--companion-dir")?;
-                opts.companion_dir = Some(PathBuf::from(value));
-                i += 2;
-            }
             "--wad" => {
                 let value = next_value(&args, i, "--wad")?;
                 opts.wad_path = Some(PathBuf::from(value));
+                i += 2;
+            }
+            "--strict" => {
+                if opts.import_mode == Some(ImportMode::Development) {
+                    return Err(CliError::ConflictingImportMode);
+                }
+                opts.import_mode = Some(ImportMode::Strict);
+                i += 1;
+            }
+            "--development" => {
+                if opts.import_mode == Some(ImportMode::Strict) {
+                    return Err(CliError::ConflictingImportMode);
+                }
+                opts.import_mode = Some(ImportMode::Development);
+                i += 1;
+            }
+            "--textures" => {
+                let value = next_value(&args, i, "--textures")?;
+                opts.textures_dir = Some(PathBuf::from(value));
                 i += 2;
             }
             other => return Err(CliError::UnknownArgument(other.to_string())),
@@ -318,9 +272,11 @@ fn print_usage() {
     eprintln!();
     eprintln!("BSP Beta — Maintained Load-Query-Physics-Behavior-Reload Proof");
     eprintln!();
-    eprintln!("Usage: bsp_beta [OPTIONS]");
+    eprintln!("Usage: bsp_beta --strict|--development [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
+    eprintln!("  --strict               Strict import mode");
+    eprintln!("  --development          Development import mode");
     eprintln!("  --bsp <path>           Path to compiled .bsp file");
     eprintln!("  --scale <float>        Quake→engine scale factor (default: 0.0254)");
     eprintln!("  --headless             Run headless (no window, renders N frames)");
@@ -329,8 +285,8 @@ fn print_usage() {
     eprintln!("  --lights               Log all imported light descriptors at startup");
     eprintln!("  --palette <path>       Path to 768-byte palette .lmp file");
     eprintln!("  --lit <path>           Path to .lit colored-light companion file");
-    eprintln!("  --companion-dir <path> Directory to auto-discover .lit and palette");
     eprintln!("  --wad <path>           Path to WAD file for texture resolution");
+    eprintln!("  --textures <dir>       Textures directory for PBR companion discovery");
     eprintln!();
 }
 
@@ -348,19 +304,21 @@ mod tests {
         assert!(!args.show_lights);
         assert!(args.palette_path.is_none());
         assert!(args.lit_path.is_none());
-        assert!(args.companion_dir.is_none());
+        assert!(args.textures_dir.is_none());
+        assert!(args.import_mode.is_none());
         assert!((args.scale - 0.0254).abs() < 1e-6);
     }
 
     #[test]
     fn parse_bsp_path() {
-        let args = parse_from(["--bsp", "maps/test.bsp"]).unwrap();
+        let args = parse_from(["--strict", "--bsp", "maps/test.bsp"]).unwrap();
         assert_eq!(args.bsp_path, Some(PathBuf::from("maps/test.bsp")));
     }
 
     #[test]
     fn parse_headless_with_capture() {
-        let args = parse_from(["--headless", "--capture-frames", "10"]).unwrap();
+        let args =
+            parse_from(["--development", "--headless", "--capture-frames", "10"]).unwrap();
         assert!(args.headless);
         assert!(!args.mcp);
         assert_eq!(args.capture_frames, 10);
@@ -368,26 +326,59 @@ mod tests {
 
     #[test]
     fn parse_mcp_implies_headless() {
-        let args = parse_from(["--mcp"]).unwrap();
+        let args = parse_from(["--strict", "--mcp"]).unwrap();
         assert!(args.mcp);
         assert!(args.headless);
     }
 
     #[test]
     fn parse_scale() {
-        let args = parse_from(["--scale", "0.03125"]).unwrap();
+        let args = parse_from(["--strict", "--scale", "0.03125"]).unwrap();
         assert!((args.scale - 0.03125).abs() < 1e-6);
     }
 
     #[test]
     fn parse_lights_flag() {
-        let args = parse_from(["--lights"]).unwrap();
+        let args = parse_from(["--development", "--lights"]).unwrap();
         assert!(args.show_lights);
+    }
+
+    #[test]
+    fn parse_strict_mode() {
+        let args = parse_from(["--strict"]).unwrap();
+        assert_eq!(args.import_mode, Some(ImportMode::Strict));
+    }
+
+    #[test]
+    fn parse_development_mode() {
+        let args = parse_from(["--development"]).unwrap();
+        assert_eq!(args.import_mode, Some(ImportMode::Development));
+    }
+
+    #[test]
+    fn parse_textures_dir() {
+        let args = parse_from(["--strict", "--textures", "gfx/textures"]).unwrap();
+        assert_eq!(args.textures_dir, Some(PathBuf::from("gfx/textures")));
+    }
+
+    #[test]
+    fn conflicting_import_modes_rejected() {
+        let err = parse_from(["--strict", "--development"]).unwrap_err();
+        assert_eq!(err, CliError::ConflictingImportMode);
+    }
+
+    #[test]
+    fn no_import_mode_is_allowed_by_parser() {
+        // Parser allows no mode; app validates later.
+        let args = parse_from(["--bsp", "maps/test.bsp"]).unwrap();
+        assert!(args.import_mode.is_none());
+        assert!(args.require_import_mode().is_err());
     }
 
     #[test]
     fn parse_combined() {
         let args = parse_from([
+            "--strict",
             "--bsp",
             "maps/e1m1.bsp",
             "--scale",
@@ -401,10 +392,10 @@ mod tests {
             "gfx/palette.lmp",
             "--lit",
             "maps/e1m1.lit",
-            "--companion-dir",
-            "maps/",
             "--wad",
             "maps/dungeon.wad",
+            "--textures",
+            "gfx/textures",
         ])
         .unwrap();
         assert_eq!(args.bsp_path, Some(PathBuf::from("maps/e1m1.bsp")));
@@ -415,127 +406,81 @@ mod tests {
         assert!(args.show_lights);
         assert_eq!(args.palette_path, Some(PathBuf::from("gfx/palette.lmp")));
         assert_eq!(args.lit_path, Some(PathBuf::from("maps/e1m1.lit")));
-        assert_eq!(args.companion_dir, Some(PathBuf::from("maps/")));
         assert_eq!(args.wad_path, Some(PathBuf::from("maps/dungeon.wad")));
+        assert_eq!(args.textures_dir, Some(PathBuf::from("gfx/textures")));
+        assert_eq!(args.import_mode, Some(ImportMode::Strict));
     }
 
     #[test]
     fn reject_equals_form_and_unknown_flags() {
         assert_eq!(
-            parse_from(["--bsp=maps/e1m1.bsp"]).unwrap_err(),
+            parse_from(["--strict", "--bsp=maps/e1m1.bsp"]).unwrap_err(),
             CliError::UnknownArgument("--bsp=maps/e1m1.bsp".to_string())
         );
         assert_eq!(
-            parse_from(["--unknown"]).unwrap_err(),
+            parse_from(["--strict", "--unknown"]).unwrap_err(),
             CliError::UnknownArgument("--unknown".to_string())
         );
     }
 
     #[test]
     fn parse_palette_and_lit_flags() {
-        let args = parse_from(["--palette", "gfx/pal.lmp", "--lit", "maps/test.lit"]).unwrap();
+        let args =
+            parse_from(["--strict", "--palette", "gfx/pal.lmp", "--lit", "maps/test.lit"])
+                .unwrap();
         assert_eq!(args.palette_path, Some(PathBuf::from("gfx/pal.lmp")));
         assert_eq!(args.lit_path, Some(PathBuf::from("maps/test.lit")));
     }
 
     #[test]
-    fn parse_companion_dir_and_wad() {
+    fn parse_wad_and_textures() {
         let args = parse_from([
-            "--companion-dir",
-            "assets/companions",
+            "--strict",
             "--wad",
             "assets/dungeon.wad",
+            "--textures",
+            "assets/textures",
         ])
         .unwrap();
-        assert_eq!(args.companion_dir, Some(PathBuf::from("assets/companions")));
         assert_eq!(args.wad_path, Some(PathBuf::from("assets/dungeon.wad")));
+        assert_eq!(args.textures_dir, Some(PathBuf::from("assets/textures")));
     }
 
     #[test]
-    fn palette_resolution_finds_game_root_gfx_from_maps_companion_dir() {
-        let root = std::env::temp_dir().join(format!(
-            "bsp-beta-palette-resolution-{}",
-            std::process::id()
-        ));
-        let maps = root.join("maps");
-        let palette = root.join("gfx/palette.lmp");
-        std::fs::create_dir_all(&maps).unwrap();
-        std::fs::create_dir_all(palette.parent().unwrap()).unwrap();
-        std::fs::write(&palette, [0u8; 768]).unwrap();
-
+    fn palette_resolution_requires_explicit_path() {
         let args = CliArgs {
-            bsp_path: Some(maps.join("start.bsp")),
-            companion_dir: Some(maps),
+            palette_path: Some(PathBuf::from("/tmp/pal.lmp")),
             ..CliArgs::default()
         };
-        assert_eq!(args.resolve_palette_path().unwrap(), palette);
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn wad_resolution_requires_explicit_file_and_discovers_companion() {
-        let root =
-            std::env::temp_dir().join(format!("bsp-beta-wad-resolution-{}", std::process::id()));
-        let maps = root.join("maps");
-        let wad = maps.join("dungeon.wad");
-        std::fs::create_dir_all(&maps).unwrap();
-        std::fs::write(&wad, b"WAD2").unwrap();
-
-        let auto_args = CliArgs {
-            bsp_path: Some(maps.join("start.bsp")),
-            ..CliArgs::default()
-        };
-        assert_eq!(auto_args.resolve_wad_path().unwrap(), Some(wad.clone()));
-
-        let missing_args = CliArgs {
-            wad_path: Some(maps.join("missing.wad")),
-            ..CliArgs::default()
-        };
-        assert!(matches!(
-            missing_args.resolve_wad_path(),
-            Err(CliError::WadNotFound(_))
-        ));
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn palette_resolution_never_falls_back_to_project_test_fixture() {
-        let root =
-            std::env::temp_dir().join(format!("bsp-beta-missing-palette-{}", std::process::id()));
-        let maps = root.join("maps");
-        std::fs::create_dir_all(&maps).unwrap();
-        let args = CliArgs {
-            bsp_path: Some(maps.join("start.bsp")),
-            companion_dir: Some(maps),
-            ..CliArgs::default()
-        };
-
+        // File doesn't exist, so it fails.
         assert!(matches!(
             args.resolve_palette_path(),
             Err(CliError::PaletteNotFound(_))
         ));
+    }
 
-        std::fs::remove_dir_all(root).unwrap();
+    #[test]
+    fn no_mode_reports_error() {
+        let args = CliArgs::default();
+        assert_eq!(args.require_import_mode().unwrap_err(), CliError::NoImportMode);
     }
 
     #[test]
     fn reject_missing_and_malformed_values() {
         assert_eq!(
-            parse_from(["--bsp"]).unwrap_err(),
+            parse_from(["--strict", "--bsp"]).unwrap_err(),
             CliError::MissingValue("--bsp")
         );
         assert_eq!(
-            parse_from(["--bsp", "--headless"]).unwrap_err(),
+            parse_from(["--strict", "--bsp", "--headless"]).unwrap_err(),
             CliError::MissingValue("--bsp")
         );
         assert!(matches!(
-            parse_from(["--scale", "nan"]).unwrap_err(),
+            parse_from(["--development", "--scale", "nan"]).unwrap_err(),
             CliError::NonFiniteScale(_)
         ));
         assert!(matches!(
-            parse_from(["--capture-frames", "-1"]).unwrap_err(),
+            parse_from(["--development", "--capture-frames", "-1"]).unwrap_err(),
             CliError::InvalidCaptureFrames(_)
         ));
     }

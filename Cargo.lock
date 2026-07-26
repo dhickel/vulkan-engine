@@ -416,6 +416,7 @@ dependencies = [
  "glam 0.28.0",
  "input",
  "log",
+ "package_io",
  "physics",
  "renderer",
  "serde",

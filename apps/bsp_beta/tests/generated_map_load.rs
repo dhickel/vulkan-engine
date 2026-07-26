@@ -2,13 +2,15 @@
 //!
 //! Generates a BSP dungeon through the full pipeline (bsp_generator →
 //! ericw-tools compilation), then loads it through the bsp_runtime
-//! coordinator to verify the runtime path works end-to-end.
+//! coordinator via the authorized import path to verify the runtime
+//! path works end-to-end.
 //!
 //! Requires ericw-tools 2.0.0-alpha3 installed at:
 //!   ~/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin/
 //! Tests skip gracefully when tools are absent.
 
 use bsp_runtime::coordinator::BspCoordinator;
+use bsp_runtime::package;
 use renderer::api::bsp::PreparedBspMount;
 use renderer::api::Scene;
 use std::path::{Path, PathBuf};
@@ -54,8 +56,8 @@ fn unique_tmp(label: &str) -> PathBuf {
     dir
 }
 
-/// Generate, compile, and load a generated BSP through BspLoader with palette.
-/// Returns (BspWorld, bsp_data, lit_data) or None if tools unavailable.
+/// Generate, compile, and load a generated BSP through the authorized
+/// import path. Returns (BspWorld, bsp_data, lit_data) or None if tools unavailable.
 fn generate_compile_and_load(
     label: &str,
 ) -> Option<(bsp::world::BspWorld, Vec<u8>, Option<Vec<u8>>)> {
@@ -120,16 +122,19 @@ fn generate_compile_and_load(
 
 #[test]
 fn coordinator_prepare_generated_bsp() {
-    let Some((world, _bsp_data, _lit_data)) = generate_compile_and_load("coord-prepare") else {
+    let Some((world, bsp_data, _lit_data)) = generate_compile_and_load("coord-prepare") else {
         return;
     };
 
     // Create coordinator
     let mut coordinator = BspCoordinator::new();
 
-    // Prepare using pre-loaded world (has palette)
+    // Build authorized import from parsed world + bytes.
+    let import = build_import_from_generated(world, &bsp_data);
+
+    // Prepare using authorized import
     let prepare = coordinator
-        .prepare_from_world(world, Some(0.0254), "generated.map")
+        .prepare_authorized_import(import)
         .expect("coordinator prepare must succeed");
 
     assert!(prepare.face_count > 0, "must have faces");
@@ -145,20 +150,89 @@ fn coordinator_prepare_generated_bsp() {
     );
 }
 
+/// Build a synthetic AuthorizedBspImport from a parsed world + bytes for tests.
+fn build_import_from_generated(
+    world: bsp::world::BspWorld,
+    bsp_bytes: &[u8],
+) -> package::AuthorizedBspImport {
+    use package::{AuthorizedBspImport, AuthorizedResource, ImportMode, ImportProvenance};
+    use package_io::ContentIdentity;
+
+    let palette_bytes = std::fs::read(palette_path()).expect("read palette");
+    let palette_identity = ContentIdentity::from_bytes(&palette_bytes);
+    let bsp_identity = ContentIdentity::from_bytes(bsp_bytes);
+
+    let wad_bytes = std::fs::read(wad_path()).expect("read WAD");
+    let wad_name = wad_path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wad_basename = wad_path()
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let wad_identity = ContentIdentity::from_bytes(&wad_bytes);
+
+    AuthorizedBspImport {
+        world,
+        policy: ImportMode::Development,
+        bsp: AuthorizedResource {
+            logical_id: "generated.map".to_string(),
+            kind: package_io::ResourceKind::Bsp,
+            identity: bsp_identity,
+            bytes: bsp_bytes.to_vec(),
+        },
+        palette: Some(AuthorizedResource {
+            logical_id: "palette.lmp".to_string(),
+            kind: package_io::ResourceKind::Palette,
+            identity: palette_identity,
+            bytes: palette_bytes,
+        }),
+        wads: vec![package::NamedAuthorizedResource {
+            basename: wad_basename,
+            resource: AuthorizedResource {
+                logical_id: wad_name,
+                kind: package_io::ResourceKind::Wad,
+                identity: wad_identity,
+                bytes: wad_bytes,
+            },
+            ordinal: 0,
+        }],
+        lit: None,
+        pbr: Vec::new(),
+        provenance: ImportProvenance {
+            route: "test".to_string(),
+            companion_root_label: None,
+            logical_root: None,
+        },
+        scale: 0.0254,
+        fullbright_start: 224,
+        fullbright_end: 255,
+        overbright: 2.0,
+        light_scale: 1.0,
+        max_atlas_pages: 4,
+    }
+}
+
 // ── Test: Coordinator full prepare → validate → commit cycle ────────────
 
 #[test]
 fn coordinator_full_transaction_generated_bsp() {
-    let Some((world, _bsp_data, _lit_data)) = generate_compile_and_load("coord-full") else {
+    let Some((world, bsp_data, _lit_data)) = generate_compile_and_load("coord-full") else {
         return;
     };
 
     let mut coordinator = BspCoordinator::new();
     let mut scene = Scene::new();
 
-    // 1. Prepare using pre-loaded world
+    // Build authorized import
+    let import = build_import_from_generated(world, &bsp_data);
+
+    // 1. Prepare using authorized import
     let prepare = coordinator
-        .prepare_from_world(world, Some(0.0254), "generated.map")
+        .prepare_authorized_import(import)
         .expect("prepare must succeed");
 
     // 2. Set renderer mount ready (empty mount — no GPU needed for structural test)
@@ -257,15 +331,16 @@ fn generated_bsp_strict_reload_zero_diagnostics() {
 
 #[test]
 fn coordinator_extracts_non_solid_spawn() {
-    let Some((world, _bsp_data, _lit_data)) = generate_compile_and_load("non-solid-spawn") else {
+    let Some((world, bsp_data, _lit_data)) = generate_compile_and_load("non-solid-spawn") else {
         return;
     };
 
     let mut coordinator = BspCoordinator::new();
 
-    // Prepare using pre-loaded world
+    // Build authorized import and prepare
+    let import = build_import_from_generated(world, &bsp_data);
     let _prepare = coordinator
-        .prepare_from_world(world, Some(0.0254), "generated.map")
+        .prepare_authorized_import(import)
         .expect("prepare must succeed");
 
     // Inspect staged entity descriptors

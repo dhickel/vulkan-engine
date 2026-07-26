@@ -34,16 +34,12 @@ cache_bsp="$cache_dir/${class}-seed-${seed}.bsp"
 cache_lit="$cache_dir/${class}-seed-${seed}.lit"
 
 wad_path="src/bsp_generator/themes/cc0_stone_beta/cc0_stone_beta.wad"
-palette_src="src/bsp_generator/themes/cc0_stone_beta/palette.lmp"
-palette_tmp="/tmp/palette.lmp"
-companion_dir="src/bsp_generator/themes/cc0_stone_beta/textures"
+palette_path="src/bsp_generator/themes/cc0_stone_beta/palette.lmp"
+textures_dir="src/bsp_generator/themes/cc0_stone_beta/textures"
 profile_path="tools/bsp_authoring/ericw-q1-bsp2-generated-profile.toml"
 default_tool_path="$HOME/.local/ericw-tools/ericw-tools-2.0.0-alpha3-Linux/bin"
 
 mkdir -p "$cache_dir"
-if [[ ! -f "$palette_tmp" ]]; then
-  cp "$palette_src" "$palette_tmp"
-fi
 
 if [[ -f "$cache_bsp" ]]; then
   echo "Using cached BSP: $cache_bsp"
@@ -61,7 +57,7 @@ else
     run -p engine_pack -- compile-bsp "$map_path"
     --profile "$profile_path"
     --out "$out_dir"
-    --palette "$palette_tmp"
+    --palette "$palette_path"
     --wad "$wad_path"
   )
   if [[ -x "$default_tool_path/qbsp" && -x "$default_tool_path/vis" && -x "$default_tool_path/light" ]]; then
@@ -80,9 +76,25 @@ else
   echo "Cached BSP: $cache_bsp"
 fi
 
+echo "Declared inputs:"
+echo "  BSP:        $cache_bsp"
+echo "  Palette:    $palette_path"
+echo "  WAD:        $wad_path"
+if [[ -f "$cache_lit" ]]; then
+  echo "  LIT:        $cache_lit"
+  lit_args=(--lit "$cache_lit")
+else
+  echo "  LIT:        (none)"
+  lit_args=()
+fi
+echo "  Textures:   $textures_dir"
+echo ""
+
 echo "Launching bsp_beta for $class seed $seed..."
 exec cargo run -p bsp_beta -- \
+  --strict \
   --bsp "$cache_bsp" \
+  --palette "$palette_path" \
   --wad "$wad_path" \
-  --palette "$palette_tmp" \
-  --companion-dir "$companion_dir"
+  "${lit_args[@]}" \
+  --textures "$textures_dir"

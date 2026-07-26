@@ -46,6 +46,10 @@ pub use candidate::BspCandidate;
 pub use coordinator::BspCoordinator;
 pub use error::{BridgePhase, BspRuntimeError};
 pub use generation::BspGenerationToken;
+pub use package::{
+    AuthorizedBspImport, AuthorizedResource, BoundPbrCompanion, ImportMode as PackageImportMode,
+    ImportProvenance, NamedAuthorizedResource, PackageLoadError, PbrCompanionKind, PbrMatchMode,
+};
 pub use snapshot::{
     BspSimulationSnapshot, ExternalInstance, SnapshotActivation, SnapshotBuilder,
     SnapshotEntityPose, SnapshotEpoch, SnapshotGeneration, SnapshotLightStyles,

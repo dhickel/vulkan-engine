@@ -23,10 +23,11 @@ use crate::bridge::{
     AppBridge, BehaviorEntityRecipe, BridgeAggregator, EntityCollisionRecipe, LightEntityRecipe,
     WorldCollisionRecipe,
 };
-use crate::cache::{compute_identity_hash, CacheIdentity, CompanionId};
+use crate::cache::{compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry, WadCacheEntry};
 use crate::candidate::{BspCandidate, CandidatePointLight};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
+use crate::package::{AuthorizedBspImport, PbrCompanionKind};
 use crate::source_link::{reconcile_overrides, BspSourceLink, OverrideReconciliation};
 
 use bsp::extract::{EntityDescriptor, ExtractedBsp};
@@ -253,6 +254,11 @@ impl BspCoordinator {
     }
 
     /// Prepare a package-loaded BSP and its auto-discovered PBR companions.
+    ///
+    /// **Development-only**: this path uses raw bytes without the authorized import
+    /// boundary. Production package and direct startup must use
+    /// [`prepare_authorized_import`](Self::prepare_authorized_import).
+    #[doc(hidden)]
     pub fn prepare_from_loaded_package(
         &mut self,
         package: crate::package::LoadedBspPackage,
@@ -280,6 +286,117 @@ impl BspCoordinator {
             scale,
             source_identity,
         )
+    }
+
+    /// Prepare an authorized BSP import — the single entry point for package
+    /// and direct launch paths.
+    ///
+    /// Derives [`BspExtractionRequest`] from the authorized import record,
+    /// carries all authorized bytes and settings into extraction, and builds
+    /// cache identity and source-link provenance from the import closure.
+    /// Required resource failures (palette, WAD, .lit in strict mode) stop
+    /// before candidate/GPU work.
+    pub fn prepare_authorized_import(
+        &mut self,
+        import: AuthorizedBspImport,
+    ) -> Result<PrepareResult, BspRuntimeError> {
+        if self.poisoned {
+            return Err(BspRuntimeError::CoordinatorPoisoned);
+        }
+
+        let _gen = self
+            .generation
+            .increment()
+            .ok_or(BspRuntimeError::GenerationExhausted)?;
+        self.rollback_staged()?;
+        log::info!(
+            "BSP coordinator: generation {} — starting authorized import (route={}, policy={:?})",
+            self.generation.current(),
+            import.provenance.route,
+            import.policy,
+        );
+        let token = self.generation.token();
+
+        let was_occupied = self.is_active();
+        let source_identity = import.bsp.logical_id.clone();
+        let _policy_strict = import.policy.is_strict();
+        let resolved_scale = import.scale;
+
+        // Derive extraction request from the authorized import.
+        let extraction_request = import.to_extraction_request();
+        let world_profile_tag = extraction_request.world.profile.tag().to_string();
+        let _world_miptex_data_len = extraction_request.world.miptex_data.len();
+
+        let extracted = bsp::extract::extract(extraction_request).map_err(|e| {
+            BspRuntimeError::SourceUnavailable {
+                reason: format!("BSP extraction failed: {} (code {:?})", e.message, e.code),
+            }
+        })?;
+
+        let face_count = extracted.face_geometries.len();
+        let entity_count = extracted.entity_descriptors.len();
+        let light_count = extracted.light_descriptors.len();
+        let batch_count = extracted.render_batches.len();
+        let has_pvs = extracted.has_pvs;
+
+        // Build source link from authorized import.
+        let source_link = self.build_source_link_from_import(
+            &extracted,
+            &import,
+            &source_identity,
+            resolved_scale,
+        );
+        let envelope = crate::source_link::BspPersistenceEnvelope::new(source_link.clone());
+        let source_link_json =
+            serde_json::to_value(&envelope).map_err(|e| BspRuntimeError::SourceUnavailable {
+                reason: format!("BSP source-link serialization failed: {e}"),
+            })?;
+
+        // Build cache identity from authorized import.
+        let cache_identity = self.build_cache_identity_from_import(
+            &extracted,
+            &import,
+            &world_profile_tag,
+        );
+        let point_lights = Self::build_candidate_point_lights(&extracted)?;
+
+        // Build bridge DTOs and call app bridge prepare.
+        let bridge_dtos = self.build_bridge_dtos(&extracted);
+        let bridge_tokens = if self.bridges.has_bridges() {
+            self.bridges.prepare_with_tokens(
+                &bridge_dtos.world_collision,
+                &bridge_dtos.entity_colliders,
+                &bridge_dtos.lights,
+                &bridge_dtos.behaviors,
+            )?
+        } else {
+            Vec::new()
+        };
+
+        let candidate = BspCandidate::new(
+            token.generation,
+            source_identity.clone(),
+            extracted,
+            cache_identity,
+            source_link,
+            source_link_json,
+            point_lights,
+            bridge_tokens,
+            was_occupied,
+        );
+
+        self.candidate = Some(candidate);
+
+        Ok(PrepareResult {
+            token,
+            source_identity,
+            face_count,
+            entity_count,
+            light_count,
+            batch_count,
+            has_pvs,
+            was_occupied,
+        })
     }
 
     /// Prepare a pre-parsed BSP world.
@@ -1285,7 +1402,163 @@ impl BspCoordinator {
         }
     }
 
-    /// Build a source link from extracted DTOs using the versioned schema.
+    /// Build a source link from extracted DTOs and an authorized import record.
+    fn build_source_link_from_import(
+        &self,
+        extracted: &ExtractedBsp,
+        import: &AuthorizedBspImport,
+        source_identity: &str,
+        scale: f32,
+    ) -> BspSourceLink {
+        let content_hash_hex: String = extracted
+            .content_hash
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        let content_hash = format!("sha256:{}", content_hash_hex);
+
+        let entity_identity_records = crate::source_link::build_identity_records(
+            &extracted.entity_identities,
+            &extracted.entity_descriptors,
+        );
+
+        let mut link = BspSourceLink::new(source_identity.to_string(), content_hash);
+
+        // Populate import policy from authorized import.
+        link.import_policy = crate::source_link::ImportPolicy {
+            scale: crate::source_link::CanonicalFloat(scale),
+            light_calibration: crate::source_link::ImportLightCalibration {
+                intensity_scale: crate::source_link::CanonicalFloat(import.light_scale),
+                overbright: crate::source_link::CanonicalFloat(import.overbright),
+            },
+            atlas_policy: crate::source_link::AtlasPolicy::default(),
+            texture_roots: import
+                .provenance
+                .companion_root_label
+                .iter()
+                .cloned()
+                .collect(),
+            strict: import.policy.is_strict(),
+        };
+
+        // Populate companion hashes from authorized import.
+        link.companion_hashes.palette = import
+            .palette
+            .as_ref()
+            .map(|r| format!("sha256:{}", r.identity.hex()));
+        link.companion_hashes.lit = import
+            .lit
+            .as_ref()
+            .map(|r| format!("sha256:{}", r.identity.hex()));
+        link.companion_hashes.wads = import
+            .wads
+            .iter()
+            .map(|w| {
+                (
+                    w.basename.clone(),
+                    format!("sha256:{}", w.resource.identity.hex()),
+                )
+            })
+            .collect();
+
+        link.entity_identity_records = entity_identity_records;
+
+        link
+    }
+
+    /// Build a cache identity from extracted DTOs and an authorized import record.
+    fn build_cache_identity_from_import(
+        &self,
+        _extracted: &ExtractedBsp,
+        import: &AuthorizedBspImport,
+        profile_tag: &str,
+    ) -> CacheIdentity {
+        let bsp_content_hash = import.bsp.identity.as_bytes();
+        let palette_hash = import
+            .palette
+            .as_ref()
+            .map(|r| *r.identity.as_bytes())
+            .unwrap_or([0u8; 32]);
+
+        // Build companion identities: .lit and WAD entries.
+        let mut companion_identities: Vec<CompanionId> = Vec::new();
+        if let Some(ref lit) = import.lit {
+            companion_identities.push(CompanionId {
+                kind: "lit".to_string(),
+                content_hash: *lit.identity.as_bytes(),
+            });
+        }
+        for wad in &import.wads {
+            companion_identities.push(CompanionId {
+                kind: format!("wad:{}", wad.basename),
+                content_hash: *wad.resource.identity.as_bytes(),
+            });
+        }
+        companion_identities.sort();
+
+        // Build WAD cache entries (preserve declaration order).
+        let wad_entries: Vec<WadCacheEntry> = import
+            .wads
+            .iter()
+            .map(|w| WadCacheEntry {
+                ordinal: w.ordinal,
+                basename: w.basename.clone(),
+                logical_id: w.resource.logical_id.clone(),
+                content_hash: *w.resource.identity.as_bytes(),
+            })
+            .collect();
+
+        // Build PBR closure entries.
+        let mut pbr_closure: Vec<PbrClosureEntry> = import
+            .pbr
+            .iter()
+            .map(|c| {
+                let kind_str = match c.kind {
+                    PbrCompanionKind::Normal => "normal",
+                    PbrCompanionKind::Gloss => "gloss",
+                };
+                PbrClosureEntry {
+                    source_slot: c.source_slot,
+                    texture_identity: c.texture_identity.clone(),
+                    kind: kind_str.to_string(),
+                    present: c.resource.is_some(),
+                    content_hash: c
+                        .resource
+                        .as_ref()
+                        .map(|r| *r.identity.as_bytes())
+                        .unwrap_or([0u8; 32]),
+                }
+            })
+            .collect();
+        pbr_closure.sort_by(|a, b| a.source_slot.cmp(&b.source_slot).then(a.kind.cmp(&b.kind)));
+
+        CacheIdentity::compute(
+            *bsp_content_hash,
+            profile_tag,
+            import.scale,
+            palette_hash,
+            import.policy.is_strict(),
+            companion_identities,
+            wad_entries,
+            pbr_closure,
+            vec![],
+            vec![],
+            crate::cache::LightCalibration {
+                intensity_scale: import.light_scale.to_le_bytes(),
+                overbright: import.overbright.to_le_bytes(),
+            },
+            crate::cache::AtlasPolicy {
+                page_size: 2048,
+                padding: 2,
+                style_count: 4,
+            },
+            crate::cache::CollisionPolicy::default(),
+            [import.fullbright_start, import.fullbright_end],
+            import.overbright,
+        )
+    }
+
+    /// Build a source link from extracted DTOs (raw-byte/development path).
     fn build_source_link(
         &self,
         extracted: &ExtractedBsp,
@@ -1314,7 +1587,7 @@ impl BspCoordinator {
         link
     }
 
-    /// Build a cache identity from extracted DTOs.
+    /// Build a cache identity from extracted DTOs (raw-byte/development path).
     fn build_cache_identity(&self, extracted: &ExtractedBsp) -> CacheIdentity {
         let mut companion_identities = extracted
             .textures
@@ -1349,12 +1622,17 @@ impl BspCoordinator {
             extracted.profile_tag,
             0.0254,
             [0; 32],
+            false,
             companion_identities,
             vec![],
             vec![],
+            vec![],
+            vec![],
             Default::default(),
             Default::default(),
             Default::default(),
+            [224, 255],
+            2.0,
         )
     }
 

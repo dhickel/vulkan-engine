@@ -6,14 +6,13 @@
 //!
 //! # Usage
 //!
-//! Windowed: `cargo run -p bsp_beta -- --bsp maps/e1m1.bsp`
-//! Headless: `cargo run -p bsp_beta -- --headless --capture-frames 5 --bsp maps/e1m1.bsp`
-//! MCP: `cargo run -p bsp_beta -- --mcp --bsp maps/e1m1.bsp`
+//! Windowed: `cargo run -p bsp_beta -- --strict --bsp maps/e1m1.bsp --palette gfx/palette.lmp --wad maps/dungeon.wad --textures textures/`
+//! Headless: `cargo run -p bsp_beta -- --strict --headless --capture-frames 5 --bsp maps/e1m1.bsp --palette gfx/palette.lmp`
+//! MCP: `cargo run -p bsp_beta -- --strict --mcp --bsp maps/e1m1.bsp --palette gfx/palette.lmp`
 
 mod cli;
 mod mcp;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -25,6 +24,7 @@ use bsp_runtime::bridge::{
     AppBridge, BehaviorEntityRecipe, EntityCollisionRecipe, LightEntityRecipe, WorldCollisionRecipe,
 };
 use bsp_runtime::coordinator::BspCoordinator;
+use bsp_runtime::package::{self, effective_import_summary};
 use engine::camera::{Camera, FPSController};
 use engine::events::{runtime_event_bus, EventBus};
 use engine::frame::{FixedStepClock, FixedStepConfig, FrameClock};
@@ -57,6 +57,8 @@ enum AppError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("no import mode selected; use --strict or --development")]
+    NoImportMode,
     #[error("BSP load/query proof failed: {code:?}: {message}")]
     BspLoadProof {
         code: bsp::diagnostic::DiagnosticCode,
@@ -70,6 +72,8 @@ enum AppError {
     Renderer(#[from] renderer::RendererError),
     #[error("BSP runtime error: {0}")]
     BspRuntime(#[from] bsp_runtime::BspRuntimeError),
+    #[error("package load error: {0}")]
+    PackageLoad(#[from] package::PackageLoadError),
     #[error("event loop error: {0}")]
     EventLoop(#[from] winit::error::EventLoopError),
     #[error("window error: {0}")]
@@ -95,88 +99,49 @@ fn run() -> Result<(), AppError> {
     let args = cli::CliArgs::parse();
 
     let bsp_path = args.bsp_path.as_ref().ok_or(AppError::NoBspPath)?;
-    let bsp_bytes = std::fs::read(bsp_path).map_err(|source| AppError::BspRead {
-        path: bsp_path.clone(),
-        source,
-    })?;
-
-    log::info!(
-        "Loaded BSP: {} ({} bytes)",
-        bsp_path.display(),
-        bsp_bytes.len()
-    );
-
-    // ── Load companions (palette + .lit) ──────────────────────────────
     let palette_path = args
         .resolve_palette_path()
         .map_err(|e| AppError::BridgeProof(e.to_string()))?;
-    let palette_bytes = load_companion_bytes(&palette_path, "palette")?;
-    log::info!(
-        "Loaded palette: {} ({} bytes)",
-        palette_path.display(),
-        palette_bytes.len()
-    );
 
-    let lit_data: Option<Vec<u8>> = if let Some(lit_path) = args.resolve_lit_path() {
-        let data = load_companion_bytes(&lit_path, ".lit")?;
-        log::info!("Loaded .lit: {} bytes", data.len());
-        Some(data)
-    } else {
-        log::info!("No .lit companion found (auto-discovered)");
-        None
-    };
-
-    // ── Load WAD archive (if available) ──────────────────────────────
-    let wad_archives: Vec<(String, Vec<u8>)> = if let Some(wad_path) = args
+    let lit_path = args.resolve_lit_path();
+    let wad_path = args
         .resolve_wad_path()
-        .map_err(|e| AppError::BridgeProof(e.to_string()))?
-    {
-        let wad_bytes = load_companion_bytes(&wad_path, "WAD")?;
-        let basename = wad_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        log::info!(
-            "Loaded WAD: {} ({} bytes)",
-            wad_path.display(),
-            wad_bytes.len()
-        );
-        vec![(basename, wad_bytes)]
-    } else {
-        log::warn!(
-            "No WAD file found — textures may not resolve (use --wad <path> or --companion-dir)"
-        );
-        Vec::new()
+        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
+
+    let import_mode = args
+        .require_import_mode()
+        .map_err(|_| AppError::NoImportMode)?;
+
+    let bsp_runtime_mode = match import_mode {
+        cli::ImportMode::Strict => package::ImportMode::Strict,
+        cli::ImportMode::Development => package::ImportMode::Development,
     };
 
-    // ── Load BSP with companions ──────────────────────────────────────
+    let textures_dir = args.textures_dir.as_deref();
+
+    // ── Authorize direct import through the runtime package boundary ────
     let t_build = Instant::now();
-    let load_options = bsp::LoadOptions {
-        strict: false,
-        palette: Some(palette_bytes),
-        lit_data: lit_data.clone(),
-        wad_archives: wad_archives.clone(),
-        source_identity: bsp_path.display().to_string(),
-        ..bsp::LoadOptions::default()
-    };
-    let world = bsp::BspLoader::load(&bsp_bytes, &load_options).map_err(|report| {
-        AppError::BspLoadProof {
-            code: report.code,
-            message: report.message,
-        }
-    })?;
+    let wad_paths: Vec<PathBuf> = wad_path.into_iter().collect();
+    let import = package::authorize_direct_import(
+        bsp_path,
+        &palette_path,
+        lit_path.as_deref(),
+        &wad_paths,
+        textures_dir,
+        bsp_runtime_mode,
+        args.scale,
+    )?;
+
     log::info!(
-        "BSP parsed: {} faces, {} nodes, {} leaves ({}ms)",
-        world.faces.len(),
-        world.nodes.len(),
-        world.leaves.len(),
+        "BSP authorized: {} ({} bytes, {}ms)",
+        bsp_path.display(),
+        import.bsp.bytes.len(),
         t_build.elapsed().as_millis(),
     );
-    let pbr_texture_companions = discover_pbr_texture_companions(&args, &world)?;
-    log::info!(
-        "Discovered {} external BSP PBR texture companions",
-        pbr_texture_companions.len()
-    );
+
+    // Emit effective-import summary.
+    let summary = effective_import_summary(&import);
+    log::info!("Effective import:\n{summary}");
 
     // ── Coordinator-based prepare ─────────────────────────────────────
     let mut coordinator = BspCoordinator::new();
@@ -187,14 +152,7 @@ fn run() -> Result<(), AppError> {
     coordinator.register_bridge("physics", Box::new(physics_bridge));
     coordinator.register_bridge("runtime", Box::new(runtime_bridge));
 
-    // Prepare through coordinator using the pre-loaded world
-    let prepare = coordinator.prepare_from_world_with_texture_companions(
-        world,
-        pbr_texture_companions,
-        wad_archives,
-        Some(args.scale),
-        bsp_path.display().to_string(),
-    )?;
+    let prepare = coordinator.prepare_authorized_import(import)?;
 
     log::info!(
         "BSP extraction: {} faces, {} entities, {} lights, {} batches, PVS={} ({}ms total)",
@@ -222,11 +180,11 @@ fn run() -> Result<(), AppError> {
     }
 
     // ── Run startup proof ─────────────────────────────────────────────
-    run_load_query_physics_behavior_proof(&args, &bsp_bytes, lit_data, bsp_path)?;
+    run_load_query_physics_behavior_proof(&args)?;
 
     // ── Run ────────────────────────────────────────────────────────────
     if args.mcp {
-        run_mcp(&mut coordinator, bsp_bytes.len())
+        run_mcp(&mut coordinator)
     } else if args.headless {
         run_headless(&args, &mut coordinator)
     } else {
@@ -234,104 +192,58 @@ fn run() -> Result<(), AppError> {
     }
 }
 
-/// Load companion file bytes.
-fn load_companion_bytes(path: &PathBuf, _label: &str) -> Result<Vec<u8>, AppError> {
-    std::fs::read(path).map_err(|source| AppError::BspRead {
-        path: path.clone(),
-        source,
-    })
-}
+// ─── Startup proof ─────────────────────────────────────────────────────
 
-fn discover_pbr_texture_companions(
-    args: &cli::CliArgs,
-    world: &bsp::BspWorld,
-) -> Result<Vec<bsp::resources::TextureCompanion>, AppError> {
-    let mut roots = Vec::<PathBuf>::new();
-    if let Some(root) = args.companion_dir.as_ref() {
-        roots.push(root.clone());
-        if let Some(game_root) = root.parent() {
-            roots.push(game_root.join("textures"));
-        }
-    }
-    if let Some(map_dir) = args.bsp_path.as_ref().and_then(|path| path.parent()) {
-        roots.push(map_dir.to_path_buf());
-        if let Some(game_root) = map_dir.parent() {
-            roots.push(game_root.join("textures"));
-        }
-    }
-    roots.dedup();
+fn run_load_query_physics_behavior_proof(args: &cli::CliArgs) -> Result<(), AppError> {
+    // Re-load through the authorized import for the proof.
+    let bsp_path = args.bsp_path.as_ref().ok_or(AppError::NoBspPath)?;
+    let palette_path = args
+        .resolve_palette_path()
+        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
+    let lit_path = args.resolve_lit_path();
+    let wad_path = args
+        .resolve_wad_path()
+        .map_err(|e| AppError::BridgeProof(e.to_string()))?;
+    let import_mode = args
+        .require_import_mode()
+        .map_err(|_| AppError::NoImportMode)?;
 
-    let mut texture_names = bsp::resources::collect_miptex_names(&world.miptex_data);
-    texture_names.sort();
-    texture_names.dedup();
-    let mut loaded = std::collections::HashSet::new();
-    let mut companions = Vec::new();
-
-    for texture_name in texture_names {
-        let Some(names) = bsp::resources::pbr_companion_file_names(&texture_name) else {
-            continue;
-        };
-        for filename in [names.normal, names.gloss] {
-            let mut variants = vec![filename.clone()];
-            let lowercase = filename.to_ascii_lowercase();
-            if lowercase != filename {
-                variants.push(lowercase);
-            }
-            'search: for root in &roots {
-                for variant in &variants {
-                    let candidate = root.join(variant);
-                    if !candidate.is_file() {
-                        continue;
-                    }
-                    let key = candidate.to_string_lossy().into_owned();
-                    if loaded.insert(key.clone()) {
-                        let bytes =
-                            std::fs::read(&candidate).map_err(|source| AppError::BspRead {
-                                path: candidate.clone(),
-                                source,
-                            })?;
-                        log::info!("Loaded BSP PBR companion: {}", candidate.display());
-                        companions.push(bsp::resources::TextureCompanion::new(key, bytes));
-                    }
-                    break 'search;
-                }
-            }
-        }
-    }
-
-    Ok(companions)
-}
-
-// ── Startup proof ─────────────────────────────────────────────────────
-
-fn run_load_query_physics_behavior_proof(
-    args: &cli::CliArgs,
-    bsp_bytes: &[u8],
-    lit_data: Option<Vec<u8>>,
-    bsp_path: &PathBuf,
-) -> Result<(), AppError> {
-    // Direct extraction for physics/behavior proof (independent of coordinator
-    // to exercise the raw bridge prepare/validate/commit path).
-    let palette_bytes = match args.resolve_palette_path() {
-        Ok(p) => std::fs::read(&p).map_err(|source| AppError::BspRead {
-            path: p.clone(),
-            source,
-        })?,
-        Err(e) => return Err(AppError::BridgeProof(format!("palette: {e}"))),
+    let bsp_runtime_mode = match import_mode {
+        cli::ImportMode::Strict => package::ImportMode::Strict,
+        cli::ImportMode::Development => package::ImportMode::Development,
     };
+
+    let wad_paths: Vec<PathBuf> = wad_path.into_iter().collect();
+    let import = package::authorize_direct_import(
+        bsp_path,
+        &palette_path,
+        lit_path.as_deref(),
+        &wad_paths,
+        args.textures_dir.as_deref(),
+        bsp_runtime_mode,
+        args.scale,
+    )?;
+
+    // Parse BSP independently for physics/behavior proof.
     let load_options = bsp::LoadOptions {
-        strict: false,
-        palette: Some(palette_bytes),
-        lit_data,
+        strict: bsp_runtime_mode.is_strict(),
+        palette: import.palette.as_ref().map(|r| r.bytes.clone()),
+        lit_data: import.lit.as_ref().map(|r| r.bytes.clone()),
+        wad_archives: import
+            .wads
+            .iter()
+            .map(|w| (w.basename.clone(), w.resource.bytes.clone()))
+            .collect(),
         source_identity: bsp_path.display().to_string(),
         ..bsp::LoadOptions::default()
     };
-    let world = bsp::BspLoader::load(bsp_bytes, &load_options).map_err(|report| {
+    let world = bsp::BspLoader::load(&import.bsp.bytes, &load_options).map_err(|report| {
         AppError::BspLoadProof {
             code: report.code,
             message: report.message,
         }
     })?;
+
     let qte = bsp::coords::QuakeToEngine::new(args.scale);
     let contents = bsp::point_contents_with_transform(
         Vec3::ZERO,
@@ -341,12 +253,33 @@ fn run_load_query_physics_behavior_proof(
         &qte,
     );
 
-    // Direct extraction for bridge proof (world already has palette from load)
+    // Direct extraction for bridge proof.
+    let palette = import
+        .palette
+        .as_ref()
+        .map(|r| bsp::resources::decode_palette(&r.bytes));
+    let wad_archives: Vec<(String, Vec<u8>)> = import
+        .wads
+        .iter()
+        .map(|w| (w.basename.clone(), w.resource.bytes.clone()))
+        .collect();
+    let texture_companions: Vec<bsp::resources::TextureCompanion> = import
+        .pbr
+        .iter()
+        .filter_map(|c| {
+            c.resource.as_ref().map(|r| {
+                bsp::resources::TextureCompanion::new(r.logical_id.clone(), r.bytes.clone())
+            })
+        })
+        .collect();
+
     let extracted = bsp::extract::extract(bsp::BspExtractionRequest {
         world,
-        palette: None, // world.palette from load is used
+        palette,
+        wad_archives,
+        texture_companions,
+        strict: bsp_runtime_mode.is_strict(),
         scale: args.scale,
-        strict: false,
         ..Default::default()
     })
     .map_err(|report| AppError::BspLoadProof {
@@ -427,6 +360,8 @@ struct BridgeInputs {
 }
 
 fn bridge_inputs_from_extraction(extracted: &bsp::extract::ExtractedBsp) -> BridgeInputs {
+    use std::collections::HashMap;
+
     let mut recipes_by_entity: HashMap<u32, Vec<bsp::collision::CollisionRecipe>> = HashMap::new();
     for recipe in &extracted.collision_recipes {
         recipes_by_entity
@@ -512,10 +447,6 @@ fn bsp_player_start(extracted: &bsp::extract::ExtractedBsp, fallback: Vec3) -> V
 }
 
 /// Start headless and MCP views at the authored player spawn.
-///
-/// A BSP's geometric bounds center is not guaranteed to be part of its sealed
-/// interior; generated layouts commonly leave that point in exterior void.
-/// The point entity is the authoritative safe camera origin.
 fn bsp_headless_camera(start_pos: Vec3, _extracted: &bsp::extract::ExtractedBsp) -> Camera {
     let camera = Camera::new(start_pos);
     log::info!("BSP headless camera: pos={start_pos:?} (info_player_start)");
@@ -570,13 +501,13 @@ fn run_windowed(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
         })
         .collect();
 
-    let entity_classnames: HashMap<u32, String> = extracted
+    let entity_classnames: std::collections::HashMap<u32, String> = extracted
         .entity_descriptors
         .iter()
         .map(|ed| (ed.entity_index, ed.classname.clone()))
         .collect();
 
-    let entity_source_models: HashMap<u32, String> = extracted
+    let entity_source_models: std::collections::HashMap<u32, String> = extracted
         .entity_descriptors
         .iter()
         .filter_map(|ed| ed.model_ref.map(|m| (ed.entity_index, format!("*{}", m))))
@@ -685,7 +616,7 @@ struct HeadlessRuntime {
 
 fn prepare_headless_runtime(
     coordinator: &mut BspCoordinator,
-    mcp_bsp_size: Option<usize>,
+    mcp_map_data: Option<&bsp::extract::ExtractedBsp>,
 ) -> Result<HeadlessRuntime, AppError> {
     let config = RendererConfig {
         app_name: "bsp_beta".to_string(),
@@ -726,12 +657,12 @@ fn prepare_headless_runtime(
             ],
         })
         .collect();
-    let entity_classnames: HashMap<u32, String> = extracted
+    let entity_classnames: std::collections::HashMap<u32, String> = extracted
         .entity_descriptors
         .iter()
         .map(|ed| (ed.entity_index, ed.classname.clone()))
         .collect();
-    let entity_source_models: HashMap<u32, String> = extracted
+    let entity_source_models: std::collections::HashMap<u32, String> = extracted
         .entity_descriptors
         .iter()
         .filter_map(|ed| ed.model_ref.map(|m| (ed.entity_index, format!("*{}", m))))
@@ -739,7 +670,7 @@ fn prepare_headless_runtime(
     let headless_camera = bsp_headless_camera(player_start, extracted);
 
     let mount = renderer.prepare_bsp_mount(extracted)?;
-    let mcp_map = mcp_bsp_size.map(|size| mcp::McpMap::from_mount(extracted, &mount, size));
+    let mcp_map = mcp_map_data.map(|ext| mcp::McpMap::from_mount(ext, &mount, 0));
     let token = bsp_runtime::BspGenerationToken {
         generation: coordinator.current_generation(),
     };
@@ -804,8 +735,6 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
                     )))
                 })?;
 
-            // Readback completion is asynchronous. Pump a bounded number of
-            // additional frames instead of exiting while the capture is pending.
             for _ in 0..8 {
                 render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
                     .map_err(AppError::Renderer)?;
@@ -850,7 +779,6 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
             }
         }
     } else {
-        // Smoke render: just a few frames
         let smoke_frames = 5u32;
         for frame_num in 0..smoke_frames {
             render_app_frame(&mut renderer, &mut scene, &mut loop_state, 1920, 1080, true)
@@ -863,14 +791,21 @@ fn run_headless(args: &cli::CliArgs, coordinator: &mut BspCoordinator) -> Result
     Ok(())
 }
 
-fn run_mcp(coordinator: &mut BspCoordinator, bsp_size: usize) -> Result<(), AppError> {
+fn run_mcp(coordinator: &mut BspCoordinator) -> Result<(), AppError> {
     log::info!("Starting BSP beta MCP mode (headless 1920×1080)");
+    // Capture extraction before it gets consumed.
+    let extracted_clone = coordinator
+        .staged_extraction()
+        .ok_or_else(|| AppError::BridgeProof("no staged extraction".to_string()))?
+        .clone();
+    let _bsp_size = extracted_clone.face_geometries.len();
+
     let HeadlessRuntime {
         mut renderer,
         mut scene,
         mut loop_state,
         mcp_map,
-    } = prepare_headless_runtime(coordinator, Some(bsp_size))?;
+    } = prepare_headless_runtime(coordinator, Some(&extracted_clone))?;
     let mcp_map = mcp_map
         .ok_or_else(|| AppError::BridgeProof("MCP map data was not retained".to_string()))?;
 
@@ -905,9 +840,9 @@ struct AppLoopState {
     /// Inline model info for pose computation.
     inline_model_infos: Vec<InlineModelInfo>,
     /// Entity classname lookup.
-    entity_classnames: HashMap<u32, String>,
+    entity_classnames: std::collections::HashMap<u32, String>,
     /// Entity source model lookup.
-    entity_source_models: HashMap<u32, String>,
+    entity_source_models: std::collections::HashMap<u32, String>,
     /// Scene node map for snapshot-driven external/inline nodes.
     entity_node_map: EntityNodeMap,
 }
@@ -929,8 +864,8 @@ impl AppLoopState {
             physics_bridge: None,
             snapshot_producer: SnapshotProducer::new(model_mappings),
             inline_model_infos: Vec::new(),
-            entity_classnames: HashMap::new(),
-            entity_source_models: HashMap::new(),
+            entity_classnames: std::collections::HashMap::new(),
+            entity_source_models: std::collections::HashMap::new(),
             entity_node_map: EntityNodeMap::default(),
         }
     }
