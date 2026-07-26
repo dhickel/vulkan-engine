@@ -1198,33 +1198,105 @@ impl Scene {
     ///
     /// While a BSP mount is active, imported BSP lights are selected via
     /// PVS-filtered deterministic scoring, and BSP static geometry is
-    /// PVS-culled before frustum culling.
+    /// PVS-culled before frustum culling. Replacing an existing mount detaches
+    /// it from scene publication before publishing the new lease.
     ///
     /// Thread: Any
     /// May Stall: No
     #[cfg(feature = "bsp")]
     pub fn set_bsp_mount(&mut self, mount: crate::api::bsp::PreparedBspMount) {
-        let mut state = mount.mount_state;
-        state.activate();
-        state.set_leaf_membership(mount.leaf_membership);
-        state.set_render_assets(
-            mount.face_meshes,
-            mount.face_materials,
-            mount.render_batches,
-            mount.batch_meshes,
-            mount.batch_materials,
-            mount.light_descriptors,
-        );
-        self.world.set_bsp_mount(state);
+        let _retired = self.retire_bsp_mount();
+        self.world.set_bsp_mount(mount.into_scene_state());
+    }
+
+    /// Retire the currently published BSP mount.
+    ///
+    /// The returned opaque receipt proves that scene submission no longer
+    /// retains the mount. It does not itself enqueue fence-aware GPU teardown;
+    /// that requires renderer cache and submission-serial ownership outside
+    /// this `Scene` facade.
+    #[cfg(feature = "bsp")]
+    pub fn retire_bsp_mount(&mut self) -> Option<crate::api::bsp::RetiredBspMount> {
+        self.world
+            .retire_bsp_mount()
+            .map(crate::api::bsp::RetiredBspMount::from_scene_state)
+    }
+
+    /// Return whether this scene currently publishes a BSP mount.
+    #[cfg(feature = "bsp")]
+    pub fn has_bsp_mount(&self) -> bool {
+        self.world.has_bsp_mount()
     }
 
     /// Clear the BSP mount, returning to non-BSP rendering.
+    ///
+    /// This compatibility helper uses the same scene-detachment boundary as
+    /// an explicit unload. [`Scene::retire_bsp_mount`] acknowledges removal
+    /// from submission, not queueing of GPU teardown.
     ///
     /// Thread: Any
     /// May Stall: No
     #[cfg(feature = "bsp")]
     pub fn clear_bsp_mount(&mut self) {
-        self.world.clear_bsp_mount();
+        let _retired = self.retire_bsp_mount();
+    }
+
+    /// Replace BSP-owned point lights after transaction preflight.
+    ///
+    /// The coordinator validates all input before commit. This method repeats
+    /// the checks before mutating anything, then performs an infallible slot
+    /// swap so an error leaves the old light set untouched.
+    #[cfg(feature = "bsp")]
+    #[doc(hidden)]
+    pub fn replace_prevalidated_bsp_point_lights(
+        &mut self,
+        old_ids: &[PointLightId],
+        new_lights: &[PointLight],
+    ) -> Result<Vec<PointLightId>, SceneError> {
+        for (index, id) in old_ids.iter().enumerate() {
+            if old_ids[..index].contains(id) {
+                return Err(SceneError::InvalidPointLight(format!(
+                    "duplicate BSP-owned point-light id (slot={}, generation={})",
+                    id.slot, id.generation
+                )));
+            }
+            self.validate_point_light(*id)?;
+        }
+        for light in new_lights {
+            light.validate()?;
+        }
+
+        let remaining = self
+            .world
+            .active_point_light_count()
+            .checked_sub(old_ids.len())
+            .ok_or_else(|| {
+                SceneError::InvalidPointLight(
+                    "BSP-owned point lights exceed the active scene count".to_string(),
+                )
+            })?;
+        if remaining.saturating_add(new_lights.len()) > MAX_POINT_LIGHTS_GPU {
+            return Err(SceneError::InvalidPointLight(format!(
+                "BSP point-light replacement would exceed cap ({MAX_POINT_LIGHTS_GPU})"
+            )));
+        }
+
+        for id in old_ids {
+            let removed = self.world.remove_point_light(*id);
+            debug_assert!(removed, "validated BSP point light must remove");
+            self.point_light_stable_ids.remove(id);
+            self.point_light_parents.remove(id);
+        }
+
+        Ok(new_lights
+            .iter()
+            .map(|light| {
+                self.world.add_point_light(PointLight {
+                    color: light.sanitize_color(),
+                    ..*light
+                })
+            })
+            .collect())
     }
 
     /// Set per-frame BSP frame values (light-style intensities, liquid time).
@@ -3651,6 +3723,21 @@ mod tests {
     use glam::{Mat4, Quat, Vec3};
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_retirement_detaches_scene_state() {
+        let mut scene = Scene::new();
+        scene.set_bsp_mount(crate::api::bsp::PreparedBspMount::new());
+        assert!(scene.has_bsp_mount());
+
+        let receipt = scene
+            .retire_bsp_mount()
+            .expect("published BSP mount must return an opaque detach receipt");
+        assert!(!scene.has_bsp_mount());
+        assert!(scene.retire_bsp_mount().is_none());
+        drop(receipt);
+    }
 
     #[test]
     fn stale_handle_rejected() {

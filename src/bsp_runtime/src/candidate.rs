@@ -25,7 +25,7 @@
 
 use crate::bridge::BridgeToken;
 use crate::cache::CacheIdentity;
-use crate::error::{CandidatePhase, BspRuntimeError};
+use crate::error::{BspRuntimeError, CandidatePhase};
 use crate::source_link::BspSourceLink;
 
 use bsp::extract::ExtractedBsp;
@@ -98,13 +98,13 @@ pub struct CandidatePointLight {
 ///
 /// After a candidate is consumed by commit, its resources move into an
 /// `ActiveBspMount`. The active mount owns the extracted DTOs, source-link
-/// metadata, cache identity, point-light IDs, published source-link JSON,
-/// and the opaque renderer mount lease.
+/// metadata, cache identity, point-light IDs, and published source-link JSON.
 ///
-/// When replaced or unloaded, the active mount's renderer lease is handed
-/// off to the renderer for fence-based retirement. `bsp_runtime` records
-/// the handoff identity but never reads raw GPU handles or computes
-/// submission serials.
+/// The opaque renderer lease moves directly from a validated candidate into
+/// `Scene`. On replacement or unload, `Scene::retire_bsp_mount` returns an
+/// opaque scene-detachment receipt; `bsp_runtime` never retains a cloned mount
+/// or reads raw GPU handles. Fence-aware GPU retirement still requires a
+/// renderer-owned queue handoff outside this record.
 pub struct ActiveBspMount {
     /// Active extracted BSP DTOs.
     pub extracted: ExtractedBsp,
@@ -116,8 +116,6 @@ pub struct ActiveBspMount {
     pub cache_identity: CacheIdentity,
     /// Point-light IDs created for this mount in the scene.
     pub light_ids: Vec<renderer::api::PointLightId>,
-    /// Opaque renderer mount lease (held by the scene).
-    pub renderer_lease: PreparedBspMount,
     /// Human-readable source identity for diagnostics.
     pub source_identity: String,
     /// Generation at which this mount was committed.
@@ -130,36 +128,7 @@ impl std::fmt::Debug for ActiveBspMount {
             .field("source_identity", &self.source_identity)
             .field("committed_generation", &self.committed_generation)
             .field("light_ids", &self.light_ids)
-            .field("renderer_lease", &"<PreparedBspMount>")
             .finish()
-    }
-}
-
-impl ActiveBspMount {
-    /// Create a new active mount from a consumed candidate.
-    pub fn from_candidate(
-        candidate: BspCandidate,
-        light_ids: Vec<renderer::api::PointLightId>,
-        committed_generation: u64,
-    ) -> Self {
-        let mount = match candidate.renderer_lease {
-            RendererLease::Ready(m) => m,
-            _ => {
-                // This is a contract violation — caller must ensure the candidate
-                // is in RendererReady state before consuming.
-                panic!("ActiveBspMount::from_candidate requires a renderer-ready candidate");
-            }
-        };
-        Self {
-            extracted: candidate.extracted,
-            source_link: candidate.source_link,
-            source_link_json: candidate.source_link_json,
-            cache_identity: candidate.cache_identity,
-            light_ids,
-            renderer_lease: mount,
-            source_identity: candidate.source_identity,
-            committed_generation,
-        }
     }
 }
 
@@ -215,8 +184,8 @@ pub struct BspCandidate {
     pub has_pvs: bool,
     /// Phase 03 import provenance for diagnostics (not used for path resolution).
     pub import_provenance: Option<ImportProvenanceRecord>,
-    /// Number of times a retirement handoff was recorded for this candidate's
-    /// replaced active mount (diagnostics only).
+    /// Reserved diagnostic count for scene-detachment handoffs associated
+    /// with this candidate (not evidence of GPU queueing).
     pub retirement_handoff_count: u64,
 }
 
@@ -375,13 +344,16 @@ impl BspCandidate {
         }
 
         match self.state {
-            CandidateState::CpuPrepared
-            | CandidateState::RendererPending
-            | CandidateState::RendererReady => {
+            CandidateState::CpuPrepared | CandidateState::RendererPending => {
                 self.state = CandidateState::Failed;
                 self.renderer_lease = RendererLease::Failed { reason };
                 Ok(())
             }
+            CandidateState::RendererReady => Err(BspRuntimeError::InvalidCandidateTransition {
+                current: CandidatePhase::RendererReady,
+                attempted: CandidatePhase::Failed,
+                detail: "a ready renderer lease must be retired through rollback".to_string(),
+            }),
             CandidateState::ValidatedForScene | CandidateState::Consumed => {
                 Err(BspRuntimeError::InvalidCandidateTransition {
                     current: CandidatePhase::from(self.state),
@@ -417,14 +389,18 @@ impl BspCandidate {
         &mut self,
         current_generation: u64,
         mount: PreparedBspMount,
-    ) -> Result<(), BspRuntimeError> {
-        // Validate generation
+    ) -> Result<(), (BspRuntimeError, PreparedBspMount)> {
+        // Every rejected completion returns its lease to the caller so the
+        // coordinator can detach it through the opaque renderer/Scene facade
+        // exactly once instead of letting Rust drop it at the error boundary.
         if self.generation != current_generation {
-            // Stale completion: the lease must be sent to retirement by the caller.
-            return Err(BspRuntimeError::StaleRendererCompletion {
-                candidate_generation: self.generation,
-                current_generation,
-            });
+            return Err((
+                BspRuntimeError::StaleRendererCompletion {
+                    candidate_generation: self.generation,
+                    current_generation,
+                },
+                mount,
+            ));
         }
 
         match self.state {
@@ -433,29 +409,36 @@ impl BspCandidate {
                 self.renderer_lease = RendererLease::Ready(mount);
                 Ok(())
             }
-            CandidateState::RendererReady => {
-                // Duplicate lease — refuse it. Caller must retire it.
-                Err(BspRuntimeError::DuplicateReadyLease {
+            CandidateState::RendererReady => Err((
+                BspRuntimeError::DuplicateReadyLease {
                     generation: self.generation,
-                })
-            }
-            CandidateState::ValidatedForScene | CandidateState::Consumed => {
-                Err(BspRuntimeError::InvalidCandidateTransition {
+                },
+                mount,
+            )),
+            CandidateState::ValidatedForScene | CandidateState::Consumed => Err((
+                BspRuntimeError::InvalidCandidateTransition {
                     current: CandidatePhase::from(self.state),
                     attempted: CandidatePhase::RendererReady,
                     detail: "candidate already validated or consumed".to_string(),
-                })
-            }
-            CandidateState::Failed => Err(BspRuntimeError::InvalidCandidateTransition {
-                current: CandidatePhase::from(self.state),
-                attempted: CandidatePhase::RendererReady,
-                detail: "candidate has failed".to_string(),
-            }),
-            CandidateState::RolledBack => Err(BspRuntimeError::InvalidCandidateTransition {
-                current: CandidatePhase::from(self.state),
-                attempted: CandidatePhase::RendererReady,
-                detail: "candidate has been rolled back".to_string(),
-            }),
+                },
+                mount,
+            )),
+            CandidateState::Failed => Err((
+                BspRuntimeError::InvalidCandidateTransition {
+                    current: CandidatePhase::from(self.state),
+                    attempted: CandidatePhase::RendererReady,
+                    detail: "candidate has failed".to_string(),
+                },
+                mount,
+            )),
+            CandidateState::RolledBack => Err((
+                BspRuntimeError::InvalidCandidateTransition {
+                    current: CandidatePhase::from(self.state),
+                    attempted: CandidatePhase::RendererReady,
+                    detail: "candidate has been rolled back".to_string(),
+                },
+                mount,
+            )),
         }
     }
 
@@ -563,66 +546,76 @@ impl BspCandidate {
         mut self,
         current_generation: u64,
         light_ids: Vec<renderer::api::PointLightId>,
-    ) -> Result<ActiveBspMount, BspRuntimeError> {
+    ) -> Result<(ActiveBspMount, PreparedBspMount), (BspRuntimeError, BspCandidate)> {
         if self.generation != current_generation {
-            return Err(BspRuntimeError::StaleGeneration {
+            let error = BspRuntimeError::StaleGeneration {
                 expected: self.generation,
                 current: current_generation,
-            });
+            };
+            return Err((error, self));
         }
 
         match self.state {
             CandidateState::ValidatedForScene => {
                 // Take the ready mount out of the candidate before it moves.
-                let mount = match std::mem::replace(
-                    &mut self.renderer_lease,
-                    RendererLease::NotStarted,
-                ) {
-                    RendererLease::Ready(m) => m,
-                    other => {
-                        self.renderer_lease = other;
-                        return Err(BspRuntimeError::CommitContractViolated {
-                            detail: "renderer mount not ready at consume time".to_string(),
-                        });
-                    }
-                };
+                let mount =
+                    match std::mem::replace(&mut self.renderer_lease, RendererLease::NotStarted) {
+                        RendererLease::Ready(mount) => mount,
+                        other => {
+                            self.renderer_lease = other;
+                            let error = BspRuntimeError::CommitContractViolated {
+                                detail: "renderer mount not ready at consume time".to_string(),
+                            };
+                            return Err((error, self));
+                        }
+                    };
 
                 self.state = CandidateState::Consumed;
 
-                Ok(ActiveBspMount {
-                    extracted: self.extracted,
-                    source_link: self.source_link,
-                    source_link_json: self.source_link_json,
-                    cache_identity: self.cache_identity,
-                    light_ids,
-                    renderer_lease: mount,
-                    source_identity: self.source_identity,
-                    committed_generation: self.generation,
-                })
+                Ok((
+                    ActiveBspMount {
+                        extracted: self.extracted,
+                        source_link: self.source_link,
+                        source_link_json: self.source_link_json,
+                        cache_identity: self.cache_identity,
+                        light_ids,
+                        source_identity: self.source_identity,
+                        committed_generation: self.generation,
+                    },
+                    mount,
+                ))
             }
             CandidateState::CpuPrepared | CandidateState::RendererPending => {
-                Err(BspRuntimeError::InvalidCandidateTransition {
+                let error = BspRuntimeError::InvalidCandidateTransition {
                     current: CandidatePhase::from(self.state),
                     attempted: CandidatePhase::Consumed,
                     detail: "candidate must be validated before commit".to_string(),
-                })
+                };
+                Err((error, self))
             }
-            CandidateState::RendererReady => Err(BspRuntimeError::InvalidCandidateTransition {
-                current: CandidatePhase::from(self.state),
-                attempted: CandidatePhase::Consumed,
-                detail: "candidate must be validated for scene before commit".to_string(),
-            }),
-            CandidateState::Consumed => Err(BspRuntimeError::InvalidCandidateTransition {
-                current: CandidatePhase::from(self.state),
-                attempted: CandidatePhase::Consumed,
-                detail: "candidate already consumed".to_string(),
-            }),
+            CandidateState::RendererReady => {
+                let error = BspRuntimeError::InvalidCandidateTransition {
+                    current: CandidatePhase::from(self.state),
+                    attempted: CandidatePhase::Consumed,
+                    detail: "candidate must be validated for scene before commit".to_string(),
+                };
+                Err((error, self))
+            }
+            CandidateState::Consumed => {
+                let error = BspRuntimeError::InvalidCandidateTransition {
+                    current: CandidatePhase::from(self.state),
+                    attempted: CandidatePhase::Consumed,
+                    detail: "candidate already consumed".to_string(),
+                };
+                Err((error, self))
+            }
             CandidateState::Failed | CandidateState::RolledBack => {
-                Err(BspRuntimeError::InvalidCandidateTransition {
+                let error = BspRuntimeError::InvalidCandidateTransition {
                     current: CandidatePhase::from(self.state),
                     attempted: CandidatePhase::Consumed,
                     detail: "cannot consume a failed or rolled-back candidate".to_string(),
-                })
+                };
+                Err((error, self))
             }
         }
     }
@@ -636,13 +629,8 @@ impl BspCandidate {
     /// and renderer retirement, respectively).
     ///
     /// Returns the bridge tokens that need rollback and any ready renderer mount
-    /// that needs retirement.
-    pub fn rollback(
-        &mut self,
-    ) -> (
-        Vec<Option<BridgeToken>>,
-        Option<PreparedBspMount>,
-    ) {
+    /// that needs opaque scene detachment.
+    pub fn rollback(&mut self) -> (Vec<Option<BridgeToken>>, Option<PreparedBspMount>) {
         match self.state {
             CandidateState::Consumed | CandidateState::RolledBack => {
                 // Terminal states: nothing to do.
@@ -651,13 +639,11 @@ impl BspCandidate {
             _ => {
                 self.state = CandidateState::RolledBack;
                 let tokens = std::mem::take(&mut self.bridge_tokens);
-                let mount = match std::mem::replace(
-                    &mut self.renderer_lease,
-                    RendererLease::NotStarted,
-                ) {
-                    RendererLease::Ready(m) => Some(m),
-                    _ => None,
-                };
+                let mount =
+                    match std::mem::replace(&mut self.renderer_lease, RendererLease::NotStarted) {
+                        RendererLease::Ready(m) => Some(m),
+                        _ => None,
+                    };
                 (tokens, mount)
             }
         }
@@ -691,42 +677,23 @@ impl BspCandidate {
     /// Mark the renderer upload as failed. Legacy path.
     #[doc(hidden)]
     pub fn fail_renderer_upload(&mut self, reason: String) {
-        self.renderer_lease = RendererLease::Failed { reason };
+        if let RendererLease::Ready(mount) =
+            std::mem::replace(&mut self.renderer_lease, RendererLease::Failed { reason })
+        {
+            let _retired = mount.retire();
+        }
         self.state = CandidateState::Failed;
     }
 
     /// Transition the renderer lease to Ready. Legacy path.
     #[doc(hidden)]
-    pub fn set_renderer_ready(
-        &mut self,
-        mount: PreparedBspMount,
-    ) -> Result<(), BspRuntimeError> {
-        match &self.renderer_lease {
-            RendererLease::Pending { generation } if *generation == self.generation => {
-                self.renderer_lease = RendererLease::Ready(mount);
-                self.state = CandidateState::RendererReady;
-                Ok(())
+    pub fn set_renderer_ready(&mut self, mount: PreparedBspMount) -> Result<(), BspRuntimeError> {
+        match self.transition_to_renderer_ready(self.generation, mount) {
+            Ok(()) => Ok(()),
+            Err((error, mount)) => {
+                let _retired = mount.retire();
+                Err(error)
             }
-            RendererLease::Pending { generation } => {
-                let old_gen = *generation;
-                self.renderer_lease = RendererLease::NotStarted;
-                Err(BspRuntimeError::StaleGeneration {
-                    expected: old_gen,
-                    current: self.generation,
-                })
-            }
-            RendererLease::NotStarted => {
-                self.renderer_lease = RendererLease::Ready(mount);
-                self.state = CandidateState::RendererReady;
-                Ok(())
-            }
-            RendererLease::Ready(_) => {
-                self.renderer_lease = RendererLease::Ready(mount);
-                Ok(())
-            }
-            RendererLease::Failed { ref reason } => Err(BspRuntimeError::SourceUnavailable {
-                reason: format!("renderer upload failed: {reason}"),
-            }),
         }
     }
 

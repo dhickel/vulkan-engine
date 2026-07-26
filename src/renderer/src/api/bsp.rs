@@ -42,7 +42,7 @@ pub use crate::scene::bsp_visibility::{
 /// Legacy face-per-element and parallel-batch arrays are derived from
 /// these records as checked compatibility projections.
 #[cfg(feature = "bsp")]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PreparedBspMount {
     /// BSP visibility state (nodes, leaves, PVS data).
     pub mount_state: BspMountState,
@@ -71,6 +71,33 @@ pub struct PreparedBspMount {
     pub upload_demand: Option<BspUploadDemand>,
     /// BSP light descriptors extracted from light entities.
     pub light_descriptors: Vec<bsp::extract::LightDescriptor>,
+}
+
+/// Opaque renderer-owned receipt for a BSP mount detached from publication.
+///
+/// The receipt proves that scene submission no longer retains the mount state.
+/// It does **not** enqueue GPU resource destruction: that requires the
+/// renderer's cache and submission-serial context, which `Scene` does not
+/// own. Dropping this receipt is therefore not fence-aware retirement.
+#[cfg(feature = "bsp")]
+#[must_use = "a detached BSP mount receipt documents removal from scene publication"]
+pub struct RetiredBspMount {
+    _state: BspMountState,
+}
+
+#[cfg(feature = "bsp")]
+impl std::fmt::Debug for RetiredBspMount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetiredBspMount")
+    }
+}
+
+#[cfg(feature = "bsp")]
+impl RetiredBspMount {
+    pub(crate) fn from_scene_state(mut state: BspMountState) -> Self {
+        state.deactivate();
+        Self { _state: state }
+    }
 }
 
 #[cfg(feature = "bsp")]
@@ -143,9 +170,10 @@ fn build_lightmap_upload_data(
         if destination_page >= page_count || destination_slot >= 4 {
             return Err("BSP lightmap destination layer is out of bounds".to_string());
         }
-        let source = atlas.pages.get(source_page as usize).ok_or_else(|| {
-            format!("BSP lightmap references missing atlas page {source_page}")
-        })?;
+        let source = atlas
+            .pages
+            .get(source_page as usize)
+            .ok_or_else(|| format!("BSP lightmap references missing atlas page {source_page}"))?;
         let source_end_x = source_offset
             .0
             .checked_add(extent.0)
@@ -308,9 +336,11 @@ impl BspUploadReceipt {
         }
     }
 
-    /// Transfer ownership of the receipt to the caller, disarming it.
+    /// Mark a successful upload committed, preventing rollback on drop.
     ///
-    /// After this call, the receipt's resources will not be rolled back on drop.
+    /// This receipt does not become part of `PreparedBspMount`; physical
+    /// cache payload ownership remains in renderer caches. A later mount
+    /// retirement path must therefore explicitly reach those caches.
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -418,6 +448,37 @@ impl PreparedBspMount {
         }
     }
 
+    /// Consume this prepared lease into the scene-owned mount state.
+    ///
+    /// This is crate-visible because only [`crate::api::scene::Scene`] may
+    /// publish a prepared mount. The lease is deliberately move-only: a
+    /// coordinator cannot retain a second copy after publication.
+    pub(crate) fn into_scene_state(self) -> BspMountState {
+        let PreparedBspMount {
+            mut mount_state,
+            leaf_membership,
+            ..
+        } = self;
+        mount_state.activate();
+        mount_state.set_leaf_membership(leaf_membership);
+        mount_state
+    }
+
+    /// Detach an unpublished mount from runtime ownership.
+    ///
+    /// The mount was never visible to scene submission. The opaque receipt
+    /// prevents integration code from reaching into renderer-owned handles,
+    /// but does not itself enqueue fence-aware GPU retirement.
+    pub fn retire(self) -> RetiredBspMount {
+        let PreparedBspMount {
+            mut mount_state,
+            leaf_membership,
+            ..
+        } = self;
+        mount_state.set_leaf_membership(leaf_membership);
+        RetiredBspMount::from_scene_state(mount_state)
+    }
+
     /// Build a `PreparedBspMount` from canonical mounted batch records.
     ///
     /// This is the sole authoritative construction path. Every mounted batch
@@ -434,18 +495,11 @@ impl PreparedBspMount {
         upload_demand: Option<BspUploadDemand>,
     ) -> Result<Self, String> {
         let face_count = mount_state.face_meshes.len();
-        let render_batches: Vec<bsp::geometry::RenderBatch> = mounted_batches
-            .iter()
-            .map(|mb| mb.render.clone())
-            .collect();
-        let batch_meshes: Vec<MeshHandle> = mounted_batches
-            .iter()
-            .map(|mb| mb.mesh)
-            .collect();
-        let batch_materials: Vec<BspMaterialHandle> = mounted_batches
-            .iter()
-            .map(|mb| mb.material)
-            .collect();
+        let render_batches: Vec<bsp::geometry::RenderBatch> =
+            mounted_batches.iter().map(|mb| mb.render.clone()).collect();
+        let batch_meshes: Vec<MeshHandle> = mounted_batches.iter().map(|mb| mb.mesh).collect();
+        let batch_materials: Vec<BspMaterialHandle> =
+            mounted_batches.iter().map(|mb| mb.material).collect();
 
         if render_batches.len() != mounted_batches.len()
             || batch_meshes.len() != mounted_batches.len()
@@ -756,7 +810,9 @@ impl PreparedBspMount {
         }
 
         let alloc_guard = guard!(
-            allocator.lock().map_err(|_| "allocator lock poisoned".to_string()),
+            allocator
+                .lock()
+                .map_err(|_| "allocator lock poisoned".to_string()),
             receipt,
             device,
             allocator,
@@ -850,8 +906,7 @@ impl PreparedBspMount {
             TextureCache::DEFAULT_EMISSIVE_TEX.generation,
         );
         if plan.textures.len() != extracted.textures.len() {
-            let err =
-                "BSP planned texture count changed after upload preflight".to_string();
+            let err = "BSP planned texture count changed after upload preflight".to_string();
             receipt.rollback(device, allocator, data_cache);
             return Err(err);
         }
@@ -1065,12 +1120,14 @@ impl PreparedBspMount {
             guard!(
                 (0..demand.material_count)
                     .map(|material_index| {
-                        surface_cache.allocate_material_set(device).map_err(|error| {
-                            format!(
+                        surface_cache
+                            .allocate_material_set(device)
+                            .map_err(|error| {
+                                format!(
                                 "failed to allocate BSP material set {material_index}/{}: {error}",
                                 demand.material_count
                             )
-                        })
+                            })
                     })
                     .collect::<Result<Vec<_>, _>>(),
                 receipt,
@@ -1094,49 +1151,50 @@ impl PreparedBspMount {
             surface_cache.material_desc_pool
         };
 
-        let material_texture_bindings = {
-            let texture_cache = guard!(
-                data_cache
-                    .texture_cache
-                    .lock()
-                    .map_err(|_| "texture_cache lock poisoned".to_string()),
-                receipt,
-                device,
-                allocator,
-                data_cache
-            );
-            guard!(
-                plan.materials
-                    .iter()
-                    .map(|material| {
-                        let (albedo_handle, fullbright_handle) = material
-                            .texture_index
-                            .and_then(|index| texture_pairs.get(index).copied())
-                            .unwrap_or((default_white_handle, default_black_handle));
-                        let albedo = texture_cache
-                            .get_loaded_texture(albedo_handle)
-                            .map_err(|error| format!("BSP albedo texture is not loaded: {error:?}"))?;
-                        let fullbright = texture_cache
-                            .get_loaded_texture(fullbright_handle)
-                            .map_err(|error| {
-                                format!("BSP fullbright texture is not loaded: {error:?}")
-                            })?;
-                        Ok::<_, String>((
-                            albedo_handle,
-                            albedo.alloc.image_view,
-                            albedo.sampler,
-                            fullbright_handle,
-                            fullbright.alloc.image_view,
-                            fullbright.sampler,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, _>>(),
-                receipt,
-                device,
-                allocator,
-                data_cache
-            )
-        };
+        let material_texture_bindings =
+            {
+                let texture_cache = guard!(
+                    data_cache
+                        .texture_cache
+                        .lock()
+                        .map_err(|_| "texture_cache lock poisoned".to_string()),
+                    receipt,
+                    device,
+                    allocator,
+                    data_cache
+                );
+                guard!(
+                    plan.materials
+                        .iter()
+                        .map(|material| {
+                            let (albedo_handle, fullbright_handle) = material
+                                .texture_index
+                                .and_then(|index| texture_pairs.get(index).copied())
+                                .unwrap_or((default_white_handle, default_black_handle));
+                            let albedo = texture_cache.get_loaded_texture(albedo_handle).map_err(
+                                |error| format!("BSP albedo texture is not loaded: {error:?}"),
+                            )?;
+                            let fullbright = texture_cache
+                                .get_loaded_texture(fullbright_handle)
+                                .map_err(|error| {
+                                    format!("BSP fullbright texture is not loaded: {error:?}")
+                                })?;
+                            Ok::<_, String>((
+                                albedo_handle,
+                                albedo.alloc.image_view,
+                                albedo.sampler,
+                                fullbright_handle,
+                                fullbright.alloc.image_view,
+                                fullbright.sampler,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, _>>(),
+                    receipt,
+                    device,
+                    allocator,
+                    data_cache
+                )
+            };
 
         for (material_index, ((material, &set), binding)) in plan
             .materials
@@ -1149,8 +1207,7 @@ impl PreparedBspMount {
                 .checked_mul(ubo_stride)
                 .ok_or_else(|| "BSP surface UBO offset overflow".to_string())?;
             unsafe {
-                let dst = (ubo_ptr as *mut u8).add(ubo_offset as usize)
-                    as *mut BspSurfaceUniform;
+                let dst = (ubo_ptr as *mut u8).add(ubo_offset as usize) as *mut BspSurfaceUniform;
                 std::ptr::write(dst, material.surface_uniform);
             }
             write_bsp_material_descriptor(
@@ -1222,40 +1279,42 @@ impl PreparedBspMount {
                 .zip(allocated_sets.iter().copied())
                 .zip(material_texture_bindings.iter())
                 .enumerate()
-                .map(|(material_index, ((material, material_descriptor), binding))| {
-                    let pipeline = match (material.surface_class, material.is_pbr) {
-                        (bsp::materials::SurfaceClass::AlphaMask, true) => {
-                            VkPipelineType::BspPbrAlphaMask
-                        }
-                        (bsp::materials::SurfaceClass::Opaque, true) => {
-                            VkPipelineType::BspPbrOpaque
-                        }
-                        (bsp::materials::SurfaceClass::AlphaMask, false) => {
-                            VkPipelineType::BspAlphaMask
-                        }
-                        (bsp::materials::SurfaceClass::Sky, _) => VkPipelineType::BspSky,
-                        (bsp::materials::SurfaceClass::Liquid, _) => VkPipelineType::BspLiquid,
-                        _ => VkPipelineType::BspOpaque,
-                    };
-                    let ubo_offset = (material_index as u64)
-                        .checked_mul(ubo_stride)
-                        .expect("BSP surface UBO offset overflow");
-                    surface_cache.add(BspCachedSurfaceRepr {
-                        material_descriptor,
-                        surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc {
-                            alloc_address: 0,
-                            offset: ubo_offset,
-                            buffer: ubo_buffer,
-                            size: ubo_size,
-                            sub_buffer_index: 0,
-                        },
-                        pipeline,
-                        surface_flags: material.surface_uniform.surface_flags,
-                        albedo_tex: binding.0,
-                        fullbright_tex: Some(binding.3),
-                        lightmap_tex: default_white_handle,
-                    })
-                })
+                .map(
+                    |(material_index, ((material, material_descriptor), binding))| {
+                        let pipeline = match (material.surface_class, material.is_pbr) {
+                            (bsp::materials::SurfaceClass::AlphaMask, true) => {
+                                VkPipelineType::BspPbrAlphaMask
+                            }
+                            (bsp::materials::SurfaceClass::Opaque, true) => {
+                                VkPipelineType::BspPbrOpaque
+                            }
+                            (bsp::materials::SurfaceClass::AlphaMask, false) => {
+                                VkPipelineType::BspAlphaMask
+                            }
+                            (bsp::materials::SurfaceClass::Sky, _) => VkPipelineType::BspSky,
+                            (bsp::materials::SurfaceClass::Liquid, _) => VkPipelineType::BspLiquid,
+                            _ => VkPipelineType::BspOpaque,
+                        };
+                        let ubo_offset = (material_index as u64)
+                            .checked_mul(ubo_stride)
+                            .expect("BSP surface UBO offset overflow");
+                        surface_cache.add(BspCachedSurfaceRepr {
+                            material_descriptor,
+                            surf_ubo_alloc: crate::vulkan::vk_types::VkSubAlloc {
+                                alloc_address: 0,
+                                offset: ubo_offset,
+                                buffer: ubo_buffer,
+                                size: ubo_size,
+                                sub_buffer_index: 0,
+                            },
+                            pipeline,
+                            surface_flags: material.surface_uniform.surface_flags,
+                            albedo_tex: binding.0,
+                            fullbright_tex: Some(binding.3),
+                            lightmap_tex: default_white_handle,
+                        })
+                    },
+                )
                 .collect();
             receipt.material_handles = handles.clone();
             handles
@@ -1443,9 +1502,7 @@ impl PreparedBspMount {
 
         // ── 7. Build canonical mounted batch records ───────────────
         let mut mounted_batches = Vec::with_capacity(plan.batches.len());
-        if plan.batches.len() != batch_meshes.len()
-            || plan.batches.len() != batch_materials.len()
-        {
+        if plan.batches.len() != batch_meshes.len() || plan.batches.len() != batch_materials.len() {
             let err = format!(
                 "batch resource count mismatch: {} planned, {} meshes, {} materials",
                 plan.batches.len(),
@@ -1491,7 +1548,9 @@ impl PreparedBspMount {
         mount_state.face_meshes = face_meshes.clone();
         mount_state.face_materials = face_materials.clone();
 
-        // Transfer receipt ownership into the mount (disarm).
+        // Commit the upload receipt. The mount does not retain a physical
+        // retirement receipt, so later cache retirement needs renderer/core
+        // context rather than this scene-facing value.
         receipt.disarm();
 
         PreparedBspMount::from_canonical(
@@ -1527,10 +1586,12 @@ pub struct BspUploadRequest {
     pub _resource_bytes: Vec<u8>,
 }
 
-/// Mount lease state machine.
+/// Conceptual mount lease state machine.
 ///
-/// A mount transitions through: `pending` → `ready` → `active` → `retiring` → `retired`.
-/// The move-only design ensures single-ownership of GPU resources at each stage.
+/// A complete implementation transitions through `pending` → `ready` →
+/// `active` → `retiring` → `retired`. The current Scene detachment path only
+/// establishes publication removal; it does not yet drive `Retiring`/`Retired`
+/// through a renderer fence-aware queue.
 #[cfg(feature = "bsp")]
 pub enum BspMountLease {
     /// Upload in progress; generation token guards against cancellation.
@@ -1539,9 +1600,9 @@ pub enum BspMountLease {
     Ready(PreparedBspMount),
     /// Attached to scene and receiving frame updates.
     Active,
-    /// Unmounted; GPU resources held for fence-aware retirement.
+    /// Unmounted; intended future state for renderer-held fence retirement.
     Retiring,
-    /// Fully retired; all GPU resources freed.
+    /// Intended future state after renderer-owned GPU payload destruction.
     Retired,
 }
 
@@ -1619,11 +1680,12 @@ mod tests {
     fn from_canonical_preserves_batch_identity() {
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![0],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![0],
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,
@@ -1632,8 +1694,8 @@ mod tests {
         let mesh = MeshHandle::new(1, 0);
         let material = BspMaterialHandle::new(1, 0);
         let bounds = (glam::Vec3::ZERO, glam::Vec3::ONE);
-        let mounted = MountedBspBatch::try_new(&batch, mesh, material, bounds)
-            .expect("valid mounted batch");
+        let mounted =
+            MountedBspBatch::try_new(&batch, mesh, material, bounds).expect("valid mounted batch");
 
         let mut mount_state = BspMountState::new();
         mount_state.face_meshes = vec![mesh];
@@ -1669,11 +1731,12 @@ mod tests {
 
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![0],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![0],
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,

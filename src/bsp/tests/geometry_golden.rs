@@ -292,8 +292,8 @@ fn golden_batch_emits_each_valid_renderable_face_once_with_sorted_leaf_set() {
 
     let emitted: Vec<u32> = batches.iter().flat_map(|b| b.face_indices.iter().copied()).collect();
     assert_eq!(emitted, vec![3]);
-    assert!(batches.iter().any(|b| b.key.leaf_signature == vec![1, 5]));
-    assert!(!batches.iter().any(|b| b.key.leaf_signature == vec![1, 2]));
+    assert!(batches.iter().any(|b| b.leaf_signature == vec![1, 5]));
+    assert!(!batches.iter().any(|b| b.leaf_signature == vec![1, 2]));
 }
 
 #[test]
@@ -301,11 +301,12 @@ fn golden_batch_key_deterministic_ordering() {
     // Even with identical content, batches should sort deterministically
     let batch1 = geometry::RenderBatch {
         key: geometry::BatchKey {
-            leaf_signature: vec![1, 3, 5],
             render_class: 0,
             material_identity: 42,
             lightmap_page: 0,
+            model_index: 0,
         },
+        leaf_signature: vec![1, 3, 5],
         face_indices: vec![0],
         pvs_eligible: true,
         is_inline_model: false,
@@ -314,11 +315,12 @@ fn golden_batch_key_deterministic_ordering() {
 
     let batch2 = geometry::RenderBatch {
         key: geometry::BatchKey {
-            leaf_signature: vec![1, 3, 5],
             render_class: 0,
             material_identity: 10,
             lightmap_page: 0,
+            model_index: 0,
         },
+        leaf_signature: vec![1, 3, 5],
         face_indices: vec![1],
         pvs_eligible: true,
         is_inline_model: false,
@@ -332,7 +334,8 @@ fn golden_batch_key_deterministic_ordering() {
             .lightmap_page
             .cmp(&b.key.lightmap_page)
             .then_with(|| a.key.material_identity.cmp(&b.key.material_identity))
-            .then_with(|| a.key.leaf_signature.cmp(&b.key.leaf_signature))
+            .then_with(|| a.key.model_index.cmp(&b.key.model_index))
+            .then_with(|| a.leaf_signature.cmp(&b.leaf_signature))
     });
 
     assert!(batches[0].key.material_identity <= batches[1].key.material_identity);

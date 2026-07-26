@@ -1397,10 +1397,11 @@ impl SceneWorld {
         self.bsp_mount.deactivate();
     }
 
-    /// Retire the active BSP mount, returning the previous mount state for
-    /// fence-aware GPU resource retirement. The returned state is no longer
-    /// referenced by the scene and can be dropped or held for retirement
-    /// tracking.
+    /// Detach the active BSP mount and return its previous scene state.
+    ///
+    /// The returned state is no longer referenced by scene submission. This
+    /// method does not itself enqueue GPU resource retirement; a caller with
+    /// renderer/core cache ownership must perform that work.
     #[cfg(feature = "bsp")]
     pub(crate) fn retire_bsp_mount(
         &mut self,
@@ -1411,8 +1412,8 @@ impl SceneWorld {
         let mut retired = crate::scene::bsp_visibility::BspMountState::new();
         std::mem::swap(&mut self.bsp_mount, &mut retired);
         // The swapped-in mount is empty/inactive; the caller receives the
-        // previous active mount with its GPU resource handles intact for
-        // proper fence-observed retirement.
+        // previous active mount state. GPU cache retirement requires a
+        // separate renderer/core handoff.
         Some(retired)
     }
 
@@ -2616,11 +2617,12 @@ mod tests {
         mount.activate();
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: Vec::new(),
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: Vec::new(),
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,
@@ -2670,11 +2672,12 @@ mod tests {
         mount.activate();
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: Vec::new(),
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: Vec::new(),
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,

@@ -702,9 +702,8 @@ pub fn visible_batch_indices(
         .filter_map(|(index, batch)| {
             let visible = !batch.pvs_eligible
                 || batch.is_inline_model
-                || batch.key.leaf_signature.is_empty()
+                || batch.leaf_signature.is_empty()
                 || batch
-                    .key
                     .leaf_signature
                     .iter()
                     .any(|&leaf| pvs.is_visible(leaf));
@@ -755,7 +754,7 @@ pub fn mounted_visibility_decision(
     }
 
     // Empty leaf signature = conservative visible.
-    if mounted.render.key.leaf_signature.is_empty() {
+    if mounted.render.leaf_signature.is_empty() {
         return VisibilityDecision::Visible;
     }
 
@@ -770,7 +769,6 @@ pub fn mounted_visibility_decision(
     // Check if any leaf in the batch's signature is visible.
     let any_visible = mounted
         .render
-        .key
         .leaf_signature
         .iter()
         .any(|&leaf| pvs.is_visible(leaf));
@@ -812,7 +810,7 @@ pub fn classify_bsp_visibility(
         }
         diag.pvs_eligible += 1;
 
-        if mounted.render.key.leaf_signature.is_empty() {
+        if mounted.render.leaf_signature.is_empty() {
             diag.conservative_visible += 1;
             continue;
         }
@@ -827,7 +825,6 @@ pub fn classify_bsp_visibility(
         // Check for invalid membership: out-of-range leaf indices.
         let any_invalid = mounted
             .render
-            .key
             .leaf_signature
             .iter()
             .any(|&leaf| leaf >= mount_state.num_leaves);
@@ -839,7 +836,6 @@ pub fn classify_bsp_visibility(
 
         let any_visible = mounted
             .render
-            .key
             .leaf_signature
             .iter()
             .any(|&leaf| pvs.is_visible(leaf));
@@ -991,11 +987,12 @@ mod tests {
     fn filter_batches_by_pvs_no_pvs_returns_all() {
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![0, 1, 2],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![0, 1, 2],
             face_indices: vec![0, 1],
             pvs_eligible: true,
             is_inline_model: false,
@@ -1014,11 +1011,12 @@ mod tests {
     fn filter_batches_by_pvs_inline_model_always_passes() {
         let batch = bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 1,
             },
+            leaf_signature: vec![],
             face_indices: vec![0],
             pvs_eligible: false,
             is_inline_model: true,
@@ -1265,17 +1263,19 @@ mod tests {
     }
 
     fn make_test_batch(leaf_signature: Vec<u32>, pvs_eligible: bool, is_inline: bool) -> bsp::geometry::RenderBatch {
+        let model_index = if is_inline { 1 } else { 0 };
         bsp::geometry::RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature,
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index,
             },
+            leaf_signature,
             face_indices: vec![0],
             pvs_eligible,
             is_inline_model: is_inline,
-            model_index: if is_inline { 1 } else { 0 },
+            model_index,
         }
     }
 }

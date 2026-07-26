@@ -296,43 +296,51 @@ fn compute_bounds(verts: &[Vec3]) -> (Vec3, Vec3) {
     (mins, maxs)
 }
 
-// ── Leaf Membership Batching ──
+// ── Immutable Draw-Identity Batching ──
 
-/// Key for batching static world faces.
+/// Immutable draw-identity key for batching static world faces.
 ///
-/// Batch grouping is by: (leaf_membership_signature, render_class,
-/// material_identity, lightmap_page).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Faces are grouped by their immutable draw identity:
+/// `(render_class, material_identity, lightmap_page, model_index)`.
+/// Leaf membership is computed as the sorted unique union per batch
+/// and stored in [`RenderBatch::leaf_signature`], not used as a
+/// grouping key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BatchKey {
-    /// Deterministic signature of sorted non-solid leaf indices.
-    pub leaf_signature: Vec<u32>,
     /// Render class index (opaque=0, alpha_mask=1, sky=2, liquid=3).
     pub render_class: u8,
     /// Material identity (resolved texture index + style mask).
     pub material_identity: u64,
     /// Lightmap atlas page index.
     pub lightmap_page: u32,
+    /// Model index (0 = world, 1+ = inline model).
+    pub model_index: u32,
 }
 
 /// A batch of faces that are rendered together.
 #[derive(Debug, Clone)]
 pub struct RenderBatch {
-    /// The batch key.
+    /// The immutable draw-identity key.
     pub key: BatchKey,
+    /// Sorted unique union of non-solid leaf indices for PVS culling.
+    pub leaf_signature: Vec<u32>,
     /// Face indices in this batch.
     pub face_indices: Vec<u32>,
     /// Whether this batch is PVS-eligible (static world only).
     pub pvs_eligible: bool,
     /// Whether this batch is for an inline model (not PVS-eligible).
     pub is_inline_model: bool,
-    /// Model index (0 = world, 1+ = inline model).
+    /// Model index (0 = world, 1+ = inline model) — mirrored from key.
     pub model_index: u32,
 }
 
-/// Group faces into render batches.
+/// Group faces into render batches by immutable draw identity.
 ///
-/// Each face is emitted exactly once. Batches are sorted by
-/// `(lightmap_page, material_identity, leaf_membership_signature)`.
+/// Each renderable source face is assigned to exactly one batch.
+/// Static-world batches carry the sorted unique union of their
+/// member face leaf indices for PVS culling; inline-model batches
+/// have an empty leaf signature. Batches are sorted deterministically
+/// by `(lightmap_page, material_identity, model_index)`.
 pub fn batch_faces(
     face_geometries: &[FaceGeometry],
     leaf_membership: &[Vec<u32>], // per-face: sorted non-solid leaf indices
@@ -341,31 +349,19 @@ pub fn batch_faces(
     lightmap_pages: &[u32],
     inline_model_faces: &[(u32, u32)], // (model_index, face_index)
 ) -> Vec<RenderBatch> {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
-    let mut batch_map: HashMap<(BatchKey, u32), Vec<u32>> = HashMap::new();
-    let inline_map: HashMap<u32, u32> = inline_model_faces
+    // Map source face index → model_index (0 = world)
+    let inline_map: std::collections::HashMap<u32, u32> = inline_model_faces
         .iter()
         .map(|&(model, face_idx)| (face_idx, model))
         .collect();
 
+    // Group faces by immutable draw identity.
+    // Key = (render_class, material_identity, lightmap_page, model_index)
+    let mut groups: BTreeMap<BatchKey, Vec<usize>> = BTreeMap::new();
+
     for (fi, geo) in face_geometries.iter().enumerate() {
-        let source_face_index = geo.face_index;
-        let model_idx = inline_map.get(&source_face_index).copied().unwrap_or(0);
-        let is_inline = model_idx != 0;
-
-        // For inline models, leaf membership is empty (not PVS-eligible)
-        let leaf_sig = if is_inline {
-            Vec::new()
-        } else if fi < leaf_membership.len() {
-            let mut leaves = leaf_membership[fi].clone();
-            leaves.sort_unstable();
-            leaves.dedup();
-            leaves
-        } else {
-            Vec::new()
-        };
-
         if !geo.is_valid {
             continue;
         }
@@ -375,41 +371,63 @@ pub fn batch_faces(
         }
         let mat_id = material_identities.get(fi).copied().unwrap_or(0);
         let lm_page = lightmap_pages.get(fi).copied().unwrap_or(0);
+        let model_idx = inline_map.get(&geo.face_index).copied().unwrap_or(0);
 
         let key = BatchKey {
-            leaf_signature: leaf_sig,
             render_class: rc as u8,
             material_identity: mat_id,
             lightmap_page: lm_page,
+            model_index: model_idx,
         };
 
-        batch_map.entry((key, model_idx)).or_default().push(source_face_index);
+        groups.entry(key).or_default().push(fi);
     }
 
-    // Flatten and sort deterministically
-    let mut batches: Vec<RenderBatch> = batch_map
+    // Produce one RenderBatch per immutable-identity group.
+    // Each batch carries the sorted unique union of its member face leaf indices.
+    let mut batches: Vec<RenderBatch> = groups
         .into_iter()
-        .map(|((key, model_idx), mut face_indices)| {
+        .map(|(key, face_slots)| {
+            let is_inline = key.model_index != 0;
+            let mut face_indices: Vec<u32> = face_slots
+                .iter()
+                .map(|&fi| face_geometries[fi].face_index)
+                .collect();
             face_indices.sort_unstable();
-            let is_inline = model_idx != 0;
+
+            // Union of leaf memberships for static-world batches.
+            let leaf_signature: Vec<u32> = if is_inline {
+                Vec::new()
+            } else {
+                let mut union: Vec<u32> = face_slots
+                    .iter()
+                    .filter(|&&fi| fi < leaf_membership.len())
+                    .flat_map(|&fi| leaf_membership[fi].iter().copied())
+                    .collect();
+                union.sort_unstable();
+                union.dedup();
+                union
+            };
+
             RenderBatch {
-                key,
+                key: key.clone(),
+                leaf_signature,
                 face_indices,
                 pvs_eligible: !is_inline,
                 is_inline_model: is_inline,
-                model_index: model_idx,
+                model_index: key.model_index,
             }
         })
         .collect();
 
-    // Deterministic sort: (lightmap_page, material_identity, leaf_signature)
+    // Deterministic sort: (lightmap_page, material_identity, model_index)
     batches.sort_by(|a, b| {
         a.key
             .lightmap_page
             .cmp(&b.key.lightmap_page)
             .then_with(|| a.key.material_identity.cmp(&b.key.material_identity))
-            .then_with(|| a.key.leaf_signature.cmp(&b.key.leaf_signature))
-            .then_with(|| a.model_index.cmp(&b.model_index))
+            .then_with(|| a.key.model_index.cmp(&b.key.model_index))
+            .then_with(|| a.leaf_signature.cmp(&b.leaf_signature))
     });
 
     batches

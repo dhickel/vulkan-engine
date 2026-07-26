@@ -96,7 +96,8 @@ renderer::prepare_bsp_mount()
        │                              → BspSurfaceUniform UBO per material
        │                              → BspFrameValuesUniform UBO (one per frame slot)
        ├─► BspMountState              → leaf→node map, PVS decompressed bytes
-       └─► PreparedBspMount           → consumed by Scene::set_bsp_mount
+       └─► PreparedBspMount           → move-consumed by Scene::set_bsp_mount
+                                      → Scene::retire_bsp_mount detaches submission state
 ```
 
 ### Retirement
@@ -109,6 +110,12 @@ All GPU resources follow the existing fence-aware retirement contract (`GpuRetir
 - Surface UBOs: `VkSubAlloc` deallocation after referencing frames complete
 
 Reserved default slots for BSP resources do not yet exist — all BSP resources are dynamically created.
+
+> **Current lifecycle gap (Phase 05 revalidation):** `Scene::retire_bsp_mount()` removes
+> `BspMountState` from scene submission and returns an opaque detached-state receipt, but it
+> does not invoke the renderer cache retirement queues. Do not treat the receipt or the
+> coordinator detachment counter as fence-aware GPU retirement evidence. A renderer/core
+> handoff with submission-serial context is still required (GitHub #59).
 
 ## 6. Descriptor and Frame ABI
 
@@ -194,30 +201,30 @@ prepare_authorized_import(import)
   ├─► run bridge prepare hooks  → physics objects created (not published)
   └─► increment generation      → previous prepare invalidated
        │
-validate(token)
-  │
-  ├─► check token == generation
-  ├─► run bridge validate hooks
-  ├─► preflight scene capacity (light slots, etc.)
-  └─► all-or-nothing: failure → rollback
-       │
 set_renderer_mount_ready(token, mount)
   │
   ├─► generation check
   ├─► GPU upload complete check
   └─► candidate.renderer_ready = true
        │
+validate_for_scene(token, scene)
+  │
+  ├─► check token == generation and renderer readiness
+  ├─► run bridge validate hooks
+  ├─► preflight scene capacity (light slots, etc.)
+  └─► all-or-nothing: failure → rollback
+       │
 commit(token, scene)
   │
   ├─► check token == generation  (stale rejection)
   ├─► check candidate.validated  (must have passed validate)
   ├─► check renderer mount ready
-  ├─► scene.set_bsp_mount(mount) (GPU resources published)
-  ├─► scene.set_bsp_source_link(json) (persistence envelope)
-  ├─► add lights to scene
-  ├─► run bridge commit hooks    (physics published)
-  ├─► swap active ← staged
-  └─► consume candidate
+  ├─► run contractually non-fallible bridge activation
+  ├─► consume the move-only candidate lease
+  ├─► replace prevalidated BSP lights
+  ├─► detach old scene mount only after candidate-side fallible work
+  ├─► scene.set_bsp_mount(mount) and publish source-link JSON
+  └─► swap active metadata ← staged
 ```
 
 ### Commit Purity
@@ -257,6 +264,11 @@ All BSP GPU resources follow `DECISION-20260725-15`:
 - Completion advances only from successful fence observations
 - Submit failure cannot fabricate completion
 - Mesh/material/atlas retirement uses `RetirementClass` taxonomy
+
+The generic cache mechanisms above are not yet connected to BSP mount cancellation,
+replacement, or unload. `bsp_runtime` must not calculate serials or touch raw cache
+handles; the missing opaque renderer handoff is tracked by GitHub #59. Active app-bridge
+teardown after commit is separately missing (GitHub #60).
 
 ## 12. Immutable Snapshot
 

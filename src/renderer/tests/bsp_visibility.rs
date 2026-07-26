@@ -177,17 +177,19 @@ fn pvs_conservative_all_visible() {
 // ── Batch filtering tests ───────────────────────────────────────────────
 
 fn make_batch(leaf_signature: Vec<u32>, pvs_eligible: bool, is_inline: bool) -> RenderBatch {
+    let model_index = if is_inline { 1 } else { 0 };
     RenderBatch {
         key: BatchKey {
-            leaf_signature,
             render_class: 0,
             material_identity: 0,
             lightmap_page: 0,
+            model_index,
         },
+        leaf_signature,
         face_indices: vec![0],
         pvs_eligible,
         is_inline_model: is_inline,
-        model_index: if is_inline { 1 } else { 0 },
+        model_index,
     }
 }
 

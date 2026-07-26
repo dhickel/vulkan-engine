@@ -256,14 +256,6 @@ struct PlannedMaterialKey {
 }
 
 #[cfg(feature = "bsp")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct PlannedBatchKey {
-    material_plan_index: usize,
-    model_index: u32,
-    leaf_bucket: u32,
-}
-
-#[cfg(feature = "bsp")]
 #[derive(Debug, Clone, Copy)]
 struct PlannedFace {
     face_index: usize,
@@ -628,56 +620,6 @@ fn collect_planned_faces(
         });
     }
     Ok(faces)
-}
-
-#[cfg(feature = "bsp")]
-fn batch_key(face: PlannedFace, leaf_bucket_span: u32) -> PlannedBatchKey {
-    let leaf_bucket = if face.model_index != 0 {
-        u32::MAX
-    } else if leaf_bucket_span == u32::MAX {
-        0
-    } else {
-        face.primary_leaf
-            .map(|leaf| leaf / leaf_bucket_span.max(1))
-            .unwrap_or(u32::MAX - 1)
-    };
-    PlannedBatchKey {
-        material_plan_index: face.material_plan_index,
-        model_index: face.model_index,
-        leaf_bucket,
-    }
-}
-
-#[cfg(feature = "bsp")]
-fn grouped_faces(
-    faces: &[PlannedFace],
-    leaf_bucket_span: u32,
-) -> std::collections::BTreeMap<PlannedBatchKey, Vec<PlannedFace>> {
-    let mut groups = std::collections::BTreeMap::new();
-    for &face in faces {
-        groups
-            .entry(batch_key(face, leaf_bucket_span))
-            .or_insert_with(Vec::new)
-            .push(face);
-    }
-    groups
-}
-
-#[cfg(feature = "bsp")]
-fn choose_leaf_bucket_span(faces: &[PlannedFace]) -> Result<u32, String> {
-    let mut span = 1u32;
-    loop {
-        let count = grouped_faces(faces, span).len();
-        if count <= MAX_BSP_RENDER_BATCHES {
-            return Ok(span);
-        }
-        if span == u32::MAX {
-            return Err(format!(
-                "BSP requires {count} render batches even with global spatial grouping; maximum is {MAX_BSP_RENDER_BATCHES}"
-            ));
-        }
-        span = span.checked_mul(2).unwrap_or(u32::MAX);
-    }
 }
 
 #[cfg(feature = "bsp")]
@@ -1210,55 +1152,92 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         });
     }
 
-    let leaf_bucket_span = choose_leaf_bucket_span(&faces)?;
-    let groups = grouped_faces(&faces, leaf_bucket_span);
+    // ── Build source-face → slot and slot → material_plan_index maps ──
+    let source_face_to_slot: std::collections::HashMap<u32, usize> = extracted
+        .face_geometries
+        .iter()
+        .enumerate()
+        .map(|(slot, geo)| (geo.face_index, slot))
+        .collect();
+    let mut slot_material = vec![None; face_count];
+    for face in &faces {
+        if slot_material[face.face_index].replace(face.material_plan_index).is_some() {
+            return Err(format!("BSP face {} has duplicate material assignment", face.face_index));
+        }
+    }
+
+    // ── Materialize neutral batches one-for-one ────────────────────
+    if extracted.render_batches.is_empty() {
+        return Err("BSP has renderable faces but produces zero neutral render batches".to_string());
+    }
     let mut face_to_batch = vec![None; face_count];
     let mut face_to_material = vec![None; face_count];
-    let mut batches = Vec::with_capacity(groups.len());
+    let mut batches = Vec::with_capacity(extracted.render_batches.len());
 
-    for (batch_index, (key, mut group_faces)) in groups.into_iter().enumerate() {
-        group_faces.sort_by_key(|face| face.source_face_index);
-        let mut leaf_signature = group_faces
+    for (batch_index, neutral_batch) in extracted.render_batches.iter().enumerate() {
+        // Map source face indices to face slots.
+        let face_slots: Vec<usize> = neutral_batch
+            .face_indices
             .iter()
-            .flat_map(|face| extracted.leaf_membership[face.face_index].iter().copied())
-            .collect::<Vec<_>>();
-        leaf_signature.sort_unstable();
-        leaf_signature.dedup();
-        let source_faces = group_faces
+            .map(|&src_face| {
+                source_face_to_slot
+                    .get(&src_face)
+                    .copied()
+                    .ok_or_else(|| format!(
+                        "BSP neutral batch {batch_index} references unknown source face {src_face}"
+                    ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Collect PlannedFace records for mesh merging.
+        let group_faces: Vec<PlannedFace> = face_slots
             .iter()
-            .map(|face| face.source_face_index)
-            .collect::<Vec<_>>();
+            .map(|&slot| {
+                let mat_plan = slot_material[slot].ok_or_else(|| {
+                    format!("BSP neutral batch {batch_index} face slot {slot} has no material plan")
+                })?;
+                Ok(PlannedFace {
+                    face_index: slot,
+                    source_face_index: extracted.face_geometries[slot].face_index,
+                    material_plan_index: mat_plan,
+                    model_index: neutral_batch.model_index,
+                    primary_leaf: None,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        // Validate material homogeneity: all faces in the batch must share
+        // the same material plan index.
+        let expected_material = group_faces
+            .first()
+            .map(|f| f.material_plan_index)
+            .ok_or_else(|| format!("BSP batch {batch_index} has no faces"))?;
+        for face in &group_faces {
+            if face.material_plan_index != expected_material {
+                return Err(format!(
+                    "BSP neutral batch {batch_index} mixes material plans {expected_material} and {}",
+                    face.material_plan_index
+                ));
+            }
+        }
+
+        // Assign face-to-batch and face-to-material mappings.
         for face in &group_faces {
             if face_to_batch[face.face_index].replace(batch_index).is_some() {
-                return Err(format!("BSP face {} was assigned to multiple batches", face.face_index));
+                return Err(format!("BSP face {} assigned to multiple batches", face.face_index));
             }
-            face_to_material[face.face_index] = Some(key.material_plan_index);
+            face_to_material[face.face_index] = Some(face.material_plan_index);
         }
-        let material = &materials[key.material_plan_index];
-        let lightmap_page = material.surface_uniform.lightmap_layer_base / 4;
-        let render_batch = RenderBatch {
-            key: bsp::geometry::BatchKey {
-                leaf_signature,
-                render_class: render_class_index(material.surface_class),
-                material_identity: key.material_plan_index as u64,
-                lightmap_page,
-            },
-            face_indices: source_faces,
-            pvs_eligible: key.model_index == 0,
-            is_inline_model: key.model_index != 0,
-            model_index: key.model_index,
-        };
+
+        // Merge face meshes into one GPU batch mesh.
         batches.push(BspPlannedBatch {
             mesh: merge_batch_mesh(extracted, batch_index, &group_faces)?,
-            material_plan_index: key.material_plan_index,
-            render_batch,
+            material_plan_index: expected_material,
+            render_batch: neutral_batch.clone(),
         });
     }
 
     // ── Post-batching invariant checks ─────────────────────────────
-    if batches.is_empty() {
-        return Err("BSP has renderable faces but produced zero batches".to_string());
-    }
     for (batch_index, batch) in batches.iter().enumerate() {
         if batch.render_batch.face_indices.is_empty() {
             return Err(format!("BSP batch {batch_index} has no faces"));
@@ -1269,7 +1248,6 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         // Validate that all faces in this batch agree on material, render class, and model identity.
         let expected_material = batch.material_plan_index;
         let expected_model = batch.render_batch.model_index;
-        let _expected_class = batch.render_batch.key.render_class;
         for &source_face in &batch.render_batch.face_indices {
             let slot = source_face as usize;
             let face_material = face_to_material[slot];
@@ -1301,7 +1279,7 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         &batches,
         materials.len(),
         faces.len(),
-        leaf_bucket_span,
+        0,
     )?;
     let textures = plan_bsp_textures(extracted)?;
     Ok(BspUploadPlan {
@@ -1878,7 +1856,7 @@ mod tests {
         assert!(plan.demand.material_count <= MAX_BSP_MATERIALS);
         assert_eq!(plan.demand.renderable_face_count, 57_595);
         assert!(plan.demand.batch_count < plan.demand.renderable_face_count / 10);
-        assert!(plan.demand.leaf_bucket_span > 1);
+        assert_eq!(plan.demand.leaf_bucket_span, 0); // neutral batching: no leaf bucketing
         assert!(plan.face_to_batch.iter().all(Option::is_some));
         assert!(plan.face_to_material.iter().all(Option::is_some));
 
@@ -1906,11 +1884,12 @@ mod tests {
     fn mounted_batch_rejects_null_mesh() {
         let batch = RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![0],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![0],
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,
@@ -1931,11 +1910,12 @@ mod tests {
     fn mounted_batch_rejects_empty_face_list() {
         let batch = RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![],
             face_indices: vec![],
             pvs_eligible: true,
             is_inline_model: false,
@@ -1956,11 +1936,12 @@ mod tests {
     fn mounted_batch_rejects_non_finite_bounds() {
         let batch = RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![0],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![0],
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,
@@ -1981,11 +1962,12 @@ mod tests {
     fn mounted_batch_rejects_inverted_bounds() {
         let batch = RenderBatch {
             key: bsp::geometry::BatchKey {
-                leaf_signature: vec![0],
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                model_index: 0,
             },
+            leaf_signature: vec![0],
             face_indices: vec![0],
             pvs_eligible: true,
             is_inline_model: false,

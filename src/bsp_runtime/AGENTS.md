@@ -26,9 +26,12 @@
 
 ### Two-Step Transaction
 1. `prepare(bsp_bytes)` — parse, extract, stage (hidden)
-2. `validate(token)` — check generation, bridges
-3. `commit_with_mount(token, scene, mount)` — publish atomically
-4. `rollback()` — idempotent cleanup
+2. `set_renderer_mount_ready(token, mount)` — accept the move-only prepared lease
+3. `validate_for_scene(token, scene)` — check generation, renderer readiness, bridges, and scene preflight
+4. `commit(token, scene)` — publish the already validated lease
+5. `rollback()` — idempotent staged-candidate cleanup
+
+`commit_with_mount` is a legacy convenience wrapper; it must not be used after a lease was already set ready.
 
 ### Generation Tokens
 - Monotonic increment on each `prepare()`
@@ -44,6 +47,10 @@
 ### Poisoning
 - Panic in bridge commit/rollback → coordinator poisoned
 - `is_poisoned()` query, no further BSP operations accepted
+
+### Current Lifecycle Boundary
+- `PreparedBspMount` is move-only and `Scene::retire_bsp_mount()` detaches it from scene submission.
+- That receipt is not a renderer fence-retirement acknowledgement. BSP cache payload queueing is blocked on GitHub #59; generic committed-bridge teardown is blocked on GitHub #60.
 
 ## Validation
 

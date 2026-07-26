@@ -27,9 +27,7 @@ use crate::cache::{
     canonical_f32_bytes, compute_identity_hash, CacheIdentity, CompanionId, PbrClosureEntry,
     WadCacheEntry,
 };
-use crate::candidate::{
-    ActiveBspMount, BspCandidate, CandidatePointLight, ImportProvenanceRecord,
-};
+use crate::candidate::{ActiveBspMount, BspCandidate, CandidatePointLight, ImportProvenanceRecord};
 use crate::error::{BridgePhase, BspRuntimeError};
 use crate::generation::{BspGenerationCounter, BspGenerationToken};
 use crate::package::{AuthorizedBspImport, ImportMode, PbrCompanionKind};
@@ -129,9 +127,9 @@ pub struct BspCoordinator {
     /// Whether the coordinator has been poisoned.
     poisoned: bool,
 
-    /// Diagnostic counter: number of opaque retirement handoffs recorded.
-    /// Incremented each time a replaced/unloaded active mount's lease is
-    /// sent to renderer retirement.
+    /// Diagnostic counter: number of opaque scene-detachment handoffs.
+    /// This records removal from runtime/scene ownership only, not acceptance
+    /// by a renderer fence-aware retirement queue.
     retired_mount_count: u64,
 }
 
@@ -175,7 +173,8 @@ impl BspCoordinator {
         self.active_mount.as_ref().map(|m| &m.cache_identity)
     }
 
-    /// Returns the number of retired mounts (diagnostics).
+    /// Returns the number of detached mounts (diagnostic only, not renderer
+    /// fence-retirement acknowledgement).
     pub fn retired_mount_count(&self) -> u64 {
         self.retired_mount_count
     }
@@ -563,51 +562,50 @@ impl BspCoordinator {
     ///
     /// # Phase 05: Stale Completion Handling
     ///
-    /// If the candidate generation no longer matches the coordinator's current
-    /// generation, the mount is NOT accepted. Instead, the coordinator records
-    /// a stale completion event and returns `StaleRendererCompletion`. The caller
-    /// is responsible for retiring the stale mount.
+    /// Every rejected completion transfers its incoming move-only lease to the
+    /// opaque scene-detachment facade before this function returns. A stale or
+    /// duplicate upload can therefore never be silently dropped or applied to
+    /// a newer candidate.
     pub fn complete_renderer_upload(
         &mut self,
         token: BspGenerationToken,
         mount: PreparedBspMount,
     ) -> Result<(), BspRuntimeError> {
-        self.generation.validate(token)?;
+        if let Err(error) = self.generation.validate(token) {
+            self.retire_unpublished_mount(mount);
+            return Err(error);
+        }
 
-        // If the candidate is missing, this is a stale completion.
-        let candidate = match self.candidate.as_mut() {
-            Some(c) => c,
+        let current_generation = self.generation.current();
+        let completion = match self.candidate.as_mut() {
+            Some(candidate) => candidate.transition_to_renderer_ready(current_generation, mount),
             None => {
-                // No candidate — the mount belongs to a cancelled generation.
-                // Return the stale error; caller retires the mount.
+                self.retire_unpublished_mount(mount);
                 return Err(BspRuntimeError::StaleRendererCompletion {
                     candidate_generation: token.generation,
-                    current_generation: self.generation.current(),
+                    current_generation,
                 });
             }
         };
 
-        let current_gen = self.generation.current();
-        match candidate.transition_to_renderer_ready(current_gen, mount) {
+        match completion {
             Ok(()) => Ok(()),
-            // Stale or duplicate — the mount was not consumed. Caller retires it.
-            Err(e @ BspRuntimeError::StaleRendererCompletion { .. }) => Err(e),
-            Err(e @ BspRuntimeError::DuplicateReadyLease { .. }) => Err(e),
-            Err(other) => Err(other),
+            Err((error, mount)) => {
+                self.retire_unpublished_mount(mount);
+                Err(error)
+            }
         }
     }
 
-    /// Legacy compatibility: set mount ready + validate.
+    /// Legacy compatibility: set a renderer-ready mount through the same
+    /// checked completion path used by asynchronous upload.
     #[doc(hidden)]
     pub fn set_renderer_mount_ready(
         &mut self,
         token: BspGenerationToken,
         mount: PreparedBspMount,
     ) -> Result<(), BspRuntimeError> {
-        self.generation.validate(token)?;
-        self.require_candidate()?;
-        let candidate = self.candidate.as_mut().unwrap();
-        candidate.set_renderer_ready(mount)
+        self.complete_renderer_upload(token, mount)
     }
 
     /// Mark the renderer upload as failed for the current candidate.
@@ -692,24 +690,53 @@ impl BspCoordinator {
             return Err(BspRuntimeError::CoordinatorPoisoned);
         }
 
-        // Check generation
+        // Check generation and candidate readiness before changing either the
+        // current scene or the active record.
         self.generation.validate(token)?;
-
-        // Candidate must be ValidatedForScene.
         {
             let candidate = self.require_candidate_mut()?;
-            if !candidate.is_commit_ready() {
+            if !candidate.is_commit_ready() || !candidate.is_renderer_ready() {
                 return Err(BspRuntimeError::InvalidCandidateTransition {
                     current: crate::error::CandidatePhase::from(candidate.state),
                     attempted: crate::error::CandidatePhase::Consumed,
-                    detail: "candidate must be ValidatedForScene before commit".to_string(),
+                    detail: "candidate must be renderer-ready and ValidatedForScene before commit"
+                        .to_string(),
                 });
             }
         }
 
+        // The coordinator and scene must agree about whether an old mount is
+        // published. Check this before bridge activation or candidate
+        // consumption so a broken scene-detachment boundary leaves the old
+        // payload diagnosable and untouched.
+        let replacing_active = self.active_mount.is_some();
+        if replacing_active != scene.has_bsp_mount() {
+            return Err(BspRuntimeError::RetirementHandoffFailed {
+                reason: "coordinator active-mount state disagrees with Scene BSP publication"
+                    .to_string(),
+            });
+        }
+
+        let old_light_ids = self
+            .active_mount
+            .as_ref()
+            .map(|mount| mount.light_ids.clone())
+            .unwrap_or_default();
+        let staged_lights: Vec<PointLight> = self
+            .candidate
+            .as_ref()
+            .expect("candidate was checked above")
+            .point_lights
+            .iter()
+            .map(|candidate_light| candidate_light.light)
+            .collect();
+
         // Commit bridges (non-fallible activation after validation).
         let bridge_count = if self.bridges.has_bridges() {
-            match self.bridges.commit_candidate(self.candidate.as_mut().unwrap()) {
+            match self
+                .bridges
+                .commit_candidate(self.candidate.as_mut().unwrap())
+            {
                 Ok(()) => self.bridges.len(),
                 Err(BspRuntimeError::CoordinatorPoisoned) => {
                     self.poisoned = true;
@@ -724,64 +751,73 @@ impl BspCoordinator {
             0
         };
 
-        // Take candidate and consume into active mount.
+        // Consume the candidate before retiring the old scene payload. The
+        // prepared renderer lease moves directly into Scene below; the active
+        // record deliberately retains only coordinator-owned metadata.
         let candidate = self.candidate.take().ok_or_else(|| {
             self.poisoned = true;
             BspRuntimeError::CommitContractViolated {
                 detail: "candidate missing after bridge commit".to_string(),
             }
         })?;
+        let (mut active_mount, prepared_mount) =
+            match candidate.consume_into_active(self.generation.current(), Vec::new()) {
+                Ok(value) => value,
+                Err((error, candidate)) => {
+                    // Preserve move-only cleanup even if an internal invariant is
+                    // violated after bridge activation.
+                    self.candidate = Some(candidate);
+                    let _ = self.rollback_candidate_with_retirement();
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            };
 
-        // Retire the old active mount (opaque handoff to renderer).
-        if let Some(old_mount) = self.active_mount.take() {
-            self.retire_active_mount_into_scene(old_mount, scene);
-            self.retired_mount_count = self.retired_mount_count.saturating_add(1);
-        }
-
-        // Publish scene lights from prevalidated payloads.
-        let point_lights: Vec<_> = candidate.point_lights.iter().cloned().collect();
-        let mut new_light_ids = Vec::with_capacity(point_lights.len());
-        for candidate_light in &point_lights {
-            match scene.create_point_light(candidate_light.light) {
-                Ok(id) => new_light_ids.push(id),
-                Err(e) => {
-                    // Contract violation after validate_for_scene: poison.
-                    for id in new_light_ids.drain(..) {
-                        let _ = scene.remove_point_light(id);
-                    }
+        // This method validates every input before removing old lights, so a
+        // contract violation leaves the old scene mount/source-link intact.
+        let new_light_ids =
+            match scene.replace_prevalidated_bsp_point_lights(&old_light_ids, &staged_lights) {
+                Ok(ids) => ids,
+                Err(error) => {
+                    self.retire_unpublished_mount(prepared_mount);
                     self.poisoned = true;
                     return Err(BspRuntimeError::CommitContractViolated {
-                        detail: format!(
-                            "prevalidated BSP light publication failed for entity {}: {:?}",
-                            candidate_light.entity_index, e
-                        ),
+                        detail: format!("prevalidated BSP light publication failed: {error:?}"),
                     });
                 }
-            }
-        }
-
+            };
         let light_count = new_light_ids.len();
+        active_mount.light_ids = new_light_ids;
 
-        // Consume candidate into ActiveBspMount.
-        let active_mount = match candidate.consume_into_active(
-            self.generation.current(),
-            new_light_ids,
-        ) {
-            Ok(m) => m,
-            Err(e) => {
-                // The candidate was not consumed; lights and mount are rolled back.
-                // The error variant should propagate.
-                self.poisoned = true;
-                return Err(e);
-            }
+        // All remaining publication operations are infallible moves. Detach
+        // the old scene state only now, after every candidate-side fallible
+        // operation has completed, then transfer the new opaque lease once.
+        let retired = if replacing_active {
+            Some(
+                scene
+                    .retire_bsp_mount()
+                    .expect("Scene BSP mount was prechecked before atomic replacement"),
+            )
+        } else {
+            None
         };
-
-        // Publish to scene.
-        scene.set_bsp_mount(active_mount.renderer_lease.clone());
+        scene.set_bsp_mount(prepared_mount);
         scene.set_bsp_source_link(active_mount.source_link_json.clone());
 
         let cache_identity = active_mount.cache_identity.clone();
-        self.active_mount = Some(active_mount);
+        let old_mount = self.active_mount.replace(active_mount);
+        if let Some(old_mount) = old_mount {
+            debug_assert!(retired.is_some());
+            self.retired_mount_count = self.retired_mount_count.saturating_add(1);
+            log::debug!(
+                "BSP coordinator: detached active mount '{}' (generation {})",
+                old_mount.source_identity,
+                old_mount.committed_generation
+            );
+        } else {
+            debug_assert!(retired.is_none());
+        }
+        drop(retired);
 
         Ok(CommitResult {
             node_count: 0,
@@ -843,7 +879,10 @@ impl BspCoordinator {
         self.rollback_candidate_with_retirement()
     }
 
-    /// The number of opaque retirement handoffs recorded (diagnostics).
+    /// The number of opaque scene-detachment handoffs recorded.
+    ///
+    /// This is a diagnostic count only; it is not evidence that renderer
+    /// cache payloads were accepted by a fence-aware retirement queue.
     pub fn retirement_diagnostics(&self) -> u64 {
         self.retired_mount_count
     }
@@ -854,9 +893,12 @@ impl BspCoordinator {
     /// the scene.
     ///
     /// 1. Increments generation (cancels any in-flight prepare)
-    /// 2. Removes BSP scene nodes, lights, materials
-    /// 3. Calls app bridge rollback hooks
-    /// 4. Clears coordinator state and retires GPU resources
+    /// 2. Detaches the published BSP scene mount and removes BSP lights
+    /// 3. Clears coordinator state
+    ///
+    /// Staged bridge tokens are rolled back. Active bridge teardown and
+    /// fence-aware GPU queueing require renderer/bridge capabilities not
+    /// supplied by this coordinator boundary.
     pub fn unload(&mut self, scene: &mut Scene) -> Result<(), BspRuntimeError> {
         if self.poisoned {
             return Err(BspRuntimeError::CoordinatorPoisoned);
@@ -870,11 +912,8 @@ impl BspCoordinator {
         // Roll back any staged candidate
         self.rollback_candidate_with_retirement()?;
 
-        // Remove active mount from scene (opaque retirement)
-        if let Some(old_mount) = self.active_mount.take() {
-            self.retire_active_mount_into_scene(old_mount, scene);
-            self.retired_mount_count = self.retired_mount_count.saturating_add(1);
-        }
+        // Detach the active mount through Scene's opaque publication boundary.
+        self.retire_active_mount_into_scene(scene)?;
 
         Ok(())
     }
@@ -1064,11 +1103,9 @@ impl BspCoordinator {
     pub fn teardown(&mut self, scene: &mut Scene) {
         // Release candidate first
         self.rollback_candidate_with_retirement().ok();
-        // Release active mount
-        if let Some(old_mount) = self.active_mount.take() {
-            self.retire_active_mount_into_scene(old_mount, scene);
-            self.retired_mount_count = self.retired_mount_count.saturating_add(1);
-        }
+        // Release active mount through Scene even when the coordinator is
+        // poisoned; terminal teardown must not bypass scene detachment.
+        let _ = self.retire_active_mount_into_scene(scene);
     }
 
     // ── Persistence: Save ───────────────────────────────────────────
@@ -1202,25 +1239,28 @@ impl BspCoordinator {
             });
         }
 
-        // 9. Validate scene publication preflight.
-        if let Err(err) = self.validate_for_scene(prepare.token, scene) {
-            return Err(err);
-        }
-
-        // 10. Update candidate's source link with reconciled overrides + stored mutable behavior.
-        if let Some(ref mut c) = self.candidate {
+        // 9. Finalize the source-link payload before scene preflight. Commit
+        // only publishes this already serialized value.
+        let source_link_json = if let Some(ref mut c) = self.candidate {
             c.source_link.overrides = reconciled_overrides;
             c.source_link.mutable_behavior = stored_link.mutable_behavior.clone();
-            match serde_json::to_value(crate::source_link::BspPersistenceEnvelope::new(
+            serde_json::to_value(crate::source_link::BspPersistenceEnvelope::new(
                 c.source_link.clone(),
-            )) {
-                Ok(json) => c.source_link_json = json,
-                Err(e) => {
-                    return self.cancel_restore_candidate(BspRuntimeError::SourceUnavailable {
-                        reason: format!("source-link serialization failed: {e}"),
-                    });
-                }
-            }
+            ))
+            .map_err(|e| BspRuntimeError::SourceUnavailable {
+                reason: format!("source-link serialization failed: {e}"),
+            })
+        } else {
+            unreachable!("candidate was present through restore reconciliation")
+        };
+        match source_link_json {
+            Ok(json) => self.candidate.as_mut().unwrap().source_link_json = json,
+            Err(error) => return self.cancel_restore_candidate(error),
+        }
+
+        // 10. Validate scene publication preflight.
+        if let Err(err) = self.validate_for_scene(prepare.token, scene) {
+            return Err(err);
         }
 
         // 11. Commit (pure publish)
@@ -1279,6 +1319,16 @@ impl BspCoordinator {
                         message: "no prepared candidate".to_string(),
                     })?;
 
+            // A candidate may not run bridge/scene validation until its opaque
+            // renderer lease has been accepted exactly once.
+            if !candidate_ref.is_renderer_ready() {
+                return Err(BspRuntimeError::InvalidCandidateTransition {
+                    current: crate::error::CandidatePhase::from(candidate_ref.state),
+                    attempted: crate::error::CandidatePhase::ValidatedForScene,
+                    detail: "renderer mount must be ready before validation".to_string(),
+                });
+            }
+
             // Phase 05: Bridge validation (non-fallible after this point)
             if self.bridges.has_bridges() {
                 self.bridges.validate_candidate(candidate_ref)?;
@@ -1318,9 +1368,17 @@ impl BspCoordinator {
             scene.reserve_point_light_storage(total_slots);
         }
 
-        // Transition candidate to ValidatedForScene.
-        if let Some(ref mut c) = self.candidate {
-            c.transition_to_validated_for_scene(current_gen)?;
+        // Transition candidate to ValidatedForScene. If an unexpected state
+        // violation appears here, clean up this candidate rather than leaving
+        // a ready lease stranded after a failed validation call.
+        let transition = self
+            .candidate
+            .as_mut()
+            .expect("candidate was checked during validation")
+            .transition_to_validated_for_scene(current_gen);
+        if let Err(error) = transition {
+            self.rollback_candidate_with_retirement()?;
+            return Err(error);
         }
         Ok(())
     }
@@ -1353,11 +1411,12 @@ impl BspCoordinator {
                 || light.intensity < 0.0
                 || !light.radius.is_finite()
             {
-                log::warn!(
-                    "BSP light descriptor for entity {} is not publishable (non-finite values); skipping",
-                    light.entity_index
-                );
-                continue;
+                return Err(BspRuntimeError::SourceUnavailable {
+                    reason: format!(
+                        "BSP light descriptor for entity {} is not publishable",
+                        light.entity_index
+                    ),
+                });
             }
 
             point_lights.push(CandidatePointLight {
@@ -1778,70 +1837,87 @@ impl BspCoordinator {
         Ok(())
     }
 
-    /// Roll back a staged candidate, including any ready renderer lease
-    /// sent to retirement, and bridge token rollback.
+    /// Detach an unpublished ready lease from runtime ownership.
+    ///
+    /// The opaque receipt is intentionally not inspected by `bsp_runtime`.
+    /// It confirms that the coordinator no longer owns scene state, but does
+    /// not acknowledge fence-aware renderer queueing.
+    fn retire_unpublished_mount(&mut self, mount: PreparedBspMount) {
+        let _detached = mount.retire();
+        self.retired_mount_count = self.retired_mount_count.saturating_add(1);
+        log::debug!("BSP coordinator: detached unpublished renderer mount");
+    }
+
+    /// Roll back a staged candidate, including exactly one scene-detachment
+    /// handoff for any ready lease and bridge-token rollback.
     ///
     /// After this call, the candidate is cleared (taken).
     fn rollback_candidate_with_retirement(&mut self) -> Result<(), BspRuntimeError> {
         let mut candidate = match self.candidate.take() {
-            Some(c) => c,
+            Some(candidate) => candidate,
             None => return Ok(()),
         };
 
         let (tokens, ready_mount) = candidate.rollback();
 
-        // Roll back bridge tokens.
+        // The renderer lease is independent of bridge cleanup. Hand it off
+        // first so a bridge rollback panic cannot cause a ready mount to be
+        // silently dropped.
+        if let Some(mount) = ready_mount {
+            self.retire_unpublished_mount(mount);
+        }
+
         let failures = self.bridges.rollback_tokens(tokens);
         if !failures.is_empty() {
             self.poisoned = true;
             return Err(BspRuntimeError::RollbackFailure { failures });
         }
 
-        // If there was a ready renderer mount, it needs opaque retirement.
-        // We discard it here since we don't have a Scene; the caller should
-        // have retired it already, or this is a terminal path like cancel.
-        if ready_mount.is_some() {
-            log::debug!(
-                "BSP candidate rollback: discarding ready renderer mount (retirement not enqueued)"
-            );
-            self.retired_mount_count = self.retired_mount_count.saturating_add(1);
-        }
-
-        // Candidate is dropped here; its state is already RolledBack.
         Ok(())
     }
 
-    /// Retire an active mount: clear scene references and hand off the opaque
-    /// renderer lease to the scene for fence-based retirement.
+    /// Detach the active scene mount through `Scene::retire_bsp_mount`.
     ///
-    /// `bsp_runtime` records the handoff but does not read raw GPU handles,
-    /// compute serials, or reap slots.
-    fn retire_active_mount_into_scene(
-        &mut self,
-        old_mount: ActiveBspMount,
-        scene: &mut Scene,
-    ) {
-        // Remove the old mount's scene resources.
-        scene.clear_bsp_mount();
-        scene.clear_bsp_source_link();
-
-        for light_id in &old_mount.light_ids {
-            if let Err(e) = scene.remove_point_light(*light_id) {
-                log::warn!(
-                    "failed to remove BSP point light slot={} during retirement: {:?}",
-                    light_id.slot,
-                    e
-                );
-            }
+    /// The active metadata stays in the coordinator until the Scene confirms
+    /// that its mount was removed. `bsp_runtime` only transfers the opaque
+    /// receipt; it never reads GPU handles, serials, or cache slots. The
+    /// receipt does not prove fence-aware renderer queueing.
+    fn retire_active_mount_into_scene(&mut self, scene: &mut Scene) -> Result<(), BspRuntimeError> {
+        let Some(active_mount) = self.active_mount.as_ref() else {
+            return Ok(());
+        };
+        if !scene.has_bsp_mount() {
+            return Err(BspRuntimeError::RetirementHandoffFailed {
+                reason: "active coordinator mount is missing from Scene".to_string(),
+            });
         }
 
-        // The old renderer lease is dropped here. The scene has cleared its
-        // BSP mount, which queues GPU resources for fence-observed retirement.
+        let old_light_ids = active_mount.light_ids.clone();
+        scene
+            .replace_prevalidated_bsp_point_lights(&old_light_ids, &[])
+            .map_err(|error| BspRuntimeError::RetirementHandoffFailed {
+                reason: format!("failed to remove BSP-owned point lights: {error:?}"),
+            })?;
+        let retired =
+            scene
+                .retire_bsp_mount()
+                .ok_or_else(|| BspRuntimeError::RetirementHandoffFailed {
+                    reason: "Scene rejected an already prechecked BSP retirement".to_string(),
+                })?;
+        scene.clear_bsp_source_link();
+
+        let old_mount = self
+            .active_mount
+            .take()
+            .expect("active mount was borrowed and prechecked above");
+        self.retired_mount_count = self.retired_mount_count.saturating_add(1);
         log::debug!(
-            "BSP coordinator: retired active mount '{}' (generation {})",
+            "BSP coordinator: detached active mount '{}' (generation {})",
             old_mount.source_identity,
             old_mount.committed_generation
         );
+        drop(retired);
+        Ok(())
     }
 
     /// Legacy rollback helper — use rollback_candidate_with_retirement instead.

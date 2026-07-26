@@ -243,11 +243,12 @@ fn bsp_mount_inline_transforms_stored() {
     // Add a face to a mount with inline model batch
     let batch = bsp::geometry::RenderBatch {
         key: bsp::geometry::BatchKey {
-            leaf_signature: Vec::new(),
             render_class: 0,
             material_identity: 0,
             lightmap_page: 0,
+            model_index: 1,
         },
+        leaf_signature: Vec::new(),
         face_indices: vec![0],
         pvs_eligible: false,
         is_inline_model: true,
