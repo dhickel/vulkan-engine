@@ -296,28 +296,17 @@ fn build_lightmap_upload_data(
 }
 
 #[cfg(feature = "bsp")]
-/// Tracks every GPU resource created during an upload candidate in creation order.
+/// Tracks cache handles reserved while a BSP upload is still a candidate.
 ///
-/// On rollback, resources are released in **reverse dependency order**:
-/// descriptor sets through their exact owning pool, pools only after owned
-/// sets are released, and so forth. Rollback is idempotent and never calls
-/// broad cache destruction.
+/// The BSP surface cache exclusively owns descriptor pools, descriptor sets,
+/// atlas images, UBOs, and material records as soon as they are installed.
+/// This receipt must never retain a second destroyable copy of those handles.
 struct BspUploadReceipt {
     /// Mesh handles reserved in the mesh cache.
     mesh_handles: Vec<MeshHandle>,
     /// Texture handles reserved in the texture cache.
     texture_handles: Vec<TextureHandle>,
-    /// Published BSP material handle slots in the surface cache.
-    material_handles: Vec<crate::data::handles::BspMaterialHandle>,
-    /// Material descriptor pool (owns all set-1 material descriptor sets).
-    material_desc_pool: Option<ash::vk::DescriptorPool>,
-    /// Individual material descriptor sets allocated from the pool.
-    material_desc_sets: Vec<ash::vk::DescriptorSet>,
-    /// Frame-values descriptor pool.
-    frame_values_desc_pool: Option<ash::vk::DescriptorPool>,
-    /// Frame-values descriptor sets.
-    frame_values_desc_sets: Vec<ash::vk::DescriptorSet>,
-    /// Receipt still owns its resources.
+    /// Receipt still owns its candidate allocations.
     armed: bool,
 }
 
@@ -327,11 +316,6 @@ impl BspUploadReceipt {
         Self {
             mesh_handles: Vec::new(),
             texture_handles: Vec::new(),
-            material_handles: Vec::new(),
-            material_desc_pool: None,
-            material_desc_sets: Vec::new(),
-            frame_values_desc_pool: None,
-            frame_values_desc_sets: Vec::new(),
             armed: true,
         }
     }
@@ -345,9 +329,10 @@ impl BspUploadReceipt {
         self.armed = false;
     }
 
-    /// Roll back all resources in reverse dependency order.
+    /// Roll back all candidate resources exactly once.
     ///
-    /// Idempotent: after the first call, all tracked handles are cleared.
+    /// The caller invokes this only after the fallible upload transaction has
+    /// unwound, so no cache or allocator lock is held by the failing scope.
     fn rollback(
         &mut self,
         device: &ash::Device,
@@ -360,63 +345,39 @@ impl BspUploadReceipt {
         self.armed = false;
         log::warn!("rolling back incomplete BSP GPU upload");
 
-        // 1. Release frame-values state (descriptors, pool, UBO).
-        if let Some(pool) = self.frame_values_desc_pool.take() {
-            if !self.frame_values_desc_sets.is_empty() {
-                unsafe {
-                    device.free_descriptor_sets(pool, &self.frame_values_desc_sets);
-                }
-            }
-            unsafe {
-                device.destroy_descriptor_pool(pool, None);
-            }
-        }
-        self.frame_values_desc_sets.clear();
-        if let Ok(mut surface_cache) = data_cache.bsp_surface_cache.lock() {
-            surface_cache.clear_frame_values(device, allocator);
+        // The cache is the sole owner of installed descriptor pools/sets and
+        // other BSP GPU payloads. Destroying through it prevents a receipt
+        // from freeing a pool and then asking the cache to free it again.
+        match data_cache.bsp_surface_cache.lock() {
+            Ok(mut surface_cache) => match allocator.lock() {
+                Ok(alloc_guard) => surface_cache.destroy_descriptor_pool(device, &alloc_guard),
+                Err(_) => log::error!("BSP upload rollback could not lock the allocator"),
+            },
+            Err(_) => log::error!("BSP upload rollback could not lock the surface cache"),
         }
 
-        // 2. Remove published BSP material handles from surface cache.
-        if let Ok(mut surface_cache) = data_cache.bsp_surface_cache.lock() {
-            for handle in self.material_handles.drain(..) {
-                surface_cache.remove(handle);
-            }
-
-            // 3. Release material descriptor sets and pool.
-            if let Some(pool) = self.material_desc_pool.take() {
-                if !self.material_desc_sets.is_empty() {
-                    unsafe {
-                        device.free_descriptor_sets(pool, &self.material_desc_sets);
-                    }
-                }
-                unsafe {
-                    device.destroy_descriptor_pool(pool, None);
-                }
-            }
-            self.material_desc_sets.clear();
-        }
-
-        // 4. Destroy surface UBO, atlas, and remaining surface cache state.
-        if let Ok(mut surface_cache) = data_cache.bsp_surface_cache.lock() {
-            if let Ok(alloc_guard) = allocator.lock() {
-                surface_cache.destroy_descriptor_pool(device, &alloc_guard);
-            }
-        }
-
-        // 5. Deallocate texture handles.
         if let Ok(mut texture_cache) = data_cache.texture_cache.lock() {
             for handle in self.texture_handles.drain(..) {
                 texture_cache.deallocate_texture(handle);
             }
+        } else {
+            log::error!("BSP upload rollback could not lock the texture cache");
         }
 
-        // 6. Deallocate mesh handles.
         if let Ok(mut mesh_cache) = data_cache.mesh_cache.lock() {
             mesh_cache.deallocate_ids(&self.mesh_handles);
+        } else {
+            log::error!("BSP upload rollback could not lock the mesh cache");
         }
         self.mesh_handles.clear();
     }
 }
+
+/// Test-only fault point for GPU rollback validation after cache-owned
+/// material resources have been installed.
+#[cfg(test)]
+static FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(feature = "bsp")]
 impl Drop for BspUploadReceipt {
@@ -646,9 +607,7 @@ impl PreparedBspMount {
         frame_slot_count: u32,
         data_cache: &crate::data::data_cache::VkDataCache,
     ) -> Result<Self, String> {
-        use crate::data::bsp_import::{
-            compute_batch_bounds, plan_bsp_upload, verify_exact_renderable_face_coverage,
-        };
+        use crate::data::bsp_import::{plan_bsp_upload, verify_exact_renderable_face_coverage};
         use crate::data::data_cache::{BspLightmapAtlasGpu, BspSurfaceUboGpu, TextureCache};
         use crate::data::gpu_data::{MeshMeta, TextureMeta, TexturePayload, Vertex};
         use crate::vulkan::vk_bsp::{
@@ -662,19 +621,17 @@ impl PreparedBspMount {
         // ── Phase 0: Receipt tracking ──────────────────────────────
         let mut receipt = BspUploadReceipt::new();
 
-        // Helper macro: on error, rollback receipt and return the error.
+        // All failures leave their local lock scopes before the outer match
+        // invokes rollback. This keeps rollback from re-locking a mutex held
+        // by the failed allocation/install operation.
         macro_rules! guard {
-            ($expr:expr, $receipt:expr, $device:expr, $allocator:expr, $data_cache:expr) => {
-                match $expr {
-                    Ok(val) => val,
-                    Err(err) => {
-                        $receipt.rollback($device, $allocator, $data_cache);
-                        return Err(err);
-                    }
-                }
-            };
+            ($expr:expr, $receipt:expr, $device:expr, $allocator:expr, $data_cache:expr) => {{
+                let _ = (&$receipt, &$device, &$allocator, &$data_cache);
+                $expr?
+            }};
         }
 
+        let upload_result = (|| -> Result<Self, String> {
         // All demand is checked and all face geometry is merged before the first
         // Vulkan/cache allocation. This is the safety boundary that prevents a
         // source face count from becoming an unbounded descriptor/draw count.
@@ -708,7 +665,6 @@ impl PreparedBspMount {
 
         if plan.batches.is_empty() {
             // Valid empty mount: no renderable faces.
-            receipt.disarm();
             let mount_state = BspMountState::from_extracted(extracted);
             return PreparedBspMount::from_canonical(
                 mount_state,
@@ -805,7 +761,6 @@ impl PreparedBspMount {
                 lightmap_upload.pixels.len(),
                 demand.lightmap_staging_bytes
             );
-            receipt.rollback(device, allocator, data_cache);
             return Err(err);
         }
 
@@ -837,7 +792,6 @@ impl PreparedBspMount {
             Ok(sampler) => sampler,
             Err(error) => {
                 crate::vulkan::vk_util::destroy_image(device, &alloc_guard, lightmap_image);
-                receipt.rollback(device, allocator, data_cache);
                 return Err(error);
             }
         };
@@ -858,7 +812,6 @@ impl PreparedBspMount {
                 device.destroy_sampler(lightmap_sampler_val, None);
             }
             crate::vulkan::vk_util::destroy_image(device, &alloc_guard, lightmap_image);
-            receipt.rollback(device, allocator, data_cache);
             return Err(error);
         }
 
@@ -907,7 +860,6 @@ impl PreparedBspMount {
         );
         if plan.textures.len() != extracted.textures.len() {
             let err = "BSP planned texture count changed after upload preflight".to_string();
-            receipt.rollback(device, allocator, data_cache);
             return Err(err);
         }
         let mut texture_metas = Vec::with_capacity(extracted.textures.len() * 2);
@@ -959,7 +911,6 @@ impl PreparedBspMount {
                     texture_cache.deallocate_texture(handle);
                 }
                 let err = "BSP texture registration fell back to the error texture".to_string();
-                receipt.rollback(device, allocator, data_cache);
                 return Err(err);
             }
             let mut required = handles.clone();
@@ -969,7 +920,6 @@ impl PreparedBspMount {
                     texture_cache.deallocate_texture(handle);
                 }
                 let err = "failed to upload BSP material textures".to_string();
-                receipt.rollback(device, allocator, data_cache);
                 return Err(err);
             }
             handles
@@ -1103,7 +1053,7 @@ impl PreparedBspMount {
 
             (buffer, allocation, ptr)
         };
-        // Record surface UBO in receipt after creation (unmap happens later).
+        // The surface UBO transfers to the surface cache after descriptor writes.
 
         // ── 5. Allocate and write material descriptors ─────────────
         let allocated_sets = {
@@ -1136,21 +1086,6 @@ impl PreparedBspMount {
                 data_cache
             )
         };
-        receipt.material_desc_sets = allocated_sets.clone();
-        receipt.material_desc_pool = {
-            let surface_cache = guard!(
-                data_cache
-                    .bsp_surface_cache
-                    .lock()
-                    .map_err(|_| "bsp_surface_cache lock poisoned".to_string()),
-                receipt,
-                device,
-                allocator,
-                data_cache
-            );
-            surface_cache.material_desc_pool
-        };
-
         let material_texture_bindings =
             {
                 let texture_cache = guard!(
@@ -1316,7 +1251,6 @@ impl PreparedBspMount {
                     },
                 )
                 .collect();
-            receipt.material_handles = handles.clone();
             handles
         };
         let mut face_materials = vec![None; face_count];
@@ -1335,6 +1269,14 @@ impl PreparedBspMount {
             material_handles.len(),
             batch_meshes.len()
         );
+
+        #[cfg(test)]
+        if FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION.swap(
+            false,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            return Err("injected BSP upload failure after material registration".to_string());
+        }
 
         // ── 6. Initialize frame-values UBO and descriptor sets (set 2) ─
         {
@@ -1355,7 +1297,6 @@ impl PreparedBspMount {
                 .ok_or_else(|| "BSP frame-values UBO stride overflow".to_string())?;
             if frame_slot_count == 0 {
                 let err = "BSP frame-values requires at least one frame slot".to_string();
-                receipt.rollback(device, allocator, data_cache);
                 return Err(err);
             }
             let total = stride
@@ -1467,9 +1408,6 @@ impl PreparedBspMount {
                 fv_descriptors.push(sets[0]);
             }
 
-            receipt.frame_values_desc_pool = Some(fv_pool);
-            receipt.frame_values_desc_sets = fv_descriptors.clone();
-
             drop(alloc_guard);
             let mut surface_cache = guard!(
                 data_cache
@@ -1509,17 +1447,10 @@ impl PreparedBspMount {
                 batch_meshes.len(),
                 batch_materials.len()
             );
-            receipt.rollback(device, allocator, data_cache);
             return Err(err);
         }
         for index in 0..plan.batches.len() {
-            let bounds = guard!(
-                compute_batch_bounds(&plan.batches[index].mesh),
-                receipt,
-                device,
-                allocator,
-                data_cache
-            );
+            let bounds = plan.batches[index].bounds;
             let mounted = guard!(
                 MountedBspBatch::try_new(
                     &plan.batches[index].render_batch,
@@ -1548,11 +1479,6 @@ impl PreparedBspMount {
         mount_state.face_meshes = face_meshes.clone();
         mount_state.face_materials = face_materials.clone();
 
-        // Commit the upload receipt. The mount does not retain a physical
-        // retirement receipt, so later cache retirement needs renderer/core
-        // context rather than this scene-facing value.
-        receipt.disarm();
-
         PreparedBspMount::from_canonical(
             mount_state,
             mounted_batches,
@@ -1560,6 +1486,18 @@ impl PreparedBspMount {
             extracted.light_descriptors.clone(),
             Some(demand),
         )
+        })();
+
+        match upload_result {
+            Ok(mount) => {
+                receipt.disarm();
+                Ok(mount)
+            }
+            Err(error) => {
+                receipt.rollback(device, allocator, data_cache);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -1609,6 +1547,85 @@ pub enum BspMountLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "bsp")]
+    fn material_fixture_extracted() -> bsp::extract::ExtractedBsp {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bsp/tests/fixtures");
+        let bsp_path = fixtures.join("compiled/dungeon-materials-bsp2.bsp");
+        let palette_path = fixtures.join("palettes/project_palette.lmp");
+        let palette_bytes = std::fs::read(&palette_path).expect("read fixture palette");
+        let world = bsp::BspLoader::load(
+            &std::fs::read(&bsp_path).expect("read material fixture"),
+            &bsp::LoadOptions {
+                palette: Some(palette_bytes.clone()),
+                source_identity: bsp_path.display().to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("load material fixture");
+        let textures = fixtures.join("textures");
+        bsp::extract::extract(bsp::BspExtractionRequest {
+            world,
+            palette: Some(bsp::resources::decode_palette(&palette_bytes)),
+            texture_companions: vec![
+                bsp::resources::TextureCompanion::new(
+                    "textures/WALL01_norm.png",
+                    std::fs::read(textures.join("WALL01_norm.png")).expect("read normal"),
+                ),
+                bsp::resources::TextureCompanion::new(
+                    "textures/WALL01_gloss.png",
+                    std::fs::read(textures.join("WALL01_gloss.png")).expect("read gloss"),
+                ),
+            ],
+            strict: false,
+            ..Default::default()
+        })
+        .expect("extract material fixture")
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    #[ignore = "requires a Vulkan-capable GPU"]
+    fn bsp_upload_rollback_after_material_registration_returns_typed_error() {
+        static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = TEST_LOCK.lock().expect("GPU rollback test lock");
+        let extracted = material_fixture_extracted();
+        assert!(!extracted.render_batches.is_empty(), "fixture must render");
+
+        eprintln!(
+            "BSP rollback GPU test working directory: {}",
+            std::env::current_dir().expect("working directory").display()
+        );
+        let mut renderer = crate::api::renderer::Renderer::new_headless(
+            crate::api::config::RendererConfig {
+                app_name: "bsp-upload-rollback-fault".to_string(),
+                headless: true,
+                validation_layer: false,
+                preload_startup_scene: false,
+                ..Default::default()
+            },
+        )
+        .expect("headless renderer");
+
+        FAIL_BSP_UPLOAD_AFTER_MATERIAL_REGISTRATION.store(
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        let error = renderer
+            .prepare_bsp_mount(&extracted)
+            .expect_err("injected upload failure must propagate");
+        assert!(
+            error
+                .to_string()
+                .contains("injected BSP upload failure after material registration"),
+            "expected typed injected failure, got: {error}"
+        );
+
+        // Teardown after the injected failure must complete without a Vulkan
+        // or allocator lifetime failure; a separate live generated-map run
+        // proves the normal mount path remains usable.
+    }
 
     #[cfg(feature = "bsp")]
     #[test]

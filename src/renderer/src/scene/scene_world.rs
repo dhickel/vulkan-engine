@@ -768,9 +768,10 @@ impl SceneWorld {
             let source_face_count = mounted.render.face_indices.len() as u32;
             let model_index = mounted.render.model_index;
 
-            if mesh_id == MeshHandle::new(0, 0)
-                || (bsp_material_id.slot == 0 && bsp_material_id.generation == 0)
-            {
+            // Mesh slot zero is the explicit no-mesh sentinel. BSP material
+            // slot zero is cache-issued for the first real material and must
+            // reach cache generation validation during recording.
+            if mesh_id == MeshHandle::new(0, 0) {
                 let failure = BspSubmissionFailure {
                     batch_index,
                     source_face_first,
@@ -2630,7 +2631,7 @@ mod tests {
             model_index: 0,
         };
         let mesh = MeshHandle::new(7, 0);
-        let material = crate::data::handles::BspMaterialHandle::new(3, 0);
+        let material = crate::data::handles::BspMaterialHandle::new(0, 0);
         let mounted = MountedBspBatch::try_new(
             &batch,
             mesh,
@@ -2659,6 +2660,10 @@ mod tests {
 
         assert_eq!(submission.bsp_draw_items.len(), 1);
         assert_eq!(submission.bsp_draw_items[0].mesh_id, MeshHandle::new(7, 0));
+        assert_eq!(
+            submission.bsp_draw_items[0].bsp_material_id,
+            crate::data::handles::BspMaterialHandle::new(0, 0)
+        );
         assert_eq!(submission.point_lights.len(), 1);
         assert_eq!(submission.point_lights[0].color, Vec3::new(1.0, 0.5, 0.25));
     }

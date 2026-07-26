@@ -31,6 +31,10 @@
       <sourceFolder url="file://$MODULE_DIR$/src/package_io/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src/package_io/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/src/bsp/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/apps/dungeon_dogfood/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp_generator/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src/bsp_generator/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/tools/dungeon_gen/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

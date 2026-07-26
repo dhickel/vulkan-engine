@@ -229,7 +229,10 @@ pub(crate) struct BspPlannedTexture {
 #[cfg(feature = "bsp")]
 #[derive(Debug, Clone)]
 pub(crate) struct BspPlannedBatch {
+    /// CPU mesh payload consumed when the GPU mesh is uploaded.
     pub mesh: ProceduralMeshData,
+    /// Finite local-space bounds retained after `mesh` is consumed.
+    pub bounds: (glam::Vec3, glam::Vec3),
     pub material_plan_index: usize,
     pub render_batch: RenderBatch,
 }
@@ -862,7 +865,7 @@ pub struct MountedBspBatch {
     pub render: RenderBatch,
     /// Live merged mesh handle (non-zero, non-stale).
     pub mesh: MeshHandle,
-    /// Live BSP material handle (non-zero, non-stale).
+    /// Live BSP material handle; slot zero is valid when cache-issued.
     pub material: BspMaterialHandle,
     /// Finite local-space axis-aligned bounds (min, max).
     pub bounds: (glam::Vec3, glam::Vec3),
@@ -880,9 +883,6 @@ impl MountedBspBatch {
     ) -> Result<Self, String> {
         if mesh.slot == 0 {
             return Err("MountedBspBatch received a null mesh handle".to_string());
-        }
-        if material.slot == 0 && material.generation == 0 {
-            return Err("MountedBspBatch received a null material handle".to_string());
         }
         if render_batch.face_indices.is_empty() {
             return Err("MountedBspBatch has an empty face list".to_string());
@@ -1279,8 +1279,11 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
             face_to_material[face.face_index] = Some(face.material_plan_index);
         }
 
+        let mesh = merge_batch_mesh(extracted, batch_index, &group_faces)?;
+        let bounds = compute_batch_bounds(&mesh)?;
         batches.push(BspPlannedBatch {
-            mesh: merge_batch_mesh(extracted, batch_index, &group_faces)?,
+            mesh,
+            bounds,
             material_plan_index: expected_material,
             render_batch: neutral_batch.clone(),
         });
@@ -1327,8 +1330,16 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
                 ));
             }
         }
-        // Validate batch bounds are finite.
-        compute_batch_bounds(&batch.mesh)?;
+        // Bounds were computed from the intact mesh before GPU transfer.
+        if !batch.bounds.0.is_finite() || !batch.bounds.1.is_finite() {
+            return Err(format!("BSP batch {batch_index} has non-finite bounds"));
+        }
+        if batch.bounds.0.x > batch.bounds.1.x
+            || batch.bounds.0.y > batch.bounds.1.y
+            || batch.bounds.0.z > batch.bounds.1.z
+        {
+            return Err(format!("BSP batch {batch_index} has inverted bounds"));
+        }
     }
 
     // Enforce aggregate demand before decoding and packing companion images.
@@ -2038,6 +2049,33 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     #[test]
+    fn mounted_batch_accepts_first_cache_material_slot() {
+        let batch = RenderBatch {
+            key: bsp::geometry::BatchKey {
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
+                model_index: 0,
+            },
+            leaf_signature: vec![0],
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(0, 0),
+            (glam::Vec3::ZERO, glam::Vec3::ONE),
+        )
+        .expect("slot zero is a valid cache-issued BSP material handle");
+        assert_eq!(mounted.material, BspMaterialHandle::new(0, 0));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
     fn mounted_batch_rejects_empty_face_list() {
         let batch = RenderBatch {
             key: bsp::geometry::BatchKey {
@@ -2154,6 +2192,19 @@ mod tests {
             err.contains("has no material") || err.contains("differ in length"),
             "expected material-related error, got: {err}"
         );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn plan_retains_bounds_after_mesh_payload_is_consumed() {
+        let mut plan = plan_bsp_upload(&stress_extracted(1, 1)).expect("upload plan");
+        let batch = plan.batches.first_mut().expect("one planned batch");
+        let retained_bounds = batch.bounds;
+
+        let _vertices = std::mem::take(&mut batch.mesh.vertices);
+        let _indices = std::mem::take(&mut batch.mesh.indices);
+        assert!(compute_batch_bounds(&batch.mesh).is_err());
+        assert_eq!(retained_bounds, (glam::Vec3::ZERO, glam::Vec3::X.max(glam::Vec3::Y)));
     }
 
     #[cfg(feature = "bsp")]

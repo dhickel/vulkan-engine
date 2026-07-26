@@ -3409,25 +3409,15 @@ impl BspSurfaceCache {
         Ok(sets[0])
     }
 
-    /// Destroy the descriptor pool and lightmap atlas (called during cache teardown).
-    pub fn destroy_descriptor_pool(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
-        if let Some(ref mut atlas) = self.lightmap_atlas {
-            atlas.destroy(device, allocator);
-            self.lightmap_atlas = None;
-        }
-        if let Some(ref mut ubo) = self.surface_ubo {
-            ubo.destroy(allocator);
-            self.surface_ubo = None;
-        }
-        if let Some(ref mut ubo) = self.frame_values_ubo {
-            ubo.destroy(allocator);
-            self.frame_values_ubo = None;
-        }
-        if let Some(pool) = self.material_desc_pool.take() {
-            unsafe {
-                device.destroy_descriptor_pool(pool, None);
-            }
-        }
+    fn clear_frame_values_with_allocator(
+        &mut self,
+        device: &ash::Device,
+        allocator: &vk_mem::Allocator,
+    ) {
+        // Destroying a descriptor pool implicitly releases every set allocated
+        // from it. The frame-values pool was not created with
+        // FREE_DESCRIPTOR_SET, so individual set frees are neither needed nor
+        // valid here.
         if let Some(pool) = self.frame_values_desc_pool.take() {
             unsafe {
                 device.destroy_descriptor_pool(pool, None);
@@ -3437,6 +3427,35 @@ impl BspSurfaceCache {
         self.frame_values_set_layout = None;
         self.frame_slot_count = 0;
         self.frame_values_stride = 0;
+        if let Some(ref mut ubo) = self.frame_values_ubo {
+            ubo.destroy(allocator);
+            self.frame_values_ubo = None;
+        }
+    }
+
+    /// Destroy all cache-owned BSP payloads and reset the cache.
+    ///
+    /// Descriptor pools are destroyed before the buffers/images referenced by
+    /// their sets. This method is idempotent because each destroyable handle is
+    /// taken from the cache before destruction.
+    pub fn destroy_descriptor_pool(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        // The material pool owns every material descriptor set.
+        if let Some(pool) = self.material_desc_pool.take() {
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
+        }
+        self.clear_frame_values_with_allocator(device, allocator);
+
+        if let Some(ref mut ubo) = self.surface_ubo {
+            ubo.destroy(allocator);
+            self.surface_ubo = None;
+        }
+        if let Some(ref mut atlas) = self.lightmap_atlas {
+            atlas.destroy(device, allocator);
+            self.lightmap_atlas = None;
+        }
+
         self.material_set_layout = None;
         self.cached_materials.clear();
         self.generations.clear();
@@ -3590,34 +3609,18 @@ impl BspSurfaceCache {
         }
     }
 
-    /// Clear frame-values state from the surface cache.
+    /// Clear only frame-values state from the surface cache.
     ///
-    /// Used by receipt rollback. Does not destroy the material descriptor pool
-    /// or surface UBO; those are handled separately.
+    /// This remains available for scoped cache maintenance; candidate rollback
+    /// uses [`Self::destroy_descriptor_pool`] so all cache-owned BSP resources
+    /// have one destruction authority.
     pub fn clear_frame_values(
         &mut self,
         device: &ash::Device,
         allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
     ) {
-        if let Some(pool) = self.frame_values_desc_pool.take() {
-            if !self.frame_values_descriptors.is_empty() {
-                unsafe {
-                    device.free_descriptor_sets(pool, &self.frame_values_descriptors);
-                }
-            }
-            unsafe {
-                device.destroy_descriptor_pool(pool, None);
-            }
-        }
-        self.frame_values_descriptors.clear();
-        self.frame_values_set_layout = None;
-        self.frame_slot_count = 0;
-        self.frame_values_stride = 0;
-        if let Some(ref mut ubo) = self.frame_values_ubo {
-            if let Ok(alloc_guard) = allocator.lock() {
-                ubo.destroy(&alloc_guard);
-            }
-            self.frame_values_ubo = None;
+        if let Ok(alloc_guard) = allocator.lock() {
+            self.clear_frame_values_with_allocator(device, &alloc_guard);
         }
     }
 }
