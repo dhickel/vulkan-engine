@@ -16,6 +16,10 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1049,12 +1053,48 @@ fn run_direct_process(
     })?;
 
     let stream_limit = usize::try_from(stream_limit_bytes).unwrap_or(usize::MAX);
-    let stdout_reader = thread::spawn(move || read_stream_bounded(&mut stdout, stream_limit));
-    let stderr_reader = thread::spawn(move || read_stream_bounded(&mut stderr, stream_limit));
+    // Reader threads signal a limit breach as soon as it is observed. The
+    // parent then terminates the compiler rather than merely draining an
+    // arbitrarily long-running process with bounded retained output.
+    const STDOUT_LIMIT_EXCEEDED: u8 = 0b01;
+    const STDERR_LIMIT_EXCEEDED: u8 = 0b10;
+    let exceeded_streams = Arc::new(AtomicU8::new(0));
+    let stdout_signal = Arc::clone(&exceeded_streams);
+    let stderr_signal = Arc::clone(&exceeded_streams);
+    let stdout_reader = thread::spawn(move || {
+        read_stream_bounded_with_signal(
+            &mut stdout,
+            stream_limit,
+            Some((stdout_signal, STDOUT_LIMIT_EXCEEDED)),
+        )
+    });
+    let stderr_reader = thread::spawn(move || {
+        read_stream_bounded_with_signal(
+            &mut stderr,
+            stream_limit,
+            Some((stderr_signal, STDERR_LIMIT_EXCEEDED)),
+        )
+    });
 
     let started = Instant::now();
     let timeout = Duration::from_secs(timeout_seconds.max(1));
     let status = loop {
+        let limit_breach = exceeded_streams.load(Ordering::Acquire);
+        if limit_breach != 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(CompilerError::StreamBoundExceeded {
+                stage: stage_name.to_string(),
+                stream: if limit_breach & STDOUT_LIMIT_EXCEEDED != 0 {
+                    "stdout".to_string()
+                } else {
+                    "stderr".to_string()
+                },
+                limit: stream_limit_bytes,
+            });
+        }
         if let Some(status) = child.try_wait().map_err(|e| CompilerError::Io {
             message: format!("failed to poll {stage_name}"),
             source: e,
@@ -1076,14 +1116,15 @@ fn run_direct_process(
 
     let stdout = join_output_reader(stdout_reader, stage_name, "stdout")?;
     let stderr = join_output_reader(stderr_reader, stage_name, "stderr")?;
-    if stdout.exceeded {
+    let limit_breach = exceeded_streams.load(Ordering::Acquire);
+    if stdout.exceeded || limit_breach & STDOUT_LIMIT_EXCEEDED != 0 {
         return Err(CompilerError::StreamBoundExceeded {
             stage: stage_name.to_string(),
             stream: "stdout".to_string(),
             limit: stream_limit_bytes,
         });
     }
-    if stderr.exceeded {
+    if stderr.exceeded || limit_breach & STDERR_LIMIT_EXCEEDED != 0 {
         return Err(CompilerError::StreamBoundExceeded {
             stage: stage_name.to_string(),
             stream: "stderr".to_string(),
@@ -1103,7 +1144,16 @@ struct CapturedStream {
     exceeded: bool,
 }
 
+#[cfg(test)]
 fn read_stream_bounded(stream: &mut impl Read, limit: usize) -> std::io::Result<CapturedStream> {
+    read_stream_bounded_with_signal(stream, limit, None)
+}
+
+fn read_stream_bounded_with_signal(
+    stream: &mut impl Read,
+    limit: usize,
+    limit_signal: Option<(Arc<AtomicU8>, u8)>,
+) -> std::io::Result<CapturedStream> {
     let mut bytes = Vec::new();
     let mut exceeded = false;
     let mut buffer = [0u8; 8192];
@@ -1122,6 +1172,9 @@ fn read_stream_bounded(stream: &mut impl Read, limit: usize) -> std::io::Result<
                 // but do not retain unbounded diagnostic output in memory.
                 bytes.clear();
                 exceeded = true;
+                if let Some((signal, bit)) = &limit_signal {
+                    signal.fetch_or(*bit, Ordering::Release);
+                }
             } else {
                 bytes.extend_from_slice(&buffer[..count]);
             }
@@ -1893,6 +1946,55 @@ light_sha256 = "0000000000000000000000000000000000000000000000000000000000000000
         let captured = read_stream_bounded(&mut exact, 4).unwrap();
         assert!(!captured.exceeded);
         assert_eq!(captured.bytes, b"0123");
+
+        let signal = Arc::new(AtomicU8::new(0));
+        let mut signalled = std::io::Cursor::new(b"overflow".to_vec());
+        let captured =
+            read_stream_bounded_with_signal(&mut signalled, 1, Some((Arc::clone(&signal), 0b10)))
+                .unwrap();
+        assert!(captured.exceeded);
+        assert_eq!(signal.load(Ordering::Acquire), 0b10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_stream_limit_terminates_the_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = std::env::temp_dir().join(format!(
+            "engine-pack-stream-limit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&temp, b"#!/bin/sh\nwhile :; do printf 0123456789; done\n").unwrap();
+        let mut permissions = std::fs::metadata(&temp).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&temp, permissions).unwrap();
+
+        let started = Instant::now();
+        let result = run_direct_process(
+            &temp,
+            &[],
+            None,
+            &minimal_env(),
+            10,
+            64,
+            "stream-limit-test",
+        );
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_file(&temp);
+
+        assert!(matches!(
+            result,
+            Err(CompilerError::StreamBoundExceeded { ref stream, .. }) if stream == "stdout"
+        ));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "stream limit must terminate the child promptly; elapsed={elapsed:?}"
+        );
     }
 
     #[test]

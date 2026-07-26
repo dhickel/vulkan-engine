@@ -1058,7 +1058,6 @@ fn stage_pbr_companions(
     for identity in &eligible {
         for suffix in &["_norm.png", "_gloss.png"] {
             let expected = format!("{identity}{suffix}");
-            let _expected_lower = expected.to_ascii_lowercase();
 
             // Search in WAD sibling directories: each WAD's parent's textures/ dir
             let mut found: Option<PathBuf> = None;
@@ -1097,48 +1096,49 @@ fn stage_pbr_companions(
                     continue;
                 }
                 validate_no_symlink_path_components(&search_dir, "PBR companion root")?;
-                if let Ok(entries) = std::fs::read_dir(&search_dir) {
-                    let all_entries: Vec<_> = entries.flatten().collect();
-                    for entry in &all_entries {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str == expected {
-                            found = Some(entry.path());
-                            break;
-                        }
-                    }
-                    if found.is_some() {
+                let all_entries = std::fs::read_dir(&search_dir)
+                    .map_err(|err| io_error("compile-bsp.read_companion_root", &search_dir, err))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| io_error("compile-bsp.read_companion_root", &search_dir, err))?;
+                for entry in &all_entries {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str == expected {
+                        found = Some(entry.path());
                         break;
                     }
-                    // ASCII-insensitive fallback: find exactly one unique match
-                    let mut fallback: Option<PathBuf> = None;
-                    let mut ambiguous = false;
-                    for entry in &all_entries {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.eq_ignore_ascii_case(&expected) && name_str != expected {
-                            if fallback.is_some() {
-                                ambiguous = true;
-                            } else {
-                                fallback = Some(entry.path());
-                            }
+                }
+                if found.is_some() {
+                    break;
+                }
+                // ASCII-insensitive fallback: find exactly one unique match
+                let mut fallback: Option<PathBuf> = None;
+                let mut ambiguous = false;
+                for entry in &all_entries {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.eq_ignore_ascii_case(&expected) && name_str != expected {
+                        if fallback.is_some() {
+                            ambiguous = true;
+                        } else {
+                            fallback = Some(entry.path());
                         }
                     }
-                    if ambiguous {
-                        return Err(CliError::Validation(ValidationError::single(
-                            ValidationDiagnostic::new(
-                                "bsp.compile",
-                                ValidationArea::Asset,
-                                format!(
-                                    "ambiguous PBR companion for '{identity}': multiple case-insensitive matches for {suffix}"
-                                ),
+                }
+                if ambiguous {
+                    return Err(CliError::Validation(ValidationError::single(
+                        ValidationDiagnostic::new(
+                            "bsp.compile",
+                            ValidationArea::Asset,
+                            format!(
+                                "ambiguous PBR companion for '{identity}': multiple case-insensitive matches for {suffix}"
                             ),
-                        )));
-                    }
-                    if let Some(p) = fallback {
-                        found = Some(p);
-                        break;
-                    }
+                        ),
+                    )));
+                }
+                if let Some(p) = fallback {
+                    found = Some(p);
+                    break;
                 }
             }
 
