@@ -14,7 +14,8 @@ use crate::identity::{self, EntityIdentity};
 use crate::lightmaps::{self, FaceLightmapLayout, LightmapAtlas, Luxel};
 use crate::lumps;
 use crate::materials::{self, AnimatedTexture, BspMaterial, SurfaceClass};
-use crate::resources::{self, ExtractedTexture, Palette, TextureCompanion};
+use crate::resources::{self, apply_alpha_mask_convention, ExtractedTexture, Palette,
+    PbrTextureCompanions, TextureCompanion};
 use crate::visibility;
 use crate::wad;
 use crate::world::BspWorld;
@@ -259,8 +260,8 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
     let qte = QuakeToEngine::new(scale);
     let num_faces = world.faces.len();
 
-    // ── 1. Resolve textures ──
-    let (textures, texture_diags) = extract_textures(
+    // ── 1. Resolve textures (slot-preserving) ──
+    let tex_out = extract_textures(
         &world,
         effective_palette.as_ref(),
         &wad_archives,
@@ -269,14 +270,9 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         fullbright_end,
         strict,
     );
-    diagnostics.extend(texture_diags);
-
-    // Build a name→index map for texture resolution
-    let texture_index_map: std::collections::HashMap<String, u32> = textures
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.identity.clone(), i as u32))
-        .collect();
+    let textures = tex_out.textures;
+    let slot_to_texture = tex_out.slot_to_texture;
+    diagnostics.extend(tex_out.diagnostics);
 
     // ── 2. Reconstruct face geometries ──
     let face_geometries: Vec<FaceGeometry> = world
@@ -300,12 +296,18 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         .collect();
 
     // ── 3. Classify surfaces and build materials ──
-    let texture_names = resources::collect_miptex_names(&world.miptex_data);
+    let miptex_slots = resources::parse_miptex_slots(&world.miptex_data);
     let surface_classes: Vec<SurfaceClass> = materials::classify_faces(
         &world.texinfos,
-        &texture_names,
+        &miptex_slots,
         &world.faces,
     );
+
+    // Collect valid texture names for animation detection
+    let texture_names: Vec<String> = miptex_slots
+        .iter()
+        .filter_map(|s| s.identity.clone())
+        .collect();
 
     // Detect animated textures
     let mut animated_textures: Vec<AnimatedTexture> = Vec::new();
@@ -325,7 +327,7 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         .flat_map(|anim| anim.frames.iter().map(move |f| (f.clone(), anim)))
         .collect();
 
-    // Build face materials
+    // Build face materials from authoritative slot→texture map
     let mut face_materials: Vec<BspMaterial> = world
         .faces
         .iter()
@@ -333,25 +335,27 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         .map(|(fi, face)| {
             let sc = surface_classes.get(fi).copied().unwrap_or(SurfaceClass::Opaque);
             let texinfo = &world.texinfos[face.texinfo_id as usize];
-            let tex_name = texinfo
-                .miptex
-                .try_into()
-                .ok()
-                .and_then(|idx: usize| texture_names.get(idx))
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let source_slot = texinfo.miptex;
+            let slot_idx = source_slot as usize;
+            let texture_index = slot_to_texture
+                .get(slot_idx)
+                .copied()
+                .flatten()
+                .unwrap_or(u32::MAX);
+            let tex_identity = miptex_slots
+                .get(slot_idx)
+                .and_then(|s| s.identity.as_deref())
+                .unwrap_or("")
+                .to_string();
 
-            let texture_index = texture_index_map.get(tex_name).copied().unwrap_or(u32::MAX);
-            let tex_identity = tex_name.to_string();
+            let anim = anim_by_name.get(&tex_identity).cloned();
 
-            let anim = anim_by_name.get(tex_name).cloned();
-
-            let has_alpha = tex_name.starts_with('{');
+            let has_alpha = tex_identity.starts_with('{');
             let has_warp = texinfo.flags & crate::materials::tex_flags::SURF_WARP != 0
-                || (tex_name.starts_with('*')
-                    && (tex_name.contains("water")
-                        || tex_name.contains("slime")
-                        || tex_name.contains("lava")));
+                || (tex_identity.starts_with('*')
+                    && (tex_identity.contains("water")
+                        || tex_identity.contains("slime")
+                        || tex_identity.contains("lava")));
             let has_flow = texinfo.flags & crate::materials::tex_flags::SURF_FLOWING != 0;
             let trans33 = texinfo.flags & crate::materials::tex_flags::SURF_TRANS33 != 0;
             let trans66 = texinfo.flags & crate::materials::tex_flags::SURF_TRANS66 != 0;
@@ -413,6 +417,19 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
         }
     }
 
+    // Strict preflight: reject unresolved renderable faces before batching
+    if strict {
+        if let Err(e) = validate_strict_face_resources(
+            num_faces,
+            &face_geometries,
+            &face_materials,
+            &face_lightmap_layouts,
+            &surface_classes,
+            &miptex_slots,
+        ) {
+            diagnostics.push(e);
+        }
+    }
     fail_on_error_diagnostic(&diagnostics)?;
 
     // Get lightmap page per face
@@ -560,7 +577,15 @@ pub fn extract(request: BspExtractionRequest) -> Result<ExtractedBsp, BspReport>
     })
 }
 
-// ── Texture Extraction ──
+// ── Texture Extraction (Slot-Preserving) ──
+
+/// Result of resolving referenced miptex slots to compact textures.
+struct TextureExtractionOutput {
+    textures: Vec<ExtractedTexture>,
+    /// Maps source slot → compact texture index (None for holes/unresolved).
+    slot_to_texture: Vec<Option<u32>>,
+    diagnostics: Vec<BspReport>,
+}
 
 fn extract_textures(
     world: &BspWorld,
@@ -570,15 +595,15 @@ fn extract_textures(
     fullbright_start: u8,
     fullbright_end: u8,
     strict: bool,
-) -> (Vec<ExtractedTexture>, Vec<BspReport>) {
+) -> TextureExtractionOutput {
     let mut textures: Vec<ExtractedTexture> = Vec::new();
     let mut diagnostics: Vec<BspReport> = Vec::new();
 
-    // Collect all texture names from texinfos
-    let miptex_names = resources::collect_miptex_names(&world.miptex_data);
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 1. Parse slot-preserving miptex table
+    let slots = resources::parse_miptex_slots(&world.miptex_data);
+    let num_slots = slots.len();
 
-    // Parse WAD archives
+    // 2. Parse WAD archives
     let parsed_wads: Vec<(String, wad::WadArchive)> = wad_archives
         .iter()
         .filter_map(|(name, data)| {
@@ -592,39 +617,68 @@ fn extract_textures(
         })
         .collect();
 
-    if !miptex_names.is_empty() && palette.is_none() {
+    // 3. Check palette requirement: needed if any slot has embedded data
+    let needs_palette = slots.iter().any(|s| matches!(s.state, resources::SlotState::Embedded { .. }));
+    if needs_palette && palette.is_none() {
         diagnostics.push(BspReport::new(
             DiagnosticCode::MissingRequiredPalette,
             strict,
             "palette is required to extract BSP textures",
         ));
-        return (textures, diagnostics);
+        return TextureExtractionOutput {
+            textures,
+            slot_to_texture: vec![None; num_slots],
+            diagnostics,
+        };
     }
-    let Some(palette) = palette else {
-        return (textures, diagnostics);
-    };
 
-    // Resolve textures referenced by texinfos
-    for tex_name in &miptex_names {
-        if !seen.insert(tex_name.clone()) {
+    // 4. Identity→compact_texture_index map (build after slot resolution)
+    let mut identity_to_compact: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut slot_to_texture: Vec<Option<u32>> = vec![None; num_slots];
+
+    // 5. Resolve each slot with an identity
+    for slot in &slots {
+        let Some(ref identity) = slot.identity else {
+            continue;
+        };
+
+        // If we already resolved this identity (dedup), reuse compact index
+        if let Some(&compact_idx) = identity_to_compact.get(identity) {
+            slot_to_texture[slot.source_slot as usize] = Some(compact_idx);
             continue;
         }
-        let (mut texture, diags) = resources::resolve_extracted_texture(
-            tex_name,
-            &world.miptex_data,
-            &parsed_wads,
-            palette,
-            fullbright_start,
-            fullbright_end,
-            strict,
-        );
+
+        let mut texture = match &slot.state {
+            resources::SlotState::Embedded { .. } => {
+                // Read from exact offset-table entry
+                resolve_embedded_by_slot(&world.miptex_data, slot.source_slot, palette, fullbright_start, fullbright_end, strict, &mut diagnostics, identity)
+            }
+            resources::SlotState::NamedExternal => {
+                // Try WAD resolution
+                resolve_wad_texture(identity, &parsed_wads, palette, fullbright_start, fullbright_end, strict, &mut diagnostics)
+            }
+            _ => {
+                // Corrupt/hole slots with identity should not reach here normally
+                ExtractedTexture {
+                    identity: identity.clone(),
+                    source: resources::TextureSource::FallbackDiagnostic,
+                    ..Default::default()
+                }
+            }
+        };
+
+        // Attach PBR companions
         texture.pbr_companions =
-            resources::discover_pbr_texture_companions(tex_name, texture_companions);
+            resources::discover_pbr_texture_companions(identity, texture_companions);
+
+        let compact_idx = textures.len() as u32;
+        identity_to_compact.insert(identity.clone(), compact_idx);
+        slot_to_texture[slot.source_slot as usize] = Some(compact_idx);
         textures.push(texture);
-        diagnostics.extend(diags);
     }
 
-    // Detect animations and update textures with animation info
+    // 6. Detect animations and update textures
     let all_names: Vec<String> = textures.iter().map(|t| t.identity.clone()).collect();
     let mut anim_by_base: std::collections::HashMap<String, (AnimatedTexture, Vec<String>)> =
         std::collections::HashMap::new();
@@ -637,8 +691,6 @@ fn extract_textures(
         }
     }
 
-    // Update textures that are animation bases
-    // Collect animation info first to avoid mutable borrow conflicts
     let mut anim_updates: Vec<(usize, bool, Vec<String>)> = Vec::new();
     for (i, tex) in textures.iter().enumerate() {
         if let Some((anim, _)) = anim_by_base.get(&tex.identity) {
@@ -657,10 +709,236 @@ fn extract_textures(
         textures[i].animation_dimensions_uniform = uniform;
     }
 
-    // Sort textures deterministically by identity
+    // 7. Sort textures deterministically by identity
+    //    After sorting, rebuild slot_to_texture to reflect new positions.
+    let old_to_new: Vec<Option<usize>> = {
+        let mut indexed: Vec<(usize, &ExtractedTexture)> =
+            textures.iter().enumerate().collect();
+        indexed.sort_by(|(_, a), (_, b)| a.identity.cmp(&b.identity));
+        let mut mapping = vec![None; textures.len()];
+        for (new_idx, (old_idx, _)) in indexed.iter().enumerate() {
+            mapping[*old_idx] = Some(new_idx);
+        }
+        mapping
+    };
+
+    // Remap slot_to_texture
+    for tex_opt in slot_to_texture.iter_mut() {
+        if let Some(old_idx) = tex_opt {
+            if let Some(&Some(new_idx)) = old_to_new.get(*old_idx as usize) {
+                *tex_opt = Some(new_idx as u32);
+            }
+        }
+    }
+
+    // Apply sort to textures
     textures.sort_by(|a, b| a.identity.cmp(&b.identity));
 
-    (textures, diagnostics)
+    TextureExtractionOutput {
+        textures,
+        slot_to_texture,
+        diagnostics,
+    }
+}
+
+/// Resolve an embedded miptex from its exact source slot offset.
+fn resolve_embedded_by_slot(
+    miptex_data: &[u8],
+    source_slot: u32,
+    palette: Option<&Palette>,
+    fullbright_start: u8,
+    fullbright_end: u8,
+    strict: bool,
+    diagnostics: &mut Vec<BspReport>,
+    identity: &str,
+) -> ExtractedTexture {
+    let Some(palette) = palette else {
+        return ExtractedTexture {
+            identity: identity.to_string(),
+            source: resources::TextureSource::FallbackDiagnostic,
+            ..Default::default()
+        };
+    };
+
+    let Some(entry_data) = wad::read_embedded_miptex_entry(miptex_data, source_slot) else {
+        diagnostics.push(BspReport::new(
+            DiagnosticCode::MiptexCorrupt,
+            strict,
+            format!("embedded miptex slot {} has no valid entry data", source_slot),
+        ));
+        return ExtractedTexture {
+            identity: identity.to_string(),
+            source: resources::TextureSource::FallbackDiagnostic,
+            ..Default::default()
+        };
+    };
+
+    match wad::decode_miptex_pixels(entry_data, palette, fullbright_start, fullbright_end) {
+        Ok(mut pixels) => {
+            apply_alpha_mask_convention(identity, &mut pixels);
+            ExtractedTexture {
+                identity: identity.to_string(),
+                palette_indices: pixels.palette_indices,
+                albedo: pixels.albedo,
+                fullbright_mask: pixels.fullbright_mask,
+                width: pixels.width,
+                height: pixels.height,
+                source: resources::TextureSource::EmbeddedMiptex { index: source_slot },
+                is_animated_base: false,
+                animation_frames: Vec::new(),
+                animation_dimensions_uniform: false,
+                pbr_companions: PbrTextureCompanions::default(),
+            }
+        }
+        Err(e) => {
+            diagnostics.push(e);
+            ExtractedTexture {
+                identity: identity.to_string(),
+                source: resources::TextureSource::FallbackDiagnostic,
+                ..Default::default()
+            }
+        }
+    }
+}
+
+/// Resolve a texture via WAD lookup.
+fn resolve_wad_texture(
+    identity: &str,
+    parsed_wads: &[(String, wad::WadArchive)],
+    palette: Option<&Palette>,
+    fullbright_start: u8,
+    fullbright_end: u8,
+    strict: bool,
+    diagnostics: &mut Vec<BspReport>,
+) -> ExtractedTexture {
+    let Some(palette) = palette else {
+        return ExtractedTexture {
+            identity: identity.to_string(),
+            source: resources::TextureSource::FallbackDiagnostic,
+            ..Default::default()
+        };
+    };
+
+    // Search all WAD archives for exact or unique case-insensitive match
+    let mut best_match: Option<(String, wad::WadEntry)> = None;
+    let mut ambiguous_candidates: Vec<String> = Vec::new();
+
+    for (archive_name, archive) in parsed_wads {
+        let result = wad::match_wad_entry(archive, archive_name, identity);
+        match result.kind {
+            wad::WadMatchKind::Exact => {
+                // Exact match wins immediately
+                let entry = result.entry.unwrap();
+                if let Some(entry_data) = wad::read_wad_entry_data(archive, &entry) {
+                    match wad::decode_miptex_pixels(entry_data, palette, fullbright_start, fullbright_end) {
+                        Ok(mut pixels) => {
+                            apply_alpha_mask_convention(identity, &mut pixels);
+                            return ExtractedTexture {
+                                identity: identity.to_string(),
+                                palette_indices: pixels.palette_indices,
+                                albedo: pixels.albedo,
+                                fullbright_mask: pixels.fullbright_mask,
+                                width: pixels.width,
+                                height: pixels.height,
+                                source: resources::TextureSource::WadLookup {
+                                    wad_name: archive_name.clone(),
+                                    texture_name: entry.name.clone(),
+                                },
+                                is_animated_base: false,
+                                animation_frames: Vec::new(),
+                                animation_dimensions_uniform: false,
+                                pbr_companions: PbrTextureCompanions::default(),
+                            };
+                        }
+                        Err(e) => {
+                            diagnostics.push(e);
+                        }
+                    }
+                }
+                // Exact match found but couldn't decode — report and fall through
+                diagnostics.push(BspReport::new(
+                    DiagnosticCode::MissingRequiredWad,
+                    strict,
+                    format!(
+                        "WAD entry '{}' in '{}' matched exactly but failed to decode",
+                        identity, archive_name
+                    ),
+                ));
+            }
+            wad::WadMatchKind::UniqueCaseInsensitive => {
+                if best_match.is_none() {
+                    let entry = result.entry.unwrap();
+                    best_match = Some((archive_name.clone(), entry));
+                }
+            }
+            wad::WadMatchKind::Ambiguous => {
+                ambiguous_candidates.extend(result.candidate_names);
+            }
+            wad::WadMatchKind::Missing => {}
+        }
+    }
+
+    if ambiguous_candidates.is_empty() {
+        if let Some((archive_name, entry)) = best_match {
+            // Find the archive and decode
+            for (an, archive) in parsed_wads {
+                if an == &archive_name {
+                    if let Some(entry_data) = wad::read_wad_entry_data(archive, &entry) {
+                        if let Ok(mut pixels) =
+                            wad::decode_miptex_pixels(entry_data, palette, fullbright_start, fullbright_end)
+                        {
+                            apply_alpha_mask_convention(identity, &mut pixels);
+                            return ExtractedTexture {
+                                identity: identity.to_string(),
+                                palette_indices: pixels.palette_indices,
+                                albedo: pixels.albedo,
+                                fullbright_mask: pixels.fullbright_mask,
+                                width: pixels.width,
+                                height: pixels.height,
+                                source: resources::TextureSource::WadLookup {
+                                    wad_name: archive_name,
+                                    texture_name: entry.name,
+                                },
+                                is_animated_base: false,
+                                animation_frames: Vec::new(),
+                                animation_dimensions_uniform: false,
+                                pbr_companions: PbrTextureCompanions::default(),
+                            };
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        // Ambiguous case collision — error
+        diagnostics.push(BspReport::new(
+            DiagnosticCode::MissingRequiredWad,
+            strict,
+            format!(
+                "texture '{}' has ambiguous WAD candidates: {:?}",
+                identity, ambiguous_candidates
+            ),
+        ));
+    }
+
+    // Fallback
+    let code = if strict {
+        DiagnosticCode::MissingRequiredWad
+    } else {
+        DiagnosticCode::FallbackDiagnosticTexture
+    };
+    diagnostics.push(BspReport::new(
+        code,
+        strict,
+        format!("texture '{}' not found; using diagnostic fallback", identity),
+    ));
+
+    ExtractedTexture {
+        identity: identity.to_string(),
+        source: resources::TextureSource::FallbackDiagnostic,
+        ..Default::default()
+    }
 }
 
 fn validate_animation_dimensions(
@@ -1190,6 +1468,126 @@ fn extract_collision_recipes(
     }
 
     (recipes, diagnostics)
+}
+
+// ── Strict Resource Validation ──
+
+/// Reject extraction when a strict renderable face has unresolved resources.
+fn validate_strict_face_resources(
+    num_faces: usize,
+    _face_geometries: &[FaceGeometry],
+    face_materials: &[BspMaterial],
+    face_lightmap_layouts: &[FaceLightmapLayout],
+    surface_classes: &[SurfaceClass],
+    miptex_slots: &[resources::MiptexSlot],
+) -> Result<(), BspReport> {
+    for fi in 0..num_faces {
+        let sc = surface_classes.get(fi).copied().unwrap_or(SurfaceClass::Opaque);
+        if !sc.is_visible() {
+            continue;
+        }
+
+        let material = &face_materials[fi];
+
+        // Visible face must have a valid texture index
+        if material.material_index == u32::MAX {
+            return Err(BspReport::fatal(
+                DiagnosticCode::MissingRequiredWad,
+                format!(
+                    "strict: visible face {} has unresolved texture (slot texinfo.miptex maps to None/hole)",
+                    fi
+                ),
+            ));
+        }
+
+        // Opaque and alpha-mask faces require lightmap data
+        if matches!(sc, SurfaceClass::Opaque | SurfaceClass::AlphaMask) {
+            let layout = face_lightmap_layouts.get(fi);
+            if layout.map(|l| !l.has_data).unwrap_or(true) {
+                return Err(BspReport::fatal(
+                    DiagnosticCode::MissingRequiredLightmap,
+                    format!(
+                        "strict: opaque/alpha-mask face {} has no lightmap data",
+                        fi
+                    ),
+                ));
+            }
+        }
+
+        // Validate source slot is not corrupt
+        if let Some(slot) = miptex_slots.get(material.material_index as usize) {
+            if slot.state.is_corrupt() {
+                return Err(BspReport::fatal(
+                    DiagnosticCode::MiptexCorrupt,
+                    format!(
+                        "strict: visible face {} references corrupt miptex slot {}",
+                        fi, slot.source_slot
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Mapping Trace ──
+
+/// Extract the BSP with an additional face→resource mapping trace.
+///
+/// Returns the normal [`ExtractedBsp`] plus a [`FaceResourceMapping`] for every
+/// source face. The trace is derived from the authoritative slot table and final
+/// batches, never independently maintained.
+pub fn extract_with_mapping_trace(
+    request: BspExtractionRequest,
+) -> Result<(ExtractedBsp, Vec<resources::FaceResourceMapping>), BspReport> {
+    // Clone data needed for trace before the world is consumed
+    let miptex_data = request.world.miptex_data.clone();
+    let texinfos = request.world.texinfos.clone();
+    let faces = request.world.faces.clone();
+    let num_faces = faces.len();
+
+    let extracted = extract(request)?;
+
+    // Parse slots from the cloned miptex data (for trace inspection)
+    let _slots = resources::parse_miptex_slots(&miptex_data);
+
+    // Build batch index per face
+    let mut face_batch: Vec<Option<u32>> = vec![None; num_faces];
+    for (bi, batch) in extracted.render_batches.iter().enumerate() {
+        for &fi in &batch.face_indices {
+            if (fi as usize) < num_faces {
+                face_batch[fi as usize] = Some(bi as u32);
+            }
+        }
+    }
+
+    let mappings: Vec<resources::FaceResourceMapping> = (0..num_faces)
+        .map(|fi| {
+            let material = extracted.face_materials.get(fi);
+            let source_slot = faces
+                .get(fi)
+                .and_then(|face| texinfos.get(face.texinfo_id as usize))
+                .map(|ti| ti.miptex);
+
+            let tex_idx = material.and_then(|m| {
+                if m.material_index == u32::MAX {
+                    None
+                } else {
+                    Some(m.material_index)
+                }
+            });
+
+            resources::FaceResourceMapping {
+                face_index: fi as u32,
+                source_slot,
+                texture_index: tex_idx,
+                material_index: material.map(|m| m.material_index),
+                batch_index: face_batch.get(fi).copied().flatten(),
+            }
+        })
+        .collect();
+
+    Ok((extracted, mappings))
 }
 
 // ── Helpers ──

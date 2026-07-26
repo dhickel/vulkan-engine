@@ -3,6 +3,13 @@ use crate::error::GeneratorError;
 /// Construction quantum: all geometry snaps to multiples of this value.
 pub const CONSTRUCTION_QUANTUM: u32 = 16;
 
+/// Minimum constructible Z span: `2 * CONSTRUCTION_QUANTUM + 80 = 112`.
+///
+/// A vertical shell must accommodate a 16-unit floor slab, an 80-unit clear
+/// throat, and a 16-unit ceiling slab. Any `z_span` below this cannot produce
+/// walkable headroom.
+pub const MIN_Z_SPAN: u32 = 2 * CONSTRUCTION_QUANTUM + 80; // 112
+
 // ── M1 frozen bounds ──────────────────────────────────────────────────────
 
 /// M1 room count range (inclusive).
@@ -197,6 +204,13 @@ impl DungeonConfig {
             return Err(GeneratorError::InvalidConfig(
                 "z_span must be non-zero".to_string(),
             ));
+        }
+
+        if self.z_span < MIN_Z_SPAN {
+            return Err(GeneratorError::InvalidConfig(format!(
+                "z_span {} is below the minimum constructible span {} (16 floor + 80 clear + 16 ceiling)",
+                self.z_span, MIN_Z_SPAN,
+            )));
         }
 
         if self.z_span % CONSTRUCTION_QUANTUM != 0 {

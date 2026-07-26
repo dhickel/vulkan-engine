@@ -11,8 +11,6 @@ fn make_face(texture: &str) -> BrushFace {
     BrushFace {
         plane_points: [(0, 0, 0), (64, 0, 0), (0, 64, 0)],
         texture: texture.to_string(),
-        u_axis: [1, 0, 0, 0],
-        v_axis: [0, 1, 0, 0],
     }
 }
 
@@ -184,8 +182,6 @@ fn faces_are_emitted_in_vec_order() {
         .map(|i| BrushFace {
             plane_points: [(i * 16, 0, 0), (i * 16 + 16, 0, 0), (i * 16, 16, 0)],
             texture: format!("face_{}", i),
-            u_axis: [1, 0, 0, 0],
-            v_axis: [0, 1, 0, 0],
         })
         .collect();
 
@@ -262,8 +258,6 @@ fn texture_axis_standard_format() {
         faces: vec![BrushFace {
             plane_points: [(0, 0, 0), (64, 0, 0), (0, 64, 0)],
             texture: "wall".to_string(),
-            u_axis: [1, 0, 0, 0],
-            v_axis: [0, 1, 0, 0],
         }],
     };
     let emission = EmissionIntent {
@@ -312,14 +306,10 @@ fn same_emission_produces_identical_bytes() {
                 BrushFace {
                     plane_points: [(0, 0, 0), (64, 0, 0), (0, 64, 0)],
                     texture: "floor".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
                 BrushFace {
                     plane_points: [(0, 64, 128), (64, 64, 128), (0, 0, 128)],
                     texture: "ceiling".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
             ],
         }],

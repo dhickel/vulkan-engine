@@ -57,7 +57,22 @@ struct GridRect {
 }
 
 /// Build the complete worldspawn brush set and point entities.
+///
+/// # Panics
+///
+/// Panics if any corridor's height is not exactly 80. The frozen vertical
+/// IR contract (`DECISION-20260726-02`) requires all corridors to use the
+/// approved fixed clear height.
 pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionIntent {
+    // G2: Validate corridor height invariant before any geometry work.
+    for (i, c) in routed.corridors.iter().enumerate() {
+        assert_eq!(
+            c.height, 80,
+            "corridor {i} height {} != 80 (DECISION-20260726-02)",
+            c.height,
+        );
+    }
+
     let mut brushes = Vec::new();
     let corridor_cells = build_corridor_cells(&routed.corridors);
 
@@ -65,11 +80,14 @@ pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionI
         brushes.extend(build_room_brushes(room, &routed.corridors, &corridor_cells));
     }
 
-    let room_clear_cells = build_room_clear_cells(layout);
-    brushes.extend(build_corridor_slabs(&corridor_cells, &room_clear_cells));
+    // G3: Build room_owned_cells mask (complete XY footprint including wall
+    // ring). Corridor emission omits every room-owned cell so build_split_wall
+    // is the sole owner of portal columns/lintels.
+    let room_owned_cells = build_room_owned_cells(layout);
+    brushes.extend(build_corridor_slabs(&corridor_cells, &room_owned_cells));
     brushes.extend(build_corridor_boundary_walls(
         &corridor_cells,
-        &room_clear_cells,
+        &room_owned_cells,
     ));
 
     for (index, brush) in brushes.iter().enumerate() {
@@ -251,13 +269,18 @@ fn build_split_wall(
     let max_y = min_y + room.dimensions.1 as i32;
     let z0 = room.position.2;
     let z1 = z0 + room.dimensions.2 as i32;
+    // G3: Walls span only the vertical range between floor and ceiling slabs.
+    // The floor slab (z0..z0+SLAB) and ceiling slab (z1-SLAB..z1) already
+    // provide solid geometry; wall cells in those bands would overlap them.
+    let wall_z0 = z0 + SLAB;
+    let wall_z1 = z1 - SLAB;
     let (tangent_min, tangent_max) = match wall {
         RoomWall::West | RoomWall::East => (min_y, max_y),
         RoomWall::South | RoomWall::North => (min_x, max_x),
     };
 
     let mut solid_cells = BTreeMap::new();
-    for z_cell in z0.div_euclid(SLAB)..z1.div_euclid(SLAB) {
+    for z_cell in wall_z0.div_euclid(SLAB)..wall_z1.div_euclid(SLAB) {
         for tangent_cell in tangent_min.div_euclid(SLAB)..tangent_max.div_euclid(SLAB) {
             solid_cells.insert((tangent_cell, z_cell), 0);
         }
@@ -363,6 +386,8 @@ fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
     for corridor in corridors {
         let half = corridor.width as i32 / 2;
         let floor_z = corridor.start.2.min(corridor.end.2);
+        // G2: Use corridor.height (always 80 per DECISION-20260726-02) instead
+        // of the global CORRIDOR_HEIGHT constant.
         let ceiling_bottom = floor_z + SLAB + corridor.height as i32;
         match corridor_orientation(corridor) {
             Orientation::Horizontal => mark_open_rect(
@@ -400,13 +425,19 @@ fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
     cells
 }
 
-fn build_room_clear_cells(layout: &LayoutIntent) -> BTreeSet<Cell> {
+/// Build the complete room-owned XY footprint in slab-cell coordinates.
+///
+/// Every cell within a room's outer bounding box (including wall ring) is
+/// owned by that room. Corridor slabs and boundary walls must not emit
+/// geometry into these cells — `build_split_wall` is the sole owner of
+/// portal columns and lintels.
+fn build_room_owned_cells(layout: &LayoutIntent) -> BTreeSet<Cell> {
     let mut cells = BTreeSet::new();
     for room in &layout.rooms {
-        let min_x = room.position.0 + SLAB;
-        let min_y = room.position.1 + SLAB;
-        let max_x = room.position.0 + room.dimensions.0 as i32 - SLAB;
-        let max_y = room.position.1 + room.dimensions.1 as i32 - SLAB;
+        let min_x = room.position.0;
+        let min_y = room.position.1;
+        let max_x = room.position.0 + room.dimensions.0 as i32;
+        let max_y = room.position.1 + room.dimensions.1 as i32;
         for gy in min_y.div_euclid(SLAB)..max_y.div_euclid(SLAB) {
             for gx in min_x.div_euclid(SLAB)..max_x.div_euclid(SLAB) {
                 cells.insert((gx, gy));
@@ -423,9 +454,12 @@ fn build_corridor_slabs(
     if corridor_cells.is_empty() {
         return Vec::new();
     }
+    // G2: Derive floor_z from the stored ceiling_bottom per cell, using the
+    // fixed 80-unit clear height (DECISION-20260726-02). The cell map carries
+    // explicit ceiling_bottom values; we subtract slab + 80 to recover floor_z.
     let floor_z = corridor_cells
         .values()
-        .map(|ceiling_bottom| ceiling_bottom - SLAB - crate::routing::CORRIDOR_HEIGHT as i32)
+        .map(|ceiling_bottom| ceiling_bottom - SLAB - 80)
         .min()
         .unwrap_or(0);
     let shell_cells: BTreeMap<Cell, i32> = corridor_cells
@@ -466,9 +500,11 @@ fn build_corridor_boundary_walls(
     if corridor_cells.is_empty() {
         return Vec::new();
     }
+    // G2: Derive floor_z from cell ceiling_bottom using the approved 80-unit
+    // clear height (DECISION-20260726-02).
     let floor_z = corridor_cells
         .values()
-        .map(|ceiling_bottom| ceiling_bottom - SLAB - crate::routing::CORRIDOR_HEIGHT as i32)
+        .map(|ceiling_bottom| ceiling_bottom - SLAB - 80)
         .min()
         .unwrap_or(0);
     let mut wall_cells: BTreeMap<Cell, i32> = BTreeMap::new();
@@ -650,8 +686,8 @@ mod tests {
             loop_count: 0,
         };
         let cells = build_corridor_cells(&[corridor_h(112, 64, 0, 96)]);
-        let room_clear = build_room_clear_cells(&layout);
-        let slabs = build_corridor_slabs(&cells, &room_clear);
+        let room_owned = build_room_owned_cells(&layout);
+        let slabs = build_corridor_slabs(&cells, &room_owned);
 
         assert!(slabs
             .iter()

@@ -225,7 +225,93 @@ pub fn is_safe_path_component(component: &str) -> bool {
         .all(|c| c.is_ascii_graphic() || c == ' ' || c == '-' || c == '_' || c == '.')
 }
 
-/// Extract the raw miptex lump data for a named entry.
+/// Kind of WAD name match result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WadMatchKind {
+    /// Exact case-sensitive match.
+    Exact,
+    /// Unique ASCII case-insensitive match (no exact match existed).
+    UniqueCaseInsensitive,
+    /// No match found.
+    Missing,
+    /// Multiple ASCII case-insensitive matches — ambiguous.
+    Ambiguous,
+}
+
+/// Result of matching a texture name against a WAD archive directory.
+#[derive(Debug, Clone)]
+pub struct WadMatchResult {
+    /// Match classification.
+    pub kind: WadMatchKind,
+    /// The matched directory entry, if any.
+    pub entry: Option<WadEntry>,
+    /// Candidate names that matched case-insensitively (for ambiguity reporting).
+    pub candidate_names: Vec<String>,
+    /// Archive basename for provenance.
+    pub archive_name: String,
+}
+
+impl WadMatchResult {
+    fn missing(archive_name: String) -> Self {
+        WadMatchResult {
+            kind: WadMatchKind::Missing,
+            entry: None,
+            candidate_names: Vec::new(),
+            archive_name,
+        }
+    }
+
+    fn ambiguous(archive_name: String, candidates: Vec<String>) -> Self {
+        WadMatchResult {
+            kind: WadMatchKind::Ambiguous,
+            entry: None,
+            candidate_names: candidates,
+            archive_name,
+        }
+    }
+}
+
+/// Match a texture name against a WAD archive with case-aware precedence.
+///
+/// Exact case-sensitive match wins. Only when no exact match exists may a
+/// single unique ASCII case-insensitive candidate be accepted. Ambiguous
+/// case collisions return [`WadMatchKind::Ambiguous`].
+pub fn match_wad_entry(archive: &WadArchive, archive_name: &str, name: &str) -> WadMatchResult {
+    // 1. Exact case-sensitive match
+    for entry in &archive.entries {
+        if entry.name == name {
+            return WadMatchResult {
+                kind: WadMatchKind::Exact,
+                entry: Some(entry.clone()),
+                candidate_names: vec![entry.name.clone()],
+                archive_name: archive_name.to_string(),
+            };
+        }
+    }
+
+    // 2. Collect ASCII case-insensitive candidates
+    let candidates: Vec<&WadEntry> = archive
+        .entries
+        .iter()
+        .filter(|e| e.name.eq_ignore_ascii_case(name))
+        .collect();
+
+    match candidates.len() {
+        0 => WadMatchResult::missing(archive_name.to_string()),
+        1 => WadMatchResult {
+            kind: WadMatchKind::UniqueCaseInsensitive,
+            entry: Some(candidates[0].clone()),
+            candidate_names: vec![candidates[0].name.clone()],
+            archive_name: archive_name.to_string(),
+        },
+        _ => WadMatchResult::ambiguous(
+            archive_name.to_string(),
+            candidates.iter().map(|e| e.name.clone()).collect(),
+        ),
+    }
+}
+
+/// Extract the raw miptex lump data for a named entry (exact case only).
 pub fn read_wad_lump<'a>(archive: &'a WadArchive, name: &str) -> Option<&'a [u8]> {
     // Case-sensitive lookup
     for entry in &archive.entries {
@@ -236,6 +322,13 @@ pub fn read_wad_lump<'a>(archive: &'a WadArchive, name: &str) -> Option<&'a [u8]
         }
     }
     None
+}
+
+/// Extract the raw miptex lump data from a matched WAD entry.
+pub fn read_wad_entry_data<'a>(archive: &'a WadArchive, entry: &WadEntry) -> Option<&'a [u8]> {
+    let start = entry.offset as usize;
+    let end = start + entry.disk_size as usize;
+    archive.data.get(start..end)
 }
 
 /// Decoded miptex mip-0 pixels: RGBA albedo + separate fullbright mask.

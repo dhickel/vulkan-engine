@@ -1,7 +1,20 @@
 //! Canonical `.map` serializer producing deterministic, byte-identical output
 //! for semantically equivalent [`EmissionIntent`] values.
 //!
-//! The serialization contract is frozen by `DECISION-20260724-08`:
+//! # Serialization grammar
+//!
+//! The approved grammar is **Standard Quake** offset/rotation/scale per
+//! `DECISION-20260726-01`. Every face line uses the canonical form:
+//!
+//! ```text
+//! ( x y z ) ( x y z ) ( x y z ) "texture" 0 0 0 1.0 1.0
+//! ```
+//!
+//! Valve 220 bracket axes (`[ 1 0 0 0 ]`) are **not** implemented. The
+//! `BrushFace` IR carries only plane points and texture identity — no
+//! `u_axis`/`v_axis` fields exist in the approved IR.
+//!
+//! The full serialization contract is frozen by `DECISION-20260724-08`:
 //!
 //! | rule                  | value                                               |
 //! |-----------------------|-----------------------------------------------------|
@@ -10,7 +23,7 @@
 //! | brush order           | by creation index                                   |
 //! | face order per brush  | bottom, top, north, south, west, east               |
 //! | integer formatting    | decimal, no scientific notation                     |
-//! | texture axes          | `[ 1 0 0 0 ]` bracket format with single spaces     |
+//! | texture axes          | Standard Quake `0 0 0 1.0 1.0` offset/rotation/scale|
 //! | line endings          | `\n` (LF)                                           |
 //! | terminal newline      | exactly one trailing `\n`                            |
 
@@ -337,44 +350,33 @@ mod tests {
 
     #[test]
     fn brush_faces_are_emitted_in_creation_order() {
-        // Build a brush with explicit faces in known order
+        // Build a brush with explicit faces in known order.
+        // Per DECISION-20260726-01, BrushFace has no u_axis/v_axis fields.
         let brush = Brush {
             faces: vec![
                 BrushFace {
                     plane_points: [(0, 0, 0), (64, 0, 0), (0, 64, 0)],
                     texture: "bottom".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
                 BrushFace {
                     plane_points: [(0, 64, 128), (64, 64, 128), (0, 0, 128)],
                     texture: "top".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
                 BrushFace {
                     plane_points: [(0, 64, 0), (64, 64, 0), (0, 64, 128)],
                     texture: "north".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
                 BrushFace {
                     plane_points: [(0, 0, 128), (64, 0, 128), (0, 0, 0)],
                     texture: "south".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
                 BrushFace {
                     plane_points: [(0, 0, 128), (0, 64, 128), (0, 0, 0)],
                     texture: "west".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
                 BrushFace {
                     plane_points: [(64, 0, 0), (64, 64, 0), (64, 0, 128)],
                     texture: "east".to_string(),
-                    u_axis: [1, 0, 0, 0],
-                    v_axis: [0, 1, 0, 0],
                 },
             ],
         };

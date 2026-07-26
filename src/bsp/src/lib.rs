@@ -290,8 +290,8 @@ pub use coords::QuakeToEngine;
 pub use diagnostic::{BspReport, DiagnosticCode, Severity};
 pub use entities::{Entity, EntityClass, KeyValue};
 pub use extract::{
-    extract, BspExtractionRequest, EntityDescriptor, ExtractedBsp, InlineModelDescriptor,
-    LightDescriptor,
+    extract, extract_with_mapping_trace, BspExtractionRequest, EntityDescriptor, ExtractedBsp,
+    InlineModelDescriptor, LightDescriptor,
 };
 pub use geometry::{
     batch_faces, build_face_geometry, BatchKey, FaceGeometry, RenderBatch, RenderClass,
@@ -321,11 +321,11 @@ pub use visibility::{
     build_leaf_membership, camera_leaf_index, camera_pvs, camera_pvs_with_scale, CameraLeafResult,
     PvsSet, PvsState,
 };
-pub use wad::MiptexPixels;
+pub use wad::{MiptexPixels, WadMatchKind, WadMatchResult};
 pub use resources::{
     discover_pbr_texture_companions, pbr_companion_file_names, ExtractedTexture,
-    PbrCompanionFileNames, PbrTextureCompanions, TextureCompanion, TextureSource, PBR_GLOSS_SUFFIX,
-    PBR_NORMAL_SUFFIX,
+    FaceResourceMapping, MiptexSlot, PbrCompanionFileNames, PbrTextureCompanions, SlotState,
+    TextureCompanion, TextureSource, PBR_GLOSS_SUFFIX, PBR_NORMAL_SUFFIX,
 };
 
 #[cfg(test)]

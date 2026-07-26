@@ -445,7 +445,7 @@ pub fn resolve_extracted_texture(
     }, reports)
 }
 
-fn apply_alpha_mask_convention(texture_name: &str, pixels: &mut crate::wad::MiptexPixels) {
+pub(crate) fn apply_alpha_mask_convention(texture_name: &str, pixels: &mut crate::wad::MiptexPixels) {
     if !texture_name.starts_with('{') {
         return;
     }
@@ -483,31 +483,203 @@ fn find_miptex_by_name(miptex_data: &[u8], name: &str) -> Option<u32> {
     None
 }
 
-/// Get all miptex names from the embedded miptex lump.
-pub fn collect_miptex_names(miptex_data: &[u8]) -> Vec<String> {
+// ── Slot-preserving miptex table ──
+
+/// State of a single miptex slot in the source offset table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    /// Embedded miptex with valid mip-0 payload (width × height pixels).
+    Embedded { width: u32, height: u32 },
+    /// Named texture but no usable embedded payload — must resolve via WAD.
+    NamedExternal,
+    /// Hole: offset is -1, no texture identity.
+    Hole,
+    /// Invalid offset: negative value other than -1.
+    InvalidOffset,
+    /// Entry data truncated or out of range.
+    TruncatedEntry,
+    /// Name is malformed (non-UTF-8 or unsafe).
+    MalformedName,
+}
+
+impl SlotState {
+    /// Whether this slot has a resolvable texture identity.
+    pub fn has_identity(&self) -> bool {
+        matches!(self, SlotState::Embedded { .. } | SlotState::NamedExternal)
+    }
+
+    /// Whether this slot is a structural error (not a valid hole).
+    pub fn is_corrupt(&self) -> bool {
+        matches!(self, SlotState::InvalidOffset | SlotState::TruncatedEntry | SlotState::MalformedName)
+    }
+}
+
+/// One slot in the source miptex offset table, preserving its index.
+#[derive(Debug, Clone)]
+pub struct MiptexSlot {
+    /// Source index in the miptex offset table.
+    pub source_slot: u32,
+    /// Exact texture identity (preserved case), if available.
+    pub identity: Option<String>,
+    /// Resolution state of this slot.
+    pub state: SlotState,
+}
+
+/// Trace record linking a source face to its resolved resources.
+#[derive(Debug, Clone)]
+pub struct FaceResourceMapping {
+    /// Face index in the BSP.
+    pub face_index: u32,
+    /// Source miptex slot from texinfo.miptex.
+    pub source_slot: Option<u32>,
+    /// Compact texture index after slot→texture resolution.
+    pub texture_index: Option<u32>,
+    /// Material index (stable within extraction).
+    pub material_index: Option<u32>,
+    /// Batch index in render_batches.
+    pub batch_index: Option<u32>,
+}
+
+/// Parse the miptex lump into slot-preserving records.
+///
+/// Returns one [`MiptexSlot`] per declared source index, preserving holes.
+/// The offset table is authoritative; compact valid-name vectors are derived
+/// projections and must never receive `texinfo.miptex` indexes.
+pub fn parse_miptex_slots(miptex_data: &[u8]) -> Vec<MiptexSlot> {
     if miptex_data.len() < 4 {
         return Vec::new();
     }
     let count = i32::from_le_bytes([
         miptex_data[0], miptex_data[1], miptex_data[2], miptex_data[3],
     ]);
-    if count <= 0 {
+    if count <= 0 || count as u32 > crate::limits::MAX_TEXTURE_COUNT {
         return Vec::new();
     }
     let count = count as usize;
-    let mut names = Vec::with_capacity(count);
+
+    // Offset table: count × i32 LE after the 4-byte count header
+    let off_table_size = count.checked_mul(4).unwrap_or(0);
+    let off_table_end = 4usize.checked_add(off_table_size).unwrap_or(miptex_data.len());
+    if off_table_end > miptex_data.len() {
+        return Vec::new();
+    }
+
+    let mut slots = Vec::with_capacity(count);
     for i in 0..count {
-        if let Some(entry) = crate::wad::read_embedded_miptex_entry(miptex_data, i as u32) {
-            if entry.len() >= 16 {
-                let name_bytes = &entry[0..16];
-                let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
-                if let Ok(s) = std::str::from_utf8(&name_bytes[..name_len]) {
-                    names.push(s.to_string());
-                }
+        let base = 4 + i * 4;
+        let entry_offset = i32::from_le_bytes([
+            miptex_data[base],
+            miptex_data[base + 1],
+            miptex_data[base + 2],
+            miptex_data[base + 3],
+        ]);
+
+        if entry_offset == -1 {
+            slots.push(MiptexSlot {
+                source_slot: i as u32,
+                identity: None,
+                state: SlotState::Hole,
+            });
+            continue;
+        }
+
+        if entry_offset < 0 {
+            slots.push(MiptexSlot {
+                source_slot: i as u32,
+                identity: None,
+                state: SlotState::InvalidOffset,
+            });
+            continue;
+        }
+
+        let off = entry_offset as usize;
+        // Need at least 40 bytes for miptex header (name[16] + w/h + 4 mip offsets)
+        if off + 40 > miptex_data.len() {
+            slots.push(MiptexSlot {
+                source_slot: i as u32,
+                identity: None,
+                state: SlotState::TruncatedEntry,
+            });
+            continue;
+        }
+
+        // Parse name
+        let name_bytes = &miptex_data[off..off + 16];
+        let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+        let identity = match std::str::from_utf8(&name_bytes[..name_len]) {
+            Ok(s) if !s.is_empty() && crate::wad::is_safe_path_component(s) => Some(s.to_string()),
+            _ => {
+                slots.push(MiptexSlot {
+                    source_slot: i as u32,
+                    identity: None,
+                    state: SlotState::MalformedName,
+                });
+                continue;
+            }
+        };
+
+        // Check for embedded mip-0 payload
+        let width = u32::from_le_bytes([
+            miptex_data[off + 16],
+            miptex_data[off + 17],
+            miptex_data[off + 18],
+            miptex_data[off + 19],
+        ]);
+        let height = u32::from_le_bytes([
+            miptex_data[off + 20],
+            miptex_data[off + 21],
+            miptex_data[off + 22],
+            miptex_data[off + 23],
+        ]);
+        let mip0_offset = u32::from_le_bytes([
+            miptex_data[off + 24],
+            miptex_data[off + 25],
+            miptex_data[off + 26],
+            miptex_data[off + 27],
+        ]);
+
+        let has_embedded = width > 0
+            && height > 0
+            && mip0_offset >= 40
+            && (off + mip0_offset as usize) < miptex_data.len()
+            && (width as u64).checked_mul(height as u64).is_some();
+
+        if has_embedded {
+            // Verify mip-0 data fits
+            let pixel_count = (width as usize).checked_mul(height as usize).unwrap_or(0);
+            let mip0_start = off.checked_add(mip0_offset as usize).unwrap_or(usize::MAX);
+            let mip0_end = mip0_start.checked_add(pixel_count).unwrap_or(usize::MAX);
+            if mip0_end <= miptex_data.len() {
+                slots.push(MiptexSlot {
+                    source_slot: i as u32,
+                    identity,
+                    state: SlotState::Embedded { width, height },
+                });
+                continue;
             }
         }
+
+        // Named but no usable embedded payload
+        slots.push(MiptexSlot {
+            source_slot: i as u32,
+            identity,
+            state: SlotState::NamedExternal,
+        });
     }
-    names
+
+    slots
+}
+
+/// Get all miptex names from the embedded miptex lump (compatibility projection).
+///
+/// Prefer [`parse_miptex_slots`] for extraction paths that index with `texinfo.miptex`.
+/// This function drops holes and returns a compact name vector;
+/// indexing it with a raw slot number will produce wrong textures when holes exist.
+pub fn collect_miptex_names(miptex_data: &[u8]) -> Vec<String> {
+    parse_miptex_slots(miptex_data)
+        .into_iter()
+        .filter_map(|slot| slot.identity)
+        .collect()
 }
 
 /// Re-exports for convenience.

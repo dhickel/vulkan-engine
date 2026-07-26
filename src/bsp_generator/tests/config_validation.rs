@@ -230,6 +230,50 @@ fn z_span_exceeds_m2_max() {
     assert!(err.to_string().contains("exceeds"), "{}", err);
 }
 
+// ── Minimum Z span rejection (G1) ───────────────────────────────────
+
+#[test]
+fn z_span_16_fails_below_min_constructible() {
+    let cfg = DungeonConfig {
+        z_span: 16,
+        ..m1_config()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(matches!(err, GeneratorError::InvalidConfig(_)));
+    assert!(err.to_string().contains("minimum constructible"), "{}", err);
+}
+
+#[test]
+fn z_span_32_fails_below_min_constructible() {
+    let cfg = DungeonConfig {
+        z_span: 32,
+        ..m1_config()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(matches!(err, GeneratorError::InvalidConfig(_)));
+    assert!(err.to_string().contains("minimum constructible"), "{}", err);
+}
+
+#[test]
+fn z_span_96_fails_below_min_constructible() {
+    let cfg = DungeonConfig {
+        z_span: 96,
+        ..m1_config()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(matches!(err, GeneratorError::InvalidConfig(_)));
+    assert!(err.to_string().contains("minimum constructible"), "{}", err);
+}
+
+#[test]
+fn z_span_112_succeeds_at_min_constructible() {
+    let cfg = DungeonConfig {
+        z_span: 112,
+        ..m1_config()
+    };
+    assert!(cfg.validate().is_ok());
+}
+
 // ── Placement parameter rejection ─────────────────────────────────────────
 
 #[test]

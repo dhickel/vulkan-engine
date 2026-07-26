@@ -70,6 +70,11 @@ pub struct RoutedIntent {
 
 /// A single face of a convex brush, defined by three non-collinear points on
 /// its plane and associated texture mapping.
+///
+/// The approved serializer grammar is Standard Quake (offset/rotation/scale)
+/// per `DECISION-20260726-01`. `u_axis`/`v_axis` fields are removed from the
+/// public IR; serialization uses the canonical `"texture" 0 0 0 1.0 1.0`
+/// format exclusively.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BrushFace {
@@ -77,10 +82,6 @@ pub struct BrushFace {
     pub plane_points: [(i32, i32, i32); 3],
     /// Texture name (references a WAD entry).
     pub texture: String,
-    /// U-axis texture mapping `[u_x, u_y, u_z, u_offset]`.
-    pub u_axis: [i32; 4],
-    /// V-axis texture mapping `[v_x, v_y, v_z, v_offset]`.
-    pub v_axis: [i32; 4],
 }
 
 /// A convex brush: an ordered set of faces.

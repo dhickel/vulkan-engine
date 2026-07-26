@@ -64,10 +64,7 @@ pub use intent::{
     Brush, BrushFace, Corridor, EmissionIntent, EntityIntent, Junction, LayoutIntent, RoomIntent,
     RoutedIntent,
 };
-pub use junction::{
-    build_junction_closures, build_l_junction, build_room_portal, build_t_junction,
-    build_x_junction, make_brush,
-};
+pub use junction::{make_brush, validate_all_brushes, validate_brush};
 pub use placement::place_rooms;
 pub use routing::{route_all_edges, route_edge, CORRIDOR_HEIGHT, CORRIDOR_WIDTH};
 pub use seed::{Seed, StageRng, StageSeed};
@@ -145,6 +142,12 @@ pub fn generate(
 
     // 6. Build emission intent (brushes + entities)
     let emission = build_emission(&layout, &routed);
+
+    // 6b. Validate every brush before serialization (release gate — G5)
+    crate::junction::validate_all_brushes(&emission.brushes)?;
+    for entity in &emission.entities {
+        crate::junction::validate_all_brushes(&entity.brushes)?;
+    }
 
     // 7. Serialize to canonical .map bytes
     let map_text = serialize(&emission);

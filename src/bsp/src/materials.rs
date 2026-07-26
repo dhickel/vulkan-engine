@@ -317,9 +317,12 @@ impl Default for BspMaterial {
 }
 
 /// Collect unique surface classes from a set of faces.
+///
+/// Accepts the slot-preserving miptex table so `texinfo.miptex` indexes the
+/// authoritative source slot; never uses a compact valid-name vector.
 pub fn classify_faces(
     texinfos: &[lumps::Texinfo],
-    texture_names: &[String], // per-texinfo texture name
+    miptex_slots: &[crate::resources::MiptexSlot],
     faces: &[lumps::Face],
 ) -> Vec<SurfaceClass> {
     faces
@@ -327,8 +330,11 @@ pub fn classify_faces(
         .map(|face| {
             let ti = texinfos.get(face.texinfo_id as usize);
             let name = ti
-                .and_then(|t| texture_names.get(t.miptex as usize))
-                .map(|s| s.as_str())
+                .and_then(|t| {
+                    miptex_slots
+                        .get(t.miptex as usize)
+                        .and_then(|slot| slot.identity.as_deref())
+                })
                 .unwrap_or("");
             let flags = ti.map(|t| t.flags).unwrap_or(0);
             classify_surface(flags, name)

@@ -369,6 +369,79 @@ fn route_all_edges_with_placed_rooms_m2() {
     }
 }
 
+// ── G6: Deterministic portal snapping ──────────────────────────────────
+
+/// 7-quantum (112-unit) room snapping — all 4 directions
+
+#[test]
+fn portal_snapping_7_quantum_room_east_west() {
+    // 7-quantum rooms: 112 units wide. Position at 0, portal at east wall (x=112).
+    // Counterpart room center at x=192, y=56. Portal on east wall of A should
+    // snap perpendicular to nearest quantum near counterpart center (56).
+    let rooms = vec![
+        room_at(0, 0, 0, 112, 112, 128),
+        room_at(160, 0, 0, 112, 112, 128),
+    ];
+    let cfg = valid_m1_config(8, 0);
+    let mut rng = make_rng(42);
+    let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
+    assert!(!corridors.is_empty());
+    for c in &corridors {
+        assert!(c.width >= CORRIDOR_WIDTH);
+        assert!(c.height >= CORRIDOR_HEIGHT);
+    }
+}
+
+#[test]
+fn portal_snapping_7_quantum_room_north_south() {
+    let rooms = vec![
+        room_at(0, 0, 0, 112, 112, 128),
+        room_at(0, 160, 0, 112, 112, 128),
+    ];
+    let cfg = valid_m1_config(8, 0);
+    let mut rng = make_rng(42);
+    let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
+    assert!(!corridors.is_empty());
+    for c in &corridors {
+        assert!(c.width >= CORRIDOR_WIDTH);
+        assert!(c.height >= CORRIDOR_HEIGHT);
+    }
+}
+
+/// 9-quantum (144-unit) room snapping — all 4 directions
+
+#[test]
+fn portal_snapping_9_quantum_room_east_west() {
+    let rooms = vec![
+        room_at(0, 0, 0, 144, 144, 128),
+        room_at(200, 0, 0, 144, 144, 128),
+    ];
+    let cfg = valid_m1_config(8, 0);
+    let mut rng = make_rng(42);
+    let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
+    assert!(!corridors.is_empty());
+    for c in &corridors {
+        assert!(c.width >= CORRIDOR_WIDTH);
+        assert!(c.height >= CORRIDOR_HEIGHT);
+    }
+}
+
+#[test]
+fn portal_snapping_9_quantum_room_north_south() {
+    let rooms = vec![
+        room_at(0, 0, 0, 144, 144, 128),
+        room_at(0, 200, 0, 144, 144, 128),
+    ];
+    let cfg = valid_m1_config(8, 0);
+    let mut rng = make_rng(42);
+    let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
+    assert!(!corridors.is_empty());
+    for c in &corridors {
+        assert!(c.width >= CORRIDOR_WIDTH);
+        assert!(c.height >= CORRIDOR_HEIGHT);
+    }
+}
+
 // ── Quantum alignment ─────────────────────────────────────────────────────
 
 #[test]

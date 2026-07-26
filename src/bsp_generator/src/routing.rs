@@ -49,15 +49,26 @@ enum Dir {
 /// Compute portal centerline positions (in world coordinates) on two rooms'
 /// walls that face each other. Returns `(portal_a, portal_b)`.
 ///
-/// Portals are placed at the midpoint of the facing wall to ensure adequate
-/// clearance from room corners, preventing occupancy-grid blocking of the
-/// portal exit.
+/// # Portal snapping policy (G6)
+///
+/// For each wall, the perpendicular coordinate is chosen from all
+/// quantum-aligned positions within the valid wall interval. The candidate
+/// nearest the counterpart room's perpendicular center is selected; on a tie
+/// the lower coordinate wins:
+///
+/// ```text
+/// min_by_key(candidate, (abs(candidate - counterpart_perpendicular_center), candidate))
+/// ```
+///
+/// This eliminates the accidental midpoint bias that could produce
+/// non-quantum-aligned portal positions for odd-quantum rooms.
 fn compute_portals(
     a: &RoomIntent,
     b: &RoomIntent,
     ca: &(i32, i32, i32),
     cb: &(i32, i32, i32),
 ) -> ((i32, i32, i32), (i32, i32, i32)) {
+    let q = CONSTRUCTION_QUANTUM as i32;
     let a_min = a.position;
     let a_max = (
         a.position.0 + a.dimensions.0 as i32,
@@ -81,63 +92,30 @@ fn compute_portals(
         // East-West facing
         if cb.0 >= ca.0 {
             // A east wall → B west wall
-            // Use room center for the perpendicular coordinate, clamped to wall
-            let a_y = clamp(
-                ca.1,
-                a_min.1 + CONSTRUCTION_QUANTUM as i32,
-                a_max.1 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let a_y = snap_portal_perpendicular(cb.1, a_min.1 + q, a_max.1 - q, q);
             portal_a = (a_max.0, a_y, a.position.2);
-            let b_y = clamp(
-                cb.1,
-                b_min.1 + CONSTRUCTION_QUANTUM as i32,
-                b_max.1 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let b_y = snap_portal_perpendicular(ca.1, b_min.1 + q, b_max.1 - q, q);
             portal_b = (b_min.0, b_y, b.position.2);
         } else {
             // A west wall → B east wall
-            let a_y = clamp(
-                ca.1,
-                a_min.1 + CONSTRUCTION_QUANTUM as i32,
-                a_max.1 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let a_y = snap_portal_perpendicular(cb.1, a_min.1 + q, a_max.1 - q, q);
             portal_a = (a_min.0, a_y, a.position.2);
-            let b_y = clamp(
-                cb.1,
-                b_min.1 + CONSTRUCTION_QUANTUM as i32,
-                b_max.1 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let b_y = snap_portal_perpendicular(ca.1, b_min.1 + q, b_max.1 - q, q);
             portal_b = (b_max.0, b_y, b.position.2);
         }
     } else {
         // North-South facing
         if cb.1 >= ca.1 {
             // A north wall → B south wall
-            let a_x = clamp(
-                ca.0,
-                a_min.0 + CONSTRUCTION_QUANTUM as i32,
-                a_max.0 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let a_x = snap_portal_perpendicular(cb.0, a_min.0 + q, a_max.0 - q, q);
             portal_a = (a_x, a_max.1, a.position.2);
-            let b_x = clamp(
-                cb.0,
-                b_min.0 + CONSTRUCTION_QUANTUM as i32,
-                b_max.0 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let b_x = snap_portal_perpendicular(ca.0, b_min.0 + q, b_max.0 - q, q);
             portal_b = (b_x, b_min.1, b.position.2);
         } else {
             // A south wall → B north wall
-            let a_x = clamp(
-                ca.0,
-                a_min.0 + CONSTRUCTION_QUANTUM as i32,
-                a_max.0 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let a_x = snap_portal_perpendicular(cb.0, a_min.0 + q, a_max.0 - q, q);
             portal_a = (a_x, a_min.1, a.position.2);
-            let b_x = clamp(
-                cb.0,
-                b_min.0 + CONSTRUCTION_QUANTUM as i32,
-                b_max.0 - CONSTRUCTION_QUANTUM as i32,
-            );
+            let b_x = snap_portal_perpendicular(ca.0, b_min.0 + q, b_max.0 - q, q);
             portal_b = (b_x, b_max.1, b.position.2);
         }
     }
@@ -145,14 +123,41 @@ fn compute_portals(
     (portal_a, portal_b)
 }
 
-fn clamp(v: i32, lo: i32, hi: i32) -> i32 {
-    if v < lo {
-        lo
-    } else if v > hi {
-        hi
-    } else {
-        v
+/// Choose the quantum-aligned coordinate in `[lo, hi]` nearest to `target`.
+/// Tie: lower coordinate wins.
+///
+/// All values must be quantum-aligned; `lo` and `hi` are inclusive bounds.
+fn snap_portal_perpendicular(target: i32, lo: i32, hi: i32, quantum: i32) -> i32 {
+    debug_assert!(lo % quantum == 0);
+    debug_assert!(hi % quantum == 0);
+    debug_assert!(lo <= hi);
+
+    if lo >= hi {
+        return lo;
     }
+
+    // Clamp target to [lo, hi], then snap to nearest quantum.
+    let clamped = target.clamp(lo, hi);
+    let lower = (clamped / quantum) * quantum;
+    let upper = lower + quantum;
+
+    let candidate = if upper > hi {
+        lower
+    } else if lower < lo {
+        upper
+    } else {
+        let dist_lower = (clamped - lower).abs();
+        let dist_upper = (upper - clamped).abs();
+        if dist_lower <= dist_upper {
+            lower
+        } else {
+            upper
+        }
+    };
+
+    // Tie-break: if equidistant, lower coordinate wins.
+    // Already handled by `<=` above.
+    candidate
 }
 
 fn room_center(room: &RoomIntent) -> (i32, i32, i32) {
