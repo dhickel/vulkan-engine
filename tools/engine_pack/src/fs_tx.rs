@@ -162,10 +162,7 @@ impl std::fmt::Display for FsTxError {
                 candidate.display()
             ),
             Self::UnsupportedPlatform { operation, reason } => {
-                write!(
-                    f,
-                    "unsupported platform for '{operation}': {reason}"
-                )
+                write!(f, "unsupported platform for '{operation}': {reason}")
             }
             Self::ValidationBeforePublish {
                 staging,
@@ -584,7 +581,9 @@ static PRE_PUBLISH_HOOK: std::sync::Mutex<Option<Box<dyn Fn() + Send + 'static>>
 /// # Panics
 /// Panics if a hook is already installed (call `clear_pre_publish_hook` first).
 pub fn set_pre_publish_hook<F: Fn() + Send + 'static>(hook: F) {
-    let mut guard = PRE_PUBLISH_HOOK.lock().expect("pre-publish hook lock poisoned");
+    let mut guard = PRE_PUBLISH_HOOK
+        .lock()
+        .expect("pre-publish hook lock poisoned");
     assert!(
         guard.is_none(),
         "pre-publish hook already set; call clear_pre_publish_hook first"
@@ -594,7 +593,9 @@ pub fn set_pre_publish_hook<F: Fn() + Send + 'static>(hook: F) {
 
 /// Remove a previously installed pre-publish hook.
 pub fn clear_pre_publish_hook() {
-    let mut guard = PRE_PUBLISH_HOOK.lock().expect("pre-publish hook lock poisoned");
+    let mut guard = PRE_PUBLISH_HOOK
+        .lock()
+        .expect("pre-publish hook lock poisoned");
     *guard = None;
 }
 
@@ -633,16 +634,15 @@ pub fn publish_directory_no_replace(staging: &Path, target: &Path) -> Result<(),
 
     // Verify parent of target exists and is a real directory
     let target_parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let parent_meta = inspect_entry_no_follow(target_parent).map_err(|_| {
-        FsTxError::PublicationFailed {
+    let parent_meta =
+        inspect_entry_no_follow(target_parent).map_err(|_| FsTxError::PublicationFailed {
             target: target.to_path_buf(),
             staging: staging.to_path_buf(),
             message: format!(
                 "target parent does not exist or is a symlink: '{}'",
                 target_parent.display()
             ),
-        }
-    })?;
+        })?;
     if !parent_meta.is_dir() {
         return Err(FsTxError::InvalidEntryPath(format!(
             "target parent is not a directory: '{}'",
@@ -655,11 +655,9 @@ pub fn publish_directory_no_replace(staging: &Path, target: &Path) -> Result<(),
     // directory device IDs where possible, but the primary guarantee
     // is that both are under the same canonical parent tree.
     let staging_parent = staging.parent().unwrap_or_else(|| Path::new("."));
-    let staging_parent_canon = staging_parent.canonicalize().map_err(|err| {
-        FsTxError::Io {
-            path: staging_parent.to_path_buf(),
-            message: format!("canonicalize staging parent: {err}"),
-        }
+    let staging_parent_canon = staging_parent.canonicalize().map_err(|err| FsTxError::Io {
+        path: staging_parent.to_path_buf(),
+        message: format!("canonicalize staging parent: {err}"),
     })?;
     let target_parent_canon = target_parent.canonicalize().map_err(|err| FsTxError::Io {
         path: target_parent.to_path_buf(),
@@ -816,12 +814,10 @@ fn collect_file_hashes(
         if meta.is_dir() {
             collect_file_hashes(root, &path, hashes)?;
         } else if meta.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| FsTxError::RootEscape {
-                    candidate: path.clone(),
-                    root: root.to_path_buf(),
-                })?;
+            let relative = path.strip_prefix(root).map_err(|_| FsTxError::RootEscape {
+                candidate: path.clone(),
+                root: root.to_path_buf(),
+            })?;
             let hash = sha256_file(&path)?;
             hashes.push((slash_path(relative), hash));
         }
@@ -847,10 +843,12 @@ fn sha256_file(path: &Path) -> Result<String, FsTxError> {
     let mut total_len = 0u64;
 
     loop {
-        let n = file.read(&mut buf[buf_len..]).map_err(|err| FsTxError::Io {
-            path: path.to_path_buf(),
-            message: format!("read for hash: {err}"),
-        })?;
+        let n = file
+            .read(&mut buf[buf_len..])
+            .map_err(|err| FsTxError::Io {
+                path: path.to_path_buf(),
+                message: format!("read for hash: {err}"),
+            })?;
         if n == 0 {
             break;
         }
@@ -903,7 +901,12 @@ fn sha256_process_block(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
     for i in 0..16 {
         let base = i * 4;
-        w[i] = u32::from_be_bytes([block[base], block[base + 1], block[base + 2], block[base + 3]]);
+        w[i] = u32::from_be_bytes([
+            block[base],
+            block[base + 1],
+            block[base + 2],
+            block[base + 3],
+        ]);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -1060,26 +1063,45 @@ pub const STAGING_MARKER_NAME: &str = ".engine-pack-staging";
 
 /// Write an ownership marker into the staging directory that binds it to the
 /// intended destination.
+///
+/// The marker deliberately excludes process IDs, timestamps, and absolute
+/// paths. It can survive a successful directory rename as transaction
+/// metadata without making otherwise identical package closures differ.
 pub fn write_staging_marker(staging: &Path, destination: &Path) -> Result<(), FsTxError> {
+    let destination_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            FsTxError::InvalidEntryPath(format!(
+                "destination has no valid final path component: '{}'",
+                destination.display()
+            ))
+        })?;
     let marker_path = staging.join(STAGING_MARKER_NAME);
-    let content = format!(
-        "destination={}\npid={}\ntime={}\n",
-        destination.display(),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    );
+    let content = format!("engine-pack-staging-v1\ndestination_name={destination_name}\n");
     fs::write(&marker_path, content).map_err(|err| FsTxError::Io {
         path: marker_path,
         message: format!("write staging marker: {err}"),
     })
 }
 
-/// Check whether a directory contains a valid staging marker.
+/// Check whether a directory contains a regular, non-symlink staging marker.
 pub fn has_staging_marker(dir: &Path) -> bool {
-    dir.join(STAGING_MARKER_NAME).is_file()
+    fs::symlink_metadata(dir.join(STAGING_MARKER_NAME))
+        .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Check whether an ownership marker binds a staging sibling to `destination`.
+pub fn staging_marker_matches_destination(dir: &Path, destination: &Path) -> bool {
+    let Some(destination_name) = destination.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let expected = format!("engine-pack-staging-v1\ndestination_name={destination_name}\n");
+    fs::read_to_string(dir.join(STAGING_MARKER_NAME))
+        .map(|actual| actual == expected)
+        .unwrap_or(false)
 }
 
 /// Recover orphaned staging directories that are direct siblings of the
@@ -1103,10 +1125,7 @@ pub fn recover_orphaned_staging(destination: &Path) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Only consider directories with the staging prefix
         if !name.starts_with(&staging_prefix) {
@@ -1116,16 +1135,49 @@ pub fn recover_orphaned_staging(destination: &Path) {
         if path == *destination {
             continue;
         }
-        // Only recover if it has an ownership marker and is a directory
-        if !path.is_dir() {
+        // Only recover a real directory with a matching ownership marker
+        // and a fully inspectable, symlink-free tree.
+        let Ok(metadata) = inspect_entry_no_follow(&path) else {
+            continue;
+        };
+        if !metadata.is_dir()
+            || !has_staging_marker(&path)
+            || !staging_marker_matches_destination(&path, destination)
+            || !owned_staging_tree_is_safe(&path)
+        {
             continue;
         }
-        if !has_staging_marker(&path) {
-            continue;
-        }
-        // Safety: no symlinks inside (we don't recurse into unknown dirs)
         let _ = fs::remove_dir_all(&path);
     }
+}
+
+fn owned_staging_tree_is_safe(dir: &Path) -> bool {
+    let Ok(metadata) = inspect_entry_no_follow(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let path = entry.path();
+        let Ok(metadata) = inspect_entry_no_follow(&path) else {
+            return false;
+        };
+        if metadata.is_dir() {
+            if !owned_staging_tree_is_safe(&path) {
+                return false;
+            }
+        } else if !metadata.is_file() {
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,105 +1191,165 @@ pub fn validate_manifest_closure(
     staging: &Path,
     manifest_bytes: &[u8],
 ) -> Result<Vec<(String, String)>, FsTxError> {
-    let manifest_str = std::str::from_utf8(manifest_bytes).map_err(|e| {
-        FsTxError::ValidationBeforePublish {
+    let manifest_str =
+        std::str::from_utf8(manifest_bytes).map_err(|e| FsTxError::ValidationBeforePublish {
             staging: staging.to_path_buf(),
             diagnostics: vec![format!("manifest is not valid UTF-8: {e}")],
-        }
-    })?;
-    let manifest: toml::Value = toml::from_str(manifest_str).map_err(|e| {
-        FsTxError::ValidationBeforePublish {
+        })?;
+    let manifest: toml::Value =
+        toml::from_str(manifest_str).map_err(|e| FsTxError::ValidationBeforePublish {
             staging: staging.to_path_buf(),
             diagnostics: vec![format!("invalid manifest TOML: {e}")],
-        }
-    })?;
+        })?;
 
-    let table = manifest.as_table().ok_or_else(|| {
-        FsTxError::ValidationBeforePublish {
+    let table = manifest
+        .as_table()
+        .ok_or_else(|| FsTxError::ValidationBeforePublish {
             staging: staging.to_path_buf(),
             diagnostics: vec!["manifest root is not a table".to_string()],
-        }
-    })?;
+        })?;
 
     let mut diagnostics: Vec<String> = Vec::new();
-    let mut declared: Vec<(String, String)> = Vec::new();
+    if table.get("manifest_schema").and_then(toml::Value::as_str) != Some("engine-pack-canonical/1")
+    {
+        diagnostics.push("manifest has an unsupported or missing manifest_schema".to_string());
+    }
+    if table.get("strict").and_then(toml::Value::as_bool) != Some(true) {
+        diagnostics.push("manifest must declare strict = true".to_string());
+    }
 
-    // Collect declared artifacts from the manifest
-    if let Some(artifacts) = table.get("published_artifacts").and_then(|v| v.as_array()) {
-        for entry in artifacts {
-            if let Some(t) = entry.as_table() {
-                let path = t.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let sha256 = t
-                    .get("sha256")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if path.is_empty() {
-                    diagnostics.push("published_artifact with empty path".to_string());
+    let mut declared: Vec<(String, String, u64)> = Vec::new();
+    match table
+        .get("published_artifacts")
+        .and_then(toml::Value::as_array)
+    {
+        Some(artifacts) => {
+            for entry in artifacts {
+                let Some(entry) = entry.as_table() else {
+                    diagnostics.push("published_artifact is not a table".to_string());
                     continue;
-                }
-                // Validate path is relative and non-escaped
-                let p = Path::new(path);
-                if p.is_absolute() || has_path_escape(p) {
+                };
+                let Some(path) = entry.get("path").and_then(toml::Value::as_str) else {
+                    diagnostics.push("published_artifact is missing a string path".to_string());
+                    continue;
+                };
+                let Some(sha256) = entry.get("sha256").and_then(toml::Value::as_str) else {
+                    diagnostics.push(format!("published_artifact '{path}' is missing sha256"));
+                    continue;
+                };
+                let Some(bytes) = entry.get("bytes").and_then(toml::Value::as_integer) else {
+                    diagnostics.push(format!("published_artifact '{path}' is missing bytes"));
+                    continue;
+                };
+                let Ok(bytes) = u64::try_from(bytes) else {
+                    diagnostics.push(format!("published_artifact '{path}' has invalid bytes"));
+                    continue;
+                };
+                let canonical_path = match normalize_logical_key(Path::new(path)) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        diagnostics.push(format!(
+                            "published_artifact path escape, absolute path, or noncanonical path: '{path}'"
+                        ));
+                        continue;
+                    }
+                };
+                if canonical_path != path {
                     diagnostics.push(format!(
-                        "published_artifact path escape/absolute: '{path}'"
+                        "published_artifact path is not canonical: '{path}' (expected '{canonical_path}')"
                     ));
                     continue;
                 }
-                // Normalize the path key
-                let key = slash_path(p);
-                declared.push((key, sha256.to_string()));
+                if canonical_path == STAGING_MARKER_NAME
+                    || canonical_path.ends_with(".manifest.toml")
+                {
+                    diagnostics.push(format!(
+                        "published_artifact '{canonical_path}' is transaction metadata, not a payload"
+                    ));
+                    continue;
+                }
+                if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    diagnostics.push(format!(
+                        "published_artifact '{canonical_path}' has invalid sha256"
+                    ));
+                    continue;
+                }
+                declared.push((canonical_path, sha256.to_ascii_lowercase(), bytes));
             }
         }
+        None => diagnostics.push("manifest has no published_artifacts array".to_string()),
     }
 
     if declared.is_empty() {
         diagnostics.push("manifest has no published_artifacts".to_string());
     }
 
-    // Check for duplicate declared paths
     let mut seen_paths: HashSet<String> = HashSet::new();
-    for (path, _) in &declared {
+    for (path, _, _) in &declared {
         if !seen_paths.insert(path.clone()) {
             diagnostics.push(format!("duplicate declared path: '{path}'"));
         }
     }
 
-    // Collect actual files in staging
-    let mut actual_files: Vec<(String, String)> = Vec::new();
+    let mut actual_files: Vec<(String, String, u64)> = Vec::new();
     collect_staging_files(staging, staging, &mut actual_files, &mut diagnostics)?;
 
-    // Verify every declared artifact exists with matching hash
-    let actual_map: HashMap<&str, &str> = actual_files
+    let manifest_paths: Vec<&str> = actual_files
         .iter()
-        .map(|(p, h)| (p.as_str(), h.as_str()))
+        .map(|(path, _, _)| path.as_str())
+        .filter(|path| path.ends_with(".manifest.toml"))
         .collect();
+    let canonical_manifest_path = match manifest_paths.as_slice() {
+        [path] => {
+            let path = *path;
+            match fs::read(staging.join(path)) {
+                Ok(bytes) if bytes == manifest_bytes => Some(path),
+                Ok(_) => {
+                    diagnostics.push(format!(
+                        "manifest bytes do not match staged manifest '{path}'"
+                    ));
+                    None
+                }
+                Err(err) => {
+                    diagnostics.push(format!("cannot read staged manifest '{path}': {err}"));
+                    None
+                }
+            }
+        }
+        [] => {
+            diagnostics.push("staging has no canonical manifest file".to_string());
+            None
+        }
+        _ => {
+            diagnostics.push("staging has multiple manifest files".to_string());
+            None
+        }
+    };
 
-    for (path, declared_hash) in &declared {
+    let actual_map: HashMap<&str, (&str, u64)> = actual_files
+        .iter()
+        .map(|(path, hash, bytes)| (path.as_str(), (hash.as_str(), *bytes)))
+        .collect();
+    for (path, declared_hash, declared_bytes) in &declared {
         match actual_map.get(path.as_str()) {
-            Some(actual_hash) if actual_hash == declared_hash => {}
-            Some(actual_hash) => {
-                diagnostics.push(format!(
-                    "hash mismatch for '{path}': declared {declared_hash}, actual {actual_hash}"
-                ));
-            }
-            None => {
-                diagnostics.push(format!(
-                    "declared artifact '{path}' not found in staging"
-                ));
-            }
+            Some((actual_hash, actual_bytes))
+                if *actual_hash == declared_hash && *actual_bytes == *declared_bytes => {}
+            Some((actual_hash, actual_bytes)) => diagnostics.push(format!(
+                "artifact mismatch for '{path}': declared sha256={declared_hash} bytes={declared_bytes}, actual sha256={actual_hash} bytes={actual_bytes}"
+            )),
+            None => diagnostics.push(format!(
+                "declared artifact '{path}' not found in staging"
+            )),
         }
     }
 
-    // Reject undeclared regular files (except markers and manifests)
-    let declared_paths: HashSet<&str> = declared.iter().map(|(p, _)| p.as_str()).collect();
-    for (path, _hash) in &actual_files {
-        if path == STAGING_MARKER_NAME {
+    let declared_paths: HashSet<&str> = declared.iter().map(|(path, _, _)| path.as_str()).collect();
+    for (path, _, _) in &actual_files {
+        if path == STAGING_MARKER_NAME || canonical_manifest_path == Some(path.as_str()) {
             continue;
         }
         if !declared_paths.contains(path.as_str()) {
-            diagnostics.push(format!(
-                "undeclared regular file in staging: '{path}'"
-            ));
+            diagnostics.push(format!("undeclared regular file in staging: '{path}'"));
         }
     }
 
@@ -1248,7 +1360,10 @@ pub fn validate_manifest_closure(
         });
     }
 
-    Ok(declared)
+    Ok(declared
+        .into_iter()
+        .map(|(path, hash, _)| (path, hash))
+        .collect())
 }
 
 /// Collect all regular files in staging (non-recursive for subdirectories
@@ -1256,7 +1371,7 @@ pub fn validate_manifest_closure(
 fn collect_staging_files(
     root: &Path,
     dir: &Path,
-    files: &mut Vec<(String, String)>,
+    files: &mut Vec<(String, String, u64)>,
     diagnostics: &mut Vec<String>,
 ) -> Result<(), FsTxError> {
     let dir_meta = inspect_entry_no_follow(dir)?;
@@ -1284,17 +1399,25 @@ fn collect_staging_files(
         let meta = inspect_entry_no_follow(&path)?;
 
         if meta.is_dir() {
+            let relative = path.strip_prefix(root).map_err(|_| FsTxError::RootEscape {
+                candidate: path.clone(),
+                root: root.to_path_buf(),
+            })?;
+            let logical_path = slash_path(relative);
+            if logical_path == ".compile-work" || logical_path.starts_with(".compile-work/") {
+                diagnostics.push(format!(
+                    "stale compiler work directory in staging: '{logical_path}'"
+                ));
+            }
             // Recurse into subdirectories (e.g. textures/)
             collect_staging_files(root, &path, files, diagnostics)?;
         } else if meta.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| FsTxError::RootEscape {
-                    candidate: path.clone(),
-                    root: root.to_path_buf(),
-                })?;
+            let relative = path.strip_prefix(root).map_err(|_| FsTxError::RootEscape {
+                candidate: path.clone(),
+                root: root.to_path_buf(),
+            })?;
             let hash = sha256_file(&path)?;
-            files.push((slash_path(relative), hash));
+            files.push((slash_path(relative), hash, meta.len()));
         } else {
             diagnostics.push(format!(
                 "non-regular entry in staging: '{}'",
@@ -1303,18 +1426,6 @@ fn collect_staging_files(
         }
     }
     Ok(())
-}
-
-fn has_path_escape(path: &Path) -> bool {
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir
-            | std::path::Component::Prefix(_)
-            | std::path::Component::RootDir => return true,
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Compute the SHA-256 of the canonical manifest bytes.
@@ -1500,12 +1611,10 @@ fn collect_staged_entries(
             }
             collect_staged_entries(root, &path, files, diagnostics)?;
         } else if meta.is_file() {
-            let relative = path
-                .strip_prefix(root)
-                .map_err(|_| FsTxError::RootEscape {
-                    candidate: path.clone(),
-                    root: root.to_path_buf(),
-                })?;
+            let relative = path.strip_prefix(root).map_err(|_| FsTxError::RootEscape {
+                candidate: path.clone(),
+                root: root.to_path_buf(),
+            })?;
             files.push(slash_path(relative));
         }
     }

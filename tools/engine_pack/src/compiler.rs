@@ -19,6 +19,8 @@ use std::process::{Command, Output};
 use std::thread;
 use std::time::{Duration, Instant};
 
+const MAX_VERSION_STREAM_BYTES: u64 = 1024 * 1024;
+
 /// Parse a `CompilerProfile` from a TOML string.
 pub fn parse_compiler_profile(content: &str) -> Result<CompilerProfile, String> {
     let root: toml::Value = toml::from_str(content).map_err(|e| format!("invalid TOML: {e}"))?;
@@ -531,13 +533,25 @@ pub enum CompilerError {
     /// Source input is a symlink or non-regular file.
     NonRegularInput { path: PathBuf, kind: String },
     /// Compiler emitted a missing-texture diagnostic.
-    MissingTexture { stage: String, stdout: String, stderr: String },
+    MissingTexture {
+        stage: String,
+        stdout: String,
+        stderr: String,
+    },
     /// Compiler leaked a pointfile (.pts or .prt).
     PointfileLeaked { path: PathBuf, stage: String },
     /// Compiler output stream exceeded size bound.
-    StreamBoundExceeded { stage: String, stream: String, limit: u64 },
+    StreamBoundExceeded {
+        stage: String,
+        stream: String,
+        limit: u64,
+    },
     /// BSP magic mismatch with profile expectation.
-    BspMagicMismatch { expected: String, found: String, path: PathBuf },
+    BspMagicMismatch {
+        expected: String,
+        found: String,
+        path: PathBuf,
+    },
     /// Lit file is invalid (wrong header, version, or size mismatch).
     InvalidLit { path: PathBuf, reason: String },
 }
@@ -634,7 +648,11 @@ impl std::fmt::Display for CompilerError {
             CompilerError::NonRegularInput { path, kind } => {
                 write!(f, "non-regular input '{}' is a {kind}", path.display())
             }
-            CompilerError::MissingTexture { stage, stdout, stderr } => {
+            CompilerError::MissingTexture {
+                stage,
+                stdout,
+                stderr,
+            } => {
                 write!(
                     f,
                     "{stage} reported missing texture:\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -643,13 +661,18 @@ impl std::fmt::Display for CompilerError {
             CompilerError::PointfileLeaked { path, stage } => {
                 write!(f, "{stage} leaked pointfile '{}'", path.display())
             }
-            CompilerError::StreamBoundExceeded { stage, stream, limit } => {
-                write!(
-                    f,
-                    "{stage} {stream} stream exceeded {limit} byte bound"
-                )
+            CompilerError::StreamBoundExceeded {
+                stage,
+                stream,
+                limit,
+            } => {
+                write!(f, "{stage} {stream} stream exceeded {limit} byte bound")
             }
-            CompilerError::BspMagicMismatch { expected, found, path } => {
+            CompilerError::BspMagicMismatch {
+                expected,
+                found,
+                path,
+            } => {
                 write!(
                     f,
                     "BSP magic mismatch in '{}': expected {expected}, found {found}",
@@ -762,6 +785,7 @@ fn verify_compiler_version(
         None,
         env,
         timeout_seconds,
+        MAX_VERSION_STREAM_BYTES,
         "version check",
     )?;
 
@@ -775,6 +799,7 @@ fn verify_compiler_version(
             None,
             env,
             timeout_seconds,
+            MAX_VERSION_STREAM_BYTES,
             "version help check",
         )?;
         let fallback_text = process_output_text(&fallback);
@@ -986,6 +1011,7 @@ fn run_direct_process(
     working_dir: Option<&Path>,
     env: &HashMap<String, String>,
     timeout_seconds: u64,
+    stream_limit_bytes: u64,
     stage_name: &str,
 ) -> Result<Output, CompilerError> {
     let mut cmd = Command::new(executable);
@@ -1022,14 +1048,9 @@ fn run_direct_process(
         CompilerError::InvalidProfile(format!("failed to capture stderr for {stage_name}"))
     })?;
 
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
+    let stream_limit = usize::try_from(stream_limit_bytes).unwrap_or(usize::MAX);
+    let stdout_reader = thread::spawn(move || read_stream_bounded(&mut stdout, stream_limit));
+    let stderr_reader = thread::spawn(move || read_stream_bounded(&mut stderr, stream_limit));
 
     let started = Instant::now();
     let timeout = Duration::from_secs(timeout_seconds.max(1));
@@ -1055,19 +1076,65 @@ fn run_direct_process(
 
     let stdout = join_output_reader(stdout_reader, stage_name, "stdout")?;
     let stderr = join_output_reader(stderr_reader, stage_name, "stderr")?;
+    if stdout.exceeded {
+        return Err(CompilerError::StreamBoundExceeded {
+            stage: stage_name.to_string(),
+            stream: "stdout".to_string(),
+            limit: stream_limit_bytes,
+        });
+    }
+    if stderr.exceeded {
+        return Err(CompilerError::StreamBoundExceeded {
+            stage: stage_name.to_string(),
+            stream: "stderr".to_string(),
+            limit: stream_limit_bytes,
+        });
+    }
 
     Ok(Output {
         status,
-        stdout,
-        stderr,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
     })
 }
 
+struct CapturedStream {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+fn read_stream_bounded(stream: &mut impl Read, limit: usize) -> std::io::Result<CapturedStream> {
+    let mut bytes = Vec::new();
+    let mut exceeded = false;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if !exceeded {
+            if bytes
+                .len()
+                .checked_add(count)
+                .map_or(true, |length| length > limit)
+            {
+                // Continue draining so the child cannot block on a full pipe,
+                // but do not retain unbounded diagnostic output in memory.
+                bytes.clear();
+                exceeded = true;
+            } else {
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+        }
+    }
+    Ok(CapturedStream { bytes, exceeded })
+}
+
 fn join_output_reader(
-    handle: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    handle: thread::JoinHandle<std::io::Result<CapturedStream>>,
     stage_name: &str,
     stream: &str,
-) -> Result<Vec<u8>, CompilerError> {
+) -> Result<CapturedStream, CompilerError> {
     handle
         .join()
         .map_err(|_| {
@@ -1086,6 +1153,7 @@ fn run_compiler_stage(
     working_dir: &Path,
     env: &HashMap<String, String>,
     timeout_seconds: u64,
+    stream_limit_bytes: u64,
     stage_name: &str,
 ) -> Result<Output, CompilerError> {
     run_direct_process(
@@ -1094,6 +1162,7 @@ fn run_compiler_stage(
         Some(working_dir),
         env,
         timeout_seconds,
+        stream_limit_bytes,
         stage_name,
     )
 }
@@ -1139,7 +1208,11 @@ fn reject_missing_textures(stage: &str, output: &Output) -> Result<(), CompilerE
 /// Check for leaked pointfiles after compilation.
 /// Only `.pts` files indicate leaks; `.prt` is the normal portal file
 /// produced by qbsp and consumed by vis.
-fn check_pointfile_leaks(work_dir: &Path, bsp_stem: &str, stage: &str) -> Result<(), CompilerError> {
+fn check_pointfile_leaks(
+    work_dir: &Path,
+    bsp_stem: &str,
+    stage: &str,
+) -> Result<(), CompilerError> {
     let pts_path = work_dir.join(format!("{bsp_stem}.pts"));
     if pts_path.exists() {
         return Err(CompilerError::PointfileLeaked {
@@ -1150,17 +1223,28 @@ fn check_pointfile_leaks(work_dir: &Path, bsp_stem: &str, stage: &str) -> Result
     Ok(())
 }
 
-/// Build a deterministic controlled-environment identity string for provenance.
+/// Build a deterministic identity for the exact minimized compiler environment.
+///
+/// The identity hashes values rather than serializing host-specific paths,
+/// usernames, or temporary directories into a reproducible package manifest.
 pub fn controlled_environment_identity() -> String {
-    let keys = ["PATH", "HOME", "USER"];
-    let mut parts: Vec<String> = Vec::new();
-    for key in &keys {
-        if let Some(val) = std::env::var_os(key) {
-            parts.push(format!("{key}={}", val.to_string_lossy()));
-        }
+    let env = minimal_env();
+    let mut entries: Vec<_> = env.into_iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = sha2::Sha256::new();
+    for (key, value) in entries {
+        hasher.update(key.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(value.as_bytes());
+        hasher.update(&[0]);
     }
-    parts.sort();
-    parts.join(";")
+    let digest = hasher.finalize();
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{digest}")
 }
 
 /// Validate source input is a regular non-symlink file.
@@ -1400,6 +1484,7 @@ pub fn compile_map(
         work_dir,
         &env,
         profile.timeout_seconds,
+        profile.max_output_size,
         "qbsp",
     )?;
     if !qbsp_output.status.success() {
@@ -1436,6 +1521,7 @@ pub fn compile_map(
         work_dir,
         &env,
         profile.timeout_seconds,
+        profile.max_output_size,
         "vis",
     )?;
     if !vis_output.status.success() {
@@ -1461,6 +1547,7 @@ pub fn compile_map(
         work_dir,
         &env,
         profile.timeout_seconds,
+        profile.max_output_size,
         "light",
     )?;
     if !light_output.status.success() {
@@ -1504,7 +1591,8 @@ pub fn compile_map(
         // Validate .lit structure before accepting it
         // We'll validate properly after BSP parse, but do structural check now
         if lit_bytes.len() >= 8 && &lit_bytes[0..4] == b"QLIT" {
-            let version = u32::from_le_bytes([lit_bytes[4], lit_bytes[5], lit_bytes[6], lit_bytes[7]]);
+            let version =
+                u32::from_le_bytes([lit_bytes[4], lit_bytes[5], lit_bytes[6], lit_bytes[7]]);
             if version != 1 {
                 return Err(CompilerError::InvalidLit {
                     path: lit_path.clone(),

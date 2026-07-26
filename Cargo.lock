@@ -1019,6 +1019,7 @@ version = "0.1.0"
 dependencies = [
  "bsp",
  "bsp_generator",
+ "bsp_runtime",
  "launch_shared",
  "libc",
  "package_io",

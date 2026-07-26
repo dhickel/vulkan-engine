@@ -18,10 +18,8 @@ use engine_pack::compiler;
 use engine_pack::fs_tx;
 use engine_pack::fs_tx::{
     build_publication_plan, cleanup_staging, contained_child_no_symlinks,
-    create_staging_file_sibling, create_staging_sibling,
-    publish_directory_no_replace, publish_staging,
-    replace_file_with_staging, stage_entry,
-    EntryType, PlanEntry, RollbackJournal,
+    create_staging_file_sibling, create_staging_sibling, publish_directory_no_replace,
+    publish_staging, replace_file_with_staging, stage_entry, EntryType, PlanEntry, RollbackJournal,
 };
 
 type CliResult<T> = Result<T, CliError>;
@@ -350,6 +348,8 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
             .with_path(&palette),
         ))
     })?;
+    validate_no_symlink_path_components(&source_map, "source map")?;
+    validate_no_symlink_path_components(&palette, "palette")?;
     for wad in &wad_paths {
         compiler::validate_input_regular(wad).map_err(|err| {
             CliError::Validation(ValidationError::single(
@@ -361,6 +361,7 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
                 .with_path(wad),
             ))
         })?;
+        validate_no_symlink_path_components(wad, "WAD input")?;
     }
 
     let out_dir = PathBuf::from(&out_dir);
@@ -414,12 +415,10 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         std::fs::write(&bsp_path, &compile_result.bsp_data)
             .map_err(|err| io_error("compile-bsp.write", &bsp_path, err))?;
 
-        let mut staged_lit = false;
         if let Some(ref lit_data) = compile_result.lit_data {
             let lit_path = staging.join(format!("{bsp_name}.lit"));
             std::fs::write(&lit_path, lit_data)
                 .map_err(|err| io_error("compile-bsp.write", &lit_path, err))?;
-            staged_lit = true;
         }
 
         // ── Stage palette ─────────────────────────────────────────
@@ -430,141 +429,156 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
             .map_err(|err| io_error("compile-bsp.write", &palette_staged, err))?;
 
         // ── Stage WADs ────────────────────────────────────────────
-        let mut staged_wads: Vec<String> = Vec::new();
-        for wad_path in &wad_paths {
-            let basename = wad_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown.wad");
-            let dest = staging.join(basename);
-            std::fs::copy(wad_path, &dest)
-                .map_err(|err| io_error("compile-bsp.copy_wad", wad_path, err))?;
-            staged_wads.push(basename.to_string());
-        }
+        // Compiler input order remains intact here. After strict resolution
+        // determines the actual closure, unused archives are removed before
+        // the manifest is written.
+        let mut seen_wad_basenames = HashSet::new();
+        let staged_wad_basenames = wad_paths
+            .iter()
+            .map(|wad_path| {
+                let basename = wad_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        CliError::Validation(internal_error(
+                            "bsp.compile",
+                            format!("WAD has no valid filename: '{}'", wad_path.display()),
+                        ))
+                    })?;
+                if !seen_wad_basenames.insert(basename.to_string()) {
+                    return Err(CliError::Validation(internal_error(
+                        "bsp.compile",
+                        format!("duplicate WAD basename in package closure: '{basename}'"),
+                    )));
+                }
+                let dest = staging.join(basename);
+                std::fs::copy(wad_path, &dest)
+                    .map_err(|err| io_error("compile-bsp.copy_wad", wad_path, err))?;
+                Ok(basename.to_string())
+            })
+            .collect::<CliResult<Vec<_>>>()?;
 
-        // ── Stage PBR companion textures ──────────────────────────
-        let staged_companions = stage_pbr_companions(
+        // ── Stage PBR companion textures and trim WAD closure ─────
+        let staged_pbr = stage_pbr_companions(
             &staging,
             bsp_name,
             &compile_result,
             &wad_paths,
             &palette_bytes,
         )?;
-
-        // ── Compute all staged file hashes ────────────────────────
-        let staged_hashes = fs_tx::compute_dir_file_hashes(&staging)
-            .map_err(CliError::FsTx)?;
+        let selected_wad_basenames = staged_wad_basenames
+            .iter()
+            .filter(|basename| staged_pbr.required_wad_basenames.contains(*basename))
+            .cloned()
+            .collect::<Vec<_>>();
+        for basename in staged_wad_basenames
+            .iter()
+            .filter(|basename| !staged_pbr.required_wad_basenames.contains(*basename))
+        {
+            let path = staging.join(basename);
+            std::fs::remove_file(&path)
+                .map_err(|err| io_error("compile-bsp.remove_unused_wad", &path, err))?;
+        }
 
         // ── Build canonical manifest ──────────────────────────────
+        // The ownership marker is transaction metadata, never a payload. The
+        // manifest itself is intentionally excluded from its payload list to
+        // avoid a recursive self-hash.
+        let staged_hashes = fs_tx::compute_dir_file_hashes(&staging).map_err(CliError::FsTx)?;
+        let source_map_identity = source_map
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                CliError::Usage("compile-bsp source map has no valid filename".into())
+            })?;
         let controlled_env = compiler::controlled_environment_identity();
         let manifest_toml = build_canonical_manifest(
-            &profile,
             &compile_result,
-            bsp_name,
-            &source_map.display().to_string(),
-            &profile_path,
+            source_map_identity,
             &profile_sha256,
             profile_family,
             &exact_profile_name,
             &controlled_env,
-            staged_lit,
-            &staged_wads,
-            &staged_companions,
+            &staging,
             &staged_hashes,
         )?;
+        let manifest_sha256 = fs_tx::compute_manifest_sha256(manifest_toml.as_bytes());
 
         let manifest_path = staging.join(format!("{bsp_name}.manifest.toml"));
         std::fs::write(&manifest_path, &manifest_toml)
             .map_err(|err| io_error("compile-bsp.write", &manifest_path, err))?;
 
-        // Recompute with manifest included
-        let final_hashes = fs_tx::compute_dir_file_hashes(&staging)
-            .map_err(CliError::FsTx)?;
-        let updated_manifest = build_canonical_manifest(
-            &profile,
-            &compile_result,
-            bsp_name,
-            &source_map.display().to_string(),
-            &profile_path,
-            &profile_sha256,
-            profile_family,
-            &exact_profile_name,
-            &controlled_env,
-            staged_lit,
-            &staged_wads,
-            &staged_companions,
-            &final_hashes,
-        )?;
-        let manifest_sha256 = fs_tx::compute_manifest_sha256(updated_manifest.as_bytes());
-
-        // Write final manifest
-        std::fs::write(&manifest_path, &updated_manifest)
-            .map_err(|err| io_error("compile-bsp.write", &manifest_path, err))?;
-
         // ── Validate manifest closure ─────────────────────────────
-        let _declared = fs_tx::validate_manifest_closure(&staging, updated_manifest.as_bytes())
+        let _declared = fs_tx::validate_manifest_closure(&staging, manifest_toml.as_bytes())
             .map_err(CliError::FsTx)?;
+
+        // ── Isolated Phase-03 strict import ───────────────────────
+        // Validate only the staged package root through the shared package
+        // boundary. This proves the manifest closure has no source-tree
+        // fallback before it becomes visible at the destination.
+        validate_staged_authorized_import(
+            &staging,
+            bsp_name,
+            compile_result.lit_data.is_some(),
+            &selected_wad_basenames,
+        )?;
 
         // ── Publication ───────────────────────────────────────────
         if destination_exists {
-            // Validate existing destination as a complete closure
+            // Validate an existing destination before comparing it. An
+            // incomplete directory is never repaired, merged, or overwritten.
             match validate_existing_destination(&out_dir) {
-                Ok(Some(existing_manifest_sha256)) => {
-                    if existing_manifest_sha256 == manifest_sha256 {
-                        return Ok(format!(
-                            "compiled[bsp]: {} -> {}/ (unchanged, manifest sha256:{})",
-                            source_map.display(),
-                            out_dir.display(),
-                            manifest_sha256
-                        ));
-                    }
-                    return Err(CliError::FsTx(
-                        fs_tx::FsTxError::PreExistingDestination {
-                            target: out_dir.clone(),
-                            message: format!(
-                                "late collision: existing manifest sha256:{} != new sha256:{}",
-                                existing_manifest_sha256, manifest_sha256
-                            ),
-                        },
+                Ok(Some(existing_manifest_sha256))
+                    if existing_manifest_sha256 == manifest_sha256 =>
+                {
+                    cleanup_staging(&staging);
+                    return Ok(format!(
+                        "compiled[bsp]: {} -> {}/ (unchanged, manifest sha256:{})",
+                        source_map.display(),
+                        out_dir.display(),
+                        manifest_sha256
                     ));
+                }
+                Ok(Some(existing_manifest_sha256)) => {
+                    return Err(CliError::FsTx(fs_tx::FsTxError::PreExistingDestination {
+                        target: out_dir.clone(),
+                        message: format!(
+                            "late collision: existing manifest sha256:{} != new sha256:{}",
+                            existing_manifest_sha256, manifest_sha256
+                        ),
+                    }));
                 }
                 Ok(None) => {
-                    return Err(CliError::FsTx(
-                        fs_tx::FsTxError::PreExistingDestination {
-                            target: out_dir.clone(),
-                            message: "incomplete destination: no valid manifest found"
-                                .to_string(),
-                        },
-                    ));
+                    return Err(CliError::FsTx(fs_tx::FsTxError::PreExistingDestination {
+                        target: out_dir.clone(),
+                        message: "incomplete destination: no valid manifest found".to_string(),
+                    }))
                 }
                 Err(reason) => {
-                    return Err(CliError::FsTx(
-                        fs_tx::FsTxError::PreExistingDestination {
-                            target: out_dir.clone(),
-                            message: format!("incomplete destination: {reason}"),
-                        },
-                    ));
+                    return Err(CliError::FsTx(fs_tx::FsTxError::PreExistingDestination {
+                        target: out_dir.clone(),
+                        message: format!("incomplete destination: {reason}"),
+                    }))
                 }
             }
         }
 
-        publish_directory_no_replace(&staging, &out_dir).map_err(|err| {
-            // On EEXIST, perform the race check
-            if let fs_tx::FsTxError::PreExistingDestination { .. } = &err {
-                if let Ok(Some(existing_hash)) = validate_existing_destination(&out_dir) {
-                    if existing_hash == manifest_sha256 {
-                        return CliError::FsTx(fs_tx::FsTxError::PreExistingDestination {
-                            target: out_dir.clone(),
-                            message: format!(
-                                "race resolved: destination now matches (sha256:{})",
-                                manifest_sha256
-                            ),
-                        });
-                    }
-                }
+        match publish_directory_no_replace(&staging, &out_dir) {
+            Ok(()) => {}
+            Err(fs_tx::FsTxError::PreExistingDestination { .. }) if matches!(validate_existing_destination(&out_dir), Ok(Some(ref hash)) if hash == &manifest_sha256) =>
+            {
+                cleanup_staging(&staging);
+                return Ok(format!(
+                    "compiled[bsp]: {} -> {}/ (unchanged, manifest sha256:{})",
+                    source_map.display(),
+                    out_dir.display(),
+                    manifest_sha256
+                ));
             }
-            CliError::FsTx(err)
-        })?;
+            Err(err) => return Err(CliError::FsTx(err)),
+        }
 
         Ok(format!(
             "published[bsp]: {} -> {}/ profile={} ({}) family={} strict=true manifest_sha256:{}",
@@ -606,7 +620,8 @@ fn validate_existing_destination(out_dir: &Path) -> Result<Option<String>, Strin
         Some(p) => p,
         None => return Ok(None),
     };
-    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
+    let manifest_bytes =
+        std::fs::read(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
     let sha256 = fs_tx::compute_manifest_sha256(&manifest_bytes);
 
     // Validate the closure
@@ -614,6 +629,329 @@ fn validate_existing_destination(out_dir: &Path) -> Result<Option<String>, Strin
         .map_err(|e| format!("validation failed: {e}"))?;
 
     Ok(Some(sha256))
+}
+
+/// Strict-load a staged closure through the Phase-03 authorization boundary.
+fn validate_staged_authorized_import(
+    staging: &Path,
+    bsp_name: &str,
+    has_lit: bool,
+    wad_paths: &[String],
+) -> CliResult<()> {
+    use package_io::budget::BudgetLedger;
+    use package_io::PackageRoot;
+
+    let root = PackageRoot::new(staging).map_err(|err| {
+        CliError::Validation(internal_error(
+            "bsp.package",
+            format!("cannot create staged package root: {err}"),
+        ))
+    })?;
+    let mut resolver =
+        package_io::resolver::PackageResolver::new(root, BudgetLedger::default_ledger());
+    let lit_path = has_lit.then(|| format!("{bsp_name}.lit"));
+
+    let import = bsp_runtime::package::authorize_package_import(
+        &mut resolver,
+        &format!("{bsp_name}.bsp"),
+        "palette.lmp",
+        lit_path.as_deref(),
+        wad_paths,
+        Some("textures"),
+        bsp_runtime::package::ImportMode::Strict,
+        0.0254,
+    )
+    .map_err(|err| {
+        CliError::Validation(internal_error(
+            "bsp.package",
+            format!("isolated strict package import failed: {err}"),
+        ))
+    })?;
+
+    if !import.world.diagnostics.is_empty() {
+        return Err(CliError::Validation(internal_error(
+            "bsp.package",
+            format!(
+                "isolated strict package import produced diagnostics: {:?}",
+                import
+                    .world
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.as_str())
+                    .collect::<Vec<_>>()
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// Return the mip-0 dimensions for a texture identity selected from an
+/// external WAD or, when present, the embedded BSP miptex slot.
+fn resolve_base_texture_dimensions(
+    world: &bsp::world::BspWorld,
+    slots: &[bsp::resources::MiptexSlot],
+    identity: &str,
+) -> CliResult<(u32, u32)> {
+    for (_, wad) in &world.wad_archives {
+        if let Some(bytes) = bsp::wad::read_wad_lump(wad, identity) {
+            let info = bsp::wad::parse_miptex_header(bytes).map_err(|err| {
+                CliError::Validation(internal_error(
+                    "bsp.compile",
+                    format!("invalid base miptex '{identity}' in staged WAD: {err}"),
+                ))
+            })?;
+            return Ok((info.width, info.height));
+        }
+    }
+
+    for slot in slots {
+        if slot.identity.as_deref() != Some(identity) {
+            continue;
+        }
+        if let Some(bytes) =
+            bsp::wad::read_embedded_miptex_entry(&world.miptex_data, slot.source_slot)
+        {
+            let info = bsp::wad::parse_miptex_header(bytes).map_err(|err| {
+                CliError::Validation(internal_error(
+                    "bsp.compile",
+                    format!("invalid embedded miptex '{identity}': {err}"),
+                ))
+            })?;
+            return Ok((info.width, info.height));
+        }
+    }
+
+    Err(CliError::Validation(internal_error(
+        "bsp.compile",
+        format!("cannot determine dimensions for selected PBR base texture '{identity}'"),
+    )))
+}
+
+/// Reject a source path with any symlink component before it is used for
+/// companion discovery or copying. This keeps PBR lookup confined to the
+/// explicit WAD-adjacent source root instead of silently traversing aliases.
+fn validate_no_symlink_path_components(path: &Path, label: &str) -> CliResult<()> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| io_error("compile-bsp.current_dir", Path::new("."), err))?
+            .join(path)
+    };
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            std::path::Component::RootDir => current.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err(CliError::Validation(internal_error(
+                    "bsp.compile",
+                    format!(
+                        "{label} path contains a parent traversal: '{}'",
+                        path.display()
+                    ),
+                )));
+            }
+            std::path::Component::Normal(part) => {
+                current.push(part);
+                let metadata = std::fs::symlink_metadata(&current)
+                    .map_err(|err| io_error("compile-bsp.inspect_source", &current, err))?;
+                if metadata.file_type().is_symlink() {
+                    return Err(CliError::Validation(internal_error(
+                        "bsp.compile",
+                        format!(
+                            "{label} path contains a symlink component: '{}'",
+                            current.display()
+                        ),
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate selected PNG companion content before it enters the publication
+/// closure. This checks the complete PNG chunk envelope, CRCs, and IHDR
+/// dimensions without adding a runtime image-decoder dependency to the tool.
+fn validate_selected_pbr_companion(
+    path: &Path,
+    identity: &str,
+    expected_dimensions: (u32, u32),
+) -> CliResult<()> {
+    compiler::validate_input_regular(path).map_err(|err| {
+        CliError::Validation(internal_error(
+            "bsp.compile",
+            format!("invalid PBR companion '{}': {err}", path.display()),
+        ))
+    })?;
+    let bytes =
+        std::fs::read(path).map_err(|err| io_error("compile-bsp.read_companion", path, err))?;
+    let dimensions = parse_png_dimensions(&bytes).map_err(|reason| {
+        CliError::Validation(internal_error(
+            "bsp.compile",
+            format!(
+                "malformed PBR companion '{}' for '{identity}': {reason}",
+                path.display()
+            ),
+        ))
+    })?;
+    if dimensions != expected_dimensions {
+        return Err(CliError::Validation(internal_error(
+            "bsp.compile",
+            format!(
+                "PBR companion '{}' dimensions {}x{} do not match base texture '{identity}' dimensions {}x{}",
+                path.display(),
+                dimensions.0,
+                dimensions.1,
+                expected_dimensions.0,
+                expected_dimensions.1
+            ),
+        )));
+    }
+    Ok(())
+}
+
+fn parse_png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < SIGNATURE.len() || &bytes[..SIGNATURE.len()] != SIGNATURE {
+        return Err("missing PNG signature".to_string());
+    }
+
+    let mut offset = SIGNATURE.len();
+    let mut dimensions = None;
+    let mut saw_idat = false;
+    let mut saw_iend = false;
+    while offset < bytes.len() {
+        let header_end = offset
+            .checked_add(8)
+            .ok_or_else(|| "PNG chunk header overflow".to_string())?;
+        if header_end > bytes.len() {
+            return Err("truncated PNG chunk header".to_string());
+        }
+        let length = u32::from_be_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .map_err(|_| "invalid PNG chunk length".to_string())?,
+        ) as usize;
+        let kind = &bytes[offset + 4..header_end];
+        let data_start = header_end;
+        let data_end = data_start
+            .checked_add(length)
+            .ok_or_else(|| "PNG chunk length overflow".to_string())?;
+        let chunk_end = data_end
+            .checked_add(4)
+            .ok_or_else(|| "PNG CRC offset overflow".to_string())?;
+        if chunk_end > bytes.len() {
+            return Err("truncated PNG chunk data".to_string());
+        }
+        let expected_crc = u32::from_be_bytes(
+            bytes[data_end..chunk_end]
+                .try_into()
+                .map_err(|_| "invalid PNG CRC".to_string())?,
+        );
+        let actual_crc = png_crc32(&bytes[offset + 4..data_end]);
+        if actual_crc != expected_crc {
+            return Err("PNG chunk CRC mismatch".to_string());
+        }
+
+        match kind {
+            b"IHDR" if dimensions.is_none() && offset == SIGNATURE.len() => {
+                if length != 13 {
+                    return Err("IHDR must be exactly 13 bytes".to_string());
+                }
+                let width =
+                    u32::from_be_bytes(bytes[data_start..data_start + 4].try_into().unwrap());
+                let height =
+                    u32::from_be_bytes(bytes[data_start + 4..data_start + 8].try_into().unwrap());
+                if width == 0 || height == 0 {
+                    return Err("IHDR dimensions must be non-zero".to_string());
+                }
+                let bit_depth = bytes[data_start + 8];
+                let color_type = bytes[data_start + 9];
+                if !matches!(bit_depth, 1 | 2 | 4 | 8 | 16)
+                    || !matches!(color_type, 0 | 2 | 3 | 4 | 6)
+                    || bytes[data_start + 10] != 0
+                    || bytes[data_start + 11] != 0
+                    || bytes[data_start + 12] > 1
+                {
+                    return Err("IHDR contains unsupported PNG parameters".to_string());
+                }
+                dimensions = Some((width, height));
+            }
+            b"IDAT" if dimensions.is_some() && !saw_iend => saw_idat = true,
+            b"IEND" if dimensions.is_some() && !saw_iend => {
+                if length != 0 {
+                    return Err("IEND must be empty".to_string());
+                }
+                saw_iend = true;
+                if chunk_end != bytes.len() {
+                    return Err("trailing bytes after IEND".to_string());
+                }
+            }
+            b"IHDR" => return Err("IHDR must be the first PNG chunk".to_string()),
+            _ if saw_iend => return Err("chunk after IEND".to_string()),
+            _ => {}
+        }
+        offset = chunk_end;
+    }
+
+    if !saw_idat {
+        return Err("PNG has no IDAT chunk".to_string());
+    }
+    if !saw_iend {
+        return Err("PNG has no IEND chunk".to_string());
+    }
+    dimensions.ok_or_else(|| "PNG has no IHDR chunk".to_string())
+}
+
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+struct StagedPbrClosure {
+    required_wad_basenames: std::collections::BTreeSet<String>,
+}
+
+/// Determine the WAD archives actually needed by face texture resolution.
+/// The first archive containing a referenced identity wins, matching the
+/// ordered WAD lookup policy used during strict loading.
+fn required_wad_basenames(
+    world: &bsp::world::BspWorld,
+    slots: &[bsp::resources::MiptexSlot],
+) -> std::collections::BTreeSet<String> {
+    let mut required = std::collections::BTreeSet::new();
+    for face in &world.faces {
+        let Some(texinfo) = world.texinfos.get(face.texinfo_id as usize) else {
+            continue;
+        };
+        let Some(identity) = slots
+            .get(texinfo.miptex as usize)
+            .and_then(|slot| slot.identity.as_deref())
+        else {
+            continue;
+        };
+        if let Some((wad_name, _)) = world.wad_archives.iter().find(|(_, wad)| {
+            wad.entries
+                .iter()
+                .any(|entry| entry.name == identity || entry.name.eq_ignore_ascii_case(identity))
+        }) {
+            required.insert(wad_name.clone());
+        }
+    }
+    required
 }
 
 /// Stage PBR companion textures by strict-loading the BSP to derive
@@ -624,12 +962,11 @@ fn stage_pbr_companions(
     compile_result: &bsp::CompileResult,
     wad_paths: &[PathBuf],
     palette_bytes: &[u8],
-) -> CliResult<Vec<String>> {
-    let mut staged = Vec::new();
-
+) -> CliResult<StagedPbrClosure> {
     // Strict-load the BSP to get face/texinfo/miptex data
     let mut wad_archives: Vec<(String, Vec<u8>)> = Vec::new();
     for wad_path in wad_paths {
+        validate_no_symlink_path_components(wad_path, "WAD input")?;
         let basename = wad_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -650,15 +987,14 @@ fn stage_pbr_companions(
         source_identity: "compile-bsp".to_string(),
     };
 
-    let world = bsp::BspLoader::load(&compile_result.bsp_data, &load_options).map_err(|report| {
-        CliError::Validation(ValidationError::single(
-            ValidationDiagnostic::new(
+    let world =
+        bsp::BspLoader::load(&compile_result.bsp_data, &load_options).map_err(|report| {
+            CliError::Validation(ValidationError::single(ValidationDiagnostic::new(
                 "bsp.compile",
                 ValidationArea::Asset,
                 format!("strict-load validation failed: {report}"),
-            ),
-        ))
-    })?;
+            )))
+        })?;
 
     if !world.diagnostics.is_empty() {
         return Err(CliError::Validation(ValidationError::single(
@@ -679,6 +1015,7 @@ fn stage_pbr_companions(
 
     // Derive companion eligibility from face.texinfo.miptex → source slot
     let slots = bsp::resources::parse_miptex_slots(&world.miptex_data);
+    let required_wad_basenames = required_wad_basenames(&world, &slots);
 
     // Collect eligible identities — only opaque and alpha-mask surfaces
     use std::collections::BTreeSet;
@@ -704,6 +1041,14 @@ fn stage_pbr_companions(
         }
     }
 
+    let base_dimensions = eligible
+        .iter()
+        .map(|identity| {
+            resolve_base_texture_dimensions(&world, &slots, identity)
+                .map(|dimensions| (identity.clone(), dimensions))
+        })
+        .collect::<CliResult<std::collections::BTreeMap<_, _>>>()?;
+
     // Resolve companions from ordered WAD texture roots
     // Normalize each WAD parent to its confined textures/ child
     let textures_dir = staging.join("textures");
@@ -728,9 +1073,30 @@ fn stage_pbr_companions(
                 } else {
                     wad_parent.join("textures")
                 };
-                if !search_dir.is_dir() {
+                let search_metadata = match std::fs::symlink_metadata(&search_dir) {
+                    Ok(metadata) => metadata,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => {
+                        return Err(io_error(
+                            "compile-bsp.inspect_companion_root",
+                            &search_dir,
+                            err,
+                        ))
+                    }
+                };
+                if search_metadata.file_type().is_symlink() {
+                    return Err(CliError::Validation(internal_error(
+                        "bsp.compile",
+                        format!(
+                            "PBR companion root must not be a symlink: '{}'",
+                            search_dir.display()
+                        ),
+                    )));
+                }
+                if !search_metadata.is_dir() {
                     continue;
                 }
+                validate_no_symlink_path_components(&search_dir, "PBR companion root")?;
                 if let Ok(entries) = std::fs::read_dir(&search_dir) {
                     let all_entries: Vec<_> = entries.flatten().collect();
                     for entry in &all_entries {
@@ -750,9 +1116,7 @@ fn stage_pbr_companions(
                     for entry in &all_entries {
                         let name = entry.file_name();
                         let name_str = name.to_string_lossy();
-                        if name_str.eq_ignore_ascii_case(&expected)
-                            && name_str != expected
-                        {
+                        if name_str.eq_ignore_ascii_case(&expected) && name_str != expected {
                             if fallback.is_some() {
                                 ambiguous = true;
                             } else {
@@ -779,6 +1143,14 @@ fn stage_pbr_companions(
             }
 
             if let Some(src) = found {
+                let expected_dimensions = base_dimensions.get(identity).copied().ok_or_else(|| {
+                    CliError::Validation(internal_error(
+                        "bsp.compile",
+                        format!("missing base texture dimensions for companion identity '{identity}'"),
+                    ))
+                })?;
+                validate_selected_pbr_companion(&src, identity, expected_dimensions)?;
+
                 // Copy companion into staging textures/
                 let fname = src
                     .file_name()
@@ -787,39 +1159,32 @@ fn stage_pbr_companions(
                 let dest = textures_dir.join(fname);
                 std::fs::copy(&src, &dest)
                     .map_err(|err| io_error("compile-bsp.copy_companion", &src, err))?;
-                staged.push(format!("textures/{fname}"));
             }
             // Absence is not an error — legacy fallback
         }
     }
 
-    Ok(staged)
+    Ok(StagedPbrClosure {
+        required_wad_basenames,
+    })
 }
 
 /// Build a canonical package manifest capturing the full closure.
 fn build_canonical_manifest(
-    _profile: &bsp::CompilerProfile,
     compile_result: &bsp::CompileResult,
-    _bsp_name: &str,
-    source_map: &str,
-    profile_path: &str,
+    source_map_identity: &str,
     profile_sha256: &str,
     profile_family: &str,
     exact_profile_name: &str,
     controlled_env: &str,
-    _staged_lit: bool,
-    _staged_wads: &[String],
-    _staged_companions: &[String],
+    staging: &Path,
     staged_hashes: &[(String, String)],
 ) -> CliResult<String> {
     use toml::Value;
 
     let mut root = toml::Table::new();
 
-    root.insert(
-        "format_version".into(),
-        Value::Integer(1),
-    );
+    root.insert("format_version".into(), Value::Integer(1));
     root.insert(
         "manifest_schema".into(),
         Value::String("engine-pack-canonical/1".into()),
@@ -906,6 +1271,40 @@ fn build_canonical_manifest(
             );
             prov.insert("compiler_hashes".into(), Value::Table(h));
         }
+        if !compile_result.provenance.source_hashes.is_empty() {
+            let hashes = compile_result
+                .provenance
+                .source_hashes
+                .iter()
+                .map(|hash| {
+                    let mut entry = toml::Table::new();
+                    entry.insert(
+                        "path".into(),
+                        Value::String(hash.path.to_string_lossy().into_owned()),
+                    );
+                    entry.insert("sha256".into(), Value::String(hash.sha256.clone()));
+                    Value::Table(entry)
+                })
+                .collect();
+            prov.insert("source_hashes".into(), Value::Array(hashes));
+        }
+        if !compile_result.provenance.output_hashes.is_empty() {
+            let hashes = compile_result
+                .provenance
+                .output_hashes
+                .iter()
+                .map(|hash| {
+                    let mut entry = toml::Table::new();
+                    entry.insert(
+                        "path".into(),
+                        Value::String(hash.path.to_string_lossy().into_owned()),
+                    );
+                    entry.insert("sha256".into(), Value::String(hash.sha256.clone()));
+                    Value::Table(entry)
+                })
+                .collect();
+            prov.insert("output_hashes".into(), Value::Array(hashes));
+        }
         prov.insert(
             "controlled_environment_identity".into(),
             Value::String(controlled_env.into()),
@@ -914,15 +1313,13 @@ fn build_canonical_manifest(
     }
 
     // ── Source identity ───────────────────────────────────────
+    // Keep provenance relocatable: source hashes below identify the copied
+    // inputs; no host or staging path is serialized into the closure.
     {
         let mut src = toml::Table::new();
         src.insert(
             "source_map".into(),
-            Value::String(source_map.into()),
-        );
-        src.insert(
-            "profile_path".into(),
-            Value::String(profile_path.into()),
+            Value::String(source_map_identity.into()),
         );
         root.insert("source_identity".into(), Value::Table(src));
     }
@@ -930,15 +1327,27 @@ fn build_canonical_manifest(
     // ── Published artifacts ───────────────────────────────────
     {
         let mut artifacts: Vec<Value> = Vec::new();
-        // The manifest itself is not included (non-recursive)
+        // The manifest itself is not included (non-recursive), and the
+        // staging marker is transaction metadata rather than a payload.
         for (rel_path, sha256) in staged_hashes {
-            // Exclude the manifest file itself from the artifact list
-            if rel_path.ends_with(".manifest.toml") {
+            if rel_path.ends_with(".manifest.toml") || rel_path == fs_tx::STAGING_MARKER_NAME {
                 continue;
             }
+            let bytes = std::fs::metadata(staging.join(rel_path))
+                .map_err(|err| io_error("compile-bsp.metadata", &staging.join(rel_path), err))?
+                .len();
             let mut entry = toml::Table::new();
             entry.insert("path".into(), Value::String(rel_path.clone()));
             entry.insert("sha256".into(), Value::String(sha256.clone()));
+            entry.insert(
+                "bytes".into(),
+                Value::Integer(i64::try_from(bytes).map_err(|_| {
+                    CliError::Validation(internal_error(
+                        "bsp.serialize",
+                        format!("artifact '{rel_path}' exceeds TOML integer range"),
+                    ))
+                })?),
+            );
             let kind = if rel_path.ends_with(".bsp") {
                 "bsp"
             } else if rel_path.ends_with(".lit") {
@@ -961,10 +1370,38 @@ fn build_canonical_manifest(
             let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or("");
             a_path.cmp(b_path)
         });
-        root.insert(
-            "published_artifacts".into(),
-            Value::Array(artifacts),
-        );
+        root.insert("published_artifacts".into(), Value::Array(artifacts));
+    }
+
+    // Record the selected PBR identities separately from generic artifacts so
+    // consumers can diagnose exactly which normal/gloss companions qualified
+    // for this closure without reconstructing names from paths.
+    {
+        let mut companions = Vec::new();
+        for (path, sha256) in staged_hashes {
+            let Some(file_name) = path.strip_prefix("textures/") else {
+                continue;
+            };
+            let (identity, map_kind) = if let Some(identity) = file_name.strip_suffix("_norm.png") {
+                (identity, "normal")
+            } else if let Some(identity) = file_name.strip_suffix("_gloss.png") {
+                (identity, "gloss")
+            } else {
+                continue;
+            };
+            let mut companion = toml::Table::new();
+            companion.insert("identity".into(), Value::String(identity.to_string()));
+            companion.insert("map_kind".into(), Value::String(map_kind.to_string()));
+            companion.insert("path".into(), Value::String(path.clone()));
+            companion.insert("sha256".into(), Value::String(sha256.clone()));
+            companions.push(Value::Table(companion));
+        }
+        companions.sort_by(|a, b| {
+            let a_path = a.get("path").and_then(|value| value.as_str()).unwrap_or("");
+            let b_path = b.get("path").and_then(|value| value.as_str()).unwrap_or("");
+            a_path.cmp(b_path)
+        });
+        root.insert("selected_pbr_companions".into(), Value::Array(companions));
     }
 
     toml::to_string_pretty(&Value::Table(root))
