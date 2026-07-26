@@ -20,7 +20,7 @@ use engine_pack::fs_tx::{
     build_publication_plan, cleanup_staging, contained_child_no_symlinks,
     create_staging_file_sibling, create_staging_sibling,
     publish_directory_no_replace, publish_staging,
-    replace_file_with_staging, stage_entry, validate_staged_artifact_set,
+    replace_file_with_staging, stage_entry,
     EntryType, PlanEntry, RollbackJournal,
 };
 
@@ -308,6 +308,16 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         ))
     })?;
 
+    // Determine profile family and exact identity
+    let profile_family = "q1-portable-ericw";
+    let exact_profile_name = profile.name.clone();
+    let profile_sha256 = compiler::sha256_file(Path::new(&profile_path)).map_err(|err| {
+        CliError::FsTx(fs_tx::FsTxError::StagingArtifactInvariant {
+            staging: PathBuf::from(&profile_path),
+            message: format!("cannot hash profile: {err}"),
+        })
+    })?;
+
     // Resolve palette path
     let palette = if let Some(pal_path) = &palette_path {
         PathBuf::from(pal_path)
@@ -319,11 +329,57 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         profile_dir.join("palette.lmp")
     };
 
+    // Validate source inputs are regular non-symlink files
+    compiler::validate_input_regular(&source_map).map_err(|err| {
+        CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "bsp.compile",
+                ValidationArea::Asset,
+                format!("invalid source map: {err}"),
+            )
+            .with_path(&source_map),
+        ))
+    })?;
+    compiler::validate_input_regular(&palette).map_err(|err| {
+        CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "bsp.compile",
+                ValidationArea::Asset,
+                format!("invalid palette: {err}"),
+            )
+            .with_path(&palette),
+        ))
+    })?;
+    for wad in &wad_paths {
+        compiler::validate_input_regular(wad).map_err(|err| {
+            CliError::Validation(ValidationError::single(
+                ValidationDiagnostic::new(
+                    "bsp.compile",
+                    ValidationArea::Asset,
+                    format!("invalid WAD: {err}"),
+                )
+                .with_path(wad),
+            ))
+        })?;
+    }
+
     let out_dir = PathBuf::from(&out_dir);
     let destination_exists = path_exists_no_follow(&out_dir);
 
+    // Recover any orphaned staging directories before starting
+    if !destination_exists {
+        fs_tx::recover_orphaned_staging(&out_dir);
+    }
+
+    let bsp_name = source_map
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+
     // Use fs_tx staging for output
     let staging = create_staging_sibling(&out_dir).map_err(CliError::FsTx)?;
+    // Write ownership marker
+    fs_tx::write_staging_marker(&staging, &out_dir).map_err(CliError::FsTx)?;
 
     let result = (|| -> CliResult<String> {
         let work_dir = staging.join(".compile-work");
@@ -350,236 +406,174 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
             ))
         })?;
 
-        std::fs::remove_dir_all(&work_dir)
-            .map_err(|err| io_error("compile-bsp.workdir", &work_dir, err))?;
+        // Remove compiler work directory; clean up after successful compile
+        let _ = std::fs::remove_dir_all(&work_dir);
 
-        // Write compiled outputs
-        let bsp_name = source_map
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output");
+        // ── Stage BSP and optional .lit ───────────────────────────
         let bsp_path = staging.join(format!("{bsp_name}.bsp"));
         std::fs::write(&bsp_path, &compile_result.bsp_data)
             .map_err(|err| io_error("compile-bsp.write", &bsp_path, err))?;
 
+        let mut staged_lit = false;
         if let Some(ref lit_data) = compile_result.lit_data {
             let lit_path = staging.join(format!("{bsp_name}.lit"));
             std::fs::write(&lit_path, lit_data)
                 .map_err(|err| io_error("compile-bsp.write", &lit_path, err))?;
+            staged_lit = true;
         }
 
-        // Write provenance
-        let provenance_path = staging.join(format!("{bsp_name}.provenance.toml"));
-        let provenance_toml = {
-            let mut root = toml::value::Table::new();
-            root.insert(
-                "compiler_identity".into(),
-                toml::Value::String(compile_result.provenance.compiler_identity.clone()),
-            );
-            root.insert(
-                "compiler_version".into(),
-                toml::Value::String(compile_result.provenance.compiler_version.clone()),
-            );
-            if !compile_result.provenance.qbsp_args.is_empty() {
-                root.insert(
-                    "qbsp_args".into(),
-                    toml::Value::Array(
-                        compile_result
-                            .provenance
-                            .qbsp_args
-                            .iter()
-                            .map(|a| toml::Value::String(a.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            if !compile_result.provenance.vis_args.is_empty() {
-                root.insert(
-                    "vis_args".into(),
-                    toml::Value::Array(
-                        compile_result
-                            .provenance
-                            .vis_args
-                            .iter()
-                            .map(|a| toml::Value::String(a.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            if !compile_result.provenance.light_args.is_empty() {
-                root.insert(
-                    "light_args".into(),
-                    toml::Value::Array(
-                        compile_result
-                            .provenance
-                            .light_args
-                            .iter()
-                            .map(|a| toml::Value::String(a.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            if !compile_result.provenance.source_hashes.is_empty() {
-                root.insert(
-                    "source_hashes".into(),
-                    toml::Value::Array(
-                        compile_result
-                            .provenance
-                            .source_hashes
-                            .iter()
-                            .map(|hash| {
-                                let mut table = toml::value::Table::new();
-                                table.insert(
-                                    "path".into(),
-                                    toml::Value::String(
-                                        hash.path.to_string_lossy().replace('\\', "/"),
-                                    ),
-                                );
-                                table.insert(
-                                    "sha256".into(),
-                                    toml::Value::String(hash.sha256.clone()),
-                                );
-                                toml::Value::Table(table)
-                            })
-                            .collect(),
-                    ),
-                );
-            }
-            if !compile_result.provenance.output_hashes.is_empty() {
-                root.insert(
-                    "output_hashes".into(),
-                    toml::Value::Array(
-                        compile_result
-                            .provenance
-                            .output_hashes
-                            .iter()
-                            .map(|hash| {
-                                let mut table = toml::value::Table::new();
-                                table.insert(
-                                    "path".into(),
-                                    toml::Value::String(
-                                        hash.path.to_string_lossy().replace('\\', "/"),
-                                    ),
-                                );
-                                table.insert(
-                                    "sha256".into(),
-                                    toml::Value::String(hash.sha256.clone()),
-                                );
-                                toml::Value::Table(table)
-                            })
-                            .collect(),
-                    ),
-                );
-            }
-            if let Some(hashes) = &compile_result.provenance.compiler_hashes {
-                let mut hash_table = toml::value::Table::new();
-                hash_table.insert(
-                    "qbsp_sha256".into(),
-                    toml::Value::String(hashes.qbsp_sha256.clone()),
-                );
-                hash_table.insert(
-                    "vis_sha256".into(),
-                    toml::Value::String(hashes.vis_sha256.clone()),
-                );
-                hash_table.insert(
-                    "light_sha256".into(),
-                    toml::Value::String(hashes.light_sha256.clone()),
-                );
-                root.insert("compiler_hashes".into(), toml::Value::Table(hash_table));
-            }
-            root.insert(
-                "stdout".into(),
-                toml::Value::String(compile_result.stdout.clone()),
-            );
-            root.insert(
-                "stderr".into(),
-                toml::Value::String(compile_result.stderr.clone()),
-            );
-            toml::Value::Table(root)
-        };
-        let provenance_str = toml::to_string_pretty(&provenance_toml)
-            .map_err(|e| CliError::Validation(internal_error("bsp.serialize", e.to_string())))?;
-        std::fs::write(&provenance_path, provenance_str)
-            .map_err(|err| io_error("compile-bsp.write", &provenance_path, err))?;
+        // ── Stage palette ─────────────────────────────────────────
+        let palette_bytes = std::fs::read(&palette)
+            .map_err(|err| io_error("compile-bsp.palette", &palette, err))?;
+        let palette_staged = staging.join("palette.lmp");
+        std::fs::write(&palette_staged, &palette_bytes)
+            .map_err(|err| io_error("compile-bsp.write", &palette_staged, err))?;
 
-        // Validate staged artifact set before publication (Phase 08)
-        let uses_bsp2 = profile.default_qbsp_args.iter().any(|a| a == "-bsp2")
-            || profile.default_light_args.iter().any(|a| a == "-bsp2");
-        let _staged_files = validate_staged_artifact_set(&staging, bsp_name, uses_bsp2)
+        // ── Stage WADs ────────────────────────────────────────────
+        let mut staged_wads: Vec<String> = Vec::new();
+        for wad_path in &wad_paths {
+            let basename = wad_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown.wad");
+            let dest = staging.join(basename);
+            std::fs::copy(wad_path, &dest)
+                .map_err(|err| io_error("compile-bsp.copy_wad", wad_path, err))?;
+            staged_wads.push(basename.to_string());
+        }
+
+        // ── Stage PBR companion textures ──────────────────────────
+        let staged_companions = stage_pbr_companions(
+            &staging,
+            bsp_name,
+            &compile_result,
+            &wad_paths,
+            &palette_bytes,
+        )?;
+
+        // ── Compute all staged file hashes ────────────────────────
+        let staged_hashes = fs_tx::compute_dir_file_hashes(&staging)
             .map_err(CliError::FsTx)?;
 
-        // Compute file hashes for provenance verification
-        let staged_hashes = engine_pack::fs_tx::compute_dir_file_hashes(&staging)
+        // ── Build canonical manifest ──────────────────────────────
+        let controlled_env = compiler::controlled_environment_identity();
+        let manifest_toml = build_canonical_manifest(
+            &profile,
+            &compile_result,
+            bsp_name,
+            &source_map.display().to_string(),
+            &profile_path,
+            &profile_sha256,
+            profile_family,
+            &exact_profile_name,
+            &controlled_env,
+            staged_lit,
+            &staged_wads,
+            &staged_companions,
+            &staged_hashes,
+        )?;
+
+        let manifest_path = staging.join(format!("{bsp_name}.manifest.toml"));
+        std::fs::write(&manifest_path, &manifest_toml)
+            .map_err(|err| io_error("compile-bsp.write", &manifest_path, err))?;
+
+        // Recompute with manifest included
+        let final_hashes = fs_tx::compute_dir_file_hashes(&staging)
+            .map_err(CliError::FsTx)?;
+        let updated_manifest = build_canonical_manifest(
+            &profile,
+            &compile_result,
+            bsp_name,
+            &source_map.display().to_string(),
+            &profile_path,
+            &profile_sha256,
+            profile_family,
+            &exact_profile_name,
+            &controlled_env,
+            staged_lit,
+            &staged_wads,
+            &staged_companions,
+            &final_hashes,
+        )?;
+        let manifest_sha256 = fs_tx::compute_manifest_sha256(updated_manifest.as_bytes());
+
+        // Write final manifest
+        std::fs::write(&manifest_path, &updated_manifest)
+            .map_err(|err| io_error("compile-bsp.write", &manifest_path, err))?;
+
+        // ── Validate manifest closure ─────────────────────────────
+        let _declared = fs_tx::validate_manifest_closure(&staging, updated_manifest.as_bytes())
             .map_err(CliError::FsTx)?;
 
-        // Verify provenance output hashes match staged bytes
-        if !compile_result.provenance.output_hashes.is_empty() {
-            let hash_map: std::collections::HashMap<&str, &str> = staged_hashes
-                .iter()
-                .map(|(rel, h)| (rel.as_str(), h.as_str()))
-                .collect();
-            for output_hash in &compile_result.provenance.output_hashes {
-                let key = output_hash.path.to_string_lossy().replace('\\', "/");
-                match hash_map.get(key.as_str()) {
-                    Some(actual_hash) if actual_hash == &output_hash.sha256 => {}
-                    Some(actual_hash) => {
-                        return Err(CliError::FsTx(
-                            engine_pack::fs_tx::FsTxError::StagingArtifactInvariant {
-                                staging: staging.clone(),
-                                message: format!(
-                                    "provenance hash mismatch for '{}': expected {}, got {}",
-                                    key, output_hash.sha256, actual_hash
-                                ),
-                            },
+        // ── Publication ───────────────────────────────────────────
+        if destination_exists {
+            // Validate existing destination as a complete closure
+            match validate_existing_destination(&out_dir) {
+                Ok(Some(existing_manifest_sha256)) => {
+                    if existing_manifest_sha256 == manifest_sha256 {
+                        return Ok(format!(
+                            "compiled[bsp]: {} -> {}/ (unchanged, manifest sha256:{})",
+                            source_map.display(),
+                            out_dir.display(),
+                            manifest_sha256
                         ));
                     }
-                    None => {
-                        return Err(CliError::FsTx(
-                            engine_pack::fs_tx::FsTxError::StagingArtifactInvariant {
-                                staging: staging.clone(),
-                                message: format!(
-                                    "provenance references missing file '{}'",
-                                    key
-                                ),
-                            },
-                        ));
-                    }
+                    return Err(CliError::FsTx(
+                        fs_tx::FsTxError::PreExistingDestination {
+                            target: out_dir.clone(),
+                            message: format!(
+                                "late collision: existing manifest sha256:{} != new sha256:{}",
+                                existing_manifest_sha256, manifest_sha256
+                            ),
+                        },
+                    ));
+                }
+                Ok(None) => {
+                    return Err(CliError::FsTx(
+                        fs_tx::FsTxError::PreExistingDestination {
+                            target: out_dir.clone(),
+                            message: "incomplete destination: no valid manifest found"
+                                .to_string(),
+                        },
+                    ));
+                }
+                Err(reason) => {
+                    return Err(CliError::FsTx(
+                        fs_tx::FsTxError::PreExistingDestination {
+                            target: out_dir.clone(),
+                            message: format!("incomplete destination: {reason}"),
+                        },
+                    ));
                 }
             }
         }
 
-        // Atomic no-replace publication (Phase 08)
-        // If destination already exists, compare content hashes for idempotent skip
-        if destination_exists {
-            if engine_pack::fs_tx::artifact_sets_identical(&staging, &out_dir)
-                .map_err(CliError::FsTx)?
-            {
-                // Idempotent: staging matches existing destination — skip
-                return Ok(format!(
-                    "compiled[bsp]: {} -> {}/{}.bsp (unchanged, skipped)",
-                    source_map.display(),
-                    out_dir.display(),
-                    bsp_name
-                ));
-            } else {
-                return Err(CliError::FsTx(
-                    engine_pack::fs_tx::FsTxError::PreExistingDestination {
-                        target: out_dir.clone(),
-                        message: "destination exists with different content; \
-                                  publication blocked to prevent clobber"
-                            .to_string(),
-                    },
-                ));
+        publish_directory_no_replace(&staging, &out_dir).map_err(|err| {
+            // On EEXIST, perform the race check
+            if let fs_tx::FsTxError::PreExistingDestination { .. } = &err {
+                if let Ok(Some(existing_hash)) = validate_existing_destination(&out_dir) {
+                    if existing_hash == manifest_sha256 {
+                        return CliError::FsTx(fs_tx::FsTxError::PreExistingDestination {
+                            target: out_dir.clone(),
+                            message: format!(
+                                "race resolved: destination now matches (sha256:{})",
+                                manifest_sha256
+                            ),
+                        });
+                    }
+                }
             }
-        }
-
-        publish_directory_no_replace(&staging, &out_dir).map_err(CliError::FsTx)?;
+            CliError::FsTx(err)
+        })?;
 
         Ok(format!(
-            "compiled[bsp]: {} -> {}/{}.bsp",
+            "published[bsp]: {} -> {}/ profile={} ({}) family={} strict=true manifest_sha256:{}",
             source_map.display(),
             out_dir.display(),
-            bsp_name
+            exact_profile_name,
+            profile.compiler_identity,
+            profile_family,
+            manifest_sha256
         ))
     })();
 
@@ -587,6 +581,394 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         cleanup_staging(&staging);
     }
     result
+}
+
+/// Validate an existing destination directory as a complete canonical closure.
+/// Returns `Ok(Some(manifest_sha256))` if it's a valid complete closure,
+/// `Ok(None)` if incomplete, or `Err(reason)` on I/O error.
+fn validate_existing_destination(out_dir: &Path) -> Result<Option<String>, String> {
+    if !out_dir.is_dir() {
+        return Err("destination is not a directory".to_string());
+    }
+    // Find a .manifest.toml file
+    let mut manifest_path = None;
+    if let Ok(entries) = std::fs::read_dir(out_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.ends_with(".manifest.toml") {
+                manifest_path = Some(entry.path());
+                break;
+            }
+        }
+    }
+    let manifest_path = match manifest_path {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| format!("read manifest: {e}"))?;
+    let sha256 = fs_tx::compute_manifest_sha256(&manifest_bytes);
+
+    // Validate the closure
+    fs_tx::validate_manifest_closure(out_dir, &manifest_bytes)
+        .map_err(|e| format!("validation failed: {e}"))?;
+
+    Ok(Some(sha256))
+}
+
+/// Stage PBR companion textures by strict-loading the BSP to derive
+/// companion eligibility from miptex slot identities.
+fn stage_pbr_companions(
+    staging: &Path,
+    _bsp_name: &str,
+    compile_result: &bsp::CompileResult,
+    wad_paths: &[PathBuf],
+    palette_bytes: &[u8],
+) -> CliResult<Vec<String>> {
+    let mut staged = Vec::new();
+
+    // Strict-load the BSP to get face/texinfo/miptex data
+    let mut wad_archives: Vec<(String, Vec<u8>)> = Vec::new();
+    for wad_path in wad_paths {
+        let basename = wad_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.wad")
+            .to_string();
+        let bytes = std::fs::read(wad_path)
+            .map_err(|err| io_error("compile-bsp.read_wad", wad_path, err))?;
+        wad_archives.push((basename, bytes));
+    }
+
+    let lit_data = compile_result.lit_data.clone();
+    let load_options = bsp::LoadOptions {
+        strict: true,
+        palette: Some(palette_bytes.to_vec()),
+        lit_data: lit_data.clone(),
+        wad_archives,
+        texture_overrides: Vec::new(),
+        source_identity: "compile-bsp".to_string(),
+    };
+
+    let world = bsp::BspLoader::load(&compile_result.bsp_data, &load_options).map_err(|report| {
+        CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "bsp.compile",
+                ValidationArea::Asset,
+                format!("strict-load validation failed: {report}"),
+            ),
+        ))
+    })?;
+
+    if !world.diagnostics.is_empty() {
+        return Err(CliError::Validation(ValidationError::single(
+            ValidationDiagnostic::new(
+                "bsp.compile",
+                ValidationArea::Asset,
+                format!(
+                    "strict-load produced diagnostics: {:?}",
+                    world
+                        .diagnostics
+                        .iter()
+                        .map(|d| d.message.as_str())
+                        .collect::<Vec<_>>()
+                ),
+            ),
+        )));
+    }
+
+    // Derive companion eligibility from face.texinfo.miptex → source slot
+    let slots = bsp::resources::parse_miptex_slots(&world.miptex_data);
+
+    // Collect eligible identities — only opaque and alpha-mask surfaces
+    use std::collections::BTreeSet;
+    let mut eligible: BTreeSet<String> = BTreeSet::new();
+    for face in &world.faces {
+        let texinfo_idx = face.texinfo_id as usize;
+        let Some(texinfo) = world.texinfos.get(texinfo_idx) else {
+            continue;
+        };
+        let miptex_idx = texinfo.miptex as usize;
+        let Some(slot) = slots.get(miptex_idx) else {
+            continue;
+        };
+        let Some(identity) = slot.identity.as_ref() else {
+            continue;
+        };
+        let class = bsp::materials::classify_surface(texinfo.flags, identity);
+        if matches!(
+            class,
+            bsp::materials::SurfaceClass::Opaque | bsp::materials::SurfaceClass::AlphaMask
+        ) {
+            eligible.insert(identity.clone());
+        }
+    }
+
+    // Resolve companions from ordered WAD texture roots
+    // Normalize each WAD parent to its confined textures/ child
+    let textures_dir = staging.join("textures");
+    std::fs::create_dir_all(&textures_dir)
+        .map_err(|err| io_error("compile-bsp.textures", &textures_dir, err))?;
+
+    for identity in &eligible {
+        for suffix in &["_norm.png", "_gloss.png"] {
+            let expected = format!("{identity}{suffix}");
+            let _expected_lower = expected.to_ascii_lowercase();
+
+            // Search in WAD sibling directories: each WAD's parent's textures/ dir
+            let mut found: Option<PathBuf> = None;
+            for wad_path in wad_paths {
+                let wad_parent = wad_path.parent().unwrap_or_else(|| Path::new("."));
+                let search_dir = if wad_parent
+                    .file_name()
+                    .map(|n| n == "textures")
+                    .unwrap_or(false)
+                {
+                    wad_parent.to_path_buf()
+                } else {
+                    wad_parent.join("textures")
+                };
+                if !search_dir.is_dir() {
+                    continue;
+                }
+                if let Ok(entries) = std::fs::read_dir(&search_dir) {
+                    let all_entries: Vec<_> = entries.flatten().collect();
+                    for entry in &all_entries {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str == expected {
+                            found = Some(entry.path());
+                            break;
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                    // ASCII-insensitive fallback: find exactly one unique match
+                    let mut fallback: Option<PathBuf> = None;
+                    let mut ambiguous = false;
+                    for entry in &all_entries {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.eq_ignore_ascii_case(&expected)
+                            && name_str != expected
+                        {
+                            if fallback.is_some() {
+                                ambiguous = true;
+                            } else {
+                                fallback = Some(entry.path());
+                            }
+                        }
+                    }
+                    if ambiguous {
+                        return Err(CliError::Validation(ValidationError::single(
+                            ValidationDiagnostic::new(
+                                "bsp.compile",
+                                ValidationArea::Asset,
+                                format!(
+                                    "ambiguous PBR companion for '{identity}': multiple case-insensitive matches for {suffix}"
+                                ),
+                            ),
+                        )));
+                    }
+                    if let Some(p) = fallback {
+                        found = Some(p);
+                        break;
+                    }
+                }
+            }
+
+            if let Some(src) = found {
+                // Copy companion into staging textures/
+                let fname = src
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(&expected);
+                let dest = textures_dir.join(fname);
+                std::fs::copy(&src, &dest)
+                    .map_err(|err| io_error("compile-bsp.copy_companion", &src, err))?;
+                staged.push(format!("textures/{fname}"));
+            }
+            // Absence is not an error — legacy fallback
+        }
+    }
+
+    Ok(staged)
+}
+
+/// Build a canonical package manifest capturing the full closure.
+fn build_canonical_manifest(
+    _profile: &bsp::CompilerProfile,
+    compile_result: &bsp::CompileResult,
+    _bsp_name: &str,
+    source_map: &str,
+    profile_path: &str,
+    profile_sha256: &str,
+    profile_family: &str,
+    exact_profile_name: &str,
+    controlled_env: &str,
+    _staged_lit: bool,
+    _staged_wads: &[String],
+    _staged_companions: &[String],
+    staged_hashes: &[(String, String)],
+) -> CliResult<String> {
+    use toml::Value;
+
+    let mut root = toml::Table::new();
+
+    root.insert(
+        "format_version".into(),
+        Value::Integer(1),
+    );
+    root.insert(
+        "manifest_schema".into(),
+        Value::String("engine-pack-canonical/1".into()),
+    );
+    root.insert("strict".into(), Value::Boolean(true));
+
+    // ── Profile identity ──────────────────────────────────────
+    root.insert(
+        "profile_family".into(),
+        Value::String(profile_family.into()),
+    );
+    root.insert(
+        "exact_profile".into(),
+        Value::String(exact_profile_name.into()),
+    );
+    root.insert(
+        "profile_sha256".into(),
+        Value::String(profile_sha256.into()),
+    );
+
+    // ── Compiler provenance ───────────────────────────────────
+    {
+        let mut prov = toml::Table::new();
+        prov.insert(
+            "compiler_identity".into(),
+            Value::String(compile_result.provenance.compiler_identity.clone()),
+        );
+        prov.insert(
+            "compiler_version".into(),
+            Value::String(compile_result.provenance.compiler_version.clone()),
+        );
+        if !compile_result.provenance.qbsp_args.is_empty() {
+            prov.insert(
+                "qbsp_args".into(),
+                Value::Array(
+                    compile_result
+                        .provenance
+                        .qbsp_args
+                        .iter()
+                        .map(|a| Value::String(a.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !compile_result.provenance.vis_args.is_empty() {
+            prov.insert(
+                "vis_args".into(),
+                Value::Array(
+                    compile_result
+                        .provenance
+                        .vis_args
+                        .iter()
+                        .map(|a| Value::String(a.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !compile_result.provenance.light_args.is_empty() {
+            prov.insert(
+                "light_args".into(),
+                Value::Array(
+                    compile_result
+                        .provenance
+                        .light_args
+                        .iter()
+                        .map(|a| Value::String(a.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(ref hashes) = compile_result.provenance.compiler_hashes {
+            let mut h = toml::Table::new();
+            h.insert(
+                "qbsp_sha256".into(),
+                Value::String(hashes.qbsp_sha256.clone()),
+            );
+            h.insert(
+                "vis_sha256".into(),
+                Value::String(hashes.vis_sha256.clone()),
+            );
+            h.insert(
+                "light_sha256".into(),
+                Value::String(hashes.light_sha256.clone()),
+            );
+            prov.insert("compiler_hashes".into(), Value::Table(h));
+        }
+        prov.insert(
+            "controlled_environment_identity".into(),
+            Value::String(controlled_env.into()),
+        );
+        root.insert("compiler_provenance".into(), Value::Table(prov));
+    }
+
+    // ── Source identity ───────────────────────────────────────
+    {
+        let mut src = toml::Table::new();
+        src.insert(
+            "source_map".into(),
+            Value::String(source_map.into()),
+        );
+        src.insert(
+            "profile_path".into(),
+            Value::String(profile_path.into()),
+        );
+        root.insert("source_identity".into(), Value::Table(src));
+    }
+
+    // ── Published artifacts ───────────────────────────────────
+    {
+        let mut artifacts: Vec<Value> = Vec::new();
+        // The manifest itself is not included (non-recursive)
+        for (rel_path, sha256) in staged_hashes {
+            // Exclude the manifest file itself from the artifact list
+            if rel_path.ends_with(".manifest.toml") {
+                continue;
+            }
+            let mut entry = toml::Table::new();
+            entry.insert("path".into(), Value::String(rel_path.clone()));
+            entry.insert("sha256".into(), Value::String(sha256.clone()));
+            let kind = if rel_path.ends_with(".bsp") {
+                "bsp"
+            } else if rel_path.ends_with(".lit") {
+                "lit"
+            } else if rel_path.ends_with(".lmp") {
+                "palette"
+            } else if rel_path.ends_with(".wad") {
+                "wad"
+            } else if rel_path.starts_with("textures/") {
+                "texture_companion"
+            } else {
+                "unknown"
+            };
+            entry.insert("kind".into(), Value::String(kind.into()));
+            artifacts.push(Value::Table(entry));
+        }
+        // Sort for determinism
+        artifacts.sort_by(|a, b| {
+            let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            a_path.cmp(b_path)
+        });
+        root.insert(
+            "published_artifacts".into(),
+            Value::Array(artifacts),
+        );
+    }
+
+    toml::to_string_pretty(&Value::Table(root))
+        .map_err(|e| CliError::Validation(internal_error("bsp.serialize", e.to_string())))
 }
 
 // ---------------------------------------------------------------------------

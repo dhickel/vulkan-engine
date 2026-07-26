@@ -235,6 +235,7 @@ fn coordinator_stages_and_clears() {
     assert!(coordinator.staged_extraction().is_some());
 
     coordinator.rollback().unwrap();
+    // After rollback, the candidate is cleared.
     assert!(coordinator.staged_extraction().is_none());
 }
 
@@ -245,7 +246,6 @@ fn unload_after_commit_clears_state() {
     let mut scene = Scene::new();
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
-    coordinator.validate(prepare.token).unwrap();
     coordinator
         .commit_with_mount(prepare.token, &mut scene, empty_mount())
         .unwrap();
@@ -268,7 +268,6 @@ fn commit_publishes_typed_source_link_to_scene_json() {
     let prepare = coordinator
         .prepare(&bsp_bytes, Some(0.5), "maps/test")
         .unwrap();
-    coordinator.validate(prepare.token).unwrap();
     coordinator
         .commit_with_mount(prepare.token, &mut scene, empty_mount())
         .unwrap();
@@ -776,4 +775,196 @@ fn empty_mutable_behavior_state_is_empty() {
     let state = MutableBehaviorState::default();
     assert!(state.is_empty());
     assert!(state.validate().is_ok());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 05: Transactional Mount Ownership — Preservation Checks
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn active_source_link_unchanged_after_candidate_rollback() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Commit a mount
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/active").unwrap();
+    coordinator
+        .commit_with_mount(prepare.token, &mut scene, empty_mount())
+        .unwrap();
+
+    let link_before = coordinator.source_link().unwrap().clone();
+
+    // Prepare a new candidate, then roll it back
+    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/candidate").unwrap();
+    coordinator.rollback().unwrap();
+
+    // Active source link must be unchanged
+    let link_after = coordinator.source_link().unwrap();
+    assert_eq!(link_after.asset_id, link_before.asset_id);
+    assert_eq!(link_after.content_hash, link_before.content_hash);
+}
+
+#[test]
+fn scene_source_link_preserved_across_failed_restore() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .unwrap();
+
+    let scene_link_before = scene.bsp_source_link().unwrap().clone();
+
+    // Capture and tamper
+    let mut envelope = coordinator
+        .capture_source_link(MutableBehaviorState::default())
+        .unwrap();
+    envelope.bsp_source.content_hash = "sha256:deadbeef".into();
+
+    // Restore should fail — scene must be unchanged
+    let result = coordinator.restore_from_persistence(
+        &envelope,
+        &bsp_bytes,
+        None,
+        &mut scene,
+        |_| empty_mount(),
+    );
+    assert!(result.is_err());
+
+    let scene_link_after = scene.bsp_source_link().unwrap();
+    assert_eq!(scene_link_after, &scene_link_before);
+}
+
+#[test]
+fn candidate_cleared_after_bridge_prepare_failure() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    // Register a failing bridge and try to prepare
+    coordinator.register_bridge(
+        "failing-prepare",
+        Box::new(PrepareFailingBridge),
+    );
+    let result = coordinator.prepare(&bsp_bytes, None, "maps/new");
+    assert!(result.is_err());
+
+    // After bridge prepare failure, candidate should be cleared
+    assert!(coordinator.staged_extraction().is_none());
+    // Active mount should still be present
+    assert!(coordinator.is_active());
+}
+
+use bsp_runtime::bridge::{
+    AppBridge, BehaviorEntityRecipe, BridgeToken, EntityCollisionRecipe, LightEntityRecipe,
+    WorldCollisionRecipe,
+};
+
+/// A bridge that fails on prepare.
+pub(crate) struct PrepareFailingBridge;
+
+impl AppBridge for PrepareFailingBridge {
+    fn name(&self) -> &str {
+        "prepare-failing"
+    }
+    fn prepare(
+        &mut self,
+        _world: &WorldCollisionRecipe,
+        _entities: &[EntityCollisionRecipe],
+        _lights: &[LightEntityRecipe],
+        _behaviors: &[BehaviorEntityRecipe],
+    ) -> Result<BridgeToken, String> {
+        Err("intentional prepare failure".to_string())
+    }
+    fn validate(&self, _token: &BridgeToken) -> Result<(), String> {
+        Ok(())
+    }
+    fn commit(&mut self, _token: BridgeToken) -> Result<(), String> {
+        Ok(())
+    }
+    fn rollback(&mut self, _token: BridgeToken) {}
+}
+
+/// A bridge that fails on validate.
+pub(crate) struct ValidateFailingBridge;
+
+impl AppBridge for ValidateFailingBridge {
+    fn name(&self) -> &str {
+        "validate-failing"
+    }
+    fn prepare(
+        &mut self,
+        _world: &WorldCollisionRecipe,
+        _entities: &[EntityCollisionRecipe],
+        _lights: &[LightEntityRecipe],
+        _behaviors: &[BehaviorEntityRecipe],
+    ) -> Result<BridgeToken, String> {
+        Ok(BridgeToken::new(vec![]))
+    }
+    fn validate(&self, _token: &BridgeToken) -> Result<(), String> {
+        Err("injected validation failure".to_string())
+    }
+    fn commit(&mut self, _token: BridgeToken) -> Result<(), String> {
+        Ok(())
+    }
+    fn rollback(&mut self, _token: BridgeToken) {}
+}
+
+#[test]
+fn candidate_cleared_after_bridge_validate_failure_with_active_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Establish an active mount
+    coordinator
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+    let ret_before = coordinator.retirement_diagnostics();
+
+    // Register a validate-failing bridge and prepare a new candidate
+    coordinator.register_bridge("v-fail", Box::new(ValidateFailingBridge));
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/new").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+
+    // Validate should fail — only the candidate is cleaned up
+    let result = coordinator.validate(prepare.token);
+    assert!(result.is_err());
+
+    // Candidate should be cleared
+    assert!(coordinator.staged_extraction().is_none());
+    // Active mount unchanged
+    assert!(coordinator.is_active());
+    // The candidate's ready renderer mount was retired during rollback.
+    // That's a retirement of the candidate's lease, not the active mount.
+    assert_eq!(coordinator.retirement_diagnostics(), ret_before + 1);
+}
+
+#[test]
+fn retirement_count_unchanged_when_candidate_rolls_back_with_active_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    coordinator
+        .reload(&bsp_bytes, None, "maps/active", &mut scene, |_| empty_mount())
+        .unwrap();
+
+    let ret_before = coordinator.retirement_diagnostics();
+
+    // Prepare and rollback candidate — no retirement of active mount
+    let _prepare = coordinator.prepare(&bsp_bytes, None, "maps/temp").unwrap();
+    coordinator.rollback().unwrap();
+
+    assert_eq!(coordinator.retirement_diagnostics(), ret_before);
 }

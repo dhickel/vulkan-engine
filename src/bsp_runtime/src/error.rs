@@ -75,6 +75,31 @@ pub enum BspRuntimeError {
         active_asset_id: String,
         reason: String,
     },
+    /// An illegal candidate state transition was attempted.
+    InvalidCandidateTransition {
+        current: CandidatePhase,
+        attempted: CandidatePhase,
+        detail: String,
+    },
+    /// A stale renderer completion was received — the lease was sent to
+    /// cancellation/retirement and the current candidate was not mutated.
+    StaleRendererCompletion {
+        candidate_generation: u64,
+        current_generation: u64,
+    },
+    /// A duplicate renderer-ready lease was received: the candidate already
+    /// holds a ready lease and the new one was sent to retirement.
+    DuplicateReadyLease {
+        generation: u64,
+    },
+    /// The renderer could not accept an opaque retirement handoff.
+    RetirementHandoffFailed {
+        reason: String,
+    },
+    /// A supposedly prevalidated publication operation violated its contract.
+    CommitContractViolated {
+        detail: String,
+    },
 }
 
 /// Which phase of the two-step transaction a bridge failure occurred in.
@@ -84,6 +109,25 @@ pub enum BridgePhase {
     Validate,
     Commit,
     Rollback,
+}
+
+/// States in the candidate lifecycle for transition validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidatePhase {
+    /// Candidate has been created with CPU-prepared DTOs (extraction done).
+    CpuPrepared,
+    /// Renderer upload has been started (async pending).
+    RendererPending,
+    /// Renderer upload is complete; the prepared mount is ready.
+    RendererReady,
+    /// All validations passed (bridges, scene preflight, publication checks).
+    ValidatedForScene,
+    /// Candidate has been consumed into an ActiveBspMount; state is transferred.
+    Consumed,
+    /// Preparation or validation failed; candidate may be rolled back.
+    Failed,
+    /// Candidate has been rolled back; all owned resources released.
+    RolledBack,
 }
 
 impl fmt::Display for BridgePhase {
@@ -231,6 +275,40 @@ impl fmt::Display for BspRuntimeError {
                     f,
                     "restore cancelled (active: '{active_asset_id}'): {reason}"
                 )
+            }
+            BspRuntimeError::InvalidCandidateTransition {
+                current,
+                attempted,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "invalid candidate transition from {:?} to {:?}: {}",
+                    current, attempted, detail
+                )
+            }
+            BspRuntimeError::StaleRendererCompletion {
+                candidate_generation,
+                current_generation,
+            } => {
+                write!(
+                    f,
+                    "stale renderer completion: candidate generation {} does not match current {}",
+                    candidate_generation, current_generation
+                )
+            }
+            BspRuntimeError::DuplicateReadyLease { generation } => {
+                write!(
+                    f,
+                    "duplicate renderer-ready lease for generation {}: sent to retirement",
+                    generation
+                )
+            }
+            BspRuntimeError::RetirementHandoffFailed { reason } => {
+                write!(f, "renderer retirement handoff failed: {}", reason)
+            }
+            BspRuntimeError::CommitContractViolated { detail } => {
+                write!(f, "commit contract violated: {}", detail)
             }
         }
     }

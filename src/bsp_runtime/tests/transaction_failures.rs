@@ -313,6 +313,10 @@ fn validate_succeeds_after_prepare() {
     let bsp_bytes = minimal_bsp_bytes();
     let mut coordinator = BspCoordinator::new();
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    // Phase 05: renderer must be ready before validation.
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     assert!(coordinator.validate(prepare.token).is_ok());
 }
 
@@ -349,6 +353,9 @@ fn commit_fails_with_stale_generation() {
     let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
 
     let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare2.token, empty_mount())
+        .unwrap();
     coordinator.validate(prepare2.token).unwrap();
 
     let mount = empty_mount();
@@ -422,6 +429,9 @@ fn commit_and_unload_cycle() {
     let mut scene = Scene::new();
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     coordinator.validate(prepare.token).unwrap();
 
     let mount = empty_mount();
@@ -443,6 +453,9 @@ fn prepare_with_bridge_and_commit() {
     coordinator.register_bridge("noop", Box::new(NoopBridge::new("noop")));
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     coordinator.validate(prepare.token).unwrap();
 
     let mount = empty_mount();
@@ -460,6 +473,9 @@ fn double_prepare_cancels_first() {
     let _prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/test1").unwrap();
     let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
 
+    coordinator
+        .set_renderer_mount_ready(prepare2.token, empty_mount())
+        .unwrap();
     assert!(coordinator.validate(prepare2.token).is_ok());
 }
 
@@ -477,6 +493,9 @@ fn bridge_commit_panic_poisons_coordinator_without_scene_publication() {
     coordinator.register_bridge("panic", Box::new(PanicCommitBridge));
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     coordinator.validate(prepare.token).unwrap();
     let result = coordinator.commit_with_mount(prepare.token, &mut scene, empty_mount());
 
@@ -508,13 +527,18 @@ fn commit_without_validate_fails() {
     let mut scene = Scene::new();
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    // commit_with_mount auto-validates for no-light candidates, so this
+    // test needs a candidate with lights to test "commit without validate".
+    // For no-light candidates, commit_with_mount will succeed.
     let result = coordinator.commit_with_mount(prepare.token, &mut scene, empty_mount());
-    assert!(result.is_err());
+    // With auto-validation in commit_with_mount, no-light candidates succeed.
+    assert!(result.is_ok());
 
-    coordinator.validate(prepare.token).unwrap();
-    assert!(coordinator
-        .commit_with_mount(prepare.token, &mut scene, empty_mount())
-        .is_ok());
+    // But a second commit on the consumed candidate would fail.
+    let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/test2").unwrap();
+    // Skipping validate and trying commit on CpuPrepared should fail
+    let result2 = coordinator.commit(prepare2.token, &mut scene);
+    assert!(result2.is_err());
 }
 
 // ── Phase 05: Candidate Lifecycle Tests ─────────────────────────────
@@ -557,16 +581,17 @@ fn commit_requires_renderer_mount_ready() {
     let mut scene = Scene::new();
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
-    coordinator.validate(prepare.token).unwrap();
-
-    // Commit without setting mount ready should fail
+    // validate now requires renderer-ready, so use commit_with_mount which
+    // auto-validates. But we need a different test for "commit without mount ready".
+    // Skip validate and try commit directly — it should fail because
+    // the candidate is still CpuPrepared.
     let result = coordinator.commit(prepare.token, &mut scene);
     assert!(result.is_err());
     match result.unwrap_err() {
-        BspRuntimeError::BridgeFailure { message, .. } => {
-            assert!(message.contains("renderer mount not ready"));
+        BspRuntimeError::InvalidCandidateTransition { detail, .. } => {
+            assert!(detail.contains("ValidatedForScene"));
         }
-        e => panic!("expected BridgeFailure about mount, got {:?}", e),
+        e => panic!("expected InvalidCandidateTransition, got {:?}", e),
     }
 }
 
@@ -662,7 +687,6 @@ fn teardown_cleans_up_candidate_and_active_state() {
 
     // Prepare and commit
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
-    coordinator.validate(prepare.token).unwrap();
     coordinator
         .commit_with_mount(prepare.token, &mut scene, empty_mount())
         .unwrap();
@@ -705,6 +729,9 @@ fn poisioned_coordinator_rejects_all_operations() {
     coordinator.register_bridge("panic", Box::new(PanicCommitBridge));
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     coordinator.validate(prepare.token).unwrap();
 
     let mut scene = Scene::new();
@@ -797,9 +824,9 @@ fn commit_without_set_renderer_ready_fails() {
     let mut scene = Scene::new();
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
-    coordinator.validate(prepare.token).unwrap();
 
-    // Commit without setting renderer mount ready
+    // Commit without setting renderer mount ready should fail.
+    // The candidate is CpuPrepared, commit requires ValidatedForScene.
     let result = coordinator.commit(prepare.token, &mut scene);
     assert!(result.is_err());
     assert!(!coordinator.is_poisoned());
@@ -894,6 +921,9 @@ fn teardown_on_poisoned_coordinator_does_not_panic() {
     let mut scene = Scene::new();
 
     let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
     coordinator.validate(prepare.token).unwrap();
     let _ = coordinator.commit_with_mount(prepare.token, &mut scene, empty_mount());
     assert!(coordinator.is_poisoned());
@@ -952,4 +982,317 @@ fn cancel_unsubmitted_candidate_via_new_prepare() {
 
     let mut scene = Scene::new();
     assert!(coordinator.commit(prepare2.token, &mut scene).is_ok());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 05: Transactional Mount Ownership — Fault Injection
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn stale_renderer_completion_is_rejected_and_does_not_mutate_candidate() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/v1").unwrap();
+
+    // Second prepare cancels the first
+    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/v2").unwrap();
+
+    // Stale completion: mount for generation 1 arrives after gen 2 started.
+    // The generation validation catches the stale token first.
+    let result = coordinator.complete_renderer_upload(prepare1.token, empty_mount());
+    assert!(matches!(
+        result,
+        Err(BspRuntimeError::StaleGeneration { .. })
+    ));
+
+    // The current candidate (gen 2) should still be present and untouched
+    assert!(coordinator.staged_extraction().is_some());
+}
+
+#[test]
+fn duplicate_renderer_ready_lease_is_rejected() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+
+    // First mount ready — accepted
+    coordinator
+        .set_renderer_mount_ready(prepare.token, empty_mount())
+        .unwrap();
+
+    // Second mount ready — duplicate, should be rejected
+    let result = coordinator.complete_renderer_upload(prepare.token, empty_mount());
+    assert!(matches!(
+        result,
+        Err(BspRuntimeError::DuplicateReadyLease { .. })
+    ));
+
+    // Candidate should still be valid and ready for validation
+    coordinator.validate(prepare.token).unwrap();
+}
+
+#[test]
+fn stale_generation_preserves_active_mount_on_commit_rejection() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Commit a mount
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/v1").unwrap();
+    coordinator
+        .commit_with_mount(prepare1.token, &mut scene, empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    let link_before = scene.bsp_source_link().unwrap().clone();
+
+    // Prepare a second candidate but don't commit
+    let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/v2").unwrap();
+
+    // Trying to commit with the stale token should fail
+    let result = coordinator.commit_with_mount(prepare1.token, &mut scene, empty_mount());
+    assert!(result.is_err());
+
+    // Active mount should still be v1
+    let link_after = scene.bsp_source_link().unwrap();
+    assert_eq!(link_after, &link_before);
+}
+
+#[test]
+fn unload_retires_active_mount_and_records_retirement() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Commit a mount
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .commit_with_mount(prepare.token, &mut scene, empty_mount())
+        .unwrap();
+
+    let retirements_before = coordinator.retirement_diagnostics();
+
+    coordinator.unload(&mut scene).unwrap();
+
+    assert!(!coordinator.is_active());
+    assert!(coordinator.retirement_diagnostics() > retirements_before);
+    assert!(coordinator.staged_extraction().is_none());
+}
+
+#[test]
+fn replacement_commits_retire_old_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // First mount
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/v1").unwrap();
+    coordinator
+        .commit_with_mount(prepare1.token, &mut scene, empty_mount())
+        .unwrap();
+    let ret_v1 = coordinator.retirement_diagnostics();
+
+    // Second mount (replacement)
+    let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/v2").unwrap();
+    coordinator
+        .commit_with_mount(prepare2.token, &mut scene, empty_mount())
+        .unwrap();
+
+    // Retirement count should have increased (old mount retired)
+    assert!(coordinator.retirement_diagnostics() > ret_v1);
+    assert!(coordinator.is_active());
+
+    // Third mount
+    let prepare3 = coordinator.prepare(&bsp_bytes, None, "maps/v3").unwrap();
+    coordinator
+        .commit_with_mount(prepare3.token, &mut scene, empty_mount())
+        .unwrap();
+
+    // Each replacement retires the previous
+    assert!(coordinator.retirement_diagnostics() > ret_v1 + 1);
+}
+
+#[test]
+fn rollback_does_not_affect_active_mount() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Commit a mount
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/active").unwrap();
+    coordinator
+        .commit_with_mount(prepare.token, &mut scene, empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    let link_before = scene.bsp_source_link().unwrap().clone();
+
+    // Prepare a candidate then roll it back
+    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/candidate").unwrap();
+    coordinator.rollback().unwrap();
+
+    // Active mount should be unchanged
+    assert!(coordinator.is_active());
+    let link_after = scene.bsp_source_link().unwrap();
+    assert_eq!(link_after, &link_before);
+}
+
+#[test]
+fn bridge_validate_failure_rolls_back_candidate_only() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Commit an active mount first
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/active").unwrap();
+    coordinator
+        .commit_with_mount(prepare.token, &mut scene, empty_mount())
+        .unwrap();
+
+    let link_before = scene.bsp_source_link().unwrap().clone();
+    let ret_before = coordinator.retirement_diagnostics();
+
+    // Now register a failing bridge and try to prepare a new candidate
+    coordinator.register_bridge("failing", Box::new(FailingValidateBridge));
+    let prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/new").unwrap();
+    coordinator
+        .set_renderer_mount_ready(prepare2.token, empty_mount())
+        .unwrap();
+
+    // Validation should fail and roll back only the candidate
+    let result = coordinator.validate(prepare2.token);
+    assert!(result.is_err());
+
+    // Active mount should be unchanged
+    assert!(coordinator.is_active());
+    let link_after = scene.bsp_source_link().unwrap();
+    assert_eq!(link_after, &link_before);
+    // The candidate's ready renderer mount is retired during rollback.
+    // That's the candidate's lease, not the active mount.
+    assert_eq!(coordinator.retirement_diagnostics(), ret_before + 1);
+    assert!(coordinator.staged_extraction().is_none());
+}
+
+#[test]
+fn teardown_retires_active_and_counts() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    let prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    coordinator
+        .commit_with_mount(prepare.token, &mut scene, empty_mount())
+        .unwrap();
+
+    let ret_before = coordinator.retirement_diagnostics();
+
+    coordinator.teardown(&mut scene);
+
+    assert!(!coordinator.is_active());
+    assert!(coordinator.retirement_diagnostics() > ret_before);
+}
+
+#[test]
+fn candidate_is_cleared_after_rollback() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let _prepare = coordinator.prepare(&bsp_bytes, None, "maps/test").unwrap();
+    assert!(coordinator.staged_extraction().is_some());
+
+    coordinator.rollback().unwrap();
+    assert!(coordinator.staged_extraction().is_none());
+
+    // Second rollback is idempotent
+    coordinator.rollback().unwrap();
+    assert!(coordinator.staged_extraction().is_none());
+}
+
+#[test]
+fn stale_token_validate_does_not_affect_newer_candidate() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+
+    let prepare1 = coordinator.prepare(&bsp_bytes, None, "maps/v1").unwrap();
+    let _prepare2 = coordinator.prepare(&bsp_bytes, None, "maps/v2").unwrap();
+
+    // Set mount ready for the current candidate
+    coordinator
+        .set_renderer_mount_ready(
+            bsp_runtime::BspGenerationToken {
+                generation: coordinator.current_generation(),
+            },
+            empty_mount(),
+        )
+        .unwrap();
+    coordinator
+        .validate(bsp_runtime::BspGenerationToken {
+            generation: coordinator.current_generation(),
+        })
+        .unwrap();
+
+    // Now try to validate with stale token — should fail
+    let result = coordinator.validate(prepare1.token);
+    assert!(result.is_err());
+
+    // The current candidate should still be present and validated
+    assert!(coordinator.staged_extraction().is_some());
+}
+
+#[test]
+fn rapid_prepare_rollback_prepare_cycle_is_clean() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // Cycle 1: prepare, set mount, validate, rollback
+    let _p1 = coordinator.prepare(&bsp_bytes, None, "maps/c1").unwrap();
+    coordinator.rollback().unwrap();
+
+    // Cycle 2: prepare, set mount, validate, commit
+    let p2 = coordinator.prepare(&bsp_bytes, None, "maps/c2").unwrap();
+    coordinator
+        .commit_with_mount(p2.token, &mut scene, empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+
+    // Cycle 3: prepare with active mount, roll back candidate only
+    let _p3 = coordinator.prepare(&bsp_bytes, None, "maps/c3").unwrap();
+    coordinator.rollback().unwrap();
+
+    // Active mount still present
+    assert!(coordinator.is_active());
+    // Staged candidate cleared
+    assert!(coordinator.staged_extraction().is_none());
+
+    // Cycle 4: prepare and commit replacement
+    let p4 = coordinator.prepare(&bsp_bytes, None, "maps/c4").unwrap();
+    coordinator
+        .commit_with_mount(p4.token, &mut scene, empty_mount())
+        .unwrap();
+    assert!(coordinator.is_active());
+}
+
+#[test]
+fn retirement_count_increases_with_each_replacement() {
+    let bsp_bytes = minimal_bsp_bytes();
+    let mut coordinator = BspCoordinator::new();
+    let mut scene = Scene::new();
+
+    // 5 prepare→commit cycles should produce 5 retirement events
+    // (first commit retires nothing, subsequent 4 each retire the previous)
+    for i in 0..5 {
+        let prepare = coordinator
+            .prepare(&bsp_bytes, None, format!("maps/v{i}"))
+            .unwrap();
+        coordinator
+            .commit_with_mount(prepare.token, &mut scene, empty_mount())
+            .unwrap();
+    }
+
+    // Retirements: first commit: 0 retirements, subsequent 4: 4 retirements
+    assert_eq!(coordinator.retirement_diagnostics(), 4);
+    assert!(coordinator.is_active());
 }

@@ -3,7 +3,7 @@
 //! Provides staging, safe traversal, atomic rename, rollback journal, and
 //! symlink-free containment checks for `engine_pack` commands.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -958,6 +958,410 @@ fn slash_path(path: &Path) -> String {
         }
     }
     parts.join("/")
+}
+
+// ---------------------------------------------------------------------------
+// Publication outcome (Phase 04)
+// ---------------------------------------------------------------------------
+
+/// Structured publication outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationOutcome {
+    /// Published successfully — staging renamed to destination.
+    Published {
+        /// The destination path.
+        target: PathBuf,
+        /// SHA-256 of the canonical manifest.
+        manifest_sha256: String,
+    },
+    /// Staging and existing destination are byte-identical — no-op.
+    Unchanged {
+        /// The existing destination path.
+        target: PathBuf,
+        /// SHA-256 of the canonical manifest.
+        manifest_sha256: String,
+    },
+    /// Destination exists with a different complete closure.
+    LateCollision {
+        /// The existing destination path.
+        target: PathBuf,
+        /// SHA-256 of the new manifest.
+        new_manifest_sha256: String,
+        /// SHA-256 of the existing manifest (if parseable).
+        existing_manifest_sha256: Option<String>,
+    },
+    /// Destination exists but is incomplete or malformed.
+    IncompleteDestination {
+        /// The existing destination path.
+        target: PathBuf,
+        /// What was wrong with it.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for PublicationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublicationOutcome::Published {
+                target,
+                manifest_sha256,
+            } => {
+                write!(
+                    f,
+                    "published: {} (manifest sha256:{})",
+                    target.display(),
+                    manifest_sha256
+                )
+            }
+            PublicationOutcome::Unchanged {
+                target,
+                manifest_sha256,
+            } => {
+                write!(
+                    f,
+                    "unchanged: {} (manifest sha256:{})",
+                    target.display(),
+                    manifest_sha256
+                )
+            }
+            PublicationOutcome::LateCollision {
+                target,
+                new_manifest_sha256,
+                existing_manifest_sha256,
+            } => {
+                write!(
+                    f,
+                    "late-collision: {} new={} existing={}",
+                    target.display(),
+                    new_manifest_sha256,
+                    existing_manifest_sha256
+                        .as_deref()
+                        .unwrap_or("<unparseable>")
+                )
+            }
+            PublicationOutcome::IncompleteDestination { target, reason } => {
+                write!(
+                    f,
+                    "incomplete-destination: {} ({})",
+                    target.display(),
+                    reason
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Owned staging markers (Phase 04)
+// ---------------------------------------------------------------------------
+
+/// Name of the ownership marker written into every staging directory.
+pub const STAGING_MARKER_NAME: &str = ".engine-pack-staging";
+
+/// Write an ownership marker into the staging directory that binds it to the
+/// intended destination.
+pub fn write_staging_marker(staging: &Path, destination: &Path) -> Result<(), FsTxError> {
+    let marker_path = staging.join(STAGING_MARKER_NAME);
+    let content = format!(
+        "destination={}\npid={}\ntime={}\n",
+        destination.display(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    fs::write(&marker_path, content).map_err(|err| FsTxError::Io {
+        path: marker_path,
+        message: format!("write staging marker: {err}"),
+    })
+}
+
+/// Check whether a directory contains a valid staging marker.
+pub fn has_staging_marker(dir: &Path) -> bool {
+    dir.join(STAGING_MARKER_NAME).is_file()
+}
+
+/// Recover orphaned staging directories that are direct siblings of the
+/// given destination. Only removes directories that contain the staging
+/// marker AND are named with the engine-pack staging prefix.
+pub fn recover_orphaned_staging(destination: &Path) {
+    let parent = match destination.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let dest_stem = destination
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let staging_prefix = format!(".{dest_stem}.");
+
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Only consider directories with the staging prefix
+        if !name.starts_with(&staging_prefix) {
+            continue;
+        }
+        // Skip the destination itself
+        if path == *destination {
+            continue;
+        }
+        // Only recover if it has an ownership marker and is a directory
+        if !path.is_dir() {
+            continue;
+        }
+        if !has_staging_marker(&path) {
+            continue;
+        }
+        // Safety: no symlinks inside (we don't recurse into unknown dirs)
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manifest closure validation (Phase 04)
+// ---------------------------------------------------------------------------
+
+/// Validate that every declared payload in a manifest is present, regular,
+/// confined, size-matching, and hash-matching in the staging directory.
+/// Also rejects any undeclared regular artifact.
+pub fn validate_manifest_closure(
+    staging: &Path,
+    manifest_bytes: &[u8],
+) -> Result<Vec<(String, String)>, FsTxError> {
+    let manifest_str = std::str::from_utf8(manifest_bytes).map_err(|e| {
+        FsTxError::ValidationBeforePublish {
+            staging: staging.to_path_buf(),
+            diagnostics: vec![format!("manifest is not valid UTF-8: {e}")],
+        }
+    })?;
+    let manifest: toml::Value = toml::from_str(manifest_str).map_err(|e| {
+        FsTxError::ValidationBeforePublish {
+            staging: staging.to_path_buf(),
+            diagnostics: vec![format!("invalid manifest TOML: {e}")],
+        }
+    })?;
+
+    let table = manifest.as_table().ok_or_else(|| {
+        FsTxError::ValidationBeforePublish {
+            staging: staging.to_path_buf(),
+            diagnostics: vec!["manifest root is not a table".to_string()],
+        }
+    })?;
+
+    let mut diagnostics: Vec<String> = Vec::new();
+    let mut declared: Vec<(String, String)> = Vec::new();
+
+    // Collect declared artifacts from the manifest
+    if let Some(artifacts) = table.get("published_artifacts").and_then(|v| v.as_array()) {
+        for entry in artifacts {
+            if let Some(t) = entry.as_table() {
+                let path = t.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let sha256 = t
+                    .get("sha256")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if path.is_empty() {
+                    diagnostics.push("published_artifact with empty path".to_string());
+                    continue;
+                }
+                // Validate path is relative and non-escaped
+                let p = Path::new(path);
+                if p.is_absolute() || has_path_escape(p) {
+                    diagnostics.push(format!(
+                        "published_artifact path escape/absolute: '{path}'"
+                    ));
+                    continue;
+                }
+                // Normalize the path key
+                let key = slash_path(p);
+                declared.push((key, sha256.to_string()));
+            }
+        }
+    }
+
+    if declared.is_empty() {
+        diagnostics.push("manifest has no published_artifacts".to_string());
+    }
+
+    // Check for duplicate declared paths
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    for (path, _) in &declared {
+        if !seen_paths.insert(path.clone()) {
+            diagnostics.push(format!("duplicate declared path: '{path}'"));
+        }
+    }
+
+    // Collect actual files in staging
+    let mut actual_files: Vec<(String, String)> = Vec::new();
+    collect_staging_files(staging, staging, &mut actual_files, &mut diagnostics)?;
+
+    // Verify every declared artifact exists with matching hash
+    let actual_map: HashMap<&str, &str> = actual_files
+        .iter()
+        .map(|(p, h)| (p.as_str(), h.as_str()))
+        .collect();
+
+    for (path, declared_hash) in &declared {
+        match actual_map.get(path.as_str()) {
+            Some(actual_hash) if actual_hash == declared_hash => {}
+            Some(actual_hash) => {
+                diagnostics.push(format!(
+                    "hash mismatch for '{path}': declared {declared_hash}, actual {actual_hash}"
+                ));
+            }
+            None => {
+                diagnostics.push(format!(
+                    "declared artifact '{path}' not found in staging"
+                ));
+            }
+        }
+    }
+
+    // Reject undeclared regular files (except markers and manifests)
+    let declared_paths: HashSet<&str> = declared.iter().map(|(p, _)| p.as_str()).collect();
+    for (path, _hash) in &actual_files {
+        if path == STAGING_MARKER_NAME {
+            continue;
+        }
+        if !declared_paths.contains(path.as_str()) {
+            diagnostics.push(format!(
+                "undeclared regular file in staging: '{path}'"
+            ));
+        }
+    }
+
+    if !diagnostics.is_empty() {
+        return Err(FsTxError::ValidationBeforePublish {
+            staging: staging.to_path_buf(),
+            diagnostics,
+        });
+    }
+
+    Ok(declared)
+}
+
+/// Collect all regular files in staging (non-recursive for subdirectories
+/// like textures/).
+fn collect_staging_files(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<(String, String)>,
+    diagnostics: &mut Vec<String>,
+) -> Result<(), FsTxError> {
+    let dir_meta = inspect_entry_no_follow(dir)?;
+    if !dir_meta.is_dir() {
+        return Err(FsTxError::InvalidEntryPath(format!(
+            "not a directory: '{}'",
+            dir.display()
+        )));
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|err| FsTxError::Io {
+            path: dir.to_path_buf(),
+            message: format!("read_dir: {err}"),
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| FsTxError::Io {
+            path: dir.to_path_buf(),
+            message: format!("read_dir entry: {err}"),
+        })?;
+    entries.sort_by_key(|e| e.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let meta = inspect_entry_no_follow(&path)?;
+
+        if meta.is_dir() {
+            // Recurse into subdirectories (e.g. textures/)
+            collect_staging_files(root, &path, files, diagnostics)?;
+        } else if meta.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| FsTxError::RootEscape {
+                    candidate: path.clone(),
+                    root: root.to_path_buf(),
+                })?;
+            let hash = sha256_file(&path)?;
+            files.push((slash_path(relative), hash));
+        } else {
+            diagnostics.push(format!(
+                "non-regular entry in staging: '{}'",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn has_path_escape(path: &Path) -> bool {
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Compute the SHA-256 of the canonical manifest bytes.
+pub fn compute_manifest_sha256(manifest_bytes: &[u8]) -> String {
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let mut buf = [0u8; 64];
+    let mut buf_len = 0usize;
+    let mut total_len = 0u64;
+
+    let mut offset = 0usize;
+    while offset < manifest_bytes.len() {
+        let space = 64 - buf_len;
+        let copy = (manifest_bytes.len() - offset).min(space);
+        buf[buf_len..buf_len + copy].copy_from_slice(&manifest_bytes[offset..offset + copy]);
+        buf_len += copy;
+        total_len += copy as u64;
+        offset += copy;
+        if buf_len == 64 {
+            sha256_process_block(&mut state, &buf);
+            buf_len = 0;
+        }
+    }
+
+    let total_bits = total_len * 8;
+    buf[buf_len] = 0x80;
+    buf_len += 1;
+    if buf_len > 56 {
+        for i in buf_len..64 {
+            buf[i] = 0;
+        }
+        sha256_process_block(&mut state, &buf);
+        buf_len = 0;
+    }
+    for i in buf_len..56 {
+        buf[i] = 0;
+    }
+    buf[56..64].copy_from_slice(&total_bits.to_be_bytes());
+    sha256_process_block(&mut state, &buf);
+
+    let mut result = String::with_capacity(64);
+    for &word in &state {
+        result.push_str(&format!("{word:08x}"));
+    }
+    result
 }
 
 /// Validate a staged compiler artifact set.

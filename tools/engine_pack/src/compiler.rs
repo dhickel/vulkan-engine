@@ -528,6 +528,18 @@ pub enum CompilerError {
     InvalidProfile(String),
     /// Source file missing or unreadable.
     SourceError { path: PathBuf, message: String },
+    /// Source input is a symlink or non-regular file.
+    NonRegularInput { path: PathBuf, kind: String },
+    /// Compiler emitted a missing-texture diagnostic.
+    MissingTexture { stage: String, stdout: String, stderr: String },
+    /// Compiler leaked a pointfile (.pts or .prt).
+    PointfileLeaked { path: PathBuf, stage: String },
+    /// Compiler output stream exceeded size bound.
+    StreamBoundExceeded { stage: String, stream: String, limit: u64 },
+    /// BSP magic mismatch with profile expectation.
+    BspMagicMismatch { expected: String, found: String, path: PathBuf },
+    /// Lit file is invalid (wrong header, version, or size mismatch).
+    InvalidLit { path: PathBuf, reason: String },
 }
 
 impl std::fmt::Display for CompilerError {
@@ -618,6 +630,34 @@ impl std::fmt::Display for CompilerError {
             }
             CompilerError::SourceError { path, message } => {
                 write!(f, "source error '{}': {message}", path.display())
+            }
+            CompilerError::NonRegularInput { path, kind } => {
+                write!(f, "non-regular input '{}' is a {kind}", path.display())
+            }
+            CompilerError::MissingTexture { stage, stdout, stderr } => {
+                write!(
+                    f,
+                    "{stage} reported missing texture:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+                )
+            }
+            CompilerError::PointfileLeaked { path, stage } => {
+                write!(f, "{stage} leaked pointfile '{}'", path.display())
+            }
+            CompilerError::StreamBoundExceeded { stage, stream, limit } => {
+                write!(
+                    f,
+                    "{stage} {stream} stream exceeded {limit} byte bound"
+                )
+            }
+            CompilerError::BspMagicMismatch { expected, found, path } => {
+                write!(
+                    f,
+                    "BSP magic mismatch in '{}': expected {expected}, found {found}",
+                    path.display()
+                )
+            }
+            CompilerError::InvalidLit { path, reason } => {
+                write!(f, "invalid .lit file '{}': {reason}", path.display())
             }
         }
     }
@@ -1072,6 +1112,122 @@ fn contains_compiler_warning(stdout: &str, stderr: &str) -> bool {
     })
 }
 
+/// Check whether compiler output indicates missing textures — a hard failure.
+fn contains_missing_texture(stdout: &str, stderr: &str) -> bool {
+    [stdout, stderr].into_iter().any(|stream| {
+        let lower = stream.to_ascii_lowercase();
+        lower.contains("unable to find texture")
+            || lower.contains("could not load texture")
+            || lower.contains("missing texture")
+    })
+}
+
+/// Detect and reject missing-texture diagnostics.
+fn reject_missing_textures(stage: &str, output: &Output) -> Result<(), CompilerError> {
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if contains_missing_texture(&stdout, &stderr) {
+        return Err(CompilerError::MissingTexture {
+            stage: stage.to_string(),
+            stdout,
+            stderr,
+        });
+    }
+    Ok(())
+}
+
+/// Check for leaked pointfiles after compilation.
+/// Only `.pts` files indicate leaks; `.prt` is the normal portal file
+/// produced by qbsp and consumed by vis.
+fn check_pointfile_leaks(work_dir: &Path, bsp_stem: &str, stage: &str) -> Result<(), CompilerError> {
+    let pts_path = work_dir.join(format!("{bsp_stem}.pts"));
+    if pts_path.exists() {
+        return Err(CompilerError::PointfileLeaked {
+            path: pts_path,
+            stage: stage.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Build a deterministic controlled-environment identity string for provenance.
+pub fn controlled_environment_identity() -> String {
+    let keys = ["PATH", "HOME", "USER"];
+    let mut parts: Vec<String> = Vec::new();
+    for key in &keys {
+        if let Some(val) = std::env::var_os(key) {
+            parts.push(format!("{key}={}", val.to_string_lossy()));
+        }
+    }
+    parts.sort();
+    parts.join(";")
+}
+
+/// Validate source input is a regular non-symlink file.
+pub fn validate_input_regular(path: &Path) -> Result<(), CompilerError> {
+    let meta = path.symlink_metadata().map_err(|e| CompilerError::Io {
+        message: format!("cannot stat input '{}'", path.display()),
+        source: e,
+    })?;
+    if meta.file_type().is_symlink() {
+        return Err(CompilerError::NonRegularInput {
+            path: path.to_path_buf(),
+            kind: "symlink".to_string(),
+        });
+    }
+    if !meta.is_file() {
+        return Err(CompilerError::NonRegularInput {
+            path: path.to_path_buf(),
+            kind: if meta.is_dir() {
+                "directory".to_string()
+            } else {
+                "special file".to_string()
+            },
+        });
+    }
+    Ok(())
+}
+
+/// Validate a .lit file: QLIT magic, version 1, payload size multiple of 3.
+pub fn validate_lit_data(lit_data: &[u8], bsp_lightdata_size: usize) -> Result<(), CompilerError> {
+    if lit_data.len() < 8 {
+        return Err(CompilerError::InvalidLit {
+            path: PathBuf::from("<lit>"),
+            reason: format!("too short: {} bytes (minimum 8)", lit_data.len()),
+        });
+    }
+    if &lit_data[0..4] != b"QLIT" {
+        return Err(CompilerError::InvalidLit {
+            path: PathBuf::from("<lit>"),
+            reason: "invalid magic (expected QLIT)".to_string(),
+        });
+    }
+    let version = u32::from_le_bytes([lit_data[4], lit_data[5], lit_data[6], lit_data[7]]);
+    if version != 1 {
+        return Err(CompilerError::InvalidLit {
+            path: PathBuf::from("<lit>"),
+            reason: format!("unsupported version {version} (expected 1)"),
+        });
+    }
+    let payload_size = lit_data.len() - 8;
+    if payload_size % 3 != 0 {
+        return Err(CompilerError::InvalidLit {
+            path: PathBuf::from("<lit>"),
+            reason: format!("payload size {payload_size} not a multiple of 3"),
+        });
+    }
+    let expected_payload = bsp_lightdata_size.saturating_mul(3);
+    if payload_size != expected_payload {
+        return Err(CompilerError::InvalidLit {
+            path: PathBuf::from("<lit>"),
+            reason: format!(
+                "payload size {payload_size} does not match BSP lightdata {bsp_lightdata_size} × 3 = {expected_payload}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn reject_compiler_warnings(stage: &str, output: &Output) -> Result<(), CompilerError> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1103,41 +1259,15 @@ pub fn compile_map(
     tool_path: Option<&Path>,
     wad_paths: &[PathBuf],
 ) -> Result<CompileResult, CompilerError> {
-    // Validate inputs
-    if !source_map.is_file() {
-        return Err(CompilerError::SourceError {
-            path: source_map.to_path_buf(),
-            message: "source .map file not found".into(),
-        });
-    }
-    if !palette_path.is_file() {
-        return Err(CompilerError::SourceError {
-            path: palette_path.to_path_buf(),
-            message: "palette file not found".into(),
-        });
-    }
+    // Validate inputs — reject non-regular and symlinked files
+    validate_input_regular(source_map)?;
+    validate_input_regular(palette_path)?;
 
     // Validate and sanitize WAD paths
     let mut wad_staging_names: Vec<(PathBuf, String)> = Vec::new();
     let mut seen_basenames: std::collections::HashSet<String> = std::collections::HashSet::new();
     for wad_path in wad_paths {
-        if !wad_path.is_file() {
-            return Err(CompilerError::SourceError {
-                path: wad_path.clone(),
-                message: "WAD file not found".into(),
-            });
-        }
-        // Reject symlinks
-        let meta = wad_path.symlink_metadata().map_err(|e| CompilerError::Io {
-            message: format!("cannot stat WAD '{}'", wad_path.display()),
-            source: e,
-        })?;
-        if meta.file_type().is_symlink() {
-            return Err(CompilerError::SourceError {
-                path: wad_path.clone(),
-                message: "WAD path must not be a symlink".into(),
-            });
-        }
+        validate_input_regular(wad_path)?;
         // Sanitize basename
         let basename = wad_path
             .file_name()
@@ -1281,12 +1411,18 @@ pub fn compile_map(
         });
     }
     reject_compiler_warnings("qbsp", &qbsp_output)?;
+    reject_missing_textures("qbsp", &qbsp_output)?;
     if !bsp_filename.exists() {
         return Err(CompilerError::MissingOutput {
             expected_path: bsp_filename.clone(),
             stage: "qbsp".into(),
         });
     }
+    // Extract stem for pointfile checks
+    let bsp_stem = bsp_filename
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
 
     // Stage 2: vis
     let vis_args: Vec<String> = {
@@ -1311,6 +1447,7 @@ pub fn compile_map(
         });
     }
     reject_compiler_warnings("vis", &vis_output)?;
+    reject_missing_textures("vis", &vis_output)?;
 
     // Stage 3: light
     let light_args: Vec<String> = {
@@ -1335,6 +1472,8 @@ pub fn compile_map(
         });
     }
     reject_compiler_warnings("light", &light_output)?;
+    reject_missing_textures("light", &light_output)?;
+    check_pointfile_leaks(work_dir, bsp_stem, "light")?;
 
     // Check output size
     let bsp_size = bsp_filename.metadata()?.len();
@@ -1361,33 +1500,49 @@ pub fn compile_map(
                 limit: profile.max_output_size,
             });
         }
-        Some(std::fs::read(&lit_path)?)
+        let lit_bytes = std::fs::read(&lit_path)?;
+        // Validate .lit structure before accepting it
+        // We'll validate properly after BSP parse, but do structural check now
+        if lit_bytes.len() >= 8 && &lit_bytes[0..4] == b"QLIT" {
+            let version = u32::from_le_bytes([lit_bytes[4], lit_bytes[5], lit_bytes[6], lit_bytes[7]]);
+            if version != 1 {
+                return Err(CompilerError::InvalidLit {
+                    path: lit_path.clone(),
+                    reason: format!("unsupported QLIT version {version} (expected 1)"),
+                });
+            }
+        }
+        Some(lit_bytes)
     } else {
         None
     };
+
+    // Check BSP length before inspecting magic
+    if bsp_data.len() < 4 {
+        return Err(CompilerError::SourceError {
+            path: bsp_filename.clone(),
+            message: format!("BSP too short to inspect magic: {} bytes", bsp_data.len()),
+        });
+    }
 
     // Validate BSP magic matches profile expectation
     let bsp_magic = &bsp_data[..4];
     if uses_bsp2 {
         if bsp_magic != b"BSP2" {
-            return Err(CompilerError::SourceError {
+            return Err(CompilerError::BspMagicMismatch {
+                expected: "BSP2".to_string(),
+                found: format!("{bsp_magic:02x?}"),
                 path: bsp_filename.clone(),
-                message: format!(
-                    "profile uses -bsp2 but output BSP has magic {:02x?}, expected BSP2",
-                    bsp_magic
-                ),
             });
         }
     } else {
         let magic_int =
             i32::from_le_bytes([bsp_magic[0], bsp_magic[1], bsp_magic[2], bsp_magic[3]]);
         if magic_int != 29 {
-            return Err(CompilerError::SourceError {
+            return Err(CompilerError::BspMagicMismatch {
+                expected: "29 (BSP29)".to_string(),
+                found: format!("{bsp_magic:02x?} (version {magic_int})"),
                 path: bsp_filename.clone(),
-                message: format!(
-                    "profile expects BSP29 but output BSP has magic {:02x?} (version {})",
-                    bsp_magic, magic_int
-                ),
             });
         }
     }
