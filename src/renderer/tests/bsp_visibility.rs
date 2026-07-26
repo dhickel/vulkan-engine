@@ -183,6 +183,7 @@ fn make_batch(leaf_signature: Vec<u32>, pvs_eligible: bool, is_inline: bool) -> 
             render_class: 0,
             material_identity: 0,
             lightmap_page: 0,
+            style_ids: [0, 255, 255, 255],
             model_index,
         },
         leaf_signature,

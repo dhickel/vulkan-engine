@@ -262,7 +262,6 @@ struct PlannedFace {
     source_face_index: u32,
     material_plan_index: usize,
     model_index: u32,
-    primary_leaf: Option<u32>,
 }
 
 #[cfg(feature = "bsp")]
@@ -608,15 +607,11 @@ fn collect_planned_faces(
             .get(&key)
             .ok_or_else(|| format!("BSP face {face_index} material was not planned"))?;
         let model_index = inline_models.get(&geometry.face_index).copied().unwrap_or(0);
-        let primary_leaf = (model_index == 0)
-            .then(|| extracted.leaf_membership[face_index].iter().copied().min())
-            .flatten();
         faces.push(PlannedFace {
             face_index,
             source_face_index: geometry.face_index,
             material_plan_index,
             model_index,
-            primary_leaf,
         });
     }
     Ok(faces)
@@ -1152,16 +1147,19 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         });
     }
 
-    // ── Build source-face → slot and slot → material_plan_index maps ──
-    let source_face_to_slot: std::collections::HashMap<u32, usize> = extracted
-        .face_geometries
-        .iter()
-        .enumerate()
-        .map(|(slot, geo)| (geo.face_index, slot))
-        .collect();
-    let mut slot_material = vec![None; face_count];
-    for face in &faces {
-        if slot_material[face.face_index].replace(face.material_plan_index).is_some() {
+    // ── Build source-face → canonical planned-face maps ───────────
+    let mut source_face_to_slot = std::collections::HashMap::with_capacity(face_count);
+    for (slot, geometry) in extracted.face_geometries.iter().enumerate() {
+        if source_face_to_slot.insert(geometry.face_index, slot).is_some() {
+            return Err(format!(
+                "BSP extraction contains duplicate source face identity {}",
+                geometry.face_index
+            ));
+        }
+    }
+    let mut planned_face_by_slot = vec![None; face_count];
+    for &face in &faces {
+        if planned_face_by_slot[face.face_index].replace(face).is_some() {
             return Err(format!("BSP face {} has duplicate material assignment", face.face_index));
         }
     }
@@ -1175,53 +1173,105 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
     let mut batches = Vec::with_capacity(extracted.render_batches.len());
 
     for (batch_index, neutral_batch) in extracted.render_batches.iter().enumerate() {
-        // Map source face indices to face slots.
+        if neutral_batch.face_indices.is_empty() {
+            return Err(format!("BSP neutral batch {batch_index} has no faces"));
+        }
+        if !neutral_batch
+            .face_indices
+            .windows(2)
+            .all(|indices| indices[0] < indices[1])
+        {
+            return Err(format!(
+                "BSP neutral batch {batch_index} source faces are not strictly sorted"
+            ));
+        }
+        if neutral_batch.key.model_index != neutral_batch.model_index {
+            return Err(format!(
+                "BSP neutral batch {batch_index} key model {} disagrees with batch model {}",
+                neutral_batch.key.model_index, neutral_batch.model_index
+            ));
+        }
+
         let face_slots: Vec<usize> = neutral_batch
             .face_indices
             .iter()
-            .map(|&src_face| {
+            .map(|&source_face| {
                 source_face_to_slot
-                    .get(&src_face)
+                    .get(&source_face)
                     .copied()
                     .ok_or_else(|| format!(
-                        "BSP neutral batch {batch_index} references unknown source face {src_face}"
+                        "BSP neutral batch {batch_index} references unknown source face {source_face}"
                     ))
             })
             .collect::<Result<Vec<_>, _>>()?;
-
-        // Collect PlannedFace records for mesh merging.
         let group_faces: Vec<PlannedFace> = face_slots
             .iter()
             .map(|&slot| {
-                let mat_plan = slot_material[slot].ok_or_else(|| {
-                    format!("BSP neutral batch {batch_index} face slot {slot} has no material plan")
-                })?;
-                Ok(PlannedFace {
-                    face_index: slot,
-                    source_face_index: extracted.face_geometries[slot].face_index,
-                    material_plan_index: mat_plan,
-                    model_index: neutral_batch.model_index,
-                    primary_leaf: None,
+                planned_face_by_slot[slot].ok_or_else(|| {
+                    format!(
+                        "BSP neutral batch {batch_index} face slot {slot} is not renderable or has no material plan"
+                    )
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        // Validate material homogeneity: all faces in the batch must share
-        // the same material plan index.
-        let expected_material = group_faces
-            .first()
-            .map(|f| f.material_plan_index)
-            .ok_or_else(|| format!("BSP batch {batch_index} has no faces"))?;
+        let expected_material = group_faces[0].material_plan_index;
+        let expected_model = group_faces[0].model_index;
+        let is_inline = expected_model != 0;
+        if neutral_batch.is_inline_model != is_inline || neutral_batch.pvs_eligible == is_inline {
+            return Err(format!(
+                "BSP neutral batch {batch_index} has inconsistent inline/PVS flags"
+            ));
+        }
+
+        let mut expected_leaf_signature = if is_inline {
+            Vec::new()
+        } else {
+            group_faces
+                .iter()
+                .flat_map(|face| extracted.leaf_membership[face.face_index].iter().copied())
+                .collect::<Vec<_>>()
+        };
+        expected_leaf_signature.sort_unstable();
+        expected_leaf_signature.dedup();
+        if neutral_batch.leaf_signature != expected_leaf_signature {
+            return Err(format!(
+                "BSP neutral batch {batch_index} leaf signature does not match its source-face union"
+            ));
+        }
+
         for face in &group_faces {
-            if face.material_plan_index != expected_material {
+            if face.material_plan_index != expected_material || face.model_index != expected_model {
                 return Err(format!(
-                    "BSP neutral batch {batch_index} mixes material plans {expected_material} and {}",
-                    face.material_plan_index
+                    "BSP neutral batch {batch_index} mixes material or model identity"
+                ));
+            }
+            let material = &extracted.face_materials[face.face_index];
+            let layout = &extracted.face_lightmap_layouts[face.face_index];
+            let style_ids = style_id_array(layout);
+            let expected_key = bsp::geometry::BatchKey {
+                render_class: render_class_index(material.surface_class),
+                material_identity: bsp::materials::material_identity(
+                    material.material_index,
+                    material.surface_class,
+                ),
+                lightmap_page: layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX),
+                style_ids: [
+                    style_ids[0] as u8,
+                    style_ids[1] as u8,
+                    style_ids[2] as u8,
+                    style_ids[3] as u8,
+                ],
+                model_index: expected_model,
+            };
+            if neutral_batch.key != expected_key {
+                return Err(format!(
+                    "BSP neutral batch {batch_index} key does not match source face {}",
+                    face.source_face_index
                 ));
             }
         }
 
-        // Assign face-to-batch and face-to-material mappings.
         for face in &group_faces {
             if face_to_batch[face.face_index].replace(batch_index).is_some() {
                 return Err(format!("BSP face {} assigned to multiple batches", face.face_index));
@@ -1229,12 +1279,20 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
             face_to_material[face.face_index] = Some(face.material_plan_index);
         }
 
-        // Merge face meshes into one GPU batch mesh.
         batches.push(BspPlannedBatch {
             mesh: merge_batch_mesh(extracted, batch_index, &group_faces)?,
             material_plan_index: expected_material,
             render_batch: neutral_batch.clone(),
         });
+    }
+
+    for face in &faces {
+        if face_to_batch[face.face_index].is_none() || face_to_material[face.face_index].is_none() {
+            return Err(format!(
+                "BSP renderable face {} is not covered by exactly one neutral batch",
+                face.source_face_index
+            ));
+        }
     }
 
     // ── Post-batching invariant checks ─────────────────────────────
@@ -1699,7 +1757,7 @@ mod tests {
             leaf_membership.push(vec![(index % 18_587) as u32]);
         }
 
-        ExtractedBsp {
+        let mut extracted = ExtractedBsp {
             transform: bsp::coords::QuakeToEngine::default(),
             profile_tag: "stress",
             textures,
@@ -1721,7 +1779,58 @@ mod tests {
             content_hash: [0; 32],
             source_identity: "stress".to_string(),
             diagnostics: Vec::new(),
-        }
+        };
+        rebuild_test_render_batches(&mut extracted);
+        extracted
+    }
+
+    #[cfg(feature = "bsp")]
+    fn rebuild_test_render_batches(extracted: &mut ExtractedBsp) {
+        let render_classes = extracted
+            .face_materials
+            .iter()
+            .map(|material| material.surface_class.render_class())
+            .collect::<Vec<_>>();
+        let material_identities = extracted
+            .face_materials
+            .iter()
+            .map(|material| {
+                bsp::materials::material_identity(material.material_index, material.surface_class)
+            })
+            .collect::<Vec<_>>();
+        let lightmap_pages = extracted
+            .face_lightmap_layouts
+            .iter()
+            .map(|layout| layout.has_data.then_some(layout.page_index).unwrap_or(u32::MAX))
+            .collect::<Vec<_>>();
+        let style_ids = extracted
+            .face_lightmap_layouts
+            .iter()
+            .map(|layout| {
+                let ids = style_id_array(layout);
+                [ids[0] as u8, ids[1] as u8, ids[2] as u8, ids[3] as u8]
+            })
+            .collect::<Vec<_>>();
+        let inline_faces = extracted
+            .inline_models
+            .iter()
+            .flat_map(|model| {
+                model
+                    .face_indices
+                    .iter()
+                    .copied()
+                    .map(move |face| (model.model_index, face))
+            })
+            .collect::<Vec<_>>();
+        extracted.render_batches = bsp::geometry::batch_faces(
+            &extracted.face_geometries,
+            &extracted.leaf_membership,
+            &render_classes,
+            &material_identities,
+            &lightmap_pages,
+            &style_ids,
+            &inline_faces,
+        );
     }
 
     #[cfg(feature = "bsp")]
@@ -1808,6 +1917,7 @@ mod tests {
     fn companion_on_ineligible_surface_keeps_legacy_route_without_decoding() {
         let mut extracted = stress_extracted(1, 1);
         extracted.face_materials[0].surface_class = bsp::materials::SurfaceClass::Liquid;
+        rebuild_test_render_batches(&mut extracted);
         extracted.textures[0].pbr_companions.normal = Some(
             bsp::resources::TextureCompanion::new(
                 "textures/texture_0_norm.png",
@@ -1871,6 +1981,26 @@ mod tests {
 
     #[cfg(feature = "bsp")]
     #[test]
+    fn plan_bsp_upload_rejects_neutral_batch_style_mismatch() {
+        let mut extracted = stress_extracted(2, 1);
+        extracted.render_batches[0].key.style_ids = [2, 255, 255, 255];
+
+        let error = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(error.contains("key does not match source face"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn plan_bsp_upload_rejects_neutral_batch_omission() {
+        let mut extracted = stress_extracted(2, 1);
+        extracted.render_batches.pop();
+
+        let error = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(error.contains("is not covered by exactly one neutral batch"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
     fn material_demand_over_cap_is_rejected_before_upload() {
         let extracted = stress_extracted(MAX_BSP_MATERIALS + 1, MAX_BSP_MATERIALS + 1);
         let error = plan_bsp_upload(&extracted).unwrap_err();
@@ -1887,6 +2017,7 @@ mod tests {
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
                 model_index: 0,
             },
             leaf_signature: vec![0],
@@ -1913,6 +2044,7 @@ mod tests {
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
                 model_index: 0,
             },
             leaf_signature: vec![],
@@ -1939,6 +2071,7 @@ mod tests {
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
                 model_index: 0,
             },
             leaf_signature: vec![0],
@@ -1965,6 +2098,7 @@ mod tests {
                 render_class: 0,
                 material_identity: 0,
                 lightmap_page: 0,
+                style_ids: [0, 255, 255, 255],
                 model_index: 0,
             },
             leaf_signature: vec![0],

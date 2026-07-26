@@ -260,6 +260,7 @@ fn golden_batch_inline_models_do_not_merge() {
         &[geometry::RenderClass::Opaque, geometry::RenderClass::Opaque],
         &[7, 7],
         &[0, 0],
+        &[[0, 255, 255, 255], [0, 255, 255, 255]],
         &[(1, 10), (2, 20)],
     );
 
@@ -287,6 +288,7 @@ fn golden_batch_emits_each_valid_renderable_face_once_with_sorted_leaf_set() {
         &[geometry::RenderClass::Opaque, geometry::RenderClass::Opaque],
         &[1, 2],
         &[0, 0],
+        &[[0, 255, 255, 255], [0, 255, 255, 255]],
         &[],
     );
 
@@ -297,6 +299,50 @@ fn golden_batch_emits_each_valid_renderable_face_once_with_sorted_leaf_set() {
 }
 
 #[test]
+fn golden_batch_keeps_distinct_style_slots_separate() {
+    let face = |face_index| geometry::FaceGeometry {
+        face_index,
+        vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+        uv0: vec![Vec2::ZERO; 3],
+        uv1: vec![Vec2::ZERO; 3],
+        normal: Vec3::Z,
+        bounds: (Vec3::ZERO, Vec3::ONE),
+        luxel_extents: (1, 1),
+        is_valid: true,
+    };
+    let batches = geometry::batch_faces(
+        &[face(3), face(7), face(11)],
+        &[vec![2], vec![1, 2], vec![9]],
+        &[
+            geometry::RenderClass::Opaque,
+            geometry::RenderClass::Opaque,
+            geometry::RenderClass::Opaque,
+        ],
+        &[42, 42, 42],
+        &[0, 0, 0],
+        &[
+            [0, 255, 255, 255],
+            [0, 255, 255, 255],
+            [1, 255, 255, 255],
+        ],
+        &[],
+    );
+
+    assert_eq!(batches.len(), 2);
+    let static_style = batches
+        .iter()
+        .find(|batch| batch.key.style_ids == [0, 255, 255, 255])
+        .expect("style-0 batch");
+    assert_eq!(static_style.face_indices, vec![3, 7]);
+    assert_eq!(static_style.leaf_signature, vec![1, 2]);
+    let animated_style = batches
+        .iter()
+        .find(|batch| batch.key.style_ids == [1, 255, 255, 255])
+        .expect("style-1 batch");
+    assert_eq!(animated_style.face_indices, vec![11]);
+}
+
+#[test]
 fn golden_batch_key_deterministic_ordering() {
     // Even with identical content, batches should sort deterministically
     let batch1 = geometry::RenderBatch {
@@ -304,6 +350,7 @@ fn golden_batch_key_deterministic_ordering() {
             render_class: 0,
             material_identity: 42,
             lightmap_page: 0,
+            style_ids: [0, 255, 255, 255],
             model_index: 0,
         },
         leaf_signature: vec![1, 3, 5],
@@ -318,6 +365,7 @@ fn golden_batch_key_deterministic_ordering() {
             render_class: 0,
             material_identity: 10,
             lightmap_page: 0,
+            style_ids: [0, 255, 255, 255],
             model_index: 0,
         },
         leaf_signature: vec![1, 3, 5],
@@ -334,6 +382,7 @@ fn golden_batch_key_deterministic_ordering() {
             .lightmap_page
             .cmp(&b.key.lightmap_page)
             .then_with(|| a.key.material_identity.cmp(&b.key.material_identity))
+            .then_with(|| a.key.style_ids.cmp(&b.key.style_ids))
             .then_with(|| a.key.model_index.cmp(&b.key.model_index))
             .then_with(|| a.leaf_signature.cmp(&b.leaf_signature))
     });

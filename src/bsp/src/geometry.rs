@@ -301,7 +301,7 @@ fn compute_bounds(verts: &[Vec3]) -> (Vec3, Vec3) {
 /// Immutable draw-identity key for batching static world faces.
 ///
 /// Faces are grouped by their immutable draw identity:
-/// `(render_class, material_identity, lightmap_page, model_index)`.
+/// `(render_class, material_identity, lightmap_page, style_ids, model_index)`.
 /// Leaf membership is computed as the sorted unique union per batch
 /// and stored in [`RenderBatch::leaf_signature`], not used as a
 /// grouping key.
@@ -309,10 +309,15 @@ fn compute_bounds(verts: &[Vec3]) -> (Vec3, Vec3) {
 pub struct BatchKey {
     /// Render class index (opaque=0, alpha_mask=1, sky=2, liquid=3).
     pub render_class: u8,
-    /// Material identity (resolved texture index + style mask).
+    /// Material identity (resolved texture index + surface class).
     pub material_identity: u64,
     /// Lightmap atlas page index.
     pub lightmap_page: u32,
+    /// Per-source-slot light style IDs. `255` marks an unused slot.
+    ///
+    /// Style IDs select frame values and therefore must remain part of immutable
+    /// draw identity even when texture, render class, and atlas page match.
+    pub style_ids: [u8; 4],
     /// Model index (0 = world, 1+ = inline model).
     pub model_index: u32,
 }
@@ -340,13 +345,14 @@ pub struct RenderBatch {
 /// Static-world batches carry the sorted unique union of their
 /// member face leaf indices for PVS culling; inline-model batches
 /// have an empty leaf signature. Batches are sorted deterministically
-/// by `(lightmap_page, material_identity, model_index)`.
+/// by `(lightmap_page, material_identity, style_ids, model_index)`.
 pub fn batch_faces(
     face_geometries: &[FaceGeometry],
     leaf_membership: &[Vec<u32>], // per-face: sorted non-solid leaf indices
     render_classes: &[RenderClass],
     material_identities: &[u64],
     lightmap_pages: &[u32],
+    style_ids: &[[u8; 4]],
     inline_model_faces: &[(u32, u32)], // (model_index, face_index)
 ) -> Vec<RenderBatch> {
     use std::collections::BTreeMap;
@@ -358,7 +364,7 @@ pub fn batch_faces(
         .collect();
 
     // Group faces by immutable draw identity.
-    // Key = (render_class, material_identity, lightmap_page, model_index)
+    // Key = (render_class, material_identity, lightmap_page, style_ids, model_index)
     let mut groups: BTreeMap<BatchKey, Vec<usize>> = BTreeMap::new();
 
     for (fi, geo) in face_geometries.iter().enumerate() {
@@ -371,12 +377,17 @@ pub fn batch_faces(
         }
         let mat_id = material_identities.get(fi).copied().unwrap_or(0);
         let lm_page = lightmap_pages.get(fi).copied().unwrap_or(0);
+        let face_style_ids = style_ids
+            .get(fi)
+            .copied()
+            .unwrap_or([crate::lightmaps::STYLE_SENTINEL; 4]);
         let model_idx = inline_map.get(&geo.face_index).copied().unwrap_or(0);
 
         let key = BatchKey {
             render_class: rc as u8,
             material_identity: mat_id,
             lightmap_page: lm_page,
+            style_ids: face_style_ids,
             model_index: model_idx,
         };
 
@@ -420,12 +431,13 @@ pub fn batch_faces(
         })
         .collect();
 
-    // Deterministic sort: (lightmap_page, material_identity, model_index)
+    // Deterministic sort: (lightmap_page, material_identity, style_ids, model_index).
     batches.sort_by(|a, b| {
         a.key
             .lightmap_page
             .cmp(&b.key.lightmap_page)
             .then_with(|| a.key.material_identity.cmp(&b.key.material_identity))
+            .then_with(|| a.key.style_ids.cmp(&b.key.style_ids))
             .then_with(|| a.key.model_index.cmp(&b.key.model_index))
             .then_with(|| a.leaf_signature.cmp(&b.leaf_signature))
     });
@@ -524,7 +536,7 @@ mod tests {
     #[test]
     fn batch_faces_deterministic() {
         // Empty input produces empty output
-        let batches = batch_faces(&[], &[], &[], &[], &[], &[]);
+        let batches = batch_faces(&[], &[], &[], &[], &[], &[], &[]);
         assert!(batches.is_empty());
     }
 
