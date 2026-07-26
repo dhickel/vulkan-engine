@@ -482,9 +482,10 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         }
 
         // ── Build canonical manifest ──────────────────────────────
-        // The ownership marker is transaction metadata, never a payload. The
-        // manifest itself is intentionally excluded from its payload list to
-        // avoid a recursive self-hash.
+        // The ownership marker is transaction metadata while staging and is
+        // excluded from this pre-removal hash list. It is removed before
+        // closure validation and publication. The manifest itself is excluded
+        // from its payload list to avoid a recursive self-hash.
         let staged_hashes = fs_tx::compute_dir_file_hashes(&staging).map_err(CliError::FsTx)?;
         let source_map_identity = source_map
             .file_name()
@@ -509,6 +510,10 @@ fn compile_bsp_cmd(args: &[String]) -> CliResult<String> {
         let manifest_path = staging.join(format!("{bsp_name}.manifest.toml"));
         std::fs::write(&manifest_path, &manifest_toml)
             .map_err(|err| io_error("compile-bsp.write", &manifest_path, err))?;
+
+        // The marker proves ownership only while this is staging. Published
+        // packages contain only declared payloads plus their canonical manifest.
+        fs_tx::remove_staging_marker(&staging).map_err(CliError::FsTx)?;
 
         // ── Validate manifest closure ─────────────────────────────
         let _declared = fs_tx::validate_manifest_closure(&staging, manifest_toml.as_bytes())
@@ -1327,8 +1332,9 @@ fn build_canonical_manifest(
     // ── Published artifacts ───────────────────────────────────
     {
         let mut artifacts: Vec<Value> = Vec::new();
-        // The manifest itself is not included (non-recursive), and the
-        // staging marker is transaction metadata rather than a payload.
+        // The manifest itself is not included (non-recursive). The ownership
+        // marker still exists while this pre-removal hash list is collected,
+        // but it is staging-only metadata and is removed before publication.
         for (rel_path, sha256) in staged_hashes {
             if rel_path.ends_with(".manifest.toml") || rel_path == fs_tx::STAGING_MARKER_NAME {
                 continue;

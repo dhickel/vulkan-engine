@@ -676,10 +676,14 @@ pub fn publish_directory_no_replace(staging: &Path, target: &Path) -> Result<(),
         });
     }
 
-    // Run any test hook just before the syscall
+    // Run any test hook just before the syscall.
     run_pre_publish_hook();
 
-    // Attempt the atomic no-replace rename
+    // Ownership metadata is valid only while this is a staging directory.
+    // Check after the hook so a race-injection test cannot publish it.
+    ensure_staging_marker_absent(staging)?;
+
+    // Attempt the atomic no-replace rename.
     rename_directory_no_replace(staging, target)
 }
 
@@ -1065,8 +1069,8 @@ pub const STAGING_MARKER_NAME: &str = ".engine-pack-staging";
 /// intended destination.
 ///
 /// The marker deliberately excludes process IDs, timestamps, and absolute
-/// paths. It can survive a successful directory rename as transaction
-/// metadata without making otherwise identical package closures differ.
+/// paths. It exists only while the directory is staging and must be removed
+/// before final closure validation and publication.
 pub fn write_staging_marker(staging: &Path, destination: &Path) -> Result<(), FsTxError> {
     let destination_name = destination
         .file_name()
@@ -1084,6 +1088,44 @@ pub fn write_staging_marker(staging: &Path, destination: &Path) -> Result<(), Fs
         path: marker_path,
         message: format!("write staging marker: {err}"),
     })
+}
+
+/// Remove the regular ownership marker before the staging directory becomes a
+/// published package.
+pub fn remove_staging_marker(staging: &Path) -> Result<(), FsTxError> {
+    let marker_path = staging.join(STAGING_MARKER_NAME);
+    let metadata = inspect_entry_no_follow(&marker_path)?;
+    if !metadata.is_file() {
+        return Err(FsTxError::StagingArtifactInvariant {
+            staging: staging.to_path_buf(),
+            message: format!(
+                "staging ownership marker is not a regular file: '{}'",
+                marker_path.display()
+            ),
+        });
+    }
+    fs::remove_file(&marker_path).map_err(|err| FsTxError::Io {
+        path: marker_path,
+        message: format!("remove staging marker: {err}"),
+    })
+}
+
+fn ensure_staging_marker_absent(staging: &Path) -> Result<(), FsTxError> {
+    let marker_path = staging.join(STAGING_MARKER_NAME);
+    match fs::symlink_metadata(&marker_path) {
+        Ok(_) => Err(FsTxError::StagingArtifactInvariant {
+            staging: staging.to_path_buf(),
+            message: format!(
+                "staging ownership marker must be removed before publication: '{}'",
+                marker_path.display()
+            ),
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(FsTxError::Io {
+            path: marker_path,
+            message: format!("inspect staging marker before publication: {err}"),
+        }),
+    }
 }
 
 /// Check whether a directory contains a regular, non-symlink staging marker.
@@ -1345,7 +1387,7 @@ pub fn validate_manifest_closure(
 
     let declared_paths: HashSet<&str> = declared.iter().map(|(path, _, _)| path.as_str()).collect();
     for (path, _, _) in &actual_files {
-        if path == STAGING_MARKER_NAME || canonical_manifest_path == Some(path.as_str()) {
+        if canonical_manifest_path == Some(path.as_str()) {
             continue;
         }
         if !declared_paths.contains(path.as_str()) {
@@ -2113,6 +2155,51 @@ mod tests {
         let error = validate_manifest_closure(&dir, manifest.as_bytes()).unwrap_err();
         assert!(matches!(error, FsTxError::ValidationBeforePublish { .. }));
 
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn manifest_closure_rejects_staging_marker() {
+        let dir = unique_tmp("manifest-marker");
+        fs::create_dir_all(&dir).unwrap();
+        let payload_path = dir.join("payload.bin");
+        fs::write(&payload_path, b"payload").unwrap();
+        let hash = sha256_file(&payload_path).unwrap();
+        let manifest = format!(
+            "format_version = 1\nmanifest_schema = \"engine-pack-canonical/1\"\nstrict = true\n\n[[published_artifacts]]\npath = \"payload.bin\"\nsha256 = \"{hash}\"\nbytes = 7\nkind = \"test\"\n"
+        );
+        fs::write(dir.join("generated.manifest.toml"), &manifest).unwrap();
+        write_staging_marker(&dir, &dir.join("published")).unwrap();
+
+        let error = validate_manifest_closure(&dir, manifest.as_bytes()).unwrap_err();
+        match error {
+            FsTxError::ValidationBeforePublish { diagnostics, .. } => {
+                assert!(diagnostics.iter().any(|diagnostic| diagnostic
+                    .contains("undeclared regular file in staging: '.engine-pack-staging'")))
+            }
+            other => panic!("expected closure validation failure, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn staging_marker_must_be_removed_before_directory_publication() {
+        let dir = unique_tmp("publish-marker");
+        fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join("staging");
+        let target = dir.join("published");
+        fs::create_dir_all(&staging).unwrap();
+        write_staging_marker(&staging, &target).unwrap();
+
+        let error = publish_directory_no_replace(&staging, &target).unwrap_err();
+        assert!(matches!(error, FsTxError::StagingArtifactInvariant { .. }));
+        assert!(staging.exists());
+        assert!(!target.exists());
+
+        remove_staging_marker(&staging).unwrap();
+        assert!(!has_staging_marker(&staging));
+        cleanup_staging(&staging);
         fs::remove_dir_all(&dir).unwrap();
     }
 
