@@ -184,7 +184,7 @@ impl DungeonConfig {
         }
 
         // Unsnapped to quantum
-        if bx % CONSTRUCTION_QUANTUM != 0 || by % CONSTRUCTION_QUANTUM != 0 {
+        if !bx.is_multiple_of(CONSTRUCTION_QUANTUM) || !by.is_multiple_of(CONSTRUCTION_QUANTUM) {
             return Err(GeneratorError::InvalidConfig(format!(
                 "xy_bounds ({}, {}) must be multiples of construction quantum {}",
                 bx, by, CONSTRUCTION_QUANTUM,
@@ -213,7 +213,7 @@ impl DungeonConfig {
             )));
         }
 
-        if self.z_span % CONSTRUCTION_QUANTUM != 0 {
+        if !self.z_span.is_multiple_of(CONSTRUCTION_QUANTUM) {
             return Err(GeneratorError::InvalidConfig(format!(
                 "z_span {} must be a multiple of construction quantum {}",
                 self.z_span, CONSTRUCTION_QUANTUM,

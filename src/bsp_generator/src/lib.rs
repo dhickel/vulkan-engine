@@ -57,7 +57,7 @@ pub mod topology;
 /// `textures/` (PNG companions), and `LICENSE` (CC0 dedication).
 pub const CC0_STONE_BETA_THEME_DIR: &str = "themes/cc0_stone_beta";
 
-pub use config::{DungeonConfig, MapClass, ValidatedConfig, CONSTRUCTION_QUANTUM};
+pub use config::{DungeonConfig, MapClass, ValidatedConfig, CONSTRUCTION_QUANTUM, MIN_Z_SPAN};
 pub use emission::build_emission;
 pub use error::GeneratorError;
 pub use intent::{
@@ -111,7 +111,8 @@ pub struct GenerationMetadata {
 /// # Errors
 ///
 /// Returns [`GeneratorError`] if configuration validation, room placement,
-/// topology construction, or corridor routing fails.
+/// topology construction, corridor routing, or source-emission validation
+/// fails.
 ///
 /// # Determinism
 ///
@@ -141,7 +142,7 @@ pub fn generate(
     let routed = route_all_edges(&layout.rooms, &layout.edges, &validated, &mut routing_rng)?;
 
     // 6. Build emission intent (brushes + entities)
-    let emission = build_emission(&layout, &routed);
+    let emission = build_emission(&layout, &routed)?;
 
     // 6b. Validate every brush before serialization (release gate — G5)
     crate::junction::validate_all_brushes(&emission.brushes)?;
@@ -222,12 +223,12 @@ fn compute_config_hash(config: &ValidatedConfig) -> u64 {
 
     let mut hasher = Sha256::new();
     hasher.update(b"dungeon-config/v1");
-    hasher.update(&[class_byte]);
-    hasher.update(&config.room_count.to_le_bytes());
-    hasher.update(&config.loop_count.to_le_bytes());
-    hasher.update(&config.xy_bounds.0.to_le_bytes());
-    hasher.update(&config.xy_bounds.1.to_le_bytes());
-    hasher.update(&config.z_span.to_le_bytes());
+    hasher.update([class_byte]);
+    hasher.update(config.room_count.to_le_bytes());
+    hasher.update(config.loop_count.to_le_bytes());
+    hasher.update(config.xy_bounds.0.to_le_bytes());
+    hasher.update(config.xy_bounds.1.to_le_bytes());
+    hasher.update(config.z_span.to_le_bytes());
     let digest: [u8; 32] = hasher.finalize().into();
     u64::from_le_bytes(digest[0..8].try_into().unwrap())
 }

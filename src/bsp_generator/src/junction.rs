@@ -8,11 +8,11 @@
 //! # Production junction architecture
 //!
 //! Per `DECISION-20260725-16`, production emission uses the corridor open-cell
-//! union exclusively. The L/T/X/portal functions below are retained as
-//! `pub(crate)` for diagnostic and test use but are never called by
-//! [`crate::emission::build_emission`].
+//! union exclusively. The L/T/X/portal functions below are private diagnostic
+//! helpers used only by this module's unit tests; they are not public API and
+//! cannot be called by production emission.
 
-#![allow(dead_code)] // diagnostic L/T/X/portal functions retained for test access
+#![allow(dead_code)] // private diagnostic L/T/X/portal helpers
 
 use crate::config::CONSTRUCTION_QUANTUM;
 use crate::error::GeneratorError;
@@ -22,6 +22,14 @@ use crate::intent::{Brush, BrushFace, Corridor, RoomIntent};
 const WALL_TEXTURE: &str = "stone_wall";
 /// Frozen wall/floor/ceiling slab thickness.
 const WALL: i32 = CONSTRUCTION_QUANTUM as i32;
+
+const PERMITTED_TEXTURES: [&str; 5] = [
+    "stone_floor",
+    "stone_wall",
+    "stone_ceiling",
+    "stone_accent",
+    "skip",
+];
 
 /// Create an axis-aligned solid brush from `min` to `max`.
 ///
@@ -90,16 +98,15 @@ pub fn make_brush(min: (i32, i32, i32), max: (i32, i32, i32), texture: &str) -> 
 
 // ── Release brush validation (G5) ─────────────────────────────────────────
 
-/// Validate that a [`Brush`] satisfies every mandatory construction contract
+/// Validate that a generated source box satisfies every construction contract
 /// required for safe Quake `.map` serialization.
 ///
-/// Returns `Ok(())` or a typed [`GeneratorError`]. This is a release-mode
-/// gate; the generator must never rely on `debug_assert` alone for brush
-/// correctness.
+/// Generation emits only canonical axis-aligned boxes. Requiring that exact
+/// representation proves six distinct planes, face order, winding, positive
+/// volume, and the common interior half-space in one release-mode check.
 pub fn validate_brush(brush: &Brush, index: usize) -> Result<(), GeneratorError> {
     let tag = || format!("brush {index}");
 
-    // 1. Exactly six faces
     if brush.faces.len() != 6 {
         return Err(GeneratorError::InvariantViolation(format!(
             "{} has {} faces (must be 6)",
@@ -108,37 +115,16 @@ pub fn validate_brush(brush: &Brush, index: usize) -> Result<(), GeneratorError>
         )));
     }
 
-    // 2. Every face has non-collinear plane points
-    for (fi, face) in brush.faces.iter().enumerate() {
-        let [p0, p1, p2] = face.plane_points;
-        let v1 = (p1.0 - p0.0, p1.1 - p0.1, p1.2 - p0.2);
-        let v2 = (p2.0 - p0.0, p2.1 - p0.1, p2.2 - p0.2);
-        let cross = (
-            v1.1 * v2.2 - v1.2 * v2.1,
-            v1.2 * v2.0 - v1.0 * v2.2,
-            v1.0 * v2.1 - v1.1 * v2.0,
-        );
-        if cross == (0, 0, 0) {
+    for (face_index, face) in brush.faces.iter().enumerate() {
+        if !points_are_non_collinear(face.plane_points) {
             return Err(GeneratorError::InvariantViolation(format!(
-                "{} face {fi} has collinear plane points",
+                "{} face {face_index} has collinear plane points",
                 tag(),
             )));
         }
     }
 
-    // 3. Positive volume: compute AABB from all plane points
-    let mut min = (i32::MAX, i32::MAX, i32::MAX);
-    let mut max = (i32::MIN, i32::MIN, i32::MIN);
-    for face in &brush.faces {
-        for &(x, y, z) in &face.plane_points {
-            min.0 = min.0.min(x);
-            min.1 = min.1.min(y);
-            min.2 = min.2.min(z);
-            max.0 = max.0.max(x);
-            max.1 = max.1.max(y);
-            max.2 = max.2.max(z);
-        }
-    }
+    let (min, max) = brush_bounds(brush);
     if min.0 >= max.0 || min.1 >= max.1 || min.2 >= max.2 {
         return Err(GeneratorError::InvariantViolation(format!(
             "{} has non-positive volume: AABB {:?} -> {:?}",
@@ -148,65 +134,45 @@ pub fn validate_brush(brush: &Brush, index: usize) -> Result<(), GeneratorError>
         )));
     }
 
-    // 4. Consistent half-space: for an axis-aligned box, each face's plane
-    //    must contain its three defining points and the opposite corner must
-    //    lie on the negative side of the plane.
-    for (fi, face) in brush.faces.iter().enumerate() {
-        let [p0, p1, p2] = face.plane_points;
-        let normal = plane_normal(p0, p1, p2);
-        if normal == (0.0, 0.0, 0.0) {
-            return Err(GeneratorError::InvariantViolation(format!(
-                "{} face {fi} has zero-area plane",
-                tag(),
-            )));
-        }
-        // Pick a point known to be on the opposite side: the AABB corner
-        // farthest from the plane along the normal.
-        let test_point = if normal.0 > 0.0 {
-            (min.0, min.1, min.2)
-        } else if normal.0 < 0.0 {
-            (max.0, max.1, max.2)
-        } else if normal.1 > 0.0 {
-            (min.0, min.1, min.2)
-        } else if normal.1 < 0.0 {
-            (max.0, max.1, max.2)
-        } else if normal.2 > 0.0 {
-            (min.0, min.1, min.2)
-        } else {
-            (max.0, max.1, max.2)
-        };
-        let d = signed_distance(p0, normal, test_point);
-        if d > 0.0 {
-            return Err(GeneratorError::InvariantViolation(format!(
-                "{} face {fi} has inconsistent half-space (d={d:.2})",
-                tag(),
-            )));
-        }
-    }
-
-    // 5. Quantum alignment: every coordinate must be a multiple of
-    //    CONSTRUCTION_QUANTUM.
     let q = CONSTRUCTION_QUANTUM as i32;
-    for (fi, face) in brush.faces.iter().enumerate() {
-        for (pi, &(x, y, z)) in face.plane_points.iter().enumerate() {
-            if x % q != 0 || y % q != 0 || z % q != 0 {
+    for (face_index, face) in brush.faces.iter().enumerate() {
+        for (point_index, &(x, y, z)) in face.plane_points.iter().enumerate() {
+            if x.rem_euclid(q) != 0 || y.rem_euclid(q) != 0 || z.rem_euclid(q) != 0 {
                 return Err(GeneratorError::InvariantViolation(format!(
-                    "{} face {fi} point {pi} ({x}, {y}, {z}) not quantum-aligned",
+                    "{} face {face_index} point {point_index} ({x}, {y}, {z}) not quantum-aligned",
                     tag(),
                 )));
             }
         }
     }
 
-    // 6. Finite coordinates (i32 is always finite, but guard for future)
-    //    Already satisfied by i32 type.
-
-    // 7. Non-empty texture identity
-    for (fi, face) in brush.faces.iter().enumerate() {
-        if face.texture.is_empty() {
+    let canonical_faces = canonical_plane_points(min, max);
+    for (face_index, (face, expected_points)) in
+        brush.faces.iter().zip(canonical_faces.iter()).enumerate()
+    {
+        if face.plane_points != *expected_points {
             return Err(GeneratorError::InvariantViolation(format!(
-                "{} face {fi} has empty texture identity",
+                "{} face {face_index} is not the canonical box plane/order/orientation",
                 tag(),
+            )));
+        }
+    }
+
+    let texture = &brush.faces[0].texture;
+    if !PERMITTED_TEXTURES.contains(&texture.as_str()) {
+        return Err(GeneratorError::InvariantViolation(format!(
+            "{} has unsupported texture identity {:?}",
+            tag(),
+            texture,
+        )));
+    }
+    for (face_index, face) in brush.faces.iter().enumerate() {
+        if face.texture.as_str() != texture.as_str() {
+            return Err(GeneratorError::InvariantViolation(format!(
+                "{} face {face_index} texture {:?} differs from box texture {:?}",
+                tag(),
+                face.texture,
+                texture,
             )));
         }
     }
@@ -216,46 +182,76 @@ pub fn validate_brush(brush: &Brush, index: usize) -> Result<(), GeneratorError>
 
 /// Validate every brush in a slice, returning the first error.
 pub fn validate_all_brushes(brushes: &[Brush]) -> Result<(), GeneratorError> {
-    for (i, brush) in brushes.iter().enumerate() {
-        validate_brush(brush, i)?;
+    for (index, brush) in brushes.iter().enumerate() {
+        validate_brush(brush, index)?;
     }
     Ok(())
 }
 
-/// Compute an outward-facing normal from three non-collinear plane points.
-fn plane_normal(
-    p0: (i32, i32, i32),
-    p1: (i32, i32, i32),
-    p2: (i32, i32, i32),
-) -> (f64, f64, f64) {
+fn brush_bounds(brush: &Brush) -> ((i32, i32, i32), (i32, i32, i32)) {
+    let mut min = (i32::MAX, i32::MAX, i32::MAX);
+    let mut max = (i32::MIN, i32::MIN, i32::MIN);
+    for face in &brush.faces {
+        for &(x, y, z) in &face.plane_points {
+            min = (min.0.min(x), min.1.min(y), min.2.min(z));
+            max = (max.0.max(x), max.1.max(y), max.2.max(z));
+        }
+    }
+    (min, max)
+}
+
+fn points_are_non_collinear(points: [(i32, i32, i32); 3]) -> bool {
+    let [p0, p1, p2] = points;
     let v1 = (
-        (p1.0 - p0.0) as f64,
-        (p1.1 - p0.1) as f64,
-        (p1.2 - p0.2) as f64,
+        p1.0 as i128 - p0.0 as i128,
+        p1.1 as i128 - p0.1 as i128,
+        p1.2 as i128 - p0.2 as i128,
     );
     let v2 = (
-        (p2.0 - p0.0) as f64,
-        (p2.1 - p0.1) as f64,
-        (p2.2 - p0.2) as f64,
+        p2.0 as i128 - p0.0 as i128,
+        p2.1 as i128 - p0.1 as i128,
+        p2.2 as i128 - p0.2 as i128,
     );
     (
         v1.1 * v2.2 - v1.2 * v2.1,
         v1.2 * v2.0 - v1.0 * v2.2,
         v1.0 * v2.1 - v1.1 * v2.0,
-    )
+    ) != (0, 0, 0)
 }
 
-/// Signed distance from `point` to the plane defined by `origin` and
-/// `normal`. Positive means the point is on the side the normal points to.
-fn signed_distance(origin: (i32, i32, i32), normal: (f64, f64, f64), point: (i32, i32, i32)) -> f64 {
-    let dx = point.0 as f64 - origin.0 as f64;
-    let dy = point.1 as f64 - origin.1 as f64;
-    let dz = point.2 as f64 - origin.2 as f64;
-    let len = (normal.0 * normal.0 + normal.1 * normal.1 + normal.2 * normal.2).sqrt();
-    if len == 0.0 {
-        return 0.0;
-    }
-    (normal.0 * dx + normal.1 * dy + normal.2 * dz) / len
+fn canonical_plane_points(min: (i32, i32, i32), max: (i32, i32, i32)) -> [[(i32, i32, i32); 3]; 6] {
+    [
+        [
+            (min.0, max.1, min.2),
+            (min.0, min.1, min.2),
+            (max.0, min.1, min.2),
+        ],
+        [
+            (min.0, max.1, max.2),
+            (max.0, max.1, max.2),
+            (max.0, min.1, max.2),
+        ],
+        [
+            (min.0, max.1, max.2),
+            (min.0, max.1, min.2),
+            (max.0, max.1, min.2),
+        ],
+        [
+            (min.0, min.1, max.2),
+            (max.0, min.1, max.2),
+            (max.0, min.1, min.2),
+        ],
+        [
+            (min.0, max.1, max.2),
+            (min.0, min.1, max.2),
+            (min.0, min.1, min.2),
+        ],
+        [
+            (max.0, max.1, min.2),
+            (max.0, min.1, min.2),
+            (max.0, min.1, max.2),
+        ],
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,7 +331,7 @@ fn other_endpoint(corridor: &Corridor, junction: (i32, i32)) -> (i32, i32) {
 ///
 /// **Diagnostic only.** Production emission uses the corridor open-cell union
 /// and never calls this function.
-pub fn build_l_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
+fn build_l_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
     let (horizontal, vertical) = match (orientation(a), orientation(b)) {
         (Orientation::Horizontal, Orientation::Vertical) => (a, b),
         (Orientation::Vertical, Orientation::Horizontal) => (b, a),
@@ -392,7 +388,7 @@ fn termination_point(terminating: &Corridor, through: &Corridor) -> Option<(i32,
 ///
 /// **Diagnostic only.** Production emission uses the corridor open-cell union
 /// and never calls this function.
-pub fn build_t_junction(terminating: &Corridor, through: &Corridor) -> Vec<Brush> {
+fn build_t_junction(terminating: &Corridor, through: &Corridor) -> Vec<Brush> {
     if orientation(terminating) == orientation(through) {
         return Vec::new();
     }
@@ -450,7 +446,7 @@ fn crossing_point(a: &Corridor, b: &Corridor) -> Option<(i32, i32)> {
 ///
 /// **Diagnostic only.** Production emission uses the corridor open-cell union
 /// and never calls this function.
-pub fn build_x_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
+fn build_x_junction(a: &Corridor, b: &Corridor) -> Vec<Brush> {
     let Some((jx, jy)) = crossing_point(a, b) else {
         return Vec::new();
     };
@@ -533,7 +529,7 @@ fn nearest_room_wall(corridor: &Corridor, room: &RoomIntent) -> (RoomWall, (i32,
 ///
 /// **Diagnostic only.** Production emission uses [`crate::emission::build_split_wall`]
 /// and never calls this function.
-pub fn build_room_portal(corridor: &Corridor, room: &RoomIntent) -> Vec<Brush> {
+fn build_room_portal(corridor: &Corridor, room: &RoomIntent) -> Vec<Brush> {
     let (wall, (cx, cy)) = nearest_room_wall(corridor, room);
     let min_x = room.position.0;
     let max_x = min_x + room.dimensions.0 as i32;
@@ -600,7 +596,7 @@ fn terminates_at(a: &Corridor, b: &Corridor) -> bool {
 ///
 /// **Diagnostic only.** Production emission uses the corridor open-cell union
 /// and never calls this function.
-pub fn build_junction_closures(corridors: &[Corridor]) -> Vec<Brush> {
+fn build_junction_closures(corridors: &[Corridor]) -> Vec<Brush> {
     let mut brushes = Vec::new();
 
     for i in 0..corridors.len() {

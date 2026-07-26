@@ -268,7 +268,10 @@ fn texture_axis_standard_format() {
     let s = serialize(&emission);
 
     // Standard format: texture_name x_off y_off rot x_scale y_scale
-    assert!(s.contains("0 0 0 1.0 1.0"), "must use standard offset/scale format");
+    assert!(
+        s.contains("0 0 0 1.0 1.0"),
+        "must use standard offset/scale format"
+    );
 
     // Verify no Valve 220 bracket format remains
     let face_line = s.lines().find(|l| l.contains("wall")).unwrap();

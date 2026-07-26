@@ -5,7 +5,10 @@
 //! The frozen M1/M2 support corpus is asserted directly: routing exhaustion is
 //! a generation failure, not a skipped invariant.
 
-use bsp_generator::{generate, DungeonConfig, MapClass, CONSTRUCTION_QUANTUM};
+use bsp_generator::{
+    build_emission, build_topology, generate, place_rooms, route_all_edges, DungeonConfig,
+    GeneratorError, MapClass, Seed, CONSTRUCTION_QUANTUM,
+};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -326,118 +329,96 @@ fn all_coordinates_are_quantum_aligned() {
     }
 }
 
-// ── G3: Exclusive solid ownership — no room-vs-corridor slab overlap ──
+// ── G3: Exclusive solid ownership ─────────────────────────────────────
 
-#[test]
-fn no_floor_or_ceiling_slab_overlap() {
-    // Generate a connected layout and verify that no floor slab
-    // (z=0..SLAB) overlaps with another floor slab, and no ceiling
-    // slab overlaps with another ceiling slab. Same-room wall corners
-    // naturally overlap — that is not a G3 violation.
-    let cfg = DungeonConfig::nominal_m1();
-    let (map_text, _meta) = gen_or_skip!(0, cfg);
-
-    let slab_thickness = bsp_generator::CONSTRUCTION_QUANTUM as i32;
-
-    // Parse all brushes with their AABBs.
-    let mut brush_aabbs: Vec<((i32,i32,i32),(i32,i32,i32))> = Vec::new();
-    let mut in_brush = false;
-    let mut saw_face = false;
-    let mut current_min = (i32::MAX, i32::MAX, i32::MAX);
-    let mut current_max = (i32::MIN, i32::MIN, i32::MIN);
-
-    for line in map_text.lines() {
-        let trimmed = line.trim();
-        if trimmed == "{" && !in_brush {
-            in_brush = true;
-            saw_face = false;
-            current_min = (i32::MAX, i32::MAX, i32::MAX);
-            current_max = (i32::MIN, i32::MIN, i32::MIN);
-        } else if trimmed == "}" && in_brush {
-            if saw_face {
-                brush_aabbs.push((current_min, current_max));
-            }
-            in_brush = false;
-        } else if in_brush && trimmed.starts_with('(') {
-            saw_face = true;
-            for part in trimmed.split('(').skip(1) {
-                if let Some(inner) = part.split(')').next() {
-                    let coords: Vec<i32> = inner
-                        .split_whitespace()
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
-                    if coords.len() == 3 {
-                        current_min.0 = current_min.0.min(coords[0]);
-                        current_min.1 = current_min.1.min(coords[1]);
-                        current_min.2 = current_min.2.min(coords[2]);
-                        current_max.0 = current_max.0.max(coords[0]);
-                        current_max.1 = current_max.1.max(coords[1]);
-                        current_max.2 = current_max.2.max(coords[2]);
-                    }
-                }
-            }
-        }
-    }
-
-    // Check that thin slabs (floor and ceiling plates) don't overlap.
-    // Thin slabs have height exactly SLAB and their Z ranges are mutually
-    // exclusive with wall brushes. Same-room wall corners naturally overlap
-    // and are not a G3 violation.
-    for i in 0..brush_aabbs.len() {
-        for j in (i + 1)..brush_aabbs.len() {
-            let (a_min, a_max) = brush_aabbs[i];
-            let (b_min, b_max) = brush_aabbs[j];
-            let a_dz = a_max.2 - a_min.2;
-            let b_dz = b_max.2 - b_min.2;
-            // Only check thin slabs (floor/ceiling plates).
-            if a_dz != slab_thickness || b_dz != slab_thickness {
-                continue;
-            }
-            // Same Z level? (overlapping or adjacent Z)
-            if a_min.2 != b_min.2 {
-                continue;
-            }
-            let overlap_x = a_min.0.max(b_min.0) < a_max.0.min(b_max.0);
-            let overlap_y = a_min.1.max(b_min.1) < a_max.1.min(b_max.1);
-            if overlap_x && overlap_y {
-                panic!(
-                    "Thin slabs at brushes {i} and {j} overlap at z={z_level}:\n  A: {a_min:?} -> {a_max:?}\n  B: {b_min:?} -> {b_max:?}",
-                    z_level = a_min.2,
-                );
-            }
-        }
-    }
-
-    assert!(brush_aabbs.len() > 10, "expected many brushes in generated map");
+fn generated_emission(seed: u64, config: DungeonConfig) -> bsp_generator::EmissionIntent {
+    let validated = config.validate().expect("valid config");
+    let master = Seed::new(seed);
+    let mut placement_rng = master.stage_seed("room-placement").rng();
+    let rooms = place_rooms(&validated, &mut placement_rng).expect("placement");
+    let mut routing_rng = master.stage_seed("corridor-routing").rng();
+    let layout = build_topology(rooms, &validated, &mut routing_rng).expect("topology");
+    let routed = route_all_edges(&layout.rooms, &layout.edges, &validated, &mut routing_rng)
+        .expect("routing");
+    build_emission(&layout, &routed).expect("emission must reject any source overlap")
 }
 
-// ── G2: Corridor height == 80 invariant ────────────────────────────────
+fn brush_bounds(brush: &bsp_generator::Brush) -> ((i32, i32, i32), (i32, i32, i32)) {
+    let mut min = (i32::MAX, i32::MAX, i32::MAX);
+    let mut max = (i32::MIN, i32::MIN, i32::MIN);
+    for face in &brush.faces {
+        for &(x, y, z) in &face.plane_points {
+            min = (min.0.min(x), min.1.min(y), min.2.min(z));
+            max = (max.0.max(x), max.1.max(y), max.2.max(z));
+        }
+    }
+    (min, max)
+}
 
 #[test]
-#[should_panic(expected = "DECISION-20260726-02")]
-fn corridor_height_not_80_panics_in_emission() {
-    use bsp_generator::{build_emission, Corridor, LayoutIntent, RoomIntent, RoutedIntent};
+fn all_generated_source_boxes_are_positive_volume_disjoint() {
+    let emission = generated_emission(0, DungeonConfig::nominal_m1());
+    let bounds: Vec<_> = emission.brushes.iter().map(brush_bounds).collect();
 
-    let room = RoomIntent {
-        position: (0, 0, 0),
-        dimensions: (112, 112, 128),
-    };
-    let layout = LayoutIntent {
-        rooms: vec![room],
+    for first in 0..bounds.len() {
+        for second in first + 1..bounds.len() {
+            let (a_min, a_max) = bounds[first];
+            let (b_min, b_max) = bounds[second];
+            assert!(
+                a_min.0.max(b_min.0) >= a_max.0.min(b_max.0)
+                    || a_min.1.max(b_min.1) >= a_max.1.min(b_max.1)
+                    || a_min.2.max(b_min.2) >= a_max.2.min(b_max.2),
+                "source boxes {first} and {second} overlap: {a_min:?}..{a_max:?} vs {b_min:?}..{b_max:?}",
+            );
+        }
+    }
+}
+
+// ── G2: Fixed-80 public corridor boundary ──────────────────────────────
+
+fn one_room_layout() -> bsp_generator::LayoutIntent {
+    bsp_generator::LayoutIntent {
+        rooms: vec![bsp_generator::RoomIntent {
+            position: (0, 0, 0),
+            dimensions: (112, 112, 128),
+        }],
         edges: Vec::new(),
         loop_count: 0,
-    };
-    let bad_corridor = Corridor {
-        start: (0, 0, 0),
-        end: (64, 0, 0),
-        width: 64,
-        height: 96, // NOT 80
-    };
-    let routed = RoutedIntent {
-        corridors: vec![bad_corridor],
+    }
+}
+
+#[test]
+fn corridor_height_not_80_is_a_typed_emission_error() {
+    let routed = bsp_generator::RoutedIntent {
+        corridors: vec![bsp_generator::Corridor {
+            start: (0, 0, 0),
+            end: (64, 0, 0),
+            width: 64,
+            height: 96,
+        }],
         junctions: Vec::new(),
     };
-    let _ = build_emission(&layout, &routed);
+
+    let error = build_emission(&one_room_layout(), &routed).unwrap_err();
+    assert!(matches!(error, GeneratorError::InvariantViolation(_)));
+    assert!(error.to_string().contains("height 96 != 80"), "{error}");
+}
+
+#[test]
+fn corridor_with_unequal_endpoint_z_is_a_typed_emission_error() {
+    let routed = bsp_generator::RoutedIntent {
+        corridors: vec![bsp_generator::Corridor {
+            start: (0, 0, 0),
+            end: (64, 0, 16),
+            width: 64,
+            height: 80,
+        }],
+        junctions: Vec::new(),
+    };
+
+    let error = build_emission(&one_room_layout(), &routed).unwrap_err();
+    assert!(matches!(error, GeneratorError::InvariantViolation(_)));
+    assert!(error.to_string().contains("unequal endpoint Z"), "{error}");
 }
 
 // ── Generated .map syntax ──────────────────────────────────────────────

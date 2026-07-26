@@ -6,8 +6,8 @@
 //! that determinism and exhaustion behaviours are correct.
 
 use bsp_generator::{
-    place_rooms, route_all_edges, route_edge, DungeonConfig, GeneratorError, MapClass,
-    RoomIntent, Seed, StageRng, CORRIDOR_HEIGHT, CORRIDOR_WIDTH, CONSTRUCTION_QUANTUM,
+    place_rooms, route_all_edges, route_edge, DungeonConfig, GeneratorError, MapClass, RoomIntent,
+    Seed, StageRng, CONSTRUCTION_QUANTUM, CORRIDOR_HEIGHT, CORRIDOR_WIDTH,
 };
 
 fn make_rng(seed_val: u64) -> StageRng {
@@ -66,7 +66,10 @@ fn straight_corridor_between_two_rooms() {
     let cfg = valid_m1_config(8, 0);
     let mut rng = make_rng(42);
     let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
-    assert!(!corridors.is_empty(), "should produce at least one corridor segment");
+    assert!(
+        !corridors.is_empty(),
+        "should produce at least one corridor segment"
+    );
 
     // Verify minimum width and height
     for c in &corridors {
@@ -186,7 +189,10 @@ fn l_shaped_route_avoids_blocking_room() {
     let cfg = valid_m1_config(8, 0);
     let mut rng = make_rng(13);
     let corridors = route_edge(0, 2, &rooms, &cfg, &mut rng).unwrap();
-    assert!(!corridors.is_empty(), "should find path around blocking room");
+    assert!(
+        !corridors.is_empty(),
+        "should find path around blocking room"
+    );
 
     // Verify minimum dimensions
     for c in &corridors {
@@ -309,16 +315,10 @@ fn route_all_edges_produces_corridors_for_every_edge() {
 fn route_all_edges_with_placed_rooms_m1() {
     let cfg = valid_m1_config(8, 0);
     let rooms = place_rooms(&cfg, &mut make_placement_rng(42)).unwrap();
-    let layout =
-        bsp_generator::build_topology(rooms, &cfg, &mut make_rng(42)).unwrap();
+    let layout = bsp_generator::build_topology(rooms, &cfg, &mut make_rng(42)).unwrap();
 
     let mut rng = make_rng(42);
-    let result = route_all_edges(
-        &layout.rooms,
-        &layout.edges,
-        &cfg,
-        &mut rng,
-    );
+    let result = route_all_edges(&layout.rooms, &layout.edges, &cfg, &mut rng);
 
     match result {
         Ok(routed) => {
@@ -341,16 +341,10 @@ fn route_all_edges_with_placed_rooms_m1() {
 fn route_all_edges_with_placed_rooms_m2() {
     let cfg = valid_m2_config(20, 2);
     let rooms = place_rooms(&cfg, &mut make_placement_rng(255)).unwrap();
-    let layout =
-        bsp_generator::build_topology(rooms, &cfg, &mut make_rng(255)).unwrap();
+    let layout = bsp_generator::build_topology(rooms, &cfg, &mut make_rng(255)).unwrap();
 
     let mut rng = make_rng(255);
-    let result = route_all_edges(
-        &layout.rooms,
-        &layout.edges,
-        &cfg,
-        &mut rng,
-    );
+    let result = route_all_edges(&layout.rooms, &layout.edges, &cfg, &mut rng);
 
     match result {
         Ok(routed) => {
@@ -386,6 +380,8 @@ fn portal_snapping_7_quantum_room_east_west() {
     let mut rng = make_rng(42);
     let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
     assert!(!corridors.is_empty());
+    assert_eq!(corridors.first().unwrap().start, (112, 48, 0));
+    assert_eq!(corridors.last().unwrap().end, (160, 48, 0));
     for c in &corridors {
         assert!(c.width >= CORRIDOR_WIDTH);
         assert!(c.height >= CORRIDOR_HEIGHT);
@@ -402,6 +398,8 @@ fn portal_snapping_7_quantum_room_north_south() {
     let mut rng = make_rng(42);
     let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
     assert!(!corridors.is_empty());
+    assert_eq!(corridors.first().unwrap().start, (48, 112, 0));
+    assert_eq!(corridors.last().unwrap().end, (48, 160, 0));
     for c in &corridors {
         assert!(c.width >= CORRIDOR_WIDTH);
         assert!(c.height >= CORRIDOR_HEIGHT);
@@ -414,12 +412,14 @@ fn portal_snapping_7_quantum_room_north_south() {
 fn portal_snapping_9_quantum_room_east_west() {
     let rooms = vec![
         room_at(0, 0, 0, 144, 144, 128),
-        room_at(200, 0, 0, 144, 144, 128),
+        room_at(208, 0, 0, 144, 144, 128),
     ];
     let cfg = valid_m1_config(8, 0);
     let mut rng = make_rng(42);
     let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
     assert!(!corridors.is_empty());
+    assert_eq!(corridors.first().unwrap().start, (144, 64, 0));
+    assert_eq!(corridors.last().unwrap().end, (208, 64, 0));
     for c in &corridors {
         assert!(c.width >= CORRIDOR_WIDTH);
         assert!(c.height >= CORRIDOR_HEIGHT);
@@ -430,12 +430,14 @@ fn portal_snapping_9_quantum_room_east_west() {
 fn portal_snapping_9_quantum_room_north_south() {
     let rooms = vec![
         room_at(0, 0, 0, 144, 144, 128),
-        room_at(0, 200, 0, 144, 144, 128),
+        room_at(0, 208, 0, 144, 144, 128),
     ];
     let cfg = valid_m1_config(8, 0);
     let mut rng = make_rng(42);
     let corridors = route_edge(0, 1, &rooms, &cfg, &mut rng).unwrap();
     assert!(!corridors.is_empty());
+    assert_eq!(corridors.first().unwrap().start, (64, 144, 0));
+    assert_eq!(corridors.last().unwrap().end, (64, 208, 0));
     for c in &corridors {
         assert!(c.width >= CORRIDOR_WIDTH);
         assert!(c.height >= CORRIDOR_HEIGHT);

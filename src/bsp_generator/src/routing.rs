@@ -92,30 +92,30 @@ fn compute_portals(
         // East-West facing
         if cb.0 >= ca.0 {
             // A east wall → B west wall
-            let a_y = snap_portal_perpendicular(cb.1, a_min.1 + q, a_max.1 - q, q);
+            let a_y = snap_portal_perpendicular(cb.1, a_min.1, a_max.1, q);
             portal_a = (a_max.0, a_y, a.position.2);
-            let b_y = snap_portal_perpendicular(ca.1, b_min.1 + q, b_max.1 - q, q);
+            let b_y = snap_portal_perpendicular(ca.1, b_min.1, b_max.1, q);
             portal_b = (b_min.0, b_y, b.position.2);
         } else {
             // A west wall → B east wall
-            let a_y = snap_portal_perpendicular(cb.1, a_min.1 + q, a_max.1 - q, q);
+            let a_y = snap_portal_perpendicular(cb.1, a_min.1, a_max.1, q);
             portal_a = (a_min.0, a_y, a.position.2);
-            let b_y = snap_portal_perpendicular(ca.1, b_min.1 + q, b_max.1 - q, q);
+            let b_y = snap_portal_perpendicular(ca.1, b_min.1, b_max.1, q);
             portal_b = (b_max.0, b_y, b.position.2);
         }
     } else {
         // North-South facing
         if cb.1 >= ca.1 {
             // A north wall → B south wall
-            let a_x = snap_portal_perpendicular(cb.0, a_min.0 + q, a_max.0 - q, q);
+            let a_x = snap_portal_perpendicular(cb.0, a_min.0, a_max.0, q);
             portal_a = (a_x, a_max.1, a.position.2);
-            let b_x = snap_portal_perpendicular(ca.0, b_min.0 + q, b_max.0 - q, q);
+            let b_x = snap_portal_perpendicular(ca.0, b_min.0, b_max.0, q);
             portal_b = (b_x, b_min.1, b.position.2);
         } else {
             // A south wall → B north wall
-            let a_x = snap_portal_perpendicular(cb.0, a_min.0 + q, a_max.0 - q, q);
+            let a_x = snap_portal_perpendicular(cb.0, a_min.0, a_max.0, q);
             portal_a = (a_x, a_min.1, a.position.2);
-            let b_x = snap_portal_perpendicular(ca.0, b_min.0 + q, b_max.0 - q, q);
+            let b_x = snap_portal_perpendicular(ca.0, b_min.0, b_max.0, q);
             portal_b = (b_x, b_max.1, b.position.2);
         }
     }
@@ -123,13 +123,27 @@ fn compute_portals(
     (portal_a, portal_b)
 }
 
-/// Choose the quantum-aligned coordinate in `[lo, hi]` nearest to `target`.
-/// Tie: lower coordinate wins.
+/// Choose a quantum-aligned portal center nearest to `target`, retaining a
+/// complete 64-unit aperture between each wall's corner reservations. Ties
+/// choose the lower coordinate.
 ///
-/// All values must be quantum-aligned; `lo` and `hi` are inclusive bounds.
-fn snap_portal_perpendicular(target: i32, lo: i32, hi: i32, quantum: i32) -> i32 {
-    debug_assert!(lo % quantum == 0);
-    debug_assert!(hi % quantum == 0);
+/// `wall_min` and `wall_max` are the room's outer tangent bounds. A valid
+/// generated room has enough width for the 16-unit corner reservation and
+/// each 32-unit half-aperture. The narrow fallback preserves diagnostic
+/// routing behavior for legacy out-of-domain direct callers; generation only
+/// produces rooms large enough for the full interval.
+fn snap_portal_perpendicular(target: i32, wall_min: i32, wall_max: i32, quantum: i32) -> i32 {
+    debug_assert_eq!(wall_min.rem_euclid(quantum), 0);
+    debug_assert_eq!(wall_max.rem_euclid(quantum), 0);
+
+    let half_aperture = CORRIDOR_WIDTH as i32 / 2;
+    let full_lo = wall_min + quantum + half_aperture;
+    let full_hi = wall_max - quantum - half_aperture;
+    let (lo, hi) = if full_lo <= full_hi {
+        (full_lo, full_hi)
+    } else {
+        (wall_min + quantum, wall_max - quantum)
+    };
     debug_assert!(lo <= hi);
 
     if lo >= hi {
@@ -530,7 +544,7 @@ fn l_shaped_paths(
     match (path_xy, path_yx) {
         (Some(xy), Some(yx)) => {
             // Both valid, choose randomly
-            if rng.next_u64() % 2 == 0 {
+            if rng.next_u64().is_multiple_of(2) {
                 Some(xy)
             } else {
                 Some(yx)
@@ -829,9 +843,9 @@ mod tests {
         // Leave a clear corridor
         for y in 0..20 {
             for x in 0..20 {
-                if x >= 5 && x <= 15 && y == 10 {
+                if (5..=15).contains(&x) && y == 10 {
                     // clear
-                } else if x >= 4 && x <= 16 {
+                } else if (4..=16).contains(&x) {
                     grid.set_blocked(x, y, true);
                 }
             }

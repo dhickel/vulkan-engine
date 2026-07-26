@@ -10,10 +10,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::CONSTRUCTION_QUANTUM;
+use crate::error::GeneratorError;
 use crate::intent::{
     Brush, Corridor, EmissionIntent, EntityIntent, LayoutIntent, RoomIntent, RoutedIntent,
 };
 use crate::junction;
+use crate::routing::{CORRIDOR_HEIGHT, CORRIDOR_WIDTH};
 
 /// CC0 Stone Beta role bindings from `themes/cc0_stone_beta/theme.toml`.
 const FLOOR_TEXTURE: &str = "stone_floor";
@@ -48,30 +50,36 @@ struct Opening {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct GridRect {
+struct GridRect<T> {
     x0: i32,
     x1: i32,
     y0: i32,
     y1: i32,
-    value: i32,
+    value: T,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CorridorCell {
+    floor_z: i32,
+    ceiling_bottom: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct WallSpan {
+    floor_z: i32,
+    shell_top: i32,
 }
 
 /// Build the complete worldspawn brush set and point entities.
 ///
-/// # Panics
-///
-/// Panics if any corridor's height is not exactly 80. The frozen vertical
-/// IR contract (`DECISION-20260726-02`) requires all corridors to use the
-/// approved fixed clear height.
-pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionIntent {
-    // G2: Validate corridor height invariant before any geometry work.
-    for (i, c) in routed.corridors.iter().enumerate() {
-        assert_eq!(
-            c.height, 80,
-            "corridor {i} height {} != 80 (DECISION-20260726-02)",
-            c.height,
-        );
-    }
+/// Direct public-IR callers are validated before any source geometry is
+/// constructed. In particular, a corridor must be level and exactly 64×80,
+/// which is the fixed vertical contract approved by `DECISION-20260726-02`.
+pub fn build_emission(
+    layout: &LayoutIntent,
+    routed: &RoutedIntent,
+) -> Result<EmissionIntent, GeneratorError> {
+    validate_corridor_contract(layout, routed)?;
 
     let mut brushes = Vec::new();
     let corridor_cells = build_corridor_cells(&routed.corridors);
@@ -80,9 +88,9 @@ pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionI
         brushes.extend(build_room_brushes(room, &routed.corridors, &corridor_cells));
     }
 
-    // G3: Build room_owned_cells mask (complete XY footprint including wall
-    // ring). Corridor emission omits every room-owned cell so build_split_wall
-    // is the sole owner of portal columns/lintels.
+    // Every XY cell in a room shell is room-owned. Corridor shell components
+    // are omitted there, leaving room floor/ceiling/wall pieces as the only
+    // source-solid owners at portals and endpoint turning chambers.
     let room_owned_cells = build_room_owned_cells(layout);
     brushes.extend(build_corridor_slabs(&corridor_cells, &room_owned_cells));
     brushes.extend(build_corridor_boundary_walls(
@@ -90,9 +98,7 @@ pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionI
         &room_owned_cells,
     ));
 
-    for (index, brush) in brushes.iter().enumerate() {
-        debug_assert_eq!(brush.faces.len(), 6, "brush {index} is not a box");
-    }
+    validate_no_positive_volume_overlap(&brushes)?;
 
     let mut entities = Vec::new();
     if let Some(first) = layout.rooms.first() {
@@ -110,11 +116,70 @@ pub fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionI
         ));
     }
 
-    EmissionIntent {
+    Ok(EmissionIntent {
         brushes,
         entities,
         wad: "cc0_stone_beta.wad".to_string(),
+    })
+}
+
+fn validate_corridor_contract(
+    layout: &LayoutIntent,
+    routed: &RoutedIntent,
+) -> Result<(), GeneratorError> {
+    let common_floor = layout.rooms.first().map(|room| room.position.2);
+
+    for (index, corridor) in routed.corridors.iter().enumerate() {
+        if corridor.height != CORRIDOR_HEIGHT {
+            return Err(GeneratorError::InvariantViolation(format!(
+                "corridor {index} height {} != {CORRIDOR_HEIGHT} (DECISION-20260726-02)",
+                corridor.height,
+            )));
+        }
+        if corridor.width != CORRIDOR_WIDTH {
+            return Err(GeneratorError::InvariantViolation(format!(
+                "corridor {index} width {} != frozen width {CORRIDOR_WIDTH}",
+                corridor.width,
+            )));
+        }
+        if corridor.start.2 != corridor.end.2 {
+            return Err(GeneratorError::InvariantViolation(format!(
+                "corridor {index} has unequal endpoint Z values {} and {}",
+                corridor.start.2, corridor.end.2,
+            )));
+        }
+        if let Some(floor_z) = common_floor {
+            if corridor.start.2 != floor_z {
+                return Err(GeneratorError::InvariantViolation(format!(
+                    "corridor {index} floor Z {} differs from the single-layer room floor {floor_z}",
+                    corridor.start.2,
+                )));
+            }
+        }
+
+        let q = SLAB;
+        for (label, point) in [("start", corridor.start), ("end", corridor.end)] {
+            if point.0.rem_euclid(q) != 0
+                || point.1.rem_euclid(q) != 0
+                || point.2.rem_euclid(q) != 0
+            {
+                return Err(GeneratorError::InvariantViolation(format!(
+                    "corridor {index} {label} {point:?} is not quantum-aligned",
+                )));
+            }
+        }
+
+        let same_x = corridor.start.0 == corridor.end.0;
+        let same_y = corridor.start.1 == corridor.end.1;
+        if same_x == same_y {
+            return Err(GeneratorError::InvariantViolation(format!(
+                "corridor {index} must be a non-zero axis-aligned segment: {:?} -> {:?}",
+                corridor.start, corridor.end,
+            )));
+        }
     }
+
+    Ok(())
 }
 
 fn point_entity(
@@ -161,7 +226,7 @@ fn light_origin(room: &RoomIntent) -> (i32, i32, i32) {
 fn build_room_brushes(
     room: &RoomIntent,
     corridors: &[Corridor],
-    corridor_cells: &BTreeMap<Cell, i32>,
+    corridor_cells: &BTreeMap<Cell, CorridorCell>,
 ) -> Vec<Brush> {
     let (x, y, z) = room.position;
     let dx = room.dimensions.0 as i32;
@@ -261,7 +326,7 @@ fn build_split_wall(
     room: &RoomIntent,
     wall: RoomWall,
     openings: &[Opening],
-    corridor_cells: &BTreeMap<Cell, i32>,
+    corridor_cells: &BTreeMap<Cell, CorridorCell>,
 ) -> Vec<Brush> {
     let min_x = room.position.0;
     let max_x = min_x + room.dimensions.0 as i32;
@@ -274,8 +339,11 @@ fn build_split_wall(
     // provide solid geometry; wall cells in those bands would overlap them.
     let wall_z0 = z0 + SLAB;
     let wall_z1 = z1 - SLAB;
+    // North/south walls own the four corner columns. Restricting east/west
+    // walls to the interior tangent interval makes every room-shell source
+    // box disjoint while retaining a sealed one-cell corner on every side.
     let (tangent_min, tangent_max) = match wall {
-        RoomWall::West | RoomWall::East => (min_y, max_y),
+        RoomWall::West | RoomWall::East => (min_y + SLAB, max_y - SLAB),
         RoomWall::South | RoomWall::North => (min_x, max_x),
     };
 
@@ -309,10 +377,10 @@ fn build_split_wall(
             RoomWall::South => (tangent_cell, min_y.div_euclid(SLAB)),
             RoomWall::North => (tangent_cell, max_y.div_euclid(SLAB) - 1),
         };
-        let Some(&corridor_ceiling) = corridor_cells.get(&wall_cell) else {
+        let Some(corridor_cell) = corridor_cells.get(&wall_cell) else {
             continue;
         };
-        let opening_top = corridor_ceiling.min(opening_limit);
+        let opening_top = corridor_cell.ceiling_bottom.min(opening_limit);
         for z_cell in opening_bottom.div_euclid(SLAB)..opening_top.div_euclid(SLAB) {
             solid_cells.remove(&(tangent_cell, z_cell));
         }
@@ -358,12 +426,12 @@ fn corridor_orientation(corridor: &Corridor) -> Orientation {
 }
 
 fn mark_open_rect(
-    cells: &mut BTreeMap<Cell, i32>,
+    cells: &mut BTreeMap<Cell, CorridorCell>,
     min_x: i32,
     min_y: i32,
     max_x: i32,
     max_y: i32,
-    ceiling_bottom: i32,
+    span: CorridorCell,
 ) {
     debug_assert_eq!(min_x.rem_euclid(SLAB), 0);
     debug_assert_eq!(min_y.rem_euclid(SLAB), 0);
@@ -374,21 +442,21 @@ fn mark_open_rect(
         for gx in min_x.div_euclid(SLAB)..max_x.div_euclid(SLAB) {
             cells
                 .entry((gx, gy))
-                .and_modify(|height| *height = (*height).max(ceiling_bottom))
-                .or_insert(ceiling_bottom);
+                .and_modify(|existing| debug_assert_eq!(*existing, span))
+                .or_insert(span);
         }
     }
 }
 
-fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
+fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, CorridorCell> {
     let mut cells = BTreeMap::new();
 
     for corridor in corridors {
         let half = corridor.width as i32 / 2;
-        let floor_z = corridor.start.2.min(corridor.end.2);
-        // G2: Use corridor.height (always 80 per DECISION-20260726-02) instead
-        // of the global CORRIDOR_HEIGHT constant.
-        let ceiling_bottom = floor_z + SLAB + corridor.height as i32;
+        let span = CorridorCell {
+            floor_z: corridor.start.2,
+            ceiling_bottom: corridor.start.2 + SLAB + corridor.height as i32,
+        };
         match corridor_orientation(corridor) {
             Orientation::Horizontal => mark_open_rect(
                 &mut cells,
@@ -396,7 +464,7 @@ fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
                 corridor.start.1 - half,
                 corridor.start.0.max(corridor.end.0),
                 corridor.start.1 + half,
-                ceiling_bottom,
+                span,
             ),
             Orientation::Vertical => mark_open_rect(
                 &mut cells,
@@ -404,7 +472,7 @@ fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
                 corridor.start.1.min(corridor.end.1),
                 corridor.start.0 + half,
                 corridor.start.1.max(corridor.end.1),
-                ceiling_bottom,
+                span,
             ),
         }
 
@@ -417,7 +485,7 @@ fn build_corridor_cells(corridors: &[Corridor]) -> BTreeMap<Cell, i32> {
                 endpoint.1 - half,
                 endpoint.0 + half,
                 endpoint.1 + half,
-                ceiling_bottom,
+                span,
             );
         }
     }
@@ -448,32 +516,25 @@ fn build_room_owned_cells(layout: &LayoutIntent) -> BTreeSet<Cell> {
 }
 
 fn build_corridor_slabs(
-    corridor_cells: &BTreeMap<Cell, i32>,
-    room_clear_cells: &BTreeSet<Cell>,
+    corridor_cells: &BTreeMap<Cell, CorridorCell>,
+    room_owned_cells: &BTreeSet<Cell>,
 ) -> Vec<Brush> {
-    if corridor_cells.is_empty() {
-        return Vec::new();
-    }
-    // G2: Derive floor_z from the stored ceiling_bottom per cell, using the
-    // fixed 80-unit clear height (DECISION-20260726-02). The cell map carries
-    // explicit ceiling_bottom values; we subtract slab + 80 to recover floor_z.
-    let floor_z = corridor_cells
-        .values()
-        .map(|ceiling_bottom| ceiling_bottom - SLAB - 80)
-        .min()
-        .unwrap_or(0);
-    let shell_cells: BTreeMap<Cell, i32> = corridor_cells
+    let shell_cells: BTreeMap<Cell, CorridorCell> = corridor_cells
         .iter()
-        .filter(|(cell, _)| !room_clear_cells.contains(cell))
-        .map(|(&cell, &ceiling_bottom)| (cell, ceiling_bottom))
+        .filter(|(cell, _)| !room_owned_cells.contains(cell))
+        .map(|(&cell, &span)| (cell, span))
+        .collect();
+
+    let floor_cells: BTreeMap<Cell, i32> = shell_cells
+        .iter()
+        .map(|(&cell, span)| (cell, span.floor_z))
+        .collect();
+    let ceiling_cells: BTreeMap<Cell, i32> = shell_cells
+        .iter()
+        .map(|(&cell, span)| (cell, span.ceiling_bottom))
         .collect();
 
     let mut brushes = Vec::new();
-    let floor_cells: BTreeMap<Cell, i32> = shell_cells
-        .keys()
-        .copied()
-        .map(|cell| (cell, floor_z))
-        .collect();
     for rect in merge_cells(&floor_cells) {
         push_box(
             &mut brushes,
@@ -482,7 +543,7 @@ fn build_corridor_slabs(
             FLOOR_TEXTURE,
         );
     }
-    for rect in merge_cells(&shell_cells) {
+    for rect in merge_cells(&ceiling_cells) {
         push_box(
             &mut brushes,
             (rect.x0 * SLAB, rect.y0 * SLAB, rect.value),
@@ -494,36 +555,32 @@ fn build_corridor_slabs(
 }
 
 fn build_corridor_boundary_walls(
-    corridor_cells: &BTreeMap<Cell, i32>,
-    room_clear_cells: &BTreeSet<Cell>,
+    corridor_cells: &BTreeMap<Cell, CorridorCell>,
+    room_owned_cells: &BTreeSet<Cell>,
 ) -> Vec<Brush> {
-    if corridor_cells.is_empty() {
-        return Vec::new();
-    }
-    // G2: Derive floor_z from cell ceiling_bottom using the approved 80-unit
-    // clear height (DECISION-20260726-02).
-    let floor_z = corridor_cells
-        .values()
-        .map(|ceiling_bottom| ceiling_bottom - SLAB - 80)
-        .min()
-        .unwrap_or(0);
-    let mut wall_cells: BTreeMap<Cell, i32> = BTreeMap::new();
+    let mut wall_cells: BTreeMap<Cell, WallSpan> = BTreeMap::new();
 
-    for (&cell, &ceiling_bottom) in corridor_cells {
-        let top = ceiling_bottom + SLAB;
+    for (&cell, &corridor_cell) in corridor_cells {
+        let span = WallSpan {
+            floor_z: corridor_cell.floor_z,
+            shell_top: corridor_cell.ceiling_bottom + SLAB,
+        };
         for neighbor in [
             (cell.0 - 1, cell.1),
             (cell.0 + 1, cell.1),
             (cell.0, cell.1 - 1),
             (cell.0, cell.1 + 1),
         ] {
-            if corridor_cells.contains_key(&neighbor) || room_clear_cells.contains(&neighbor) {
+            if corridor_cells.contains_key(&neighbor) || room_owned_cells.contains(&neighbor) {
                 continue;
             }
             wall_cells
                 .entry(neighbor)
-                .and_modify(|height| *height = (*height).max(top))
-                .or_insert(top);
+                .and_modify(|existing| {
+                    debug_assert_eq!(existing.floor_z, span.floor_z);
+                    existing.shell_top = existing.shell_top.max(span.shell_top);
+                })
+                .or_insert(span);
         }
     }
 
@@ -531,8 +588,8 @@ fn build_corridor_boundary_walls(
     for rect in merge_cells(&wall_cells) {
         push_box(
             &mut brushes,
-            (rect.x0 * SLAB, rect.y0 * SLAB, floor_z),
-            (rect.x1 * SLAB, rect.y1 * SLAB, rect.value),
+            (rect.x0 * SLAB, rect.y0 * SLAB, rect.value.floor_z),
+            (rect.x1 * SLAB, rect.y1 * SLAB, rect.value.shell_top),
             WALL_TEXTURE,
         );
     }
@@ -541,13 +598,13 @@ fn build_corridor_boundary_walls(
 
 // ── Grid rectangle merging ────────────────────────────────────────────────
 
-fn merge_cells(cells: &BTreeMap<Cell, i32>) -> Vec<GridRect> {
-    let mut rows: BTreeMap<i32, Vec<(i32, i32)>> = BTreeMap::new();
+fn merge_cells<T: Copy + Ord>(cells: &BTreeMap<Cell, T>) -> Vec<GridRect<T>> {
+    let mut rows: BTreeMap<i32, Vec<(i32, T)>> = BTreeMap::new();
     for (&(x, y), &value) in cells {
         rows.entry(y).or_default().push((x, value));
     }
 
-    let mut active: BTreeMap<(i32, i32, i32), GridRect> = BTreeMap::new();
+    let mut active: BTreeMap<(i32, i32, T), GridRect<T>> = BTreeMap::new();
     let mut finished = Vec::new();
     let mut previous_y = None;
 
@@ -601,6 +658,39 @@ fn push_box(brushes: &mut Vec<Brush>, min: (i32, i32, i32), max: (i32, i32, i32)
     if min.0 < max.0 && min.1 < max.1 && min.2 < max.2 {
         brushes.push(junction::make_brush(min, max, texture));
     }
+}
+
+fn brush_bounds(brush: &Brush) -> ((i32, i32, i32), (i32, i32, i32)) {
+    let mut min = (i32::MAX, i32::MAX, i32::MAX);
+    let mut max = (i32::MIN, i32::MIN, i32::MIN);
+    for face in &brush.faces {
+        for &(x, y, z) in &face.plane_points {
+            min = (min.0.min(x), min.1.min(y), min.2.min(z));
+            max = (max.0.max(x), max.1.max(y), max.2.max(z));
+        }
+    }
+    (min, max)
+}
+
+/// Reject positive-volume intersections between any two emitted source boxes.
+/// Shared boundary planes remain legal; all three axes must overlap strictly.
+fn validate_no_positive_volume_overlap(brushes: &[Brush]) -> Result<(), GeneratorError> {
+    let bounds: Vec<_> = brushes.iter().map(brush_bounds).collect();
+    for first in 0..bounds.len() {
+        for second in first + 1..bounds.len() {
+            let (a_min, a_max) = bounds[first];
+            let (b_min, b_max) = bounds[second];
+            let overlaps = a_min.0.max(b_min.0) < a_max.0.min(b_max.0)
+                && a_min.1.max(b_min.1) < a_max.1.min(b_max.1)
+                && a_min.2.max(b_min.2) < a_max.2.min(b_max.2);
+            if overlaps {
+                return Err(GeneratorError::InvariantViolation(format!(
+                    "emitted source brushes {first} and {second} have a positive-volume overlap: {a_min:?}..{a_max:?} vs {b_min:?}..{b_max:?}",
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

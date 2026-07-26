@@ -3,8 +3,13 @@
 //! correct entity/brush/face counts, and appropriate entity classnames.
 
 use bsp_generator::{
-    build_emission, generate, Corridor, DungeonConfig, LayoutIntent, RoomIntent, RoutedIntent,
+    build_emission as try_build_emission, generate, Corridor, DungeonConfig, EmissionIntent,
+    LayoutIntent, RoomIntent, RoutedIntent,
 };
+
+fn build_emission(layout: &LayoutIntent, routed: &RoutedIntent) -> EmissionIntent {
+    try_build_emission(layout, routed).expect("valid emission input")
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 

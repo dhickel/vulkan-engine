@@ -123,7 +123,7 @@ fn emit_face(out: &mut String, face: &BrushFace) {
 
     // Texture name + standard offset/rotation/scale (no explicit axis vectors)
     // Format: "name" x_off y_off rotation x_scale y_scale
-    write!(out, "\"{}\" 0 0 0 1.0 1.0\n", face.texture).unwrap();
+    writeln!(out, "\"{}\" 0 0 0 1.0 1.0", face.texture).unwrap();
 }
 
 fn emit_key_value(out: &mut String, key: &str, value: &str) {
@@ -265,7 +265,10 @@ mod tests {
         let emission = make_test_emission();
         let s = serialize(&emission);
         // Every face line should contain standard offset/rotation/scale pattern
-        assert!(s.contains("0 0 0 1.0 1.0"), "missing texture coordinate format");
+        assert!(
+            s.contains("0 0 0 1.0 1.0"),
+            "missing texture coordinate format"
+        );
         // Verify no bracket format remains
         let face_lines: Vec<&str> = s.lines().filter(|l| l.contains('[')).collect();
         assert!(face_lines.is_empty(), "no bracket format expected");

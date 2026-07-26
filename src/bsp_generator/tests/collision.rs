@@ -6,7 +6,7 @@
 
 use bsp_generator::{
     geometry::rooms_overlap, place_rooms, route_all_edges, route_edge, DungeonConfig, MapClass,
-    RoomIntent, Seed, StageRng, CORRIDOR_HEIGHT, CORRIDOR_WIDTH, CONSTRUCTION_QUANTUM,
+    RoomIntent, Seed, StageRng, CONSTRUCTION_QUANTUM, CORRIDOR_HEIGHT, CORRIDOR_WIDTH,
 };
 
 fn make_rng(seed_val: u64) -> StageRng {
@@ -68,9 +68,9 @@ fn corridor_to_room_rect(corridor: &bsp_generator::Corridor) -> RoomIntent {
 fn corridor_does_not_overlap_unintended_room() {
     // Room A (source), Room B (blocking), Room C (target)
     let rooms = vec![
-        room_at(0, 0, 0, 64, 64, 128),    // A
-        room_at(80, 32, 0, 64, 64, 128),  // B (blocking)
-        room_at(0, 160, 0, 64, 64, 128),  // C
+        room_at(0, 0, 0, 64, 64, 128),   // A
+        room_at(80, 32, 0, 64, 64, 128), // B (blocking)
+        room_at(0, 160, 0, 64, 64, 128), // C
     ];
     let cfg = valid_m1_config(8, 0);
     let mut rng = make_rng(13);
@@ -132,10 +132,10 @@ fn corridors_avoid_all_non_endpoint_rooms() {
 fn parallel_corridors_maintain_separation() {
     // Two separate room pairs whose corridors run parallel
     let rooms = vec![
-        room_at(0, 0, 0, 64, 64, 128),      // A
-        room_at(160, 0, 0, 64, 64, 128),    // B
-        room_at(0, 128, 0, 64, 64, 128),    // C
-        room_at(160, 128, 0, 64, 64, 128),  // D
+        room_at(0, 0, 0, 64, 64, 128),     // A
+        room_at(160, 0, 0, 64, 64, 128),   // B
+        room_at(0, 128, 0, 64, 64, 128),   // C
+        room_at(160, 128, 0, 64, 64, 128), // D
     ];
     let cfg = valid_m1_config(8, 0);
     let c1 = route_edge(0, 1, &rooms, &cfg, &mut make_rng(42)).unwrap();
@@ -185,7 +185,10 @@ fn parallel_corridors_keep_minimum_gap() {
         }
     }
     // With sufficient room separation, the corridors should not overlap
-    assert!(!any_overlap, "parallel corridors should maintain separation");
+    assert!(
+        !any_overlap,
+        "parallel corridors should maintain separation"
+    );
 
     // Verify minimum dimensions
     for c in c1.iter().chain(c2.iter()) {
@@ -243,11 +246,17 @@ fn corridor_width_respected_after_routing() {
         let rect = corridor_to_room_rect(c);
         if c.start.1 == c.end.1 {
             // Horizontal corridor: width is in Y dimension
-            assert_eq!(rect.dimensions.1, c.width, "horizontal corridor width mismatch");
+            assert_eq!(
+                rect.dimensions.1, c.width,
+                "horizontal corridor width mismatch"
+            );
             assert_eq!(rect.dimensions.2, c.height, "corridor height mismatch");
         } else {
             // Vertical corridor: width is in X dimension
-            assert_eq!(rect.dimensions.0, c.width, "vertical corridor width mismatch");
+            assert_eq!(
+                rect.dimensions.0, c.width,
+                "vertical corridor width mismatch"
+            );
             assert_eq!(rect.dimensions.2, c.height, "corridor height mismatch");
         }
     }
@@ -271,14 +280,8 @@ fn full_pipeline_no_collision_m1() {
     .validate()
     .unwrap();
     let rooms = place_rooms(&cfg, &mut make_placement_rng(7)).unwrap();
-    let layout =
-        bsp_generator::build_topology(rooms, &cfg, &mut make_rng(7)).unwrap();
-    let routed = route_all_edges(
-        &layout.rooms,
-        &layout.edges,
-        &cfg,
-        &mut make_rng(7),
-    );
+    let layout = bsp_generator::build_topology(rooms, &cfg, &mut make_rng(7)).unwrap();
+    let routed = route_all_edges(&layout.rooms, &layout.edges, &cfg, &mut make_rng(7));
 
     match routed {
         Ok(routed) => {
@@ -380,12 +383,7 @@ fn multiple_seeds_produce_collision_free_routing() {
         let rooms = rooms.unwrap();
         let layout =
             bsp_generator::build_topology(rooms.clone(), &cfg, &mut make_rng(seed)).unwrap();
-        let routed = route_all_edges(
-            &layout.rooms,
-            &layout.edges,
-            &cfg,
-            &mut make_rng(seed),
-        );
+        let routed = route_all_edges(&layout.rooms, &layout.edges, &cfg, &mut make_rng(seed));
 
         match routed {
             Ok(routed) => {
