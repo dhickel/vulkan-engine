@@ -8,8 +8,9 @@
 //! Tests skip gracefully when tools are absent.
 
 use bsp::{BspLoader, LoadOptions};
-use engine_pack::compiler;
+use engine_pack::{compiler, fs_tx};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 // ── Paths (relative to engine_pack crate root: tools/engine_pack/) ──────
 
@@ -218,6 +219,68 @@ fn full_pipeline_generate_compile_validate() {
     );
 
     // Cleanup
+    let _ = std::fs::remove_dir_all(&staging);
+}
+
+// ── Test: CLI publication produces an exact final closure ─────────────────
+
+#[test]
+fn compile_bsp_cli_publishes_no_staging_marker() {
+    let tool_dir = ericw_tools_dir();
+    if !tools_available(&tool_dir) {
+        eprintln!("SKIP: ericw-tools not found at {}", tool_dir.display());
+        return;
+    }
+
+    let staging = unique_tmp("cli-closure");
+    let map_path = staging.join("generated.map");
+    let out_dir = staging.join("published");
+    let profile_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bsp_authoring/ericw-q1-bsp2-generated-profile.toml")
+        .canonicalize()
+        .expect("canonical profile path");
+    let palette = palette_path()
+        .canonicalize()
+        .expect("canonical palette path");
+    let wad = wad_path().canonicalize().expect("canonical WAD path");
+    let (map_text, _) =
+        bsp_generator::generate(0, bsp_generator::DungeonConfig::nominal_m1())
+            .expect("generate must succeed");
+    std::fs::write(&map_path, map_text).expect("write map");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_engine_pack"))
+        .args([
+            "compile-bsp",
+            map_path.to_str().expect("UTF-8 map path"),
+            "--profile",
+            profile_path.to_str().expect("UTF-8 profile path"),
+            "--out",
+            out_dir.to_str().expect("UTF-8 output path"),
+            "--palette",
+            palette.to_str().expect("UTF-8 palette path"),
+            "--wad",
+            wad.to_str().expect("UTF-8 WAD path"),
+            "--tool-path",
+            tool_dir.to_str().expect("UTF-8 tool path"),
+        ])
+        .output()
+        .expect("run engine_pack compile-bsp");
+    assert!(
+        output.status.success(),
+        "compile-bsp failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !out_dir.join(fs_tx::STAGING_MARKER_NAME).exists(),
+        "staging ownership metadata must never become a published artifact"
+    );
+    let manifest_path = out_dir.join("generated.manifest.toml");
+    let manifest = std::fs::read(&manifest_path).expect("read canonical manifest");
+    fs_tx::validate_manifest_closure(&out_dir, &manifest)
+        .expect("published directory must be an exact manifest closure");
+
     let _ = std::fs::remove_dir_all(&staging);
 }
 
