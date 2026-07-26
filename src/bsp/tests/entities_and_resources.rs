@@ -383,7 +383,8 @@ fn entity_model_ref_bounds_check() {
     }
 
     // Entities with *99 model reference (invalid - only model 0 exists)
-    let entities = b"{\"classname\" \"worldspawn\"}\0{\"classname\" \"func_door\" \"model\" \"*99\"}\0";
+    let entities =
+        b"{\"classname\" \"worldspawn\"}\0{\"classname\" \"func_door\" \"model\" \"*99\"}\0";
     let e_off = data.len() as u32;
     data.extend_from_slice(entities);
     let base = 4 + 0 * 8;
@@ -464,7 +465,7 @@ fn identity_duplicate_ordinals_assigned() {
 // ── Texture extraction from miptex ──
 
 #[test]
-fn extraction_miptex_texture_resolution() {
+fn extraction_ignores_unreferenced_miptex_textures() {
     let palette: [[u8; 3]; 256] = {
         let mut p = [[0u8; 3]; 256];
         for i in 0..=255u8 {
@@ -502,13 +503,13 @@ fn extraction_miptex_texture_resolution() {
     miptex.extend_from_slice(&name);
     miptex.extend_from_slice(&16u32.to_le_bytes()); // width = 16
     miptex.extend_from_slice(&16u32.to_le_bytes()); // height = 16
-    // mip offsets: mip0=40, others=0 (no mips)
+                                                    // mip offsets: mip0=40, others=0 (no mips)
     let mip0_offset = 40u32;
     miptex.extend_from_slice(&mip0_offset.to_le_bytes());
     miptex.extend_from_slice(&0u32.to_le_bytes()); // mip1
     miptex.extend_from_slice(&0u32.to_le_bytes()); // mip2
     miptex.extend_from_slice(&0u32.to_le_bytes()); // mip3
-    // Mip 0 pixel data: 256 bytes of index 0
+                                                   // Mip 0 pixel data: 256 bytes of index 0
     miptex.extend_from_slice(&vec![0u8; 256]);
 
     let mt_sz = miptex.len() as u32;
@@ -543,29 +544,9 @@ fn extraction_miptex_texture_resolution() {
         ..Default::default()
     };
     let extracted = extract(request).unwrap();
-    // Should have extracted at least the WALL01 texture
-    let wall_tex = extracted.textures.iter().find(|t| t.identity == "WALL01");
-    assert!(wall_tex.is_some());
-    let tex = wall_tex.unwrap();
-    assert_eq!(tex.width, 16);
-    assert_eq!(tex.height, 16);
-    assert!(tex.palette_indices.len() >= 16 * 16);
-    assert!(tex.albedo.len() >= 16 * 16 * 4);
-    assert!(tex.fullbright_mask.len() >= 16 * 16);
-    assert_eq!(
-        tex.pbr_companions
-            .normal
-            .as_ref()
-            .map(|companion| companion.logical_path.as_str()),
-        Some("textures/WALL01_norm.png")
-    );
-    assert_eq!(
-        tex.pbr_companions
-            .gloss
-            .as_ref()
-            .map(|companion| companion.bytes.as_slice()),
-        Some(&[4, 5, 6][..])
-    );
+    // The slot table remains available to callers, but extraction decodes only
+    // slots referenced by renderable faces. This fixture has no faces.
+    assert!(extracted.textures.is_empty());
 }
 
 // ── Phase 03: material evidence fixture tests ─────────────────────────────
@@ -586,8 +567,7 @@ fn phase03_miptex_decode_from_compiled_fixture() {
         palette: Some(palette_data),
         ..LoadOptions::default()
     };
-    let world = BspLoader::load(&bsp_data, &options)
-        .expect("load dungeon-materials-bsp2");
+    let world = BspLoader::load(&bsp_data, &options).expect("load dungeon-materials-bsp2");
 
     let miptex_names = resources::collect_miptex_names(&world.miptex_data);
     assert!(
@@ -619,8 +599,7 @@ fn phase03_colored_light_lit_binding() {
         lit_data: Some(lit_data.clone()),
         ..LoadOptions::default()
     };
-    let world = BspLoader::load(&bsp_data, &options)
-        .expect("load with .lit");
+    let world = BspLoader::load(&bsp_data, &options).expect("load with .lit");
 
     // Fixture has _color on its light entities, compiled with -lit
     assert!(lit_data.len() > 8, ".lit must have real RGB data");
@@ -658,8 +637,8 @@ fn phase03_texture_companion_discovery_from_disk() {
 
 #[test]
 fn phase03_pbr_companion_names_safe_for_wall01() {
-    let names = resources::pbr_companion_file_names("WALL01")
-        .expect("WALL01 is a safe texture name");
+    let names =
+        resources::pbr_companion_file_names("WALL01").expect("WALL01 is a safe texture name");
     assert_eq!(names.normal, "WALL01_norm.png");
     assert_eq!(names.gloss, "WALL01_gloss.png");
 }
@@ -672,8 +651,7 @@ fn phase03_colored_light_source_fallback_to_monochrome_when_no_lit() {
         // no lit_data
         ..LoadOptions::default()
     };
-    let world = BspLoader::load(&bsp_data, &options)
-        .expect("load without .lit");
+    let world = BspLoader::load(&bsp_data, &options).expect("load without .lit");
 
     assert_eq!(
         world.colored_light_source,
@@ -697,11 +675,10 @@ fn phase03_fullbright_indices_preserved_in_decode() {
     miptex[16..20].copy_from_slice(&2u32.to_le_bytes()); // width = 2
     miptex[20..24].copy_from_slice(&2u32.to_le_bytes()); // height = 2
     miptex[24..28].copy_from_slice(&40u32.to_le_bytes()); // mip0 offset
-    // mip0 pixels: two non-fullbright (0, 100), two fullbright (224, 255)
+                                                          // mip0 pixels: two non-fullbright (0, 100), two fullbright (224, 255)
     miptex[40..44].copy_from_slice(&[0u8, 100u8, 224u8, 255u8]);
 
-    let pixels = wad::decode_miptex_pixels(&miptex, &palette, 224, 255)
-        .expect("decode miptex");
+    let pixels = wad::decode_miptex_pixels(&miptex, &palette, 224, 255).expect("decode miptex");
 
     assert_eq!(pixels.width, 2);
     assert_eq!(pixels.height, 2);
@@ -785,12 +762,24 @@ fn phase02_slot_preserving_hole_bearing_miptex_fixture() {
     // Slot 1: TEX1 embedded
     assert_eq!(slots[1].source_slot, 1);
     assert_eq!(slots[1].identity.as_deref(), Some("TEX1"));
-    assert!(matches!(slots[1].state, resources::SlotState::Embedded { width: 8, height: 8 }));
+    assert!(matches!(
+        slots[1].state,
+        resources::SlotState::Embedded {
+            width: 8,
+            height: 8
+        }
+    ));
 
     // Slot 2: TEX2 embedded
     assert_eq!(slots[2].source_slot, 2);
     assert_eq!(slots[2].identity.as_deref(), Some("TEX2"));
-    assert!(matches!(slots[2].state, resources::SlotState::Embedded { width: 16, height: 16 }));
+    assert!(matches!(
+        slots[2].state,
+        resources::SlotState::Embedded {
+            width: 16,
+            height: 16
+        }
+    ));
 
     // Slot 3: TEX3 embedded
     assert_eq!(slots[3].source_slot, 3);
@@ -884,7 +873,11 @@ fn make_bsp_with_face(miptex_lump: &[u8], texinfo_miptex: u32) -> Vec<u8> {
     make_bsp_with_face_inner(miptex_lump, texinfo_miptex, false)
 }
 
-fn make_bsp_with_face_inner(miptex_lump: &[u8], texinfo_miptex: u32, include_lightmap: bool) -> Vec<u8> {
+fn make_bsp_with_face_inner(
+    miptex_lump: &[u8],
+    texinfo_miptex: u32,
+    include_lightmap: bool,
+) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(&29u32.to_le_bytes());
 
@@ -1012,20 +1005,20 @@ fn make_bsp_with_face_inner(miptex_lump: &[u8], texinfo_miptex: u32, include_lig
     // Write lump table
     let lumps: [(u32, u32); 15] = [
         (e_off_final, e_sz_final), // 0: entities
-        (p_off, p_sz),              // 1: planes
-        (mt_off, mt_sz),            // 2: miptex
-        (v_off, v_sz),              // 3: vertices
-        (0, 0),                     // 4: visinfo
-        (0, 0),                     // 5: nodes
-        (ti_off, ti_sz),            // 6: texinfo
-        (f_off, f_sz),              // 7: faces
-        (lm_off, lm_sz),            // 8: lightmaps
-        (0, 0),                     // 9: clipnodes
-        (0, 0),                     // 10: leaves
-        (0, 0),                     // 11: markfaces
-        (ed_off, ed_sz),            // 12: edges
-        (se_off, se_sz),            // 13: surfedges
-        (mo_off, mo_sz),            // 14: models
+        (p_off, p_sz),             // 1: planes
+        (mt_off, mt_sz),           // 2: miptex
+        (v_off, v_sz),             // 3: vertices
+        (0, 0),                    // 4: visinfo
+        (0, 0),                    // 5: nodes
+        (ti_off, ti_sz),           // 6: texinfo
+        (f_off, f_sz),             // 7: faces
+        (lm_off, lm_sz),           // 8: lightmaps
+        (0, 0),                    // 9: clipnodes
+        (0, 0),                    // 10: leaves
+        (0, 0),                    // 11: markfaces
+        (ed_off, ed_sz),           // 12: edges
+        (se_off, se_sz),           // 13: surfedges
+        (mo_off, mo_sz),           // 14: models
     ];
     for (i, &(off, sz)) in lumps.iter().enumerate() {
         let base = 4 + i * 8;
@@ -1056,7 +1049,7 @@ fn phase02_strict_rejects_visible_face_with_hole_miptex() {
 
     let palette_arr = resources::decode_palette(&palette);
 
-    // Non-strict: should succeed (hole faces get u32::MAX material)
+    // Non-strict: a recoverable hole gets one concrete diagnostic texture.
     let request = BspExtractionRequest {
         world: world.clone(),
         palette: Some(palette_arr),
@@ -1066,10 +1059,15 @@ fn phase02_strict_rejects_visible_face_with_hole_miptex() {
     let result = extract(request);
     assert!(result.is_ok(), "non-strict should succeed");
     let extracted = result.unwrap();
-    // In non-strict mode, the face gets u32::MAX material_index (unresolved)
     let material = &extracted.face_materials[0];
-    assert_eq!(material.material_index, u32::MAX, "hole slot → u32::MAX in non-strict");
-    assert_eq!(material.texture_identity, "", "hole slot has empty identity");
+    let texture = &extracted.textures[material.material_index as usize];
+    assert_eq!(texture.source, resources::TextureSource::FallbackDiagnostic);
+    assert_eq!(texture.width, 2);
+    assert_eq!(texture.height, 2);
+    assert!(extracted
+        .diagnostics
+        .iter()
+        .any(|report| report.code == DiagnosticCode::FallbackDiagnosticTexture));
 
     // Strict: should fail because visible face references a hole
     let request = BspExtractionRequest {
@@ -1141,10 +1139,7 @@ fn phase02_face_to_texture_slot_mapping_with_hole() {
         p
     };
 
-    let miptex = make_miptex_lump(&[
-        (-1, None, None),
-        (0, Some("WALL"), Some((4, 4))),
-    ]);
+    let miptex = make_miptex_lump(&[(-1, None, None), (0, Some("WALL"), Some((4, 4)))]);
 
     // Face references slot 1 (WALL) - NOT slot 0 (hole)
     let data = make_bsp_with_face(&miptex, 1);
@@ -1172,9 +1167,9 @@ fn phase02_face_to_texture_slot_mapping_with_hole() {
 
 // ── Phase 02: WAD case handling ────────────────────────────────────────────
 
-fn make_wad_with_entries(entries: &[(&str, &[u8])]) -> wad::WadArchive {
+fn make_wad_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut data = vec![0u8; 12];
-    let mut dir = Vec::new();
+    let mut directory = Vec::new();
     let num_entries = entries.len() as u32;
 
     for (name, payload) in entries {
@@ -1182,27 +1177,29 @@ fn make_wad_with_entries(entries: &[(&str, &[u8])]) -> wad::WadArchive {
         data.extend_from_slice(payload);
 
         let mut name_bytes = [0u8; 16];
-        let name_ascii = name.as_bytes();
-        let copy_len = name_ascii.len().min(16);
-        name_bytes[..copy_len].copy_from_slice(&name_ascii[..copy_len]);
+        let name_bytes_source = name.as_bytes();
+        let copy_len = name_bytes_source.len().min(16);
+        name_bytes[..copy_len].copy_from_slice(&name_bytes_source[..copy_len]);
 
-        dir.extend_from_slice(&offset.to_le_bytes());
-        dir.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        dir.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        dir.push(0x44);
-        dir.push(0);
-        dir.extend_from_slice(&[0u8; 2]);
-        dir.extend_from_slice(&name_bytes);
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        directory.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        directory.push(0x44);
+        directory.push(0);
+        directory.extend_from_slice(&[0u8; 2]);
+        directory.extend_from_slice(&name_bytes);
     }
 
-    let dir_offset = data.len() as u32;
-    data.extend_from_slice(&dir);
-
+    let directory_offset = data.len() as u32;
+    data.extend_from_slice(&directory);
     data[0..4].copy_from_slice(b"WAD2");
     data[4..8].copy_from_slice(&num_entries.to_le_bytes());
-    data[8..12].copy_from_slice(&dir_offset.to_le_bytes());
+    data[8..12].copy_from_slice(&directory_offset.to_le_bytes());
+    data
+}
 
-    wad::parse_wad(data).unwrap()
+fn make_wad_with_entries(entries: &[(&str, &[u8])]) -> wad::WadArchive {
+    wad::parse_wad(make_wad_bytes(entries)).unwrap()
 }
 
 fn make_minimal_miptex_entry(name: &str, w: u32, h: u32) -> Vec<u8> {
@@ -1231,9 +1228,8 @@ fn phase02_wad_exact_match_wins() {
 
 #[test]
 fn phase02_wad_case_insensitive_unique_match() {
-    let archive = make_wad_with_entries(&[
-        ("TEXTURE", &make_minimal_miptex_entry("TEXTURE", 4, 4)),
-    ]);
+    let archive =
+        make_wad_with_entries(&[("TEXTURE", &make_minimal_miptex_entry("TEXTURE", 4, 4))]);
 
     let result = wad::match_wad_entry(&archive, "test.wad", "texture");
     assert_eq!(result.kind, wad::WadMatchKind::UniqueCaseInsensitive);
@@ -1256,11 +1252,323 @@ fn phase02_wad_ambiguous_case_collision() {
 
 #[test]
 fn phase02_wad_missing_entry() {
-    let archive = make_wad_with_entries(&[
-        ("OTHER", &make_minimal_miptex_entry("OTHER", 4, 4)),
-    ]);
+    let archive = make_wad_with_entries(&[("OTHER", &make_minimal_miptex_entry("OTHER", 4, 4))]);
 
     let result = wad::match_wad_entry(&archive, "test.wad", "MISSING");
     assert_eq!(result.kind, wad::WadMatchKind::Missing);
     assert!(result.entry.is_none());
+}
+
+fn phase02_palette() -> resources::Palette {
+    let mut palette = [[0u8; 3]; 256];
+    for index in 0..=255u8 {
+        palette[index as usize] = [index, index, index];
+    }
+    palette
+}
+
+fn make_external_miptex_lump(name: &str) -> Vec<u8> {
+    let mut lump = Vec::new();
+    lump.extend_from_slice(&1i32.to_le_bytes());
+    lump.extend_from_slice(&8i32.to_le_bytes());
+    let mut header = [0u8; 40];
+    let name_bytes = name.as_bytes();
+    header[..name_bytes.len().min(16)].copy_from_slice(&name_bytes[..name_bytes.len().min(16)]);
+    // A zero mip-0 offset declares an external WAD-resolvable texture.
+    lump.extend_from_slice(&header);
+    lump
+}
+
+fn make_phase02_face_world(miptex_data: Vec<u8>, source_slots: &[u32]) -> BspWorld {
+    let mut world = BspWorld::empty();
+    world.planes = vec![lumps::Plane {
+        normal: glam::Vec3::Z,
+        dist: 0.0,
+        plane_type: 0,
+    }];
+    world.vertices = vec![
+        glam::Vec3::ZERO,
+        glam::Vec3::new(64.0, 0.0, 0.0),
+        glam::Vec3::new(0.0, 64.0, 0.0),
+    ];
+    world.edges = vec![
+        lumps::Edge { v: [0, 1] },
+        lumps::Edge { v: [1, 2] },
+        lumps::Edge { v: [2, 0] },
+    ];
+    world.surfedges = vec![0, 1, 2];
+    world.texinfos = source_slots
+        .iter()
+        .map(|&source_slot| lumps::Texinfo {
+            vec_s: glam::Vec3::new(0.03125, 0.0, 0.0),
+            dist_s: 0.0,
+            vec_t: glam::Vec3::new(0.0, 0.03125, 0.0),
+            dist_t: 0.0,
+            miptex: source_slot,
+            flags: 0,
+        })
+        .collect();
+    world.faces = source_slots
+        .iter()
+        .enumerate()
+        .map(|(face_index, _)| lumps::Face {
+            plane_id: 0,
+            side: 0,
+            ledge_id: 0,
+            ledge_num: 3,
+            texinfo_id: face_index as u32,
+            styles: [0, 255, 255, 255],
+            lightofs: (face_index * 4) as i32,
+        })
+        .collect();
+    world.lightmap_data = vec![128; source_slots.len() * 4];
+    world.miptex_data = miptex_data;
+    world.palette = Some(phase02_palette());
+    world.source_identity = "phase02-slot-fixture".to_string();
+    world
+}
+
+#[test]
+fn phase02_hole_slots_preserve_face_texture_material_and_batch_trace() {
+    // Slots 0 and 4 are holes. Faces intentionally use source slots 1, 2,
+    // and 3 so compact-name indexing would incorrectly shift TEX2/TEX3.
+    let miptex = make_miptex_lump(&[
+        (-1, None, None),
+        (0, Some("TEX1"), Some((4, 4))),
+        (0, Some("TEX2"), Some((8, 8))),
+        (0, Some("TEX3"), Some((16, 16))),
+        (-1, None, None),
+    ]);
+    assert_eq!(
+        resources::collect_miptex_names(&miptex),
+        vec!["TEX1", "TEX2", "TEX3"],
+        "legacy callers retain the compact name projection"
+    );
+    let world = make_phase02_face_world(miptex, &[1, 2, 3]);
+    let (extracted, trace) = extract::extract_with_mapping_trace(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        strict: true,
+        ..Default::default()
+    })
+    .expect("strict extraction of valid hole-bearing slots");
+
+    assert_eq!(trace.len(), 3);
+    for (face_index, expected_identity) in ["TEX1", "TEX2", "TEX3"].into_iter().enumerate() {
+        let mapping = &trace[face_index];
+        assert_eq!(mapping.face_index, face_index as u32);
+        assert_eq!(mapping.source_slot, Some((face_index + 1) as u32));
+        assert_eq!(mapping.slot_identity.as_deref(), Some(expected_identity));
+        assert!(matches!(
+            mapping.slot_state,
+            Some(resources::SlotState::Embedded { .. })
+        ));
+        assert!(mapping.strict);
+        assert!(mapping.lightmap_required);
+        let texture_index = mapping
+            .texture_index
+            .expect("renderable slot maps to a texture");
+        assert_eq!(
+            extracted.textures[texture_index as usize].identity, expected_identity,
+            "face {face_index} must keep its original source-slot identity"
+        );
+        assert_eq!(mapping.material_index, Some(texture_index));
+        assert!(mapping.batch_index.is_some());
+    }
+
+    let texture_indices: std::collections::BTreeSet<u32> = trace
+        .iter()
+        .map(|mapping| mapping.texture_index.expect("mapped texture"))
+        .collect();
+    assert_eq!(
+        texture_indices.len(),
+        3,
+        "distinct source slots retain distinct compact textures"
+    );
+}
+
+#[test]
+fn phase02_duplicate_names_keep_distinct_source_slot_payloads() {
+    let miptex = make_miptex_lump(&[
+        (0, Some("DUP"), Some((4, 4))),
+        (0, Some("DUP"), Some((8, 8))),
+    ]);
+    let world = make_phase02_face_world(miptex, &[0, 1]);
+    let (extracted, trace) = extract::extract_with_mapping_trace(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        strict: true,
+        ..Default::default()
+    })
+    .expect("duplicate source identities remain independently resolved");
+
+    let first = trace[0].texture_index.expect("first texture");
+    let second = trace[1].texture_index.expect("second texture");
+    assert_ne!(
+        first, second,
+        "name equality must not deduplicate source slots"
+    );
+    assert_eq!(extracted.textures[first as usize].width, 4);
+    assert_eq!(extracted.textures[second as usize].width, 8);
+}
+
+#[test]
+fn phase02_wad_exact_match_beats_case_insensitive_candidates_across_archives() {
+    let insensitive_payload = make_minimal_miptex_entry("Texture", 4, 4);
+    let exact_payload = make_minimal_miptex_entry("texture", 8, 8);
+    let world = make_phase02_face_world(make_external_miptex_lump("texture"), &[0]);
+    let extracted = extract(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        wad_archives: vec![
+            (
+                "insensitive.wad".to_string(),
+                make_wad_bytes(&[("Texture", &insensitive_payload)]),
+            ),
+            (
+                "exact.wad".to_string(),
+                make_wad_bytes(&[("texture", &exact_payload)]),
+            ),
+        ],
+        strict: true,
+        ..Default::default()
+    })
+    .expect("later exact WAD match must beat an earlier case-folded candidate");
+
+    let texture = &extracted.textures[extracted.face_materials[0].material_index as usize];
+    assert_eq!(texture.width, 8);
+    assert!(matches!(
+        &texture.source,
+        resources::TextureSource::WadLookup { wad_name, texture_name }
+            if wad_name == "exact.wad" && texture_name == "texture"
+    ));
+}
+
+#[test]
+fn phase02_wad_unique_case_insensitive_match_resolves_with_actual_entry_case() {
+    let payload = make_minimal_miptex_entry("TEXTURE", 4, 4);
+    let world = make_phase02_face_world(make_external_miptex_lump("texture"), &[0]);
+    let extracted = extract(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        wad_archives: vec![(
+            "unique.wad".to_string(),
+            make_wad_bytes(&[("TEXTURE", &payload)]),
+        )],
+        strict: true,
+        ..Default::default()
+    })
+    .expect("one case-insensitive WAD candidate is deterministic");
+
+    let texture = &extracted.textures[extracted.face_materials[0].material_index as usize];
+    assert!(matches!(
+        &texture.source,
+        resources::TextureSource::WadLookup { wad_name, texture_name }
+            if wad_name == "unique.wad" && texture_name == "TEXTURE"
+    ));
+}
+
+#[test]
+fn phase02_wad_case_folded_candidates_across_archives_are_ambiguous() {
+    let upper = make_minimal_miptex_entry("TEXTURE", 4, 4);
+    let title = make_minimal_miptex_entry("Texture", 8, 8);
+    let world = make_phase02_face_world(make_external_miptex_lump("texture"), &[0]);
+    let wad_archives = vec![
+        (
+            "upper.wad".to_string(),
+            make_wad_bytes(&[("TEXTURE", &upper)]),
+        ),
+        (
+            "title.wad".to_string(),
+            make_wad_bytes(&[("Texture", &title)]),
+        ),
+    ];
+
+    let error = extract(BspExtractionRequest {
+        world: world.clone(),
+        palette: Some(phase02_palette()),
+        wad_archives: wad_archives.clone(),
+        strict: true,
+        ..Default::default()
+    })
+    .expect_err("multiple case-folded candidates must not be selected");
+    assert_eq!(error.code, DiagnosticCode::MissingRequiredWad);
+    assert_eq!(error.severity, Severity::Error);
+
+    let (extracted, trace) = extract::extract_with_mapping_trace(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        wad_archives,
+        strict: false,
+        ..Default::default()
+    })
+    .expect("development mode uses an explicit diagnostic fallback");
+    let mapping = &trace[0];
+    let texture_index = mapping.texture_index.expect("fallback texture index");
+    assert_eq!(mapping.material_index, Some(texture_index));
+    assert!(mapping.batch_index.is_some());
+    assert_eq!(
+        mapping.texture_source,
+        Some(resources::TextureSource::FallbackDiagnostic)
+    );
+    assert_eq!(
+        extracted.textures[texture_index as usize].source,
+        resources::TextureSource::FallbackDiagnostic
+    );
+}
+
+#[test]
+fn phase02_development_missing_external_texture_uses_palette_independent_fallback() {
+    let mut world = make_phase02_face_world(make_external_miptex_lump("MISSING"), &[0]);
+    world.palette = None;
+    let (extracted, trace) = extract::extract_with_mapping_trace(BspExtractionRequest {
+        world,
+        palette: None,
+        strict: false,
+        ..Default::default()
+    })
+    .expect("missing external texture falls back without decoding palette data");
+
+    let texture_index = trace[0].texture_index.expect("diagnostic texture index");
+    assert_eq!(
+        extracted.textures[texture_index as usize].source,
+        resources::TextureSource::FallbackDiagnostic
+    );
+    assert!(extracted
+        .diagnostics
+        .iter()
+        .any(|report| report.code == DiagnosticCode::FallbackDiagnosticTexture));
+}
+
+#[test]
+fn phase02_rejects_out_of_range_renderable_source_slot() {
+    let miptex = make_miptex_lump(&[(0, Some("ONLY"), Some((4, 4)))]);
+    let world = make_phase02_face_world(miptex, &[1]);
+
+    let error = extract(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        strict: true,
+        ..Default::default()
+    })
+    .expect_err("renderable texinfo.miptex must index the source slot table");
+    assert_eq!(error.code, DiagnosticCode::StructuralCorruptIndex);
+    assert_eq!(error.severity, Severity::Error);
+}
+
+#[test]
+fn phase02_referenced_malformed_embedded_entry_is_not_a_wad_fallback() {
+    let mut miptex = make_miptex_lump(&[(0, Some("BROKEN"), Some((4, 4)))]);
+    miptex.pop(); // Header declares 16 mip-0 bytes but only 15 remain.
+    let world = make_phase02_face_world(miptex, &[0]);
+
+    let error = extract(BspExtractionRequest {
+        world,
+        palette: Some(phase02_palette()),
+        strict: false,
+        ..Default::default()
+    })
+    .expect_err("malformed referenced embedded data is structural corruption");
+    assert_eq!(error.code, DiagnosticCode::MiptexCorrupt);
+    assert_eq!(error.severity, Severity::Error);
 }

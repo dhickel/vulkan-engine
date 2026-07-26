@@ -348,7 +348,10 @@ pub enum TextureSource {
     /// Embedded miptex in the BSP.
     EmbeddedMiptex { index: u32 },
     /// WAD archive lookup.
-    WadLookup { wad_name: String, texture_name: String },
+    WadLookup {
+        wad_name: String,
+        texture_name: String,
+    },
     /// Diagnostic fallback (checkerboard).
     FallbackDiagnostic,
 }
@@ -371,22 +374,30 @@ pub fn resolve_extracted_texture(
         let actual_idx = find_miptex_by_name(miptex_data, tex_name);
         if let Some(idx) = actual_idx {
             if let Some(data) = crate::wad::read_embedded_miptex_entry(miptex_data, idx) {
-                match crate::wad::decode_miptex_pixels(data, palette, fullbright_start, fullbright_end) {
+                match crate::wad::decode_miptex_pixels(
+                    data,
+                    palette,
+                    fullbright_start,
+                    fullbright_end,
+                ) {
                     Ok(mut pixels) => {
                         apply_alpha_mask_convention(tex_name, &mut pixels);
-                        return (ExtractedTexture {
-                            identity: tex_name.to_string(),
-                            palette_indices: pixels.palette_indices,
-                            albedo: pixels.albedo,
-                            fullbright_mask: pixels.fullbright_mask,
-                            width: pixels.width,
-                            height: pixels.height,
-                            source: TextureSource::EmbeddedMiptex { index: idx },
-                            is_animated_base: false,
-                            animation_frames: Vec::new(),
-                            animation_dimensions_uniform: false,
-                            pbr_companions: PbrTextureCompanions::default(),
-                        }, reports);
+                        return (
+                            ExtractedTexture {
+                                identity: tex_name.to_string(),
+                                palette_indices: pixels.palette_indices,
+                                albedo: pixels.albedo,
+                                fullbright_mask: pixels.fullbright_mask,
+                                width: pixels.width,
+                                height: pixels.height,
+                                source: TextureSource::EmbeddedMiptex { index: idx },
+                                is_animated_base: false,
+                                animation_frames: Vec::new(),
+                                animation_dimensions_uniform: false,
+                                pbr_companions: PbrTextureCompanions::default(),
+                            },
+                            reports,
+                        );
                     }
                     Err(e) => {
                         reports.push(e);
@@ -399,25 +410,33 @@ pub fn resolve_extracted_texture(
     // 2. Try WAD lookup
     for (wad_name, archive) in wad_archives {
         if let Some(entry_data) = crate::wad::read_wad_lump(archive, tex_name) {
-            match crate::wad::decode_miptex_pixels(entry_data, palette, fullbright_start, fullbright_end) {
+            match crate::wad::decode_miptex_pixels(
+                entry_data,
+                palette,
+                fullbright_start,
+                fullbright_end,
+            ) {
                 Ok(mut pixels) => {
                     apply_alpha_mask_convention(tex_name, &mut pixels);
-                    return (ExtractedTexture {
-                        identity: tex_name.to_string(),
-                        palette_indices: pixels.palette_indices,
-                        albedo: pixels.albedo,
-                        fullbright_mask: pixels.fullbright_mask,
-                        width: pixels.width,
-                        height: pixels.height,
-                        source: TextureSource::WadLookup {
-                            wad_name: wad_name.clone(),
-                            texture_name: tex_name.to_string(),
+                    return (
+                        ExtractedTexture {
+                            identity: tex_name.to_string(),
+                            palette_indices: pixels.palette_indices,
+                            albedo: pixels.albedo,
+                            fullbright_mask: pixels.fullbright_mask,
+                            width: pixels.width,
+                            height: pixels.height,
+                            source: TextureSource::WadLookup {
+                                wad_name: wad_name.clone(),
+                                texture_name: tex_name.to_string(),
+                            },
+                            is_animated_base: false,
+                            animation_frames: Vec::new(),
+                            animation_dimensions_uniform: false,
+                            pbr_companions: PbrTextureCompanions::default(),
                         },
-                        is_animated_base: false,
-                        animation_frames: Vec::new(),
-                        animation_dimensions_uniform: false,
-                        pbr_companions: PbrTextureCompanions::default(),
-                    }, reports);
+                        reports,
+                    );
                 }
                 Err(e) => {
                     reports.push(e);
@@ -435,17 +454,26 @@ pub fn resolve_extracted_texture(
     reports.push(BspReport::new(
         code,
         strict,
-        format!("texture '{}' not found; using diagnostic fallback", tex_name),
+        format!(
+            "texture '{}' not found; using diagnostic fallback",
+            tex_name
+        ),
     ));
 
-    (ExtractedTexture {
-        identity: tex_name.to_string(),
-        source: TextureSource::FallbackDiagnostic,
-        ..Default::default()
-    }, reports)
+    (
+        ExtractedTexture {
+            identity: tex_name.to_string(),
+            source: TextureSource::FallbackDiagnostic,
+            ..Default::default()
+        },
+        reports,
+    )
 }
 
-pub(crate) fn apply_alpha_mask_convention(texture_name: &str, pixels: &mut crate::wad::MiptexPixels) {
+pub(crate) fn apply_alpha_mask_convention(
+    texture_name: &str,
+    pixels: &mut crate::wad::MiptexPixels,
+) {
     if !texture_name.starts_with('{') {
         return;
     }
@@ -463,7 +491,10 @@ fn find_miptex_by_name(miptex_data: &[u8], name: &str) -> Option<u32> {
         return None;
     }
     let count = i32::from_le_bytes([
-        miptex_data[0], miptex_data[1], miptex_data[2], miptex_data[3],
+        miptex_data[0],
+        miptex_data[1],
+        miptex_data[2],
+        miptex_data[3],
     ]);
     if count <= 0 {
         return None;
@@ -510,7 +541,10 @@ impl SlotState {
 
     /// Whether this slot is a structural error (not a valid hole).
     pub fn is_corrupt(&self) -> bool {
-        matches!(self, SlotState::InvalidOffset | SlotState::TruncatedEntry | SlotState::MalformedName)
+        matches!(
+            self,
+            SlotState::InvalidOffset | SlotState::TruncatedEntry | SlotState::MalformedName
+        )
     }
 }
 
@@ -526,18 +560,37 @@ pub struct MiptexSlot {
 }
 
 /// Trace record linking a source face to its resolved resources.
-#[derive(Debug, Clone)]
+///
+/// This is a diagnostic projection of the authoritative source-slot mapping;
+/// none of these fields is used to select a texture during extraction.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaceResourceMapping {
+    /// Identity of the extracted BSP artifact.
+    pub artifact_identity: String,
     /// Face index in the BSP.
     pub face_index: u32,
-    /// Source miptex slot from texinfo.miptex.
+    /// Texinfo index referenced by the face.
+    pub texinfo_index: Option<u32>,
+    /// Source miptex slot from `texinfo.miptex`.
     pub source_slot: Option<u32>,
-    /// Compact texture index after slot→texture resolution.
+    /// State of the referenced source slot.
+    pub slot_state: Option<SlotState>,
+    /// Exact source-slot identity, if the slot has one.
+    pub slot_identity: Option<String>,
+    /// Compact texture index after source-slot resolution.
     pub texture_index: Option<u32>,
+    /// Source provenance of the compact texture.
+    pub texture_source: Option<TextureSource>,
     /// Material index (stable within extraction).
     pub material_index: Option<u32>,
-    /// Batch index in render_batches.
+    /// Batch index in `render_batches`.
     pub batch_index: Option<u32>,
+    /// Render classification of the face.
+    pub surface_class: crate::materials::SurfaceClass,
+    /// Whether this face must have a lightmap mapping.
+    pub lightmap_required: bool,
+    /// Extraction policy used to produce this trace.
+    pub strict: bool,
 }
 
 /// Parse the miptex lump into slot-preserving records.
@@ -549,68 +602,84 @@ pub fn parse_miptex_slots(miptex_data: &[u8]) -> Vec<MiptexSlot> {
     if miptex_data.len() < 4 {
         return Vec::new();
     }
-    let count = i32::from_le_bytes([
-        miptex_data[0], miptex_data[1], miptex_data[2], miptex_data[3],
+    let declared_count = i32::from_le_bytes([
+        miptex_data[0],
+        miptex_data[1],
+        miptex_data[2],
+        miptex_data[3],
     ]);
-    if count <= 0 || count as u32 > crate::limits::MAX_TEXTURE_COUNT {
+    if declared_count <= 0 || declared_count as u32 > crate::limits::MAX_TEXTURE_COUNT {
         return Vec::new();
     }
-    let count = count as usize;
+    let count = declared_count as usize;
 
-    // Offset table: count × i32 LE after the 4-byte count header
-    let off_table_size = count.checked_mul(4).unwrap_or(0);
-    let off_table_end = 4usize.checked_add(off_table_size).unwrap_or(miptex_data.len());
-    if off_table_end > miptex_data.len() {
+    // Validate count-table arithmetic before allocating or indexing. A legal
+    // declared count still owns every source slot when the table itself is
+    // truncated, so preserve all of them as corrupt records.
+    let Some(table_size) = count.checked_mul(4) else {
         return Vec::new();
+    };
+    let Some(table_end) = 4usize.checked_add(table_size) else {
+        return Vec::new();
+    };
+    if table_end > miptex_data.len() {
+        return (0..count)
+            .map(|source_slot| MiptexSlot {
+                source_slot: source_slot as u32,
+                identity: None,
+                state: SlotState::TruncatedEntry,
+            })
+            .collect();
     }
 
     let mut slots = Vec::with_capacity(count);
-    for i in 0..count {
-        let base = 4 + i * 4;
+    for source_slot in 0..count {
+        let base = 4 + source_slot * 4;
         let entry_offset = i32::from_le_bytes([
             miptex_data[base],
             miptex_data[base + 1],
             miptex_data[base + 2],
             miptex_data[base + 3],
         ]);
+        let slot_index = source_slot as u32;
 
         if entry_offset == -1 {
             slots.push(MiptexSlot {
-                source_slot: i as u32,
+                source_slot: slot_index,
                 identity: None,
                 state: SlotState::Hole,
             });
             continue;
         }
-
         if entry_offset < 0 {
             slots.push(MiptexSlot {
-                source_slot: i as u32,
+                source_slot: slot_index,
                 identity: None,
                 state: SlotState::InvalidOffset,
             });
             continue;
         }
 
-        let off = entry_offset as usize;
-        // Need at least 40 bytes for miptex header (name[16] + w/h + 4 mip offsets)
-        if off + 40 > miptex_data.len() {
+        let offset = entry_offset as usize;
+        let header_end = offset.checked_add(40);
+        if offset < table_end || header_end.is_none_or(|end| end > miptex_data.len()) {
             slots.push(MiptexSlot {
-                source_slot: i as u32,
+                source_slot: slot_index,
                 identity: None,
                 state: SlotState::TruncatedEntry,
             });
             continue;
         }
 
-        // Parse name
-        let name_bytes = &miptex_data[off..off + 16];
-        let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(16);
+        let name_bytes = &miptex_data[offset..offset + 16];
+        let name_len = name_bytes.iter().position(|&byte| byte == 0).unwrap_or(16);
         let identity = match std::str::from_utf8(&name_bytes[..name_len]) {
-            Ok(s) if !s.is_empty() && crate::wad::is_safe_path_component(s) => Some(s.to_string()),
+            Ok(name) if !name.is_empty() && crate::wad::is_safe_path_component(name) => {
+                name.to_string()
+            }
             _ => {
                 slots.push(MiptexSlot {
-                    source_slot: i as u32,
+                    source_slot: slot_index,
                     identity: None,
                     state: SlotState::MalformedName,
                 });
@@ -618,52 +687,59 @@ pub fn parse_miptex_slots(miptex_data: &[u8]) -> Vec<MiptexSlot> {
             }
         };
 
-        // Check for embedded mip-0 payload
         let width = u32::from_le_bytes([
-            miptex_data[off + 16],
-            miptex_data[off + 17],
-            miptex_data[off + 18],
-            miptex_data[off + 19],
+            miptex_data[offset + 16],
+            miptex_data[offset + 17],
+            miptex_data[offset + 18],
+            miptex_data[offset + 19],
         ]);
         let height = u32::from_le_bytes([
-            miptex_data[off + 20],
-            miptex_data[off + 21],
-            miptex_data[off + 22],
-            miptex_data[off + 23],
+            miptex_data[offset + 20],
+            miptex_data[offset + 21],
+            miptex_data[offset + 22],
+            miptex_data[offset + 23],
         ]);
         let mip0_offset = u32::from_le_bytes([
-            miptex_data[off + 24],
-            miptex_data[off + 25],
-            miptex_data[off + 26],
-            miptex_data[off + 27],
+            miptex_data[offset + 24],
+            miptex_data[offset + 25],
+            miptex_data[offset + 26],
+            miptex_data[offset + 27],
         ]);
 
-        let has_embedded = width > 0
-            && height > 0
-            && mip0_offset >= 40
-            && (off + mip0_offset as usize) < miptex_data.len()
-            && (width as u64).checked_mul(height as u64).is_some();
-
-        if has_embedded {
-            // Verify mip-0 data fits
-            let pixel_count = (width as usize).checked_mul(height as usize).unwrap_or(0);
-            let mip0_start = off.checked_add(mip0_offset as usize).unwrap_or(usize::MAX);
-            let mip0_end = mip0_start.checked_add(pixel_count).unwrap_or(usize::MAX);
-            if mip0_end <= miptex_data.len() {
-                slots.push(MiptexSlot {
-                    source_slot: i as u32,
-                    identity,
-                    state: SlotState::Embedded { width, height },
-                });
-                continue;
-            }
+        // A zero mip-0 offset is the explicit external-texture form. Any
+        // nonzero declaration must carry a complete, valid embedded mip-0;
+        // otherwise it is corruption and must not fall through to a WAD.
+        if mip0_offset == 0 {
+            slots.push(MiptexSlot {
+                source_slot: slot_index,
+                identity: Some(identity),
+                state: SlotState::NamedExternal,
+            });
+            continue;
         }
 
-        // Named but no usable embedded payload
+        let pixel_count = u64::from(width).checked_mul(u64::from(height));
+        let mip0_start = offset.checked_add(mip0_offset as usize);
+        let mip0_end = pixel_count
+            .and_then(|count| usize::try_from(count).ok())
+            .and_then(|count| mip0_start.and_then(|start| start.checked_add(count)));
+        if mip0_offset < 40
+            || width == 0
+            || height == 0
+            || mip0_end.is_none_or(|end| end > miptex_data.len())
+        {
+            slots.push(MiptexSlot {
+                source_slot: slot_index,
+                identity: Some(identity),
+                state: SlotState::TruncatedEntry,
+            });
+            continue;
+        }
+
         slots.push(MiptexSlot {
-            source_slot: i as u32,
-            identity,
-            state: SlotState::NamedExternal,
+            source_slot: slot_index,
+            identity: Some(identity),
+            state: SlotState::Embedded { width, height },
         });
     }
 
@@ -713,8 +789,14 @@ mod tests {
             TextureCompanion::new("textures/unrelated_norm.png", vec![3]),
         ];
         let found = discover_pbr_texture_companions("brick1_2", &available);
-        assert_eq!(found.normal.as_ref().map(|map| map.bytes.as_slice()), Some(&[1][..]));
-        assert_eq!(found.gloss.as_ref().map(|map| map.bytes.as_slice()), Some(&[2][..]));
+        assert_eq!(
+            found.normal.as_ref().map(|map| map.bytes.as_slice()),
+            Some(&[1][..])
+        );
+        assert_eq!(
+            found.gloss.as_ref().map(|map| map.bytes.as_slice()),
+            Some(&[2][..])
+        );
     }
 
     #[test]
@@ -755,6 +837,19 @@ mod tests {
     fn validate_texture_dim_too_large() {
         let r = validate_texture_dimension(8192, "test");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn truncated_offset_table_preserves_declared_slots() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&2i32.to_le_bytes());
+        data.extend_from_slice(&(-1i32).to_le_bytes()); // second offset is absent
+
+        let slots = parse_miptex_slots(&data);
+        assert_eq!(slots.len(), 2);
+        assert!(slots
+            .iter()
+            .all(|slot| slot.state == SlotState::TruncatedEntry));
     }
 
     #[test]

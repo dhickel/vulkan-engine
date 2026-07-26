@@ -316,9 +316,7 @@ pub fn read_wad_lump<'a>(archive: &'a WadArchive, name: &str) -> Option<&'a [u8]
     // Case-sensitive lookup
     for entry in &archive.entries {
         if entry.name == name {
-            let start = entry.offset as usize;
-            let end = start + entry.disk_size as usize;
-            return archive.data.get(start..end);
+            return read_wad_entry_data(archive, entry);
         }
     }
     None
@@ -327,7 +325,7 @@ pub fn read_wad_lump<'a>(archive: &'a WadArchive, name: &str) -> Option<&'a [u8]
 /// Extract the raw miptex lump data from a matched WAD entry.
 pub fn read_wad_entry_data<'a>(archive: &'a WadArchive, entry: &WadEntry) -> Option<&'a [u8]> {
     let start = entry.offset as usize;
-    let end = start + entry.disk_size as usize;
+    let end = start.checked_add(entry.disk_size as usize)?;
     archive.data.get(start..end)
 }
 
@@ -393,7 +391,10 @@ pub fn decode_miptex_pixels(
             DiagnosticCode::MiptexCorrupt,
             format!(
                 "miptex '{}' mip-0 data [{}, {}) exceeds entry length {}",
-                info.name, mip0_off, mip0_end, data.len()
+                info.name,
+                mip0_off,
+                mip0_end,
+                data.len()
             ),
         ));
     }
@@ -428,10 +429,7 @@ pub fn decode_miptex_pixels(
 ///
 /// The embedded miptex lump starts with a count (i32 LE), then an offset table
 /// (count × i32 LE), then each miptex entry at its offset.
-pub fn read_embedded_miptex_entry(
-    lump_data: &[u8],
-    entry_index: u32,
-) -> Option<&[u8]> {
+pub fn read_embedded_miptex_entry(lump_data: &[u8], entry_index: u32) -> Option<&[u8]> {
     if lump_data.len() < 4 {
         return None;
     }
@@ -440,43 +438,38 @@ pub fn read_embedded_miptex_entry(
         return None;
     }
     let count = count as usize;
-    let ei = entry_index as usize;
-    let off_table_end = 4 + count * 4;
-    if off_table_end > lump_data.len() || (ei + 1) * 4 + 4 > lump_data.len() {
+    let entry_index = entry_index as usize;
+    let table_size = count.checked_mul(4)?;
+    let table_end = 4usize.checked_add(table_size)?;
+    if table_end > lump_data.len() {
         return None;
     }
 
-    let entry_off = i32::from_le_bytes([
-        lump_data[4 + ei * 4],
-        lump_data[4 + ei * 4 + 1],
-        lump_data[4 + ei * 4 + 2],
-        lump_data[4 + ei * 4 + 3],
-    ]);
-    if entry_off < 0 {
+    let entry_table_offset = 4usize.checked_add(entry_index.checked_mul(4)?)?;
+    let entry_table_end = entry_table_offset.checked_add(4)?;
+    let entry_offset = lump_data.get(entry_table_offset..entry_table_end)?;
+    let entry_offset = i32::from_le_bytes(entry_offset.try_into().ok()?);
+    if entry_offset < 0 {
         return None;
     }
-    let start = entry_off as usize;
-    // Read width/height from header to determine entry size
-    if start + 40 > lump_data.len() {
+    let start = entry_offset as usize;
+    let header_end = start.checked_add(40)?;
+    if start < table_end || header_end > lump_data.len() {
         return None;
     }
-    let width = u32::from_le_bytes([
-        lump_data[start + 16],
-        lump_data[start + 17],
-        lump_data[start + 18],
-        lump_data[start + 19],
-    ]);
-    let height = u32::from_le_bytes([
-        lump_data[start + 20],
-        lump_data[start + 21],
-        lump_data[start + 22],
-        lump_data[start + 23],
-    ]);
-    // Mip 0 pixel count + header + optional mips; read enough bytes for at least mip 0
-    let pixel_count = (width as usize).checked_mul(height as usize)?;
-    let entry_end = start.checked_add(40 + pixel_count)?;
-    let entry_end = entry_end.min(lump_data.len());
-    Some(&lump_data[start..entry_end])
+
+    let width = u32::from_le_bytes(lump_data.get(start + 16..start + 20)?.try_into().ok()?);
+    let height = u32::from_le_bytes(lump_data.get(start + 20..start + 24)?.try_into().ok()?);
+    let mip0_offset = u32::from_le_bytes(lump_data.get(start + 24..start + 28)?.try_into().ok()?);
+    if width == 0 || height == 0 || mip0_offset < 40 {
+        return None;
+    }
+
+    let pixel_count = u64::from(width).checked_mul(u64::from(height))?;
+    let pixel_count = usize::try_from(pixel_count).ok()?;
+    let mip0_start = start.checked_add(mip0_offset as usize)?;
+    let entry_end = mip0_start.checked_add(pixel_count)?;
+    lump_data.get(start..entry_end)
 }
 
 /// Parse a miptex header to get dimensions and mip offsets.
@@ -606,5 +599,23 @@ mod tests {
         assert!(!is_safe_path_component(".."));
         assert!(!is_safe_path_component("../escape"));
         assert!(!is_safe_path_component(""));
+    }
+
+    #[test]
+    fn embedded_entry_honors_declared_mip0_offset() {
+        let mut lump = Vec::new();
+        lump.extend_from_slice(&1i32.to_le_bytes());
+        lump.extend_from_slice(&8i32.to_le_bytes());
+        let mut entry = vec![0u8; 49];
+        entry[..4].copy_from_slice(b"TEST");
+        entry[16..20].copy_from_slice(&1u32.to_le_bytes());
+        entry[20..24].copy_from_slice(&1u32.to_le_bytes());
+        entry[24..28].copy_from_slice(&48u32.to_le_bytes());
+        entry[48] = 7;
+        lump.extend_from_slice(&entry);
+
+        let embedded = read_embedded_miptex_entry(&lump, 0).expect("complete mip-0 payload");
+        assert_eq!(embedded.len(), 49);
+        assert_eq!(embedded[48], 7);
     }
 }
