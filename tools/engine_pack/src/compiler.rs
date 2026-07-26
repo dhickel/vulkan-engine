@@ -1882,6 +1882,20 @@ light_sha256 = "0000000000000000000000000000000000000000000000000000000000000000
     }
 
     #[test]
+    fn bounded_stream_reader_drains_without_retaining_unbounded_output() {
+        let mut stream = std::io::Cursor::new(b"0123456789".to_vec());
+        let captured = read_stream_bounded(&mut stream, 4).unwrap();
+        assert!(captured.exceeded);
+        assert!(captured.bytes.is_empty());
+        assert_eq!(stream.position(), 10, "reader must drain the whole stream");
+
+        let mut exact = std::io::Cursor::new(b"0123".to_vec());
+        let captured = read_stream_bounded(&mut exact, 4).unwrap();
+        assert!(!captured.exceeded);
+        assert_eq!(captured.bytes, b"0123");
+    }
+
+    #[test]
     fn output_too_large_error() {
         let err = CompilerError::OutputTooLarge {
             path: PathBuf::from("test.bsp"),

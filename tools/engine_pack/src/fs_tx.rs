@@ -1366,8 +1366,8 @@ pub fn validate_manifest_closure(
         .collect())
 }
 
-/// Collect all regular files in staging (non-recursive for subdirectories
-/// like textures/).
+/// Recursively collect all regular files in staging, including allowed
+/// subdirectories such as `textures/`.
 fn collect_staging_files(
     root: &Path,
     dir: &Path,
@@ -2081,6 +2081,86 @@ mod tests {
             normalize_logical_key(Path::new("models/crate.glb")).unwrap(),
             "models/crate.glb"
         );
+    }
+
+    #[test]
+    fn manifest_closure_rejects_undeclared_or_mismatched_payloads() {
+        let dir = unique_tmp("manifest-closure");
+        fs::create_dir_all(&dir).unwrap();
+        let payload_path = dir.join("payload.bin");
+        fs::write(&payload_path, b"payload").unwrap();
+        let hash = sha256_file(&payload_path).unwrap();
+        let manifest = format!(
+            "format_version = 1\nmanifest_schema = \"engine-pack-canonical/1\"\nstrict = true\n\n[[published_artifacts]]\npath = \"payload.bin\"\nsha256 = \"{hash}\"\nbytes = 7\nkind = \"test\"\n"
+        );
+        fs::write(dir.join("generated.manifest.toml"), &manifest).unwrap();
+
+        assert!(validate_manifest_closure(&dir, manifest.as_bytes()).is_ok());
+
+        fs::write(dir.join("rogue.bin"), b"rogue").unwrap();
+        let error = validate_manifest_closure(&dir, manifest.as_bytes()).unwrap_err();
+        match error {
+            FsTxError::ValidationBeforePublish { diagnostics, .. } => {
+                assert!(diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains("undeclared regular file")));
+            }
+            other => panic!("expected closure validation failure, got {other:?}"),
+        }
+        fs::remove_file(dir.join("rogue.bin")).unwrap();
+
+        fs::write(&payload_path, b"changed").unwrap();
+        let error = validate_manifest_closure(&dir, manifest.as_bytes()).unwrap_err();
+        assert!(matches!(error, FsTxError::ValidationBeforePublish { .. }));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn orphan_recovery_requires_owned_symlink_free_tree() {
+        let dir = unique_tmp("orphan-recovery");
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("published");
+        let owned = dir.join(".published.owned");
+        fs::create_dir_all(&owned).unwrap();
+        write_staging_marker(&owned, &destination).unwrap();
+        fs::write(owned.join("payload"), b"safe").unwrap();
+
+        let wrong_destination = dir.join(".published.wrong-destination");
+        fs::create_dir_all(&wrong_destination).unwrap();
+        write_staging_marker(&wrong_destination, &dir.join("different")).unwrap();
+
+        recover_orphaned_staging(&destination);
+        assert!(!owned.exists(), "matching safe orphan must be recovered");
+        assert!(
+            wrong_destination.exists(),
+            "mismatched ownership marker must not be removed"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_recovery_never_removes_symlinked_tree() {
+        let dir = unique_tmp("orphan-symlink");
+        fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("published");
+        let unsafe_orphan = dir.join(".published.unsafe");
+        fs::create_dir_all(&unsafe_orphan).unwrap();
+        write_staging_marker(&unsafe_orphan, &destination).unwrap();
+        let outside = dir.join("outside");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, unsafe_orphan.join("link")).unwrap();
+
+        recover_orphaned_staging(&destination);
+        assert!(
+            unsafe_orphan.exists(),
+            "an orphan containing a symlink must be retained for manual inspection"
+        );
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
