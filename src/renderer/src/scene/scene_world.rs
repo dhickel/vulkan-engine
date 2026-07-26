@@ -699,23 +699,38 @@ impl SceneWorld {
 
     #[cfg(feature = "bsp")]
     fn collect_bsp_draw_items(&self, submission: &mut RenderSubmission, frustum: Option<&Frustum>) {
-        let visible_batch_indices = crate::scene::bsp_visibility::visible_batch_indices(
-            &self.bsp_mount.render_batches,
+        use crate::scene::bsp_visibility::{
+            classify_bsp_visibility, mounted_visibility_decision, VisibilityDecision,
+        };
+        use crate::scene::render_submission::BspSubmissionFailure;
+
+        let diagnostics = classify_bsp_visibility(
+            &self.bsp_mount.mounted_batches,
             &self.bsp_mount,
         );
+        submission.bsp_diagnostics = diagnostics.clone();
         log::debug!(
-            "BSP submission: {} / {} batches visible (PVS={})",
-            visible_batch_indices.len(),
-            self.bsp_mount.render_batches.len(),
-            self.bsp_mount.current_pvs.is_some()
+            "BSP submission: total={} eligible={} pvs_visible={} pvs_culled={} conservative={} invalid_member={}",
+            diagnostics.total_mounted,
+            diagnostics.pvs_eligible,
+            diagnostics.pvs_visible,
+            diagnostics.pvs_culled,
+            diagnostics.conservative_visible,
+            diagnostics.invalid_membership,
         );
 
-        for batch_index in visible_batch_indices {
-            let Some(batch) = self.bsp_mount.render_batches.get(batch_index) else {
-                continue;
-            };
-            // Inline model batches use the snapshot-provided transform;
-            // static world batches use identity.
+        for (batch_index, mounted) in self.bsp_mount.mounted_batches.iter().enumerate() {
+            // --- PVS Classification ---
+            let pvs_decision = mounted_visibility_decision(mounted, &self.bsp_mount);
+            match pvs_decision {
+                VisibilityDecision::PvsCulled => {
+                    continue;
+                }
+                VisibilityDecision::Visible => {}
+            }
+
+            // --- Inline model frustum cull ---
+            let batch = &mounted.render;
             let batch_transform = if batch.is_inline_model {
                 self.bsp_mount
                     .inline_model_transforms
@@ -736,28 +751,54 @@ impl SceneWorld {
                     if !crate::scene::bsp_visibility::aabb_intersects_frustum(
                         world_min, world_max, frustum,
                     ) {
-                        continue;
+                        continue; // intentional frustum cull
                     }
                 }
             }
 
-            let Some(mesh_id) = self.bsp_mount.batch_meshes.get(batch_index).copied() else {
-                continue;
-            };
-            let Some(bsp_material_id) =
-                self.bsp_mount.batch_materials.get(batch_index).copied()
-            else {
-                continue;
-            };
-            if mesh_id == MeshHandle::new(0, 0) {
+            // --- Resource validation (fail-closed) ---
+            let mesh_id = mounted.mesh;
+            let bsp_material_id = mounted.material;
+            let source_face_first = mounted
+                .render
+                .face_indices
+                .first()
+                .copied()
+                .unwrap_or(0);
+            let source_face_count = mounted.render.face_indices.len() as u32;
+            let model_index = mounted.render.model_index;
+
+            if mesh_id == MeshHandle::new(0, 0)
+                || (bsp_material_id.slot == 0 && bsp_material_id.generation == 0)
+            {
+                let failure = BspSubmissionFailure {
+                    batch_index,
+                    source_face_first,
+                    source_face_count,
+                    pipeline_class: None,
+                    model_index,
+                    reason: format!(
+                        "missing required BSP state: mesh={:?} material={:?}",
+                        mesh_id, bsp_material_id
+                    ),
+                };
+                if submission.bsp_failure.is_none() {
+                    submission.bsp_failure = Some(failure);
+                }
                 continue;
             }
+
             submission
                 .bsp_draw_items
                 .push(crate::scene::render_submission::BspFrameDrawItem {
                     mesh_id,
                     bsp_material_id,
                     transform: batch_transform,
+                    batch_index,
+                    source_face_first,
+                    source_face_count,
+                    pipeline_class: None,
+                    model_index,
                 });
             submission.culling_stats.submitted_draw_items += 1;
         }
@@ -1354,6 +1395,25 @@ impl SceneWorld {
     #[cfg(feature = "bsp")]
     pub(crate) fn clear_bsp_mount(&mut self) {
         self.bsp_mount.deactivate();
+    }
+
+    /// Retire the active BSP mount, returning the previous mount state for
+    /// fence-aware GPU resource retirement. The returned state is no longer
+    /// referenced by the scene and can be dropped or held for retirement
+    /// tracking.
+    #[cfg(feature = "bsp")]
+    pub(crate) fn retire_bsp_mount(
+        &mut self,
+    ) -> Option<crate::scene::bsp_visibility::BspMountState> {
+        if !self.bsp_mount.active {
+            return None;
+        }
+        let mut retired = crate::scene::bsp_visibility::BspMountState::new();
+        std::mem::swap(&mut self.bsp_mount, &mut retired);
+        // The swapped-in mount is empty/inactive; the caller receives the
+        // previous active mount with its GPU resource handles intact for
+        // proper fence-observed retirement.
+        Some(retired)
     }
 
     /// Return whether a BSP mount is currently active.
@@ -2549,35 +2609,47 @@ mod tests {
     #[cfg(feature = "bsp")]
     #[test]
     fn bsp_mount_submits_draws_and_lights_without_scene_root() {
+        use crate::data::bsp_import::MountedBspBatch;
+
         let mut scene = SceneWorld::new();
         let mut mount = crate::scene::bsp_visibility::BspMountState::new();
         mount.activate();
-        mount.set_render_assets(
-            vec![MeshHandle::new(7, 0)],
-            vec![Some(crate::data::handles::BspMaterialHandle::new(3, 0))],
-            vec![bsp::geometry::RenderBatch {
-                key: bsp::geometry::BatchKey {
-                    leaf_signature: Vec::new(),
-                    render_class: 0,
-                    material_identity: 0,
-                    lightmap_page: 0,
-                },
-                face_indices: vec![0],
-                pvs_eligible: true,
-                is_inline_model: false,
-                model_index: 0,
-            }],
-            vec![MeshHandle::new(7, 0)],
-            vec![crate::data::handles::BspMaterialHandle::new(3, 0)],
-            vec![bsp::extract::LightDescriptor {
-                entity_index: 0,
-                origin: Vec3::new(1.0, 0.0, 0.0),
-                intensity: 64.0,
-                color: [1.0, 0.5, 0.25],
-                radius: 128.0,
-                style: None,
-            }],
-        );
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature: Vec::new(),
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(7, 0);
+        let material = crate::data::handles::BspMaterialHandle::new(3, 0);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            mesh,
+            material,
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .expect("valid mounted batch");
+        mount
+            .set_render_assets_from_canonical(
+                &[mounted],
+                vec![mesh],
+                vec![Some(material)],
+                vec![bsp::extract::LightDescriptor {
+                    entity_index: 0,
+                    origin: Vec3::new(1.0, 0.0, 0.0),
+                    intensity: 64.0,
+                    color: [1.0, 0.5, 0.25],
+                    radius: 128.0,
+                    style: None,
+                }],
+            )
+            .expect("canonical batch publish");
         scene.set_bsp_mount(mount);
 
         let submission = scene.build_submission();
@@ -2586,5 +2658,60 @@ mod tests {
         assert_eq!(submission.bsp_draw_items[0].mesh_id, MeshHandle::new(7, 0));
         assert_eq!(submission.point_lights.len(), 1);
         assert_eq!(submission.point_lights[0].color, Vec3::new(1.0, 0.5, 0.25));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_retirement_returns_active_state_and_leaves_scene_empty() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut scene = SceneWorld::new();
+        let mut mount = crate::scene::bsp_visibility::BspMountState::new();
+        mount.activate();
+        let batch = bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature: Vec::new(),
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let mesh = MeshHandle::new(7, 0);
+        let material = crate::data::handles::BspMaterialHandle::new(3, 0);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            mesh,
+            material,
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .expect("valid mounted batch");
+        mount
+            .set_render_assets_from_canonical(&[mounted], vec![mesh], vec![Some(material)], vec![])
+            .expect("canonical batch publish");
+        scene.set_bsp_mount(mount);
+        assert!(scene.has_bsp_mount());
+
+        let retired = scene.retire_bsp_mount();
+        assert!(retired.is_some());
+        assert!(!scene.has_bsp_mount());
+
+        // Scene submission after retirement should have no BSP draws.
+        let submission = scene.build_submission();
+        assert!(submission.bsp_draw_items.is_empty());
+        assert!(submission.bsp_selected_lights.is_empty());
+        assert!(submission.bsp_failure.is_none());
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_mount_retire_on_inactive_returns_none() {
+        let mut scene = SceneWorld::new();
+        assert!(!scene.has_bsp_mount());
+        let retired = scene.retire_bsp_mount();
+        assert!(retired.is_none());
     }
 }

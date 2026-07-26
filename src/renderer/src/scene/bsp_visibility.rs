@@ -1,7 +1,7 @@
 //! BSP PVS-aware culling for scene submission.
 //!
 //! Locates the camera leaf via BSP tree traversal, decompresses the PVS
-//! set, and filters render batches before frustum/BVH culling.
+//! set, and classifies mounted batches for fail-closed draw submission.
 //!
 //! Contract: `bsp-spatial-physics.md` §4.
 
@@ -10,7 +10,9 @@ use crate::data::bsp_import::MountedBspBatch;
 #[cfg(feature = "bsp")]
 use crate::data::handles::{BspMaterialHandle, MeshHandle};
 #[cfg(feature = "bsp")]
-use crate::scene::render_submission::{FramePointLight, MAX_POINT_LIGHTS_GPU};
+use crate::scene::render_submission::{
+    BspSubmissionDiagnostics, FramePointLight, MAX_POINT_LIGHTS_GPU,
+};
 #[cfg(feature = "bsp")]
 use bsp::extract::ExtractedBsp;
 #[cfg(feature = "bsp")]
@@ -93,6 +95,9 @@ pub struct BspMountState {
     pub frame_style_intensities: [f32; 64],
     /// Per-frame liquid animation time.
     pub frame_liquid_time: f32,
+    /// Diagnostic PVS-off switch (debug-only; never serialized or packaged).
+    #[cfg(debug_assertions)]
+    pub(crate) diagnostic_pvs_off: bool,
 }
 
 #[cfg(feature = "bsp")]
@@ -150,6 +155,8 @@ impl BspMountState {
             inline_model_bounds: std::collections::HashMap::new(),
             frame_style_intensities: default_style_intensities(),
             frame_liquid_time: 0.0,
+            #[cfg(debug_assertions)]
+            diagnostic_pvs_off: false,
         }
     }
 
@@ -190,6 +197,8 @@ impl BspMountState {
             inline_model_bounds: std::collections::HashMap::new(),
             frame_style_intensities: default_style_intensities(),
             frame_liquid_time: 0.0,
+            #[cfg(debug_assertions)]
+            diagnostic_pvs_off: false,
         }
     }
 
@@ -227,6 +236,8 @@ impl BspMountState {
             inline_model_bounds: std::collections::HashMap::new(),
             frame_style_intensities: default_style_intensities(),
             frame_liquid_time: 0.0,
+            #[cfg(debug_assertions)]
+            diagnostic_pvs_off: false,
         }
     }
 
@@ -667,21 +678,13 @@ fn light_descriptor_to_frame_light(light: &bsp::extract::LightDescriptor) -> Fra
     }
 }
 
-// ── PVS batch filtering ─────────────────────────────────────────────────
+// ── PVS batch filtering (projected from classifier) ────────────────────
 
 #[cfg(feature = "bsp")]
 /// Filter a list of render batches by PVS visibility.
 ///
-/// Returns the subset of batches whose leaf membership intersects the
-/// camera PVS. When PVS is not available, returns all batches unchanged
-/// (conservative).
-///
-/// # Inline Model PVS Bypass
-///
-/// Inline models (`is_inline_model = true`) are **never** rejected by
-/// static-world PVS. They are always passed through for conservative
-/// frustum culling. Moving inline models must not be culled by the
-/// static PVS of their original leaf membership.
+/// Compatibility projection of the deterministic classifier over mounted records.
+/// New callers should use `classify_bsp_visibility` and `mounted_visibility_decision`.
 pub fn visible_batch_indices(
     batches: &[bsp::geometry::RenderBatch],
     mount_state: &BspMountState,
@@ -719,6 +722,161 @@ pub fn filter_batches_by_pvs(
         .into_iter()
         .filter_map(|index| batches.get(index).cloned())
         .collect()
+}
+
+// ── Deterministic PVS classifier over mounted records ───────────────────
+
+#[cfg(feature = "bsp")]
+/// Draw decision for a mounted batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityDecision {
+    Visible,
+    PvsCulled,
+}
+
+#[cfg(feature = "bsp")]
+/// Classify a mounted batch's visibility using the current PVS state.
+///
+/// Only static PVS-eligible records can be culled. Inline models, non-PVS
+/// batches, empty signatures, corrupt VIS, invalid camera leaf, reserved
+/// leaf zero, and out-of-range membership produce `Visible` (conservative).
+pub fn mounted_visibility_decision(
+    mounted: &MountedBspBatch,
+    mount_state: &BspMountState,
+) -> VisibilityDecision {
+    // Inline models are never PVS-culled.
+    if mounted.render.is_inline_model {
+        return VisibilityDecision::Visible;
+    }
+
+    // Non-PVS-eligible batches are always visible.
+    if !mounted.render.pvs_eligible {
+        return VisibilityDecision::Visible;
+    }
+
+    // Empty leaf signature = conservative visible.
+    if mounted.render.key.leaf_signature.is_empty() {
+        return VisibilityDecision::Visible;
+    }
+
+    // No valid PVS = conservative visible.
+    let Some(pvs) = mount_state.current_pvs.as_ref() else {
+        return VisibilityDecision::Visible;
+    };
+    if !pvs.valid {
+        return VisibilityDecision::Visible;
+    }
+
+    // Check if any leaf in the batch's signature is visible.
+    let any_visible = mounted
+        .render
+        .key
+        .leaf_signature
+        .iter()
+        .any(|&leaf| pvs.is_visible(leaf));
+
+    if any_visible {
+        VisibilityDecision::Visible
+    } else {
+        VisibilityDecision::PvsCulled
+    }
+}
+
+#[cfg(feature = "bsp")]
+/// Deterministic PVS classification diagnostics over mounted records.
+///
+/// Produces stable counts: total mounted, eligible, PVS-visible, PVS-culled,
+/// conservative-visible, and invalid-membership decisions.
+pub fn classify_bsp_visibility(
+    mounted_batches: &[MountedBspBatch],
+    mount_state: &BspMountState,
+) -> BspSubmissionDiagnostics {
+    let mut diag = BspSubmissionDiagnostics::default();
+    diag.total_mounted = mounted_batches.len() as u32;
+
+    // PVS-off diagnostic switch: when active, classify all eligible as conservative-visible.
+    #[cfg(debug_assertions)]
+    let pvs_off = mount_state.diagnostic_pvs_off;
+    #[cfg(not(debug_assertions))]
+    let pvs_off = false;
+
+    let has_valid_pvs = mount_state
+        .current_pvs
+        .as_ref()
+        .map(|p| p.valid)
+        .unwrap_or(false);
+
+    for mounted in mounted_batches {
+        if !mounted.render.pvs_eligible || mounted.render.is_inline_model {
+            continue;
+        }
+        diag.pvs_eligible += 1;
+
+        if mounted.render.key.leaf_signature.is_empty() {
+            diag.conservative_visible += 1;
+            continue;
+        }
+
+        if pvs_off || !has_valid_pvs {
+            diag.conservative_visible += 1;
+            continue;
+        }
+
+        let pvs = mount_state.current_pvs.as_ref().unwrap();
+
+        // Check for invalid membership: out-of-range leaf indices.
+        let any_invalid = mounted
+            .render
+            .key
+            .leaf_signature
+            .iter()
+            .any(|&leaf| leaf >= mount_state.num_leaves);
+        if any_invalid {
+            diag.invalid_membership += 1;
+            diag.conservative_visible += 1;
+            continue;
+        }
+
+        let any_visible = mounted
+            .render
+            .key
+            .leaf_signature
+            .iter()
+            .any(|&leaf| pvs.is_visible(leaf));
+
+        if any_visible {
+            diag.pvs_visible += 1;
+        } else {
+            diag.pvs_culled += 1;
+        }
+    }
+
+    diag
+}
+
+// ── PVS-off diagnostic switch ───────────────────────────────────────────
+
+#[cfg(feature = "bsp")]
+impl BspMountState {
+    /// When `true` (debug builds only), PVS-eligible batches are classified as
+    /// conservative-visible. This switch is never serialized, packaged, or
+    /// enabled by production defaults. It exists for evidence harnesses.
+    #[cfg(debug_assertions)]
+    pub fn set_diagnostic_pvs_off(&mut self, off: bool) {
+        self.diagnostic_pvs_off = off;
+    }
+
+    /// Query the PVS-off diagnostic state.
+    pub fn diagnostic_pvs_off(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.diagnostic_pvs_off
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
 }
 
 /// Test whether a world-space AABB intersects the camera frustum.
@@ -872,5 +1030,252 @@ mod tests {
 
         let result = filter_batches_by_pvs(&batches, &members, &mount);
         assert_eq!(result.len(), 1);
+    }
+
+    // ── Phase 07 fail-closed classifier tests ──────────────────────────
+
+    #[test]
+    fn classifier_empty_mounted_batches_produces_zero_eligible() {
+        let mount = BspMountState::new();
+        let diag = classify_bsp_visibility(&[], &mount);
+        assert_eq!(diag.total_mounted, 0);
+        assert_eq!(diag.pvs_eligible, 0);
+        assert_eq!(diag.pvs_visible, 0);
+        assert_eq!(diag.pvs_culled, 0);
+    }
+
+    #[test]
+    fn classifier_empty_leaf_signature_is_conservative_visible() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x00],
+            valid: true,
+        });
+
+        let batch = make_test_batch(vec![], true, false);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.total_mounted, 1);
+        assert_eq!(diag.pvs_eligible, 1);
+        assert_eq!(diag.conservative_visible, 1);
+        assert_eq!(diag.pvs_visible, 0);
+        assert_eq!(diag.pvs_culled, 0);
+    }
+
+    #[test]
+    fn classifier_pvs_culled_when_no_leaf_visible() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.num_leaves = 8;
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x01], // only leaf 0 visible
+            valid: true,
+        });
+
+        let batch = make_test_batch(vec![1, 2], true, false);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.total_mounted, 1);
+        assert_eq!(diag.pvs_eligible, 1);
+        assert_eq!(diag.pvs_culled, 1);
+        assert_eq!(diag.pvs_visible, 0);
+    }
+
+    #[test]
+    fn classifier_pvs_visible_when_leaf_intersects() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.num_leaves = 8;
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x03], // leaves 0 and 1 visible
+            valid: true,
+        });
+
+        let batch = make_test_batch(vec![0, 3], true, false);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.pvs_visible, 1);
+        assert_eq!(diag.pvs_culled, 0);
+    }
+
+    #[test]
+    fn classifier_inline_model_is_not_pvs_eligible() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x00],
+            valid: true,
+        });
+
+        let batch = make_test_batch(vec![0], true, true);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.total_mounted, 1);
+        assert_eq!(diag.pvs_eligible, 0); // inline not counted as eligible
+    }
+
+    #[test]
+    fn classifier_invalid_membership_is_conservative() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.num_leaves = 2; // only leaves 0-1 valid
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x00],
+            valid: true,
+        });
+
+        let batch = make_test_batch(vec![5, 10], true, false); // out of range
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.invalid_membership, 1);
+        assert_eq!(diag.conservative_visible, 1);
+        assert_eq!(diag.pvs_culled, 0);
+    }
+
+    #[test]
+    fn classifier_invalid_pvs_makes_all_conservative() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x00],
+            valid: false, // corrupt
+        });
+
+        let batch = make_test_batch(vec![0, 1], true, false);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.conservative_visible, 1);
+        assert_eq!(diag.pvs_culled, 0);
+    }
+
+    #[test]
+    fn classifier_pvs_off_diagnostic_makes_all_conservative() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mut mount = BspMountState::new();
+        mount.active = true;
+        mount.num_leaves = 8;
+        mount.current_pvs = Some(PvsSet {
+            leaf_index: 0,
+            bits: vec![0x00],
+            valid: true,
+        });
+        mount.set_diagnostic_pvs_off(true);
+
+        let batch = make_test_batch(vec![0, 1], true, false);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.conservative_visible, 1);
+    }
+
+    #[test]
+    fn classifier_no_pvs_state_conservative() {
+        use crate::data::bsp_import::MountedBspBatch;
+
+        let mount = BspMountState::new(); // no PVS
+
+        let batch = make_test_batch(vec![0], true, false);
+        let mounted = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+        )
+        .unwrap();
+
+        let diag = classify_bsp_visibility(&[mounted], &mount);
+        assert_eq!(diag.conservative_visible, 1);
+    }
+
+    #[test]
+    fn classifier_zero_face_mount_valid() {
+        let mount = BspMountState::new();
+        let diag = classify_bsp_visibility(&[], &mount);
+        assert_eq!(diag.total_mounted, 0);
+        assert_eq!(diag.pvs_visible, 0);
+        assert_eq!(diag.pvs_culled, 0);
+    }
+
+    fn make_test_batch(leaf_signature: Vec<u32>, pvs_eligible: bool, is_inline: bool) -> bsp::geometry::RenderBatch {
+        bsp::geometry::RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature,
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![0],
+            pvs_eligible,
+            is_inline_model: is_inline,
+            model_index: if is_inline { 1 } else { 0 },
+        }
     }
 }

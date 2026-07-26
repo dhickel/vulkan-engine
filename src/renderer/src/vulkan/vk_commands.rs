@@ -9,6 +9,14 @@
 //! pointer, and that pointer targets only the current frame. Recording state is split into
 //! ordinary lifetime-bound field borrows; pass contexts contain no raw pointers and cannot
 //! reach `VkRenderCore` or presentation state.
+//!
+//! ## BSP fail-closed recording (Phase 07)
+//!
+//! BSP draw commands never silently skip required state. Every missing resource,
+//! stale handle, null descriptor, or failed reference mark returns a typed error
+//! through the existing geometry/rendergraph result path. A per-frame fixed-capacity
+//! diagnostic collector records every draw outcome with batch identity and descriptor
+//! set handles for traceability.
 
 use crate::api::config::{CaptureTarget, DueFrameCapture, FrameCaptureStatus, VisualTuning};
 use crate::data::data_cache::{VkCache, VkDataCache, VkPipelineType};
@@ -21,6 +29,10 @@ use crate::data::gpu_data::{BspFrameValuesUniform, BspModelPushConsts};
 use crate::data::handles::{EnvironmentHandle, MaterialHandle, MeshHandle};
 use crate::debug_ui::DebugUiManager;
 use crate::rendergraph::{RenderGraph, RenderGraphContext, RenderGraphExecutionReport};
+#[cfg(feature = "bsp")]
+use crate::scene::render_submission::{
+    BspCommandDiag, BspDrawOutcome,
+};
 use crate::scene::render_submission::RenderSubmission;
 use crate::vulkan::vk_debug::{record_frame_capture, FrameCaptureTargetDesc, PendingFrameCapture};
 use crate::vulkan::vk_frame::{imgui_pass_plan, ImguiPassPlan};
@@ -34,10 +46,14 @@ use crate::vulkan::vk_types::PendingTransition;
 use crate::vulkan::vk_types::*;
 use crate::vulkan::vk_util;
 use ash::vk;
-use log::{error, info};
+use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use vk_mem::Allocator;
+
+/// Maximum entries in the per-frame BSP command diagnostic collector.
+#[cfg(feature = "bsp")]
+const BSP_COMMAND_DIAG_MAX: usize = 2048;
 
 // ---------------------------------------------------------------------------
 // Pass-specific recording contexts
@@ -585,6 +601,18 @@ fn draw_geometry_from_submission_impl(
         .frame_graphics_primary()
         .map_err(|e| format!("GeometryPass: {e}"))?;
 
+    #[cfg(feature = "bsp")]
+    if let Some(ref failure) = submission.bsp_failure {
+        return Err(format!(
+            "BSP submission failure: batch={} face_first={} face_count={} model={}: {}",
+            failure.batch_index,
+            failure.source_face_first,
+            failure.source_face_count,
+            failure.model_index,
+            failure.reason,
+        ));
+    }
+
     let color_clear = vk::ClearValue {
         color: vk::ClearColorValue {
             float32: [0.0, 0.0, 0.0, 1.0],
@@ -715,6 +743,9 @@ fn draw_geometry_from_submission_impl(
         light_view_projection,
     );
 
+    #[cfg(feature = "bsp")]
+    let mut bsp_command_diags: Vec<BspCommandDiag> = Vec::new();
+
     // SAFETY: Command recording uses the active frame context and caller-owned Vulkan handles; pass lifetimes prevent escape and rendergraph preconditions establish valid objects.
     unsafe {
         record_geometry_draw_sequence_impl(
@@ -734,10 +765,45 @@ fn draw_geometry_from_submission_impl(
             #[cfg(feature = "bsp")]
             data_cache,
             #[cfg(feature = "bsp")]
-            &submission.bsp_draw_items,
+            submission,
             #[cfg(feature = "bsp")]
-            submission.bsp_frame_values,
+            &mut bsp_command_diags,
+        )?;
+    }
+
+    #[cfg(feature = "bsp")]
+    if !bsp_command_diags.is_empty() {
+        let recorded = bsp_command_diags
+            .iter()
+            .filter(|d| matches!(d.outcome, BspDrawOutcome::Recorded))
+            .count();
+        let failed = bsp_command_diags
+            .iter()
+            .filter(|d| matches!(d.outcome, BspDrawOutcome::Failed(_)))
+            .count();
+        let culled = bsp_command_diags
+            .iter()
+            .filter(|d| matches!(d.outcome, BspDrawOutcome::Culled(_)))
+            .count();
+        log::info!(
+            "BSP frame diagnostics: {} recorded, {} failed, {} culled (total diag entries: {})",
+            recorded,
+            failed,
+            culled,
+            bsp_command_diags.len()
         );
+        if failed > 0 {
+            for diag in &bsp_command_diags {
+                if let BspDrawOutcome::Failed(reason) = &diag.outcome {
+                    log::warn!(
+                        "BSP draw failed: batch={} pipeline={:?} reason={}",
+                        diag.batch_index,
+                        diag.pipeline,
+                        reason
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1460,9 +1526,9 @@ unsafe fn record_geometry_draw_sequence_impl(
     env_ubo: EnvironmentUBO,
     #[cfg_attr(not(feature = "bsp"), allow(unused_variables))] next_submit_serial: u64,
     #[cfg(feature = "bsp")] data_cache: &Arc<VkDataCache>,
-    #[cfg(feature = "bsp")] bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
-    #[cfg(feature = "bsp")] bsp_frame_values: crate::scene::render_submission::BspFrameValuesState,
-) {
+    #[cfg(feature = "bsp")] submission: &RenderSubmission,
+    #[cfg(feature = "bsp")] bsp_command_diags: &mut Vec<BspCommandDiag>,
+) -> Result<(), String> {
     device.cmd_begin_rendering(cmd_buffer, rendering_info);
 
     let Some(scene_descs) = scene_descriptors.get_mut(&active_env_id) else {
@@ -1471,7 +1537,7 @@ unsafe fn record_geometry_draw_sequence_impl(
             active_env_id
         );
         device.cmd_end_rendering(cmd_buffer);
-        return;
+        return Ok(());
     };
 
     let scene_desc = scene_descs.update_scene_uniforms(device, *scene_data, env_ubo, frame_index);
@@ -1568,8 +1634,8 @@ unsafe fn record_geometry_draw_sequence_impl(
     });
 
     #[cfg(feature = "bsp")]
-    if !bsp_draw_items.is_empty() {
-        update_bsp_frame_values_for_slot(data_cache, frame_index, bsp_frame_values);
+    if !submission.bsp_draw_items.is_empty() {
+        update_bsp_frame_values_for_slot(data_cache, frame_index, submission.bsp_frame_values)?;
         record_bsp_opaque_draw_sequence_impl(
             device,
             vulkan_cache,
@@ -1577,13 +1643,14 @@ unsafe fn record_geometry_draw_sequence_impl(
             scene_desc,
             cmd_buffer,
             next_submit_serial,
-            bsp_draw_items,
+            &submission.bsp_draw_items,
             frame_index,
-        );
+            bsp_command_diags,
+        )?;
     }
 
     #[cfg(feature = "bsp")]
-    let mut transparent_draws = collect_transparent_draws(&draw_lists, data_cache, bsp_draw_items);
+    let mut transparent_draws = collect_transparent_draws(&draw_lists, data_cache, &submission.bsp_draw_items);
     #[cfg(not(feature = "bsp"))]
     let mut transparent_draws = collect_transparent_draws(&draw_lists);
     sort_transparent_draws(&mut transparent_draws, scene_data.cam_pos);
@@ -1598,9 +1665,10 @@ unsafe fn record_geometry_draw_sequence_impl(
         frame_index,
         default_joint_desc,
         &transparent_draws,
-    );
+        bsp_command_diags,
+    )?;
     #[cfg(not(feature = "bsp"))]
-    record_transparent_draw_sequence_impl(
+    record_transparent_draw_sequence_impl_non_bsp(
         device,
         vulkan_cache,
         scene_desc,
@@ -1610,9 +1678,38 @@ unsafe fn record_geometry_draw_sequence_impl(
     );
 
     device.cmd_end_rendering(cmd_buffer);
+    Ok(())
 }
 
-// ── Transparent draw dispatch ──────────────────────────────────────────
+// ── Transparent draw dispatch (non-BSP) ───────────────────────────────
+
+#[cfg(not(feature = "bsp"))]
+/// # Safety
+/// Caller must uphold command-buffer recording preconditions.
+unsafe fn record_transparent_draw_sequence_impl_non_bsp(
+    device: &ash::Device,
+    vulkan_cache: &VkCache,
+    scene_desc: vk::DescriptorSet,
+    cmd_buffer: vk::CommandBuffer,
+    default_joint_desc: vk::DescriptorSet,
+    transparent_draws: &[QueuedTransparentDraw<'_>],
+) {
+    for queued in transparent_draws {
+        match queued.draw {
+            TransparentDrawRef::Pbr { object, pipeline } => draw_pbr_transparent_object_impl(
+                device,
+                vulkan_cache,
+                scene_desc,
+                cmd_buffer,
+                default_joint_desc,
+                object,
+                pipeline,
+            ),
+        }
+    }
+}
+
+// ── Transparent draw dispatch (BSP) ───────────────────────────────────
 
 /// # Safety
 /// Caller must uphold command-buffer recording preconditions.
@@ -1684,7 +1781,7 @@ fn update_bsp_frame_values_for_slot(
     data_cache: &Arc<VkDataCache>,
     frame_slot_index: u32,
     frame_values: crate::scene::render_submission::BspFrameValuesState,
-) {
+) -> Result<(), String> {
     let mut values = BspFrameValuesUniform::default();
     values.style_intensities = frame_values.style_intensities;
     values.style_intensities[0] = 1.0;
@@ -1695,12 +1792,13 @@ fn update_bsp_frame_values_for_slot(
     let mut surface_cache = data_cache
         .bsp_surface_cache
         .lock()
-        .expect("bsp_surface_cache lock poisoned");
+        .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
     if surface_cache.has_frame_values() {
-        if let Err(err) = surface_cache.write_frame_values_for_slot(frame_slot_index, &values) {
-            log::warn!("failed to update BSP frame-values UBO: {err}");
-        }
+        surface_cache
+            .write_frame_values_for_slot(frame_slot_index, &values)
+            .map_err(|err| format!("failed to update BSP frame-values UBO: {err}"))?;
     }
+    Ok(())
 }
 
 #[cfg(feature = "bsp")]
@@ -1715,41 +1813,52 @@ unsafe fn draw_bsp_item_impl(
     next_submit_serial: u64,
     frame_slot_index: u32,
     item: &crate::scene::render_submission::BspFrameDrawItem,
-) {
+) -> Result<(), String> {
     let mut mesh_cache = data_cache
         .mesh_cache
         .lock()
-        .expect("mesh_cache lock poisoned");
+        .map_err(|_| "mesh_cache lock poisoned".to_string())?;
     let mut texture_cache = data_cache
         .texture_cache
         .lock()
-        .expect("texture_cache lock poisoned");
+        .map_err(|_| "texture_cache lock poisoned".to_string())?;
     let bsp_surface_cache = data_cache
         .bsp_surface_cache
         .lock()
-        .expect("bsp_surface_cache lock poisoned");
+        .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
 
-    let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
-        return;
-    };
-    if mesh_cache
+    let bsp_mat = bsp_surface_cache
+        .get(item.bsp_material_id)
+        .map_err(|_| format!("BSP material handle {:?} is stale or missing (batch {})", item.bsp_material_id, item.batch_index))?;
+
+    mesh_cache
         .mark_referenced(item.mesh_id, next_submit_serial)
-        .is_err()
-    {
-        return;
-    }
-    let Ok(mesh) = mesh_cache.get_loaded_id(item.mesh_id) else {
-        return;
-    };
+        .map_err(|_| format!("failed to mark BSP mesh {:?} referenced (batch {})", item.mesh_id, item.batch_index))?;
 
-    let _ = texture_cache.mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial);
+    let mesh = mesh_cache
+        .get_loaded_id(item.mesh_id)
+        .map_err(|_| format!("BSP mesh {:?} is stale or missing (batch {})", item.mesh_id, item.batch_index))?;
+
+    texture_cache
+        .mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial)
+        .map_err(|_| format!("failed to mark BSP albedo texture referenced (batch {})", item.batch_index))?;
     if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
-        let _ = texture_cache.mark_texture_referenced(fullbright_tex, next_submit_serial);
+        texture_cache
+            .mark_texture_referenced(fullbright_tex, next_submit_serial)
+            .map_err(|_| format!("failed to mark BSP fullbright texture referenced (batch {})", item.batch_index))?;
     }
-    let _ = texture_cache.mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial);
+    texture_cache
+        .mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial)
+        .map_err(|_| format!("failed to mark BSP lightmap texture referenced (batch {})", item.batch_index))?;
 
     let pipeline = *vulkan_cache.pipelines.get_pipeline(bsp_mat.pipeline);
     let frame_values_desc = bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index);
+    let material_descriptor = bsp_mat.material_descriptor;
+
+    // Release cache locks before Vulkan commands.
+    drop(bsp_surface_cache);
+    drop(texture_cache);
+    drop(mesh_cache);
 
     device.cmd_bind_pipeline(
         cmd_buffer,
@@ -1769,7 +1878,7 @@ unsafe fn draw_bsp_item_impl(
         vk::PipelineBindPoint::GRAPHICS,
         pipeline.layout,
         1,
-        &[bsp_mat.material_descriptor],
+        &[material_descriptor],
         &[],
     );
     if frame_values_desc != vk::DescriptorSet::null() {
@@ -1805,10 +1914,13 @@ unsafe fn draw_bsp_item_impl(
         0,
         0,
     );
+
+    Ok(())
 }
 
 /// # Safety
 /// Caller must uphold command-buffer recording preconditions.
+#[cfg(feature = "bsp")]
 unsafe fn record_transparent_draw_sequence_impl(
     device: &ash::Device,
     vulkan_cache: &VkCache,
@@ -1819,7 +1931,8 @@ unsafe fn record_transparent_draw_sequence_impl(
     #[cfg(feature = "bsp")] frame_slot_index: u32,
     default_joint_desc: vk::DescriptorSet,
     transparent_draws: &[QueuedTransparentDraw<'_>],
-) {
+    #[cfg(feature = "bsp")] command_diags: &mut Vec<BspCommandDiag>,
+) -> Result<(), String> {
     for queued in transparent_draws {
         match queued.draw {
             TransparentDrawRef::Pbr { object, pipeline } => draw_pbr_transparent_object_impl(
@@ -1832,18 +1945,53 @@ unsafe fn record_transparent_draw_sequence_impl(
                 pipeline,
             ),
             #[cfg(feature = "bsp")]
-            TransparentDrawRef::BspLiquid { item } => draw_bsp_item_impl(
-                device,
-                vulkan_cache,
-                data_cache,
-                scene_desc,
-                cmd_buffer,
-                next_submit_serial,
-                frame_slot_index,
-                item,
-            ),
+            TransparentDrawRef::BspLiquid { item } => {
+                match draw_bsp_item_impl(
+                    device,
+                    vulkan_cache,
+                    data_cache,
+                    scene_desc,
+                    cmd_buffer,
+                    next_submit_serial,
+                    frame_slot_index,
+                    item,
+                ) {
+                    Ok(()) => {
+                        if command_diags.len() < BSP_COMMAND_DIAG_MAX {
+                            command_diags.push(BspCommandDiag {
+                                frame_slot: frame_slot_index,
+                                pipeline: item.pipeline_class,
+                                set_0: 0,
+                                set_1: 0,
+                                set_2: 0,
+                                batch_index: item.batch_index,
+                                mesh_generation: item.mesh_id.generation,
+                                material_generation: item.bsp_material_id.generation,
+                                outcome: BspDrawOutcome::Recorded,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        if command_diags.len() < BSP_COMMAND_DIAG_MAX {
+                            command_diags.push(BspCommandDiag {
+                                frame_slot: frame_slot_index,
+                                pipeline: item.pipeline_class,
+                                set_0: 0,
+                                set_1: 0,
+                                set_2: 0,
+                                batch_index: item.batch_index,
+                                mesh_generation: item.mesh_id.generation,
+                                material_generation: item.bsp_material_id.generation,
+                                outcome: BspDrawOutcome::Failed(e.clone()),
+                            });
+                        }
+                        return Err(e);
+                    }
+                }
+            }
         }
     }
+    Ok(())
 }
 
 // ── BSP draw dispatch ──────────────────────────────────────────────────
@@ -1860,22 +2008,27 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
     next_submit_serial: u64,
     bsp_draw_items: &[crate::scene::render_submission::BspFrameDrawItem],
     frame_slot_index: u32,
-) {
+    command_diags: &mut Vec<BspCommandDiag>,
+) -> Result<(), String> {
     let mut mesh_cache = data_cache
         .mesh_cache
         .lock()
-        .expect("mesh_cache lock poisoned");
+        .map_err(|_| "mesh_cache lock poisoned".to_string())?;
     let mut texture_cache = data_cache
         .texture_cache
         .lock()
-        .expect("texture_cache lock poisoned");
+        .map_err(|_| "texture_cache lock poisoned".to_string())?;
     let bsp_surface_cache = data_cache
         .bsp_surface_cache
         .lock()
-        .expect("bsp_surface_cache lock poisoned");
+        .map_err(|_| "bsp_surface_cache lock poisoned".to_string())?;
 
     let frame_values_desc = if bsp_surface_cache.has_frame_values() {
-        bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index)
+        let desc = bsp_surface_cache.frame_values_descriptor_for_slot(frame_slot_index);
+        if desc == vk::DescriptorSet::null() {
+            return Err("BSP frame-values descriptor is null for slot {frame_slot_index}".to_string());
+        }
+        desc
     } else {
         vk::DescriptorSet::null()
     };
@@ -1885,117 +2038,251 @@ unsafe fn record_bsp_opaque_draw_sequence_impl(
     let mut curr_material_descriptor: Option<vk::DescriptorSet> = None;
     let mut curr_frame_values_bound: bool = false;
 
-    let mut opaque_draws: Vec<&crate::scene::render_submission::BspFrameDrawItem> = Vec::new();
+    // Collect opaque draws, filtering out liquids.
+    let opaque_draws: Vec<&crate::scene::render_submission::BspFrameDrawItem> = bsp_draw_items
+        .iter()
+        .filter(|item| {
+            bsp_surface_cache
+                .get(item.bsp_material_id)
+                .map(|mat| mat.pipeline != VkPipelineType::BspLiquid)
+                .unwrap_or(true) // stale material → treat as opaque to fail in draw loop
+        })
+        .collect();
 
-    for item in bsp_draw_items.iter() {
-        let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
-            continue;
+    // Resolve all cache data into by-value records while guards are held.
+    struct ResolvedBspDraw {
+        batch_index: usize,
+        pipeline: VkPipelineType,
+        pipeline_object: vk::Pipeline,
+        layout: vk::PipelineLayout,
+        material_descriptor: vk::DescriptorSet,
+        index_buffer: vk::Buffer,
+        index_count: u32,
+        first_index: u32,
+        vertex_buffer_addr: u64,
+        transform: glam::Mat4,
+    }
+
+    let mut resolved: Vec<ResolvedBspDraw> = Vec::with_capacity(opaque_draws.len());
+
+    for item in &opaque_draws {
+        let bsp_mat = match bsp_surface_cache.get(item.bsp_material_id) {
+            Ok(m) => m,
+            Err(_) => {
+                let msg = format!(
+                    "BSP material handle {:?} is stale or missing (batch {})",
+                    item.bsp_material_id, item.batch_index
+                );
+                push_diag_failed(command_diags, frame_slot_index, item, &msg);
+                return Err(msg);
+            }
         };
-        if bsp_mat.pipeline != VkPipelineType::BspLiquid {
-            opaque_draws.push(item);
+
+        if mesh_cache
+            .mark_referenced(item.mesh_id, next_submit_serial)
+            .is_err()
+        {
+            let msg = format!(
+                "failed to mark BSP mesh {:?} referenced (batch {})",
+                item.mesh_id, item.batch_index
+            );
+            push_diag_failed(command_diags, frame_slot_index, item, &msg);
+            return Err(msg);
+        }
+
+        let mesh = match mesh_cache.get_loaded_id(item.mesh_id) {
+            Ok(m) => m,
+            Err(_) => {
+                let msg = format!(
+                    "BSP mesh {:?} is stale or missing (batch {})",
+                    item.mesh_id, item.batch_index
+                );
+                push_diag_failed(command_diags, frame_slot_index, item, &msg);
+                return Err(msg);
+            }
+        };
+
+        if texture_cache
+            .mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial)
+            .is_err()
+        {
+            let msg = format!(
+                "failed to mark BSP albedo texture referenced (batch {})",
+                item.batch_index
+            );
+            push_diag_failed(command_diags, frame_slot_index, item, &msg);
+            return Err(msg);
+        }
+        if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
+            if texture_cache
+                .mark_texture_referenced(fullbright_tex, next_submit_serial)
+                .is_err()
+            {
+                let msg = format!(
+                    "failed to mark BSP fullbright texture referenced (batch {})",
+                    item.batch_index
+                );
+                push_diag_failed(command_diags, frame_slot_index, item, &msg);
+                return Err(msg);
+            }
+        }
+        if texture_cache
+            .mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial)
+            .is_err()
+        {
+            let msg = format!(
+                "failed to mark BSP lightmap texture referenced (batch {})",
+                item.batch_index
+            );
+            push_diag_failed(command_diags, frame_slot_index, item, &msg);
+            return Err(msg);
+        }
+
+        let pipeline = *vulkan_cache.pipelines.get_pipeline(bsp_mat.pipeline);
+
+        resolved.push(ResolvedBspDraw {
+            batch_index: item.batch_index,
+            pipeline: bsp_mat.pipeline,
+            pipeline_object: pipeline.pipeline,
+            layout: pipeline.layout,
+            material_descriptor: bsp_mat.material_descriptor,
+            index_buffer: mesh.index_buffer.buffer,
+            index_count: mesh.index_count,
+            first_index: mesh.get_first_index(),
+            vertex_buffer_addr: mesh.vertex_buffer.alloc_address,
+            transform: item.transform,
+        });
+    }
+
+    // Release all cache locks before issuing Vulkan commands.
+    drop(bsp_surface_cache);
+    drop(texture_cache);
+    drop(mesh_cache);
+
+    for draw in &resolved {
+        let pipeline_type = draw.pipeline;
+
+        // Pipeline transition: bind pipeline + set 0 + set 2.
+        if curr_pipeline_type != Some(pipeline_type) {
+            curr_pipeline_type = Some(pipeline_type);
+            curr_pipeline_layout = draw.layout;
+            curr_material_descriptor = None;
+            curr_frame_values_bound = false;
+
+            device.cmd_bind_pipeline(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                draw.pipeline_object,
+            );
+            // Explicitly bind set 0 on every pipeline-layout transition.
+            device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                curr_pipeline_layout,
+                0,
+                &[scene_desc],
+                &[],
+            );
+        }
+
+        // Bind frame values (set 2) once per pipeline/descriptor group.
+        if !curr_frame_values_bound && frame_values_desc != vk::DescriptorSet::null() {
+            device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                curr_pipeline_layout,
+                2,
+                &[frame_values_desc],
+                &[],
+            );
+            curr_frame_values_bound = true;
+        }
+
+        // Bind material descriptor (set 1) when it changes.
+        if curr_material_descriptor != Some(draw.material_descriptor) {
+            device.cmd_bind_descriptor_sets(
+                cmd_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                curr_pipeline_layout,
+                1,
+                &[draw.material_descriptor],
+                &[],
+            );
+            curr_material_descriptor = Some(draw.material_descriptor);
+        }
+
+        device.cmd_bind_index_buffer(
+            cmd_buffer,
+            draw.index_buffer,
+            0,
+            vk::IndexType::UINT32,
+        );
+
+        let push_consts =
+            BspModelPushConsts::new(draw.transform, draw.vertex_buffer_addr);
+
+        device.cmd_push_constants(
+            cmd_buffer,
+            curr_pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            push_consts.as_byte_slice(),
+        );
+
+        device.cmd_draw_indexed(
+            cmd_buffer,
+            draw.index_count,
+            1,
+            draw.first_index,
+            0,
+            0,
+        );
+
+        // Record diagnostic.
+        if command_diags.len() < BSP_COMMAND_DIAG_MAX {
+            command_diags.push(BspCommandDiag {
+                frame_slot: frame_slot_index,
+                pipeline: Some(pipeline_type),
+                set_0: 0,
+                set_1: 0,
+                set_2: 0,
+                batch_index: draw.batch_index,
+                mesh_generation: 0, // mesh generation not tracked in ResolvedBspDraw
+                material_generation: 0,
+                outcome: BspDrawOutcome::Recorded,
+            });
         }
     }
 
-    let mut draw_items = |items: &[&crate::scene::render_submission::BspFrameDrawItem]| {
-        for item in items.iter() {
-            let Ok(bsp_mat) = bsp_surface_cache.get(item.bsp_material_id) else {
-                continue;
-            };
-            if mesh_cache
-                .mark_referenced(item.mesh_id, next_submit_serial)
-                .is_err()
-            {
-                continue;
-            }
-            let Ok(mesh) = mesh_cache.get_loaded_id(item.mesh_id) else {
-                continue;
-            };
+    if resolved.len() >= BSP_COMMAND_DIAG_MAX {
+        warn!("BSP command diagnostic collector truncated at {} entries", BSP_COMMAND_DIAG_MAX);
+    }
 
-            let _ = texture_cache.mark_texture_referenced(bsp_mat.albedo_tex, next_submit_serial);
-            if let Some(fullbright_tex) = bsp_mat.fullbright_tex {
-                let _ = texture_cache.mark_texture_referenced(fullbright_tex, next_submit_serial);
-            }
-            let _ = texture_cache.mark_texture_referenced(bsp_mat.lightmap_tex, next_submit_serial);
-
-            let pipeline_type = bsp_mat.pipeline;
-            if curr_pipeline_type != Some(pipeline_type) {
-                let next_pipeline = *vulkan_cache.pipelines.get_pipeline(pipeline_type);
-                curr_pipeline_type = Some(pipeline_type);
-                curr_pipeline_layout = next_pipeline.layout;
-                curr_material_descriptor = None;
-                curr_frame_values_bound = false;
-
-                device.cmd_bind_pipeline(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    next_pipeline.pipeline,
-                );
-                device.cmd_bind_descriptor_sets(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    curr_pipeline_layout,
-                    0,
-                    &[scene_desc],
-                    &[],
-                );
-            }
-
-            // Bind frame values (set 2) once per pipeline/descriptor group.
-            if !curr_frame_values_bound && frame_values_desc != vk::DescriptorSet::null() {
-                device.cmd_bind_descriptor_sets(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    curr_pipeline_layout,
-                    2,
-                    &[frame_values_desc],
-                    &[],
-                );
-                curr_frame_values_bound = true;
-            }
-
-            if curr_material_descriptor != Some(bsp_mat.material_descriptor) {
-                device.cmd_bind_descriptor_sets(
-                    cmd_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    curr_pipeline_layout,
-                    1,
-                    &[bsp_mat.material_descriptor],
-                    &[],
-                );
-                curr_material_descriptor = Some(bsp_mat.material_descriptor);
-            }
-
-            device.cmd_bind_index_buffer(
-                cmd_buffer,
-                mesh.index_buffer.buffer,
-                0,
-                vk::IndexType::UINT32,
-            );
-
-            let push_consts =
-                BspModelPushConsts::new(item.transform, mesh.vertex_buffer.alloc_address);
-
-            device.cmd_push_constants(
-                cmd_buffer,
-                curr_pipeline_layout,
-                vk::ShaderStageFlags::VERTEX,
-                0,
-                push_consts.as_byte_slice(),
-            );
-
-            device.cmd_draw_indexed(
-                cmd_buffer,
-                mesh.index_count,
-                1,
-                mesh.get_first_index(),
-                0,
-                0,
-            );
-        }
-    };
-
-    draw_items(&opaque_draws);
+    Ok(())
 }
+
+#[cfg(feature = "bsp")]
+fn push_diag_failed(
+    diags: &mut Vec<BspCommandDiag>,
+    frame_slot: u32,
+    item: &crate::scene::render_submission::BspFrameDrawItem,
+    reason: &str,
+) {
+    if diags.len() < BSP_COMMAND_DIAG_MAX {
+        diags.push(BspCommandDiag {
+            frame_slot,
+            pipeline: item.pipeline_class,
+            set_0: 0,
+            set_1: 0,
+            set_2: 0,
+            batch_index: item.batch_index,
+            mesh_generation: item.mesh_id.generation,
+            material_generation: item.bsp_material_id.generation,
+            outcome: BspDrawOutcome::Failed(reason.to_string()),
+        });
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // draw_imgui

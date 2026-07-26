@@ -65,14 +65,130 @@ pub struct FrameSpotLight {
     pub outer_cos: f32,
 }
 
-/// A single BSP frame draw item.
-/// For BSP geometry, we need the BSP material handle and transform.
+/// Stable cull reason carried through PVS and frustum decisions.
 #[cfg(feature = "bsp")]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BspCullReason {
+    PvsCulled,
+    FrustumCulled,
+}
+
+/// A typed BSP submission failure carrying batch identity and context.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub struct BspSubmissionFailure {
+    /// Mounted batch index in canonical order.
+    pub batch_index: usize,
+    /// First source-face index from the mounted record.
+    pub source_face_first: u32,
+    /// Number of source faces in this batch.
+    pub source_face_count: u32,
+    /// Expected pipeline class.
+    pub pipeline_class: Option<crate::data::data_cache::VkPipelineType>,
+    /// Model index (0 = worldspawn, 1+ = inline).
+    pub model_index: u32,
+    /// Human-readable failure reason.
+    pub reason: String,
+}
+
+/// A typed BSP recording failure after acquisition.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub enum BspRecordingFailure {
+    /// Submission-side failure carried into recording.
+    Submission(BspSubmissionFailure),
+    /// Cache lock poisoned.
+    CacheLockPoisoned(String),
+    /// Missing or stale mesh handle.
+    MissingMesh { batch_index: usize, mesh: MeshHandle },
+    /// Missing or stale material handle.
+    MissingMaterial { batch_index: usize, material: crate::data::handles::BspMaterialHandle },
+    /// Missing or stale albedo texture.
+    MissingAlbedoTexture { batch_index: usize },
+    /// Missing or stale lightmap texture.
+    MissingLightmapTexture { batch_index: usize },
+    /// Missing fullbright texture (only when expected by pipeline).
+    MissingFullbrightTexture { batch_index: usize },
+    /// Null scene descriptor (set 0).
+    NullSceneDescriptor,
+    /// Null material descriptor (set 1).
+    NullMaterialDescriptor { batch_index: usize },
+    /// Null frame-values descriptor (set 2).
+    NullFrameValuesDescriptor,
+    /// Mesh index/vertex buffer missing.
+    MissingMeshBuffer { batch_index: usize },
+    /// Null or incompatible BSP pipeline.
+    NullOrIncompatiblePipeline { batch_index: usize, expected: String },
+    /// Invalid frame slot index.
+    InvalidFrameSlot { slot: u32 },
+    /// Pipeline class mismatch between draw item and resolved material.
+    PipelineClassDrift { batch_index: usize, expected: String, actual: String },
+    /// Failed to mark mesh referenced (stale generation or cache error).
+    FailedMeshReference { batch_index: usize, mesh: MeshHandle },
+    /// Failed to mark albedo texture referenced.
+    FailedAlbedoReference { batch_index: usize },
+    /// Failed to mark fullbright texture referenced.
+    FailedFullbrightReference { batch_index: usize },
+    /// Failed to mark lightmap texture referenced.
+    FailedLightmapReference { batch_index: usize },
+}
+
+/// Per-draw outcome recorded in the BSP command diagnostic collector.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub enum BspDrawOutcome {
+    Recorded,
+    Culled(BspCullReason),
+    Failed(String),
+}
+
+/// Fixed-capacity per-frame BSP command diagnostic entry.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
+pub struct BspCommandDiag {
+    pub frame_slot: u32,
+    pub pipeline: Option<crate::data::data_cache::VkPipelineType>,
+    pub set_0: u64,
+    pub set_1: u64,
+    pub set_2: u64,
+    pub batch_index: usize,
+    pub mesh_generation: u32,
+    pub material_generation: u32,
+    pub outcome: BspDrawOutcome,
+}
+
+/// By-value BSP submission diagnostics produced at collection time.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone, Default)]
+pub struct BspSubmissionDiagnostics {
+    pub total_mounted: u32,
+    pub pvs_eligible: u32,
+    pub pvs_visible: u32,
+    pub pvs_culled: u32,
+    pub conservative_visible: u32,
+    pub invalid_membership: u32,
+    pub frustum_culled: u32,
+    pub recorded: u32,
+    pub failed: u32,
+}
+
+/// A single BSP frame draw item with immutable trace identity.
+#[cfg(feature = "bsp")]
+#[derive(Debug, Clone)]
 pub struct BspFrameDrawItem {
     pub mesh_id: MeshHandle,
     pub bsp_material_id: crate::data::handles::BspMaterialHandle,
     pub transform: Mat4,
+    /// Mounted batch index in canonical order.
+    pub batch_index: usize,
+    /// First source-face index.
+    pub source_face_first: u32,
+    /// Source-face count from the mounted record.
+    pub source_face_count: u32,
+    /// Expected pipeline class from the planned material.
+    pub pipeline_class: Option<crate::data::data_cache::VkPipelineType>,
+    /// Model index (0 = worldspawn).
+    pub model_index: u32,
 }
 
 /// BSP frame-varying values captured from the scene snapshot for this submission.
@@ -119,6 +235,16 @@ pub struct RenderSubmission {
     /// BSP frame-varying shader values captured with this submission.
     #[cfg(feature = "bsp")]
     pub bsp_frame_values: BspFrameValuesState,
+    /// First BSP submission failure (carried into recording as typed error).
+    #[cfg(feature = "bsp")]
+    pub bsp_failure: Option<BspSubmissionFailure>,
+    /// By-value BSP submission diagnostics.
+    #[cfg(feature = "bsp")]
+    pub bsp_diagnostics: BspSubmissionDiagnostics,
+    /// Per-frame BSP command diagnostic collector (populated during recording).
+    /// Fixed capacity; truncation is explicitly logged.
+    #[cfg(feature = "bsp")]
+    pub bsp_command_diags: Vec<BspCommandDiag>,
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -151,6 +277,12 @@ impl RenderSubmission {
             bsp_selected_lights: Vec::new(),
             #[cfg(feature = "bsp")]
             bsp_frame_values: BspFrameValuesState::default(),
+            #[cfg(feature = "bsp")]
+            bsp_failure: None,
+            #[cfg(feature = "bsp")]
+            bsp_diagnostics: BspSubmissionDiagnostics::default(),
+            #[cfg(feature = "bsp")]
+            bsp_command_diags: Vec::new(),
         }
     }
 
