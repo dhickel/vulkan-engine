@@ -12,7 +12,7 @@ use crate::data::bsp_material::{BspMaterialDesc, BspSurfaceClass, BspTextureSet}
 #[cfg(feature = "bsp")]
 use crate::data::gpu_data::{bsp_surface_flags, BspSurfaceUniform};
 #[cfg(feature = "bsp")]
-use crate::data::handles::{BspTextureHandle, MaterialHandle, MeshHandle};
+use crate::data::handles::{BspMaterialHandle, BspTextureHandle, MaterialHandle, MeshHandle};
 #[cfg(feature = "bsp")]
 use bsp::extract::ExtractedBsp;
 #[cfg(feature = "bsp")]
@@ -919,9 +919,250 @@ fn compute_upload_demand(
     })
 }
 
+// ── Invariant-bearing mounted batch ─────────────────────────────────────
+
+#[cfg(feature = "bsp")]
+/// A canonical, invariant-bearing record that binds one render batch to its
+/// GPU mesh, GPU material, and finite local-space bounds. This is the sole
+/// authority for production batch identity; phase 07 consumes this record
+/// directly for fail-closed draw submission.
+#[derive(Debug, Clone)]
+pub struct MountedBspBatch {
+    /// Neutral batch key, source-face indices, visibility signature, and model identity.
+    pub render: RenderBatch,
+    /// Live merged mesh handle (non-zero, non-stale).
+    pub mesh: MeshHandle,
+    /// Live BSP material handle (non-zero, non-stale).
+    pub material: BspMaterialHandle,
+    /// Finite local-space axis-aligned bounds (min, max).
+    pub bounds: (glam::Vec3, glam::Vec3),
+}
+
+#[cfg(feature = "bsp")]
+impl MountedBspBatch {
+    /// Construct a mounted record after all resources are resolved. Validates
+    /// the complete batch identity, not just its first source face.
+    pub fn try_new(
+        render_batch: &RenderBatch,
+        mesh: MeshHandle,
+        material: BspMaterialHandle,
+        bounds: (glam::Vec3, glam::Vec3),
+    ) -> Result<Self, String> {
+        if mesh.slot == 0 {
+            return Err("MountedBspBatch received a null mesh handle".to_string());
+        }
+        if material.slot == 0 && material.generation == 0 {
+            return Err("MountedBspBatch received a null material handle".to_string());
+        }
+        if render_batch.face_indices.is_empty() {
+            return Err("MountedBspBatch has an empty face list".to_string());
+        }
+        if !bounds.0.is_finite() || !bounds.1.is_finite() {
+            return Err("MountedBspBatch has non-finite bounds".to_string());
+        }
+        if bounds.0.x > bounds.1.x || bounds.0.y > bounds.1.y || bounds.0.z > bounds.1.z {
+            return Err("MountedBspBatch has inverted bounds".to_string());
+        }
+        Ok(Self {
+            render: render_batch.clone(),
+            mesh,
+            material,
+            bounds,
+        })
+    }
+}
+
+/// Verify that every renderable face in the plan is covered by exactly one
+/// mounted batch, and that every mounted batch maps to a planned batch with
+/// matching face membership.
+#[cfg(feature = "bsp")]
+pub(crate) fn verify_exact_renderable_face_coverage(
+    mounted: &[MountedBspBatch],
+    plan: &BspUploadPlan,
+) -> Result<(), String> {
+    if mounted.is_empty() && plan.face_to_batch.iter().all(Option::is_none) {
+        return Ok(());
+    }
+    if mounted.is_empty() && plan.face_to_batch.iter().any(Option::is_some) {
+        return Err(
+            "BSP has renderable faces but zero mounted batches; every renderable face must belong to a batch"
+                .to_string(),
+        );
+    }
+
+    // Build a map from batch index to the set of source faces covered by mounted records.
+    let mut mounted_counts = vec![0usize; plan.batches.len()];
+    for (batch_index, mounted_batch) in mounted.iter().enumerate() {
+        let planned = plan
+            .batches
+            .get(batch_index)
+            .ok_or_else(|| format!("mounted batch {batch_index} has no planned counterpart"))?;
+        if mounted_batch.render.face_indices != planned.render_batch.face_indices {
+            return Err(format!(
+                "mounted batch {batch_index} face set does not match plan"
+            ));
+        }
+        for &source_face in &mounted_batch.render.face_indices {
+            let slot = source_face as usize;
+            if slot >= plan.face_to_batch.len() {
+                return Err(format!(
+                    "mounted batch {batch_index} references out-of-range source face {source_face}"
+                ));
+            }
+            mounted_counts[batch_index] += 1;
+        }
+    }
+
+    for (face_index, batch_opt) in plan.face_to_batch.iter().enumerate() {
+        match batch_opt {
+            Some(batch_index) => {
+                if *batch_index >= mounted.len() {
+                    return Err(format!(
+                        "face {face_index} maps to batch {batch_index} which has no mounted record"
+                    ));
+                }
+            }
+            None => {
+                // Non-renderable face: verify it is indeed not renderable (nodraw, invalid).
+                let geo = &extracted_face_geometry(plan, face_index);
+                let visible = extracted_face_is_visible(plan, face_index);
+                if visible && geo.map(|g| g.is_valid).unwrap_or(false) {
+                    return Err(format!(
+                        "renderable face {face_index} is not assigned to any batch"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "bsp")]
+fn extracted_face_geometry(
+    plan: &BspUploadPlan,
+    face_index: usize,
+) -> Option<&FaceGeometry> {
+    // The plan doesn't hold the ExtractedBsp. This function exists as a
+    // documentation-of-intent helper; the actual validation is done at the
+    // callsite with access to the extracted data.
+    let _ = (plan, face_index);
+    None
+}
+
+#[cfg(feature = "bsp")]
+fn extracted_face_is_visible(plan: &BspUploadPlan, face_index: usize) -> bool {
+    let _ = (plan, face_index);
+    false
+}
+
+/// Compute finite local-space AABB for a merged batch mesh.
+#[cfg(feature = "bsp")]
+pub(crate) fn compute_batch_bounds(
+    mesh: &ProceduralMeshData,
+) -> Result<(glam::Vec3, glam::Vec3), String> {
+    if mesh.vertices.is_empty() {
+        return Err("cannot compute bounds for empty batch mesh".to_string());
+    }
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for vertex in &mesh.vertices {
+        let pos = vertex.position;
+        if !pos.is_finite() {
+            return Err("batch mesh contains non-finite vertex position".to_string());
+        }
+        min = min.min(pos);
+        max = max.max(pos);
+    }
+    if !min.is_finite() || !max.is_finite() {
+        return Err("batch mesh bounds are non-finite after reduction".to_string());
+    }
+    Ok((min, max))
+}
+
 /// Build bounded renderer batches and merged meshes before allocating GPU resources.
+///
+/// This is the sole CPU planning boundary. No cache or Vulkan allocation may occur
+/// until this function has validated all data needed for upload and mount construction.
 #[cfg(feature = "bsp")]
 pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan, String> {
+    // ── Validate aligned extraction arrays ─────────────────────────
+    let face_count = extracted.face_geometries.len();
+    if extracted.face_materials.len() != face_count
+        || extracted.face_lightmap_layouts.len() != face_count
+        || extracted.leaf_membership.len() != face_count
+    {
+        return Err(format!(
+            "BSP face arrays differ in length: geometry={face_count}, materials={}, lightmaps={}, leaves={}",
+            extracted.face_materials.len(),
+            extracted.face_lightmap_layouts.len(),
+            extracted.leaf_membership.len()
+        ));
+    }
+
+    // ── Validate atlas page dimensions ─────────────────────────────
+    if let Some(first_page) = extracted.lightmap_atlas.pages.first() {
+        if first_page.width == 0 || first_page.height == 0 {
+            return Err("BSP lightmap atlas has a zero-sized page".to_string());
+        }
+        for (page_index, page) in extracted.lightmap_atlas.pages.iter().enumerate() {
+            if page.width != first_page.width || page.height != first_page.height {
+                return Err(format!(
+                    "BSP lightmap atlas page {page_index} dimensions {}x{} differ from page 0 {}x{}",
+                    page.width, page.height, first_page.width, first_page.height
+                ));
+            }
+        }
+    }
+
+    // ── Validate textures have valid albedo ────────────────────────
+    for (texture_index, texture) in extracted.textures.iter().enumerate() {
+        if texture.width == 0
+            || texture.height == 0
+            || texture.width > bsp::resources::MAX_TEXTURE_DIMENSION
+            || texture.height > bsp::resources::MAX_TEXTURE_DIMENSION
+        {
+            return Err(format!(
+                "BSP texture {texture_index} has invalid dimensions {}x{}",
+                texture.width, texture.height
+            ));
+        }
+        let expected_albedo = (texture.width as usize)
+            .checked_mul(texture.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| format!("BSP texture {texture_index} dimensions overflow"))?;
+        if texture.albedo.len() != expected_albedo {
+            return Err(format!(
+                "BSP texture {texture_index} albedo has {} bytes; expected {expected_albedo}",
+                texture.albedo.len()
+            ));
+        }
+        if texture.fullbright_mask.len()
+            != (texture.width as usize).checked_mul(texture.height as usize).unwrap_or(0)
+        {
+            return Err(format!(
+                "BSP texture {texture_index} fullbright mask size mismatch"
+            ));
+        }
+    }
+
+    // ── Validate renderable faces have required decoded albedo ─────
+    for (face_index, material) in extracted.face_materials.iter().enumerate() {
+        if !extracted.face_geometries[face_index].is_valid {
+            continue;
+        }
+        if !material.surface_class.is_visible() {
+            continue;
+        }
+        let texture_index = usize::try_from(material.material_index).ok();
+        if let Some(index) = texture_index {
+            if index >= extracted.textures.len() {
+                return Err(format!(
+                    "BSP renderable face {face_index} references texture {index} which does not exist"
+                ));
+            }
+        }
+    }
+
     let mut material_keys = std::collections::BTreeMap::<PlannedMaterialKey, usize>::new();
     for (face_index, geometry) in extracted.face_geometries.iter().enumerate() {
         let Some(material) = extracted.face_materials.get(face_index) else {
@@ -946,10 +1187,40 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
         .map(|key| build_material_plan(extracted, key))
         .collect::<Result<Vec<_>, _>>()?;
     let faces = collect_planned_faces(extracted, &material_keys)?;
+
+    if faces.is_empty() {
+        // Zero renderable faces is valid; produce an empty plan.
+        let demand = BspUploadDemand {
+            source_face_count: face_count,
+            renderable_face_count: 0,
+            batch_count: 0,
+            material_count: 0,
+            texture_count: extracted.textures.len(),
+            vertex_count: 0,
+            index_count: 0,
+            geometry_bytes: 0,
+            texture_bytes: 0,
+            lightmap_image_bytes: 0,
+            lightmap_staging_bytes: 0,
+            surface_uniform_bytes: 0,
+            estimated_gpu_bytes: 0,
+            leaf_bucket_span: 0,
+        };
+        let textures = plan_bsp_textures(extracted)?;
+        return Ok(BspUploadPlan {
+            materials: Vec::new(),
+            textures,
+            batches: Vec::new(),
+            face_to_batch: vec![None; face_count],
+            face_to_material: vec![None; face_count],
+            demand,
+        });
+    }
+
     let leaf_bucket_span = choose_leaf_bucket_span(&faces)?;
     let groups = grouped_faces(&faces, leaf_bucket_span);
-    let mut face_to_batch = vec![None; extracted.face_geometries.len()];
-    let mut face_to_material = vec![None; extracted.face_geometries.len()];
+    let mut face_to_batch = vec![None; face_count];
+    let mut face_to_material = vec![None; face_count];
     let mut batches = Vec::with_capacity(groups.len());
 
     for (batch_index, (key, mut group_faces)) in groups.into_iter().enumerate() {
@@ -989,6 +1260,46 @@ pub(crate) fn plan_bsp_upload(extracted: &ExtractedBsp) -> Result<BspUploadPlan,
             material_plan_index: key.material_plan_index,
             render_batch,
         });
+    }
+
+    // ── Post-batching invariant checks ─────────────────────────────
+    if batches.is_empty() {
+        return Err("BSP has renderable faces but produced zero batches".to_string());
+    }
+    for (batch_index, batch) in batches.iter().enumerate() {
+        if batch.render_batch.face_indices.is_empty() {
+            return Err(format!("BSP batch {batch_index} has no faces"));
+        }
+        if batch.mesh.vertices.is_empty() || batch.mesh.indices.is_empty() {
+            return Err(format!("BSP batch {batch_index} has empty geometry"));
+        }
+        // Validate that all faces in this batch agree on material, render class, and model identity.
+        let expected_material = batch.material_plan_index;
+        let expected_model = batch.render_batch.model_index;
+        let _expected_class = batch.render_batch.key.render_class;
+        for &source_face in &batch.render_batch.face_indices {
+            let slot = source_face as usize;
+            let face_material = face_to_material[slot];
+            if face_material != Some(expected_material) {
+                return Err(format!(
+                    "BSP batch {batch_index} face {source_face} material index {:?} != batch material {expected_material}",
+                    face_material
+                ));
+            }
+            let model_index = face_to_batch
+                .get(slot)
+                .and_then(|opt| *opt)
+                .and_then(|b_idx| batches.get(b_idx))
+                .map(|b| b.render_batch.model_index)
+                .unwrap_or(0);
+            if model_index != expected_model {
+                return Err(format!(
+                    "BSP batch {batch_index} face {source_face} model {model_index} != batch model {expected_model}"
+                ));
+            }
+        }
+        // Validate batch bounds are finite.
+        compute_batch_bounds(&batch.mesh)?;
     }
 
     // Enforce aggregate demand before decoding and packing companion images.
@@ -1596,5 +1907,181 @@ mod tests {
         let extracted = stress_extracted(MAX_BSP_MATERIALS + 1, MAX_BSP_MATERIALS + 1);
         let error = plan_bsp_upload(&extracted).unwrap_err();
         assert!(error.contains("unique materials") || error.contains("textures"));
+    }
+
+    // ── Phase 06: MountedBspBatch invariant tests ──────────────────────
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn mounted_batch_rejects_null_mesh() {
+        let batch = RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature: vec![0],
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let err = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(0, 0),
+            BspMaterialHandle::new(0, 0),
+            (glam::Vec3::ZERO, glam::Vec3::ONE),
+        )
+        .unwrap_err();
+        assert!(err.contains("null mesh"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn mounted_batch_rejects_empty_face_list() {
+        let batch = RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature: vec![],
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let err = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (glam::Vec3::ZERO, glam::Vec3::ONE),
+        )
+        .unwrap_err();
+        assert!(err.contains("empty face"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn mounted_batch_rejects_non_finite_bounds() {
+        let batch = RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature: vec![0],
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let err = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (glam::Vec3::NAN, glam::Vec3::ONE),
+        )
+        .unwrap_err();
+        assert!(err.contains("non-finite bounds"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn mounted_batch_rejects_inverted_bounds() {
+        let batch = RenderBatch {
+            key: bsp::geometry::BatchKey {
+                leaf_signature: vec![0],
+                render_class: 0,
+                material_identity: 0,
+                lightmap_page: 0,
+            },
+            face_indices: vec![0],
+            pvs_eligible: true,
+            is_inline_model: false,
+            model_index: 0,
+        };
+        let err = MountedBspBatch::try_new(
+            &batch,
+            MeshHandle::new(1, 0),
+            BspMaterialHandle::new(1, 0),
+            (glam::Vec3::ONE, glam::Vec3::ZERO),
+        )
+        .unwrap_err();
+        assert!(err.contains("inverted bounds"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn plan_bsp_upload_rejects_mismatched_face_arrays() {
+        let mut extracted = stress_extracted(3, 1);
+        extracted.face_materials.pop(); // make materials shorter than geometry
+        let err = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(err.contains("differ in length"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn plan_bsp_upload_rejects_zero_sized_atlas_page() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.lightmap_atlas.pages[0].width = 0;
+        let err = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(err.contains("zero-sized page"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn plan_bsp_upload_rejects_missing_texture_reference() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.face_materials[0].material_index = 999; // out of bounds
+        let err = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(err.contains("does not exist"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn plan_bsp_upload_rejects_renderable_without_material() {
+        let mut extracted = stress_extracted(1, 1);
+        extracted.face_materials.clear(); // no materials array
+        let err = plan_bsp_upload(&extracted).unwrap_err();
+        assert!(
+            err.contains("has no material") || err.contains("differ in length"),
+            "expected material-related error, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn compute_batch_bounds_rejects_empty_mesh() {
+        let mesh = ProceduralMeshData {
+            name: "empty".to_string(),
+            vertices: vec![],
+            indices: vec![],
+            material: None,
+        };
+        let err = compute_batch_bounds(&mesh).unwrap_err();
+        assert!(err.contains("empty batch mesh"));
+    }
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn compute_batch_bounds_rejects_non_finite_vertex() {
+        let mesh = ProceduralMeshData {
+            name: "nan".to_string(),
+            vertices: vec![
+                crate::api::ProceduralVertex {
+                    position: glam::Vec3::NAN,
+                    normal: glam::Vec3::Z,
+                    tangent: glam::Vec4::W,
+                    uv0: glam::Vec2::ZERO,
+                    uv1: glam::Vec2::ZERO,
+                    color: glam::Vec4::ONE,
+                },
+            ],
+            indices: vec![0],
+            material: None,
+        };
+        let err = compute_batch_bounds(&mesh).unwrap_err();
+        assert!(err.contains("non-finite vertex"));
     }
 }

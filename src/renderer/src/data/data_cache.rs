@@ -3269,7 +3269,7 @@ pub struct BspSurfaceCache {
     /// Free slot indices for reuse after retirement.
     free_slots: Vec<u32>,
     /// Descriptor pool for material descriptor sets (set 1).
-    material_desc_pool: Option<vk::DescriptorPool>,
+    pub(crate) material_desc_pool: Option<vk::DescriptorPool>,
     /// Cached material descriptor set layout.
     material_set_layout: Option<vk::DescriptorSetLayout>,
     /// Device handle for pool destruction.
@@ -3563,6 +3563,62 @@ impl BspSurfaceCache {
         self.cached_materials
             .get(slot)
             .ok_or(crate::data::handles::CacheError::InvalidHandle)
+    }
+
+    /// Invalidate a BSP material handle by bumping its generation counter.
+    ///
+    /// Idempotent: calling twice on the same handle is safe; the second call
+    /// is a no-op because the generation has already advanced past the handle.
+    pub fn remove(&mut self, handle: crate::data::handles::BspMaterialHandle) {
+        let slot = handle.slot as usize;
+        if let Some(gen) = self.generations.get_mut(slot) {
+            if *gen == handle.generation {
+                *gen = gen.wrapping_add(1);
+                self.free_slots.push(handle.slot);
+            }
+        }
+    }
+
+    /// Clear the lightmap atlas from the surface cache.
+    ///
+    /// Used by receipt rollback to release atlas GPU resources without
+    /// destroying the entire cache.
+    pub fn clear_lightmap_atlas(&mut self, device: &ash::Device, allocator: &vk_mem::Allocator) {
+        if let Some(ref mut atlas) = self.lightmap_atlas {
+            atlas.destroy(device, allocator);
+            self.lightmap_atlas = None;
+        }
+    }
+
+    /// Clear frame-values state from the surface cache.
+    ///
+    /// Used by receipt rollback. Does not destroy the material descriptor pool
+    /// or surface UBO; those are handled separately.
+    pub fn clear_frame_values(
+        &mut self,
+        device: &ash::Device,
+        allocator: &std::sync::Arc<std::sync::Mutex<vk_mem::Allocator>>,
+    ) {
+        if let Some(pool) = self.frame_values_desc_pool.take() {
+            if !self.frame_values_descriptors.is_empty() {
+                unsafe {
+                    device.free_descriptor_sets(pool, &self.frame_values_descriptors);
+                }
+            }
+            unsafe {
+                device.destroy_descriptor_pool(pool, None);
+            }
+        }
+        self.frame_values_descriptors.clear();
+        self.frame_values_set_layout = None;
+        self.frame_slot_count = 0;
+        self.frame_values_stride = 0;
+        if let Some(ref mut ubo) = self.frame_values_ubo {
+            if let Ok(alloc_guard) = allocator.lock() {
+                ubo.destroy(&alloc_guard);
+            }
+            self.frame_values_ubo = None;
+        }
     }
 }
 

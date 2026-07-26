@@ -6,6 +6,8 @@
 //! Contract: `bsp-spatial-physics.md` §4.
 
 #[cfg(feature = "bsp")]
+use crate::data::bsp_import::MountedBspBatch;
+#[cfg(feature = "bsp")]
 use crate::data::handles::{BspMaterialHandle, MeshHandle};
 #[cfg(feature = "bsp")]
 use crate::scene::render_submission::{FramePointLight, MAX_POINT_LIGHTS_GPU};
@@ -62,6 +64,9 @@ pub struct BspMountState {
     pub leaf_membership: Vec<Vec<u32>>,
     /// Whether a BSP mount is active.
     pub active: bool,
+    /// Canonical mounted batch records — authoritative for batch identity.
+    /// Each record pairs a render batch with its mesh, material, and bounds.
+    pub mounted_batches: Vec<MountedBspBatch>,
     /// Mesh handles per source face index. Non-rendered faces use `MeshHandle::new(0, 0)`.
     pub face_meshes: Vec<MeshHandle>,
     /// BSP material handles per source face index.
@@ -132,6 +137,7 @@ impl BspMountState {
             scale: 0.0254,
             leaf_membership: Vec::new(),
             active: false,
+            mounted_batches: Vec::new(),
             face_meshes: Vec::new(),
             face_materials: Vec::new(),
             render_batches: Vec::new(),
@@ -171,6 +177,7 @@ impl BspMountState {
             scale,
             leaf_membership: Vec::new(),
             active: true,
+            mounted_batches: Vec::new(),
             face_meshes: Vec::new(),
             face_materials: Vec::new(),
             render_batches: Vec::new(),
@@ -207,6 +214,7 @@ impl BspMountState {
             scale: extracted.transform.scale,
             leaf_membership: extracted.leaf_membership.clone(),
             active: true,
+            mounted_batches: Vec::new(),
             face_meshes: Vec::new(),
             face_materials: Vec::new(),
             render_batches: Vec::new(),
@@ -227,7 +235,90 @@ impl BspMountState {
         self.leaf_membership = members;
     }
 
+    /// Set renderer-facing BSP assets from canonical mounted batch records.
+    ///
+    /// This is the authoritative publication path. Legacy parallel arrays are
+    /// derived from the canonical records and verified for exact equality.
+    /// Returns an error on any mismatch.
+    pub fn set_render_assets_from_canonical(
+        &mut self,
+        mounted_batches: &[MountedBspBatch],
+        face_meshes: Vec<MeshHandle>,
+        face_materials: Vec<Option<BspMaterialHandle>>,
+        light_descriptors: Vec<bsp::extract::LightDescriptor>,
+    ) -> Result<(), String> {
+        if mounted_batches.is_empty() {
+            self.mounted_batches = Vec::new();
+            self.face_meshes = face_meshes;
+            self.face_materials = face_materials;
+            self.render_batches = Vec::new();
+            self.batch_meshes = Vec::new();
+            self.batch_materials = Vec::new();
+            self.light_descriptors = light_descriptors;
+            self.refresh_light_leafs();
+            self.reset_light_selection();
+            return Ok(());
+        }
+
+        let render_batches: Vec<bsp::geometry::RenderBatch> = mounted_batches
+            .iter()
+            .map(|mb| mb.render.clone())
+            .collect();
+        let batch_meshes: Vec<MeshHandle> = mounted_batches
+            .iter()
+            .map(|mb| mb.mesh)
+            .collect();
+        let batch_materials: Vec<BspMaterialHandle> = mounted_batches
+            .iter()
+            .map(|mb| mb.material)
+            .collect();
+
+        if render_batches.len() != batch_meshes.len()
+            || render_batches.len() != batch_materials.len()
+        {
+            return Err("canonical batch array length mismatch".to_string());
+        }
+
+        // Verify that per-face projections are consistent with canonical records.
+        for mb in mounted_batches {
+            for &source_face in &mb.render.face_indices {
+                let slot = source_face as usize;
+                if slot >= face_meshes.len() {
+                    return Err(format!(
+                        "canonical batch references out-of-range source face {source_face}"
+                    ));
+                }
+                if face_meshes[slot] != mb.mesh {
+                    return Err(format!(
+                        "face {source_face} mesh handle mismatch: face={:?} batch={:?}",
+                        face_meshes[slot], mb.mesh
+                    ));
+                }
+                if face_materials[slot] != Some(mb.material) {
+                    return Err(format!(
+                        "face {source_face} material handle mismatch: face={:?} batch={:?}",
+                        face_materials[slot], Some(mb.material)
+                    ));
+                }
+            }
+        }
+
+        self.mounted_batches = mounted_batches.to_vec();
+        self.face_meshes = face_meshes;
+        self.face_materials = face_materials;
+        self.render_batches = render_batches;
+        self.batch_meshes = batch_meshes;
+        self.batch_materials = batch_materials;
+        self.light_descriptors = light_descriptors;
+        self.refresh_light_leafs();
+        self.reset_light_selection();
+        Ok(())
+    }
+
     /// Set renderer-facing BSP assets stored alongside the visibility mount.
+    ///
+    /// Deprecated: prefer `set_render_assets_from_canonical` which validates
+    /// all alignments. This method retains a debug_assert for backward compat.
     pub fn set_render_assets(
         &mut self,
         face_meshes: Vec<MeshHandle>,
