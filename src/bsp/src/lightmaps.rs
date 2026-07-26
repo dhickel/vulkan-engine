@@ -48,8 +48,9 @@ impl Luxel {
 pub struct StyleLightmapLayout {
     /// BSP light style identifier.
     pub style_id: u8,
-    /// Zero-based layer index within this face's style list.
-    pub layer_index: u32,
+    /// Source slot index (0–3) in the face's `styles` array.
+    /// This determines the physical array layer: `page * 4 + source_slot`.
+    pub source_slot: u8,
     /// Which atlas page this style's luxels live on.
     pub page_index: u32,
     /// Pixel coordinates of the bottom-left luxel in the atlas.
@@ -95,10 +96,12 @@ pub struct AtlasPage {
     pub index: u32,
     /// RGB8 pixel data (width × height × 3 bytes).
     pub data: Vec<u8>,
-    /// Page width.
+    /// Page width (total allocated).
     pub width: u32,
-    /// Page height.
+    /// Page height (total allocated).
     pub height: u32,
+    /// Maximum used pixel extent in this page (width, height).
+    pub used_extent: (u32, u32),
     /// Current write cursor position (x, y) for next face.
     cursor: (u32, u32),
     /// Current row height (used during packing).
@@ -106,7 +109,7 @@ pub struct AtlasPage {
 }
 
 impl AtlasPage {
-    /// Create a new atlas page.
+    /// Create a new atlas page with reserved capacity.
     pub fn new(index: u32, width: u32, height: u32) -> Self {
         let size = (width * height * 3) as usize;
         AtlasPage {
@@ -114,9 +117,15 @@ impl AtlasPage {
             data: vec![0u8; size],
             width,
             height,
+            used_extent: (0, 0),
             cursor: (0, 0),
             row_height: 0,
         }
+    }
+
+    /// The maximum pixel extent actually occupied by written luxels.
+    pub fn max_used_extent(&self) -> (u32, u32) {
+        self.used_extent
     }
 
     /// Try to allocate a rectangle of (w, h) luxels with padding.
@@ -148,7 +157,7 @@ impl AtlasPage {
         None
     }
 
-    /// Write a luxel block at the given atlas offset.
+    /// Write a luxel block at the given atlas offset and update used extent.
     pub fn write_luxels(
         &mut self,
         offset: (u32, u32),
@@ -156,6 +165,12 @@ impl AtlasPage {
         width: u32,
         height: u32,
     ) {
+        let end_x = offset.0.saturating_add(width);
+        let end_y = offset.1.saturating_add(height);
+        self.used_extent = (
+            self.used_extent.0.max(end_x),
+            self.used_extent.1.max(end_y),
+        );
         for y in 0..height {
             for x in 0..width {
                 let lx = (offset.0 + x) as usize;
@@ -217,8 +232,8 @@ impl LightmapAtlas {
     ) -> Result<FaceLightmapLayout, BspReport> {
         let style_layout = self.allocate_face_style_with_limit(
             face_index,
-            0,
-            0,
+            0,   // style_id
+            0,   // source_slot
             luxel_data,
             luxel_width,
             luxel_height,
@@ -244,7 +259,7 @@ impl LightmapAtlas {
         &mut self,
         _face_index: u32,
         style_id: u8,
-        layer_index: u32,
+        source_slot: u8,
         luxel_data: &[Luxel],
         luxel_width: u32,
         luxel_height: u32,
@@ -253,7 +268,7 @@ impl LightmapAtlas {
         if luxel_data.is_empty() || luxel_width == 0 || luxel_height == 0 {
             return Ok(StyleLightmapLayout {
                 style_id,
-                layer_index,
+                source_slot,
                 page_index: 0,
                 atlas_offset: (0, 0),
                 luxel_extents: (0, 0),
@@ -269,7 +284,7 @@ impl LightmapAtlas {
                 self.pages[page_idx].write_luxels(offset, luxel_data, w, h);
                 return Ok(StyleLightmapLayout {
                     style_id,
-                    layer_index,
+                    source_slot,
                     page_index: page_idx as u32,
                     atlas_offset: offset,
                     luxel_extents: (w, h),
@@ -298,12 +313,30 @@ impl LightmapAtlas {
 
         Ok(StyleLightmapLayout {
             style_id,
-            layer_index,
+            source_slot,
             page_index,
             atlas_offset: offset,
             luxel_extents: (w, h),
             has_data: true,
         })
+    }
+
+    /// Compute the common used extent across all populated atlas pages.
+    ///
+    /// Returns `(width, height)` that is large enough for every page's
+    /// occupied region, clamped to at least 1×1. When there are no pages
+    /// the result is `(1, 1)`.
+    pub fn common_used_extent(&self) -> (u32, u32) {
+        if self.pages.is_empty() {
+            return (1, 1);
+        }
+        let mut max_w = 1u32;
+        let mut max_h = 1u32;
+        for page in &self.pages {
+            max_w = max_w.max(page.used_extent.0.max(1));
+            max_h = max_h.max(page.used_extent.1.max(1));
+        }
+        (max_w, max_h)
     }
 
     /// Get the face layout for a given face index.

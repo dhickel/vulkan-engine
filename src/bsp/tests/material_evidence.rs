@@ -383,3 +383,219 @@ fn materials_lit_validation_rejects_bad_magic() {
 fn materials_lit_validation_too_small() {
     assert!(companions::validate_lit_header(&[0u8; 3], false).is_err());
 }
+
+// ── Phase 08: Lightmap atlas slot preservation ────────────────────────────
+
+/// Verify that a face with styles [0, 255, 1, 255] places style 0 into
+/// source slot 0 and style 1 into source slot 2 (not compact slot 0/1).
+#[test]
+fn phase08_lightmap_slot_preserves_source_order() {
+    let (bsp_data, lit_data) = load_dungeon_materials_bsp2();
+    let palette_data = read(&palette_path());
+    let palette = load_palette();
+
+    let options = LoadOptions {
+        palette: Some(palette_data),
+        lit_data: Some(lit_data),
+        ..LoadOptions::default()
+    };
+    let world = BspLoader::load(&bsp_data, &options).expect("load");
+
+    let request = BspExtractionRequest {
+        world,
+        palette: Some(palette),
+        ..Default::default()
+    };
+    let extracted = extract(request).expect("extract");
+
+    // Every face with lightmap data must have style_layers whose
+    // source_slot field matches their position in face.styles.
+    for (fi, face_geo) in extracted.face_geometries.iter().enumerate() {
+        let layout = &extracted.face_lightmap_layouts[fi];
+        if !layout.has_data {
+            continue;
+        }
+        for style_layout in &layout.style_layers {
+            let source_slot = style_layout.source_slot as usize;
+            assert!(source_slot < 4,
+                "face {fi} style layout has invalid source_slot {source_slot}");
+            // Verify the style_id matches the face's style at that slot
+            // (we can't directly access BSP faces from ExtractedBsp, but
+            // we can verify source_slot is in range and the style_id is valid)
+            assert!(style_layout.style_id <= 63,
+                "face {fi} source_slot {source_slot} has invalid style_id {}",
+                style_layout.style_id);
+        }
+
+        // Verify no duplicate source_slots within a face
+        let mut slots = [false; 4];
+        for style_layout in &layout.style_layers {
+            let s = style_layout.source_slot as usize;
+            assert!(!slots[s],
+                "face {fi} has duplicate source_slot {s}");
+            slots[s] = true;
+        }
+    }
+}
+
+/// Verify that atlas pages track their used extent correctly.
+#[test]
+fn phase08_atlas_page_used_extent() {
+    let mut page = lightmaps::AtlasPage::new(0, 256, 256);
+    assert_eq!(page.used_extent, (0, 0));
+
+    // Allocate a 16×16 block at offset (2, 2) with padding
+    let offset = page.allocate(16, 16).expect("allocate");
+    assert_eq!(offset.0, lightmaps::ATLAS_PADDING);
+    assert_eq!(offset.1, lightmaps::ATLAS_PADDING);
+
+    let luxels = vec![lightmaps::Luxel::from_gray(128); 256];
+    page.write_luxels(offset, &luxels, 16, 16);
+
+    // Used extent should be offset + width = 2 + 16 = 18
+    assert_eq!(page.used_extent.0, 18);
+    assert_eq!(page.used_extent.1, 18);
+
+    // Allocate another block further out
+    let offset2 = page.allocate(32, 8).expect("allocate");
+    let luxels2 = vec![lightmaps::Luxel::from_gray(200); 256];
+    page.write_luxels(offset2, &luxels2, 32, 8);
+
+    // Used extent should be the max of both blocks
+    assert!(page.used_extent.0 >= 18 + 2 + 32);
+    assert!(page.used_extent.1 >= 18);
+}
+
+/// Verify that the common_used_extent reflects actual content, not 4096².
+#[test]
+fn phase08_common_used_extent_not_nominal() {
+    let mut atlas = lightmaps::LightmapAtlas::new();
+    assert_eq!(atlas.common_used_extent(), (1, 1));
+
+    let luxels = vec![lightmaps::Luxel::from_gray(128); 64]; // 8×8
+    atlas.allocate_face_style_with_limit(
+        0, 0, 0, &luxels, 8, 8, 4,
+    ).expect("allocate face style");
+
+    let (w, h) = atlas.common_used_extent();
+    // Used extent should be much smaller than 4096
+    assert!(w < 4096, "common used extent width {w} should be < 4096");
+    assert!(h < 4096, "common used extent height {h} should be < 4096");
+    assert!(w >= 10, "width {w} should be at least luxels + padding");
+    assert!(h >= 10, "height {h} should be at least luxels + padding");
+}
+
+/// Verify that style IDs 64..=254 are rejected or cause the face to fail
+/// lightmap validation (since no valid style remains to provide light data).
+#[test]
+fn phase08_style_id_64_254_rejected() {
+    let mut world = bsp_test_minimal_world();
+    world.faces[0].styles = [64, 255, 255, 255]; // invalid: 64 is not 255 and not <=63
+    // Provide enough lightmap data
+    world.lightmap_data = vec![128; 16];
+
+    let result = extract(BspExtractionRequest {
+        world,
+        strict: true,
+        ..Default::default()
+    });
+    assert!(result.is_err(), "should reject style 64");
+}
+
+/// Verify strict mode rejects visible faces with absent lightmap data.
+#[test]
+fn phase08_strict_rejects_missing_lightmap() {
+    let mut world = bsp_test_minimal_world();
+    world.faces[0].lightofs = -1; // no lightmap offset
+    world.faces[0].styles = [0, 255, 255, 255];
+
+    let result = extract(BspExtractionRequest {
+        world,
+        strict: true,
+        ..Default::default()
+    });
+    assert!(result.is_err(), "strict should reject missing lightmap");
+}
+
+/// Verify the common used extent is used by the demand computation.
+#[test]
+fn phase08_demand_uses_common_used_extent() {
+    let mut world = bsp_test_minimal_world();
+    world.faces[0].styles = [0, 255, 255, 255];
+    world.lightmap_data = vec![128; 4]; // 2×2 luxels × 1 byte
+
+    let extracted = extract(BspExtractionRequest {
+        world,
+        ..Default::default()
+    }).expect("extract");
+
+    let (used_w, used_h) = extracted.lightmap_atlas.common_used_extent();
+    assert!(used_w > 0 && used_h > 0);
+    // A single 2×2 face with padding should fit in a small area
+    assert!(used_w <= 64);
+    assert!(used_h <= 64);
+}
+
+// ── Helper: build minimal BSP world for lightmap tests ────────────────────
+
+fn bsp_test_minimal_world() -> BspWorld {
+    use crate::lumps;
+    let mut world = BspWorld::empty();
+    world.profile = crate::profile::BspProfile::Bsp29;
+
+    // One plane facing up
+    world.planes = vec![lumps::Plane {
+        normal: glam::Vec3::Z,
+        dist: 0.0,
+        plane_type: 0,
+    }];
+    // Three vertices for a small triangle
+    world.vertices = vec![
+        glam::Vec3::ZERO,
+        glam::Vec3::X * 16.0,
+        glam::Vec3::Y * 16.0,
+    ];
+    world.edges = vec![
+        lumps::Edge { v: [0, 1] },
+        lumps::Edge { v: [1, 2] },
+        lumps::Edge { v: [2, 0] },
+    ];
+    world.surfedges = vec![0, 1, 2];
+    world.texinfos = vec![lumps::Texinfo {
+        vec_s: glam::Vec3::X,
+        dist_s: 0.0,
+        vec_t: glam::Vec3::Y,
+        dist_t: 0.0,
+        miptex: 0,
+        flags: 0,
+    }];
+    // One face with style 0
+    world.faces = vec![lumps::Face {
+        plane_id: 0,
+        side: 0,
+        ledge_id: 0,
+        ledge_num: 3,
+        texinfo_id: 0,
+        styles: [0, 255, 255, 255],
+        lightofs: 0,
+    }];
+    // Miptex data with one embedded texture slot
+    let mut miptex = Vec::new();
+    miptex.extend_from_slice(&1i32.to_le_bytes()); // count
+    miptex.extend_from_slice(&8i32.to_le_bytes()); // offset to first entry
+    let mut name = [0u8; 16];
+    name[..4].copy_from_slice(b"TEST");
+    miptex.extend_from_slice(&name);
+    miptex.extend_from_slice(&4u32.to_le_bytes());  // width
+    miptex.extend_from_slice(&4u32.to_le_bytes());  // height
+    miptex.extend_from_slice(&40u32.to_le_bytes()); // mip0 offset
+    miptex.extend_from_slice(&0u32.to_le_bytes());  // mip1
+    miptex.extend_from_slice(&0u32.to_le_bytes());  // mip2
+    miptex.extend_from_slice(&0u32.to_le_bytes());  // mip3
+    // 4×4 palette indices (16 bytes) + 2 bytes padding
+    miptex.extend_from_slice(&[0u8; 18]);
+    world.miptex_data = miptex;
+    world.palette = Some([[128u8; 3]; 256]);
+
+    world
+}

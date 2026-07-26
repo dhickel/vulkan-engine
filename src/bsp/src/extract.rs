@@ -11,7 +11,7 @@ use crate::diagnostic::{BspReport, DiagnosticCode};
 use crate::entities::{self, Entity, EntityClass};
 use crate::geometry::{self, FaceGeometry, RenderBatch, RenderClass};
 use crate::identity::{self, EntityIdentity};
-use crate::lightmaps::{self, FaceLightmapLayout, LightmapAtlas, Luxel};
+use crate::lightmaps::{self, FaceLightmapLayout, LightmapAtlas, Luxel, MAX_STYLES_PER_FACE};
 use crate::lumps;
 use crate::materials::{self, AnimatedTexture, BspMaterial, SurfaceClass};
 use crate::resources::{
@@ -1151,14 +1151,12 @@ fn extract_lightmaps(
             .copied()
             .map(|sc| matches!(sc, SurfaceClass::Opaque | SurfaceClass::AlphaMask))
             .unwrap_or(true);
-        let valid_styles: Vec<u8> = face
+        let has_any_valid_style = face
             .styles
             .iter()
-            .copied()
-            .filter(|&style| style != lightmaps::STYLE_SENTINEL)
-            .collect();
+            .any(|&style| style != lightmaps::STYLE_SENTINEL);
 
-        if face.lightofs < 0 || extents.0 == 0 || extents.1 == 0 || valid_styles.is_empty() {
+        if face.lightofs < 0 || extents.0 == 0 || extents.1 == 0 || !has_any_valid_style {
             if visible_lightmapped && face.lightofs < 0 {
                 diagnostics.push(BspReport::new(
                     DiagnosticCode::MissingRequiredLightmap,
@@ -1172,30 +1170,59 @@ fn extract_lightmaps(
 
         let luxel_count = (extents.0 as usize).saturating_mul(extents.1 as usize);
         let mut layout = FaceLightmapLayout::empty();
-        let mut style_luxel_offset = 0usize;
-        for (slot, style) in valid_styles.iter().copied().enumerate() {
-            atlas.add_style(style);
+        // data_ordinal advances only for populated source slots; it is
+        // independent of the source-slot index.
+        let mut data_ordinal: usize = 0;
+        for source_slot in 0..MAX_STYLES_PER_FACE {
+            let style_id = face.styles[source_slot];
+            if style_id == lightmaps::STYLE_SENTINEL {
+                continue;
+            }
+            if style_id > lightmaps::MAX_STYLE_IDENTIFIER {
+                diagnostics.push(BspReport::new(
+                    DiagnosticCode::UnsupportedStyleSlot,
+                    strict,
+                    format!(
+                        "face {} source slot {} has invalid style id {}",
+                        fi, source_slot, style_id
+                    ),
+                ));
+                continue;
+            }
+            atlas.add_style(style_id);
+            let style_offset = match data_ordinal.checked_mul(luxel_count) {
+                Some(offset) => offset,
+                None => {
+                    diagnostics.push(BspReport::new(
+                        DiagnosticCode::LightmapStyleTruncated,
+                        strict,
+                        format!("face {} style {} ordinal overflow", fi, style_id),
+                    ));
+                    data_ordinal = data_ordinal.saturating_add(1);
+                    continue;
+                }
+            };
             match decode_face_style_luxels(
                 light_data,
                 colored,
                 face.lightofs,
-                style_luxel_offset,
+                style_offset,
                 luxel_count,
                 fi,
-                style,
+                style_id,
                 strict,
             ) {
                 Ok(luxels) => match atlas.allocate_face_style_with_limit(
                     fi as u32,
-                    style,
-                    slot as u32,
+                    style_id,
+                    source_slot as u8,
                     &luxels,
                     extents.0,
                     extents.1,
                     max_pages,
                 ) {
                     Ok(style_layout) => {
-                        if slot == 0 {
+                        if source_slot == 0 {
                             layout.page_index = style_layout.page_index;
                             layout.atlas_offset = style_layout.atlas_offset;
                             layout.luxel_extents = style_layout.luxel_extents;
@@ -1207,7 +1234,7 @@ fn extract_lightmaps(
                 },
                 Err(e) => diagnostics.push(e),
             }
-            style_luxel_offset = style_luxel_offset.saturating_add(luxel_count);
+            data_ordinal = data_ordinal.saturating_add(1);
         }
         while atlas.face_layouts.len() <= fi {
             atlas.face_layouts.push(FaceLightmapLayout::empty());

@@ -94,59 +94,41 @@ fn build_lightmap_upload_data(
         ));
     }
 
-    let (width, height, page_count) = if let Some(first_page) = atlas.pages.first() {
-        if first_page.width == 0 || first_page.height == 0 {
-            return Err("BSP lightmap atlas has a zero-sized page".to_string());
-        }
-        let required_page_bytes = (first_page.width as usize)
-            .checked_mul(first_page.height as usize)
-            .and_then(|pixels| pixels.checked_mul(3))
-            .ok_or_else(|| "BSP lightmap page dimensions overflow".to_string())?;
-        for (page_index, page) in atlas.pages.iter().enumerate() {
-            if page.width != first_page.width || page.height != first_page.height {
-                return Err(
-                    "BSP lightmap atlas pages must share dimensions for array upload".to_string(),
-                );
-            }
-            if page.data.len() < required_page_bytes {
-                return Err(format!(
-                    "BSP lightmap page {page_index} has {} bytes; expected at least {required_page_bytes}",
-                    page.data.len()
-                ));
-            }
-        }
-        (
-            first_page.width,
-            first_page.height,
-            u32::try_from(atlas.pages.len())
-                .map_err(|_| "BSP lightmap page count exceeds u32".to_string())?,
-        )
-    } else {
-        // A 1x1 fallback keeps no-lightmap surfaces renderable without a fake
-        // atlas handle or a special shader path.
-        (1, 1, 1)
-    };
+    let page_count = u32::try_from(atlas.pages.len())
+        .map_err(|_| "BSP lightmap page count exceeds u32".to_string())?;
+    let (width, height) = atlas.common_used_extent();
+    if width == 0 || height == 0 {
+        return Err("BSP lightmap atlas has zero used extent".to_string());
+    }
     let layer_count = page_count
         .checked_mul(4)
         .ok_or_else(|| "BSP lightmap array layer count overflow".to_string())?;
 
-    let mut pixels = vec![255, 255, 255, 255];
-    let mut regions = vec![
-        ash::vk::BufferImageCopy::default()
-            .buffer_offset(0)
-            .image_subresource(
-                ash::vk::ImageSubresourceLayers::default()
-                    .aspect_mask(ash::vk::ImageAspectFlags::COLOR)
-                    .mip_level(0)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            )
-            .image_extent(ash::vk::Extent3D {
-                width: 1,
-                height: 1,
-                depth: 1,
-            }),
-    ];
+    let mut pixels = Vec::new();
+    let mut regions = Vec::new();
+
+    // Fallback: a single 1×1 white pixel so that no-lightmap surfaces
+    // (sky, liquid, nodraw) can still sample the atlas without a special
+    // shader path. The first copy region initializes layer 0 with white.
+    if extracted.face_lightmap_layouts.iter().all(|l| !l.has_data) {
+        pixels.extend_from_slice(&[255, 255, 255, 255]);
+        regions.push(
+            ash::vk::BufferImageCopy::default()
+                .buffer_offset(0)
+                .image_subresource(
+                    ash::vk::ImageSubresourceLayers::default()
+                        .aspect_mask(ash::vk::ImageAspectFlags::COLOR)
+                        .mip_level(0)
+                        .base_array_layer(0)
+                        .layer_count(1),
+                )
+                .image_extent(ash::vk::Extent3D {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                }),
+        );
+    }
 
     let mut append_rect = |destination_page: u32,
                            destination_slot: u32,
@@ -180,8 +162,8 @@ fn build_lightmap_upload_data(
             .1
             .checked_add(extent.1)
             .ok_or_else(|| "BSP lightmap destination y overflow".to_string())?;
-        if source_end_x > width
-            || source_end_y > height
+        if source_end_x > source.width
+            || source_end_y > source.height
             || destination_end_x > width
             || destination_end_y > height
         {
@@ -202,7 +184,7 @@ fn build_lightmap_upload_data(
             .map_err(|_| "BSP lightmap staging allocation failed".to_string())?;
         for y in 0..extent.1 {
             for x in 0..extent.0 {
-                let source_index = (((source_offset.1 + y) as usize * width as usize)
+                let source_index = (((source_offset.1 + y) as usize * source.width as usize)
                     + (source_offset.0 + x) as usize)
                     .checked_mul(3)
                     .ok_or_else(|| "BSP lightmap source index overflow".to_string())?;
@@ -252,8 +234,10 @@ fn build_lightmap_upload_data(
                 layout.page_index
             ));
         }
-        let mut copied_style = false;
-        for (slot, style_layout) in layout.style_layers.iter().take(4).enumerate() {
+        // Emit exactly one copy region per populated style slot at
+        // `page * 4 + source_slot`. Unused source slots have no copy
+        // region and are skipped by the shader (style_id == 255).
+        for style_layout in &layout.style_layers {
             if !style_layout.has_data {
                 continue;
             }
@@ -263,24 +247,13 @@ fn build_lightmap_upload_data(
                     style_layout.style_id
                 ));
             }
-            copied_style = true;
             append_rect(
                 layout.page_index,
-                slot as u32,
+                style_layout.source_slot as u32,
                 layout.atlas_offset,
                 style_layout.page_index,
                 style_layout.atlas_offset,
                 style_layout.luxel_extents,
-            )?;
-        }
-        if !copied_style {
-            append_rect(
-                layout.page_index,
-                0,
-                layout.atlas_offset,
-                layout.page_index,
-                layout.atlas_offset,
-                layout.luxel_extents,
             )?;
         }
     }

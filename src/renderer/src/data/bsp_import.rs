@@ -687,36 +687,34 @@ fn bake_lightmap_uv(
     uv: Vec2,
 ) -> Result<Vec2, String> {
     let layout = &extracted.face_lightmap_layouts[face_index];
+    let (image_width, image_height) = extracted.lightmap_atlas.common_used_extent();
     if !layout.has_data {
-        let (width, height) = extracted
-            .lightmap_atlas
-            .pages
-            .first()
-            .map(|page| (page.width.max(1), page.height.max(1)))
-            .unwrap_or((1, 1));
-        return Ok(Vec2::new(0.5 / width as f32, 0.5 / height as f32));
+        let w = image_width.max(1) as f32;
+        let h = image_height.max(1) as f32;
+        return Ok(Vec2::new(0.5 / w, 0.5 / h));
     }
-    let page = extracted
+    // Validate the page exists and used extent is consistent.
+    if extracted
         .lightmap_atlas
         .pages
         .get(layout.page_index as usize)
-        .ok_or_else(|| {
-            format!(
-                "BSP face {face_index} references missing lightmap page {}",
-                layout.page_index
-            )
-        })?;
-    if page.width == 0 || page.height == 0 {
+        .is_none()
+    {
         return Err(format!(
-            "BSP face {face_index} references zero-sized lightmap page {}",
+            "BSP face {face_index} references missing lightmap page {}",
             layout.page_index
+        ));
+    }
+    if image_width == 0 || image_height == 0 {
+        return Err(format!(
+            "BSP face {face_index} has a zero-sized lightmap atlas"
         ));
     }
     let texel = Vec2::new(
         layout.atlas_offset.0 as f32 + uv.x * layout.luxel_extents.0.max(1) as f32,
         layout.atlas_offset.1 as f32 + uv.y * layout.luxel_extents.1.max(1) as f32,
     );
-    let atlas_uv = texel / Vec2::new(page.width as f32, page.height as f32);
+    let atlas_uv = texel / Vec2::new(image_width as f32, image_height as f32);
     if !atlas_uv.is_finite() {
         return Err(format!("BSP face {face_index} produced non-finite atlas UV"));
     }
@@ -833,18 +831,13 @@ fn compute_upload_demand(
         )
     })?;
 
-    let (atlas_width, atlas_height, atlas_pages) = if let Some(first) = extracted.lightmap_atlas.pages.first() {
-        if first.width == 0 || first.height == 0 {
-            return Err("BSP lightmap atlas has a zero-sized page".to_string());
+    let (atlas_width, atlas_height, atlas_pages) = {
+        let (used_w, used_h) = extracted.lightmap_atlas.common_used_extent();
+        if used_w == 0 || used_h == 0 {
+            (1u64, 1u64, 1u64)
+        } else {
+            (used_w as u64, used_h as u64, extracted.lightmap_atlas.pages.len() as u64)
         }
-        for page in &extracted.lightmap_atlas.pages {
-            if page.width != first.width || page.height != first.height {
-                return Err("BSP lightmap atlas pages must have identical dimensions".to_string());
-            }
-        }
-        (first.width as u64, first.height as u64, extracted.lightmap_atlas.pages.len() as u64)
-    } else {
-        (1, 1, 1)
     };
     let atlas_layers = checked_mul(atlas_pages, 4, "lightmap layer")?;
     let lightmap_image_bytes = checked_mul(
@@ -1341,9 +1334,15 @@ pub struct BspLightmapAtlasPage {
 impl BspLightmapAtlasPage {
     /// Build atlas pages from the extracted BSP lightmap data.
     ///
-    /// The extraction pipeline already populates atlas pages with RGB8 data.
-    /// This function converts each `AtlasPage` into a `BspLightmapAtlasPage`
-    /// suitable for GPU upload by expanding to RGBA8 and organizing by style layers.
+    /// The extraction pipeline already populates atlas pages with packed face
+    /// luxels in RGB8. This function expands each page to RGBA8 for a single
+    /// array layer per page. The multi-layer array upload (page_count × 4
+    /// style-slot layers) is built directly by the renderer upload pipeline
+    /// from `face_lightmap_layouts` and does not use this function.
+    ///
+    /// Do NOT duplicate a page into every style layer — that defect was
+    /// repaired in Phase 08. The style-specific layering is managed by the
+    /// per-face `face_lightmap_layouts` and the renderer's layer-copy plan.
     pub fn from_extracted(extracted: &ExtractedBsp) -> Vec<Self> {
         let atlas = &extracted.lightmap_atlas;
 
@@ -1351,27 +1350,25 @@ impl BspLightmapAtlasPage {
             return Vec::new();
         }
 
-        // For now, produce one page per atlas page.
-        // Style layers are packed within the page data by the extraction pipeline.
+        // Produce one single-layer RGBA8 page per source atlas page.
+        // Each page covers a single array element; the renderer distributes
+        // face rectangles into the correct style-slot layers (page * 4 + slot).
         atlas
             .pages
             .iter()
             .map(|page| {
                 let pixel_count = (page.width * page.height) as usize;
-                let layer_count = atlas.styles.len().max(1) as u32;
-                let mut rgba = vec![0u8; pixel_count * 4 * layer_count as usize];
-                for layer in 0..layer_count as usize {
-                    for y in 0..page.height as usize {
-                        for x in 0..page.width as usize {
-                            let src_idx = (y * page.width as usize + x) * 3;
-                            let dst_idx =
-                                layer * pixel_count * 4 + (y * page.width as usize + x) * 4;
-                            if src_idx + 2 < page.data.len() {
-                                rgba[dst_idx] = page.data[src_idx];
-                                rgba[dst_idx + 1] = page.data[src_idx + 1];
-                                rgba[dst_idx + 2] = page.data[src_idx + 2];
-                                rgba[dst_idx + 3] = 255;
-                            }
+                let layer_count: u32 = 1;
+                let mut rgba = vec![0u8; pixel_count * 4];
+                for y in 0..page.height as usize {
+                    for x in 0..page.width as usize {
+                        let src_idx = (y * page.width as usize + x) * 3;
+                        let dst_idx = (y * page.width as usize + x) * 4;
+                        if src_idx + 2 < page.data.len() {
+                            rgba[dst_idx] = page.data[src_idx];
+                            rgba[dst_idx + 1] = page.data[src_idx + 1];
+                            rgba[dst_idx + 2] = page.data[src_idx + 2];
+                            rgba[dst_idx + 3] = 255;
                         }
                     }
                 }
@@ -1444,8 +1441,9 @@ fn write_face_luxels_to_layer(
 #[cfg(feature = "bsp")]
 fn style_ids_for_layout(layout: &FaceLightmapLayout) -> UVec4 {
     let mut ids = [255u32; 4];
-    for (slot, style_layout) in layout.style_layers.iter().take(4).enumerate() {
-        if style_layout.has_data && style_layout.style_id <= 63 {
+    for style_layout in &layout.style_layers {
+        let slot = style_layout.source_slot as usize;
+        if slot < 4 && style_layout.has_data && style_layout.style_id <= 63 {
             ids[slot] = style_layout.style_id as u32;
         }
     }
@@ -1538,18 +1536,10 @@ pub fn build_bsp_material_descs(
 
         let luxel_w = layout.luxel_extents.0.max(1) as f32;
         let luxel_h = layout.luxel_extents.1.max(1) as f32;
-        let atlas_w = extracted
-            .lightmap_atlas
-            .pages
-            .get(layout.page_index as usize)
-            .map(|p| p.width.max(1) as f32)
-            .unwrap_or(4096.0);
-        let atlas_h = extracted
-            .lightmap_atlas
-            .pages
-            .get(layout.page_index as usize)
-            .map(|p| p.height.max(1) as f32)
-            .unwrap_or(4096.0);
+        let (atlas_w, atlas_h) = {
+            let (used_w, used_h) = extracted.lightmap_atlas.common_used_extent();
+            (used_w.max(1) as f32, used_h.max(1) as f32)
+        };
 
         let surface_params = BspSurfaceUniform {
             lightmap_scale_bias: Vec4::new(
@@ -1721,7 +1711,7 @@ mod tests {
                 has_data: true,
                 style_layers: vec![StyleLightmapLayout {
                     style_id,
-                    layer_index: 0,
+                    source_slot: 0,
                     page_index: 0,
                     atlas_offset: offset,
                     luxel_extents: (1, 1),
