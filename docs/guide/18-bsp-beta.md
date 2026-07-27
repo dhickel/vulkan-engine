@@ -15,7 +15,7 @@ Rust developers building applications that include compiled Quake-format BSP map
   ```
 - **Compiler toolchain**: The engine does NOT bundle a BSP compiler. You must supply `ericw-tools 2.0.0-alpha3` (or a pinned compatible version) on your build host. The approved executables are `qbsp`, `vis`, and `light`.
 - **Fixture rights**: All `.map` sources, palettes, and compiled `.bsp` files must be your own work or licensed for redistribution (CC0 or project license). The engine includes **zero** copyrighted id Software content.
-- **Dungeon generator**: A procedural dungeon generator is implemented in `src/bsp_generator/` and targets the frozen M1/M2 bounds. See the [BSP Generator Guide](19-bsp-generator.md) for usage and the [dungeon generation specification](../../.internal-dev/specifications/bsp-dungeon-generation.md) for the frozen contract. **Beta gate status: NO-GO** — strict extraction and GPU mount paths are blocked by open GitHub issues #57–#63.
+- **Dungeon generator**: A procedural dungeon generator is implemented in `src/bsp_generator/` and targets the frozen M1/M2 bounds. See the [BSP Generator Guide](19-bsp-generator.md) for usage and the [dungeon generation specification](../../.internal-dev/specifications/bsp-dungeon-generation.md) for the frozen contract. **Beta gate status: NO-GO** — the exact generated dungeon now has a strict visual fallback mount, but compiler/release evidence and lifecycle work remain blocked by open GitHub issues #57–#62.
 
 ## Package Layout
 
@@ -255,9 +255,11 @@ The BSP coordinator supports two diagnostic severity modes:
 | mode | behavior |
 |------|----------|
 | **Development** (`--development`) | Explicit diagnostic policy for development/test imports. Unsupported compatibility features are diagnosed but may remain usable. |
-| **Strict / Release** (`--strict`) | Explicit release policy. Required-resource, compatibility, and structural failures reject the import before candidate/GPU work. |
+| **Strict / Release** (`--strict`) | Explicit release policy. Required-resource, compatibility, and structural failures reject the import before candidate/GPU work, except for the temporary generated-dungeon visual fallbacks below. |
 
-Set strict mode when validating release-ready package/direct content:
+Set strict mode when validating release-ready package/direct content. For generated dungeons, a structurally valid but unresolved texture slot receives `BSP-FALLBACK-DIAGNOSTIC-TEXTURE`, and a visible face with no lightmap offset receives `BSP-FALLBACK-MISSING-LIGHTMAP` and renders unlit. These owner-authorized warnings keep the dungeon drawable; they are not release or compiler-publication evidence.
+
+
 
 ```rust
 let import = bsp_runtime::package::authorize_direct_import(
@@ -351,14 +353,13 @@ These issues block the beta gate and must be resolved before sign-off:
 | issue | summary | effect |
 |-------|---------|--------|
 | [#57](https://github.com/dhickel/vulkan-engine/issues/57) | Static batch ceiling not enforced across frozen corpus | Batch/draw budget compliance unproven |
-| [#58](https://github.com/dhickel/vulkan-engine/issues/58) | Strict extraction fails on generated faces (missing lightmap) | Strict runtime path blocked |
+| [#58](https://github.com/dhickel/vulkan-engine/issues/58) | Generated faces can lack baked lightmap data | Runtime uses the unlit fallback; compiler/release evidence remains blocked |
 | [#59](https://github.com/dhickel/vulkan-engine/issues/59) | Renderer mount retirement missing fence-aware queue | Stale handle invalidation incomplete |
 | [#60](https://github.com/dhickel/vulkan-engine/issues/60) | Committed bridge has no active teardown receipt | Generic bridge unload/replacement not atomic |
 | [#61](https://github.com/dhickel/vulkan-engine/issues/61) | GPU upload rollback crashes with SIGSEGV (descriptor pool double-free) | Development GPU mount blocked |
 | [#62](https://github.com/dhickel/vulkan-engine/issues/62) | Planned mesh bounds lost after GPU transfer | Canonical batch record construction fails |
-| [#63](https://github.com/dhickel/vulkan-engine/issues/63) | First material slot (0,0) rejected as null sentinel | Development mount blocked |
 
-**Current workaround**: Development-mode authorization (`--development`) bypasses strict extraction and allows the runtime path to reach preflight. A fresh nominal M1 seed-0 package reaches 364 renderable faces and 6 neutral/upload-preflight batches, but GPU mount fails at #61.
+**Current generated-dungeon status**: The exact baseline mounts in strict headless mode with 411 renderable faces, 6 batches, and three PBR textures. Missing WAD/lightmap data uses the documented visual fallbacks. This proves the draw path only; it does not close compiler/release evidence or the remaining lifecycle issues.
 
 ### Unavailable Evidence (Requires GPU/WSI Environment)
 
