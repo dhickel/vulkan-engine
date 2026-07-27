@@ -474,6 +474,25 @@ fn checked_mul(a: u64, b: u64, label: &str) -> Result<u64, String> {
 }
 
 #[cfg(feature = "bsp")]
+pub(crate) fn bsp_texture_mip_levels(width: u32, height: u32) -> u32 {
+    crate::data::data_util::resolve_texture_mip_count(width, height, None)
+}
+
+#[cfg(feature = "bsp")]
+fn bsp_texture_mip_texel_count(width: u32, height: u32) -> Result<u64, String> {
+    let mut width = u64::from(width.max(1));
+    let mut height = u64::from(height.max(1));
+    let mut total = 0u64;
+    for _ in 0..bsp_texture_mip_levels(width as u32, height as u32) {
+        let level_texels = checked_mul(width, height, "texture mip pixels")?;
+        total = checked_add(total, level_texels, "texture mip pixels")?;
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    Ok(total)
+}
+
+#[cfg(feature = "bsp")]
 fn render_class_index(class: bsp::materials::SurfaceClass) -> u8 {
     class.render_class() as u8
 }
@@ -762,19 +781,12 @@ fn compute_upload_demand(
     let geometry_bytes = checked_add(vertex_bytes, index_bytes, "geometry")?;
 
     let texture_bytes = extracted.textures.iter().try_fold(0u64, |total, texture| {
-        let albedo = u64::try_from(texture.albedo.len())
-            .map_err(|_| "BSP albedo byte count exceeds u64".to_string())?;
-        let material_data = checked_mul(
-            u64::try_from(texture.fullbright_mask.len())
-                .map_err(|_| "BSP material-data pixel count exceeds u64".to_string())?,
-            4,
-            "material-data expansion",
-        )?;
-        checked_add(
-            total,
-            checked_add(albedo, material_data, "texture")?,
-            "texture total",
-        )
+        // Albedo and packed material data each use RGBA8 full mip chains. The
+        // upload path may conservatively fall back to one level on formats
+        // without linear blit support, but preflight must budget the maximum.
+        let mip_texels = bsp_texture_mip_texel_count(texture.width, texture.height)?;
+        let texture = checked_mul(mip_texels, 8, "texture mip chains")?;
+        checked_add(total, texture, "texture total")
     })?;
 
     let (atlas_width, atlas_height, atlas_pages) = {
@@ -1670,6 +1682,15 @@ pub struct BspRenderSubmissionData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "bsp")]
+    #[test]
+    fn bsp_textures_allocate_complete_mip_chains() {
+        assert_eq!(bsp_texture_mip_levels(1024, 1024), 11);
+        assert_eq!(bsp_texture_mip_texel_count(1024, 1024).unwrap(), 1_398_101);
+        assert_eq!(bsp_texture_mip_levels(1, 1), 1);
+        assert_eq!(bsp_texture_mip_texel_count(1, 1).unwrap(), 1);
+    }
 
     #[cfg(feature = "bsp")]
     #[test]

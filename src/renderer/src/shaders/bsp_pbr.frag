@@ -3,9 +3,9 @@
 
 #include "tonemapping.glsl"
 
-// BSP PBR fragment path. The baked BSP lightmap replaces the environment's
-// diffuse irradiance term; the existing prefiltered environment + BRDF LUT
-// provide roughness-dependent specular IBL.
+// BSP PBR fragment path. The baked BSP lightmap supplies classic diffuse
+// modulation; the existing prefiltered environment + BRDF LUT provide
+// roughness-dependent specular IBL.
 
 layout (location = 0) in vec3 inWorldPos;
 layout (location = 1) in vec2 inUV0;
@@ -68,7 +68,6 @@ const uint SURF_UNLIT_FALLBACK = 1u << 7;
 const uint RECEIVE_IBL = 1u << 8;
 
 const float OVERBRIGHT = 2.0;
-const float PI_INV = 1.0 / 3.14159265359;
 const float MIN_ROUGHNESS = 0.04;
 
 float styleIntensity(uint styleId)
@@ -83,12 +82,14 @@ float styleIntensity(uint styleId)
 
 vec3 decodeLightmap(vec3 encoded)
 {
-    return pow(max(encoded, vec3(0.0)), vec3(2.2));
+    // ericw/Quake bytes are legacy surface-modulation factors, not physical
+    // irradiance. Preserve their calibrated range for classic overbright.
+    return max(encoded, vec3(0.0));
 }
 
-vec3 sampleBakedIrradiance(vec2 atlasUv)
+vec3 sampleBakedLightModulation(vec2 atlasUv)
 {
-    vec3 irradiance = vec3(0.0);
+    vec3 modulation = vec3(0.0);
     for (uint slot = 0u; slot < 4u; ++slot) {
         uint styleId = surf.styleIds[int(slot)];
         if (styleId == 255u) {
@@ -98,9 +99,9 @@ vec3 sampleBakedIrradiance(vec2 atlasUv)
             lightmapAtlas,
             vec3(atlasUv, float(surf.lightmapLayerBase + slot))
         ).rgb;
-        irradiance += decodeLightmap(encoded) * styleIntensity(styleId);
+        modulation += decodeLightmap(encoded) * styleIntensity(styleId);
     }
-    return irradiance * OVERBRIGHT;
+    return modulation * OVERBRIGHT;
 }
 
 vec3 mappedNormal(vec4 materialData)
@@ -149,13 +150,13 @@ void main()
 
     bool hasBakedLightmap = (surf.surfaceFlags & SURF_UNLIT_FALLBACK) == 0u;
     vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
-    vec3 bakedIrradiance = vec3(0.0);
+    vec3 bakedLightModulation = vec3(0.0);
     if (hasBakedLightmap) {
-        bakedIrradiance = sampleBakedIrradiance(atlasUv);
+        bakedLightModulation = sampleBakedLightModulation(atlasUv);
     }
 
     // Dielectric BSP materials are non-metallic. The baked lightmap remains the
-    // only diffuse irradiance source and is energy-balanced against specular IBL.
+    // only diffuse-light modulation source; PBR companions add specular IBL.
     vec3 f0 = vec3(0.04);
     vec3 brdf = texture(
         samplerBRDFLUT,
@@ -164,8 +165,8 @@ void main()
     vec3 kS = clamp(f0 * brdf.x + brdf.y, vec3(0.0), vec3(1.0));
     vec3 kD = vec3(1.0) - kS;
     vec3 color = hasBakedLightmap
-        ? bakedIrradiance * albedoSample.rgb * kD * PI_INV
-        : albedoSample.rgb * 3.0;
+        ? bakedLightModulation * albedoSample.rgb * kD
+        : albedoSample.rgb;
 
     if ((surf.receiveMask & RECEIVE_IBL) != 0u) {
         vec3 reflection = normalize(reflect(-V, N));

@@ -11,7 +11,7 @@
 //   warped uv = inUV0 + sin/cos warp from liquidFrame.warpTime
 //   albedo = texture(albedoTex, warpedUv).rgb
 //   lightmap = 4-style weighted sum (same as opaque)
-//   diffuse = lightmap * overbright * albedo / PI
+//   diffuse = lightmap modulation * overbright * albedo
 //   outColor = vec4(diffuse, liquidAlpha)
 
 layout (location = 0) in vec3 inWorldPos;
@@ -67,8 +67,8 @@ layout (set = 2, binding = 0) uniform BspFrameValues {
 
 layout (location = 0) out vec4 outColor;
 
+const uint SURF_UNLIT_FALLBACK = 1u << 7;
 const float OVERBRIGHT = 2.0;
-const float PI_INV     = 1.0 / 3.14159265359;
 const float LIQUID_ALPHA = 0.6;
 
 float styleIntensity(uint styleId)
@@ -83,7 +83,7 @@ float styleIntensity(uint styleId)
 
 vec3 decodeLightmap(vec3 encoded)
 {
-    return pow(max(encoded, vec3(0.0)), vec3(2.2));
+    return max(encoded, vec3(0.0));
 }
 
 void main()
@@ -108,28 +108,29 @@ void main()
 
     // ── Lightmap 4-style weighted sum ───────────────────────────────
 
+    bool hasBakedLightmap = (surf.surfaceFlags & SURF_UNLIT_FALLBACK) == 0u;
     vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
-    vec3 lightmapIrradiance = vec3(0.0);
+    vec3 lightmapModulation = vec3(0.0);
 
-    if (surf.styleIds.x != 255u) {
+    if (hasBakedLightmap && surf.styleIds.x != 255u) {
         float intensity = styleIntensity(surf.styleIds.x);
-        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb) * intensity;
+        lightmapModulation += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb) * intensity;
     }
-    if (surf.styleIds.y != 255u) {
+    if (hasBakedLightmap && surf.styleIds.y != 255u) {
         float intensity = styleIntensity(surf.styleIds.y);
-        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb) * intensity;
+        lightmapModulation += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb) * intensity;
     }
-    if (surf.styleIds.z != 255u) {
+    if (hasBakedLightmap && surf.styleIds.z != 255u) {
         float intensity = styleIntensity(surf.styleIds.z);
-        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb) * intensity;
+        lightmapModulation += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb) * intensity;
     }
-    if (surf.styleIds.w != 255u) {
+    if (hasBakedLightmap && surf.styleIds.w != 255u) {
         float intensity = styleIntensity(surf.styleIds.w);
-        lightmapIrradiance += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb) * intensity;
+        lightmapModulation += decodeLightmap(texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb) * intensity;
     }
 
-    vec3 irradiance = lightmapIrradiance * OVERBRIGHT;
-    vec3 diffuse = irradiance * albedo * PI_INV;
+    vec3 lightModulation = lightmapModulation * OVERBRIGHT;
+    vec3 diffuse = hasBakedLightmap ? lightModulation * albedo : albedo;
     float fullbright = texture(fullbrightMask, warpedUV).r;
     // Preserve the palette's emissive color instead of bleaching fullbright
     // lava pixels to white.

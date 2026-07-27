@@ -346,9 +346,9 @@ fn coordinator_extracts_non_solid_spawn() {
 /// Prove that a freshly generated and compiled BSP passes strict extraction
 /// through the bsp crate (no GPU, no coordinator).
 ///
-/// When lightmap data is incomplete (known generator limitation), strict
-/// extraction correctly rejects. This test verifies the strict path works
-/// for both success and expected rejection.
+/// Faces without a valid baked-light layout remain strict-compatible only
+/// through the explicit warning-level fallback contract. This test verifies
+/// that valid baked lighting and fallback faces are accounted for separately.
 #[test]
 fn phase01_strict_extract_generated_bsp() {
     let Some((world, _bsp_data, _lit_data)) = generate_compile_and_load("strict-extract") else {
@@ -371,35 +371,47 @@ fn phase01_strict_extract_generated_bsp() {
         strict: true,
         ..Default::default()
     };
-    match bsp::extract(request) {
-        Ok(extracted) => {
-            assert!(!extracted.face_geometries.is_empty());
-            assert!(!extracted.render_batches.is_empty());
-            assert!(!extracted.entity_descriptors.is_empty());
-            assert!(extracted.diagnostics.iter().all(|d| !d.is_error()));
-            for (fi, material) in extracted.face_materials.iter().enumerate() {
-                if material.surface_class.requires_baked_lightmap() {
-                    let layout = &extracted.face_lightmap_layouts[fi];
-                    assert!(layout.has_data, "baked consumer face {fi} has no lightmap data");
-                }
+    let extracted = bsp::extract(request)
+        .expect("strict extraction must accept explicitly diagnosed missing-lightmap fallbacks");
+    assert!(!extracted.face_geometries.is_empty());
+    assert!(!extracted.render_batches.is_empty());
+    assert!(!extracted.entity_descriptors.is_empty());
+    assert!(extracted.diagnostics.iter().all(|d| !d.is_error()));
+
+    let (valid_lightmaps, fallback_lightmaps) = extracted
+        .face_materials
+        .iter()
+        .zip(&extracted.face_lightmap_layouts)
+        .filter(|(material, _)| material.surface_class.requires_baked_lightmap())
+        .fold((0usize, 0usize), |(valid, fallback), (_, layout)| {
+            if layout.has_data {
+                (valid + 1, fallback)
+            } else {
+                (valid, fallback + 1)
             }
-            eprintln!(
-                "Strict extraction OK: {} faces, {} batches, {} lights",
-                extracted.face_geometries.len(),
-                extracted.render_batches.len(),
-                extracted.light_descriptors.len()
-            );
-        }
-        Err(report) => {
-            // Strict extraction correctly rejects incomplete lightmap coverage.
-            let msg = format!("{report}");
-            assert!(
-                msg.contains("lightmap") || msg.contains("MissingRequiredLightmap"),
-                "strict extraction rejection must reference lightmap: {msg}"
-            );
-            eprintln!("Strict extraction correctly rejected (expected): {msg}");
-        }
-    }
+        });
+    let fallback_reports = extracted
+        .diagnostics
+        .iter()
+        .filter(|report| report.code == bsp::diagnostic::DiagnosticCode::FallbackMissingLightmap)
+        .count();
+
+    assert!(
+        valid_lightmaps > 0,
+        "generated BSP must contain baked-light data"
+    );
+    assert_eq!(
+        fallback_reports, fallback_lightmaps,
+        "every baked consumer without a layout must emit the explicit fallback diagnostic"
+    );
+    eprintln!(
+        "Strict extraction OK: {} faces, {} batches, {} lights, {} valid lightmaps, {} fallbacks",
+        extracted.face_geometries.len(),
+        extracted.render_batches.len(),
+        extracted.light_descriptors.len(),
+        valid_lightmaps,
+        fallback_lightmaps
+    );
 }
 
 // ── Phase 08: Strict published import (corpus acceptance path) ──────────

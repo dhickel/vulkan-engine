@@ -156,12 +156,12 @@ Identical six-binding layout as `SceneData`. BSP and PBR paths can share the sam
 
 ### BSP Fragment Color Path
 
-- Lightmap images are `R8G8B8A8_UNORM`; fragment shaders decode sampled bytes with `pow(encoded, 2.2)` before applying the 2× overbright factor.
+- Lightmap images are `R8G8B8A8_UNORM`; fragment shaders use sampled bytes directly as legacy baked-light modulation, then apply the 2× overbright factor. They do not apply `pow(2.2)` or Lambertian `/ PI` to ericw/Quake light bytes.
 - Opaque, liquid, and sky output all use the shared renderer exposure/tone-map/gamma path.
 - Fullbright masks multiply sampled albedo RGB. A white scalar is not a valid emissive color because it destroys palette-authored lava/trim hues.
-- External PBR companions opt opaque/alpha-mask materials into `bsp_pbr.frag`: baked lightmaps remain diffuse irradiance, `roughness = 1 - gloss`, and set 0 prefiltered environment + BRDF LUT provide dielectric specular. Missing normal/gloss channels use flat/fully-rough defaults.
+- External PBR companions opt opaque/alpha-mask materials into `bsp_pbr.frag`: baked lightmaps remain diffuse-light modulation, `roughness = 1 - gloss`, and set 0 prefiltered environment + BRDF LUT provide dielectric specular. Missing normal/gloss channels use flat/fully-rough defaults.
 - `{...}` alpha-mask textures clear alpha and fullbright emission only where palette index 255 occurs; index 255 stays opaque on other texture classes.
-- With no PBR companion, packed material-data bytes reproduce the prior fullbright RGBA upload and the surface stays on `bsp_lightmapped.frag`.
+- BSP albedo and packed material-data images allocate matching complete mip chains through 1×1; upload preflight budgets every level. With no PBR companion, packed material-data bytes reproduce the prior fullbright RGBA upload and the surface stays on `bsp_lightmapped.frag`.
 - A visible face without a valid baked-lightmap layout is marked `SURF_UNLIT_FALLBACK`; the fragment path skips atlas sampling and tone-maps its resolved albedo/material directly rather than sampling an unrelated or uninitialized atlas texel.
 
 ### Pipeline Variants

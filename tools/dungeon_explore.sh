@@ -53,46 +53,59 @@ verify_cache() {
   local current_version; current_version="$(generator_version)"
   [[ "$stored_version" == "$current_version" ]] || { echo "  $(dim "generator changed ($stored_version → $current_version), rebuilding")"; return 1; }
 
-  local stored
-  stored="$(grep '^bsp\\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
-  [[ -n "$stored" ]] || return 1
-  local actual; actual="$(calc_sha256 "$bsp")"
-  [[ "$stored" == "$actual" ]] || return 1
+  [[ -f "$lit" ]] || return 1
+  local stored_bsp; stored_bsp="$(grep '^bsp\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  local stored_lit; stored_lit="$(grep '^lit\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  [[ -n "$stored_bsp" && -n "$stored_lit" ]] || return 1
+  [[ "$stored_bsp" == "$(calc_sha256 "$bsp")" ]] || return 1
+  [[ "$stored_lit" == "$(calc_sha256 "$lit")" ]] || return 1
 
-  local stored_pal; stored_pal="$(grep '^palette\\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
-  local actual_pal; actual_pal="$(calc_sha256 "$PALETTE_PATH")"
-  [[ "$stored_pal" == "$actual_pal" ]] || return 1
+  local stored_pal; stored_pal="$(grep '^palette\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  local stored_wad; stored_wad="$(grep '^wad\.sha256' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  [[ "$stored_pal" == "$(calc_sha256 "$PALETTE_PATH")" ]] || return 1
+  [[ "$stored_wad" == "$(calc_sha256 "$WAD_PATH")" ]] || return 1
 
-  local stored_gen; stored_gen="$(grep '^generator' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
+  local stored_gen; stored_gen="$(grep '^generator[[:space:]]*=' "$manifest" 2>/dev/null | awk -F'"' '{print $2}')"
   [[ "$stored_gen" == "dungeon_gen" ]] || return 1
 
   return 0
 }
 
 generator_version() {
-  # Fingerprint key source files + theme resources. Changes to any of these
-  # trigger automatic cache bust.
+  # Fingerprint every generator source plus all compiler inputs. A curated
+  # source list previously omitted serialize.rs, so texture-scale changes kept
+  # reusing a scale-1 BSP even after the generator had moved to scale 0.25.
   local files=(
-    "$repo_root/src/bsp_generator/Cargo.toml"
-    "$repo_root/src/bsp/Cargo.toml"
-    "$repo_root/src/bsp_generator/src/emission.rs"
-    "$repo_root/src/bsp_generator/src/junction.rs"
-    "$repo_root/src/bsp_generator/src/intent.rs"
-    "$repo_root/src/bsp_generator/src/config.rs"
-    "$repo_root/src/bsp/src/extract.rs"
-    "$repo_root/src/bsp/src/materials.rs"
-    "$repo_root/src/bsp/src/lightmaps.rs"
-    "$repo_root/src/bsp/src/wad.rs"
-    "$repo_root/src/bsp/src/resources.rs"
-    "$repo_root/src/bsp/src/lumps.rs"
-    "$repo_root/src/bsp/src/geometry.rs"
+    "$repo_root/Cargo.lock"
+    "$repo_root/tools/dungeon_explore.sh"
+    "$PROFILE_PATH"
     "$WAD_PATH"
     "$PALETTE_PATH"
   )
-  local hash_input=""
-  for f in "${files[@]}"; do
-    [[ -f "$f" ]] && hash_input+="$(sha256sum "$f" | awk '{print $1}')"
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done < <(
+    find \
+      "$repo_root/src/bsp" \
+      "$repo_root/src/bsp_generator" \
+      "$repo_root/src/launch_shared" \
+      "$repo_root/tools/dungeon_gen" \
+      "$repo_root/tools/engine_pack" \
+      -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -print0
+  )
+  local tool tool_path
+  for tool in qbsp vis light; do
+    tool_path="$DEFAULT_TOOL_PATH/$tool"
+    if [[ ! -x "$tool_path" ]]; then
+      tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    fi
+    [[ -n "$tool_path" ]] && files+=("$tool_path")
   done
+
+  local hash_input=""
+  while IFS= read -r -d '' f; do
+    [[ -f "$f" ]] && hash_input+="$(sha256sum "$f" | awk '{print $1}')"
+  done < <(printf '%s\0' "${files[@]}" | sort -zu)
   echo "$hash_input" | sha256sum | awk '{print $1}' | head -c 16
 }
 
@@ -137,13 +150,20 @@ build_cache() {
 
   local compiled_bsp="$out_dir/${class}-seed-${seed}.bsp"
   local compiled_lit="$out_dir/${class}-seed-${seed}.lit"
+  [[ -f "$compiled_bsp" && -f "$compiled_lit" ]] || {
+    echo "  $(red "✗") compiler did not produce the required BSP/LIT pair" >&2
+    return 1
+  }
+  rm -f "$bsp" "$lit" "$manifest"
   cp "$compiled_bsp" "$bsp"
-  [[ -f "$compiled_lit" ]] && cp "$compiled_lit" "$lit"
+  cp "$compiled_lit" "$lit"
   rm -rf "$tmp_dir"
   trap - RETURN
 
   local palette_sha256; palette_sha256="$(calc_sha256 "$PALETTE_PATH")"
+  local wad_sha256; wad_sha256="$(calc_sha256 "$WAD_PATH")"
   local bsp_sha256; bsp_sha256="$(calc_sha256 "$bsp")"
+  local lit_sha256; lit_sha256="$(calc_sha256 "$lit")"
   cat > "$manifest" <<MANIFEST
 # Auto-generated dungeon manifest — do not edit manually
 [generator]
@@ -158,9 +178,11 @@ profile = "ericw-q1-bsp2-generated"
 [resources]
 palette.sha256 = "$palette_sha256"
 wad.path = "$WAD_PATH"
+wad.sha256 = "$wad_sha256"
 
 [compiled]
 bsp.sha256 = "$bsp_sha256"
+lit.sha256 = "$lit_sha256"
 MANIFEST
 
   echo "  $(green "✓") cached $(bold "$(basename "$bsp")") ($(du -h "$bsp" | awk '{print $1}'))"
@@ -181,8 +203,8 @@ draw_menu() {
   echo "  $(bold "Dungeon Explorer")"
   echo "  $(dim "─────────────────────────────────────────────")"
   echo ""
-  printf "  $(bold "1.") Seed:       $(green "%s" "$SEED")\n" "$SEED"
-  printf "  $(bold "2.") Class:      $(green "%s" "$CLASS")  $(dim "(m1 / m2)")\n"
+  printf "  %s Seed:       %s\n" "$(bold "1.")" "$(green "$SEED")"
+  printf "  %s Class:      %s  %s\n" "$(bold "2.")" "$(green "$CLASS")" "$(dim "(m1 / m2)")"
   printf "  $(bold "3.") Mode:       %s\n" "$(status_badge "$MODE")"
   printf "  $(bold "4.") Camera:     %s  $(dim "('' / spawn / corridor / junction)")\n" "${CAMERA:-(default)}"
   printf "  $(bold "5.") Stats:      %s  $(dim "(set to '1' or leave empty)")\n" "${STATS:-(off)}"
@@ -202,7 +224,7 @@ cache_status_line() {
   if verify_cache "$CACHE_BSP" "$CACHE_LIT" "$CACHE_MANIFEST"; then
     local sz; sz="$(du -h "$CACHE_BSP" | awk '{print $1}')"
     echo "$(green "valid") $(dim "($sz)")"
-  elif [[ -f "$bsp" ]]; then
+  elif [[ -f "$CACHE_BSP" ]]; then
     echo "$(red "stale") $(dim "(will rebuild)")"
   else
     echo "$(dim "none") $(dim "(needs build)")"

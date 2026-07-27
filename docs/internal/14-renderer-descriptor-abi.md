@@ -137,7 +137,7 @@ std140 layout:
 | BSP opaque | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write ON, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
 | BSP fullbright | same as opaque | same as opaque | off | back | Same shader pair; fullbright path is inside fragment. |
 | BSP alpha mask | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write ON, LESS | off | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_lightmapped.frag(.spv)`. |
-| BSP PBR opaque | same BSP sets/layout | write ON, LESS | off | back | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_pbr.frag(.spv)`. Baked lightmap is diffuse irradiance; set 0 b3/b4 provide specular IBL. |
+| BSP PBR opaque | same BSP sets/layout | write ON, LESS | off | back | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_pbr.frag(.spv)`. Baked lightmap supplies legacy diffuse modulation; set 0 b3/b4 provide specular IBL. |
 | BSP PBR alpha mask | same BSP sets/layout | write ON, LESS | off | none (two-sided) | Same PBR shader pair with alpha test controlled by `SURF_ALPHA_MASK`. |
 | BSP sky | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` (layout-compatible) | write OFF, LESS | off | back | `mat4 model` + `vertex_buffer_addr`, 80 B, vertex. `bsp_lightmapped.vert(.spv)` + `bsp_sky.frag(.spv)`. No `gl_FragDepth`. |
 | BSP liquid | set 0 `BspScene`, set 1 `BspMaterial`, set 2 `BspFrameValues` | write OFF, LESS | alpha blend | none (two-sided) | Same push constants. `bsp_lightmapped.vert(.spv)` + `bsp_liquid.frag(.spv)`. |

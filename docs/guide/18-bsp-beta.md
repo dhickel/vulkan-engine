@@ -166,7 +166,7 @@ Companions are named from the BSP texture identity, not the BSP filename:
 
 Either file is sufficient to opt an opaque or alpha-mask surface into the BSP PBR pipeline. A missing normal map defaults to a flat normal; a missing gloss map defaults to fully rough. Companion dimensions must exactly match the resolved base texture, and malformed or mismatched PNGs reject the renderer upload rather than silently changing material behavior.
 
-PBR surfaces remain BSP lightmapped surfaces: baked lightmaps provide diffuse irradiance, while the prefiltered scene environment and BRDF LUT provide dielectric specular. Palette fullbright pixels remain additive, hue-preserving emission. Sky and liquid surfaces keep their dedicated legacy shaders. If neither companion exists, the original packed fullbright upload, pipeline selection, and `bsp_lightmapped.frag` path are unchanged.
+PBR surfaces remain BSP lightmapped surfaces: normalized baked-light bytes modulate diffuse albedo with classic 2× overbright, while the prefiltered scene environment and BRDF LUT provide dielectric specular. Palette fullbright pixels remain additive, hue-preserving emission. BSP albedo/material images use complete mip chains for stable minification. Sky and liquid surfaces keep their dedicated legacy shaders. If neither companion exists, the original packed fullbright upload, pipeline selection, and `bsp_lightmapped.frag` path are unchanged.
 
 Package loading derives these files through `PackageResolver`, records both
 present and absent PBR closure entries, and carries their verified identities

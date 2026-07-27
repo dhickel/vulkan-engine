@@ -375,64 +375,109 @@ fn bsp_headless_camera(start_pos: Vec3, _extracted: &bsp::extract::ExtractedBsp)
     camera
 }
 
-/// Phase 09: Frozen acceptance camera for the given semantic label.
+const ACCEPTANCE_CLEARANCE_STEP: f32 = 0.1;
+const ACCEPTANCE_CLEARANCE_LIMIT: f32 = 128.0;
+
+fn acceptance_point_contents(
+    point: Vec3,
+    extracted: &bsp::extract::ExtractedBsp,
+) -> bsp::queries::PointContents {
+    bsp::queries::point_contents_with_transform(
+        point,
+        &extracted.visibility.nodes,
+        &extracted.visibility.leaves,
+        &extracted.visibility.planes,
+        &extracted.transform,
+    )
+}
+
+fn acceptance_clear_distance(
+    eye: Vec3,
+    direction: Vec3,
+    extracted: &bsp::extract::ExtractedBsp,
+) -> f32 {
+    let mut distance = ACCEPTANCE_CLEARANCE_STEP;
+    while distance <= ACCEPTANCE_CLEARANCE_LIMIT {
+        if acceptance_point_contents(eye + direction * distance, extracted).is_solid() {
+            return distance - ACCEPTANCE_CLEARANCE_STEP;
+        }
+        distance += ACCEPTANCE_CLEARANCE_STEP;
+    }
+    ACCEPTANCE_CLEARANCE_LIMIT
+}
+
+fn longest_acceptance_direction(eye: Vec3, extracted: &bsp::extract::ExtractedBsp) -> (Vec3, f32) {
+    // Prefer the engine's default forward direction for deterministic ties.
+    [Vec3::NEG_Z, Vec3::X, Vec3::Z, Vec3::NEG_X]
+        .into_iter()
+        .map(|direction| {
+            (
+                direction,
+                acceptance_clear_distance(eye, direction, extracted),
+            )
+        })
+        .reduce(|best, candidate| {
+            if candidate.1 > best.1 {
+                candidate
+            } else {
+                best
+            }
+        })
+        .unwrap_or((Vec3::NEG_Z, 0.0))
+}
+
+fn camera_angles_for_direction(direction: Vec3) -> (f32, f32) {
+    let direction = direction.normalize_or_zero();
+    let horizontal = (direction.x * direction.x + direction.z * direction.z).sqrt();
+    let yaw = (-direction.x).atan2(-direction.z);
+    let pitch = direction.y.atan2(horizontal);
+    (yaw, pitch)
+}
+
+/// Fixed acceptance camera for the given semantic label.
 ///
-/// Returns (eye, look_at) in engine space derived from the extracted BSP's
-/// authored spawn and spatial witnesses. Cameras with non-finite data or in
-/// solid space are rejected.
+/// Generated spawn origins already represent eye height. The camera therefore
+/// starts at an authored non-solid origin and chooses the longest clear
+/// cardinal view instead of adding a second eye-height offset or averaging an
+/// arbitrary point that may lie inside a wall or ceiling.
 fn bsp_acceptance_camera(
     label: &str,
     extracted: &bsp::extract::ExtractedBsp,
 ) -> Result<Camera, AppError> {
-    // Find info_player_start for reference.
-    let player_start = extracted
-        .entity_descriptors
-        .iter()
-        .find(|entity| {
-            matches!(
-                entity.classname.as_str(),
-                "info_player_start" | "info_player_deathmatch"
-            )
-        })
-        .and_then(|entity| entity.origin)
-        .filter(|origin| origin.is_finite());
+    let player_start = extracted.entity_descriptors.iter().find(|entity| {
+        matches!(
+            entity.classname.as_str(),
+            "info_player_start" | "info_player_deathmatch"
+        )
+    });
 
-    // Compute map center from entity origins as fallback.
     let origins: Vec<Vec3> = extracted
         .entity_descriptors
         .iter()
-        .filter_map(|e| e.origin)
-        .filter(|o| o.is_finite())
+        .filter_map(|entity| entity.origin)
+        .filter(|origin| origin.is_finite())
         .collect();
     let map_center = if origins.is_empty() {
         Vec3::ZERO
     } else {
-        let sum: Vec3 = origins.iter().sum();
-        sum / origins.len() as f32
+        origins.iter().copied().sum::<Vec3>() / origins.len() as f32
     };
+    let spawn_pos = player_start
+        .and_then(|entity| entity.origin)
+        .filter(|origin| origin.is_finite())
+        .unwrap_or(map_center);
 
-    let spawn_pos = player_start.unwrap_or(map_center);
-
-    let (eye, look_at) = match label {
-        "spawn" => {
-            let eye = spawn_pos + Vec3::new(0.0, 2.0, 0.0);
-            let look = eye + Vec3::Z * 5.0;
-            (eye, look)
-        }
-        "corridor" => {
-            let eye = Vec3::new(
-                map_center.x * 0.5,
-                spawn_pos.y + 2.0,
-                map_center.z * 1.5,
-            );
-            let look = eye + Vec3::X * 5.0;
-            (eye, look)
-        }
-        "junction" => {
-            let eye = Vec3::new(map_center.x, map_center.y + 2.0, map_center.z);
-            let look = eye + Vec3::NEG_Z * 5.0;
-            (eye, look)
-        }
+    let eye = match label {
+        "spawn" | "corridor" => spawn_pos,
+        "junction" => origins
+            .iter()
+            .copied()
+            .filter(|origin| !acceptance_point_contents(*origin, extracted).is_solid())
+            .min_by(|left, right| {
+                left.distance_squared(map_center)
+                    .total_cmp(&right.distance_squared(map_center))
+            })
+            .unwrap_or(spawn_pos),
         _ => {
             return Err(AppError::BridgeProof(format!(
                 "unknown acceptance camera label: {label}"
@@ -440,20 +485,27 @@ fn bsp_acceptance_camera(
         }
     };
 
-    if !eye.is_finite() || !look_at.is_finite() {
+    if !eye.is_finite() {
         return Err(AppError::BridgeProof(format!(
-            "acceptance camera '{label}' has non-finite data: eye={eye:?}, look_at={look_at:?}"
+            "acceptance camera '{label}' has non-finite eye data: {eye:?}"
+        )));
+    }
+    let contents = acceptance_point_contents(eye, extracted);
+    if contents.is_solid() {
+        return Err(AppError::BridgeProof(format!(
+            "acceptance camera '{label}' eye lies in solid space: {eye:?}"
         )));
     }
 
+    let (direction, clear_distance) = longest_acceptance_direction(eye, extracted);
+    let look_at = eye + direction * clear_distance.max(5.0);
+    let (yaw, pitch) = camera_angles_for_direction(direction);
+
     let mut camera = Camera::new(eye);
-    let dir = (look_at - eye).normalize();
-    let yaw = dir.z.atan2(dir.x);
-    let pitch = (-dir.y).atan2((dir.x * dir.x + dir.z * dir.z).sqrt());
     camera.update_rotation(yaw, pitch);
 
     log::info!(
-        "Acceptance camera '{label}': eye={eye:?}, look_at={look_at:?}, yaw={yaw:.3}, pitch={pitch:.3}",
+        "Acceptance camera '{label}': eye={eye:?}, look_at={look_at:?}, contents={contents:?}, clear_distance={clear_distance:.2}, yaw={yaw:.3}, pitch={pitch:.3}",
     );
 
     Ok(camera)
@@ -1044,4 +1096,28 @@ fn install_app_fps_input(input: &mut InputSystem) {
         LayerDescriptor::new("bsp-beta-fps-actions", LayerPriority(10)),
         map.into_layer(),
     );
+}
+
+#[cfg(test)]
+mod acceptance_camera_tests {
+    use super::camera_angles_for_direction;
+    use glam::Vec3;
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn camera_angles_match_camera_forward_convention() {
+        let (yaw, pitch) = camera_angles_for_direction(Vec3::NEG_Z);
+        assert_near(yaw, 0.0);
+        assert_near(pitch, 0.0);
+
+        let (yaw, pitch) = camera_angles_for_direction(Vec3::X);
+        assert_near(yaw, -std::f32::consts::FRAC_PI_2);
+        assert_near(pitch, 0.0);
+
+        let (_, pitch) = camera_angles_for_direction(Vec3::Y);
+        assert_near(pitch, std::f32::consts::FRAC_PI_2);
+    }
 }

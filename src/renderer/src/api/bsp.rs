@@ -6,6 +6,8 @@
 
 // Internal module-use imports.
 #[cfg(feature = "bsp")]
+use crate::data::bsp_import::bsp_texture_mip_levels;
+#[cfg(feature = "bsp")]
 use crate::data::data_cache::VkDescType;
 #[cfg(feature = "bsp")]
 use crate::data::handles::TextureHandle;
@@ -1068,13 +1070,14 @@ impl PreparedBspMount {
         }
         let mut texture_metas = Vec::with_capacity(extracted.textures.len() * 2);
         for (texture, planned) in extracted.textures.iter().zip(&plan.textures) {
+            let mip_levels = bsp_texture_mip_levels(texture.width, texture.height);
             texture_metas.push(TextureMeta {
                 payload: TexturePayload::Raw {
                     bytes: texture.albedo.clone(),
                     width: texture.width,
                     height: texture.height,
                     format: ash::vk::Format::R8G8B8A8_SRGB,
-                    mips_levels: 1,
+                    mips_levels: mip_levels,
                 },
                 uv_index: 0,
                 sampler_info: None,
@@ -1085,7 +1088,7 @@ impl PreparedBspMount {
                     width: texture.width,
                     height: texture.height,
                     format: ash::vk::Format::R8G8B8A8_UNORM,
-                    mips_levels: 1,
+                    mips_levels: mip_levels,
                 },
                 uv_index: 0,
                 sampler_info: None,

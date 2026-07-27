@@ -415,7 +415,10 @@ fn bsp_shader_preserves_lightmap_transfer_and_palette_fullbright_color() {
 
     for shader in [&lightmapped, &liquid] {
         assert!(shader.contains("decodeLightmap"));
-        assert!(shader.contains("vec3(2.2)"));
+        assert!(shader.contains("return max(encoded, vec3(0.0));"));
+        assert!(!shader.contains("pow(encoded"));
+        assert!(shader.contains("SURF_UNLIT_FALLBACK"));
+        assert!(shader.contains("hasBakedLightmap ?"));
         assert!(shader.contains("fullbright * albedo"));
         assert!(!shader.contains("vec3(fullbright)"));
         assert!(shader.contains("outColor = tonemap"));
@@ -424,10 +427,14 @@ fn bsp_shader_preserves_lightmap_transfer_and_palette_fullbright_color() {
 
     let pbr = read(root.join("src/shaders/bsp_pbr.frag"));
     assert!(pbr.contains("decodeLightmap"));
+    assert!(pbr.contains("return max(encoded, vec3(0.0));"));
+    assert!(!pbr.contains("pow(encoded"));
+    assert!(pbr.contains("SURF_UNLIT_FALLBACK"));
+    assert!(pbr.contains("hasBakedLightmap"));
     assert!(pbr.contains("1.0 - gloss"));
     assert!(pbr.contains("prefilteredMap"));
     assert!(pbr.contains("samplerBRDFLUT"));
-    assert!(pbr.contains("bakedIrradiance * albedoSample.rgb"));
+    assert!(pbr.contains("bakedLightModulation * albedoSample.rgb"));
     assert!(pbr.contains("materialData.r * albedoSample.rgb"));
 }
 

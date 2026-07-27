@@ -91,8 +91,8 @@ const uint RECEIVE_DYNAMIC_LIGHTS = 1u << 10;
 
 // ── Lighting constants ─────────────────────────────────────────────────
 
-const float OVERBRIGHT   = 2.0;
-const float PI_INV       = 1.0 / 3.14159265359;
+const float OVERBRIGHT = 2.0;
+const float PI_INV = 1.0 / 3.14159265359;
 
 float styleIntensity(uint styleId)
 {
@@ -106,7 +106,10 @@ float styleIntensity(uint styleId)
 
 vec3 decodeLightmap(vec3 encoded)
 {
-    return pow(max(encoded, vec3(0.0)), vec3(2.2));
+    // ericw/Quake lightmaps are authored as legacy surface-modulation
+    // factors. They are not physical irradiance and must not receive a second
+    // transfer decode before the classic overbright multiplication.
+    return max(encoded, vec3(0.0));
 }
 
 void main()
@@ -127,41 +130,43 @@ void main()
 
     bool hasBakedLightmap = (surf.surfaceFlags & SURF_UNLIT_FALLBACK) == 0u;
     vec2 atlasUv = inUV1 * surf.lightmapScaleBias.xy + surf.lightmapScaleBias.zw;
-    vec3 lightmapIrradiance = vec3(0.0);
+    vec3 lightmapModulation = vec3(0.0);
 
     if (hasBakedLightmap) {
         // Style slot 0
         if (surf.styleIds.x != 255u) {
             float intensity = styleIntensity(surf.styleIds.x);
             vec3 sample0 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase))).rgb;
-            lightmapIrradiance += decodeLightmap(sample0) * intensity;
+            lightmapModulation += decodeLightmap(sample0) * intensity;
         }
         // Style slot 1
         if (surf.styleIds.y != 255u) {
             float intensity = styleIntensity(surf.styleIds.y);
             vec3 sample1 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 1u))).rgb;
-            lightmapIrradiance += decodeLightmap(sample1) * intensity;
+            lightmapModulation += decodeLightmap(sample1) * intensity;
         }
         // Style slot 2
         if (surf.styleIds.z != 255u) {
             float intensity = styleIntensity(surf.styleIds.z);
             vec3 sample2 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 2u))).rgb;
-            lightmapIrradiance += decodeLightmap(sample2) * intensity;
+            lightmapModulation += decodeLightmap(sample2) * intensity;
         }
         // Style slot 3
         if (surf.styleIds.w != 255u) {
             float intensity = styleIntensity(surf.styleIds.w);
             vec3 sample3 = texture(lightmapAtlas, vec3(atlasUv, float(surf.lightmapLayerBase + 3u))).rgb;
-            lightmapIrradiance += decodeLightmap(sample3) * intensity;
+            lightmapModulation += decodeLightmap(sample3) * intensity;
         }
     }
 
-    // Apply transfer function and overbright once after sum.
-    vec3 irradiance = lightmapIrradiance * OVERBRIGHT;
+    // Apply classic overbright once after the style sum.
+    vec3 lightModulation = lightmapModulation * OVERBRIGHT;
 
-    // ── 3. Diffuse Lambertian ──────────────────────────────────────
+    // ── 3. Legacy lightmap modulation ──────────────────────────────
 
-    vec3 color = hasBakedLightmap ? irradiance * albedo * PI_INV : albedo * 3.0;
+    // Missing-lightmap fallback is neutral modulation, not an unrelated
+    // brightness boost. This keeps lit and fallback faces on one scale.
+    vec3 color = hasBakedLightmap ? lightModulation * albedo : albedo;
 
     // ── 4. Fullbright emissive ─────────────────────────────────────
 

@@ -540,9 +540,11 @@ impl Drop for VkRenderCore {
                 }
             }
 
-            if let Some(imgui) = self.imgui.as_mut() {
-                imgui.renderer.destroy();
-            }
+            // The ImGui renderer owns Vulkan pipelines, descriptors, textures,
+            // and its own allocator. Drop it exactly once while the logical
+            // device is still alive; calling its explicit `destroy()` and then
+            // allowing `Drop` to run would destroy the same handles twice.
+            drop(self.imgui.take());
 
             let allocator_guard = match self.allocator.lock() {
                 Ok(guard) => guard,
